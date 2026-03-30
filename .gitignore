@@ -1,0 +1,9 @@
+build/
+test/HIDMaestroTest/bin/
+test/HIDMaestroTest/obj/
+test/HIDMaestroTest/publish_out/
+*.cer
+*.cat
+*.user
+*.suo
+.vs/
