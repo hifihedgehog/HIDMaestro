@@ -1,13 +1,12 @@
 === HIDMaestro Test Client ===
 
--- Emulating: DualSense (PS5) --
+-- Emulating: Xbox One Controller (Original, Model 1537) --
 
-  Profile:  dualsense
-  VID:PID:  0x054C:0x0CE6
-  Product:  Wireless Controller
+  Profile:  xbox-one-original
+  VID:PID:  0x045E:0x02D1
+  Product:  Controller
   Using universal descriptor (116 bytes)
 
   Writing profile to registry... OK
   Recreating device node... OK
-  Setting device name... OK
-  Opening HID device... 
+  Setting device name... 
