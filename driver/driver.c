@@ -21,6 +21,37 @@
 /* Registry path for device configuration */
 static const WCHAR CONFIG_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\HIDMaestro";
 
+/* XUSB interface GUID — xinput1_4.dll enumerates this to find Xbox controllers */
+static const GUID XUSB_INTERFACE_CLASS_GUID =
+    { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
+
+/* XUSB IOCTL codes (from OpenXinput / XInputHooker) */
+#define IOCTL_XUSB_GET_INFORMATION      0x80006000
+#define IOCTL_XUSB_GET_CAPABILITIES     0x8000E004
+#define IOCTL_XUSB_GET_LED_STATE        0x8000E008
+#define IOCTL_XUSB_GET_STATE            0x8000E00C
+#define IOCTL_XUSB_SET_STATE            0x8000A010
+#define IOCTL_XUSB_WAIT_GUIDE           0x8000E014
+#define IOCTL_XUSB_GET_BATTERY_INFO     0x8000E018
+#define IOCTL_XUSB_GET_INFORMATION_EX   0x8000E3FC
+#define IOCTL_XUSB_WAIT_FOR_INPUT       0x8000E3AC
+
+/* XUSB report structure (20 bytes — matches XUSB_INTERRUPT_IN_PACKET) */
+#pragma pack(push, 1)
+typedef struct _XUSB_REPORT {
+    UCHAR  Id;          /* 0x00 */
+    UCHAR  Size;        /* 0x14 (20) */
+    USHORT Buttons;
+    UCHAR  LeftTrigger;
+    UCHAR  RightTrigger;
+    SHORT  ThumbLX;
+    SHORT  ThumbLY;
+    SHORT  ThumbRX;
+    SHORT  ThumbRY;
+    UCHAR  Reserved[6];
+} XUSB_REPORT;
+#pragma pack(pop)
+
 /* ================================================================== */
 /*  Helper: copy bytes to request output buffer                        */
 /* ================================================================== */
@@ -222,6 +253,14 @@ EvtDeviceAdd(
         propData.Lcid = LOCALE_NEUTRAL;
         WdfDeviceAssignProperty(device, &propData, DEVPROP_TYPE_STRING,
             ctx->ProductStringBytes, ctx->ProductString);
+    }
+
+    /* Register XUSB device interface so XInput can find us.
+     * Ignore failure — XInput just won't see us if this fails. */
+    {
+        NTSTATUS ifaceStatus = WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+        (void)ifaceStatus; /* Non-fatal */
     }
 
     /* Create locks */
@@ -427,6 +466,149 @@ EvtIoDeviceControl(
     case IOCTL_HID_SEND_IDLE_NOTIFICATION_REQUEST:
         status = STATUS_SUCCESS;
         break;
+
+    /* ============================================================ */
+    /*  XUSB IOCTLs — XInput talks to us through these              */
+    /* ============================================================ */
+
+    case IOCTL_XUSB_GET_INFORMATION: {
+        /*
+         * Returns basic device information.
+         * xinput1_4.dll calls this first to discover the device.
+         * Output: 12 bytes — vendor ID, product ID, input ID, etc.
+         */
+        UCHAR info[12];
+        RtlZeroMemory(info, sizeof(info));
+        info[0] = 0x00; /* Type: Gamepad */
+        info[1] = 0x01; /* SubType: Gamepad */
+        info[2] = 0x01; /* VendorSpecific count */
+        info[4] = 0x01; /* InputId */
+        status = RequestCopyFromBuffer(Request, info, sizeof(info));
+        break;
+    }
+
+    case IOCTL_XUSB_GET_CAPABILITIES: {
+        /*
+         * Returns device capabilities — what buttons/axes it has.
+         * Very similar to XInputGetCapabilities output.
+         */
+        UCHAR caps[20];
+        RtlZeroMemory(caps, sizeof(caps));
+        caps[0] = 0x01; /* Type: XINPUT_DEVTYPE_GAMEPAD */
+        caps[1] = 0x01; /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
+        caps[2] = 0x04; /* Flags: XINPUT_CAPS_FFB_SUPPORTED */
+        /* Gamepad caps (buttons mask = all supported) */
+        caps[4] = 0xFF; caps[5] = 0xF3; /* wButtons mask */
+        caps[6] = 0xFF; /* bLeftTrigger */
+        caps[7] = 0xFF; /* bRightTrigger */
+        /* Axes: report max range */
+        *(SHORT*)&caps[8]  = 32767; /* ThumbLX */
+        *(SHORT*)&caps[10] = 32767; /* ThumbLY */
+        *(SHORT*)&caps[12] = 32767; /* ThumbRX */
+        *(SHORT*)&caps[14] = 32767; /* ThumbRY */
+        status = RequestCopyFromBuffer(Request, caps, sizeof(caps));
+        break;
+    }
+
+    case IOCTL_XUSB_GET_STATE: {
+        /*
+         * Returns current gamepad state — this is THE critical IOCTL.
+         * xinput1_4.dll calls this for XInputGetState().
+         * Output: XUSB_REPORT (22 bytes: 1 byte id + 1 byte size + 20 byte data)
+         */
+        XUSB_REPORT report;
+        RtlZeroMemory(&report, sizeof(report));
+        report.Id = 0x00;
+        report.Size = 0x14; /* 20 bytes */
+
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        if (ctx->InputReportReady && ctx->InputReportSize >= 12) {
+            /* Parse input report (universal descriptor format):
+             * Bytes 0-1: LX, 2-3: LY, 4-5: RX, 6-7: RY,
+             * 8-9: LT, 10-11: RT, 12: buttons low, 13: buttons high + hat
+             */
+            PUCHAR d = ctx->InputReport;
+            /* Skip Report ID if present */
+            if (d[0] == 0x01 && ctx->InputReportSize > 12) d++;
+
+            report.ThumbLX     = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
+            report.ThumbLY     = (SHORT)((int)(*(USHORT*)&d[2]) - 32768);
+            report.ThumbRX     = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
+            report.ThumbRY     = (SHORT)((int)(*(USHORT*)&d[6]) - 32768);
+            report.LeftTrigger  = (UCHAR)(*(USHORT*)&d[8] >> 8);
+            report.RightTrigger = (UCHAR)(*(USHORT*)&d[10] >> 8);
+
+            /* Button mapping: our descriptor buttons -> XUSB buttons */
+            {
+                UCHAR btnLow = d[12];
+                UCHAR btnHigh = d[13];
+                UCHAR hat = (btnHigh >> 2) & 0x0F;
+                USHORT buttons = 0;
+
+                if (btnLow & 0x01) buttons |= 0x1000; /* A */
+                if (btnLow & 0x02) buttons |= 0x2000; /* B */
+                if (btnLow & 0x04) buttons |= 0x4000; /* X */
+                if (btnLow & 0x08) buttons |= 0x8000; /* Y */
+                if (btnLow & 0x10) buttons |= 0x0100; /* LB */
+                if (btnLow & 0x20) buttons |= 0x0200; /* RB */
+                if (btnLow & 0x40) buttons |= 0x0020; /* Back */
+                if (btnLow & 0x80) buttons |= 0x0010; /* Start */
+                if (btnHigh & 0x01) buttons |= 0x0040; /* LThumb */
+                if (btnHigh & 0x02) buttons |= 0x0080; /* RThumb */
+
+                /* Hat -> D-pad */
+                switch (hat) {
+                    case 1: buttons |= 0x0001; break;
+                    case 2: buttons |= 0x0001|0x0008; break;
+                    case 3: buttons |= 0x0008; break;
+                    case 4: buttons |= 0x0008|0x0002; break;
+                    case 5: buttons |= 0x0002; break;
+                    case 6: buttons |= 0x0002|0x0004; break;
+                    case 7: buttons |= 0x0004; break;
+                    case 8: buttons |= 0x0004|0x0001; break;
+                }
+                report.Buttons = buttons;
+            }
+        }
+        WdfWaitLockRelease(ctx->InputLock);
+
+        status = RequestCopyFromBuffer(Request, &report, sizeof(report));
+        break;
+    }
+
+    case IOCTL_XUSB_SET_STATE: {
+        /* Vibration — absorb for now, could pass to user-mode later */
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    case IOCTL_XUSB_GET_LED_STATE: {
+        UCHAR led[3] = { 0x01, 0x03, 0x02 }; /* Player 1 LED */
+        status = RequestCopyFromBuffer(Request, led, sizeof(led));
+        break;
+    }
+
+    case IOCTL_XUSB_GET_BATTERY_INFO: {
+        UCHAR batt[2] = { 0x01, 0x03 }; /* Wired, Full */
+        status = RequestCopyFromBuffer(Request, batt, sizeof(batt));
+        break;
+    }
+
+    case IOCTL_XUSB_WAIT_GUIDE:
+    case IOCTL_XUSB_WAIT_FOR_INPUT:
+        /* Async waits — park the request */
+        status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
+        if (NT_SUCCESS(status)) completeRequest = FALSE;
+        break;
+
+    case IOCTL_XUSB_GET_INFORMATION_EX: {
+        UCHAR infoEx[8];
+        RtlZeroMemory(infoEx, sizeof(infoEx));
+        infoEx[0] = 0x01; /* Version */
+        infoEx[4] = 0x01; /* Count */
+        status = RequestCopyFromBuffer(Request, infoEx, sizeof(infoEx));
+        break;
+    }
 
     default:
         status = STATUS_NOT_IMPLEMENTED;

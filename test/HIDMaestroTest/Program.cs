@@ -359,24 +359,16 @@ class Program
     /// parsing the HID descriptor layout. So we use our proven descriptor
     /// for all profiles and just swap the identity.
     /// </summary>
-    static readonly byte[] UniversalDescriptor = {
-        // EXACT COPY of G_DefaultReportDescriptor from driver.h
-        // This descriptor is PROVEN working (Xbox 360 PoC).
-        0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01,
-        0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x27, 0xFF,
-        0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x02, 0x81,
-        0x02, 0x09, 0x33, 0x09, 0x34, 0x81, 0x02, 0x09,
-        0x32, 0x09, 0x35, 0x81, 0x02, 0x05, 0x09, 0x19,
-        0x01, 0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75,
-        0x01, 0x95, 0x0A, 0x81, 0x02, 0x75, 0x06, 0x95,
-        0x01, 0x81, 0x01, 0x05, 0x01, 0x09, 0x39, 0x15,
-        0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01,
-        0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
-        0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25,
-        0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
-        0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01,
-        0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
-        0x0E, 0xB1, 0x02, 0xC0
+    // Verified byte-for-byte from driver.h G_DefaultReportDescriptor (116 bytes)
+    static readonly byte[] UniversalDescriptor = new byte[] {
+        0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x27, 0xFF,
+        0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x09, 0x33, 0x09, 0x34, 0x81, 0x02, 0x09,
+        0x32, 0x09, 0x35, 0x81, 0x02, 0x05, 0x09, 0x19, 0x01, 0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75,
+        0x01, 0x95, 0x0A, 0x81, 0x02, 0x75, 0x06, 0x95, 0x01, 0x81, 0x01, 0x05, 0x01, 0x09, 0x39, 0x15,
+        0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
+        0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
+        0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
+        0x0E, 0xB1, 0x02, 0xC0,
     };
 
     // ── Registry config ──
@@ -384,6 +376,8 @@ class Program
     static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
+        // Debug: log what we're writing
+        Console.Write($"  [descriptor: {descriptor.Length}B, bytes[15]=0x{descriptor[15]:X2}, bytes[16]=0x{descriptor[16]:X2}] ");
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         key.SetValue("VendorId", (int)vid, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)pid, RegistryValueKind.DWord);
@@ -615,12 +609,10 @@ class Program
         Console.WriteLine($"  Product:  {profile.ProductString}");
         // Determine if this is an Xbox profile that needs XInput support
         bool isXbox = profile.Vendor == "Microsoft" && profile.Type == "gamepad";
-        bool useNativeDescriptor = isXbox && profile.HasDescriptor;
-
-        // For Xbox XInput: use the native GIP descriptor so xinputhid.sys accepts it
-        // For everything else: use the universal descriptor with Feature Report data channel
-        byte[] descriptor = useNativeDescriptor ? profile.GetDescriptorBytes()! : UniversalDescriptor;
-        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes ({(useNativeDescriptor ? "native GIP" : "universal")})\n");
+        // Always use the universal descriptor — it has proper Report IDs and
+        // passes HID validation. The XUSB interface GUID handles XInput separately.
+        byte[] descriptor = UniversalDescriptor;
+        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal + XUSB interface)\n");
 
         // Step 1: Write descriptor to registry FIRST
         Console.Write("  Writing profile to registry... ");
@@ -668,12 +660,10 @@ class Program
         Console.WriteLine("\n  Sending input. Open joy.cpl to watch.");
         Console.WriteLine("  Ctrl+C to stop.\n");
 
-        // For Xbox native: use WriteFile (IOCTL_HID_WRITE_REPORT -> driver treats as input)
-        // For universal: use HidD_SetFeature (Report ID 2 -> driver builds input)
-        bool useWriteFile = useNativeDescriptor;
-        int reportSize = useWriteFile ? 16 : 14; // GIP input = 16 bytes, universal feature = 14
-        byte[] report = new byte[reportSize + (useWriteFile ? 0 : 1)]; // +1 for feature report ID
-        if (!useWriteFile) report[0] = 0x02; // Feature Report ID 2
+        // Always use HidD_SetFeature with Report ID 2 (universal descriptor data channel)
+        int reportSize = 14; // matches Feature Report Count (0x0E)
+        byte[] report = new byte[reportSize + 1]; // +1 for Report ID
+        report[0] = 0x02; // Feature Report ID 2
 
         var sw = Stopwatch.StartNew();
         int count = 0;
@@ -684,21 +674,13 @@ class Program
             double angle = t * Math.PI * 2 * 0.5;
 
             // Pack gamepad input
-            int dataOfs = useWriteFile ? 0 : 1; // skip feature report ID byte
+            int dataOfs = 1; // skip feature report ID byte
             ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
             ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
             report[dataOfs + 0] = (byte)(lx & 0xFF); report[dataOfs + 1] = (byte)(lx >> 8);
             report[dataOfs + 2] = (byte)(ly & 0xFF); report[dataOfs + 3] = (byte)(ly >> 8);
 
-            bool ok;
-            if (useWriteFile)
-            {
-                ok = WriteFile(h, report, (uint)report.Length, out _, IntPtr.Zero);
-            }
-            else
-            {
-                ok = HidD_SetFeature(h, report, (uint)report.Length);
-            }
+            bool ok = HidD_SetFeature(h, report, (uint)report.Length);
 
             if (!ok)
             {
