@@ -1,11 +1,11 @@
 
-Found: \\?\root#system#0012#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+Found: \\?\root#system#0010#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
 GET_STATE: ok=True bytes=29
-  status=1 pkt=174
+  status=1 pkt=774171
   buttons=0x1000
   LX=-1
   LY=0
   RX=-16384
   RY=-32768
-  Raw hex: 01-01-01-00-00-AE-00-00-00-00-00-00-10-00-00-FF-FF-00-00-00-C0-00-80-00-00-00-00-00-00
+  Raw hex: 01-01-01-00-00-1B-D0-0B-00-00-00-00-10-00-00-FF-FF-00-00-00-C0-00-80-00-00-00-00-00-00
 

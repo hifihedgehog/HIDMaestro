@@ -374,7 +374,7 @@ class Program
         0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
         0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
         0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
-        0x0E, 0xB1, 0x02, 0xC0,
+        0x0F, 0xB1, 0x02, 0xC0,
     };
 
     // ── Registry config ──
@@ -679,12 +679,12 @@ class Program
         Console.WriteLine("\n  Sending input to HID + XInput. Ctrl+C to stop.\n");
 
         // HID feature report: Report ID 2 + 14 bytes
-        int reportSize = 14;
+        int reportSize = 15; // matches Feature Report Count (0x0F) in descriptor
         byte[] report = new byte[reportSize + 1];
         report[0] = 0x02;
 
         // XUSB input: piggybacked on GET_STATE (3-byte header + 14 bytes data = 17)
-        byte[] xusbInput = new byte[17];
+        byte[] xusbInput = new byte[18]; // 3 header + 15 data
         xusbInput[0] = 0x01; xusbInput[1] = 0x01; xusbInput[2] = 0x00; // v1.1, slot 0
         byte[] xusbOutput = new byte[29]; // GET_STATE output (discarded)
 
@@ -731,7 +731,7 @@ class Program
             // Send to XUSB device (XInput) — piggyback on GET_STATE
             if (xh != null)
             {
-                Array.Copy(report, 1, xusbInput, 3, 14); // copy 14 data bytes after 3-byte header
+                Array.Copy(report, 1, xusbInput, 3, 15); // copy 15 data bytes after 3-byte header
                 DeviceIoControl(xh, 0x8000E00C, xusbInput, (uint)xusbInput.Length,
                     xusbOutput, (uint)xusbOutput.Length, out _, IntPtr.Zero);
             }
