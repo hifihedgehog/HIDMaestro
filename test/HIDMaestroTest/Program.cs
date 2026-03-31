@@ -303,16 +303,25 @@ class Program
         string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Register OEM joystick name so joy.cpl shows the correct name.
-        // Joy.cpl looks up the name from:
-        //   HKLM\System\CurrentControlSet\Control\MediaProperties\
-        //     PrivateProperties\Joystick\OEM\VID_XXXX&PID_YYYY
-        // with an OEMName string value.
+        // Register OEM joystick name so joy.cpl/DirectInput shows the correct name.
+        // DirectInput reads OEMName from BOTH HKLM and HKCU — HKCU takes priority.
         {
-            string oemKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
-            using var oem = Registry.LocalMachine.CreateSubKey(oemKey);
-            oem.SetValue("OEMName", displayName, RegistryValueKind.String);
-            oem.SetValue("OEMData", new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, RegistryValueKind.Binary);
+            string oemSubKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
+            byte[] oemData = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+            // Write to HKLM
+            using (var oem = Registry.LocalMachine.CreateSubKey(oemSubKey))
+            {
+                oem.SetValue("OEMName", displayName, RegistryValueKind.String);
+                oem.SetValue("OEMData", oemData, RegistryValueKind.Binary);
+            }
+
+            // Write to HKCU (takes priority for DirectInput/joy.cpl)
+            using (var oem = Registry.CurrentUser.CreateSubKey(oemSubKey))
+            {
+                oem.SetValue("OEMName", displayName, RegistryValueKind.String);
+                oem.SetValue("OEMData", oemData, RegistryValueKind.Binary);
+            }
         }
     }
 
