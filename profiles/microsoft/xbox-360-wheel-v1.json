@@ -10,5 +10,6 @@
   "connection": "usb",
   "descriptor": "05010905a101a1000930150026ffff350046ffff950175108102c005010932150026ff00950175088102050209bb150026ff0095017508810205091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
   "inputReportSize": null,
-  "notes": "110-byte descriptor. Source: DJm00n/ControllersInfo xusb_wheel1."
+  "notes": "110-byte descriptor. Source: DJm00n/ControllersInfo xusb_wheel1.",
+  "deviceDescription": "Xbox 360 Controller for Windows"
 }

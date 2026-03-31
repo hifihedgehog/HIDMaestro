@@ -10,5 +10,6 @@
   "connection": "usb",
   "descriptor": "05010905a10105091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
   "inputReportSize": null,
-  "notes": "59-byte descriptor. Source: DJm00n/ControllersInfo xusb_dancepad. Identical to arcade stick descriptor."
+  "notes": "59-byte descriptor. Source: DJm00n/ControllersInfo xusb_dancepad. Identical to arcade stick descriptor.",
+  "deviceDescription": "Xbox 360 Controller for Windows"
 }

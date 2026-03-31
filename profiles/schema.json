@@ -51,6 +51,10 @@
       "type": ["integer", "null"],
       "description": "Size of the input report in bytes (excluding report ID). Null if unknown."
     },
+    "deviceDescription": {
+      "type": ["string", "null"],
+      "description": "Device Manager display name (from vendor INF or Windows HID class). Null means use productString. This is what FriendlyName gets set to on the device node."
+    },
     "notes": {
       "type": ["string", "null"],
       "description": "Implementation notes, caveats, or special behavior."

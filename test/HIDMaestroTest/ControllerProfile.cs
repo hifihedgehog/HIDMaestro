@@ -46,6 +46,9 @@ public sealed class ControllerProfile
     [JsonPropertyName("inputReportSize")]
     public int? InputReportSize { get; set; }
 
+    [JsonPropertyName("deviceDescription")]
+    public string? DeviceDescription { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -56,6 +59,10 @@ public sealed class ControllerProfile
     /// <summary>Parsed PID as ushort.</summary>
     [JsonIgnore]
     public ushort ProductId => Convert.ToUInt16(Pid, 16);
+
+    /// <summary>Device Manager display name. Uses deviceDescription if set, otherwise productString.</summary>
+    [JsonIgnore]
+    public string DisplayName => DeviceDescription ?? ProductString;
 
     /// <summary>True if this profile has a HID descriptor ready to use.</summary>
     [JsonIgnore]

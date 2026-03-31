@@ -281,7 +281,7 @@ class Program
 
     // ── Registry config ──
 
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null)
+    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
@@ -290,6 +290,9 @@ class Program
         key.SetValue("VersionNumber", (int)ver, RegistryValueKind.DWord);
         if (productString != null)
             key.SetValue("ProductString", productString, RegistryValueKind.String);
+        // DeviceDescription = what Device Manager / FriendlyName shows
+        string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
+        key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
         // Register OEM joystick name so joy.cpl shows the correct name.
         // Joy.cpl looks up the name from:
@@ -376,12 +379,11 @@ class Program
         Thread.Sleep(3000);
         Console.WriteLine("OK");
 
-        // Set device name properties so joy.cpl shows correct name
+        // Set device name properties so Device Manager / joy.cpl shows correct name
         Console.Write("  Setting device name... ");
-        string prodStr = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("ProductString") ?? "Controller";
-        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", prodStr);
-        // Also set FriendlyName via registry on both root and HID child
-        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", prodStr);
+        string dispName = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription") ?? "Controller";
+        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", dispName);
+        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", dispName);
         Console.WriteLine("OK");
 
         return true;
@@ -507,7 +509,8 @@ class Program
         // The driver reads this at EvtDeviceAdd (device node creation)
         Console.Write("  Writing profile to registry... ");
         WriteConfig(UniversalDescriptor, profile.VendorId, profile.ProductId,
-            productString: profile.ProductString);
+            productString: profile.ProductString,
+            deviceDescription: profile.DeviceDescription);
         Console.WriteLine("OK");
 
         // Step 2: Build, sign, install driver + create device node
