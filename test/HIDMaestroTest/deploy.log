@@ -22,12 +22,10 @@ Device Description:         Game Controller
 Class Name:                 HIDClass
 Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Manufacturer Name:          HIDMaestro
-Status:                     Problem
-Problem Code:               10 (0x0A) [CM_PROB_FAILED_START]
-Problem Status:             0xC000009C
+Status:                     Started
 Driver Name:                oem48.inf
 
 
-PROBLEM: Device has error code 10
+SUCCESS: Device is running!
 
 === DEPLOY COMPLETE ===

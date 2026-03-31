@@ -204,42 +204,17 @@ EvtDeviceAdd(
      * root\HIDMaestro = HID mode — filter under MsHidUmdf
      * root\HIDMaestroXUSB = XUSB mode — standalone function driver for XInput
      */
+    /* Device mode determined at compile time.
+     * HIDMaestro.dll = HID minidriver (HIDMAESTRO_XUSB_MODE not defined)
+     * HIDMaestroXUSB.dll = XUSB standalone (HIDMAESTRO_XUSB_MODE defined)
+     */
+#ifdef HIDMAESTRO_XUSB_MODE
+    BOOLEAN isXusbDevice = TRUE;
+    /* XUSB mode: we ARE the function driver. Don't set as filter. */
+#else
     BOOLEAN isXusbDevice = FALSE;
-    {
-        /* Check the device's own HW registry for XusbMode=1.
-         * The XUSB INF writes this via AddReg in the .NT.HW section.
-         * We use WdfFdoInitQueryProperty to read it before device creation.
-         * If that fails, fall back to checking the global registry.
-         */
-        WDFMEMORY propMem = NULL;
-        if (NT_SUCCESS(WdfFdoInitQueryProperty(DeviceInit,
-                DevicePropertyHardwareID, NonPagedPoolNx,
-                WDF_NO_OBJECT_ATTRIBUTES, &propMem))) {
-            PWCH buf = (PWCH)WdfMemoryGetBuffer(propMem, NULL);
-            if (buf && wcsstr(buf, L"HIDMaestroXUSB")) {
-                isXusbDevice = TRUE;
-            }
-            WdfObjectDelete(propMem);
-        }
-        /* Fallback: check global registry */
-        if (!isXusbDevice) {
-            HKEY hKey;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
-                              0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-                DWORD val = 0, sz = sizeof(val), regType;
-                if (RegQueryValueExW(hKey, L"XusbMode", NULL, &regType,
-                                     (LPBYTE)&val, &sz) == ERROR_SUCCESS &&
-                    regType == REG_DWORD && val != 0) {
-                    isXusbDevice = TRUE;
-                }
-                RegCloseKey(hKey);
-            }
-        }
-    }
-
-    if (!isXusbDevice) {
-        WdfFdoInitSetFilter(DeviceInit);
-    }
+    WdfFdoInitSetFilter(DeviceInit);
+#endif
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
