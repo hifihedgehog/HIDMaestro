@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csl-elite-pedals-lc",
+  "name": "Fanatec CSL Elite Pedals LC V1",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x6204",
+  "productString": "CSL Elite Pedals LC",
+  "manufacturerString": "Endor AG",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t-flight-rudder-pedals",
+  "name": "Thrustmaster T.Flight Rudder Pedals",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB678",
+  "productString": "T.Flight Rudder Pedals",
+  "manufacturerString": "Thrustmaster",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": null
+}

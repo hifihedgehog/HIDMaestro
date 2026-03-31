@@ -1,0 +1,14 @@
+{
+  "id": "pxn-v12",
+  "name": "PXN V12 Racing Wheel",
+  "vendor": "PXN",
+  "vid": "0x11FF",
+  "pid": "0x1212",
+  "productString": "PXN V12",
+  "manufacturerString": "PXN",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From universal-pidff hid-ids.h. Lite variant PIDs: 0x1112, 0x1211."
+}

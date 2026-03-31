@@ -1,0 +1,14 @@
+{
+  "id": "virpil-mongoost-50cm2-throttle",
+  "name": "Virpil VPC MongoosT-50CM2 Throttle",
+  "vendor": "Virpil",
+  "vid": "0x3344",
+  "pid": "0x8193",
+  "productString": "VPC MongoosT-50CM2 Throttle",
+  "manufacturerString": "VIRPIL Controls",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

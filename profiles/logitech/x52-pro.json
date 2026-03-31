@@ -1,0 +1,14 @@
+{
+  "id": "saitek-x52-pro",
+  "name": "Saitek X52 Pro Flight Control System",
+  "vendor": "Logitech (Saitek)",
+  "vid": "0x06A3",
+  "pid": "0x0762",
+  "productString": "Saitek X52 Pro Flight Control System",
+  "manufacturerString": "Saitek",
+  "type": "hotas",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Uses Saitek VID 0x06A3 (now Logitech-owned). Non-Pro X52 uses PID 0x075C. X52 variant 2 uses PID 0x0255."
+}

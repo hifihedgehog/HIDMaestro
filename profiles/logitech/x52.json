@@ -1,0 +1,14 @@
+{
+  "id": "saitek-x52",
+  "name": "Saitek X52 Flight Control System",
+  "vendor": "Logitech (Saitek)",
+  "vid": "0x06A3",
+  "pid": "0x075C",
+  "productString": "Saitek X52 Flight Control System",
+  "manufacturerString": "Saitek",
+  "type": "hotas",
+  "connection": "usb",
+  "descriptor": "05010904a10901a100093009311500260007750b9502810209351500260003750a950181020932093309340936150026ff007508950481020509190129221500250195227501810275029501810105010939150125083500463b106614007504950181420505092409261500250f750495028102c0c0",
+  "inputReportSize": null,
+  "notes": "119-byte descriptor. Source: Ubuntu Bug #492056 / hid-remapper issue. Non-Pro X52 (PID 075C). X52 Pro (0762) descriptor not publicly available."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "moza-r3",
+  "name": "MOZA R3 Racing Wheelbase",
+  "vendor": "MOZA",
+  "vid": "0x346E",
+  "pid": "0x0005",
+  "productString": "MOZA R3",
+  "manufacturerString": "Gudsen Technology",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

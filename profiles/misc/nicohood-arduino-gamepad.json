@@ -1,0 +1,14 @@
+{
+  "id": "nicohood-arduino-gamepad",
+  "name": "NicoHood Arduino HID Gamepad (Generic)",
+  "vendor": "Generic/Arduino",
+  "vid": "0x2341",
+  "pid": "0x8036",
+  "productString": "Arduino Leonardo",
+  "manufacturerString": "Arduino LLC",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101050919012920150025017501952081020501a100093009310933093416008026ff7f751095048102093209351580257f750895028102c005010939093915012508950275048102c0",
+  "inputReportSize": 15,
+  "notes": "78-byte descriptor. Source: NicoHood/HID SingleGamepad.cpp. Used by thousands of DIY/Arduino gamepad projects. 32 buttons, 4x16-bit axes (X/Y/Rx/Ry), 2x8-bit axes (Z/Rz), 2 hat switches. VID:PID shown is Arduino Leonardo default -- override as needed."
+}

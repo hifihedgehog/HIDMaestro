@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-clubsport-shifter",
+  "name": "Fanatec ClubSport Shifter SQ V1.5",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x1A92",
+  "productString": "ClubSport Shifter SQ V1.5",
+  "manufacturerString": "Endor AG",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

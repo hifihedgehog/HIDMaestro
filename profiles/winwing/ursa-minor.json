@@ -1,0 +1,14 @@
+{
+  "id": "winwing-ursa-minor",
+  "name": "Winwing Ursa Minor Fighter Stick (R)",
+  "vendor": "Winwing",
+  "vid": "0x4098",
+  "pid": "0xBC2A",
+  "productString": "Ursa Minor Fighter Stick R",
+  "manufacturerString": "Winwing",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

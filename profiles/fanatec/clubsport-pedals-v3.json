@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-clubsport-pedals-v3",
+  "name": "Fanatec ClubSport Pedals V3",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x183B",
+  "productString": "ClubSport Pedals V3",
+  "manufacturerString": "Endor AG",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

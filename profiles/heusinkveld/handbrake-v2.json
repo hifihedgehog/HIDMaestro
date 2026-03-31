@@ -1,0 +1,14 @@
+{
+  "id": "heusinkveld-handbrake-v2",
+  "name": "Heusinkveld Handbrake V2",
+  "vendor": "Heusinkveld",
+  "vid": "0x30B7",
+  "pid": "0x1002",
+  "productString": "Handbrake V2",
+  "manufacturerString": "Heusinkveld Engineering",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

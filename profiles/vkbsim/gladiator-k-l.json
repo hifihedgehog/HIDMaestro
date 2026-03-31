@@ -1,0 +1,14 @@
+{
+  "id": "vkbsim-gladiator-k-l",
+  "name": "VKBsim Gladiator K (L)",
+  "vendor": "VKBSim",
+  "vid": "0x231D",
+  "pid": "0x0133",
+  "productString": "VKBsim Gladiator K (L)",
+  "manufacturerString": "VKB-Sim",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

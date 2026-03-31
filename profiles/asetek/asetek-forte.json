@@ -1,0 +1,14 @@
+{
+  "id": "asetek-forte",
+  "name": "Asetek SimSports Forte Wheelbase",
+  "vendor": "Asetek",
+  "vid": "0x2433",
+  "pid": "0xF301",
+  "productString": "Forte",
+  "manufacturerString": "Asetek SimSports",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant. From universal-pidff hid-ids.h."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "logitech-gt-force",
+  "name": "Logitech GT Force (WingMan FFG)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC293",
+  "productString": "WingMan Formula Force GP",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950675012501450105091901290681029501750826ff0046ff000600ff090181020501093181020600ff090195038102c0a102090295079102c0c0",
+  "inputReportSize": null,
+  "notes": "85-byte descriptor. Source: lgff_wheel_adapter / GIMX EMUGTF."
+}

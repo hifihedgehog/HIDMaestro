@@ -1,0 +1,14 @@
+{
+  "id": "moza-r5",
+  "name": "MOZA R5 Racing Wheelbase",
+  "vendor": "MOZA",
+  "vid": "0x346E",
+  "pid": "0x0004",
+  "productString": "MOZA R5",
+  "manufacturerString": "Gudsen Technology",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "1243-byte PID-compliant descriptor. Full structure documented (8x 16-bit axes, 128 buttons, hat, PID FFB). Alternate PID 0x0014. Requires physical dump for exact hex."
+}

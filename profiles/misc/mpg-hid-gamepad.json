@@ -1,0 +1,14 @@
+{
+  "id": "mpg-hid-gamepad",
+  "name": "MPG/FeralAI HID Gamepad (Hori FC Clone)",
+  "vendor": "Generic",
+  "vid": "0x0F0D",
+  "pid": "0x0094",
+  "productString": "Hori Fighting Commander",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a101150025013500450175019510050919012910810205012507463b017504950165140939814265009501810126ff0046ff0009300931093209357508950481020600ff092075089501b102c0",
+  "inputReportSize": null,
+  "notes": "81-byte descriptor. Source: FeralAI/MPG HIDDescriptors.h. 16 buttons, hat, 4x 8-bit axes, 1 vendor feature byte. PS3-compatible layout."
+}

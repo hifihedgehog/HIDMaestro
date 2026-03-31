@@ -1,0 +1,14 @@
+{
+  "id": "asetek-invicta-pedals",
+  "name": "Asetek SimSports Invicta Pedals",
+  "vendor": "Asetek",
+  "vid": "0x2433",
+  "pid": "0xF100",
+  "productString": "Invicta Pedals",
+  "manufacturerString": "Asetek SimSports",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

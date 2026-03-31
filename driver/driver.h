@@ -62,6 +62,10 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   InputReportSize;
     BOOLEAN InputReportReady;
 
+    /* Product string (returned on IOCTL_HID_GET_STRING) */
+    WCHAR   ProductString[128];
+    ULONG   ProductStringBytes; /* size in bytes including null terminator */
+
     /* Latest raw output report (received from HID class) */
     UCHAR   OutputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   OutputReportSize;

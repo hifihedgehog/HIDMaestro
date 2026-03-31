@@ -1,0 +1,14 @@
+{
+  "id": "simucube-2-pro",
+  "name": "Simucube 2 Pro",
+  "vendor": "Granite Devices",
+  "vid": "0x16D0",
+  "pid": "0x0D60",
+  "productString": "Simucube 2 Pro",
+  "manufacturerString": "Granite Devices",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant. 8 axes (16-bit unsigned), 128 buttons. Requires physical dump."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "gamecube-adapter",
+  "name": "GameCube Controller Adapter (Wii U / Switch)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x0337",
+  "productString": "WUP-028",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Does NOT use HID — uses raw USB bulk endpoints. Most software (Dolphin, etc.) accesses it via libusb. Supports 4 GC controllers. Would need a different approach to impersonate."
+}

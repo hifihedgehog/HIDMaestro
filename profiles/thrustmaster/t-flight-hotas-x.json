@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t-flight-hotas-x",
+  "name": "Thrustmaster T-Flight HOTAS X",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB108",
+  "productString": "T-Flight Hotas X Flight Stick",
+  "manufacturerString": "Thrustmaster",
+  "type": "hotas",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": null
+}

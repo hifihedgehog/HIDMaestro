@@ -1,0 +1,14 @@
+{
+  "id": "virpil-constellation-alpha-warbrd",
+  "name": "Virpil VPC Constellation Alpha (WarBRD-D base)",
+  "vendor": "Virpil",
+  "vid": "0x3344",
+  "pid": "0x43F5",
+  "productString": "R-VPC Stick WarBRD-D",
+  "manufacturerString": "VIRPIL Controls",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

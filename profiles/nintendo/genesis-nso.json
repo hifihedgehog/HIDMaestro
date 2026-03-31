@@ -1,0 +1,14 @@
+{
+  "id": "genesis-nso",
+  "name": "Sega Genesis Controller (Nintendo Switch Online)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x201E",
+  "productString": "Sega Genesis Controller",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "bluetooth",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "NSO retro controller. Bluetooth connectivity."
+}

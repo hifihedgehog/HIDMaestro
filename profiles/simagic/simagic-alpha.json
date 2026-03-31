@@ -1,0 +1,14 @@
+{
+  "id": "simagic-alpha",
+  "name": "Simagic Alpha Wheelbase",
+  "vendor": "Simagic",
+  "vid": "0x0483",
+  "pid": "0x0522",
+  "productString": "Simagic Alpha",
+  "manufacturerString": "Simagic",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Pre-fw171: PID-compliant. Post-fw171: proprietary protocol. Shared VID with STMicroelectronics."
+}

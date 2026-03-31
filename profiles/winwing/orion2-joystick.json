@@ -1,0 +1,14 @@
+{
+  "id": "winwing-orion2-joystick",
+  "name": "Winwing Orion 2 Joystick Base",
+  "vendor": "Winwing",
+  "vid": "0x4098",
+  "pid": "0xBEA1",
+  "productString": "Orion 2 Joystick Base",
+  "manufacturerString": "Winwing",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

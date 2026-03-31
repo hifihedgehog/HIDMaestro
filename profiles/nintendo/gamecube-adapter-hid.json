@@ -1,0 +1,14 @@
+{
+  "id": "gamecube-adapter-hid",
+  "name": "GameCube Controller Adapter (HID)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x0337",
+  "productString": "WUP-028",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05050900a101851119002aff00150026ff00750895059100c0a101852119002aff00150026ff00750895258100c0a101851219002aff00150026ff00750895019100c0a101852219002aff00150026ff00750895198100c0a101851319002aff00150026ff00750895019100c0a101852319002aff00150026ff00750895028100c0a101851419002aff00150026ff00750895019100c0a101852419002aff00150026ff00750895028100c0a101851519002aff00150026ff00750895019100c0a101852519002aff00150026ff00750895028100c0",
+  "inputReportSize": null,
+  "notes": "214-byte descriptor. Source: GBAtemp USB HID dump. Uses vendor Usage Page (0x05, 0x05), report IDs 0x11-0x15 (out) and 0x21-0x25 (in). Known buggy: report 0x21 declares Count=37 but sends 36."
+}

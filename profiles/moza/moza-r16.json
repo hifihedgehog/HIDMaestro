@@ -1,0 +1,14 @@
+{
+  "id": "moza-r16",
+  "name": "MOZA R16/R21 Racing Wheelbase",
+  "vendor": "MOZA",
+  "vid": "0x346E",
+  "pid": "0x0000",
+  "productString": "MOZA R16",
+  "manufacturerString": "Gudsen Technology",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Same PID-compliant descriptor structure as R5. Alternate PID 0x0010."
+}

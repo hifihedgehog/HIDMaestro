@@ -1,0 +1,14 @@
+{
+  "id": "logitech-driving-force-gt",
+  "name": "Logitech Driving Force GT",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC29A",
+  "productString": "Driving Force GT",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101150025073500463b01651409397504950181426500250145010509190129157501951581020600ff09019507810226ff3f46ff3f750e9501050109308102250145010600ff090175019502810226ff0046ff000501093109327508810295070600ff0902910295830903b102c0",
+  "inputReportSize": null,
+  "notes": "115-byte descriptor. Source: lgff_wheel_adapter."
+}

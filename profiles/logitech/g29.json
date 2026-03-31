@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g29",
+  "name": "Logitech G29 Driving Force Racing Wheel",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC24F",
+  "productString": "G29 Driving Force Racing Wheel",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a1010939150025073500463b0165147504950181420509190129196500250145017501951981027501950381030501093027ffff000047ffff000075109501810209320935093126ff0046ff007508950381020600ff0901950281020600ff0901950181020600ff090226ff0046ff00951075089102c0",
+  "inputReportSize": null,
+  "notes": "123-byte descriptor for PS3/PC mode (PID 0xC24F). Source: lgff_wheel_adapter. PS4 mode (PID 0xC260) uses a different 160-byte PS4-compatible descriptor."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "winwing-skywalker-pedals",
+  "name": "Winwing Skywalker Metal Rudder Pedals",
+  "vendor": "Winwing",
+  "vid": "0x4098",
+  "pid": "0xBEF0",
+  "productString": "SKYWALKER Metal Rudder Pedals",
+  "manufacturerString": "Winwing",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "virpil-control-panel-2",
+  "name": "Virpil VPC Control Panel #2",
+  "vendor": "Virpil",
+  "vid": "0x3344",
+  "pid": "0x025B",
+  "productString": "VPC Control Panel #2",
+  "manufacturerString": "VIRPIL Controls",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

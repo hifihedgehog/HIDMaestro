@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t300rs",
+  "name": "Thrustmaster T300RS Racing Wheel",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB66D",
+  "productString": "Thrustmaster T300RS Racing wheel",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010905a10185010930093109320935150026ff007508950481020939150025073500463b016514750495018142650005091901290e150025017501950e81020600ff0920750695018102050109330934150026ff007508950281020600ff09219536810285050922951f910285030a2127952fb102c006f0ff0940a10185f00947953fb10285f10948953fb10285f20949950fb10285f30a01479507b102c0",
+  "inputReportSize": null,
+  "notes": "160-byte descriptor. Source: GIMX EMUT300RSPS4 (verified original device descriptor). PID 0xB66D is PS4 mode. PS3 normal: 0xB66E. PS3 advanced: 0xB66F."
+}

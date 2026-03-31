@@ -1,0 +1,14 @@
+{
+  "id": "asetek-tony-kanaan",
+  "name": "Asetek SimSports Tony Kanaan Wheelbase",
+  "vendor": "Asetek",
+  "vid": "0x2433",
+  "pid": "0xF306",
+  "productString": "Tony Kanaan Edition",
+  "manufacturerString": "Asetek SimSports",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

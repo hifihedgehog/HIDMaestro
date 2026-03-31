@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t80",
+  "name": "Thrustmaster T80 Racing Wheel",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB668",
+  "productString": "T80 Racing Wheel",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010905a10185010930093109320935150026ff007508950481020939150025073500463b016514750495018142650005091901290e150025017501950e81020600ff0920750695018102050109330034150026ff007508950281020600ff09219536810285050922951f910285030a2127952fb102c006f0ff0940a10185f00947953fb10285f10948953fb10285f20949950fb10285f30a01479507b102c0",
+  "inputReportSize": null,
+  "notes": "160-byte PS4-compatible descriptor. Same layout as HOTAS 4, T300RS PS4. T80 is a basic non-FFB wheel that still uses the PS4 HID interface."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "joypad-xac",
+  "name": "Joypad-OS XAC-compatible Gamepad",
+  "vendor": "Joypad",
+  "vid": "0x2563",
+  "pid": "0x0576",
+  "productString": "Joypad (XAC)",
+  "manufacturerString": "Joypad",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a1010930093109320935150026ff007508950481020939150025073500463b0165147504950181426500450005091901290c150025017501950c8102c0",
+  "inputReportSize": null,
+  "notes": "65-byte descriptor. Source: joypad-ai/joypad-os. Xbox Adaptive Controller compatible: 4 axes, hat, 12 buttons."
+}

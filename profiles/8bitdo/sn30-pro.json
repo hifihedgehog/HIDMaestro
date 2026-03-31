@@ -1,0 +1,14 @@
+{
+  "id": "8bitdo-sn30-pro",
+  "name": "8BitDo SN30 Pro",
+  "vendor": "8BitDo",
+  "vid": "0x2DC8",
+  "pid": "0x6001",
+  "productString": "8Bitdo SN30 Pro",
+  "manufacturerString": "8BitDo",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID 0x6001 is USB wired D-Input mode. Bluetooth D-Input: 0x6101. SN30 Pro+ uses PID 0x6002 (wired). In XInput/Switch modes, VID changes to Microsoft/Nintendo."
+}

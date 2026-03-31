@@ -1,0 +1,14 @@
+{
+  "id": "asetek-forte-pedals",
+  "name": "Asetek SimSports Forte Pedals",
+  "vendor": "Asetek",
+  "vid": "0x2433",
+  "pid": "0xF101",
+  "productString": "Forte Pedals",
+  "manufacturerString": "Asetek SimSports",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

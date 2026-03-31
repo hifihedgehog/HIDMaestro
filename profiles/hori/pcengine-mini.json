@@ -1,0 +1,14 @@
+{
+  "id": "hori-pcengine-mini",
+  "name": "HORI PC Engine Mini Pad",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x0138",
+  "productString": "PCEngine PAD",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10115002501350045017501950e05091901290e81029502810105012507463b017504950165140939814265009501810126ff0046ff0009300931093209357508950481027508950181010a4f4875089508b1020a4f489102c0",
+  "inputReportSize": null,
+  "notes": "94-byte descriptor. Source: GP2040-CE PCEngineDescriptors.h. 14 buttons, hat, 4 axes, vendor feature/output reports."
+}

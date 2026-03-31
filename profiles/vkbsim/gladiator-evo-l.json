@@ -1,0 +1,14 @@
+{
+  "id": "vkbsim-gladiator-evo-l",
+  "name": "VKBsim Gladiator NXT/EVO (L)",
+  "vendor": "VKBSim",
+  "vid": "0x231D",
+  "pid": "0x0201",
+  "productString": "VKBsim Gladiator NXT/EVO L",
+  "manufacturerString": "VKB-Sim",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

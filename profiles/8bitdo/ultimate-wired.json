@@ -1,0 +1,14 @@
+{
+  "id": "8bitdo-ultimate-wired",
+  "name": "8BitDo Ultimate Wired Controller",
+  "vendor": "8BitDo",
+  "vid": "0x2DC8",
+  "pid": "0x2002",
+  "productString": "8BitDo Ultimate Wired Controller",
+  "manufacturerString": "8BitDo",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "2.4GHz wireless via dongle uses PID 0x3106. Ultimate 2 Wireless: PID 0x6012. Ultimate 2C Wireless: PID 0x310A."
+}

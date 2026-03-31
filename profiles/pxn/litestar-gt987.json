@@ -1,0 +1,14 @@
+{
+  "id": "litestar-gt987",
+  "name": "Lite Star GT987 Racing Wheel",
+  "vendor": "PXN/Lite Star",
+  "vid": "0x11FF",
+  "pid": "0x2141",
+  "productString": "GT987",
+  "manufacturerString": "Lite Star",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

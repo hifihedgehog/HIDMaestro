@@ -1,0 +1,14 @@
+{
+  "id": "ch-fighterstick",
+  "name": "CH Products Fighterstick",
+  "vendor": "CH Products",
+  "vid": "0x068E",
+  "pid": "0x00F3",
+  "productString": "Fighterstick",
+  "manufacturerString": "CH Products, Inc.",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

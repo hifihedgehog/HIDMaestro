@@ -1,0 +1,14 @@
+{
+  "id": "logitech-rs-pedals",
+  "name": "Logitech RS Pedals (Standalone)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC277",
+  "productString": "RS Pedals",
+  "manufacturerString": "Logitech",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From simracing-hwdb. Standalone pedal set."
+}

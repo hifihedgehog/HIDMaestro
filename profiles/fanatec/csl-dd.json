@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csl-dd",
+  "name": "Fanatec CSL DD Wheelbase",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0020",
+  "productString": "CSL DD",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump. Linux driver hid-fanatecff."
+}

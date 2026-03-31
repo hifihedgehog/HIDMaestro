@@ -1,0 +1,14 @@
+{
+  "id": "switch2-pro-controller",
+  "name": "Nintendo Switch 2 Pro Controller",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x2069",
+  "productString": "Pro Controller",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

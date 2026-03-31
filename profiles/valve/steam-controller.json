@@ -1,0 +1,14 @@
+{
+  "id": "steam-controller",
+  "name": "Steam Controller (Wired)",
+  "vendor": "Valve",
+  "vid": "0x28DE",
+  "pid": "0x1102",
+  "productString": "Steam Controller",
+  "manufacturerString": "Valve Software",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "0600ff0901a101150026ff00750895400901810295400901910295400901b102c0",
+  "inputReportSize": 64,
+  "notes": "33-byte vendor-specific descriptor. Source: cyrozap/steam-controller-re. Uses Usage Page 0xFF00 with 64-byte raw reports — all gamepad data in proprietary binary format. Wireless dongle PID: 0x1142."
+}

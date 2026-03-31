@@ -1,0 +1,14 @@
+{
+  "id": "logitech-extreme-3d-pro",
+  "name": "Logitech Extreme 3D Pro",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC215",
+  "productString": "Extreme 3D Pro",
+  "manufacturerString": "Logitech",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Classic joystick. Twist axis for rudder, 12 buttons, hat switch, throttle slider."
+}

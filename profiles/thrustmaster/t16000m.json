@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t16000m",
+  "name": "Thrustmaster T.16000M Joystick",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB10A",
+  "productString": "T.16000M Joystick",
+  "manufacturerString": "Thrustmaster",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": "05010904a101050919012910150025013500450175019510810205010939150025073500463b016514750495018142810105010930150026ff3f350046ff3f6500750e95018102750281010931750e81027502810109350936150026ff00350046ff0065007508950281020600ff27ffff0000090175089504b1a2c0",
+  "inputReportSize": 7,
+  "notes": "124-byte descriptor. Source: py-hid-declarative dump_t16000m.bin (gpineda-dev/py-hid-declarative). 16 buttons, hat switch, X/Y 14-bit, twist 14-bit, throttle/rudder 8-bit. Uses vendor-specific feature reports."
+}

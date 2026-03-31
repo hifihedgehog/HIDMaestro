@@ -1,0 +1,14 @@
+{
+  "id": "retrolink-snes-0011",
+  "name": "Retrolink/DragonRise SNES USB Controller",
+  "vendor": "DragonRise",
+  "vid": "0x0079",
+  "pid": "0x0011",
+  "productString": "Gamepad",
+  "manufacturerString": "DragonRise Inc.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a1021475089503810126ff0095020930093181027501950481012501950a05091901290a8102950a8101c0c0",
+  "inputReportSize": 8,
+  "notes": "50-byte descriptor. Source: Linux kernel hid-dr.c pid0011_rdesc_fixed[] array. This is the FIXED descriptor -- the original hardware descriptor is 101 bytes but badly broken (duplicates Usage(X) for all axes). Represented as DVTech PC JS19, Retrolink SNES, and other retro-style USB pads. 2 axes (X/Y), 10 buttons, 3 constant bytes + 10 constant bits for padding."
+}

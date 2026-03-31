@@ -1,0 +1,14 @@
+{
+  "id": "oddor-handbrake",
+  "name": "Oddor USB Handbrake",
+  "vendor": "Oddor",
+  "vid": "0x1021",
+  "pid": "0x1888",
+  "productString": "Oddor Handbrake",
+  "manufacturerString": "Oddor",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csl-elite",
+  "name": "Fanatec CSL Elite Wheelbase",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0E03",
+  "productString": "CSL Elite Wheel Base",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "133-byte descriptor reported by lsusb. Requires physical hardware dump. Linux driver hid-fanatecff injects PID FFB collection at runtime."
+}

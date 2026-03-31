@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -102,25 +104,72 @@ class Program
 
     static CancellationTokenSource _cts = new();
 
+    static bool IsElevated()
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        var principal = new System.Security.Principal.WindowsPrincipal(identity);
+        return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
+    static int RelaunchElevated(string[] args)
+    {
+        string exe = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName;
+        var psi = new ProcessStartInfo
+        {
+            FileName = exe,
+            Arguments = string.Join(" ", args),
+            UseShellExecute = true,
+            Verb = "runas"
+        };
+        try
+        {
+            using var proc = Process.Start(psi);
+            proc?.WaitForExit();
+            return proc?.ExitCode ?? 1;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            Console.Error.WriteLine("ERROR: Elevation denied. This command requires administrator privileges.");
+            return 1;
+        }
+    }
+
+    static readonly string[] ElevatedCommands = { "emulate", "xbox", "ds5", "cleanup" };
+
     static int Main(string[] args)
     {
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; _cts.Cancel(); };
 
+        // Auto-elevate for commands that need admin
+        if (args.Length > 0 && ElevatedCommands.Contains(args[0].ToLower()) && !IsElevated())
+        {
+            Console.WriteLine("  Requesting elevation (admin required)...\n");
+            return RelaunchElevated(args);
+        }
+
         if (args.Length == 0)
         {
             Console.WriteLine("Usage:");
-            Console.WriteLine("  HIDMaestroTest xbox      Xbox 360 gamepad");
-            Console.WriteLine("  HIDMaestroTest ds5       DualSense gamepad");
-            Console.WriteLine("  HIDMaestroTest cleanup   Remove everything");
+            Console.WriteLine("  HIDMaestroTest emulate <id>      Emulate any controller profile");
+            Console.WriteLine("  HIDMaestroTest xbox              Xbox 360 gamepad (hardcoded quick test)");
+            Console.WriteLine("  HIDMaestroTest ds5               DualSense gamepad (hardcoded quick test)");
+            Console.WriteLine("  HIDMaestroTest list              List all controller profiles");
+            Console.WriteLine("  HIDMaestroTest search <query>    Search profiles by name/vendor");
+            Console.WriteLine("  HIDMaestroTest info <id>         Show profile details");
+            Console.WriteLine("  HIDMaestroTest cleanup           Remove everything");
             Console.WriteLine("\nMust run elevated for config writes + device restart.");
             return 1;
         }
 
         return args[0].ToLower() switch
         {
+            "emulate" => EmulateProfile(args.Length > 1 ? args[1] : ""),
             "xbox"    => TestXbox360(),
             "ds5"     => TestDualSense(),
+            "list"    => ListProfiles(),
+            "search"  => SearchProfiles(args.Length > 1 ? args[1] : ""),
+            "info"    => ShowProfile(args.Length > 1 ? args[1] : ""),
             "cleanup" => RunCleanup(),
             _         => Error($"Unknown command: {args[0]}")
         };
@@ -128,37 +177,72 @@ class Program
 
     static int Error(string msg) { Console.Error.WriteLine($"ERROR: {msg}"); return 1; }
 
+    // ── Descriptor preparation ──
+
+    /// <summary>
+    /// The HIDMaestro universal gamepad descriptor: 6 axes (16-bit), 10 buttons,
+    /// 1 hat switch, plus Feature Report ID 2 as the data channel.
+    /// This descriptor uses explicit Report IDs throughout, so adding the
+    /// feature report is always valid. VID/PID/ProductString from the profile
+    /// determine the identity; this descriptor determines the report format.
+    ///
+    /// Games identify controllers by VID/PID and product string — not by
+    /// parsing the HID descriptor layout. So we use our proven descriptor
+    /// for all profiles and just swap the identity.
+    /// </summary>
+    static readonly byte[] UniversalDescriptor = {
+        // EXACT COPY of G_DefaultReportDescriptor from driver.h
+        // This descriptor is PROVEN working (Xbox 360 PoC).
+        0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01,
+        0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x27, 0xFF,
+        0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x02, 0x81,
+        0x02, 0x09, 0x33, 0x09, 0x34, 0x81, 0x02, 0x09,
+        0x32, 0x09, 0x35, 0x81, 0x02, 0x05, 0x09, 0x19,
+        0x01, 0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75,
+        0x01, 0x95, 0x0A, 0x81, 0x02, 0x75, 0x06, 0x95,
+        0x01, 0x81, 0x01, 0x05, 0x01, 0x09, 0x39, 0x15,
+        0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01,
+        0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
+        0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25,
+        0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
+        0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01,
+        0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
+        0x0E, 0xB1, 0x02, 0xC0
+    };
+
     // ── Registry config ──
 
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100)
+    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         key.SetValue("VendorId", (int)vid, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)pid, RegistryValueKind.DWord);
         key.SetValue("VersionNumber", (int)ver, RegistryValueKind.DWord);
+        if (productString != null)
+            key.SetValue("ProductString", productString, RegistryValueKind.String);
+
+        // Register OEM joystick name so joy.cpl shows the correct name.
+        // Joy.cpl looks up the name from:
+        //   HKLM\System\CurrentControlSet\Control\MediaProperties\
+        //     PrivateProperties\Joystick\OEM\VID_XXXX&PID_YYYY
+        // with an OEMName string value.
+        if (productString != null)
+        {
+            string oemKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
+            using var oem = Registry.LocalMachine.CreateSubKey(oemKey);
+            oem.SetValue("OEMName", productString, RegistryValueKind.String);
+            oem.SetValue("OEMData", new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, RegistryValueKind.Binary);
+        }
     }
 
-    // ── Device restart (remove + recreate via PowerShell script) ──
+    // ── Process runner ──
 
-    static void RestartDevice()
-    {
-        Console.Write("  Removing + recreating device node... ");
+    static readonly string RepoRoot = @"C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro";
+    static readonly string ScriptsDir = Path.Combine(RepoRoot, "scripts");
+    static readonly string BuildDir = Path.Combine(RepoRoot, "build");
 
-        // Remove existing nodes
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
-        Thread.Sleep(1000);
-
-        // Recreate via the create_node.ps1 script
-        string script = @"C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\scripts\create_node.ps1";
-        RunProcess("powershell.exe", $"-ExecutionPolicy Bypass -File \"{script}\"");
-
-        Console.WriteLine("OK");
-        Thread.Sleep(3000); // Wait for HID child to enumerate
-    }
-
-    static void RunProcess(string fileName, string args)
+    static (int exitCode, string output) RunProcess(string fileName, string args, int timeoutMs = 30_000, bool showOutput = false)
     {
         var psi = new ProcessStartInfo
         {
@@ -166,10 +250,81 @@ class Program
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true
         };
-        using var proc = Process.Start(psi);
-        proc?.StandardOutput.ReadToEnd();
-        proc?.StandardError.ReadToEnd();
-        proc?.WaitForExit(10_000);
+        using var proc = Process.Start(psi)!;
+        string stdout = proc.StandardOutput.ReadToEnd();
+        string stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(timeoutMs);
+        string combined = stdout + stderr;
+        if (showOutput && !string.IsNullOrWhiteSpace(combined))
+            Console.WriteLine(combined.TrimEnd());
+        return (proc.ExitCode, combined);
+    }
+
+    static void RunPowerShell(string script, bool showOutput = false)
+    {
+        RunProcess("powershell.exe",
+            $"-ExecutionPolicy Bypass -File \"{Path.Combine(ScriptsDir, script)}\"",
+            showOutput: showOutput);
+    }
+
+    // ── Full build + sign + install pipeline ──
+
+    static bool IsDriverInStore()
+    {
+        var (_, output) = RunProcess("pnputil.exe", "/enum-drivers");
+        return output.Contains("hidmaestro.inf");
+    }
+
+    static bool EnsureDriverInstalled()
+    {
+        string dllPath = Path.Combine(BuildDir, "HIDMaestro.dll");
+        string driverSource = Path.Combine(RepoRoot, "driver", "driver.c");
+        string driverHeader = Path.Combine(RepoRoot, "driver", "driver.h");
+
+        bool needsBuild = !File.Exists(dllPath) ||
+            File.GetLastWriteTime(driverSource) > File.GetLastWriteTime(dllPath) ||
+            File.GetLastWriteTime(driverHeader) > File.GetLastWriteTime(dllPath);
+
+        bool driverInstalled = IsDriverInStore();
+
+        if (needsBuild || !driverInstalled)
+        {
+            // Full deploy: build + sign + install + create node
+            string skipArg = needsBuild ? "" : "-SkipBuild";
+            var (_, output) = RunProcess("powershell.exe",
+                $"-ExecutionPolicy Bypass -File \"{Path.Combine(ScriptsDir, "full_deploy.ps1")}\" {skipArg}",
+                timeoutMs: 120_000, showOutput: true);
+            return output.Contains("Deploy Complete");
+        }
+
+        // Driver is installed — just remove and recreate device node
+        // (EvtDeviceAdd re-reads registry config on creation)
+        Console.Write("  Recreating device node... ");
+        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
+        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
+        Thread.Sleep(1000);
+        RunPowerShell("create_node.ps1");
+        Thread.Sleep(3000);
+        Console.WriteLine("OK");
+        return true;
+    }
+
+    // ── Device restart (remove + recreate) ──
+
+    static void RestartDevice()
+    {
+        Console.Write("  Restarting device node... ");
+
+        // Remove existing nodes
+        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
+        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
+        Thread.Sleep(1000);
+
+        // Recreate via the create_node.ps1 script
+        RunPowerShell("create_node.ps1");
+
+        Console.WriteLine("OK");
+        Thread.Sleep(3000); // Wait for HID child to enumerate
     }
 
     // ── Find and open HID child device ──
@@ -233,6 +388,114 @@ class Program
         }
 
         return null;
+    }
+
+    // ── Emulate any profile ──
+
+    static int EmulateProfile(string profileId)
+    {
+        if (string.IsNullOrEmpty(profileId))
+            return Error("Usage: HIDMaestroTest emulate <profile-id>\n  Use 'list' to see available profiles.");
+
+        var db = ProfileDatabase.Load(GetProfilesDir());
+        var profile = db.GetById(profileId);
+        if (profile == null)
+        {
+            // Try fuzzy search
+            var matches = db.Search(profileId).ToList();
+            if (matches.Count == 1)
+                profile = matches[0];
+            else if (matches.Count > 1)
+            {
+                Console.Error.WriteLine($"Multiple matches for '{profileId}':");
+                foreach (var m in matches.Take(10))
+                    Console.Error.WriteLine($"  {m.Id,-35} {m.Name}");
+                return 1;
+            }
+            else
+                return Error($"Profile '{profileId}' not found. Use 'list' to see profiles.");
+        }
+
+        if (!profile.HasDescriptor)
+            return Error($"Profile '{profile.Id}' has no HID descriptor. Cannot emulate.\n  This profile needs a descriptor captured from physical hardware.");
+
+        Console.WriteLine($"-- Emulating: {profile.Name} --\n");
+        Console.WriteLine($"  Profile:  {profile.Id}");
+        Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
+        Console.WriteLine($"  Product:  {profile.ProductString}");
+        Console.WriteLine($"  Using universal descriptor ({UniversalDescriptor.Length} bytes)\n");
+
+        // Step 1: Write prepared descriptor to registry FIRST
+        // The driver reads this at EvtDeviceAdd (device node creation)
+        Console.Write("  Writing profile to registry... ");
+        WriteConfig(UniversalDescriptor, profile.VendorId, profile.ProductId,
+            productString: profile.ProductString);
+        Console.WriteLine("OK");
+
+        // Step 2: Build, sign, install driver + create device node
+        // The driver will read the registry config we just wrote
+        if (!EnsureDriverInstalled())
+            return Error("Driver build/install failed. Run elevated.");
+
+        // Step 3: Open the HID child device
+        Console.Write("  Opening HID device... ");
+        Thread.Sleep(2000); // Wait for HID child to enumerate
+        using var h = OpenHidDevice(profile.VendorId, profile.ProductId);
+        if (h == null)
+        {
+            Console.WriteLine("FAILED");
+            Console.WriteLine("  Device not found. Check Device Manager.");
+            return 1;
+        }
+
+        // Feature report: Report ID 2 + up to 64 bytes of input data
+        // The driver takes the feature data, prepends Report ID 1, and delivers as input
+        Console.WriteLine("\n  Sending input via feature reports. Open joy.cpl to watch.");
+        Console.WriteLine("  Ctrl+C to stop.\n");
+
+        // Determine input report size from descriptor
+        // For simplicity, send a standard gamepad pattern: stick circles
+        // The actual report layout depends on the controller profile
+        int featureSize = 14; // matches Feature Report Count (0x0E) in UniversalDescriptor
+        byte[] report = new byte[featureSize + 1]; // +1 for Report ID
+        report[0] = 0x02; // Feature Report ID 2 (data channel)
+
+        var sw = Stopwatch.StartNew();
+        int count = 0;
+
+        while (!_cts.Token.IsCancellationRequested)
+        {
+            double t = sw.Elapsed.TotalSeconds;
+            double angle = t * Math.PI * 2 * 0.5;
+
+            // Generic gamepad input pattern — works for most descriptors
+            // Axes at various byte widths
+            if (featureSize >= 4)
+            {
+                // Try both 8-bit and 16-bit axis patterns
+                ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
+                ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
+                report[1] = (byte)(lx & 0xFF); report[2] = (byte)(lx >> 8);
+                report[3] = (byte)(ly & 0xFF); report[4] = (byte)(ly >> 8);
+            }
+
+            if (!HidD_SetFeature(h, report, (uint)report.Length))
+            {
+                int err = Marshal.GetLastWin32Error();
+                if (count == 0)
+                    Console.Error.WriteLine($"  HidD_SetFeature failed: {err} (0x{err:X})");
+                if (count > 3) break;
+            }
+
+            count++;
+            if (count % 100 == 0)
+                Console.Write($"\r  Reports: {count}  t={t:F1}s  ");
+
+            Thread.Sleep(4); // ~250 Hz
+        }
+
+        Console.WriteLine($"\n\n  Sent {count} reports.");
+        return 0;
     }
 
     // ── Xbox 360 HID Gamepad ──
@@ -458,6 +721,77 @@ class Program
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
+        return 0;
+    }
+
+    // ── Profile database commands ──
+
+    static string GetProfilesDir()
+    {
+        // Walk up from exe to find profiles/ directory
+        string? dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 8 && dir != null; i++)
+        {
+            string candidate = Path.Combine(dir, "profiles");
+            if (Directory.Exists(candidate)) return candidate;
+            dir = Path.GetDirectoryName(dir);
+        }
+        // Fallback to known path
+        return @"C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\profiles";
+    }
+
+    static int ListProfiles()
+    {
+        Console.WriteLine("-- Controller Profile Database --");
+        var db = ProfileDatabase.Load(GetProfilesDir());
+        db.PrintAll();
+        return 0;
+    }
+
+    static int SearchProfiles(string query)
+    {
+        if (string.IsNullOrEmpty(query))
+            return Error("Usage: HIDMaestroTest search <query>");
+
+        var db = ProfileDatabase.Load(GetProfilesDir());
+        var results = db.Search(query).ToList();
+
+        Console.WriteLine($"-- Search results for \"{query}\" ({results.Count} found) --\n");
+        foreach (var p in results)
+            Console.WriteLine($"  {p.Id,-35} {p.Name,-45} {p.VendorId:X4}:{p.ProductId:X4}");
+
+        if (results.Count == 0)
+            Console.WriteLine("  No profiles found.");
+        return 0;
+    }
+
+    static int ShowProfile(string id)
+    {
+        if (string.IsNullOrEmpty(id))
+            return Error("Usage: HIDMaestroTest info <profile-id>");
+
+        var db = ProfileDatabase.Load(GetProfilesDir());
+        var p = db.GetById(id);
+
+        if (p == null)
+        {
+            Console.Error.WriteLine($"Profile '{id}' not found. Use 'list' to see all profiles.");
+            return 1;
+        }
+
+        Console.WriteLine($"-- Profile: {p.Name} --\n");
+        Console.WriteLine($"  ID:             {p.Id}");
+        Console.WriteLine($"  Vendor:         {p.Vendor}");
+        Console.WriteLine($"  VID:            0x{p.VendorId:X4}");
+        Console.WriteLine($"  PID:            0x{p.ProductId:X4}");
+        Console.WriteLine($"  Product String: {p.ProductString}");
+        Console.WriteLine($"  Manufacturer:   {p.ManufacturerString ?? "(unknown)"}");
+        Console.WriteLine($"  Type:           {p.Type}");
+        Console.WriteLine($"  Connection:     {p.Connection}");
+        Console.WriteLine($"  Descriptor:     {(p.HasDescriptor ? $"{p.GetDescriptorBytes()!.Length} bytes" : "NOT CAPTURED")}");
+        Console.WriteLine($"  Input Report:   {(p.InputReportSize.HasValue ? $"{p.InputReportSize} bytes" : "unknown")}");
+        if (!string.IsNullOrEmpty(p.Notes))
+            Console.WriteLine($"\n  Notes: {p.Notes}");
         return 0;
     }
 

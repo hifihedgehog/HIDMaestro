@@ -1,0 +1,14 @@
+{
+  "id": "heusinkveld-sprint-pedals",
+  "name": "Heusinkveld Sprint Pedals",
+  "vendor": "Heusinkveld",
+  "vid": "0x30B7",
+  "pid": "0x1001",
+  "productString": "Sprint Pedals",
+  "manufacturerString": "Heusinkveld Engineering",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From simracing-hwdb."
+}

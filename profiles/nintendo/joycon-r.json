@@ -1,0 +1,14 @@
+{
+  "id": "joycon-r",
+  "name": "Nintendo Switch Joy-Con (R)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x2007",
+  "productString": "Joy-Con (R)",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "bluetooth",
+  "descriptor": "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0",
+  "inputReportSize": null,
+  "notes": "170-byte Bluetooth HID descriptor (identical for both L and R Joy-Con). Source: switchbrew/Joy-Con.txt. Bluetooth only — no direct USB. USB goes through Charging Grip (PID 0x200E)."
+}

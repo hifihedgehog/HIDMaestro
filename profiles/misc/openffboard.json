@@ -1,0 +1,14 @@
+{
+  "id": "openffboard",
+  "name": "OpenFFBoard (Open-Source FFB Wheel)",
+  "vendor": "OpenFFBoard",
+  "vid": "0x1209",
+  "pid": "0xFFB0",
+  "productString": "OpenFFBoard",
+  "manufacturerString": "OpenFFBoard",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Open-source force feedback wheel controller. PID-compliant. From universal-pidff hid-ids.h."
+}

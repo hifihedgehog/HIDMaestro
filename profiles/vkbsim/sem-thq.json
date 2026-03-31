@@ -1,0 +1,14 @@
+{
+  "id": "vkbsim-sem-thq",
+  "name": "VKBsim NXT SEM THQ Module",
+  "vendor": "VKBSim",
+  "vid": "0x231D",
+  "pid": "0x2214",
+  "productString": "VKBSim NXT SEM THQ",
+  "manufacturerString": "VKB-Sim",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

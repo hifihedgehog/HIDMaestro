@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t150",
+  "name": "Thrustmaster T150 Racing Wheel",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB677",
+  "productString": "T150 Racing Wheel",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a1010901a10085070930150027ffff0000350047ffff0000751095018102093126ff0346ff0381020935810209368102810305091901290d250145017501950d8102750b95018103050109392507463b01550065147504814265008103850a0600ff090a7508950e26ff0046ff009102850209028102091485148102c0c0",
+  "inputReportSize": null,
+  "notes": "130-byte descriptor. Source: scarburato/t150_driver (original device, firmware v35, confirmed 044F:B677). Active PS3/PC wheel mode (after bootloader mode-switch from 044F:B65D)."
+}

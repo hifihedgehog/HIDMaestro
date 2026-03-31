@@ -1,0 +1,14 @@
+{
+  "id": "virpil-constellation-alpha-cm3",
+  "name": "Virpil VPC Constellation Alpha (CM3 base)",
+  "vendor": "Virpil",
+  "vid": "0x3344",
+  "pid": "0x0391",
+  "productString": "VPC Stick MT-50CM3",
+  "manufacturerString": "VIRPIL Controls",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

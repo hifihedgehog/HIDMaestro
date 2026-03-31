@@ -1,0 +1,14 @@
+{
+  "id": "amazon-luna-usb",
+  "name": "Amazon Luna Controller (USB)",
+  "vendor": "Amazon",
+  "vid": "0x1949",
+  "pid": "0x0419",
+  "productString": "Luna Controller",
+  "manufacturerString": "Amazon",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a101a100850105091901290c150025017501950c810275019504810105010939150025073500463b01651475089501814265000930093109320935150026ff00750895048102050109330934150026ff00750895028102c0c0",
+  "inputReportSize": null,
+  "notes": "93-byte descriptor. Source: DJm00n/ControllersInfo. VID 0x1949, alternate PID 0x041A also exists."
+}

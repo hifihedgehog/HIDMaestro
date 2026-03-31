@@ -1,0 +1,14 @@
+{
+  "id": "winwing-orion2-f16ex",
+  "name": "Winwing Orion Throttle Base II + F16EX Handle",
+  "vendor": "Winwing",
+  "vid": "0x4098",
+  "pid": "0xBE68",
+  "productString": "Orion Throttle Base II + F16EX",
+  "manufacturerString": "Winwing",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

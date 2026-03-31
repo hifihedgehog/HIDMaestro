@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HIDMaestro Controller Profile",
+  "description": "Defines the identity and HID characteristics of a game controller for virtual device emulation.",
+  "type": "object",
+  "required": ["id", "name", "vendor", "vid", "pid", "productString", "type", "connection"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier slug (e.g. 'xbox-360-wired')"
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable display name"
+    },
+    "vendor": {
+      "type": "string",
+      "description": "Manufacturer name"
+    },
+    "vid": {
+      "type": "string",
+      "description": "USB Vendor ID as hex string (e.g. '0x045E')"
+    },
+    "pid": {
+      "type": "string",
+      "description": "USB Product ID as hex string (e.g. '0x028E')"
+    },
+    "productString": {
+      "type": "string",
+      "description": "String returned by IOCTL_HID_GET_STRING (iProduct). This is what joy.cpl and games see."
+    },
+    "manufacturerString": {
+      "type": ["string", "null"],
+      "description": "String returned for manufacturer query (iManufacturer). Null if unknown."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["gamepad", "wheel", "joystick", "flightstick", "hotas", "arcadestick", "pedals", "other"],
+      "description": "Controller category"
+    },
+    "connection": {
+      "type": "string",
+      "enum": ["usb", "bluetooth", "wireless-adapter"],
+      "description": "Connection type this profile represents"
+    },
+    "descriptor": {
+      "type": ["string", "null"],
+      "description": "HID report descriptor as a hex string (e.g. '05010905A101...'). Null if not yet captured."
+    },
+    "inputReportSize": {
+      "type": ["integer", "null"],
+      "description": "Size of the input report in bytes (excluding report ID). Null if unknown."
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "Implementation notes, caveats, or special behavior."
+    }
+  }
+}

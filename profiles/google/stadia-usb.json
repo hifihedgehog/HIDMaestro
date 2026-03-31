@@ -1,0 +1,14 @@
+{
+  "id": "stadia-controller-usb",
+  "name": "Google Stadia Controller (USB)",
+  "vendor": "Google",
+  "vid": "0x18D1",
+  "pid": "0x9400",
+  "productString": "Stadia Controller",
+  "manufacturerString": "Google LLC",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10185030501750495012507463b01651409398142450065007501950481010509150025017501950f0912091109140913090d090c090b090f090e09080907090509040902090181027501950181010501150126ff000901a10009300931750895028102c00901a10009320935750895028102c0050275089502150026ff0009c509c481028505060f0009977510950227ffff00009102c0",
+  "inputReportSize": null,
+  "notes": "156-byte USB/wired descriptor. Source: DJm00n/ControllersInfo. Original wired mode, lacks Consumer Control section present in BLE version."
+}

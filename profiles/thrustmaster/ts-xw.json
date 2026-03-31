@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-ts-xw",
+  "name": "Thrustmaster TS-XW Racer",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB692",
+  "productString": "Thrustmaster TS-XW Racer",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a1010901a10085070930150027ffff0000350047ffff0000751095018102093526ff0346ff0381020932810209318102810305091901290d250145017501950d8102750b95018103050109392507463b0155006514750481426500810385600600ff09607508953f26ff7f150046ff7f3600809102850209028102091485148102c0c0",
+  "inputReportSize": null,
+  "notes": "135-byte descriptor (driver fixup). Source: hid-tmff2."
+}

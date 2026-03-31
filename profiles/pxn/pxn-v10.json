@@ -1,0 +1,14 @@
+{
+  "id": "pxn-v10",
+  "name": "PXN V10 Racing Wheel",
+  "vendor": "PXN",
+  "vid": "0x11FF",
+  "pid": "0x3245",
+  "productString": "PXN V10",
+  "manufacturerString": "PXN",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From universal-pidff hid-ids.h."
+}

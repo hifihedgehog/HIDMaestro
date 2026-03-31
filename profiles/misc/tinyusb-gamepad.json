@@ -1,0 +1,14 @@
+{
+  "id": "tinyusb-generic-gamepad",
+  "name": "TinyUSB Generic Gamepad (RP2040/ESP32)",
+  "vendor": "Generic",
+  "vid": "0xCafe",
+  "pid": "0x4005",
+  "productString": "TinyUSB Device",
+  "manufacturerString": "TinyUSB",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10185020901a10009300931150026ff00750895028102c00901a10009320935150026ff00750895028102c005021500260003093609c50932750a95038102750295038103050109390939150125083500463b0166140075049502814265000509190129107501951081020600ff0920150026ff007508950181020921150026ff0075089508910209221500250175049501b102c0",
+  "inputReportSize": null,
+  "notes": "148-byte descriptor. Source: TinyUSB hid_device example (hid_gamepad_report_desc). RP2040/ESP32/STM32 default gamepad: 4x 8-bit axes (2 sticks), 3x 10-bit axes (triggers/sim), 2 hat switches, 16 buttons. Very widely used in DIY firmware."
+}

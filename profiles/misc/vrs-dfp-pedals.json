@@ -1,0 +1,14 @@
+{
+  "id": "vrs-dfp-pedals",
+  "name": "VRS DirectForce Pro Pedals",
+  "vendor": "VRS",
+  "vid": "0x0483",
+  "pid": "0xA3BE",
+  "productString": "DirectForce Pro Pedals",
+  "manufacturerString": "Virtual Racing School",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": "05010904a1010501a1028501093009310932150027ffff0000350047ffff00007510950381020600ff09019539750826ff0015008102c00600ff0901a1018564953f750826ff001500090191028565953f750826ff00150009018102c0c0",
+  "inputReportSize": null,
+  "notes": "94-byte descriptor. Source: SDL testevdev.c (libsdl-org/SDL). 3x 16-bit pedal axes (clutch/brake/throttle), vendor-specific data. Report IDs 0x01/0x64/0x65."
+}

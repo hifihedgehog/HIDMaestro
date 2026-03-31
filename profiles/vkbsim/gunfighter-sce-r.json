@@ -1,0 +1,14 @@
+{
+  "id": "vkbsim-gunfighter-sce-r",
+  "name": "VKBsim Gunfighter Mk.III SCE (R)",
+  "vendor": "VKBSim",
+  "vid": "0x231D",
+  "pid": "0x0126",
+  "productString": "Gunfighter Mk.III 'Space Combat Edition' (R)",
+  "manufacturerString": "VKB-Sim",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

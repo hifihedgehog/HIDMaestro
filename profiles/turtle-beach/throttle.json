@@ -1,0 +1,14 @@
+{
+  "id": "velocityone-throttle",
+  "name": "Turtle Beach VelocityOne Throttle",
+  "vendor": "Turtle Beach",
+  "vid": "0x10F5",
+  "pid": "0x7085",
+  "productString": "VelocityOne Throttle",
+  "manufacturerString": "Voyetra Turtle Beach, Inc.",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

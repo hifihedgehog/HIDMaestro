@@ -1,0 +1,14 @@
+{
+  "id": "hori-horipad-switch",
+  "name": "HORIPAD for Nintendo Switch",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x00C1",
+  "productString": "HORIPAD for Nintendo Switch",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10115002501350045017501950e05091901290e81029502810105012507463b017504950165140939814265009501810126ff0046ff000930093109320935750895048102750895018101c0",
+  "inputReportSize": null,
+  "notes": "80-byte descriptor. Source: jwiki95 lsusb dump."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "simagic-gt-neo",
+  "name": "Simagic GT Neo / EVO",
+  "vendor": "Simagic",
+  "vid": "0x3670",
+  "pid": "0x0500",
+  "productString": "GT Neo",
+  "manufacturerString": "Simagic",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

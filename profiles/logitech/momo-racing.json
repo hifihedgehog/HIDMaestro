@@ -1,0 +1,14 @@
+{
+  "id": "logitech-momo-racing",
+  "name": "Logitech MOMO Racing (Black)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xCA03",
+  "productString": "MOMO Racing",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950a75012501450105091901290a81020600ff0900950481029501750826ff0046ff0005010931810295030600ff09018102c0a102090295079102c0c0",
+  "inputReportSize": null,
+  "notes": "87-byte descriptor. Source: lgff_wheel_adapter."
+}

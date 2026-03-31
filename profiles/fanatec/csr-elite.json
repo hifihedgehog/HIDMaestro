@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csr-elite",
+  "name": "Fanatec CSR Elite Wheelbase",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0011",
+  "productString": "CSR Elite Wheel Base",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

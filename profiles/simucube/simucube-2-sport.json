@@ -1,0 +1,14 @@
+{
+  "id": "simucube-2-sport",
+  "name": "Simucube 2 Sport",
+  "vendor": "Granite Devices",
+  "vid": "0x16D0",
+  "pid": "0x0D61",
+  "productString": "Simucube 2 Sport",
+  "manufacturerString": "Granite Devices",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant. Same structure as SC2 Pro."
+}

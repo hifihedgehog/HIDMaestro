@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g923-ps",
+  "name": "Logitech G923 Racing Wheel (PlayStation)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC266",
+  "productString": "G923 Racing Wheel for PlayStation 4 and PC",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a1010939150025073500463b0165147504950181420509190129196500250145017501951981027501950381030501093027ffff000047ffff000075109501810209320935093126ff0046ff007508950381020600ff090009019502810225014501190229097501950881020601ff090226ff0046ff00951075089102c0",
+  "inputReportSize": null,
+  "notes": "130-byte descriptor. Source: lgff_wheel_adapter. PID 0xC266 is PC mode. PS4 mode uses PID 0xC267."
+}

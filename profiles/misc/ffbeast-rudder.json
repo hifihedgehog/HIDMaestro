@@ -1,0 +1,14 @@
+{
+  "id": "ffbeast-rudder",
+  "name": "FFBeast Force Feedback Rudder",
+  "vendor": "FFBeast",
+  "vid": "0x045B",
+  "pid": "0x5968",
+  "productString": "FFBeast Rudder",
+  "manufacturerString": "FFBeast",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

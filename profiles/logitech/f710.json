@@ -1,0 +1,14 @@
+{
+  "id": "logitech-f710",
+  "name": "Logitech Wireless Gamepad F710",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC219",
+  "productString": "Logitech Wireless Gamepad F710",
+  "manufacturerString": "Logitech",
+  "type": "gamepad",
+  "connection": "wireless-adapter",
+  "descriptor": "05010905a101a102850175089504150026ff00350046ff0009300931093209358102750495012507463b01661400093981426600007501950c2501450105091901290c8102950175080600ff26ff0046ff0009008102c0a10285029507750826ff0046ff000600ff09038102c0a102850309049102c0c0",
+  "inputReportSize": null,
+  "notes": "119-byte descriptor (DirectInput mode). Source: WebKit test data. PID 0xC219 is DInput mode. XInput mode uses PID 0xC21F. 2.4GHz wireless via USB dongle."
+}

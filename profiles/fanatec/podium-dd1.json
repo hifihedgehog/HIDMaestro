@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-podium-dd1",
+  "name": "Fanatec Podium DD1",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0006",
+  "productString": "Podium Wheel Base DD1",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

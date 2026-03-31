@@ -1,0 +1,14 @@
+{
+  "id": "xbox-360-flight-stick",
+  "name": "Xbox 360 Flight Stick (XInput HID)",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x028E",
+  "productString": "Controller (XBOX 360 For Windows)",
+  "manufacturerString": "©Microsoft Corporation",
+  "type": "flightstick",
+  "connection": "usb",
+  "descriptor": "05010904a10105010932150026ff0095017508810205010935150026ff0095017508810205010901a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0",
+  "inputReportSize": null,
+  "notes": "127-byte descriptor. Source: DJm00n/ControllersInfo xusb_flightstick."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "vrs-dfp-wheel",
+  "name": "VRS DirectForce Pro Wheelbase",
+  "vendor": "VRS",
+  "vid": "0x0483",
+  "pid": "0xA355",
+  "productString": "DirectForce Pro",
+  "manufacturerString": "Virtual Racing School",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

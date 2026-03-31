@@ -1,0 +1,14 @@
+{
+  "id": "joypad-gc-adapter",
+  "name": "Joypad-OS GameCube Adapter (HID)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x0337",
+  "productString": "WUP-028",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10111a103851119002aff00150026ff00750895059100c021a10385210600ff0901150026ff00750895248102c013a103851319002aff00150026ff00750895019100c0c0",
+  "inputReportSize": null,
+  "notes": "76-byte HID descriptor. Source: joypad-ai/joypad-os gc_adapter_descriptors.h. Report ID 0x11=rumble(5B), 0x21=input(36B), 0x13=init(1B)."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "honeycomb-bravo",
+  "name": "Honeycomb Bravo Throttle Quadrant",
+  "vendor": "Honeycomb",
+  "vid": "0x294B",
+  "pid": "0x1901",
+  "productString": "Bravo Throttle Quadrant",
+  "manufacturerString": "Honeycomb Aeronautical",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

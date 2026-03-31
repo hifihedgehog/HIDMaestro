@@ -1,0 +1,14 @@
+{
+  "id": "vrc2",
+  "name": "VRC-2 Car/Flight Controller",
+  "vendor": "VRC",
+  "vid": "0x07C0",
+  "pid": "0x1125",
+  "productString": "VRC-2",
+  "manufacturerString": "VRC",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": "05010904a1010901a10009300931150026ff07350046ff00751095028102c0750895038103c0",
+  "inputReportSize": null,
+  "notes": "38-byte descriptor. Source: Linux kernel hid-vrc2.c vrc2_rdesc_fixed. 2-axis controller."
+}

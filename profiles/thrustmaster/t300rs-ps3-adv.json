@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t300rs-ps3-adv",
+  "name": "Thrustmaster T300RS (PS3 Advanced/F1 Mode)",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB66F",
+  "productString": "Thrustmaster T300RS Racing wheel",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a1010901a10085070930150027ffff0000350047ffff0000751095018102093126ff0346ff0381020935810209368102810305091901291925014501750195198102750395018103050109392507463b015500651475048142650085600600ff09607508953f26ff0046ff009102850209028102091485148102c0c0",
+  "inputReportSize": null,
+  "notes": "128-byte descriptor (driver fixup). Source: hid-tmff2. PID 0xB66F is PS3 advanced/F1 mode."
+}

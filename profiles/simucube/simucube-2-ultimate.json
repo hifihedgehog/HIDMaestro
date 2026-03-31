@@ -1,0 +1,14 @@
+{
+  "id": "simucube-2-ultimate",
+  "name": "Simucube 2 Ultimate",
+  "vendor": "Granite Devices",
+  "vid": "0x16D0",
+  "pid": "0x0D5F",
+  "productString": "Simucube 2 Ultimate",
+  "manufacturerString": "Granite Devices",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant. Same structure as SC2 Pro."
+}

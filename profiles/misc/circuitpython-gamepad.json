@@ -1,0 +1,14 @@
+{
+  "id": "circuitpython-gamepad",
+  "name": "Adafruit CircuitPython Standard Gamepad",
+  "vendor": "Adafruit",
+  "vid": "0x239A",
+  "pid": "0x80F4",
+  "productString": "CircuitPython HID",
+  "manufacturerString": "Adafruit Industries LLC",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10185050509190129101500250175019510810205011581257f0930093109320935750895048102c0",
+  "inputReportSize": 6,
+  "notes": "45-byte descriptor. Source: CircuitPython hid_report_descriptors.py GAMEPAD_WITH_ID. Report ID 0x05. 16 buttons, 4 signed 8-bit axes (X/Y/Z/Rz, range -127..127). No hat switch. Used by Adafruit Feather, QT Py, and other RP2040/SAMD boards running CircuitPython. VID:PID varies by board."
+}

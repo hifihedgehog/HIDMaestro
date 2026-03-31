@@ -1,0 +1,14 @@
+{
+  "id": "steam-deck",
+  "name": "Steam Deck Controller",
+  "vendor": "Valve",
+  "vid": "0x28DE",
+  "pid": "0x1205",
+  "productString": "Steam Deck",
+  "manufacturerString": "Valve Software",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
+  "inputReportSize": 64,
+  "notes": "38-byte vendor-specific descriptor. Source: ShadowBlip/InputPlumber. Uses Usage Page 0xFFFF with 64-byte raw reports — all inputs in proprietary binary format."
+}

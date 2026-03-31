@@ -1,0 +1,14 @@
+{
+  "id": "ffbeast-joystick",
+  "name": "FFBeast Force Feedback Joystick",
+  "vendor": "FFBeast",
+  "vid": "0x045B",
+  "pid": "0x58F9",
+  "productString": "FFBeast Joystick",
+  "manufacturerString": "FFBeast",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

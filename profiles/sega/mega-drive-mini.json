@@ -1,0 +1,14 @@
+{
+  "id": "sega-mega-drive-mini",
+  "name": "Sega Mega Drive Mini Gamepad",
+  "vendor": "Sega",
+  "vid": "0x0CA3",
+  "pid": "0x0024",
+  "productString": "MEGA DRIVE mini GAMEPAD",
+  "manufacturerString": "SEGA CORP.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a10275089505150026ff00350046ff00093009300930093009318102750495012507463b0165140900814265007501950a2501450105091901290a81020600ff7501950a2501450109018102c0a1027508950446ff0026ff0009029102c0c0",
+  "inputReportSize": null,
+  "notes": "101-byte descriptor. Source: GP2040-CE MDMiniDescriptors.h. Identical to Astro City Mini descriptor."
+}

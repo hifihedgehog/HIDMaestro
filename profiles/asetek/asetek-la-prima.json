@@ -1,0 +1,14 @@
+{
+  "id": "asetek-la-prima",
+  "name": "Asetek SimSports La Prima Wheelbase",
+  "vendor": "Asetek",
+  "vid": "0x2433",
+  "pid": "0xF303",
+  "productString": "La Prima",
+  "manufacturerString": "Asetek SimSports",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant. From universal-pidff hid-ids.h."
+}

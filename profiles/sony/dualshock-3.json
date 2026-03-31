@@ -1,0 +1,14 @@
+{
+  "id": "dualshock-3",
+  "name": "DualShock 3 (SIXAXIS)",
+  "vendor": "Sony",
+  "vid": "0x054C",
+  "pid": "0x0268",
+  "productString": "PLAYSTATION(R)3 Controller",
+  "manufacturerString": "Sony",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a102850175089501150026ff00810375019513150025013500450105091901291381027501950d0600ff8103150026ff0005010901a10075089504350046ff0009300931093209358102c0050175089527090181027508953009019102750895300901b102c0a1028502750895300901b102c0a10285ee750895300901b102c0a10285ef750895300901b102c0c0",
+  "inputReportSize": 49,
+  "notes": "148-byte descriptor from native firmware. Source: Nefarius Project docs. Single USB interface (class 0x03 HID). 64-byte interrupt endpoints, 1ms polling interval."
+}

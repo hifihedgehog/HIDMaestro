@@ -1,0 +1,14 @@
+{
+  "id": "leo-bodnar-pedals",
+  "name": "Leo Bodnar SLI-M Pedals",
+  "vendor": "Leo Bodnar",
+  "vid": "0x1DD2",
+  "pid": "0x100C",
+  "productString": "SLI-M",
+  "manufacturerString": "Leo Bodnar Electronics",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

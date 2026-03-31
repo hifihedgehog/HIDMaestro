@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g29-ps4",
+  "name": "Logitech G29 Driving Force Racing Wheel (PS4 mode)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC260",
+  "productString": "G29 Driving Force Racing Wheel",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a10185010930093109320935150026ff007508950481020939150025073500463b016514750495018142650005091901290e150025017501950e81020600ff0920750695018102050109330934150026ff007508950281020600ff09219536810285050922951f910285030a2127952fb102c006f0ff0940a10185f00947953fb10285f10948953fb10285f20949950fb10285f30a01479507b102c0",
+  "inputReportSize": null,
+  "notes": "160-byte PS4-compatible descriptor. Source: GIMX EMUG29PS4. PID 0xC260 is PS4 mode (different from PS3/PC mode 0xC24F). Same descriptor structure as T300RS PS4 — Sony PS4 authentication requires this layout."
+}

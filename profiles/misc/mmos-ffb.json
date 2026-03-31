@@ -1,0 +1,14 @@
+{
+  "id": "mmos-ffb",
+  "name": "MMOS Force Feedback Wheel",
+  "vendor": "MMOS",
+  "vid": "0xF055",
+  "pid": "0x0FFB",
+  "productString": "MMOS FFB Wheel",
+  "manufacturerString": "MMOS",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

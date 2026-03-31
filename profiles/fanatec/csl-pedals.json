@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csl-pedals",
+  "name": "Fanatec CSL Pedals",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x6205",
+  "productString": "CSL Pedals",
+  "manufacturerString": "Endor AG",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

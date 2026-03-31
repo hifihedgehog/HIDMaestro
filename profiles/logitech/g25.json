@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g25",
+  "name": "Logitech G25 Racing Wheel",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC299",
+  "productString": "G25 Racing Wheel",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101150025073500463b01651409397504950181426500250145010509190129137501951381020600ff09019503810226ff3f46ff3f750e950105010930810226ff0046ff007508950309320935093181020600ff09049503810295070600ff0902910295900903b102c0",
+  "inputReportSize": null,
+  "notes": "111-byte descriptor. Source: lgff_wheel_adapter."
+}

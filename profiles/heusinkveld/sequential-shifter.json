@@ -1,0 +1,14 @@
+{
+  "id": "heusinkveld-sequential-shifter",
+  "name": "Heusinkveld Sequential Shifter",
+  "vendor": "Heusinkveld",
+  "vid": "0xA020",
+  "pid": "0x3142",
+  "productString": "Sequential Shifter",
+  "manufacturerString": "Heusinkveld Engineering",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

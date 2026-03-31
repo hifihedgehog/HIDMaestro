@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g27",
+  "name": "Logitech G27 Racing Wheel",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC29B",
+  "productString": "G27 Racing Wheel",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101150025073500463b016514093975049501814265002501450105091901291675019516810226ff3f46ff3f750e950105010930810226ff0046ff007508950309320935093181020600ff09019502810295017501250145010509091781020600ff09019507810226ff0046ff000600ff090295077508910295900903b102c0",
+  "inputReportSize": null,
+  "notes": "133-byte descriptor. Source: GIMX EMUG27 + lgff_wheel_adapter (byte-for-byte match from 2 independent sources). Force feedback via custom protocol."
+}

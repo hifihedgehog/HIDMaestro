@@ -1,0 +1,14 @@
+{
+  "id": "logitech-wingman-formula-gp",
+  "name": "Logitech WingMan Formula GP",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC20E",
+  "productString": "WingMan Formula GP",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a102150026ff00350046ff007508950109308102a425014501750195028101950605091901290681020501b40931810295020600ff09018102c0a10226ff0046ff00750895040902b102c0c0",
+  "inputReportSize": null,
+  "notes": "82-byte descriptor. Source: lgff_wheel_adapter."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "vkbsim-gunfighter",
+  "name": "VKBsim Gunfighter (R)",
+  "vendor": "VKBSim",
+  "vid": "0x231D",
+  "pid": "0x0125",
+  "productString": "VKBsim Gunfighter (R)",
+  "manufacturerString": "VKB-Sim",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

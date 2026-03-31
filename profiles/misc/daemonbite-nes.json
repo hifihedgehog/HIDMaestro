@@ -1,0 +1,14 @@
+{
+  "id": "daemonbite-nes",
+  "name": "DaemonBite NES Controller Adapter",
+  "vendor": "DaemonBite",
+  "vid": "0x2341",
+  "pid": "0x8036",
+  "productString": "NES Controller",
+  "manufacturerString": "DaemonBite",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a1000509190129041500250195047501810295017504810305010901a1000930093115ff2501950275088102c0c0c0",
+  "inputReportSize": 3,
+  "notes": "53-byte descriptor. Source: MickGyver/DaemonBite-Retro-Controllers-USB NESControllersUSB. 4 buttons + 4-bit padding, 2x signed 8-bit D-pad axes."
+}

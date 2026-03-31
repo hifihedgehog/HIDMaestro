@@ -1,0 +1,14 @@
+{
+  "id": "virpil-constellation-alpha-cm2",
+  "name": "Virpil VPC Constellation Alpha (CM2 base)",
+  "vendor": "Virpil",
+  "vid": "0x3344",
+  "pid": "0x412F",
+  "productString": "R-VPC Stick MT-50CM2",
+  "manufacturerString": "VIRPIL Controls",
+  "type": "joystick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

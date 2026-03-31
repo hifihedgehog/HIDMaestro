@@ -1,0 +1,14 @@
+{
+  "id": "ch-flight-sim-yoke",
+  "name": "CH Products Flight Sim Yoke",
+  "vendor": "CH Products",
+  "vid": "0x068E",
+  "pid": "0x00FF",
+  "productString": "Flight Sim Yoke",
+  "manufacturerString": "CH Products, Inc.",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

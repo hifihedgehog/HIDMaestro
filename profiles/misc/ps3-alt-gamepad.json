@@ -1,0 +1,14 @@
+{
+  "id": "ps3-alt-gamepad",
+  "name": "PS3-compatible Alt Gamepad (GP2040-CE)",
+  "vendor": "Generic",
+  "vid": "0x10C4",
+  "pid": "0x82C0",
+  "productString": "Gamepad",
+  "manufacturerString": "Open Stick Community",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a101a10215002501350045017501950d05091901290d81029503810105012507463b017504950165140939814265009501810126ff0046ff0009300931093209357508950481020600ff0920092109220923092409250926092709280929092a092b950c81020a21269508b1020a2126910226ff0346ff03092c092d092e092f751095048102c0a10226ff0046ff009507750809039102c0c0",
+  "inputReportSize": null,
+  "notes": "157-byte PS3-alt descriptor. Source: GP2040-CE PS3Descriptors.h. 13 buttons, hat, 4 axes, 12 vendor inputs, 4x 16-bit axes, 7-byte vendor output."
+}

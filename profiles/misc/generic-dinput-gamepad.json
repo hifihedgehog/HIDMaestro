@@ -1,0 +1,14 @@
+{
+  "id": "generic-dinput-gamepad",
+  "name": "Generic DirectInput USB Gamepad",
+  "vendor": "Generic",
+  "vid": "0x0079",
+  "pid": "0x0006",
+  "productString": "USB Gamepad",
+  "manufacturerString": "Generic",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10105091901292015002501952075018102050109392507950175048142950175048101050126ff0046ff000930093109320935750895048102c0",
+  "inputReportSize": null,
+  "notes": "63-byte descriptor. Source: GP2040-CE HIDDescriptors.h. Standard DirectInput gamepad: 32 buttons, hat, 4 8-bit axes. Used by many third-party arcade sticks and DIY controllers in PC/DInput mode."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "ps3-remote",
+  "name": "PlayStation 3 Blu-ray Remote",
+  "vendor": "Sony",
+  "vid": "0x054C",
+  "pid": "0x0306",
+  "productString": "BD Remote Control",
+  "manufacturerString": "Sony",
+  "type": "other",
+  "connection": "bluetooth",
+  "descriptor": "0501090505a101a102750808950101810101050919010129181814250101750101951818810202c0a10205091829fefe1426fe000075080895010180ff750808950606810101050609202014250505750808950101810202c0c0",
+  "inputReportSize": null,
+  "notes": "90-byte descriptor. Source: Linux kernel hid-sony.c ps3remote_rdesc."
+}

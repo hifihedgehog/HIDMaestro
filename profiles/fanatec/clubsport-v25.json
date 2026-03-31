@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-clubsport-v25",
+  "name": "Fanatec ClubSport V2.5 Wheelbase",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0004",
+  "productString": "ClubSport Wheel Base V2.5",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

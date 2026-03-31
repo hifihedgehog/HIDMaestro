@@ -1,0 +1,14 @@
+{
+  "id": "simucube-1",
+  "name": "Simucube 1",
+  "vendor": "Granite Devices",
+  "vid": "0x16D0",
+  "pid": "0x0D5A",
+  "productString": "Simucube",
+  "manufacturerString": "Granite Devices",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

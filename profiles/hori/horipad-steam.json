@@ -1,0 +1,14 @@
+{
+  "id": "hori-horipad-steam",
+  "name": "HORIPAD Steam Controller",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x0196",
+  "productString": "HORIPAD Steam",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a1018507a1000930093109320935150026ff00750895048102c00939150025073500463b016514750495018142050919012914150025017501951481020502150026ff0009c409c59502750881020600ff092095268102850509219520910285120922953f81020923910285140926953f81020927910285100924953f8102850f0928953f9102c0",
+  "inputReportSize": null,
+  "notes": "140-byte descriptor. Source: ShadowBlip/InputPlumber. Report ID 7 = gamepad (4 axes, hat, 20 buttons, triggers)."
+}

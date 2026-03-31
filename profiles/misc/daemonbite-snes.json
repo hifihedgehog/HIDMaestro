@@ -1,0 +1,14 @@
+{
+  "id": "daemonbite-snes",
+  "name": "DaemonBite SNES Controller Adapter",
+  "vendor": "DaemonBite",
+  "vid": "0x2341",
+  "pid": "0x8036",
+  "productString": "SNES Controller",
+  "manufacturerString": "DaemonBite",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a1000509190129081500250195087501810205010901a1000930093115ff2501950275088102c0c0c0",
+  "inputReportSize": 3,
+  "notes": "47-byte descriptor. Source: MickGyver/DaemonBite-Retro-Controllers-USB SNESControllersUSB. 8 buttons, 2x signed 8-bit D-pad axes. Also used for Amiga CD32 adapter. Arduino Leonardo VID:PID."
+}

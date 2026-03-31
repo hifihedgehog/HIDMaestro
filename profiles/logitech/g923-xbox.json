@@ -1,0 +1,14 @@
+{
+  "id": "logitech-g923-xbox",
+  "name": "Logitech G923 Racing Wheel (Xbox)",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC26E",
+  "productString": "G923 Racing Wheel for Xbox One and PC",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010905a10185010930093109320935150026ff00750895048102093915002507350046 3b016514750495018142650005091901290e150025017501950e81020600ff0920750695018102050109330934150026ff007508950281020600ff09219536810285050922951f910285030a2127952fb102c0",
+  "inputReportSize": null,
+  "notes": "Interface 0 main input descriptor. Source: Logitech G923 Linux kernel driver issue #2. Same layout as G920. PID 0xC26E primary, 0xC26D variant."
+}

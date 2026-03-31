@@ -1,0 +1,14 @@
+{
+  "id": "vader-4-pro",
+  "name": "Flydigi Vader 4 Pro",
+  "vendor": "Flydigi",
+  "vid": "0x04B4",
+  "pid": "0x2412",
+  "productString": "Flydigi Vader 4 Pro",
+  "manufacturerString": "Flydigi",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a10175089504150026ff00350046ff0009300931093209358102750495012507463b01651409398142650025014501050c0969750195018102050909140913091209110910090f090e090c090b090a0909090809070906090509040903090209017501951381020502150026ff0009c509c4950275088102c0",
+  "inputReportSize": 32,
+  "notes": "125-byte descriptor. Source: ShadowBlip/InputPlumber. DInput mode descriptor. 4 axes (8-bit), hat switch, 1 consumer button (Red Menu), 19 buttons, brake/accelerator triggers. No report ID in descriptor (single-report device). VID 0x04B4 is Cypress Semiconductor (Infineon)."
+}

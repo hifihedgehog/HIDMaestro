@@ -1,0 +1,14 @@
+{
+  "id": "taito-egret-ii-mini",
+  "name": "Taito Egret II Mini Controller",
+  "vendor": "Taito",
+  "vid": "0x0AE4",
+  "pid": "0x0702",
+  "productString": "TAITO USB Control Pad",
+  "manufacturerString": "Taito",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a10115002501350045017501950c05091901290c810295048101050126ff0046ff0009300931750895028102c0",
+  "inputReportSize": null,
+  "notes": "49-byte descriptor. Source: GP2040-CE EgretDescriptors.h. 12 buttons, 2 axes."
+}

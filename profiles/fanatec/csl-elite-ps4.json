@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-csl-elite-ps4",
+  "name": "Fanatec CSL Elite PS4 Wheelbase",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x0005",
+  "productString": "CSL Elite Wheel Base PS4",
+  "manufacturerString": "Endor AG",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Requires physical hardware dump."
+}

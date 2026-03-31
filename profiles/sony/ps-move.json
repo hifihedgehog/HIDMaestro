@@ -1,0 +1,14 @@
+{
+  "id": "ps-move",
+  "name": "PlayStation Move Motion Controller",
+  "vendor": "Sony",
+  "vid": "0x054C",
+  "pid": "0x03D5",
+  "productString": "Motion Controller",
+  "manufacturerString": "Sony",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": "05010904a101a10285017501951515002501350045010509190129158102950b0600ff8103150026ff000501a10075089501350046ff0009308102c00600ff7508950781020501751046ffff27ffff0000950309330934093581020600ff9503810205010901950381020600ff95038102750c46ff0f26ff0f95048102750846ff0026ff00950681027508953009019102750895300901b102c0a1028502750895300901b102c0a10285ee750895300901b102c0a10285ef750895300901b102c0c0",
+  "inputReportSize": null,
+  "notes": "194-byte descriptor. Source: Linux kernel hid-sony.c motion_rdesc."
+}

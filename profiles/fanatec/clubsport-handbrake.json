@@ -1,0 +1,14 @@
+{
+  "id": "fanatec-clubsport-handbrake",
+  "name": "Fanatec ClubSport Handbrake V1.5",
+  "vendor": "Fanatec",
+  "vid": "0x0EB7",
+  "pid": "0x1A93",
+  "productString": "ClubSport Handbrake V1.5",
+  "manufacturerString": "Endor AG",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": "05010904a101150026ff0095017508093081020600ff0901950381020600ff090195029102c0",
+  "inputReportSize": null,
+  "notes": "38-byte descriptor. Source: SDL testevdev.c (libsdl-org/SDL). Single 8-bit X axis, 3 bytes vendor-specific input, 2 bytes vendor-specific output."
+}

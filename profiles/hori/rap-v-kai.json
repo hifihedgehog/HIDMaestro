@@ -1,0 +1,14 @@
+{
+  "id": "hori-rap-v-kai",
+  "name": "HORI Real Arcade Pro V Kai (Xbox)",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x0078",
+  "productString": "Real Arcade Pro V Kai",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "arcadestick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "Xbox One/360 version. PS4 version (Hayabusa) uses PID 0x00AA. PS4 RAP4 uses PID 0x008A."
+}

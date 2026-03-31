@@ -1,0 +1,14 @@
+{
+  "id": "heusinkveld-ultimate-pedals",
+  "name": "Heusinkveld Ultimate Pedals",
+  "vendor": "Heusinkveld",
+  "vid": "0x30B7",
+  "pid": "0x1003",
+  "productString": "Ultimate Pedals",
+  "manufacturerString": "Heusinkveld Engineering",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": "05010904a101093309340935150026ff0f850175109503810209007510950682010185027510950309000900b1028503750895030900820101c0",
+  "inputReportSize": null,
+  "notes": "58-byte descriptor. Source: SDL testevdev.c (libsdl-org/SDL). 3x 16-bit pedal axes (Rx/Ry/Rz), 12-bit range (0-4095). Report IDs 0x01/0x02/0x03."
+}

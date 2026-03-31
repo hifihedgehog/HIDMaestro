@@ -1,0 +1,14 @@
+{
+  "id": "hori-racing-wheel-apex",
+  "name": "HORI Racing Wheel Apex",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x00A4",
+  "productString": "HORI Racing Wheel Apex",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": null
+}

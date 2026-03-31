@@ -1,0 +1,14 @@
+{
+  "id": "ps-classic",
+  "name": "PlayStation Classic Controller",
+  "vendor": "Sony",
+  "vid": "0x054C",
+  "pid": "0x0CDA",
+  "productString": "Controller",
+  "manufacturerString": "Sony Interactive Entertainment",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a101150025017501950a05091901290a81020501093009311500250235004502750295028102750195028101c0",
+  "inputReportSize": null,
+  "notes": "51-byte descriptor. Source: GP2040-CE PSClassicDescriptors.h. Simple 10-button digital pad."
+}

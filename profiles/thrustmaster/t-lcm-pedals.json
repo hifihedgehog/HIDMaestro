@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t-lcm-pedals",
+  "name": "Thrustmaster T-LCM Pedals",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB371",
+  "productString": "T-LCM Pedals",
+  "manufacturerString": "Thrustmaster",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From simracing-hwdb."
+}

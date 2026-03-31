@@ -1,0 +1,14 @@
+{
+  "id": "logitech-driving-force-pro",
+  "name": "Logitech Driving Force Pro",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC298",
+  "productString": "Logitech Driving Force Pro",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a1029501750e150026ff3f350046ff3f09308102950e75012501450105091901290e81020501950175042507463b0165140939814265009501750826ff0046ff00093181020600ff0900950375088102c0a102090295079102c0c0",
+  "inputReportSize": null,
+  "notes": "97-byte descriptor. Source: lgff_wheel_adapter / GIMX EMUDFP."
+}

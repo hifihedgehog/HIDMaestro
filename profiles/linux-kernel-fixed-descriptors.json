@@ -1,0 +1,712 @@
+{
+  "_meta": {
+    "description": "HID report descriptors extracted from Linux kernel driver source code. These are 'fixed' descriptors that Linux substitutes for buggy hardware descriptors, representing real controller layouts.",
+    "source": "https://github.com/torvalds/linux/tree/master/drivers/hid",
+    "extracted": "2026-03-30",
+    "total_descriptors": 76
+  },
+  "descriptors": [
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "df_rdesc_fixed",
+      "device": "Logitech Driving Force wheel",
+      "vid": "0x046D",
+      "pid": "0xC294",
+      "byte_count": 132,
+      "descriptor": "05010904a101a1029501750a1426ff033446ff0309308102950c75012501450105091901290c810295020600ff09018102050126ff0046ff009501750881022507463b0175046514093981427501950465000600ff090125014501810205019501750826ff0046ff000931810209358102c0a10226ff0046ff009507750809039102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "dfp_rdesc_fixed",
+      "device": "Logitech Driving Force Pro wheel",
+      "vid": "0x046D",
+      "pid": "0xC298",
+      "byte_count": 90,
+      "descriptor": "05010904a101a1029501750e1426ff3f3446ff3f09308102950e75012501450105091901290e81020501950175042507463b01651409398142650026ff0046ff007508810109318102093581028101c0a102090295079102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "fv_rdesc_fixed",
+      "device": "Logitech Formula Vibration wheel",
+      "vid": "0x046D",
+      "pid": "0xCA04",
+      "byte_count": 136,
+      "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950c75012501450105091901290c810295020600ff09018102090226ff0046ff0095017508810205012507463b0175046514093981427501950465000600ff090125014501810205019501750826ff0046ff000931810209328102c0a10226ff0046ff009507750809039102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "momo_rdesc_fixed",
+      "device": "Logitech MOMO Racing wheel",
+      "vid": "0x046D",
+      "pid": "0xC295",
+      "byte_count": 89,
+      "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950875012501450105091901290881020600ff750e950126ff0046ff00090081020501750809318102093281020600ff09018102c0a102090295079102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "momo2_rdesc_fixed",
+      "device": "Logitech MOMO Racing Force wheel (2nd gen)",
+      "vid": "0x046D",
+      "pid": "0xCA03",
+      "byte_count": 93,
+      "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950a75012501450105091901290a81020600ff0900950481029501750826ff0046ff0009018102050109318102093281020600ff09008102c0a102090295079102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "ffg_rdesc_fixed",
+      "device": "Logitech Wingman Force Feedback (Formula Force GP)",
+      "vid": "0x046D",
+      "pid": "0xC293",
+      "byte_count": 89,
+      "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950675012501450105091901290681029501750826ff0046ff000600ff090181020501810109318102093281020600ff09018102c0a102090295079102c0c0"
+    },
+    {
+      "source_file": "hid-lg.c",
+      "array_name": "fg_rdesc_fixed",
+      "device": "Logitech Wingman Force/Formula GP",
+      "vid": "0x046D",
+      "pid": "0xC20E",
+      "byte_count": 79,
+      "descriptor": "05010904a101a102150026ff00350046ff007508950109308102a425014501750195028101950605091901290681020501b481020931810209328102c0a10226ff0046ff00750895040902b102c0c0"
+    },
+    {
+      "source_file": "hid-sony.c",
+      "array_name": "motion_rdesc",
+      "device": "Sony PlayStation Move Motion Controller",
+      "vid": "0x054C",
+      "pid": "0x03D5",
+      "byte_count": 194,
+      "descriptor": "05010904a101a10285017501951515002501350045010509190129158102950b0600ff8103150026ff000501a10075089501350046ff0009308102c00600ff7508950781020501751046ffff27ffff0000950309330934093581020600ff9503810205010901950381020600ff95038102750c46ff0f26ff0f95048102750846ff0026ff00950681027508953009019102750895300901b102c0a1028502750895300901b102c0a10285ee750895300901b102c0a10285ef750895300901b102c0c0"
+    },
+    {
+      "source_file": "hid-sony.c",
+      "array_name": "ps3remote_rdesc",
+      "device": "Sony PS3 Blu-ray Disc Remote",
+      "vid": "0x054C",
+      "pid": "0x0306",
+      "byte_count": 90,
+      "descriptor": "0501090505a101a102750808950101810101050919010129181814250101750101951818810202c0a10205091829fefe1426fe000075080895010180ff750808950606810101050609202014250505750808950101810202c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "kbd_descriptor",
+      "device": "Logitech Unifying Receiver - Keyboard (DJ)",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 67,
+      "notes": "Virtual descriptor for keyboards connected via Logitech Unifying/DJ receiver",
+      "descriptor": "05010906a10185019508750115002501050719e029e7810295067508150026ff00050719002aff008100850e05089505750115002501190129059102950175039101c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "kbd_lightspeed_1_3_descriptor",
+      "device": "Logitech Lightspeed 1.3+ Receiver - Keyboard",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 75,
+      "notes": "Virtual descriptor for Lightspeed 1.3+ keyboards",
+      "descriptor": "05010906a1018501050719e0e029e7e715002501750195088102957019040429737381029505198787298b8b8102950319909029929281029505850e0508190129059102950175039103c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse_descriptor",
+      "device": "Logitech Unifying Receiver - Mouse (DJ)",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 69,
+      "notes": "Virtual descriptor for mice connected via Logitech Unifying receiver",
+      "descriptor": "05010902a10185020901a1000509190129101500250195107501810205011601f826ff07750c95020930093181061581257f7508950109388106050c0a380295018106c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse_27mhz_descriptor",
+      "device": "Logitech 27MHz Receiver - Mouse",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 69,
+      "notes": "Virtual descriptor for mice connected via 27MHz wireless receiver",
+      "descriptor": "05010902a10185020901a1000509190129081500250195087501810205011601f826ff07750c95020930093181061581257f7508950109388106050c0a380295018106c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse_bluetooth_descriptor",
+      "device": "Logitech Bluetooth Receiver - Mouse",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 91,
+      "notes": "Virtual descriptor for Bluetooth mice via Logitech receiver",
+      "descriptor": "05010902a10185020901a1000509190129081500250195087501810205011601f826ff07750c95020930093181061581257f7508950109388106050c0a380215f9250775049501810605091909290c15002501750195048102c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse5_bluetooth_descriptor",
+      "device": "Logitech Bluetooth Receiver - Mouse (5-button)",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 75,
+      "notes": "Virtual descriptor for 5-button Bluetooth mice via Logitech receiver",
+      "descriptor": "05010902a10185050901a1000509190129081500250195087501810205011601f826ff07750c95020930093181061581257f7508950109388106050c0a38021581257f750895018106c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse_high_res_descriptor",
+      "device": "Logitech Unifying Receiver - High-Resolution Mouse",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 69,
+      "notes": "Virtual descriptor for high-resolution scroll mice via Unifying receiver",
+      "descriptor": "05010902a10185020901a10005091901291015002501951075018102050116018026ff7f751095020930093181061581257f7508950109388106050c0a380295018106c0c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "mse_high_res_ls_1_3_descriptor",
+      "device": "Logitech Lightspeed 1.3+ Receiver - High-Resolution Mouse",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 89,
+      "notes": "Virtual descriptor for Lightspeed 1.3+ high-resolution scroll mice",
+      "descriptor": "05010902a10185020901a1009510750115002501050919010129101081029502751016018026ff7f0501093009318106950175081581257f093881069501050c0a38028106c00600ffff09f1f175089505150026ff008100c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "consumer_descriptor",
+      "device": "Logitech Unifying Receiver - Consumer Controls",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 25,
+      "notes": "Virtual descriptor for consumer control buttons (media keys) via Unifying receiver",
+      "descriptor": "050c0901a101850375109502150126ff0219012aff028100c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "syscontrol_descriptor",
+      "device": "Logitech Unifying Receiver - System Control",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 29,
+      "notes": "Virtual descriptor for system control (power/sleep/wake) via Unifying receiver",
+      "descriptor": "05010980a10185047502950115012503098209810983816075068103c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "media_descriptor",
+      "device": "Logitech Unifying Receiver - Media Keys",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 29,
+      "notes": "Virtual descriptor for vendor-specific media keys via Unifying receiver",
+      "descriptor": "06bcffff098800a101850819010029ff00150126ff00750895018100c0"
+    },
+    {
+      "source_file": "hid-logitech-dj.c",
+      "array_name": "hidpp_descriptor",
+      "device": "Logitech Unifying Receiver - HID++ Protocol",
+      "vid": "0x046D",
+      "pid": null,
+      "byte_count": 103,
+      "notes": "Virtual descriptor for Logitech HID++ protocol channels (short/long/DJ) via Unifying receiver",
+      "descriptor": "0600ff0901a101851075089506150026ff000901810009019100c00600ff0902a101851175089513150026ff000902810009029100c00600ff090404a10185207508950e150026ff00094141810009414191008521951f150026ff0009424281000942429100c0"
+    },
+    {
+      "source_file": "hid-steelseries.c",
+      "array_name": "steelseries_srws1_rdesc_fixed",
+      "device": "SteelSeries SRW-S1 Steering Wheel Controller",
+      "vid": "0x1038",
+      "pid": "0x1410",
+      "byte_count": 139,
+      "descriptor": "05010908a101a10295010501093016f8f82608076514550f751081020931150026ff03750c81020932150026ff03750c81020501093925073500463b0165147504950181022501450165007501950381010509190129119511810205010933750495021500250b8102093575049501250381020600ff09017504950d8102c0a1020902750895109102c0c0"
+    },
+    {
+      "source_file": "hid-bigbenff.c",
+      "array_name": "pid0902_rdesc_fixed",
+      "device": "BigBen Interactive PS3 Official Mini Pad",
+      "vid": "0x146B",
+      "pid": "0x0902",
+      "byte_count": 144,
+      "descriptor": "05010905a10115002501350045017501950d05090905090109020904090709080909090a090b090c090e090f090d810275019503810105012507463b017504950165140939814265009501810126ff0046ff000930093109330934750895048102950a8101050126ff0046ff000932093595028102950881010600ffffb1020a212626950891020a21262695088102c0"
+    },
+    {
+      "source_file": "hid-pxrc.c",
+      "array_name": "pxrc_rdesc_fixed",
+      "device": "PhoenixRC USB Flight Controller Dongle",
+      "vid": "0x1781",
+      "pid": "0x0898",
+      "byte_count": 44,
+      "descriptor": "05010904a1010901a10009300936093109320933093409350937150026ff00350046ff00750895088102c0c0"
+    },
+    {
+      "source_file": "hid-dr.c",
+      "array_name": "pid0011_rdesc_fixed",
+      "device": "DragonRise Inc. DVTech PC JS19 Joystick (PID 0x0011)",
+      "vid": "0x0079",
+      "pid": "0x0011",
+      "byte_count": 50,
+      "descriptor": "05010904a101a1021475089503810126ff0095020930093181027501950481012501950a05091901290a8102950a8101c0c0"
+    },
+    {
+      "source_file": "hid-vrc2.c",
+      "array_name": "vrc2_rdesc_fixed",
+      "device": "VRC-2 USB Flight Controller",
+      "vid": "0x07C0",
+      "pid": "0x1125",
+      "byte_count": 38,
+      "descriptor": "05010904a1010901a10009300931150026ff07350046ff00751095028102c0750895038103c0"
+    },
+    {
+      "source_file": "hid-viewsonic.c",
+      "array_name": "pd1011_rdesc_fixed",
+      "device": "ViewSonic PD1011 Pen Display",
+      "vid": "0x0543",
+      "pid": "0xE621",
+      "byte_count": 88,
+      "descriptor": "050d0901a10185020920a075109501a40501651355fd340930465d212780a900008102093146da1426f0698102b4142501750195018103093209429502810295058103751095010930150526ff078102751095018103c0c0"
+    },
+    {
+      "source_file": "hid-xiaomi.c",
+      "array_name": "mi_silent_mouse_rdesc_fixed",
+      "device": "Xiaomi Mi Silent Mouse (Bluetooth)",
+      "vid": "0x2717",
+      "pid": "0x5014",
+      "byte_count": 87,
+      "descriptor": "05010902a10185030901a100050919012905150025017501950581027503950181010501093009311581257f75089502810609381581257f750895018106c0c00601ff0901a10185050905150026ff0075089504b102c0"
+    },
+    {
+      "source_file": "hid-holtek-kbd.c",
+      "array_name": "holtek_kbd_rdesc_fixed",
+      "device": "Holtek On Line Grip Keyboard",
+      "vid": "0x04D9",
+      "pid": "0x5015",
+      "byte_count": 139,
+      "notes": "Multi-collection keyboard descriptor with consumer controls and system control",
+      "descriptor": "05010980a10185011981298315002501950375018102950175058101c0050c0901a101850219002aff2f2f7f150026ff2f2f7f950175108100c005010906a10185039538750115002501050719e029e71900292f8102c005010906a101850495387501150025010507193029678102c005010906a1010508190129031500250175019503910295059101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "easypen_m406_control_rdesc",
+      "device": "KYE EasyPen M406 Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5005",
+      "byte_count": 45,
+      "descriptor": "050c0901a10185120a450209400a2f020a46020a1a020a6a020a24020a250214250175019508810295308101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "easypen_m506_control_rdesc",
+      "device": "KYE EasyPen M506 Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x500F",
+      "byte_count": 34,
+      "descriptor": "050c0901a10185120a6a020a1a020a2d020a2e0214250175019504810295348101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "easypen_m406w_control_rdesc",
+      "device": "KYE EasyPen M406W Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5012",
+      "byte_count": 33,
+      "descriptor": "050c0901a10185120a6a020a1a020a0102094014250175019504810295348101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "easypen_m610x_control_rdesc",
+      "device": "KYE EasyPen M610X Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5013",
+      "byte_count": 34,
+      "descriptor": "050c0901a10185120a1a020a79020a2d020a2e0214250175019504810295348101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "pensketch_m912_control_rdesc",
+      "device": "KYE PenSketch M912 Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5015",
+      "byte_count": 48,
+      "descriptor": "050c0901a101851214250175019508050c0a6a020a1a020a01020a2f020a25020a24020a2d020a2e02810295308103c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "mousepen_m508wx_control_rdesc",
+      "device": "KYE MousePen M508WX Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5016",
+      "byte_count": 34,
+      "descriptor": "050c0901a10185120a1a020a6a020a2d020a2e0214250175019504810295348101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "mousepen_m508x_control_rdesc",
+      "device": "KYE MousePen M508X Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5017",
+      "byte_count": 56,
+      "descriptor": "050c0901a10185120a010209400a6a020a1a02142501750195048102810115ff951081010a35020a2f020a380275089503810695018101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "easypen_m406xe_control_rdesc",
+      "device": "KYE EasyPen M406XE Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x5019",
+      "byte_count": 34,
+      "descriptor": "050c0901a1018512142501750195040a79020a1a020a2d020a2e02810295348103c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "pensketch_t609a_control_rdesc",
+      "device": "KYE PenSketch T609A Tablet (control interface)",
+      "vid": "0x0458",
+      "pid": "0x501B",
+      "byte_count": 25,
+      "descriptor": "050c0901a10185120a6a0214250175019508810295378101c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "kye_tablet_rdesc",
+      "device": "KYE Tablet (generic pen digitizer descriptor)",
+      "vid": "0x0458",
+      "pid": null,
+      "byte_count": 112,
+      "notes": "Used by multiple KYE tablets for the pen digitizer interface",
+      "descriptor": "0600ff0901a101850509011581257f75089507b102c0050d0901a10185100920a0094209440946142501750195038102950481010932950181027510a40501093027ff7f00003447000000006511550075108102093127ff7f000047000000008102b4050d093027ff0700008102c0c0"
+    },
+    {
+      "source_file": "hid-kye.c",
+      "array_name": "kye_tablet_mouse_rdesc",
+      "device": "KYE Tablet (mouse emulation descriptor)",
+      "vid": "0x0458",
+      "pid": null,
+      "byte_count": 91,
+      "notes": "Used by multiple KYE tablets for mouse emulation mode",
+      "descriptor": "05010902a10185110901a005091901290314250175019503810295048101050d0937950181020501a4093027ff7f00003447000000006511550075108102093127ff7f000047000000008102b4093815ff7508950181068101c0c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "slim_tablet_5_8_inch_rdesc_fixed",
+      "device": "Waltop Slim Tablet 5.8 inch",
+      "vid": "0x172F",
+      "pid": "0x0032",
+      "byte_count": 84,
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501800932142501750195018102950381037510950114a40501651355fd3409304688132610278102093146b80b2670178102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "slim_tablet_12_1_inch_rdesc_fixed",
+      "device": "Waltop Slim Tablet 12.1 inch",
+      "vid": "0x172F",
+      "pid": "0x0034",
+      "byte_count": 84,
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501800932142501750195018102950381037510950114a40501651355fd34093046102726204e81020931466a1826d4308102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "q_pad_rdesc_fixed",
+      "device": "Waltop Q Pad",
+      "vid": "0x172F",
+      "pid": "0x0037",
+      "byte_count": 84,
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501800932142501750195018102950381037510950114a40501651355fd340930467017260030810209314694112600248102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "pid_0038_rdesc_fixed",
+      "device": "Waltop tablet PID 0x0038",
+      "vid": "0x172F",
+      "pid": "0x0038",
+      "byte_count": 84,
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501800932142501750195018102950381037510950114a40501651355fd340930462e222600468102093146821426002a8102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "media_tablet_10_6_inch_rdesc_fixed",
+      "device": "Waltop Media Tablet 10.6 inch",
+      "vid": "0x172F",
+      "pid": "0x0501",
+      "byte_count": 202,
+      "notes": "Multi-interface: pen digitizer + mouse + consumer control",
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501807501093214250195018102950381037510950114a40501651355fd34093046282326504681020931467c1526f82a8102b4093026ff038102c0c005010902a10185010901a0750895038103950215ff250109380b38020c00810695028103c0c0050c0901a101850d9501751081030a2f020a2e020a2d0209b609b508080808080a2e020a2d02150c25177505807503810375208103c00901a101850c750109e909ea09e21425019503810695358103c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "media_tablet_14_1_inch_rdesc_fixed",
+      "device": "Waltop Media Tablet 14.1 inch",
+      "vid": "0x172F",
+      "pid": "0x0500",
+      "byte_count": 198,
+      "notes": "Multi-interface: pen digitizer + mouse + consumer control",
+      "descriptor": "050d0902a10185100920a00942094409461501250375049501807501093214250195018102950381037510950114a40501651355fd34093046e02e26ff3f8102093146521c26ff3f8102b4093026ff038102c0c005010902a10185010901a0750895038103950215ff250109380b38020c008106c0c0050c0901a101850d9501751081030a2f020a2e020a2d0209b609b508080808080a2e020a2d02150c25177505807503810375208103c00901a101850c750109e909ea09e21425019503810675058103c0"
+    },
+    {
+      "source_file": "hid-waltop.c",
+      "array_name": "sirius_battery_free_tablet_rdesc_fixed",
+      "device": "Waltop Sirius Battery Free Tablet",
+      "vid": "0x172F",
+      "pid": "0x0502",
+      "byte_count": 229,
+      "notes": "Multi-interface: pen digitizer with tilt + mouse + keyboard + consumer control",
+      "descriptor": "050d0902a10185100920a09501150125037502094209440946801425017501093c810281030932810295038103a4050155fd651334147510950146102726204e0930810246701726e02e09318102b4751095011426ff0309308102a455fe6512359745691597256975089502093d093e8102b4c0c005010902a10185010901a0750895038103093815ff2501750895018106750895038103c0c005010906a101850d050719e029e71425017501950881027508950181011829651425657508950580c0050c0901a101850c09e909ea142501750195028102750695018103751095038103c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_wp4030u_fixed_arr",
+      "device": "UC-Logic WP4030U Tablet",
+      "vid": null,
+      "pid": null,
+      "byte_count": 73,
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950581017510950114a4050155fd651334093046a00f26ff7f8102093146b80b26ff7f8102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_wp5540u_fixed_arr",
+      "device": "UC-Logic WP5540U Tablet",
+      "vid": null,
+      "pid": null,
+      "byte_count": 133,
+      "notes": "Pen digitizer + mouse emulation",
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950581017510950114a4050155fd6513340930467c1526ff7f8102093146a00f26ff7f8102b4093026ff038102c0c005010902a10185080901a07501050919012903142501950381029505810105017508093009311581257f95028106093815ff2501950181068101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_wp8060u_fixed_arr",
+      "device": "UC-Logic WP8060U Tablet",
+      "vid": null,
+      "pid": null,
+      "byte_count": 133,
+      "notes": "Pen digitizer + mouse emulation",
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950581017510950114a4050155fd651334093046401f26ff7f8102093146701726ff7f8102b4093026ff038102c0c005010902a10185080901a07501050919012903142501950381029505810105017508093009311581257f95028106093815ff2501950181068101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_wp1062_fixed_arr",
+      "device": "UC-Logic WP1062 Tablet",
+      "vid": null,
+      "pid": null,
+      "byte_count": 79,
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950481010932950181027510950114a4050155fd651334093046102726204e8102093146b719266e338102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_pf1209_fixed_arr",
+      "device": "UC-Logic PF1209 Tablet",
+      "vid": null,
+      "pid": null,
+      "byte_count": 133,
+      "notes": "Pen digitizer + mouse emulation",
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950581017510950114a4050155fd651334093046e02e26ff7f8102093146282326ff7f8102b4093026ff038102c0c005010902a10185080901a07501050919012903142501950381029505810105017508093009311581257f95028106093815ff2501950181068101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_twhl850_fixed0_arr",
+      "device": "UC-Logic TWHL850 Tablet (pen digitizer)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 76,
+      "descriptor": "050d0901a10185090920a0142501750195030942094409468102810395010932810281037510a40501651355fd34093046401f26007d8102093146881326204e8102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_twhl850_fixed1_arr",
+      "device": "UC-Logic TWHL850 Tablet (mouse emulation)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 64,
+      "descriptor": "05010902a10185010901a00509750195031901290314250181029505810305010930093116008026ff7f751095028106093815ff25019501750881068103c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_twhl850_fixed2_arr",
+      "device": "UC-Logic TWHL850 Tablet (keyboard)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 35,
+      "descriptor": "05010906a101850305071419e029e725017501950881021829ff26ff007508950680c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_twha60_fixed0_arr",
+      "device": "UC-Logic TWHA60 Tablet (pen digitizer)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 81,
+      "descriptor": "050d0901a10185090920a0750109420944094614250195038102950481010932950181027510950114a4050155fd6513340930461027273f9c000081020931466a1826a7618102b4093026ff038102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_twha60_fixed1_arr",
+      "device": "UC-Logic TWHA60 Tablet (keyboard/hotkeys)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 40,
+      "descriptor": "05010906a10185050507142501750195088101950c193a29458102950c19682973810295088101c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_v1_pen_template_arr",
+      "device": "UC-Logic v1 Pen Digitizer (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 72,
+      "notes": "Template descriptor with placeholder bytes for axis ranges, used by multiple tablets",
+      "descriptor": "050d0901a10185070920a0142501750109420944094695038102950381030932950181029501810375109501a40501651355fd34093027478102093127478102b40930278102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_v2_pen_template_arr",
+      "device": "UC-Logic v2 Pen Digitizer (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 95,
+      "notes": "Template descriptor with tilt support, placeholder bytes for axis ranges",
+      "descriptor": "050d0901a10185080920a014250175010942094409469503810295038103093295018102950181039501a40501651355fd751834093027478102093127478102b40930751027810254651435c4453c15c4253c75089502093d093e8102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_v2_frame_touch_ring_arr",
+      "device": "UC-Logic v2 Frame Controls (touch ring)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 78,
+      "descriptor": "05010907a1018514050d0939a025017501050909019501810295078101750895028101050d0affff26ff00950181020501093895011500250b810209300931142501750195028102952e8101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_v2_frame_touch_strip_arr",
+      "device": "UC-Logic v2 Frame Controls (touch strip)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 80,
+      "descriptor": "05010907a1018514050d0939a025017501050909019501810295078101750895028101050d0affff26ff0095018102050109330934950115002507810209300931142501750195028102952e8101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_v2_frame_dial_arr",
+      "device": "UC-Logic v2 Frame Controls (dial)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 82,
+      "descriptor": "05010907a1018514050d0939a02501750195018101050909019501810295068101750895028101050d0affff26ff009501810205010938950115ff2501810609300931142501750195028102952e8101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_v2_pen_template_arr",
+      "device": "UGEE v2 Pen Digitizer (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 114,
+      "notes": "Template for UGEE/XP-Pen v2 protocol tablets with tilt support",
+      "descriptor": "050d0901a10185020920a1000942094409467501950314250181029502810309329501810295028103751095013500a4050109306513550d27478102093127478102b40930450027750d95018102750195038101093d35c3453c15c3253c750895018102093e35c3453c15c3253c8102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_v2_frame_btn_template_arr",
+      "device": "UGEE v2 Frame Buttons (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 35,
+      "descriptor": "05010907a10185050d0939a075019508810105091901950a142501810295468101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_v2_frame_dial_template_arr",
+      "device": "UGEE v2 Frame with Dial (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 57,
+      "descriptor": "05010907a10185050d0939a075019508810105091901950a14250181029506810175089503810105010938950115ff2501810695028101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_v2_frame_mouse_template_arr",
+      "device": "UGEE v2 Frame Mouse Mode (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 54,
+      "descriptor": "05010902a10185010501a0750195020509190129021425018102950681010501093009317510950216008026ff7f810695018101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_v2_battery_template_arr",
+      "device": "UGEE v2 Battery Status (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 53,
+      "descriptor": "05010907a1018575089502810105840585096575089501150026ff00810275019501150025010944810295078101750895078101c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_ex07_frame_arr",
+      "device": "UGEE EX07 Frame Controls",
+      "vid": null,
+      "pid": null,
+      "byte_count": 39,
+      "descriptor": "05010907a1018506050d0939a0050975011903290695048102951a81031901290295028102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_ugee_g5_frame_arr",
+      "device": "UGEE G5 Frame Controls",
+      "vid": null,
+      "pid": null,
+      "byte_count": 94,
+      "descriptor": "05010907a1018506050d0939a01425010501050919012905750195058102750195038101050d0affff26ff00750895018102250109447501950181020501093009317501950281027501950b81010501093815ff2501750295018106c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_xppen_deco01_frame_arr",
+      "device": "XP-Pen Deco 01 Frame Controls",
+      "vid": null,
+      "pid": null,
+      "byte_count": 52,
+      "descriptor": "05010907a10185061425017501050d0939a005091901290895088102050d0944950181020501093009319502810295158101c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_xppen_artist_22r_pro_frame_arr",
+      "device": "XP-Pen Artist 22R Pro Frame Controls",
+      "vid": null,
+      "pid": null,
+      "byte_count": 69,
+      "descriptor": "05010907a10185050d0939a01425017501950881010509190129149514810295148101050109387508950115ff25088106050c0a38029501810626ff00750895018102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_xppen_artist_24_pro_pen_template_arr",
+      "device": "XP-Pen Artist 24 Pro Pen Digitizer (template)",
+      "vid": null,
+      "pid": null,
+      "byte_count": 118,
+      "notes": "Template with 20-bit X axis for large display tablets with tilt",
+      "descriptor": "050d0901a10185020920a1000942094409467501950314250181029502810309329501810295028103751095013500a4050109306513550d2747752081027510093127478102b40930450027750d95018102750195038101093d35c3453c15c3253c750895018102093e35c3453c15c3253c8102c0c0"
+    },
+    {
+      "source_file": "hid-uclogic-rdesc.c",
+      "array_name": "uclogic_rdesc_xppen_artist_24_pro_frame_arr",
+      "device": "XP-Pen Artist 24 Pro Frame Controls",
+      "vid": null,
+      "pid": null,
+      "byte_count": 74,
+      "descriptor": "05010907a10185050d0939a01425017501950881010509190129149514810295148101050109387508950115ff25088106050c0a38029501810626ff007508950181027501958101c0c0"
+    },
+    {
+      "source_file": "hid-lenovo.c",
+      "array_name": "lenovo_pro_dock_need_fixup_collection",
+      "device": "Lenovo ThinkPad Pro Dock (partial descriptor for fixup matching)",
+      "vid": "0x17EF",
+      "pid": "0x6067",
+      "byte_count": 15,
+      "notes": "This is a pattern-match fragment used to identify the collection to fix, not a full descriptor",
+      "descriptor": "058888090101a101850419002affff"
+    },
+    {
+      "source_file": "hid-lenovo.c",
+      "array_name": "lenovo_tpIIbtkbd_need_fixup_collection",
+      "device": "Lenovo ThinkPad II Bluetooth Keyboard (partial descriptor for fixup matching)",
+      "vid": "0x17EF",
+      "pid": "0x60E1",
+      "byte_count": 33,
+      "notes": "This is a pattern-match fragment used to identify the collection to fix, not a full descriptor",
+      "descriptor": "0600ffff090101a10185051af100f12afc00fc150025017501950d810295038101"
+    }
+  ]
+}

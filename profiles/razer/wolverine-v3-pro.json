@@ -1,0 +1,14 @@
+{
+  "id": "razer-wolverine-v3-pro",
+  "name": "Razer Wolverine V3 Pro (Wired)",
+  "vendor": "Razer",
+  "vid": "0x1532",
+  "pid": "0x0A3F",
+  "productString": "Razer Wolverine V3 Pro",
+  "manufacturerString": "Razer Inc.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "0600ff0901a1018502150026ff0009027508953f8102150026ff0009037508953f9102c0050c0901a10185011500250109cd09b509b609b77501950481021500250109b009b109b309b47501950481221500250109e909ea09e2750195038122750595018101c0",
+  "inputReportSize": null,
+  "notes": "103-byte descriptor. Source: openrazer issue #2364. Vendor-specific 63-byte I/O reports (ID 2) for controller data + Consumer Controls (ID 1) for media keys."
+}

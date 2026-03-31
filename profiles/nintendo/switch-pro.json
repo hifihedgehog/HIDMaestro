@@ -1,0 +1,14 @@
+{
+  "id": "switch-pro",
+  "name": "Nintendo Switch Pro Controller",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x2009",
+  "productString": "Pro Controller",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "050115000904a1018530050105091901290a150025017501950a5500650081020509190b290e150025017501950481027501950281030b01000100a1000b300001000b310001000b320001000b35000100150027ffff0000751095048102c00b39000100150025073500463b0165147504950181020509190f2912150025017501950481027508953481030600ff852109017508953f8103858109027508953f8103850109037508953f9183851009047508953f9183858009057508953f9183858209067508953f9183c0",
+  "inputReportSize": 64,
+  "notes": "203-byte descriptor. Source: DJm00n/ControllersInfo. Uses Report ID 0x30 for standard input, vendor IDs 0x21/0x81 for extended features (gyro, NFC). Same descriptor over USB and Bluetooth."
+}

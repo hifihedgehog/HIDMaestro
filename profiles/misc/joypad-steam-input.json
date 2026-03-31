@@ -1,0 +1,14 @@
+{
+  "id": "joypad-steam-input",
+  "name": "Joypad-OS Steam Input Gamepad",
+  "vendor": "Joypad",
+  "vid": "0x2E8A",
+  "pid": "0x10C6",
+  "productString": "Joypad (SInput)",
+  "manufacturerString": "Joypad",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905a101850600ff0905150026ff007508951881028505060920150026ff00750895028102050919012920150025017501952081020501093009310932093516008026ff7f75109504810209330934150026ff7f7510950281020600ff0901150027ffffff7f7520950181020501093d093e093f09400941094216008026ff7f7510950681020600ff0902150026ff007508951d8102850600ff0903150026ff007508950191020904952e9102c0",
+  "inputReportSize": null,
+  "notes": "176-byte descriptor. Source: joypad-ai/joypad-os. Steam Input compatible mode: 32 buttons, 4x 16-bit axes, 2x 16-bit axes, 1x 32-bit axis, 6x 16-bit gyro/accel axes, vendor data."
+}

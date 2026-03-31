@@ -1,0 +1,14 @@
+{
+  "id": "hori-fighting-stick-alpha",
+  "name": "HORI Fighting Stick Alpha (PS5)",
+  "vendor": "HORI",
+  "vid": "0x0F0D",
+  "pid": "0x0184",
+  "productString": "HORI Fighting Stick \u03b1",
+  "manufacturerString": "HORI CO.,LTD.",
+  "type": "arcadestick",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID 0x0184 is PS5 mode. PS4 mode: 0x011C. PC mode: 0x011E."
+}

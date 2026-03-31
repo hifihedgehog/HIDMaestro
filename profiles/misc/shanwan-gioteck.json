@@ -1,0 +1,14 @@
+{
+  "id": "shanwan-gioteck-ps3",
+  "name": "ShanWan/Gioteck PS3 Wireless Controller",
+  "vendor": "ShanWan",
+  "vid": "0x25F0",
+  "pid": "0xC131",
+  "productString": "PS(R) Controller",
+  "manufacturerString": "ShanWan",
+  "type": "gamepad",
+  "connection": "wireless-adapter",
+  "descriptor": "05010904a101a10275089504150026ff00350046ff0009320935093009318102750495012507463b0165140939814265007501950c2501450105091901290c81020600ff750195082501450109018102c0a1027508950446ff0026ff0009029102c0c0",
+  "inputReportSize": null,
+  "notes": "99-byte descriptor. Source: USB_Host_Shield_2.0 issue #437. Common PS3 clone chipset used by many third-party controllers."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "8bitdo-pro-2",
+  "name": "8BitDo Pro 2",
+  "vendor": "8BitDo",
+  "vid": "0x2DC8",
+  "pid": "0x6003",
+  "productString": "8BitDo Pro 2",
+  "manufacturerString": "8BitDo",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID 0x6003 is USB wired D-Input mode. Bluetooth D-Input: 0x6006. In XInput mode reports as Microsoft (VID 0x045E). In Switch mode reports as Nintendo Pro Controller (VID 0x057E:0x2009)."
+}

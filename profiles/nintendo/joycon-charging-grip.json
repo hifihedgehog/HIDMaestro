@@ -1,0 +1,14 @@
+{
+  "id": "joycon-charging-grip",
+  "name": "Nintendo Switch Joy-Con Charging Grip",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x200E",
+  "productString": "Joy-Con Charging Grip",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "USB device that presents as a single device. Driver splits into L+R internally."
+}

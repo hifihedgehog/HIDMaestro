@@ -1,0 +1,14 @@
+{
+  "id": "ch-pro-pedals",
+  "name": "CH Products Pro Pedals",
+  "vendor": "CH Products",
+  "vid": "0x068E",
+  "pid": "0x0501",
+  "productString": "CH Pro Pedals",
+  "manufacturerString": "CH Products, Inc.",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed from Linux USB database / kernel sources / SDL. Descriptor requires physical hardware capture."
+}

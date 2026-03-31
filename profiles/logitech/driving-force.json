@@ -1,0 +1,14 @@
+{
+  "id": "logitech-driving-force",
+  "name": "Logitech Driving Force",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xC294",
+  "productString": "Logitech Driving Force",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950c75012501450105091901290c810295020600ff090181020501093126ff0046ff009501750881022507463b0175046514093981427501950465000600ff09012501450181029502750826ff0046ff0009028102c0a10226ff0046ff009507750809039102c0c0",
+  "inputReportSize": null,
+  "notes": "130-byte descriptor. Source: lgff_wheel_adapter / GIMX EMUDF."
+}

@@ -1,0 +1,14 @@
+{
+  "id": "steelseries-srws1",
+  "name": "SteelSeries SRW-S1 Steering Wheel",
+  "vendor": "SteelSeries",
+  "vid": "0x1038",
+  "pid": "0x1410",
+  "productString": "SteelSeries SRW-S1",
+  "manufacturerString": "SteelSeries",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010908a101a10295010501093016f8f82608076514550f751081020931150026ff03750c81020932150026ff03750c81020501093925073500463b0165147504950181022501450165007501950381010509190129119511810205010933750495021500250b8102093575049501250381020600ff09017504950d8102c0a1020902750895109102c0c0",
+  "inputReportSize": null,
+  "notes": "139-byte descriptor. Source: Linux kernel hid-steelseries.c srws1_rdesc_fixed."
+}

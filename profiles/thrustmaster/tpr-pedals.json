@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-tpr-pedals",
+  "name": "Thrustmaster TPR Rudder Pedals",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB68F",
+  "productString": "TPR Pendular Rudder",
+  "manufacturerString": "Thrustmaster",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "From simracing-hwdb."
+}

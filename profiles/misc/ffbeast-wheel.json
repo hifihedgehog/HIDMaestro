@@ -1,0 +1,14 @@
+{
+  "id": "ffbeast-wheel",
+  "name": "FFBeast Force Feedback Wheel",
+  "vendor": "FFBeast",
+  "vid": "0x045B",
+  "pid": "0x59D7",
+  "productString": "FFBeast Wheel",
+  "manufacturerString": "FFBeast",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

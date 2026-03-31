@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t-rudder-pedals",
+  "name": "Thrustmaster T-Rudder Pedals",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB679",
+  "productString": "T-Rudder Pedals",
+  "manufacturerString": "Thrustmaster",
+  "type": "pedals",
+  "connection": "usb",
+  "descriptor": "05010904a1011500350026ff0346ff030930093109327510950381020600ff092075089525810209219520910206f0ff0940094726ff007508953fb102c0",
+  "inputReportSize": null,
+  "notes": "62-byte descriptor. Source: GtunerIV issue #405. 3x 16-bit axes."
+}

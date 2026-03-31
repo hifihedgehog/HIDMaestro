@@ -1,0 +1,14 @@
+{
+  "id": "cammus-c5",
+  "name": "Cammus C5 Wheelbase",
+  "vendor": "Cammus",
+  "vid": "0x3416",
+  "pid": "0x0301",
+  "productString": "CAMMUS C5",
+  "manufacturerString": "Cammus",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "PID-compliant but MISSING Start Delay field (0xA7). Requires universal-pidff driver on Linux."
+}

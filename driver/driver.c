@@ -56,60 +56,83 @@ static VOID
 ReadConfigFromRegistry(
     _In_ PDEVICE_CONTEXT ctx)
 {
-    NTSTATUS        status;
-    WDFKEY          key = NULL;
-    UNICODE_STRING  keyPath;
-    UNICODE_STRING  valueName;
-    ULONG           dwordVal;
+    /*
+     * UMDF2 runs in user-mode (WUDFHost.exe), so WdfRegistryOpenKey with
+     * kernel-style paths (\Registry\Machine\...) does NOT work. We use
+     * the Win32 RegOpenKeyExW API directly — UMDF2 has full Win32 access.
+     */
+    HKEY    hKey = NULL;
+    LONG    result;
+    DWORD   dwordVal, dwordSize;
+    BYTE    binBuf[HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
+    DWORD   binSize;
+    DWORD   regType;
 
-    RtlInitUnicodeString(&keyPath, CONFIG_REG_PATH);
-
-    status = WdfRegistryOpenKey(NULL, &keyPath, KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &key);
-    if (!NT_SUCCESS(status)) {
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
+                           0, KEY_READ, &hKey);
+    if (result != ERROR_SUCCESS) {
         return; /* No config key — use defaults */
     }
 
     /* Read ReportDescriptor (REG_BINARY) */
-    RtlInitUnicodeString(&valueName, L"ReportDescriptor");
-    {
-        WDFMEMORY memory = NULL;
-        status = WdfRegistryQueryMemory(key, &valueName, PagedPool,
-            WDF_NO_OBJECT_ATTRIBUTES, &memory, NULL);
-        if (NT_SUCCESS(status) && memory != NULL) {
-            size_t bufSize;
-            PVOID buf = WdfMemoryGetBuffer(memory, &bufSize);
-            if (buf && bufSize > 0 && bufSize <= HIDMAESTRO_MAX_DESCRIPTOR_SIZE) {
-                RtlCopyMemory(ctx->ReportDescriptor, buf, bufSize);
-                ctx->ReportDescriptorSize = (ULONG)bufSize;
-                ctx->HidDescriptor.DescriptorList[0].wReportLength = (USHORT)bufSize;
-                ctx->DescriptorSet = TRUE;
-            }
-            WdfObjectDelete(memory);
-        }
+    binSize = sizeof(binBuf);
+    result = RegQueryValueExW(hKey, L"ReportDescriptor", NULL,
+                              &regType, binBuf, &binSize);
+    if (result == ERROR_SUCCESS && regType == REG_BINARY &&
+        binSize > 0 && binSize <= HIDMAESTRO_MAX_DESCRIPTOR_SIZE) {
+        /*
+         * Use the profile descriptor as-is. The test client is responsible
+         * for ensuring the descriptor includes whatever data channel items
+         * are needed (e.g., Feature Report ID 2).
+         *
+         * We do NOT modify the descriptor here — injecting Report IDs into
+         * descriptors that use the default (no-ID) report can violate HID
+         * validation rules. The client pre-processes the descriptor.
+         */
+        RtlCopyMemory(ctx->ReportDescriptor, binBuf, binSize);
+        ctx->ReportDescriptorSize = (ULONG)binSize;
+        ctx->HidDescriptor.DescriptorList[0].wReportLength =
+            (USHORT)ctx->ReportDescriptorSize;
+        ctx->DescriptorSet = TRUE;
     }
 
-    /* Read VendorId */
-    RtlInitUnicodeString(&valueName, L"VendorId");
-    status = WdfRegistryQueryULong(key, &valueName, &dwordVal);
-    if (NT_SUCCESS(status)) {
+    /* Read VendorId (REG_DWORD) */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"VendorId", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    if (result == ERROR_SUCCESS && regType == REG_DWORD) {
         ctx->HidDeviceAttributes.VendorID = (USHORT)dwordVal;
     }
 
-    /* Read ProductId */
-    RtlInitUnicodeString(&valueName, L"ProductId");
-    status = WdfRegistryQueryULong(key, &valueName, &dwordVal);
-    if (NT_SUCCESS(status)) {
+    /* Read ProductId (REG_DWORD) */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"ProductId", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    if (result == ERROR_SUCCESS && regType == REG_DWORD) {
         ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
     }
 
-    /* Read VersionNumber */
-    RtlInitUnicodeString(&valueName, L"VersionNumber");
-    status = WdfRegistryQueryULong(key, &valueName, &dwordVal);
-    if (NT_SUCCESS(status)) {
+    /* Read VersionNumber (REG_DWORD) */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"VersionNumber", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    if (result == ERROR_SUCCESS && regType == REG_DWORD) {
         ctx->HidDeviceAttributes.VersionNumber = (USHORT)dwordVal;
     }
 
-    WdfRegistryClose(key);
+    /* Read ProductString (REG_SZ) */
+    {
+        WCHAR strBuf[128];
+        DWORD strSize = sizeof(strBuf);
+        result = RegQueryValueExW(hKey, L"ProductString", NULL,
+                                  &regType, (LPBYTE)strBuf, &strSize);
+        if (result == ERROR_SUCCESS && regType == REG_SZ && strSize > 0) {
+            RtlCopyMemory(ctx->ProductString, strBuf, strSize);
+            ctx->ProductStringBytes = strSize;
+        }
+    }
+
+    RegCloseKey(hKey);
 }
 
 /* ================================================================== */
@@ -175,6 +198,13 @@ EvtDeviceAdd(
     ctx->HidDeviceAttributes.ProductID     = 0x028E;  /* Xbox 360 Controller */
     ctx->HidDeviceAttributes.VersionNumber = 0x0114;
 
+    /* Default product string */
+    {
+        static const WCHAR defaultStr[] = L"Controller (XBOX 360 For Windows)";
+        RtlCopyMemory(ctx->ProductString, defaultStr, sizeof(defaultStr));
+        ctx->ProductStringBytes = sizeof(defaultStr);
+    }
+
     /* Read config from registry (overrides defaults if present) */
     ReadConfigFromRegistry(ctx);
 
@@ -235,16 +265,33 @@ EvtIoDeviceControl(
         break;
 
     case IOCTL_HID_GET_STRING: {
-        static const WCHAR prodStr[] = L"Controller (XBOX 360 For Windows)";
+        /*
+         * The string ID is passed in the lower 16 bits of the input value.
+         * For UMDF2, retrieve it from the input buffer.
+         * HID_STRING_ID_IMANUFACTURER = 1
+         * HID_STRING_ID_IPRODUCT = 2
+         * HID_STRING_ID_ISERIALNUMBER = 3
+         * We return the product string for all queries — this is what
+         * joy.cpl and games see.
+         */
+        PVOID   inBuf = NULL;
+        size_t  inBufSize = 0;
+        ULONG   stringId = 0;
+
+        /* Try to get string ID from input buffer */
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG), &inBuf, &inBufSize))) {
+            stringId = *(ULONG*)inBuf;
+        }
+
+        /* Return product string for all string types */
         status = RequestCopyFromBuffer(Request,
-            (PVOID)prodStr, sizeof(prodStr));
+            ctx->ProductString, ctx->ProductStringBytes);
         break;
     }
 
     case IOCTL_HID_GET_INDEXED_STRING: {
-        static const WCHAR idxStr[] = L"Controller (XBOX 360 For Windows)";
         status = RequestCopyFromBuffer(Request,
-            (PVOID)idxStr, sizeof(idxStr));
+            ctx->ProductString, ctx->ProductStringBytes);
         break;
     }
 
@@ -316,10 +363,7 @@ EvtIoDeviceControl(
         /*
          * User-mode calls HidD_SetFeature with Report ID 2.
          * The feature data IS the input report payload.
-         * Store it and complete the next pending READ_REPORT.
-         *
-         * UMDF marshalling: input buffer = report data (report ID separate).
-         * Output buffer = report ID byte.
+         * We prepend Report ID 1 and deliver as input.
          */
         PVOID       featureBuf;
         size_t      featureSize;

@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-th8a-shifter",
+  "name": "Thrustmaster TH8A Gear Shifter",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB660",
+  "productString": "Thrustmaster TH8A",
+  "manufacturerString": "Thrustmaster",
+  "type": "other",
+  "connection": "usb",
+  "descriptor": "05010904a101850105091901290a15002501350045017501950a8102750695018101050109300931650026ff0046ff0075089502810206ff000901090281029505810109bb950b9102850206ff0009038102c0",
+  "inputReportSize": null,
+  "notes": "83-byte descriptor. Source: bremme lsusb gist. 10 buttons, 2 axes."
+}

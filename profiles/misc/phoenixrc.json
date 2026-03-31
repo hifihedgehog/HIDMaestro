@@ -1,0 +1,14 @@
+{
+  "id": "phoenixrc-pxrc",
+  "name": "PhoenixRC 8-Axis Flight Controller",
+  "vendor": "PhoenixRC",
+  "vid": "0x1781",
+  "pid": "0x0898",
+  "productString": "PXRC Flight Controller",
+  "manufacturerString": "PhoenixRC",
+  "type": "flightstick",
+  "connection": "usb",
+  "descriptor": "05010904a1010901a10009300936093109320933093409350937150026ff00350046ff00750895088102c0c0",
+  "inputReportSize": 8,
+  "notes": "44-byte descriptor. Source: Linux kernel hid-pxrc.c pxrc_rdesc_fixed. Simple 8-axis controller for RC flight sims."
+}

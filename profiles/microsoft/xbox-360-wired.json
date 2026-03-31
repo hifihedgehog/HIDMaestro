@@ -1,0 +1,14 @@
+{
+  "id": "xbox-360-wired",
+  "name": "Xbox 360 Controller (Wired)",
+  "vendor": "Microsoft",
+  "vid": "0x045E",
+  "pid": "0x028E",
+  "productString": "Controller (XBOX 360 For Windows)",
+  "manufacturerString": "\u00a9Microsoft Corporation",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010905A1018501093009311500270000000075109502810209330934810209320935810205091901290A1500250175019502810275069501810105010939150125083500463B016614007504950181427504950115002500350045006500810385020600FF0901150026FF00750895B10200C0",
+  "inputReportSize": 14,
+  "notes": "Real Xbox 360 wired controllers use vendor-specific USB class (0xFF/0x5D/0x01), not standard HID. This profile uses a standard HID gamepad descriptor that produces identical joy.cpl behavior. The descriptor includes a feature report (ID 2, 14 bytes) used as the user-mode data channel."
+}

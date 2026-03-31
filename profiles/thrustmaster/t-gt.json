@@ -1,0 +1,14 @@
+{
+  "id": "thrustmaster-t-gt",
+  "name": "Thrustmaster T-GT Racing Wheel",
+  "vendor": "Thrustmaster",
+  "vid": "0x044F",
+  "pid": "0xB684",
+  "productString": "Thrustmaster T-GT Racing Wheel",
+  "manufacturerString": "Thrustmaster",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "T-GT II shares the same PID. Ferrari F1 Wheel Advanced T-GT mode uses PID 0xB685."
+}

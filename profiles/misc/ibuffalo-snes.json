@@ -1,0 +1,14 @@
+{
+  "id": "ibuffalo-snes",
+  "name": "iBuffalo Classic USB SNES Gamepad",
+  "vendor": "iBuffalo",
+  "vid": "0x0583",
+  "pid": "0x2060",
+  "productString": "USB,2-axis 8-button gamepad",
+  "manufacturerString": "iBuffalo",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": "05010904a101a10275089502150026ff00350046ff000930093181027501950815002501350045010509190129088102c0c0",
+  "inputReportSize": null,
+  "notes": "50-byte descriptor. Reconstructed from known device characteristics. 2 axes, 8 buttons — the most popular retro USB SNES pad."
+}

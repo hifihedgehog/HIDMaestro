@@ -1,0 +1,14 @@
+{
+  "id": "logitech-formula-vibration",
+  "name": "Logitech Formula Vibration Feedback Wheel",
+  "vendor": "Logitech",
+  "vid": "0x046D",
+  "pid": "0xCA04",
+  "productString": "Formula Vibration Feedback Wheel",
+  "manufacturerString": "Logitech",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950c75012501450105091901290c810295020600ff09018102090226ff0046ff0095017508810205012507463b0175046514093981427501950465000600ff090125014501810205019501750826ff0046ff000931810209328102c0a10226ff0046ff009507750809039102c0c0",
+  "inputReportSize": null,
+  "notes": "136-byte descriptor. Source: Linux kernel hid-lg.c fv_rdesc_fixed."
+}

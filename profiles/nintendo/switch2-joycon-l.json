@@ -1,0 +1,14 @@
+{
+  "id": "switch2-joycon-l",
+  "name": "Nintendo Switch 2 Joy-Con (L)",
+  "vendor": "Nintendo",
+  "vid": "0x057E",
+  "pid": "0x2067",
+  "productString": "Joy-Con (L)",
+  "manufacturerString": "Nintendo Co., Ltd.",
+  "type": "gamepad",
+  "connection": "usb",
+  "descriptor": null,
+  "inputReportSize": null,
+  "notes": "VID/PID confirmed. Descriptor requires physical hardware capture."
+}

@@ -71,7 +71,8 @@ link.exe /nologo /DLL ^
     WdfDriverStubUm.lib ^
     ntdll.lib ^
     OneCoreUAP.lib ^
-    mincore.lib
+    mincore.lib ^
+    advapi32.lib
 
 if errorlevel 1 (
     echo LINK FAILED
