@@ -613,12 +613,18 @@ class Program
         Console.WriteLine($"  Profile:  {profile.Id}");
         Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
         Console.WriteLine($"  Product:  {profile.ProductString}");
-        Console.WriteLine($"  Using universal descriptor ({UniversalDescriptor.Length} bytes)\n");
+        // Determine if this is an Xbox profile that needs XInput support
+        bool isXbox = profile.Vendor == "Microsoft" && profile.Type == "gamepad";
+        bool useNativeDescriptor = isXbox && profile.HasDescriptor;
 
-        // Step 1: Write prepared descriptor to registry FIRST
-        // The driver reads this at EvtDeviceAdd (device node creation)
+        // For Xbox XInput: use the native GIP descriptor so xinputhid.sys accepts it
+        // For everything else: use the universal descriptor with Feature Report data channel
+        byte[] descriptor = useNativeDescriptor ? profile.GetDescriptorBytes()! : UniversalDescriptor;
+        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes ({(useNativeDescriptor ? "native GIP" : "universal")})\n");
+
+        // Step 1: Write descriptor to registry FIRST
         Console.Write("  Writing profile to registry... ");
-        WriteConfig(UniversalDescriptor, profile.VendorId, profile.ProductId,
+        WriteConfig(descriptor, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription);
         Console.WriteLine("OK");
@@ -659,17 +665,15 @@ class Program
             }
         }
 
-        // Feature report: Report ID 2 + up to 64 bytes of input data
-        // The driver takes the feature data, prepends Report ID 1, and delivers as input
-        Console.WriteLine("\n  Sending input via feature reports. Open joy.cpl to watch.");
+        Console.WriteLine("\n  Sending input. Open joy.cpl to watch.");
         Console.WriteLine("  Ctrl+C to stop.\n");
 
-        // Determine input report size from descriptor
-        // For simplicity, send a standard gamepad pattern: stick circles
-        // The actual report layout depends on the controller profile
-        int featureSize = 14; // matches Feature Report Count (0x0E) in UniversalDescriptor
-        byte[] report = new byte[featureSize + 1]; // +1 for Report ID
-        report[0] = 0x02; // Feature Report ID 2 (data channel)
+        // For Xbox native: use WriteFile (IOCTL_HID_WRITE_REPORT -> driver treats as input)
+        // For universal: use HidD_SetFeature (Report ID 2 -> driver builds input)
+        bool useWriteFile = useNativeDescriptor;
+        int reportSize = useWriteFile ? 16 : 14; // GIP input = 16 bytes, universal feature = 14
+        byte[] report = new byte[reportSize + (useWriteFile ? 0 : 1)]; // +1 for feature report ID
+        if (!useWriteFile) report[0] = 0x02; // Feature Report ID 2
 
         var sw = Stopwatch.StartNew();
         int count = 0;
@@ -679,22 +683,28 @@ class Program
             double t = sw.Elapsed.TotalSeconds;
             double angle = t * Math.PI * 2 * 0.5;
 
-            // Generic gamepad input pattern — works for most descriptors
-            // Axes at various byte widths
-            if (featureSize >= 4)
+            // Pack gamepad input
+            int dataOfs = useWriteFile ? 0 : 1; // skip feature report ID byte
+            ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
+            ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
+            report[dataOfs + 0] = (byte)(lx & 0xFF); report[dataOfs + 1] = (byte)(lx >> 8);
+            report[dataOfs + 2] = (byte)(ly & 0xFF); report[dataOfs + 3] = (byte)(ly >> 8);
+
+            bool ok;
+            if (useWriteFile)
             {
-                // Try both 8-bit and 16-bit axis patterns
-                ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
-                ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
-                report[1] = (byte)(lx & 0xFF); report[2] = (byte)(lx >> 8);
-                report[3] = (byte)(ly & 0xFF); report[4] = (byte)(ly >> 8);
+                ok = WriteFile(h, report, (uint)report.Length, out _, IntPtr.Zero);
+            }
+            else
+            {
+                ok = HidD_SetFeature(h, report, (uint)report.Length);
             }
 
-            if (!HidD_SetFeature(h, report, (uint)report.Length))
+            if (!ok)
             {
                 int err = Marshal.GetLastWin32Error();
                 if (count == 0)
-                    Console.Error.WriteLine($"  HidD_SetFeature failed: {err} (0x{err:X})");
+                    Console.Error.WriteLine($"  Send failed: {err} (0x{err:X})");
                 if (count > 3) break;
             }
 
