@@ -201,6 +201,15 @@ EvtDeviceAdd(
 
     WdfFdoInitSetFilter(DeviceInit);
 
+    /* Allow file creates so XUSB interface can be opened */
+    {
+        WDF_FILEOBJECT_CONFIG fileConfig;
+        WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, NULL, NULL, NULL);
+        fileConfig.AutoForwardCleanupClose = WdfTrue;
+        WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig,
+            WDF_NO_OBJECT_ATTRIBUTES);
+    }
+
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
@@ -255,12 +264,50 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /* Register XUSB device interface so XInput can find us.
-     * Ignore failure — XInput just won't see us if this fails. */
+    /*
+     * Create a control device with XUSB interface for XInput.
+     * The control device is separate from the MsHidUmdf stack,
+     * so CreateFile works and XInput can communicate with us.
+     */
     {
-        NTSTATUS ifaceStatus = WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-        (void)ifaceStatus; /* Non-fatal */
+        WDFDEVICE               ctrlDevice;
+        PWDFDEVICE_INIT         ctrlInit;
+        WDF_IO_QUEUE_CONFIG     ctrlQueueConfig;
+        WDF_OBJECT_ATTRIBUTES   ctrlAttrs;
+        WDFQUEUE                ctrlQueue;
+        DECLARE_CONST_UNICODE_STRING(ctrlName, L"\\Device\\HIDMaestroXUSB");
+        DECLARE_CONST_UNICODE_STRING(ctrlLink, L"\\DosDevices\\HIDMaestroXUSB");
+
+        ctrlInit = WdfControlDeviceInitAllocate(
+            WdfDeviceGetDriver(device), &SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RWX_RES_RWX);
+        if (ctrlInit) {
+            WdfDeviceInitSetDeviceType(ctrlInit, FILE_DEVICE_UNKNOWN);
+            WdfDeviceInitAssignName(ctrlInit, &ctrlName);
+
+            WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&ctrlAttrs, DEVICE_CONTEXT);
+            status = WdfDeviceCreate(&ctrlInit, &ctrlAttrs, &ctrlDevice);
+            if (NT_SUCCESS(status)) {
+                /* Share context — point control device's context to main device's context */
+                PDEVICE_CONTEXT ctrlCtx = GetDeviceContext(ctrlDevice);
+                *ctrlCtx = *ctx; /* Copy — shares pointers to locks, queues */
+
+                /* Create symbolic link */
+                WdfDeviceCreateSymbolicLink(ctrlDevice, &ctrlLink);
+
+                /* Register XUSB interface on the control device */
+                WdfDeviceCreateDeviceInterface(ctrlDevice,
+                    (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+
+                /* Create queue for XUSB IOCTLs on control device */
+                WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&ctrlQueueConfig,
+                    WdfIoQueueDispatchParallel);
+                ctrlQueueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
+                WdfIoQueueCreate(ctrlDevice, &ctrlQueueConfig,
+                    WDF_NO_OBJECT_ATTRIBUTES, &ctrlQueue);
+
+                WdfControlFinishInitializing(ctrlDevice);
+            }
+        }
     }
 
     /* Create locks */
@@ -473,139 +520,152 @@ EvtIoDeviceControl(
 
     case IOCTL_XUSB_GET_INFORMATION: {
         /*
-         * Returns basic device information.
-         * xinput1_4.dll calls this first to discover the device.
-         * Output: 12 bytes — vendor ID, product ID, input ID, etc.
+         * OutDeviceInfos_t — 12 bytes. No input buffer.
+         * +0x00 WORD  XUSBVersion (0x0101)
+         * +0x02 BYTE  deviceIndex (controller count — must be >= 1)
+         * +0x03 BYTE  unk1
+         * +0x04 BYTE  unk2 (bit 7 set = skip interface)
+         * +0x05 BYTE  unk3
+         * +0x06 WORD  unk4
+         * +0x08 WORD  vendorId
+         * +0x0A WORD  productId
          */
         UCHAR info[12];
         RtlZeroMemory(info, sizeof(info));
-        info[0] = 0x00; /* Type: Gamepad */
-        info[1] = 0x01; /* SubType: Gamepad */
-        info[2] = 0x01; /* VendorSpecific count */
-        info[4] = 0x01; /* InputId */
+        *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 */
+        info[2] = 0x01;                /* deviceIndex = 1 controller */
+        info[4] = 0x00;                /* unk2 — bit 7 clear = don't skip */
+        *(USHORT*)&info[8] = ctx->HidDeviceAttributes.VendorID;
+        *(USHORT*)&info[10] = ctx->HidDeviceAttributes.ProductID;
         status = RequestCopyFromBuffer(Request, info, sizeof(info));
         break;
     }
 
     case IOCTL_XUSB_GET_CAPABILITIES: {
         /*
-         * Returns device capabilities — what buttons/axes it has.
-         * Very similar to XInputGetCapabilities output.
+         * GamepadCapabilities0101 — 24 bytes.
+         * Input: InBaseRequest_t (3 bytes: version + deviceIndex)
          */
-        UCHAR caps[20];
+        UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
-        caps[0] = 0x01; /* Type: XINPUT_DEVTYPE_GAMEPAD */
-        caps[1] = 0x01; /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        caps[2] = 0x04; /* Flags: XINPUT_CAPS_FFB_SUPPORTED */
-        /* Gamepad caps (buttons mask = all supported) */
-        caps[4] = 0xFF; caps[5] = 0xF3; /* wButtons mask */
-        caps[6] = 0xFF; /* bLeftTrigger */
-        caps[7] = 0xFF; /* bRightTrigger */
-        /* Axes: report max range */
-        *(SHORT*)&caps[8]  = 32767; /* ThumbLX */
-        *(SHORT*)&caps[10] = 32767; /* ThumbLY */
-        *(SHORT*)&caps[12] = 32767; /* ThumbRX */
-        *(SHORT*)&caps[14] = 32767; /* ThumbRY */
+        *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
+        caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
+        caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
+        *(USHORT*)&caps[4] = 0xF3FF;  /* wButtons mask (all) */
+        caps[6] = 0xFF;                /* bLeftTrigger */
+        caps[7] = 0xFF;                /* bRightTrigger */
+        *(SHORT*)&caps[8]  = 32767;    /* ThumbLX */
+        *(SHORT*)&caps[10] = 32767;    /* ThumbLY */
+        *(SHORT*)&caps[12] = 32767;    /* ThumbRX */
+        *(SHORT*)&caps[14] = 32767;    /* ThumbRY */
+        caps[22] = 0xFF;               /* bLeftMotorSpeed */
+        caps[23] = 0xFF;               /* bRightMotorSpeed */
         status = RequestCopyFromBuffer(Request, caps, sizeof(caps));
         break;
     }
 
     case IOCTL_XUSB_GET_STATE: {
         /*
-         * Returns current gamepad state — this is THE critical IOCTL.
-         * xinput1_4.dll calls this for XInputGetState().
-         * Output: XUSB_REPORT (22 bytes: 1 byte id + 1 byte size + 20 byte data)
+         * GamepadState0101 — 29 bytes.
+         * Input: InBaseRequest_t (3 bytes: WORD version + BYTE deviceIndex)
+         * THE critical IOCTL — status byte at offset +2 MUST be 1 for connected.
          */
-        XUSB_REPORT report;
-        RtlZeroMemory(&report, sizeof(report));
-        report.Id = 0x00;
-        report.Size = 0x14; /* 20 bytes */
+        UCHAR state[29];
+        RtlZeroMemory(state, sizeof(state));
+        *(USHORT*)&state[0] = 0x0101;  /* XUSBVersion */
+        state[2] = 0x01;               /* status = CONNECTED */
+        /* state[3] = unk2, state[4] = inputId */
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);
+
+        /* Packet number at offset 5 (DWORD) */
+        ctx->InputReportsSubmitted++;
+        *(DWORD*)&state[5] = (DWORD)ctx->InputReportsSubmitted;
+
         if (ctx->InputReportReady && ctx->InputReportSize >= 12) {
-            /* Parse input report (universal descriptor format):
-             * Bytes 0-1: LX, 2-3: LY, 4-5: RX, 6-7: RY,
-             * 8-9: LT, 10-11: RT, 12: buttons low, 13: buttons high + hat
-             */
             PUCHAR d = ctx->InputReport;
-            /* Skip Report ID if present */
             if (d[0] == 0x01 && ctx->InputReportSize > 12) d++;
 
-            report.ThumbLX     = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
-            report.ThumbLY     = (SHORT)((int)(*(USHORT*)&d[2]) - 32768);
-            report.ThumbRX     = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
-            report.ThumbRY     = (SHORT)((int)(*(USHORT*)&d[6]) - 32768);
-            report.LeftTrigger  = (UCHAR)(*(USHORT*)&d[8] >> 8);
-            report.RightTrigger = (UCHAR)(*(USHORT*)&d[10] >> 8);
-
-            /* Button mapping: our descriptor buttons -> XUSB buttons */
+            /* Buttons at offset 0x0B (WORD) */
             {
                 UCHAR btnLow = d[12];
                 UCHAR btnHigh = d[13];
                 UCHAR hat = (btnHigh >> 2) & 0x0F;
                 USHORT buttons = 0;
-
-                if (btnLow & 0x01) buttons |= 0x1000; /* A */
-                if (btnLow & 0x02) buttons |= 0x2000; /* B */
-                if (btnLow & 0x04) buttons |= 0x4000; /* X */
-                if (btnLow & 0x08) buttons |= 0x8000; /* Y */
-                if (btnLow & 0x10) buttons |= 0x0100; /* LB */
-                if (btnLow & 0x20) buttons |= 0x0200; /* RB */
-                if (btnLow & 0x40) buttons |= 0x0020; /* Back */
-                if (btnLow & 0x80) buttons |= 0x0010; /* Start */
-                if (btnHigh & 0x01) buttons |= 0x0040; /* LThumb */
-                if (btnHigh & 0x02) buttons |= 0x0080; /* RThumb */
-
-                /* Hat -> D-pad */
+                if (btnLow & 0x01) buttons |= 0x1000;
+                if (btnLow & 0x02) buttons |= 0x2000;
+                if (btnLow & 0x04) buttons |= 0x4000;
+                if (btnLow & 0x08) buttons |= 0x8000;
+                if (btnLow & 0x10) buttons |= 0x0100;
+                if (btnLow & 0x20) buttons |= 0x0200;
+                if (btnLow & 0x40) buttons |= 0x0020;
+                if (btnLow & 0x80) buttons |= 0x0010;
+                if (btnHigh & 0x01) buttons |= 0x0040;
+                if (btnHigh & 0x02) buttons |= 0x0080;
                 switch (hat) {
                     case 1: buttons |= 0x0001; break;
-                    case 2: buttons |= 0x0001|0x0008; break;
+                    case 2: buttons |= 0x0009; break;
                     case 3: buttons |= 0x0008; break;
-                    case 4: buttons |= 0x0008|0x0002; break;
+                    case 4: buttons |= 0x000A; break;
                     case 5: buttons |= 0x0002; break;
-                    case 6: buttons |= 0x0002|0x0004; break;
+                    case 6: buttons |= 0x0006; break;
                     case 7: buttons |= 0x0004; break;
-                    case 8: buttons |= 0x0004|0x0001; break;
+                    case 8: buttons |= 0x0005; break;
                 }
-                report.Buttons = buttons;
+                *(USHORT*)&state[0x0B] = buttons;
             }
+            /* Triggers at offset 0x0D, 0x0E */
+            state[0x0D] = (UCHAR)(*(USHORT*)&d[8] >> 8);   /* LT */
+            state[0x0E] = (UCHAR)(*(USHORT*)&d[10] >> 8);  /* RT */
+            /* Sticks at offsets 0x0F-0x16 (SHORT each) */
+            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
+            *(SHORT*)&state[0x11] = (SHORT)((int)(*(USHORT*)&d[2]) - 32768);
+            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
+            *(SHORT*)&state[0x15] = (SHORT)((int)(*(USHORT*)&d[6]) - 32768);
         }
         WdfWaitLockRelease(ctx->InputLock);
 
-        status = RequestCopyFromBuffer(Request, &report, sizeof(report));
+        status = RequestCopyFromBuffer(Request, state, sizeof(state));
         break;
     }
 
     case IOCTL_XUSB_SET_STATE: {
-        /* Vibration — absorb for now, could pass to user-mode later */
+        /* Vibration/LED — absorb */
         status = STATUS_SUCCESS;
         break;
     }
 
     case IOCTL_XUSB_GET_LED_STATE: {
-        UCHAR led[3] = { 0x01, 0x03, 0x02 }; /* Player 1 LED */
+        /* 3 bytes: version(2) + LED state(1) */
+        UCHAR led[3];
+        *(USHORT*)&led[0] = 0x0101;
+        led[2] = 0x02; /* Player 1 */
         status = RequestCopyFromBuffer(Request, led, sizeof(led));
         break;
     }
 
     case IOCTL_XUSB_GET_BATTERY_INFO: {
-        UCHAR batt[2] = { 0x01, 0x03 }; /* Wired, Full */
+        /* 4 bytes for v1.1: version(2) + batteryType(1) + batteryLevel(1) */
+        UCHAR batt[4];
+        *(USHORT*)&batt[0] = 0x0101;
+        batt[2] = 0x01; /* BATTERY_TYPE_WIRED */
+        batt[3] = 0x03; /* BATTERY_LEVEL_FULL */
         status = RequestCopyFromBuffer(Request, batt, sizeof(batt));
         break;
     }
 
     case IOCTL_XUSB_WAIT_GUIDE:
     case IOCTL_XUSB_WAIT_FOR_INPUT:
-        /* Async waits — park the request */
         status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
         if (NT_SUCCESS(status)) completeRequest = FALSE;
         break;
 
     case IOCTL_XUSB_GET_INFORMATION_EX: {
+        /* 8 bytes: version(2) + unk(2) + count(2) + unk(2) */
         UCHAR infoEx[8];
         RtlZeroMemory(infoEx, sizeof(infoEx));
-        infoEx[0] = 0x01; /* Version */
-        infoEx[4] = 0x01; /* Count */
+        *(USHORT*)&infoEx[0] = 0x0101;
+        *(USHORT*)&infoEx[4] = 0x0001; /* count */
         status = RequestCopyFromBuffer(Request, infoEx, sizeof(infoEx));
         break;
     }

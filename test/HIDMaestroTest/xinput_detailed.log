@@ -1,0 +1,11 @@
+
+=== XUSB Device Interface Enumeration ===
+XUSB interfaces found: 1
+  XUSB Interface 0: \\?\root#hidclass#0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+
+
+=== XInput State ===
+  Slot 0 : err=1167
+  Slot 1 : err=1167
+  Slot 2 : err=1167
+  Slot 3 : err=1167
