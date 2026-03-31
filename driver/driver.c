@@ -32,6 +32,10 @@ static const GUID XUSB_INTERFACE_CLASS_GUID =
 #define IOCTL_XUSB_GET_STATE            0x8000E00C
 #define IOCTL_XUSB_SET_STATE            0x8000A010
 #define IOCTL_XUSB_WAIT_GUIDE           0x8000E014
+
+/* Custom IOCTL for user-mode to submit input data to the XUSB device */
+#define IOCTL_HIDMAESTRO_XUSB_SUBMIT_REPORT \
+    CTL_CODE(FILE_DEVICE_HIDMAESTRO, 0x810, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define IOCTL_XUSB_GET_BATTERY_INFO     0x8000E018
 #define IOCTL_XUSB_GET_INFORMATION_EX   0x8000E3FC
 #define IOCTL_XUSB_WAIT_FOR_INPUT       0x8000E3AC
@@ -620,8 +624,42 @@ EvtIoDeviceControl(
     }
 
     case IOCTL_XUSB_SET_STATE: {
-        /* Vibration/LED — absorb */
+        /* Dual purpose: vibration (5 bytes) or input submission (>5 bytes) */
+        PVOID setBuf; size_t setBufSize;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &setBuf, &setBufSize))
+            && setBufSize > 5) {
+            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            ULONG copySize = (ULONG)setBufSize;
+            if (copySize > HIDMAESTRO_MAX_REPORT_SIZE)
+                copySize = HIDMAESTRO_MAX_REPORT_SIZE;
+            RtlCopyMemory(ctx->InputReport, setBuf, copySize);
+            ctx->InputReportSize = copySize;
+            ctx->InputReportReady = TRUE;
+            WdfWaitLockRelease(ctx->InputLock);
+        }
         status = STATUS_SUCCESS;
+        break;
+    }
+
+    case IOCTL_HIDMAESTRO_XUSB_SUBMIT_REPORT: {
+        /*
+         * User-mode submits raw input report bytes (same format as
+         * the universal HID descriptor: 14 bytes of axis/button data).
+         * Stored in InputReport for GET_STATE to read.
+         */
+        PVOID inBuf;
+        size_t inBufSize;
+        status = WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inBufSize);
+        if (NT_SUCCESS(status)) {
+            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            if (inBufSize > HIDMAESTRO_MAX_REPORT_SIZE)
+                inBufSize = HIDMAESTRO_MAX_REPORT_SIZE;
+            RtlCopyMemory(ctx->InputReport, inBuf, inBufSize);
+            ctx->InputReportSize = (ULONG)inBufSize;
+            ctx->InputReportReady = TRUE;
+            WdfWaitLockRelease(ctx->InputLock);
+            status = STATUS_SUCCESS;
+        }
         break;
     }
 

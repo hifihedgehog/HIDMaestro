@@ -223,6 +223,12 @@ class Program
     static extern bool WriteFile(SafeFileHandle hFile, byte[] lpBuffer,
         uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool DeviceIoControl(SafeFileHandle hDevice, uint dwIoControlCode,
+        byte[] lpInBuffer, uint nInBufferSize, byte[]? lpOutBuffer, uint nOutBufferSize,
+        out uint lpBytesReturned, IntPtr lpOverlapped);
+
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool HidD_GetAttributes(SafeFileHandle HidDeviceObject,
@@ -637,33 +643,48 @@ class Program
             return 1;
         }
 
-        // Step 4: For Xbox profiles, inject xinputhid upper filter for XInput support
-        if (profile.Vendor == "Microsoft" && profile.Type == "gamepad")
+        // XInput is handled by the separate XUSB device (HIDMaestroXUSB.dll)
+        // — no need to inject xinputhid or modify the HID device
+
+        // Open the XUSB device for XInput input injection
+        Console.Write("  Opening XUSB device... ");
+        SafeFileHandle? xh = null;
         {
-            Console.Write("  Enabling XInput... ");
-            bool xinputOk = EnableXInputOnHidChild();
-            Console.WriteLine(xinputOk ? "OK" : "SKIPPED");
-            if (xinputOk)
+            HidD_GetHidGuid(out Guid _); // just to init
+            var xusbGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
+            IntPtr dis = SetupDiGetClassDevsW(ref xusbGuid, IntPtr.Zero, IntPtr.Zero,
+                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+            if (dis != new IntPtr(-1))
             {
-                // Reopen device after restart
-                h.Dispose();
-                Thread.Sleep(2000);
-                var h2 = OpenHidDevice(profile.VendorId, profile.ProductId);
-                if (h2 != null)
+                var did = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+                if (SetupDiEnumDeviceInterfaces(dis, IntPtr.Zero, ref xusbGuid, 0, ref did))
                 {
-                    // Swap handle — can't reassign 'using var' so we'll use h2 below
-                    // Actually we need to restructure... for now just proceed
+                    SetupDiGetDeviceInterfaceDetailW(dis, ref did, IntPtr.Zero, 0, out uint reqSize, IntPtr.Zero);
+                    IntPtr detail = Marshal.AllocHGlobal((int)reqSize);
+                    Marshal.WriteInt32(detail, 8);
+                    if (SetupDiGetDeviceInterfaceDetailW(dis, ref did, detail, reqSize, out _, IntPtr.Zero))
+                    {
+                        string xpath = Marshal.PtrToStringUni(detail + 4)!;
+                        xh = CreateFileW(xpath, GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                        if (xh.IsInvalid) xh = null;
+                    }
+                    Marshal.FreeHGlobal(detail);
                 }
+                SetupDiDestroyDeviceInfoList(dis);
             }
         }
+        Console.WriteLine(xh != null ? "OK" : "not found (XInput won't get live data)");
 
-        Console.WriteLine("\n  Sending input. Open joy.cpl to watch.");
-        Console.WriteLine("  Ctrl+C to stop.\n");
+        Console.WriteLine("\n  Sending input to HID + XInput. Ctrl+C to stop.\n");
 
-        // Always use HidD_SetFeature with Report ID 2 (universal descriptor data channel)
-        int reportSize = 14; // matches Feature Report Count (0x0E)
-        byte[] report = new byte[reportSize + 1]; // +1 for Report ID
-        report[0] = 0x02; // Feature Report ID 2
+        // HID feature report: Report ID 2 + 14 bytes
+        int reportSize = 14;
+        byte[] report = new byte[reportSize + 1];
+        report[0] = 0x02;
+
+        // XUSB input: same 14 bytes (no report ID prefix)
+        byte[] xusbInput = new byte[14];
 
         var sw = Stopwatch.StartNew();
         int count = 0;
@@ -680,13 +701,23 @@ class Program
             report[dataOfs + 0] = (byte)(lx & 0xFF); report[dataOfs + 1] = (byte)(lx >> 8);
             report[dataOfs + 2] = (byte)(ly & 0xFF); report[dataOfs + 3] = (byte)(ly >> 8);
 
+            // Send to HID device (DirectInput/SDL)
             bool ok = HidD_SetFeature(h, report, (uint)report.Length);
+
+            // Send to XUSB device (XInput) — same data, no report ID prefix
+            if (xh != null)
+            {
+                Array.Copy(report, 1, xusbInput, 0, 14);
+                // IOCTL_XUSB_SET_STATE with >5 bytes = input report submission
+                DeviceIoControl(xh, 0x8000A010, xusbInput, (uint)xusbInput.Length,
+                    null, 0, out _, IntPtr.Zero);
+            }
 
             if (!ok)
             {
                 int err = Marshal.GetLastWin32Error();
                 if (count == 0)
-                    Console.Error.WriteLine($"  Send failed: {err} (0x{err:X})");
+                    Console.Error.WriteLine($"  HID send failed: {err} (0x{err:X})");
                 if (count > 3) break;
             }
 
