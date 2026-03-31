@@ -498,9 +498,25 @@ EvtIoDeviceControl(
 
     case IOCTL_UMDF_HID_GET_FEATURE:
     case IOCTL_UMDF_HID_SET_OUTPUT_REPORT:
-    case IOCTL_UMDF_HID_GET_INPUT_REPORT:
         status = STATUS_NOT_SUPPORTED;
         break;
+
+    case IOCTL_UMDF_HID_GET_INPUT_REPORT: {
+        /* Return the latest input report for polled reading (browser Gamepad API) */
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        if (ctx->InputReportReady) {
+            status = RequestCopyFromBuffer(Request,
+                ctx->InputReport, ctx->InputReportSize);
+        } else {
+            /* No data yet — return zeros with Report ID */
+            UCHAR emptyReport[16];
+            RtlZeroMemory(emptyReport, sizeof(emptyReport));
+            emptyReport[0] = 0x01; /* Report ID 1 */
+            status = RequestCopyFromBuffer(Request, emptyReport, sizeof(emptyReport));
+        }
+        WdfWaitLockRelease(ctx->InputLock);
+        break;
+    }
 
     case IOCTL_HID_ACTIVATE_DEVICE:
     case IOCTL_HID_DEACTIVATE_DEVICE:

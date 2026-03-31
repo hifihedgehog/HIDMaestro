@@ -374,7 +374,7 @@ class Program
         0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
         0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
         0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
-        0x0F, 0xB1, 0x02, 0xC0,
+        0x0E, 0xB1, 0x02, 0xC0,
     };
 
     // ── Registry config ──
@@ -613,12 +613,11 @@ class Program
         Console.WriteLine($"  Profile:  {profile.Id}");
         Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
         Console.WriteLine($"  Product:  {profile.ProductString}");
-        // Determine if this is an Xbox profile that needs XInput support
-        bool isXbox = profile.Vendor == "Microsoft" && profile.Type == "gamepad";
-        // Always use the universal descriptor — it has proper Report IDs and
-        // passes HID validation. The XUSB interface GUID handles XInput separately.
+        // Use universal descriptor for now — works with joy.cpl and XInput.
+        // TODO: use profile-specific descriptors for browser Gamepad API compatibility
         byte[] descriptor = UniversalDescriptor;
-        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal + XUSB interface)\n");
+        bool useNativeHID = false;
+        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal)\n");
 
         // Step 1: Write descriptor to registry FIRST
         Console.Write("  Writing profile to registry... ");
@@ -676,17 +675,28 @@ class Program
         }
         Console.WriteLine(xh != null ? "OK" : "not found (XInput won't get live data)");
 
-        Console.WriteLine("\n  Sending input to HID + XInput. Ctrl+C to stop.\n");
+        Console.WriteLine($"\n  Sending input ({(useNativeHID ? "WriteFile" : "SetFeature")}) + XInput. Ctrl+C to stop.\n");
 
-        // HID feature report: Report ID 2 + 14 bytes
-        int reportSize = 15; // matches Feature Report Count (0x0F) in descriptor
-        byte[] report = new byte[reportSize + 1];
-        report[0] = 0x02;
+        // HID report buffer
+        byte[] report;
+        if (useNativeHID)
+        {
+            // Native descriptor: no Report IDs, send raw via WriteFile
+            // The GIP descriptor input is variable, but we'll send the standard
+            // gamepad data that the descriptor defines
+            report = new byte[16]; // enough for basic gamepad data
+        }
+        else
+        {
+            // Universal descriptor: Feature Report ID 2 + 14 bytes
+            report = new byte[15];
+            report[0] = 0x02;
+        }
 
-        // XUSB input: piggybacked on GET_STATE (3-byte header + 14 bytes data = 17)
-        byte[] xusbInput = new byte[18]; // 3 header + 15 data
-        xusbInput[0] = 0x01; xusbInput[1] = 0x01; xusbInput[2] = 0x00; // v1.1, slot 0
-        byte[] xusbOutput = new byte[29]; // GET_STATE output (discarded)
+        // XUSB input: piggybacked on GET_STATE
+        byte[] xusbInput = new byte[17];
+        xusbInput[0] = 0x01; xusbInput[1] = 0x01; xusbInput[2] = 0x00;
+        byte[] xusbOutput = new byte[29];
 
         var sw = Stopwatch.StartNew();
         int count = 0;
@@ -696,13 +706,8 @@ class Program
             double t = sw.Elapsed.TotalSeconds;
             double angle = t * Math.PI * 2 * 0.5;
 
-            // Pack full gamepad input (14 bytes at offset 1 after Report ID)
-            // Universal descriptor layout:
-            //   [0-1] LX uint16  [2-3] LY uint16  [4-5] RX uint16
-            //   [6-7] RY uint16  [8-9] LT uint16  [10-11] RT uint16
-            //   [12] buttons low (A,B,X,Y,LB,RB,Back,Start)
-            //   [13] buttons high (LThumb,RThumb) + hat (bits 2-5) + padding
-            int d = 1; // skip Report ID byte
+            // Pack gamepad input — format depends on descriptor type
+            int d = useNativeHID ? 0 : 1; // native: no Report ID prefix; universal: skip ID
 
             // Left stick: circles
             ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
@@ -710,28 +715,40 @@ class Program
             report[d+0] = (byte)(lx & 0xFF); report[d+1] = (byte)(lx >> 8);
             report[d+2] = (byte)(ly & 0xFF); report[d+3] = (byte)(ly >> 8);
 
-            // Right stick: centered (32768 = 0x8000)
+            // Right stick: centered (32768)
             report[d+4] = 0x00; report[d+5] = 0x80;
             report[d+6] = 0x00; report[d+7] = 0x80;
 
-            // Triggers: zero (0 = not pressed)
+            // Triggers: zero
             report[d+8] = 0x00; report[d+9] = 0x00;
             report[d+10] = 0x00; report[d+11] = 0x00;
 
             // Buttons: toggle A every second
-            int btns = ((int)t % 2 == 0) ? 0x01 : 0x00; // bit 0 = A
-            report[d+12] = (byte)btns;
+            int btns = ((int)t % 2 == 0) ? 0x01 : 0x00;
+            if (report.Length > d + 12) report[d+12] = (byte)btns;
 
-            // Hat: centered (0 = no direction pressed, but hat uses 1-8 with 0=null)
-            report[d+13] = 0x00; // no hat, no extra buttons
+            // Hat: neutral
+            if (report.Length > d + 13) report[d+13] = 0x00;
 
-            // Send to HID device (DirectInput/SDL)
-            bool ok = HidD_SetFeature(h, report, (uint)report.Length);
+            // Send to HID device
+            bool ok;
+            if (useNativeHID)
+            {
+                // Native descriptor: WriteFile → IOCTL_HID_WRITE_REPORT → driver stores as input
+                ok = WriteFile(h, report, (uint)report.Length, out _, IntPtr.Zero);
+            }
+            else
+            {
+                // Universal descriptor: HidD_SetFeature(Report ID 2) → driver builds input
+                ok = HidD_SetFeature(h, report, (uint)report.Length);
+            }
 
             // Send to XUSB device (XInput) — piggyback on GET_STATE
             if (xh != null)
             {
-                Array.Copy(report, 1, xusbInput, 3, 15); // copy 15 data bytes after 3-byte header
+                int copyOfs = useNativeHID ? 0 : 1;
+                int copyLen = Math.Min(14, report.Length - copyOfs);
+                Array.Copy(report, copyOfs, xusbInput, 3, copyLen);
                 DeviceIoControl(xh, 0x8000E00C, xusbInput, (uint)xusbInput.Length,
                     xusbOutput, (uint)xusbOutput.Length, out _, IntPtr.Zero);
             }

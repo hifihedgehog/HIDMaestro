@@ -152,7 +152,7 @@ static const UCHAR G_DefaultReportDescriptor[] = {
     0x15, 0x00,                     /*   Logical Minimum (0) */
     0x26, 0xFF, 0x00,               /*   Logical Maximum (255) */
     0x75, 0x08,                     /*   Report Size (8) */
-    0x95, 0x0F,                     /*   Report Count (15) — matches input report data size */
+    0x95, 0x0E,                     /*   Report Count (14) */
     0xB1, 0x02,                     /*   FEATURE (Data, Var, Abs) */
     0xC0                            /* End Collection */
 };
