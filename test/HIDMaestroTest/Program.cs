@@ -374,6 +374,8 @@ class Program
         Console.Write("  Recreating device node... ");
         RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
         RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
+        // Clean up ghost HID children from previous sessions
+        RunPowerShell("cleanup_ghosts.ps1");
         Thread.Sleep(1000);
         RunPowerShell("create_node.ps1");
         Thread.Sleep(3000);
