@@ -696,12 +696,34 @@ class Program
             double t = sw.Elapsed.TotalSeconds;
             double angle = t * Math.PI * 2 * 0.5;
 
-            // Pack gamepad input
-            int dataOfs = 1; // skip feature report ID byte
+            // Pack full gamepad input (14 bytes at offset 1 after Report ID)
+            // Universal descriptor layout:
+            //   [0-1] LX uint16  [2-3] LY uint16  [4-5] RX uint16
+            //   [6-7] RY uint16  [8-9] LT uint16  [10-11] RT uint16
+            //   [12] buttons low (A,B,X,Y,LB,RB,Back,Start)
+            //   [13] buttons high (LThumb,RThumb) + hat (bits 2-5) + padding
+            int d = 1; // skip Report ID byte
+
+            // Left stick: circles
             ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
             ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
-            report[dataOfs + 0] = (byte)(lx & 0xFF); report[dataOfs + 1] = (byte)(lx >> 8);
-            report[dataOfs + 2] = (byte)(ly & 0xFF); report[dataOfs + 3] = (byte)(ly >> 8);
+            report[d+0] = (byte)(lx & 0xFF); report[d+1] = (byte)(lx >> 8);
+            report[d+2] = (byte)(ly & 0xFF); report[d+3] = (byte)(ly >> 8);
+
+            // Right stick: centered (32768 = 0x8000)
+            report[d+4] = 0x00; report[d+5] = 0x80;
+            report[d+6] = 0x00; report[d+7] = 0x80;
+
+            // Triggers: zero (0 = not pressed)
+            report[d+8] = 0x00; report[d+9] = 0x00;
+            report[d+10] = 0x00; report[d+11] = 0x00;
+
+            // Buttons: toggle A every second
+            int btns = ((int)t % 2 == 0) ? 0x01 : 0x00; // bit 0 = A
+            report[d+12] = (byte)btns;
+
+            // Hat: centered (0 = no direction pressed, but hat uses 1-8 with 0=null)
+            report[d+13] = 0x00; // no hat, no extra buttons
 
             // Send to HID device (DirectInput/SDL)
             bool ok = HidD_SetFeature(h, report, (uint)report.Length);
