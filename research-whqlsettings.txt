@@ -1,0 +1,1045 @@
+﻿ 
+
+ Back Doors for Cross-Signed Drivers 
+
+ Home 
+ Table of Contents 
+ About This Site 
+
+ What’s New? 
+ Feedback 
+ Consult 
+
+ Geoff Chappell - Software Analyst 
+
+ Back Doors for Cross-Signed Drivers 
+
+ Four undocumented registry values in one key vary the default validation 
+ of signatures on kernel-mode code such that Windows 10 may allow cross-signed 
+ drivers when it is otherwise documented as requiring Microsoft-signed drivers.
+
+ This may be welcome for running your own drivers on your own computers without 
+ having to send them to Microsoft for signing. Or it may be an unwelcome exposure 
+ to software that would install drivers by surprise, including to let malware 
+ elevate from administrative access to kernel-mode execution. 
+
+ Setting these values requires administrative access. Their action is subject 
+ to System Integrity policy, which provides the best defence. 
+
+ Digital signatures on Windows kernel-mode drivers are usefully classified according 
+ to how directly the driver’s owner has to involve Microsoft in getting the driver 
+ signed: 
+
+ WHQL-signed; 
+
+ cross-signed; 
+
+ self-signed. 
+
+ A WHQL-signed driver is signed with a certificate whose private key is kept 
+ by Microsoft so that only Microsoft can do the signing. WHQL means Windows Hardware 
+ Quality Labs. For many years the only way that Microsoft would sign a driver for 
+ an Independent Software Vendor (ISV) was if the driver was sent to Microsoft with 
+ a record of having passed an appropriate WHQL test suite. In those years, a WHQL 
+ signature gave some assurance of the driver’s quality. 
+
+ For the many sorts of driver for which Microsoft had not yet devised tests 
+ for hardware compatibility, ISVs simply could not get WHQL signatures. Such drivers 
+ could instead be cross-signed by the ISV using 
+ both a Software Publisher Certificate (SPC) that is issued to the ISV by a third-party 
+ certification authority (CA) and a publicly available cross-certificate that Microsoft 
+ issues to the CA. In the particular way that Windows validates signatures on drivers, 
+ the signature on a cross-signed driver has a root certificate from Microsoft but 
+ it’s one that distinguishes the code verification as having been out-sourced. 
+ Microsoft’s involvement in cross-signing is only indirect, to vet CAs as having 
+ sufficiently high standards for authenticating that whoever they issue their certificates 
+ to is an identifiable (and hopefully responsible) software publisher. A cross-signature 
+ is some assurance that the driver, of whatever quality, is the work of a specific 
+ known entity. 
+
+ Banning Cross-Signed Drivers 
+
+ Of course, there are WHQL-signed drivers that don’t live up to the expected 
+ assurance of quality and there are cross-signed drivers that don’t live up to 
+ the expected assurance of authenticity. Even if no Microsoft-approved third-party 
+ CA ever issued certificates to frauds, some ISVs demonstrably did not guard the 
+ private keys in their SPCs carefully enough. Inevitably, kernel-mode drivers written 
+ as malware circulated with cross-signatures to look like the commercial products 
+ of legitimate (and even prominent) software vendors. 
+
+ For Windows 10, Microsoft took the opportunity to draw a line and make it significantly 
+ more difficult for anyone outside Microsoft to sign drivers that Windows will 
+ load in anything like ordinary use. Microsoft’s first-known public statement of 
+ motivation for
+
+ Driver Signing changes in Windows 10 was: 
+
+ We’re making these changes to help make Windows more secure. These changes limit 
+ the risk of a driver publisher’s signing keys being lost or stolen and also 
+ ensures that driver publishers are strongly authenticated. 
+ For most practical effect, all new drivers must be signed directly by Microsoft. 
+ The days of Windows users being exposed to cross-signed drivers that can have 
+ been signed by just about anyone, possibly for mischief, possibly without being 
+ traceable, are numbered. Though this goal surely could be met securely without 
+ going so far as requiring that drivers can load only if signed by Microsoft, there 
+ doesn’t look to be any reasonable dispute that the goal is worthy or even that 
+ cross-signed drivers would better be gone. 
+
+ To support this new requirement of Microsoft signatures on all new drivers, 
+ the programme of signing by Microsoft only after passing WHQL tests is expanded 
+ so that a WHQL signature can alternatively be obtained after an
+ attestation to Microsoft. Both for the ISV’s one-time 
+ registration with Microsoft and on each subsequent submission to Microsoft to 
+ get a driver signed, Microsoft requires a very strong verification of the ISV’s 
+ identity: not just any old certificate from the many CAs that Microsoft issues 
+ cross-certificates to but a more secure and expensive Extended Validation (EV) 
+ certificate from a handful of CAs that Microsoft yet approves for this new purpose. 
+ The bar is raised, if not directly for the quality of driver writing, then at 
+ least for the traceability of the writers. 
+
+ Exceptions 
+
+ Though cross-signed drivers are thus banished in general for Windows 10, there 
+ are exceptions. According to what Microsoft presumably intends as the definitive 
+ description of
+
+ Driver Signing Policy , “Starting with Windows 10, version 1607, Windows will 
+ not load any new kernel-mode drivers which are not signed by the Dev Portal” but
+
+ Cross-signed drivers are still permitted if any of the following are true:
+
+ The PC was upgraded from an earlier release of Windows to Windows 10, 
+ version 1607.
+
+ Secure Boot is off in the BIOS.
+
+ Drivers was signed with an end-entity certificate issued prior to July 
+ 29th 2015 that chains to a supported cross-signed CA.
+
+ Let’s leave aside for now the mystery of Microsoft’s proclaiming this behaviour 
+ as new for the 1607 release when it’s very nearly a restoration of the original 
+ release’s behaviour which had been relaxed for the 1511 release (apparently without 
+ announcement). More or less continuous updates mean the world soon moves on, and 
+ mostly has by now. The confusion that Microsoft created for all this in the early 
+ releases can now be tipped into the dustbin of history, probably with no lessons 
+ learnt (either at Microsoft or in the community of device driver programmers that 
+ seemed unable even to want to free itself from the helplessness of depending on 
+ Microsoft for thin pickings). Let’s instead take Microsoft’s list of exceptions 
+ as definitive for the stated version and for the foreseeable future. How might 
+ these exceptions affect you? 
+
+ New Commercial Driver 
+
+ If you’re the writer of a new driver for commercial distribution, then the 
+ exceptions don’t much matter. Your only realistic choice is of what sort of WHQL 
+ signature, with or without WHQL testing, to get for your driver. If you tried 
+ instead to get your customers to configure their Windows for one of the exceptions 
+ as your price for their use of your cross-signed driver, then you would soon be 
+ out of business. And a good thing, too! Nobody should have to turn Secure Boot 
+ off for you, much as you perhaps resent Microsoft telling you to turn it off for 
+ your final observations in private of your driver’s performance in real-world 
+ conditions before you send it to Microsoft for a signature. 
+
+ Old Cross-Signed Driver 
+
+ If you’re the writer of an old cross-signed driver that is already in commercial 
+ distribution and ought to work unchanged for Windows 10, then the exceptions have 
+ the doubtlessly welcome effect that your customers will not lose the use of your 
+ driver when they upgrade to Windows 10 and you’re not put to the otherwise unnecessary 
+ trouble of getting a WHQL signature. Say what you will about Microsoft, but their 
+ mostly very good record of attending to backwards compatibility is not appreciated 
+ nearly well enough, including to be recognised as a significant reason that Microsoft’s 
+ operating systems, rather than some others’, ever got to dominate the mass market.
+
+ Own Driver 
+
+ If you’re the writer of a driver for your own computers, whether for your private 
+ pleasure or because you write for internal use by an enterprise (so that “own 
+ computers” may mean hundreds, thousands or even hundreds of thousands), then you 
+ should want to know the exceptions because one or other of them may be acceptable 
+ to you as an alternative to signing contracts with Microsoft and to sharing your 
+ intellectual property with Microsoft. I should not be surprised if more than a 
+ few government departments, security contractors, discreet financial institutions 
+ and secretive research laboratories have gone down this path, perhaps even with 
+ a nod and a wink from Microsoft. (See below about an NDA.) 
+
+ Users 
+
+ If you’re an ordinary user of computers—well, a security-conscious user—then 
+ you should want to know the exceptions because however much Microsoft’s raising 
+ of the bar might benefit the security of Windows users in general, it’s less than 
+ beneficial to your security in particular if your computer somehow becomes covered 
+ by one of the exceptions and you’re not immediately aware.
+ Though it’s not, of itself, a security issue if Windows 
+ 10 loads a cross-signed driver, it arguably is if such drivers get loaded on your 
+ computer when you reasonably expected they would be prevented. 
+
+ What’s reasonable to expect is hard to assess. Microsoft’s own descriptions 
+ of driver-signing requirements for Windows 10 have at times seemed impossibly 
+ confusing even to experts. For instance,
+ Peter Viscarola , 
+ a “founder, President and Consulting Partner at OSR” with a long experience not 
+ just of device driver development but of close relations with Microsoft, seems 
+ more than a little frustrated in
+ Yet another query 
+ about driver signing : “But to say this stuff is confusing is a considerable 
+ understatement.” This was in response to a wider problem, not just of knowing 
+ the driver-signing requirements for Windows 10 but of reconciling the varying 
+ requirements of multiple Windows versions in multiple configurations. But it was 
+ as late as November 2016, well over a year after arranging what might be thought 
+ a definitive
+
+ Questions and Answers: Windows 10 Driver Signing with Microsoft’s James Murray, 
+ itself done as a welcome service to the OSR community after a long stream of observations 
+ such as “I agree it IS more confusing than it should be.” If even experts at writing 
+ drivers and educating driver writers have areas of confusion over these requirements, 
+ what hope does your typical system administrator, let alone an ordinary computer 
+ user, have of appreciating that a seemingly obvious interpretation hides all sorts 
+ of subtleties and caveats? 
+
+ New or Upgraded 
+
+ One subtlety is with how your Windows 10 might get to be treated as if it has 
+ been upgraded even though you installed it fresh. You might think the difference 
+ between new and upgraded is much like the difference between, say, Windows Home 
+ and Windows Professional, or even between Windows 10 and Windows Server 2016, 
+ and is fixed in stone or is at least tamper-proofed. And so it may be once Windows 
+ is fully up and running. But decisions about Code Integrity configuration have 
+ to be made not just before the kernel has initialised its support for tamper-proofing 
+ but before the kernel is even loaded. If only for now, these early decisions are 
+ made independently of the ordinary machinery for licensing. They thus depend on 
+ things that are not nearly as well settled or protected as you might think or 
+ hope. 
+
+ The closest that Microsoft seems to have come to disclosing that the exception 
+ for upgraded systems is decided by something as simple and vulnerable as a registry 
+ setting is in a video presentation
+
+ Driver Certification on Windows Client and Server by Scott Anderson on 27th 
+ May 2016. I transcribe from eleven minutes in: 
+
+ And then finally, we are actually going to have a registry key. So, as I mentioned. 
+ And this registry key is, you know, intended just for testing, so we definitely 
+ don't want you setting that registry key as you install the driver. The registry 
+ key essentially mimics the same behaviour as if you have, say, an upgraded system. 
+ So, like I mentioned, if you have an upgraded system we continue to trust the 
+ cross-signed certificates and you'll be able to then test with your cross-signed 
+ certificates rather than needing to submit everything to us.
+
+ As far as I know, Microsoft never has published which “registry key” does this 
+ magic. According to Peter Viscarola, again, but this time in
+ Signing during 
+ development and testing on Windows 10 : “The registry key information is only 
+ available under NDA.” 
+
+ I see no reason either to doubt him or to suppose that his own knowlege isn’t 
+ under the NDA. That disclosure by Microsoft under an NDA “means it’ll probably 
+ turn-up in lots of places online eventually” is at least plausible, if cynical, 
+ and a setting that’s named UpgradedSystem has indeed 
+ turned up on the Internet. I doubt, though, that it has turned up only because 
+ someone broke their NDA. As registry settings go, this one never can have been 
+ meant to stay secret for long. Its purpose is presumably that Microsoft sets it 
+ on all upgraded systems, and so its existence, though not immediately its meaning, 
+ will have turned up most readily just from comparing the registries of new and 
+ upgraded installations. (If there’s one thing the Internet is reliably good at, 
+ it’s to stimulate brute-force analysis by helping it circulate as some kind of 
+ research.) 
+
+ It is anyway not safely inferred that UpgradedSystem 
+ is the “registry key” from the video. We should perhaps not parse anyone’s conference 
+ talk too literally, but see that what’s talked about “essentially mimics” an upgraded 
+ system, yet UpgradedSystem is less a mimic than 
+ the defining indicator for the Windows loader to know that Windows was upgraded. 
+ Also, the “registry key” is said to be something that Microsoft is “going to have”, 
+ yet UpgradedSystem was already old, having been 
+ introduced for the original release of Windows 10 (not that anyone outside Microsoft 
+ seems to have understood its significance so early). 
+
+ Of course, such context is easier to read (or misread) into Anderson’s words 
+ if you already know that there are other registry values that he can have meant, 
+ including some that were not yet defined in public releases. Within the one registry 
+ key are as many as five values that govern whether a driver’s signature must be 
+ a WHQL signature to be valid. Most of these evidently aren’t set in the ordinary 
+ course of upgrading a Windows installation or even of using Windows. They therefore 
+ do not turn up in brute-force comparison of registries. For one, a Google search 
+ for the name in quotes gives just one match (today, 11th July 2018), and it’s 
+ just another dump from brute-force analysis but this time of plain-text strings 
+ in executables. These registry settings are as obscure as such things ever are.
+
+ Security 
+
+ The obscurity of the registry values matters because of something else that 
+ Anderson says and for which he plainly intends the obvious direct meaning:
+ “we definitely don’t want you setting that registry key 
+ as you install the driver.” 
+
+ Well, no, of course we definitely don’t! The banishing of cross-signed drivers 
+ for fear that this relatively easy signing with third-party certificates has been 
+ hijacked by the unscrupulous would be completely undone if those unscrupulous 
+ writers can simply continue as before except to make their installer take the 
+ extra step of setting a magic registry value. That they won’t do this if they 
+ know how and it works is fanciful beyond words. 
+
+ So, why, you should be asking, am I about to help them? Don’t I heed my own 
+ words? You’d certainly be right that I am about to document these registry values 
+ and I won’t disagree that my doing so may help the unscrupulous. If they didn’t 
+ already know the registry values, they will soon. If they can get administrative 
+ access to your computer, then they can set one of these (undocumented) registry 
+ values and then set more (documented) values that install their driver. For this 
+ very little trouble, they will gain a very good expectation that their driver 
+ will load when Windows 10 next restarts even if you have Secure Boot enabled and 
+ your Windows was never upgraded. If you ever then discover that you’ve given them 
+ kernel-mode access, you may be tempted to blame me for having revealed the means. 
+ So be it. I, of course, say to blame Microsoft for having provided the means and 
+ for having thought that you didn’t need to be warned—and while you’re at it, direct 
+ a little of that blame to those who signed the NDA and thus went along, happily 
+ or not, with Microsoft’s security by obscurity. 
+
+ It’s well past time that Microsoft documented the applicable registry values. 
+ This is not to say that Microsoft ought to have documented the registry values 
+ from the start. Had I been writing this three years earlier, I’d like to think 
+ I’d have argued that what matters is not whether the registry values themselves 
+ are documented but that the need for and means of defence is documented. It would 
+ have sufficed had Microsoft documented that the exceptions are susceptible to 
+ being enabled by malware with administrative access and that Windows users may 
+ want to defend themselves by various mechanisms that Microsoft would document 
+ for easy use. But time has passed. The only ethical strategy this late from Microsoft 
+ is full openness—but do not expect you’ll ever see this! 
+
+ What is a WHQL Signature? 
+
+ Before I can list the registry values and describe their effects, we must sort 
+ out a question of terminology. What Microsoft’s programmers and technical writers 
+ sometimes mean by a WHQL signature when writing about driver signing for Windows 
+ 10 is not what programmers outside Microsoft have tended to think it means. As 
+ noted above, ISVs had been conditioned for a decade to think that getting a driver 
+ signed by Microsoft starts with getting it to pass the applicable WHQL test programme 
+ (if one exists). Given this background, it’s not the slightest bit surprising 
+ that when Microsoft writes some such phrase as “WHQL signature required” in a 
+ supposedly helpful table at yet another page on
+ Driver Signing 
+ Policy , what ISVs read is “WHQL testing required”. 
+
+ Now, I don’t mean to suggest that driver writers are frightened of testing, 
+ or to excuse them if they skimp on it, though I certainly do sympathise with their 
+ apprehension that WHQL testing may take them down a rabbit hole of overheads that 
+ far exceed the technical demands of designing and implementing a solid driver. 
+ Where the WHQL tests truly do test just an ISV’s driver, then the ISV can’t credibly 
+ be anything but glad that someone else has done the hard and unglamorous work 
+ of developing a test rig to use for free. There’s a good argument in such cases 
+ that the ISV would do better to run their driver through the WHQL tests even if 
+ not needed for driver signing (and even if the driver is for private use). Against 
+ this is that there have not always been—and there might not be for a good while 
+ yet—WHQL tests that truly do apply to all types of kernel-mode code that ISVs 
+ may think to write. Anyone who has even glimpsed the WHQL-testing experience that 
+ awaits the writer of a driver of a type that Microsoft has not explicitly supported 
+ for its WHQL tests will appreciate how alarming can be even the suggestion that 
+ drivers for Windows 10 must get WHQL signatures. If Microsoft didn’t mean that 
+ all new drivers for Windows 10 must pass WHQL tests, then Microsoft has been ham-fisted 
+ to talk of requiring WHQL signatures. 
+
+ Still, “WHQL signature” plainly is Microsoft’s choice of term, in some contexts, 
+ for three types of signature: 
+
+ signatures granted to drivers that pass WHQL tests; 
+
+ signatures on Microsoft’s own drivers (even ones that don’t pass the WHQL 
+ tests that Microsoft would select for these drivers if written by ISVs);
+
+ and the new sort of signature that is obtained by attestation. 
+
+ This breadth of interpretation, and particularly its application to the attestation 
+ signature, shows in too many places with too much consistency to be anything but 
+ intended. For instance, public symbol files reveal Microsoft’s names for internal 
+ routines ImgpIsWhqlSignatureRequired in 
+ the boot manager and Windows loader and CipWhqlEnforcementEnabled 
+ in the kernel-mode Code Integrity module (CI), and if these routines determine 
+ that a WHQL signature is required or that WHQL enforcement is enabled, then an 
+ attestation signature is ordinarily satisfactory. This even carries through to 
+ the user-interface visibility of plain-text descriptions for the CodeIntegrity 
+ event log. Events 3082 to 3085 were added for the 1607 release to tell of failure 
+ to meet “WHQL requirements” and of “WHQL driver enforcement” being enabled or 
+ disabled, yet attestation-signed drivers ordinarily don’t fail the WHQL requirements 
+ and do load when WHQL driver enforcement is enabled. 
+
+ Thus did I write (far) above that the programme of signing by Microsoft only 
+ after passing WHQL tests is expanded so that a WHQL signature can
+ alternatively be obtained after an attestation to 
+ Microsoft. As confusing as Microsoft’s terminology surely was for programmers 
+ who will entirely understandably have taken the term WHQL signature as suggesting 
+ WHQL testing, it’s too late to change now. We all have to stick with it. All I 
+ can hope is to clarify that it was Microsoft who made this murky. 
+
+ In this view, and certainly for all this article, a 
+ signature that is obtained from Microsoft by attestation is a WHQL signature 
+ but of a new type that comes with no WHQL testing and with slightly fewer legal 
+ obligations to Microsoft. 
+
+ Taxonomy 
+
+ As to what exactly Windows needs to see in a signature to recognise it as any 
+ sort of WHQL signature, I am somehow both astonished and unsurprised to find nothing 
+ public that I might simply refer to as definitive, or even as adequate, so that 
+ I can move straight on to listing those registry values. 
+
+ WHQL Roots 
+
+ It is, of course, well known that a WHQL signature must have one of relatively 
+ few well-known Microsoft certificates as the signature’s root. The boot manager, 
+ Windows loader and CI are each hard-coded with identifying details for different 
+ selections of Microsoft root certificates. For the following table, I reproduce 
+ the common names of the roots that Windows 10 requires for a WHQL signature:
+
+ Common Name 
+ Remarks 
+
+ Microsoft Authenticode(tm) Root Authority 
+ old roots 
+
+ Microsoft Root Authority 
+
+ Microsoft Root Certificate Authority 
+
+ Microsoft Root Certificate Authority 2010 
+ new root 
+
+ Microsoft Test Root Authority 
+ old root for
+
+ WHQL Test Signature Program 
+
+ Microsoft Testing Root Certificate Authority 2010 
+ new root for WHQL Test Signature Program 
+
+ Microsoft Development Root Certificate Authority 2014 
+ (new) root for Insider Preview and flightsigning 
+
+ In practice, the old roots won’t be seen in WHQL signatures that Microsoft 
+ gives to new drivers for execution on Windows 10. Of the new roots, Microsoft 
+ Root Certificate Authority 2010 is the one to expect in signatures for drivers 
+ that are intended for a formal Windows 10 release, rather than for quick fixes 
+ and previews. How the certificate chain gets to this root is irrelevant, but different 
+ types of signature will be created by signing with different certificates and 
+ an observed correlation will tend to be reliable for a time, such that a few examples 
+ can usefully be presented for concreteness: 
+
+ Signature Type 
+ Certification Path (Root CA to End Entity) 
+
+ built-in 
+ Microsoft Root Certificate Authority 2010 
+
+ → Microsoft Windows Production PCA 2011 
+
+ → Microsoft Windows 
+
+ WHQL testing 
+ Microsoft Root Certificate Authority 2010 
+
+ → Microsoft Windows Third Party Component CA 2012 
+
+ → Microsoft Windows Hardware Compatibility Publisher 
+
+ attestation 
+ Microsoft Root Certificate Authority 2010 
+
+ → Microsoft Windows Third Party Component CA 2014 
+
+ → Microsoft Windows Hardware Compatibility Publisher 
+
+ Remember, though, that these are just correlations that are observed for real-world 
+ Windows installations at the time of writing. Microsoft is presumably free to 
+ change at will to whatever new certification paths take its fancy. 
+
+ EKU Requirements 
+
+ What does reliably distinguish the different signatures that are obtained from 
+ Microsoft in different ways but which all count as WHQL signatures is their Enhanced 
+ Key Usage (EKU). A signature is not a WHQL signature just for having one of the 
+ necessary Microsoft roots. Its end-entity certificate must have a distinguishing 
+ EKU—or even two of them. It seems tidier to tabulate the relevant EKUs before 
+ proceeding to what each means and in what conditions it applies: 
+
+ EKU 
+ Symbolic Name 
+ Details tab in Certificate dialog 
+
+ 1.3.6.1.4.1.311.10.3.5 
+ szOID_WHQL_CRYPTO 
+ Windows Hardware Driver Verification 
+
+ 1.3.6.1.4.1.311.10.3.5.1 
+ szOID_ATTEST_WHQL_CRYPTO 
+ Windows Hardware Driver Attested Verification 
+
+ 1.3.6.1.4.1.311.10.3.6 
+ szOID_NT5_CRYPTO 
+ Windows System Component Verification 
+
+ 1.3.6.1.4.1.311.10.3.20 
+ szOID_WINDOWS_KITS_SIGNER 
+ Windows Kits Component 
+
+ 1.3.6.1.4.1.311.10.3.39 
+ szOID_EV_WHQL_CRYPTO 
+ Windows Hardware Driver Extended Verification 
+
+ The symbolic names are from WINCRYPT.H for each EKU as an Object ID (OID) in 
+ string form. Microsoft’s plain-text descriptions are from the MUI file for CRYPT32.DLL 
+ but are more easily experienced via the Digital Signatures tab in the Properties 
+ dialog for a file as shown in the File Explorer. 
+
+ The EKU 1.3.6.1.4.1.311.10.3.5 is observed in Microsoft’s signatures on third-party 
+ drivers for Windows 10 whether the signature was obtained by WHQL testing or by 
+ attestation. This is as good a place as any to amplify the point that Microsoft 
+ plausibly has thought all along that an attestation signature is naturally a new 
+ type of WHQL signature. Attestation signatures are observed to have the additional 
+ EKU 1.3.6.1.4.1.311.10.3.5.1. Comments with the respective definitions in WINCRYPT.H 
+ are instructive: 
+
+ // Signed by Microsoft through hardware certification (WHQL) 
+// Signed by Microsoft after the developer attests it is valid (Attested WHQL)
+
+ Beware, though, that presence of the EKU with the appended “.1” in attestation 
+ signatures is just an observation. It seems to be true of Microsoft’s practice 
+ so far, but the boot manager, Windows loader and CI don’t care about this EKU. 
+ To them, any signature that has the EKU 1.3.6.1.4.1.311.10.3.5 is a WHQL signature 
+ (but read a few paragraphs further for an important caveat). 
+
+ Anything that’s signed with a certificate that has the EKU 1.3.6.1.4.1.311.10.3.6 
+ may as well be called Windows-signed. This term has support from the names of 
+ some internal routines as known from public symbol files, e.g.,
+ SbCheckPolicyIsWindowsSigned , which the 
+ boot manager, boot loader and CI all have for checking that a Secure Boot policy 
+ file is signed by Microsoft. Any signature that has this EKU counts as a WHQL 
+ signature. 
+
+ In a few configurations, one more EKU, 1.3.6.1.4.1.311.10.3.20, suffices for 
+ recognising a signature as a WHQL signature. Examples of this EKU in signatures 
+ abound in the Windows Driver Kit (WDK) for Windows 10, but only for ARM and ARM64 
+ builds. While I care only for general-purpose computers with x86 and x64 builds, 
+ I leave this EKU and the applicable configurations as a diversion that we don’t 
+ need for present purposes. 
+
+ The EKU 1.3.6.1.4.1.311.10.3.39 does not suffice on its own for counting a 
+ signature as a WHQL signature. It can, however, be an extra requirement for 1.3.6.1.4.1.311.10.3.5 
+ to suffice. This happens if a loaded System Integrity policy sets the “Required: 
+ EV Signers” option, as through the XML 
+
+ <Rules>
+ <Rule>
+ <Option>Required:EV Signers</Option>
+ </Rule>
+</Rules>
+
+ When this policy option is active, presence of 1.3.6.1.4.1.311.10.3.5 in a 
+ signature makes the signature a WHQL signature only if 1.3.6.1.4.1.311.10.3.39 
+ is present too. Or would a better way to put it be that a signature that has the 
+ first but not the second is still a WHQL signature but not a good enough WHQL 
+ signature for this stricter policy? The second EKU is observed in Microsoft’s 
+ signatures of third-party drivers for Windows 10 that seem to have got the signature 
+ through WHQL testing but not on any that look instead to have been signed by attestation. 
+ If this observation is indeed how Microsoft means to continue distinguishing these 
+ two types of WHQL signature, then there is an implication: when Windows operates 
+ under the “Required:EV Signers” policy, if the default validation of a signature 
+ on a kernel-mode driver requires a WHQL signature, then a signature that is obtained 
+ by attestation will be invalid and a driver that is signed only because of attestation 
+ will ordinarily not be allowed to load. I doubt that this is well appreciated 
+ by ISVs who get Microsoft to sign their drivers just by attestation. 
+
+ Is a WHQL Signature Required? 
+
+ Now that we know what a WHQL signature is, we can proceed to the registry values 
+ that influence whether a signature on a driver must be a WHQL signature if it’s 
+ to be valid for driver-loading. 
+
+ Wouldn’t that be nice? But see that I say only influence, not determine. The 
+ registry values are not alone in the determination. Indeed, they mostly have the 
+ lowest precedence. I also don’t write simply “whether WHQL signatures are required” 
+ (though I will start to, for brevity). Most of the factors in the determination 
+ do apply generally, but there is one case that is evaluated per-signature. I also 
+ hedge around a signature’s being “valid for driver-loading” rather than commit 
+ to whether the driver is allowed to load. A driver with a signature that is valid 
+ for driver-loading may yet be rejected because of a System Integrity policy. A 
+ driver with no such signature may anyway get loaded (notably, but not only, because 
+ Windows is running under a kernel-mode debugger). 
+
+ Indeed, while I can find in public no reliable overview of the algorithm for 
+ validating signatures on drivers, I also have to gloss over the circumstances 
+ in which Windows even cares for whether WHQL signatures are required. Notably, 
+ it does not come even close if validation is in the hands of a Secure Boot policy 
+ that specifies its own allowed signers. Even in default of that, which is usual, 
+ WHQL signatures don’t figure for validation if the signature is already invalidated 
+ for not having an accepted root. What counts as an accepted root is subject to 
+ some configurable options and varies with the type of driver and the circumstances 
+ in which it is being loaded. However important the details may be—and they are 
+ historically the most important part of the default validation algorithm—we can 
+ put them aside for present purposes except on one count. The effective root of 
+ signatures on cross-signed drivers is the Microsoft Code Verification Root. If 
+ in the circumstances, this happens not to be among the accepted roots, then signatures 
+ on cross-signed drivers are already invalid. 
+
+ Even where a signature isn’t already invalid, the question of whether it must 
+ be a WHQL signature may simply be skipped. This happens for exotica such as HAL 
+ extensions and ELAM drivers (whose signatures will have long before been invalidated 
+ just as signatures unless they satisfy very particular EKU requirements). Starting 
+ in the 1703 release, it also happens if the accepted roots have been broadened, 
+ as for the testsigning boot option or because of
+ Licensed Driver Signing , 
+ to allow custom roots. In effect, skipping the question means that a WHQL signature 
+ is not required. If a WHQL signature is not required, or if it is but the signature 
+ is indeed a WHQL signature, then the signature is valid for this stage and the 
+ driver is let through to a second stage which evaluates it against the loaded 
+ System Integrity policies. 
+
+ The converse is our primary interest here and may as well be spelt out. If 
+ a WHQL signature is required but the signature is not a WHQL signature, then the 
+ signature is invalid and the driver will ordinarily not be allowed to load. This 
+ is where Windows 10 mostly rejects cross-signed drivers. To understand how it 
+ might instead allow them, and might be made to allow them, let’s take as given 
+ that validation of some signature has got as far as asking whether a WHQL signature 
+ is required. How is this particular question decided? As a rough guide, it’s decided 
+ by the following in decreasing order of precedence: 
+
+ Factor 
+ Applicable Versions 
+ WHQL Signature Required? 
+
+ Test Mode 
+ 1607 and higher 
+ no 
+
+ applicable policy options 
+ all 
+ yes 
+
+ upgrade in progress; 
+
+ or Windows PE 
+ 1607 and higher 
+ no 
+
+ one registry setting 
+ 1703 and higher 
+ yes 
+
+ Secure Boot disabled; 
+
+ or other registry settings; 
+
+ or old signature 
+ all 
+ no 
+
+ default 
+ all 
+ yes, generally; 
+
+ but no in 1511 
+
+ The details, inevitably, depend on whether the validation is done by the Windows 
+ loader or by CI and in which Windows 10 release. You should know that I, who have 
+ no help from Microsoft except for the formally released executables, documentation 
+ and public symbol files, am always behind the times, such that “and higher” presently 
+ extends only to the 1803 release. There is, inevitably, much that must still be 
+ worked out. What follows is as much as I yet know and have seen how to describe. 
+ If you want more, try getting it from Microsoft. 
+
+ Test Mode 
+
+ Starting with the 1607 release, WHQL signatures are explicitly not required 
+ if testsigning is enabled. I don’t yet see how this 
+ is not redundant in 1703 and higher (which, remember, avoid the question if the 
+ accepted roots have been widened to include custom roots). For 1607, however, 
+ it looks to have been a bug fix. The point to the testsigning 
+ option, perhaps even its reason for existence, is to allow the loading of drivers 
+ that are in development and are not yet signed for real-world use. The option 
+ is meant to boot Windows in a Test Mode that accepts drivers that have any signature 
+ at all, including most notably drivers that are self-signed with simple root certificates 
+ that a programmer might quickly make with the makecert 
+ tool. This is thwarted in the original and the 1511 releases if a policy option, 
+ as described shortly, would require WHQL signatures. Test Mode can have its intended 
+ effect only if it has a higher priority than the policy options, which it has 
+ in 1607 and higher. 
+
+ Secure Boot Policy Option 
+
+ In all releases, if the active Secure Boot policy specifies the “Required:WHQL” 
+ option, then of course WHQL signatures are required. Most computers, but perhaps 
+ not most tablets and phones, have only a default Secure Boot policy file embedded 
+ in the boot manager’s resources, and it does not specify this option. 
+
+ As to what this option is properly called, I can only guess: Secure Boot policy 
+ files look to be completely undocumented. Microsoft surely prepares them from 
+ XML, plausibly from the very similar XML that acts as source code for compiling 
+ System Integrity policy files via PowerShell’s ConvertFrom-CIPolicy 
+ command. Though the binary format of a Secure Boot policy file is not that of 
+ a System Integrity policy file, each has a dword of bit flags for options and 
+ many of the bits are shared, as if the file formats were developed either in common 
+ or one from the other. Where the meaning of a bit is shared, as for this option 
+ (0x00000080), I take it as no bad guess that the name in the XML is shared too.
+
+ System Integrity Policy Options 
+
+ If either the “Required:WHQL” or “Required:EV Signers” (0x00200000) option 
+ is set in any loaded System Integrity policy, then WHQL signatures are required. 
+ The difference, remember, is that the latter is stricter about what sort of WHQL 
+ signature is good enough. I can’t find a formal announcement by Microsoft that 
+ the “Required:EV Signers” option is intended as invalidating attestation signatures, 
+ yet drivers even from prominent vendors such as Lenovo are in circulation with 
+ WHQL signatures that were obtained by attestation and do not have the EKU that 
+ is required by this option. 
+
+ By the way, you should be aware that System Integrity policies go by many names. 
+ I persist in calling them System Integrity policies because this looks to be what 
+ they were called by Microsoft’s programmers who wrote the code that interprets 
+ the policies. This is the name that survives not only in what the public symbol 
+ files tell us of relevant internal routines and variables, but also in the text 
+ of error messages, in the names that the files must have, as with SiPolicy.p7b, 
+ and in the names that header files from Microsoft’s programming kits assign to 
+ error codes, as with STATUS_SYSTEM_INTEGRITY_POLICY_NOT_SIGNED 
+ (0xC0E90004). In other contexts, Microsoft uses other names. Code Integrity policies, 
+ for instance, are preferred for the PowerShell commands that look to be the whole 
+ of Microsoft’s formal support for these policies. Elsewhere, Microsoft refers 
+ to Device Guard policies and even to Windows Defender Application Control (WDAC) 
+ policies. The last, despite being Microsoft’s latest preference, is conspicuously 
+ unhelpful for disguising its applicability to kernel-mode drivers. 
+
+ Audit Mode 
+
+ Whatever we’re to name them, these System Integrity policy options are not 
+ absolute. Among the many other options for System Integrity policies is “Enabled:Audit 
+ Mode” (0x00010000). This is intended to ease a policy’s preparation by logging 
+ what the policy would deny if not in audit mode. If “Required:WHQL” or “Required:EV 
+ Signers” would indeed be too restrictive for you by rejecting a driver that you 
+ actually do need, then learning about it by auditing the policy and inspecting 
+ the log very likely is easier than activating the policy and finding that Windows 
+ doesn’t start or that you lose some (peripheral) device without which Windows 
+ is difficult to use. Helpful though this crutch may be, it does mean that while 
+ “Enabled:Audit Mode” is set, including if it’s set to audit any of the many other 
+ things that System Integrity policies can affect, the “Required:WHQL” and “Required:EV 
+ Signers” options have greatly diminished effect. 
+
+ For the original and 1511 releases, it would be as well to say the options 
+ are defeated. It just doesn’t matter that a “Required:WHQL” or “Required:EV Signers” 
+ option says WHQL signatures are required. The “Enabled:Audit Mode” countermands, 
+ with the end-effect that WHQL signatures are not required. 
+
+ Starting with the 1607 release, however, audit mode actually does audit. The 
+ “Enabled:Audit Mode” option respects the “Required:WHQL” and “Required:EV Signers” 
+ options in that WHQL signatures are still required, but if a signature on a driver 
+ turns out not to be a WHQL signature, then the driver is granted an override for 
+ the audit. If all other things go as usual, the driver with its invalid signature 
+ is allowed to load but with an audit trail in the CodeIntegrity event log (specifically, 
+ as event 3082). 
+
+ Upgrade in Progress or Windows PE 
+
+ Also starting for the 1607 release, WHQL signatures are not required while 
+ Windows is being upgraded or is being run as the Windows Preinstallation Environment, 
+ e.g., as a recovery option. Whether an upgrade is in progress is determined from 
+ the registry: 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\Setup 
+
+ Value: 
+ Upgrade 
+
+ Type: 
+ REG_DWORD 
+
+ Data: 
+ must be 1 
+
+ Operation as Windows PE is indicated by the presence of the
+ winpe boot option in the current BCD object. Though 
+ both do have the same effect as the documented exceptions, i.e., that WHQL signatures 
+ are not required even when Secure Boot is enabled, I list them here only for completeness, 
+ not to suggest that they are configurable ways around the usual requirement of 
+ WHQL signatures. 
+
+ Registry Values in CI Policy 
+
+ Of the exceptions that Microsoft documents for the 1607 release and higher, 
+ whether “Secure Boot is off in the BIOS” is not configurable in the registry, 
+ of course, but the other exceptions are—and have been from the very start. 
+
+ Original Exceptions 
+
+ All known releases of Windows 10 recognise a registry value as distinguishing 
+ that Windows was installed by upgrading: 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI\Policy 
+
+ Value: 
+ UpgradedSystem 
+
+ Type: 
+ REG_DWORD 
+
+ Mere presence of the UpgradedSystem value means 
+ that WHQL signatures are not required. 
+
+ Similarly old is a registry value that can bring forward the cut-off for whether 
+ a signature counts as old: 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI\Policy 
+
+ Value: 
+ WhqlEnforcementDateTime 
+
+ Type: 
+ REG_BINARY 
+
+ Data: 
+ eight-byte time stamp 
+
+ The data must be exactly eight bytes for interpretation as the usual Windows 
+ time stamp, i.e., in 100ns units since 1601. To be valid, the time stamp must 
+ be less than 0x01D0C991`830F4000, meaning midnight at the start of 29th July 2015, 
+ presumably to be understood as the release date for Windows 10. 
+
+ Very plausibly, the WhqlEnforcementDateTime value 
+ only ever existed as an aid to testing in the lead-up to the first release, specifically 
+ to observe the different handling of what would count as old and new cross-signed 
+ drivers. The valid time stamp from the registry data, else 29th July 2015, acts 
+ as a cut-off for deciding whether any particular signature is required to be a 
+ WHQL signature. The time taken from the signature for this comparison is version-dependent. 
+ The original Windows 10 uses the signing time, if available, else the start time 
+ for the end-entity certificate’s period of validity. Only the latter matters for 
+ the 1607 release and higher. A signature that predates the cut-off is not required 
+ to be a WHQL signature. 
+
+ I would not ordinarily spell out the converse, but there is a subtlety for 
+ the 1607 release when the validation is done by the Windows loader, as when a 
+ driver has 0 for its Start value. It is still true 
+ that if the driver’s signature does not predate the cut-off, then it must be a 
+ WHQL signature to be valid. What’s special is that if the signature turns out 
+ not to be a WHQL signature, then the driver is granted an exemption. If all other 
+ things go as usual, the driver with its invalid signature is allowed to load for 
+ apparently no greater price than a complaint in the CodeIntegrity event log (specifically, 
+ event 3083). My support for describing this handling as an exemption is that public 
+ symbols show that the corresponding event descriptor in CI is labelled
+ WhqlEnforcementFailureExempted . That this case of 
+ a cross-signed driver being allowed to load is not among the exceptions that Microsoft 
+ documents for
+
+ Driver Signing Policy , as quoted far above, is presumably because it was intended 
+ from the start to be short-lived. Indeed, where it is listed among the exceptions 
+ in the announcement of
+
+ Driver Signing Changes in Windows 10, version 1607 , Microsoft said outright 
+ that “Future versions of Windows will block boot drivers” and evidently meant 
+ it. 
+
+ Relaxation (1511) 
+
+ As noted above, WHQL enforcement for the original release of Windows 10 was 
+ relaxed for the 1511 release. Except if overridden by a Secure Boot policy or 
+ System Integrity policy, WHQL signatures are not required. In this release, the 
+ two original registry values continue to be read by both the Windows loader and 
+ CI, but their contents are immaterial and are ignored. 
+
+ Restoration (1607) 
+
+ For the restoration of WHQL enforcement in the 1607 release, Microsoft seems 
+ to have taken the opportunity not only to tweak the original exceptions and to 
+ enumerate them in public, but also to embellish the configurability. Starting 
+ with the 1607 release, Windows recognises two more values in the
+ Policy key. 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI\Policy 
+
+ Value: 
+ WhqlDeveloperTestMode 
+
+ Type: 
+ REG_DWORD 
+
+ Data: 
+ must be 1 
+
+ When the WhqlDeveloperTestMode is 1, WHQL signatures 
+ are not required. This WhqlDeveloperTestMode value 
+ best fits a literal reading of Anderson’s description in Microsoft’s video. Of 
+ all the values in the key, only this one is named as if to exist “just for testing”. 
+ It does not itself indicate an upgraded system but “essentially mimics”
+ UpgradedSystem . And it will have been, at the time, 
+ something that Microsoft was “going to have”. Perhaps now that the registry values 
+ are all disclosed in public without breaching Microsoft’s NDA, those who have 
+ signed the NDA are free to say. 
+
+ Or perhaps not, since the information about which 
+ registry value is covered by the NDA is not information that is knowable, with 
+ certainty, except through the NDA. From outside Microsoft’s cone of silence, I 
+ can’t know that the NDA’s “registry key” is not instead the following, which looks 
+ to formalise multiple effects as generalised WHQL settings. 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI\Policy 
+
+ Value: 
+ WhqlSettings 
+
+ Type: 
+ REG_DWORD 
+
+ Data: 
+ bit flags 
+
+ A set 0x00000001 bit means that WHQL signatures are not required. 
+
+ The 0x00000002 bit is a sort of opposite in the 1703 release and higher: if 
+ it is set, then WHQL signatures are required even if Secure Boot is off. See that 
+ it overrides all the other registry values (which are inconsequential unless Secure 
+ Boot is on). In the 1607 release, this role of a set 0x00000002 bit as an override 
+ of other registry values is all the bit has. It defeats the 0x00000001 bit and 
+ the UpgradedSystem value, but not
+ WhqlDeveloperTestMode . 
+
+ High bits in the WhqlSettings data consolidate 
+ other registry values in the Policy key: 
+
+ 0x80000000 for UpgradedSystem ; 
+
+ 0x40000000 for WhqlDeveloperTestMode ; 
+
+ 0x20000000 for BootUpgradedSystem (see below).
+
+ Each can be set as its own registry value or as the corresponding bit in
+ WhqlSettings to have exactly the same effect. This 
+ doesn’t mean, of course, that Microsoft intends that they ever be set as bits 
+ in WhqlSettings as a registry value, not that we 
+ know Microsoft’s intentions about setting anything in any of these registry values.
+
+ Not only do the WhqlSettings consolidate the 
+ other registry values and provide separately for disabling and enabling WHQL enforcement, 
+ but they survive to the user-interface visibility of the event log. The CodeIntegrity 
+ events 3084 and 3085, which record whether “WHQL driver enforcement” is enabled 
+ or disabled, qualify their report with two items of event data. The one that’s 
+ presented as Settings can have the 0x00000001 and 0x00000002 bits directly from 
+ the WhqlSettings and the 0x80000000 bit that corresponds 
+ to UpgradedSystem . (If WHQL driver enforcement is 
+ instead disabled because of WhqlDeveloperTestMode , 
+ then Settings shows as zero.) 
+
+ As an aside, the other item for event data for CodeIntegrity events 3084 and 
+ 3085 is named Exemption. The 1607 release does not show it in the plain-text report 
+ of the event, but later releases do. The Exemption is ordinarily 1 whether WHQL 
+ driver enforcement is enabled or disabled. It is 0 only if WHQL driver enforcement 
+ is disabled because of a Secure Boot or System Integrity policy option. 
+
+ Boot Drivers (1703) 
+
+ The 1703 release recognises one more registry value in the
+ Policy key: 
+
+ Key: 
+ HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI\Policy 
+
+ Value: 
+ BootUpgradedSystem 
+
+ Type: 
+ REG_DWORD 
+
+ As with UpgradedSystem , mere presence of the
+ BootUpgradedSystem value is enough to mean that 
+ WHQL signatures are not required. The difference is that
+ BootUpgradedSystem acts only for drivers that are 
+ loaded by the Windows loader. It is ignored by CI and thus has no effect on drivers 
+ that are loaded by the kernel (which by far the most are). 
+
+ A first thought is that the BootUpgradedSystem 
+ value exists only as some sort of attempt at continuing something like the exemption 
+ that the 1607 release allows for boot drivers whose non-WHQL signature is invalid 
+ for not predating a cut-off. I’d hope, though, that there’s more to it. If
+ BootUpgradedSystem is present on its own, then the 
+ 1703 and later releases will typically load cross-signed boot drivers but not 
+ load other drivers that are cross-signed. But the CodeIntegrity event log will 
+ show that “WHQL driver enforcement” is enabled and, unlike the behaviour in the 
+ 1607 release, there is no event for each boot driver that gets loaded despite 
+ having an invalid signature. 
+
+ Defence 
+
+ Although the registry values can be changed with administrative access, they 
+ are neither the first word nor the last in whether they allow cross-signed drivers. 
+ Simple options in one or another policy can require WHQL signatures such that 
+ the registry values in effect don’t matter. Even if registry values act so that 
+ a driver’s signature is not required to be a WHQL signature, the driver still 
+ must be evaluated against the full specification of what the System Integrity 
+ policies allow or deny. 
+
+ The policy options thus provide a broad defence. The easiest way to prevent 
+ all cross-signed drivers from loading is with a System Integrity policy that has 
+ the “Required:WHQL” option (and does not have the “Enabled:Audit Mode” option) 
+ but otherwise allows everything. Presumably, Microsoft has a readily available 
+ example to download, along with clear directions for signing it for protection 
+ against the same malware or rude installers that might otherwise have set one 
+ of those registry values. 
+
+ The obvious problem with this broad defence is that it’s no help to you at 
+ all if you actually do have an upgraded system and with it a dependence on some 
+ cross-signed driver or drivers. Of course, Microsoft might rather that everyone 
+ in this position should update those drivers—which likely would be beneficial—and 
+ then avail themselves of the broad defence. But if the ISV has not yet got an 
+ attestion signature or never will, whether for objecting to Microsoft’s procedures 
+ or for being out of business, then the broad defence is not available to you.
+
+ With the full power of System Integrity policies, you can specify how you are 
+ more fussy about signatures that Windows has otherwise approved, and you can accept 
+ or deny drivers as files identified by name, hash, or properties from its resources. 
+ For the question of cross-signed drivers that would otherwise be taken as valid 
+ because of those registry values, it will help you to remember that signatures 
+ on cross-signed drivers have the Microsoft Code Verification Root, which you can 
+ codify within a Signer tag as 
+
+ <CertRoot Type="Wellknown" Value="08" />
+
+ You can then black-list or white-list. If you allow cross-signed drivers in 
+ general by allowing the Microsoft Code Verification Root, you can set up all sorts 
+ of other rules to deny specific signatures or drivers. Perhaps more usefully, 
+ just make it that the Microsoft Code Verification Root is neither allowed nor 
+ explicitly denied, and then set up other rules to allow just the cross-signed 
+ drivers that you actually do want. 
+
+ Productive Use 
+
+ White-listing is not just a finer defence against unwanted cross-signed drivers 
+ when you have an upgraded Windows that depends on particular cross-signed drivers. 
+ It is also a way that individuals and enterprises that write their own drivers 
+ can sign them for their own use without having to send them to Microsoft and without 
+ exposing their computers to cross-signed drivers from anyone else. Being able 
+ to use your own cross-signed drivers is of course a very poor cousin of getting 
+ Windows to accept drivers that you sign with your own certificates—but the rich 
+ cousin, integrated with Secure Boot for distinguishing your drivers from others’, 
+ is kept by Microsoft as something you need to be licensed for. Until this changes, 
+ the combination of setting a registry value for an exception to allow cross-signed 
+ drivers and installing a System Integrity policy to deny cross-signed drivers 
+ other than your own is as much control of driver-loading on your own computers 
+ as Microsoft permits you. If you dislike that, then you know who to petition.
+
+ Policy Preparation 
+
+ Microsoft may yet publish formal documentation of System Integrity policies. 
+ Meanwhile, though Microsoft’s cook-book approach to describing what can be done 
+ with System Integrity policies is mostly directed at user-mode code integrity 
+ (UMCI) for controlling applications, enough is provided for getting by if you’re 
+ prepared to put in the time for trial-and-error or if you know by other means 
+ how the things work. I’d help more—and I may yet since documenting System Integrity 
+ policies is very firmly on my radar. But I also think that these back doors for 
+ cross-signed drivers are a mess of Microsoft’s making—indeed, just a small part 
+ of a big mess that Microsoft made over the whole subject of driver-signing requirements 
+ for Windows 10—and it’s properly Microsoft’s mess to sort out. 
+
+ This page was created on 7th July 2018 and was last modified 
+ on 11th August 2018 (except for spelling corrections and some very slight rephrasing 
+ or restyling on 7th June 2019, 1st March 2020 and 30th March 2021). 
+
+ Copyright © 2018-2021. Geoff Chappell. All rights reserved. 
+ Conditions apply .

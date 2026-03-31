@@ -1,0 +1,17 @@
+
+=== WHQL Bypass Attempt 2 - All Registry Values ===
+Setting all bypass values...
+WhqlDeveloperTestMode: 1
+UpgradedSystem: 1
+WhqlSettings: 0x40000001
+Setup\Upgrade: 1
+
+Attempting to load...
+  [SC] CreateService SUCCESS
+  [SC] StartService FAILED 577:
+  
+  Windows cannot verify the digital signature for this file. A recent hardware or software change might have installed a file that is signed incorrectly or damaged, or that might be malicious software from an unknown source.
+  
+Exit code: 577
+
+=== Done ===

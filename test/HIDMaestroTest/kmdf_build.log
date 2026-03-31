@@ -1,0 +1,21 @@
+Compiling minimal_test.sys ...
+minimal_test.c
+Linking minimal_test.sys ...
+Signing minimal_test.sys ...
+Done Adding Additional Store
+Successfully signed: C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\busdriver\..\build\minimal_test.sys
+
+BUILD + SIGN SUCCEEDED: C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\busdriver\..\build\minimal_test.sys
+
+Testing if it loads...
+[SC] CreateService SUCCESS
+[SC] StartService FAILED 577:
+
+Windows cannot verify the digital signature for this file. A recent hardware or software change might have installed a file that is signed incorrectly or damaged, or that might be malicious software from an unknown source.
+
+Start result: 577
+[SC] ControlService FAILED 1062:
+
+The service has not been started.
+
+[SC] DeleteService SUCCESS
