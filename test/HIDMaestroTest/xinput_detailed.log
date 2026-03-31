@@ -1,10 +1,11 @@
 
 === XUSB Device Interface Enumeration ===
-XUSB interfaces found: 0
+XUSB interfaces found: 1
+  XUSB Interface 0: \\?\root#system#0011#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
 
 
 === XInput State ===
-  Slot 0 : err=1167
+  Slot 0 : CONNECTED pkt=402 LX=0 LY=0 Btns=0x0000
   Slot 1 : err=1167
   Slot 2 : err=1167
   Slot 3 : err=1167
