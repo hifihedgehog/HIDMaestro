@@ -98,6 +98,6 @@ ServiceBinary      = %13%\HIDMaestro.dll
 [Strings]
 ProviderName     = "HIDMaestro"
 ManufacturerName = "HIDMaestro"
-DeviceDesc       = "HIDMaestro Virtual HID Device"
+DeviceDesc       = "Game Controller"
 DiskName         = "HIDMaestro Installation Disk"
 WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"

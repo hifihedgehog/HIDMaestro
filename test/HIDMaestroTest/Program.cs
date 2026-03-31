@@ -77,23 +77,32 @@ class Program
     static void SetDeviceFriendlyName(string rootInstanceId, string name)
     {
         // DEVPKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
-        var key = new DEVPROPKEY
+        var fnKey = new DEVPROPKEY
         {
             fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
             pid = 14
+        };
+        // DEVPKEY_Device_DeviceDesc = {a45c254e-df1c-4efd-8020-67d146a850e0}, 2
+        var ddKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 2
         };
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
 
         uint locResult = CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0);
         if (locResult != 0) { Console.Error.Write($"(locate={locResult}) "); return; }
 
-        uint setResult = CM_Set_DevNode_PropertyW(devInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
-        if (setResult != 0) Console.Error.Write($"(set root={setResult}) ");
+        // Set both FriendlyName and DeviceDesc on root — eliminates all
+        // "HIDMaestro Virtual HID Device" appearances
+        CM_Set_DevNode_PropertyW(devInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+        CM_Set_DevNode_PropertyW(devInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
 
+        // Set on HID child too
         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
         {
-            uint childResult = CM_Set_DevNode_PropertyW(childInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
-            if (childResult != 0) Console.Error.Write($"(set child={childResult}) ");
+            CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+            CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
         }
     }
 
@@ -299,11 +308,10 @@ class Program
         //   HKLM\System\CurrentControlSet\Control\MediaProperties\
         //     PrivateProperties\Joystick\OEM\VID_XXXX&PID_YYYY
         // with an OEMName string value.
-        if (productString != null)
         {
             string oemKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
             using var oem = Registry.LocalMachine.CreateSubKey(oemKey);
-            oem.SetValue("OEMName", productString, RegistryValueKind.String);
+            oem.SetValue("OEMName", displayName, RegistryValueKind.String);
             oem.SetValue("OEMData", new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, RegistryValueKind.Binary);
         }
     }
