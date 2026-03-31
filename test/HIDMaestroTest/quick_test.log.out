@@ -1,0 +1,13 @@
+=== HIDMaestro Test Client ===
+
+-- Emulating: DualSense (PS5) --
+
+  Profile:  dualsense
+  VID:PID:  0x054C:0x0CE6
+  Product:  Wireless Controller
+  Using universal descriptor (116 bytes)
+
+  Writing profile to registry... OK
+  Recreating device node... OK
+  Setting device name... OK
+  Opening HID device... 

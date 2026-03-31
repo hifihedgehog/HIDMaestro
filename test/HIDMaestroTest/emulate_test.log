@@ -1,0 +1,59 @@
+
+=== HIDMaestro Test Client ===
+
+-- Emulating: Xbox One Controller (Original, Model 1537) --
+
+  Profile:  xbox-one-original
+  VID:PID:  0x045E:0x02D1
+  Product:  Controller
+  Using universal descriptor (116 bytes)
+
+  Writing profile to registry... OK
+
+=== HIDMaestro Full Deploy ===
+
+[1/4] Skipping build
+[2/4] Signing driver...
+  Signature: Valid
+[3/4] Installing driver...
+  Removing old oem48.inf
+  Driver installed
+[4/4] Creating device node...
+  WARNING: Device node not found. Check Device Manager.
+
+=== Deploy Complete ===
+  Opening HID device...   Found: VID=045E PID=02D1 @ \\?\hid#hidclass#1&2d595ca7&40&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}
+
+  Sending input via feature reports. Open joy.cpl to watch.
+  Ctrl+C to stop.
+
+
+  Reports: 100  t=1.5s  
+  Reports: 200  t=3.0s  
+  Reports: 300  t=4.6s  
+  Reports: 400  t=6.0s  
+  Reports: 500  t=7.6s  
+  Reports: 600  t=9.0s  
+  Reports: 700  t=10.5s  
+  Reports: 800  t=11.5s  
+  Reports: 900  t=12.7s  
+  Reports: 1000  t=14.2s  
+  Reports: 1100  t=15.6s  
+  Reports: 1200  t=17.1s  
+  Reports: 1300  t=18.5s  
+  Reports: 1400  t=20.0s  
+  Reports: 1500  t=21.4s  
+  Reports: 1600  t=23.0s  
+  Reports: 1700  t=24.5s  
+  Reports: 1800  t=25.8s  
+  Reports: 1900  t=27.2s  
+  Reports: 2000  t=28.6s  
+  Reports: 2100  t=30.1s  
+  Reports: 2200  t=31.7s  
+  Reports: 2300  t=33.3s  
+  Reports: 2400  t=34.6s  
+  Reports: 2500  t=36.0s  
+  Reports: 2600  t=37.5s  
+  Reports: 2700  t=39.1s  
+  Reports: 2800  t=40.5s  
+  Reports: 2900  t=42.1s  

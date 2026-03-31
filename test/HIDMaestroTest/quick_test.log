@@ -1,0 +1,27 @@
+
+=== Quick Test: dualsense ===
+
+[WinMM]
+  joyGetNumDevs: 16
+  SLOT 0 : CapsErr=165 PosErr=0 Name="(caps failed)" X=32767 Y=32767 Btns=0x0
+
+[HID]
+  Child: Wireless Controller
+  BusReportedDeviceDesc: ''
+
+[Output]
+  === HIDMaestro Test Client ===
+  
+  -- Emulating: DualSense (PS5) --
+  
+    Profile:  dualsense
+    VID:PID:  0x054C:0x0CE6
+    Product:  Wireless Controller
+    Using universal descriptor (116 bytes)
+  
+    Writing profile to registry... OK
+    Recreating device node... OK
+    Setting device name... OK
+    Opening HID device... 
+
+Done.

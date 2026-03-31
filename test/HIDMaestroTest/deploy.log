@@ -1,0 +1,30 @@
+
+=== CLEAN + DEPLOY ===
+[1] Removing device nodes...
+[2] Removing old drivers from store...
+  Removing oem48.inf
+[3] Building driver...
+  Build OK
+[4] Signing DLL...
+  DLL: Valid
+[5] Creating catalog...
+  CAT: Valid
+[6] Adding driver to store...
+  Published: oem48.inf
+[7] Creating device node...
+  Device creation: OK
+[8] Verifying...
+Microsoft PnP Utility
+
+Instance ID:                ROOT\HIDCLASS\0000
+Device Description:         HIDMaestro Virtual HID Device
+Class Name:                 HIDClass
+Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Manufacturer Name:          HIDMaestro
+Status:                     Started
+Driver Name:                oem48.inf
+
+
+SUCCESS: Device is running!
+
+=== DEPLOY COMPLETE ===

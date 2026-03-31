@@ -1,0 +1,44 @@
+
+=== HIDMaestro Diagnostics ===
+
+[Registry]
+  VendorId:      1118 (0x045E)
+  ProductId:     721 (0x02D1)
+  ProductString: Controller
+  Descriptor:    106 bytes
+
+[Root Device]
+Microsoft PnP Utility
+
+Instance ID:                ROOT\HIDCLASS\0000
+Device Description:         HIDMaestro Virtual HID Device
+Class Name:                 HIDClass
+Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Manufacturer Name:          HIDMaestro
+Status:                     Started
+Driver Name:                oem48.inf
+
+[HID Children]
+  No game controllers found
+
+[Driver Files]
+Microsoft PnP Utility
+
+Instance ID:                ROOT\HIDCLASS\0000
+Device Description:         HIDMaestro Virtual HID Device
+Class Name:                 HIDClass
+Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Manufacturer Name:          HIDMaestro
+Status:                     Started
+Driver Name:                oem48.inf
+Matching Drivers:
+    Driver Name:            oem48.inf
+    Original Name:          hidmaestro.inf
+    Provider Name:          HIDMaestro
+    Class Name:             HIDClass
+    Class GUID:             {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+    Driver Version:         03/30/2026 1.0.0.0
+    Signer Name:            HIDMaestroTestCert
+    Matching Device ID:     root\HIDMaestro
+    Driver Rank:            00FF0000
+    Driver Status:          Best Ranked / Installed

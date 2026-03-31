@@ -1,0 +1,8 @@
+
+=== HID Gamepad Devices ===
+VID=045E PID=02D1 "Controller" UsagePage=0x0001 Usage=0x0005 InSize=16 OutSize=0 FeatSize=15 Btns=1 Vals=7
+
+
+=== WinMM Joystick Slots ===
+  Slot 0: X=32767 Y=32767 Btns=0x0 Hat=65535
+
