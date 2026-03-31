@@ -1,0 +1,25 @@
+
+=== XUSB Final Deploy ===
+[1] XusbMode=1 set
+  Removed ROOT\SYSTEM\0010
+[2] Signed
+[3] Driver: Microsoft PnP Utility
+
+Adding driver package:  hidmaestro_xusb.inf
+Driver package added successfully.
+Published Name:         oem49.inf
+
+Total driver packages:  1
+Added driver packages:  1
+[4] Device node created
+[5] Device: ROOT\SYSTEM\0010 Status=OK
+XUSB Interfaces: Microsoft PnP Utility
+
+Interface Path:         \\?\HID#{00001812-0000-1000-8000-00805f9b34fb}&Dev&VID_045e&PID_0b13&REV_0523&a88c3e2c8a96&IG_00#b&bf275c2&0&0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+Interface Description:  Unknown
+Interface Class GUID:   {ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+Device Instance ID:     HID\{00001812-0000-1000-8000-00805f9b34fb}&Dev&VID_045e&PID_0b13&REV_0523&a88c3e2c8a96&IG_00\b&bf275c2&0&0000
+Interface Status:       Disabled
+[6] XusbMode=0 restored
+
+=== Done ===

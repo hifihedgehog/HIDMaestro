@@ -199,15 +199,46 @@ EvtDeviceAdd(
 
     UNREFERENCED_PARAMETER(Driver);
 
-    WdfFdoInitSetFilter(DeviceInit);
-
-    /* Allow file creates so XUSB interface can be opened */
+    /*
+     * Detect device mode: HID minidriver (filter) vs XUSB standalone (function).
+     * root\HIDMaestro = HID mode — filter under MsHidUmdf
+     * root\HIDMaestroXUSB = XUSB mode — standalone function driver for XInput
+     */
+    BOOLEAN isXusbDevice = FALSE;
     {
-        WDF_FILEOBJECT_CONFIG fileConfig;
-        WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, NULL, NULL, NULL);
-        fileConfig.AutoForwardCleanupClose = WdfTrue;
-        WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig,
-            WDF_NO_OBJECT_ATTRIBUTES);
+        /* Check the device's own HW registry for XusbMode=1.
+         * The XUSB INF writes this via AddReg in the .NT.HW section.
+         * We use WdfFdoInitQueryProperty to read it before device creation.
+         * If that fails, fall back to checking the global registry.
+         */
+        WDFMEMORY propMem = NULL;
+        if (NT_SUCCESS(WdfFdoInitQueryProperty(DeviceInit,
+                DevicePropertyHardwareID, NonPagedPoolNx,
+                WDF_NO_OBJECT_ATTRIBUTES, &propMem))) {
+            PWCH buf = (PWCH)WdfMemoryGetBuffer(propMem, NULL);
+            if (buf && wcsstr(buf, L"HIDMaestroXUSB")) {
+                isXusbDevice = TRUE;
+            }
+            WdfObjectDelete(propMem);
+        }
+        /* Fallback: check global registry */
+        if (!isXusbDevice) {
+            HKEY hKey;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
+                              0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                DWORD val = 0, sz = sizeof(val), regType;
+                if (RegQueryValueExW(hKey, L"XusbMode", NULL, &regType,
+                                     (LPBYTE)&val, &sz) == ERROR_SUCCESS &&
+                    regType == REG_DWORD && val != 0) {
+                    isXusbDevice = TRUE;
+                }
+                RegCloseKey(hKey);
+            }
+        }
+    }
+
+    if (!isXusbDevice) {
+        WdfFdoInitSetFilter(DeviceInit);
     }
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
@@ -218,6 +249,34 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
+    ctx->IsXusbDevice = isXusbDevice;
+
+    if (isXusbDevice) {
+        /* XUSB standalone mode — register XUSB interface, skip HID init */
+        ReadConfigFromRegistry(ctx); /* Read VID/PID for XUSB responses */
+
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+
+        /* Create locks */
+        status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
+        if (!NT_SUCCESS(status)) return status;
+
+        /* Default queue for XUSB IOCTLs */
+        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+        queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
+        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->DefaultQueue);
+        if (!NT_SUCCESS(status)) return status;
+
+        /* Manual queue for pending requests */
+        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
+        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->ManualQueue);
+        return status;
+    }
+
+    /* HID minidriver mode — full initialization below */
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -264,51 +323,7 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /*
-     * Create a control device with XUSB interface for XInput.
-     * The control device is separate from the MsHidUmdf stack,
-     * so CreateFile works and XInput can communicate with us.
-     */
-    {
-        WDFDEVICE               ctrlDevice;
-        PWDFDEVICE_INIT         ctrlInit;
-        WDF_IO_QUEUE_CONFIG     ctrlQueueConfig;
-        WDF_OBJECT_ATTRIBUTES   ctrlAttrs;
-        WDFQUEUE                ctrlQueue;
-        DECLARE_CONST_UNICODE_STRING(ctrlName, L"\\Device\\HIDMaestroXUSB");
-        DECLARE_CONST_UNICODE_STRING(ctrlLink, L"\\DosDevices\\HIDMaestroXUSB");
-
-        ctrlInit = WdfControlDeviceInitAllocate(
-            WdfDeviceGetDriver(device), &SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RWX_RES_RWX);
-        if (ctrlInit) {
-            WdfDeviceInitSetDeviceType(ctrlInit, FILE_DEVICE_UNKNOWN);
-            WdfDeviceInitAssignName(ctrlInit, &ctrlName);
-
-            WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&ctrlAttrs, DEVICE_CONTEXT);
-            status = WdfDeviceCreate(&ctrlInit, &ctrlAttrs, &ctrlDevice);
-            if (NT_SUCCESS(status)) {
-                /* Share context — point control device's context to main device's context */
-                PDEVICE_CONTEXT ctrlCtx = GetDeviceContext(ctrlDevice);
-                *ctrlCtx = *ctx; /* Copy — shares pointers to locks, queues */
-
-                /* Create symbolic link */
-                WdfDeviceCreateSymbolicLink(ctrlDevice, &ctrlLink);
-
-                /* Register XUSB interface on the control device */
-                WdfDeviceCreateDeviceInterface(ctrlDevice,
-                    (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-
-                /* Create queue for XUSB IOCTLs on control device */
-                WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&ctrlQueueConfig,
-                    WdfIoQueueDispatchParallel);
-                ctrlQueueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
-                WdfIoQueueCreate(ctrlDevice, &ctrlQueueConfig,
-                    WDF_NO_OBJECT_ATTRIBUTES, &ctrlQueue);
-
-                WdfControlFinishInitializing(ctrlDevice);
-            }
-        }
-    }
+    /* XUSB interface is registered on the separate XUSB device, not here */
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);

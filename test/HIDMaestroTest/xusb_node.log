@@ -1,0 +1,9 @@
+
+INF: C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\build\hidmaestro_xusb.inf
+Exists: True
+Result: Register=OK UpdateDriver=False err=0xE0000219 reboot=False
+
+Device state:
+  Microsoft PnP Utility
+  
+  No devices were found on the system.

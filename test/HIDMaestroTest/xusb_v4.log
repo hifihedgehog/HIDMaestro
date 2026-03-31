@@ -1,0 +1,18 @@
+
+[1] Adding driver to store...
+Microsoft PnP Utility
+
+Adding driver package:  hidmaestro_xusb.inf
+Driver package added successfully.
+Published Name:         oem49.inf
+
+Total driver packages:  1
+Added driver packages:  1
+
+[2] Creating device node...
+  Result: OK
+
+[3] Device state:
+Microsoft PnP Utility
+
+No devices were found on the system.

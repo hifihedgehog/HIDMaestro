@@ -3,6 +3,7 @@
 [1] Removing device nodes...
 [2] Removing old drivers from store...
   Removing oem48.inf
+  Removing oem49.inf
 [3] Building driver...
   Build OK
 [4] Signing DLL...
@@ -21,10 +22,12 @@ Device Description:         Game Controller
 Class Name:                 HIDClass
 Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Manufacturer Name:          HIDMaestro
-Status:                     Started
+Status:                     Problem
+Problem Code:               10 (0x0A) [CM_PROB_FAILED_START]
+Problem Status:             0xC000009C
 Driver Name:                oem48.inf
 
 
-SUCCESS: Device is running!
+PROBLEM: Device has error code 10
 
 === DEPLOY COMPLETE ===

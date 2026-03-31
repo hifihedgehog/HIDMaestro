@@ -1,7 +1,6 @@
 
 === XUSB Device Interface Enumeration ===
-XUSB interfaces found: 1
-  XUSB Interface 0: \\?\root#hidclass#0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+XUSB interfaces found: 0
 
 
 === XInput State ===

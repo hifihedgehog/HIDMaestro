@@ -48,6 +48,7 @@
 typedef struct _DEVICE_CONTEXT {
 
     WDFDEVICE   Device;
+    BOOLEAN     IsXusbDevice;   /* TRUE if this is the standalone XUSB device */
 
     /* HID report descriptor (set by user-mode, returned to HID class) */
     UCHAR   ReportDescriptor[HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
