@@ -20,6 +20,7 @@
 #include <ntstatus.h>
 #include <wdf.h>
 #include <hidport.h>
+#include <devpropdef.h>
 
 #include "../include/hidmaestro.h"
 

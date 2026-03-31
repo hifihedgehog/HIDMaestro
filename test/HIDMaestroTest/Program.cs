@@ -29,6 +29,74 @@ class Program
 {
     const string REG_PATH = @"SOFTWARE\HIDMaestro";
 
+    // ── P/Invoke: CfgMgr32 for device property setting ──
+
+    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+    [DllImport("CfgMgr32.dll", SetLastError = true)]
+    static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
+        uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
+
+    [DllImport("CfgMgr32.dll", SetLastError = true)]
+    static extern uint CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
+        out uint propertyType, byte[] propertyBuffer, ref uint propertyBufferSize, uint ulFlags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    static void SetBusReportedDeviceDesc(string instanceId, string description)
+    {
+        // DEVPKEY_Device_BusReportedDeviceDesc = {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4
+        var key = new DEVPROPKEY
+        {
+            fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
+            pid = 4
+        };
+
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return;
+
+        byte[] strBytes = Encoding.Unicode.GetBytes(description + "\0");
+        // DEVPROP_TYPE_STRING = 0x12
+        CM_Set_DevNode_PropertyW(devInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
+
+        // Also set on HID child
+        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
+        {
+            CM_Set_DevNode_PropertyW(childInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
+        }
+    }
+
+    static void SetDeviceFriendlyName(string rootInstanceId, string name)
+    {
+        // DEVPKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
+        var key = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 14
+        };
+        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+
+        uint locResult = CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0);
+        if (locResult != 0) { Console.Error.Write($"(locate={locResult}) "); return; }
+
+        uint setResult = CM_Set_DevNode_PropertyW(devInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
+        if (setResult != 0) Console.Error.Write($"(set root={setResult}) ");
+
+        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
+        {
+            uint childResult = CM_Set_DevNode_PropertyW(childInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
+            if (childResult != 0) Console.Error.Write($"(set child={childResult}) ");
+        }
+    }
+
     // ── P/Invoke ──
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -134,7 +202,7 @@ class Program
         }
     }
 
-    static readonly string[] ElevatedCommands = { "emulate", "xbox", "ds5", "cleanup" };
+    static readonly string[] ElevatedCommands = { "emulate", "xbox", "ds5", "cleanup", "setname" };
 
     static int Main(string[] args)
     {
@@ -171,6 +239,7 @@ class Program
             "search"  => SearchProfiles(args.Length > 1 ? args[1] : ""),
             "info"    => ShowProfile(args.Length > 1 ? args[1] : ""),
             "cleanup" => RunCleanup(),
+            "setname" => SetNameTest(args.Length > 1 ? args[1] : "Controller"),
             _         => Error($"Unknown command: {args[0]}")
         };
     }
@@ -306,6 +375,15 @@ class Program
         RunPowerShell("create_node.ps1");
         Thread.Sleep(3000);
         Console.WriteLine("OK");
+
+        // Set device name properties so joy.cpl shows correct name
+        Console.Write("  Setting device name... ");
+        string prodStr = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("ProductString") ?? "Controller";
+        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", prodStr);
+        // Also set FriendlyName via registry on both root and HID child
+        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", prodStr);
+        Console.WriteLine("OK");
+
         return true;
     }
 
@@ -792,6 +870,46 @@ class Program
         Console.WriteLine($"  Input Report:   {(p.InputReportSize.HasValue ? $"{p.InputReportSize} bytes" : "unknown")}");
         if (!string.IsNullOrEmpty(p.Notes))
             Console.WriteLine($"\n  Notes: {p.Notes}");
+        return 0;
+    }
+
+    // ── SetName test ──
+
+    static int SetNameTest(string name)
+    {
+        Console.WriteLine($"Setting device name to: \"{name}\"\n");
+
+        // Set FriendlyName on root
+        Console.Write("  Setting FriendlyName on root... ");
+        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", name);
+        Console.WriteLine();
+
+        // Set BusReportedDeviceDesc on root
+        Console.Write("  Setting BusReportedDeviceDesc on root... ");
+        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", name);
+        Console.WriteLine();
+
+        // Verify
+        uint locResult = CM_Locate_DevNodeW(out uint devInst, @"ROOT\HIDCLASS\0000", 0);
+        Console.WriteLine($"  Locate root: result={locResult} inst={devInst}");
+
+        if (locResult == 0)
+        {
+            // Try reading back FriendlyName
+            var fnKey = new DEVPROPKEY
+            {
+                fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+                pid = 14
+            };
+            byte[] readBuf = new byte[512];
+            uint readSz = 512;
+            uint readType;
+
+            uint getResult = CM_Get_DevNode_PropertyW(devInst, ref fnKey, out readType, readBuf, ref readSz, 0);
+            string readVal = readSz > 0 ? Encoding.Unicode.GetString(readBuf, 0, (int)readSz).TrimEnd('\0') : "(empty)";
+            Console.WriteLine($"  Read FriendlyName: result={getResult} type={readType} val=\"{readVal}\"");
+        }
+
         return 0;
     }
 

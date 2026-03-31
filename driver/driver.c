@@ -208,6 +208,22 @@ EvtDeviceAdd(
     /* Read config from registry (overrides defaults if present) */
     ReadConfigFromRegistry(ctx);
 
+    /*
+     * Set BusReportedDeviceDesc so joy.cpl shows the profile name.
+     * DEVPKEY_Device_BusReportedDeviceDesc = {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4
+     */
+    {
+        static const DEVPROPKEY busDescKey = {
+            { 0x540b947e, 0x8b40, 0x45bc, { 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2 } },
+            4
+        };
+        WDF_DEVICE_PROPERTY_DATA propData;
+        WDF_DEVICE_PROPERTY_DATA_INIT(&propData, &busDescKey);
+        propData.Lcid = LOCALE_NEUTRAL;
+        WdfDeviceAssignProperty(device, &propData, DEVPROP_TYPE_STRING,
+            ctx->ProductStringBytes, ctx->ProductString);
+    }
+
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
     if (!NT_SUCCESS(status)) return status;
