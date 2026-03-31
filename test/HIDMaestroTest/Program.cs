@@ -683,8 +683,10 @@ class Program
         byte[] report = new byte[reportSize + 1];
         report[0] = 0x02;
 
-        // XUSB input: same 14 bytes (no report ID prefix)
-        byte[] xusbInput = new byte[14];
+        // XUSB input: piggybacked on GET_STATE (3-byte header + 14 bytes data = 17)
+        byte[] xusbInput = new byte[17];
+        xusbInput[0] = 0x01; xusbInput[1] = 0x01; xusbInput[2] = 0x00; // v1.1, slot 0
+        byte[] xusbOutput = new byte[29]; // GET_STATE output (discarded)
 
         var sw = Stopwatch.StartNew();
         int count = 0;
@@ -704,13 +706,12 @@ class Program
             // Send to HID device (DirectInput/SDL)
             bool ok = HidD_SetFeature(h, report, (uint)report.Length);
 
-            // Send to XUSB device (XInput) — same data, no report ID prefix
+            // Send to XUSB device (XInput) — piggyback on GET_STATE
             if (xh != null)
             {
-                Array.Copy(report, 1, xusbInput, 0, 14);
-                // IOCTL_XUSB_SET_STATE with >5 bytes = input report submission
-                DeviceIoControl(xh, 0x8000A010, xusbInput, (uint)xusbInput.Length,
-                    null, 0, out _, IntPtr.Zero);
+                Array.Copy(report, 1, xusbInput, 3, 14); // copy 14 data bytes after 3-byte header
+                DeviceIoControl(xh, 0x8000E00C, xusbInput, (uint)xusbInput.Length,
+                    xusbOutput, (uint)xusbOutput.Length, out _, IntPtr.Zero);
             }
 
             if (!ok)
