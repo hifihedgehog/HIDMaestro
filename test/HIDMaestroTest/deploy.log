@@ -28,4 +28,8 @@ Driver Name:                oem48.inf
 
 SUCCESS: Device is running!
 
+[9] Deploying XUSB device...
+  Removed ghost: ROOT\SYSTEM\0012
+  XUSB: ROOT\SYSTEM\0010 OK
+
 === DEPLOY COMPLETE ===
