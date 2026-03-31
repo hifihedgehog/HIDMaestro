@@ -1,0 +1,32 @@
+
+Removing ALL XInput Bridge devices...
+  Removed ROOT\SYSTEM\0011
+  Removed driver oem49.inf
+Added: Microsoft PnP Utility
+
+Adding driver package:  hidmaestro_xusb.inf
+Driver package added successfully.
+Published Name:         oem49.inf
+
+Total driver packages:  1
+Added driver packages:  1
+Device created
+XUSB: ROOT\SYSTEM\0012 Status=OK
+Stack:                      PnpManager
+
+XInput check:
+  HID Child: HID-compliant game controller
+  Instance: HID\HIDCLASS\1&2D595CA7&6D&0000
+    HWID: HID\VID_045E&PID_02D1
+    HWID: HID\HIDMaestro
+    HWID: HID\VID_045E&UP:0001_U:0005
+    HWID: HID_DEVICE_SYSTEM_GAME
+    HWID: HID_DEVICE_UP:0001_U:0005
+    HWID: HID_DEVICE
+    UpperFilters: (none)
+  
+  === XInput State ===
+    XInput Slot 0 : Not connected (err=1167)
+    XInput Slot 1 : Not connected (err=1167)
+    XInput Slot 2 : Not connected (err=1167)
+    XInput Slot 3 : Not connected (err=1167)

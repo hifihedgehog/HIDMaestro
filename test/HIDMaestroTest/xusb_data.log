@@ -1,0 +1,14 @@
+
+Testing: \\?\root#system#0010#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+OPEN OK
+SET_STATE(14B): ok=True err=0 ret=0
+GET_STATE: ok=True bytes=29 err=0
+  status=1
+  pkt=4211
+  buttons=0x0000
+  LT=0 RT=0
+  LX=0
+  LY=0
+  RX=0
+  RY=0
+

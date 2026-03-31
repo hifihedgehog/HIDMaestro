@@ -562,28 +562,41 @@ EvtIoDeviceControl(
         /*
          * GamepadState0101 — 29 bytes.
          * Input: InBaseRequest_t (3 bytes: WORD version + BYTE deviceIndex)
-         * THE critical IOCTL — status byte at offset +2 MUST be 1 for connected.
+         *
+         * ALSO: if input > 3 bytes, the extra bytes are input report data
+         * from our user-mode feeder (piggyback on GET_STATE's RW access).
          */
+        {
+            PVOID gsInBuf; size_t gsInSize;
+            if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &gsInBuf, &gsInSize))
+                && gsInSize > 3) {
+                /* Input report data piggybacked on GET_STATE */
+                PUCHAR reportData = (PUCHAR)gsInBuf + 3;
+                ULONG reportSize = (ULONG)(gsInSize - 3);
+                WdfWaitLockAcquire(ctx->InputLock, NULL);
+                if (reportSize > HIDMAESTRO_MAX_REPORT_SIZE)
+                    reportSize = HIDMAESTRO_MAX_REPORT_SIZE;
+                RtlCopyMemory(ctx->InputReport, reportData, reportSize);
+                ctx->InputReportSize = reportSize;
+                ctx->InputReportReady = TRUE;
+                WdfWaitLockRelease(ctx->InputLock);
+            }
+        }
+
         UCHAR state[29];
         RtlZeroMemory(state, sizeof(state));
-        *(USHORT*)&state[0] = 0x0101;  /* XUSBVersion */
-        state[2] = 0x01;               /* status = CONNECTED */
-        /* state[3] = unk2, state[4] = inputId */
+        *(USHORT*)&state[0] = 0x0101;
+        state[2] = 0x01; /* CONNECTED */
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);
-
-        /* Packet number at offset 5 (DWORD) */
         ctx->InputReportsSubmitted++;
         *(DWORD*)&state[5] = (DWORD)ctx->InputReportsSubmitted;
 
         if (ctx->InputReportReady && ctx->InputReportSize >= 12) {
             PUCHAR d = ctx->InputReport;
             if (d[0] == 0x01 && ctx->InputReportSize > 12) d++;
-
-            /* Buttons at offset 0x0B (WORD) */
             {
-                UCHAR btnLow = d[12];
-                UCHAR btnHigh = d[13];
+                UCHAR btnLow = d[12], btnHigh = d[13];
                 UCHAR hat = (btnHigh >> 2) & 0x0F;
                 USHORT buttons = 0;
                 if (btnLow & 0x01) buttons |= 0x1000;
@@ -597,21 +610,15 @@ EvtIoDeviceControl(
                 if (btnHigh & 0x01) buttons |= 0x0040;
                 if (btnHigh & 0x02) buttons |= 0x0080;
                 switch (hat) {
-                    case 1: buttons |= 0x0001; break;
-                    case 2: buttons |= 0x0009; break;
-                    case 3: buttons |= 0x0008; break;
-                    case 4: buttons |= 0x000A; break;
-                    case 5: buttons |= 0x0002; break;
-                    case 6: buttons |= 0x0006; break;
-                    case 7: buttons |= 0x0004; break;
-                    case 8: buttons |= 0x0005; break;
+                    case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
+                    case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
+                    case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
+                    case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
                 }
                 *(USHORT*)&state[0x0B] = buttons;
             }
-            /* Triggers at offset 0x0D, 0x0E */
-            state[0x0D] = (UCHAR)(*(USHORT*)&d[8] >> 8);   /* LT */
-            state[0x0E] = (UCHAR)(*(USHORT*)&d[10] >> 8);  /* RT */
-            /* Sticks at offsets 0x0F-0x16 (SHORT each) */
+            state[0x0D] = (UCHAR)(*(USHORT*)&d[8] >> 8);
+            state[0x0E] = (UCHAR)(*(USHORT*)&d[10] >> 8);
             *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
             *(SHORT*)&state[0x11] = (SHORT)((int)(*(USHORT*)&d[2]) - 32768);
             *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
@@ -619,7 +626,15 @@ EvtIoDeviceControl(
         }
         WdfWaitLockRelease(ctx->InputLock);
 
-        status = RequestCopyFromBuffer(Request, state, sizeof(state));
+        /* Copy state to output buffer */
+        {
+            PVOID outBuf; size_t outSize;
+            status = WdfRequestRetrieveOutputBuffer(Request, sizeof(state), &outBuf, &outSize);
+            if (NT_SUCCESS(status)) {
+                RtlCopyMemory(outBuf, state, sizeof(state));
+                WdfRequestSetInformation(Request, sizeof(state));
+            }
+        }
         break;
     }
 
