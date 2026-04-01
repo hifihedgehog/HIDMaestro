@@ -16,8 +16,11 @@ Log "=== CLEAN + DEPLOY ==="
 
 # 1. Remove all device nodes
 Log "[1] Removing device nodes..."
-pnputil /remove-device "ROOT\HID_IG_00\0000" /subtree 2>&1 | Out-Null
-pnputil /remove-device "ROOT\HIDCLASS\0001" /subtree 2>&1 | Out-Null
+# Remove all possible HID_IG_00 and HIDCLASS instances
+for ($i = 0; $i -lt 10; $i++) {
+    pnputil /remove-device "ROOT\HID_IG_00\$($i.ToString('D4'))" /subtree 2>&1 | Out-Null
+    pnputil /remove-device "ROOT\HIDCLASS\$($i.ToString('D4'))" /subtree 2>&1 | Out-Null
+}
 Start-Sleep 1
 
 # 2. Remove ALL HIDMaestro drivers from store

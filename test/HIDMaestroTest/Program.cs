@@ -37,6 +37,9 @@ class Program
     [DllImport("CfgMgr32.dll", SetLastError = true)]
     static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
+    [DllImport("CfgMgr32.dll", SetLastError = true)]
+    static extern uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
         uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
@@ -643,11 +646,37 @@ class Program
         Thread.Sleep(3000);
         Console.WriteLine("OK");
 
-        // Set device name
+        // Set device name on root AND HID child (xinputhid overrides the child name)
         Console.Write("  Setting device name... ");
         string dispName = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription") ?? "Controller";
         SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", dispName);
         SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", dispName);
+        // Find and rename the HID child (xinputhid sets it to "Xbox Wireless Controller")
+        if (CM_Locate_DevNodeW(out uint rootInst, @"ROOT\HID_IG_00\0000", 0) == 0)
+        {
+            if (CM_Get_Child(out uint childInst, rootInst, 0) == 0)
+            {
+                // Walk children to find the HID child
+                uint inst = childInst;
+                do
+                {
+                    // Set name on every child
+                    var friendlyKey = new DEVPROPKEY
+                    {
+                        fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+                        pid = 14
+                    };
+                    var busDescKey = new DEVPROPKEY
+                    {
+                        fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
+                        pid = 4
+                    };
+                    byte[] nameBytes = Encoding.Unicode.GetBytes(dispName + "\0");
+                    CM_Set_DevNode_PropertyW(inst, ref friendlyKey, 0x12, nameBytes, (uint)nameBytes.Length, 0);
+                    CM_Set_DevNode_PropertyW(inst, ref busDescKey, 0x12, nameBytes, (uint)nameBytes.Length, 0);
+                } while (CM_Get_Sibling(out inst, inst, 0) == 0);
+            }
+        }
         Console.WriteLine("OK");
 
         return true;
@@ -811,9 +840,43 @@ class Program
         if (!EnsureDriverInstalled())
             return Error("Driver build/install failed. Run elevated.");
 
-        // Step 3: Open the HID child device
+        // Step 3: Wait for HID child + xinputhid to fully load, then fix name
+        Thread.Sleep(3000); // Wait for HID child + xinputhid to enumerate
+        // xinputhid overrides the HID child name to "Xbox Wireless Controller"
+        // We override it back to match the profile's deviceDescription
+        Console.Write("  Fixing device name... ");
+        {
+            string fixName = profile.DeviceDescription ?? profile.ProductString;
+            // Find our root device dynamically (instance ID increments on recreate)
+            bool nameSet = false;
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string rootId = $@"ROOT\HID_IG_00\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
+                {
+                    if (CM_Get_Child(out uint childI, rootI, 0) == 0)
+                    {
+                        var fKey = new DEVPROPKEY { fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0), pid = 14 };
+                        var bKey = new DEVPROPKEY { fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2), pid = 4 };
+                        byte[] nb = Encoding.Unicode.GetBytes(fixName + "\0");
+                        // Set on root
+                        CM_Set_DevNode_PropertyW(rootI, ref fKey, 0x12, nb, (uint)nb.Length, 0);
+                        CM_Set_DevNode_PropertyW(rootI, ref bKey, 0x12, nb, (uint)nb.Length, 0);
+                        // Set on all children (xinputhid overrides HID child name)
+                        uint curInst = childI;
+                        do {
+                            CM_Set_DevNode_PropertyW(curInst, ref fKey, 0x12, nb, (uint)nb.Length, 0);
+                            CM_Set_DevNode_PropertyW(curInst, ref bKey, 0x12, nb, (uint)nb.Length, 0);
+                        } while (CM_Get_Sibling(out curInst, curInst, 0) == 0);
+                        nameSet = true;
+                    }
+                }
+            }
+            Console.WriteLine(nameSet ? "OK" : "FAILED (device not found)");
+        }
+
+        // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");
-        Thread.Sleep(2000); // Wait for HID child to enumerate
         using var h = OpenHidDevice(profile.VendorId, profile.ProductId);
         if (h == null)
         {
