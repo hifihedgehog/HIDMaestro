@@ -60,7 +60,7 @@ Write-Host "Device creation: $r"
 # Wait for HID child + xinputhid to fully load, then override the name
 # xinputhid sets "Xbox Wireless Controller" / "Xbox Adaptive Controller" etc.
 # We override with the profile's deviceDescription from registry
-Start-Sleep 5
+Start-Sleep 2
 $devDesc = try { (Get-ItemProperty "HKLM:\SOFTWARE\HIDMaestro" -EA Stop).DeviceDescription } catch { $null }
 if ($devDesc) {
     Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {
