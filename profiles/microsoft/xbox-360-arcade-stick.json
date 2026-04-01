@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "59-byte descriptor. Source: DJm00n/ControllersInfo xusb_arcadestick. XInput HID view \u00e2\u20ac\u201d arcade stick subtype (10 buttons, hat, no axes).",
   "deviceDescription": "Xbox 360 Controller for Windows",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

@@ -13,5 +13,5 @@
   "notes": "Xbox 360 wired uses xusb22.sys on real hardware (not HID). For HIDMaestro emulation, we use the GIP 262-byte descriptor with xinputhid. PID 0x028E is NOT in xinputhid's GIP_Hid list, so create_node must use a compatible hardware ID.",
   "deviceDescription": "Controller (XBOX 360 For Windows)",
   "triggerMode": "combined",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

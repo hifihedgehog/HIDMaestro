@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "This is the wireless receiver, not the controller itself. The receiver is the USB device; individual wireless controllers do not have USB PIDs. Uses vendor-specific USB class (0xFF/0x5D/0x01). PID 0x0291 is the v2 receiver.",
   "deviceDescription": "Xbox 360 Wireless Receiver for Windows",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

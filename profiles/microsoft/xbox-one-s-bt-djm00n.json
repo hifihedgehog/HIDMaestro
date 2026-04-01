@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "334-byte Bluetooth descriptor (Linux firmware mode, 15 buttons). Source: DJm00n/ControllersInfo. Has AC Home (0x0C0224) and rumble. See xbox-one-s-bt for 307-byte Windows firmware mode.",
   "deviceDescription": "Xbox Wireless Controller",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

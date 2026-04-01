@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "127-byte descriptor. Source: DJm00n/ControllersInfo xusb_flightstick.",
   "deviceDescription": "Xbox 360 Controller for Windows",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

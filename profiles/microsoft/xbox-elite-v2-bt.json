@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "1037-byte Bluetooth HID descriptor \u00e2\u20ac\u201d the most feature-rich Xbox BT descriptor. Source: DJm00n/ControllersInfo (Model 1797). Paddles (buttons 16-30), extra analog axes, Consumer Page media controls, vendor feature reports (IDs 0x06-0x0B), IMU data (ID 0x0A), keyboard TLC (ID 0x05).",
   "deviceDescription": "Xbox Wireless Controller",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

@@ -833,6 +833,81 @@ class Program
     static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwndParent, string HardwareId,
         string FullInfPath, int InstallFlags, out bool RebootRequired);
 
+    /// <summary>
+    /// Creates the standalone XUSB device for XInput support.
+    /// Used by driverMode=hid profiles (Xbox 360) where xinputhid doesn't provide XInput.
+    /// </summary>
+    static bool CreateXusbDevice()
+    {
+        // Check if XUSB device already exists
+        for (int idx = 0; idx < 10; idx++)
+        {
+            string candidate = $@"ROOT\SYSTEM\{idx:D4}";
+            if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+            {
+                // Check if it's our XUSB device
+                var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                if (info.Contains("XInput") || info.Contains("HIDMaestro"))
+                    return true; // Already exists
+            }
+        }
+
+        // Create XUSB device node
+        var systemGuid = new Guid("4D36E97D-E325-11CE-BFC1-08002BE10318"); // System class
+        IntPtr dis = SetupDiCreateDeviceInfoList(ref systemGuid, IntPtr.Zero);
+        if (dis == new IntPtr(-1)) return false;
+
+        try
+        {
+            string hwMulti = "root\\HIDMaestroXUSB\0\0";
+            byte[] hwBytes = Encoding.Unicode.GetBytes(hwMulti);
+
+            byte[] devInfoBuf = new byte[32];
+            int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
+            BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
+            var devInfoHandle = System.Runtime.InteropServices.GCHandle.Alloc(devInfoBuf, GCHandleType.Pinned);
+
+            if (!SetupDiCreateDeviceInfoW_Raw(dis, "System", ref systemGuid,
+                "HIDMaestro XInput Bridge", IntPtr.Zero, 1, devInfoHandle.AddrOfPinnedObject()))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            if (!SetupDiSetDeviceRegistryPropertyW_Raw(dis, devInfoHandle.AddrOfPinnedObject(),
+                1, hwBytes, (uint)hwBytes.Length))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            if (!SetupDiCallClassInstaller_Raw(0x19, dis, devInfoHandle.AddrOfPinnedObject()))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            devInfoHandle.Free();
+
+            // Install XUSB driver
+            string xusbInfPath = Path.Combine(BuildDir, "hidmaestro_xusb.inf");
+            if (File.Exists(xusbInfPath))
+            {
+                // Ensure XUSB driver is in store
+                var (_, storeCheck) = RunProcess("pnputil.exe", "/enum-drivers");
+                if (!storeCheck.Contains("hidmaestro_xusb"))
+                    RunProcess("pnputil.exe", $"/add-driver \"{xusbInfPath}\"");
+            }
+
+            Thread.Sleep(3000);
+            return true;
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(dis);
+        }
+    }
+
     static bool IsDriverInStore()
     {
         var (_, output) = RunProcess("pnputil.exe", "/enum-drivers");
@@ -1126,6 +1201,13 @@ class Program
         }
         nameSetDone:
         Console.WriteLine("OK");
+
+        // Step 3.5: Create XUSB device for XInput support (Xbox/XInput profiles only)
+        if (profile.UsesXinputhid)
+        {
+            Console.Write("  Creating XUSB bridge... ");
+            Console.WriteLine(CreateXusbDevice() ? "OK" : "already exists");
+        }
 
         // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");

@@ -13,5 +13,5 @@
   "notes": "464-byte Bluetooth descriptor. Source: SDL testevdev.c (libsdl-org/SDL). Newer firmware PID. Includes paddles, consumer controls, rumble output, keyboard TLC. Compare with PID 0x0B05 (older firmware, 1037 bytes).",
   "triggerMode": "separate",
   "deviceDescription": "HID-compliant game controller",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

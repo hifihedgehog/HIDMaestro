@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "59-byte descriptor. Source: DJm00n/ControllersInfo xusb_dancepad. Identical to arcade stick descriptor.",
   "deviceDescription": "Xbox 360 Controller for Windows",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

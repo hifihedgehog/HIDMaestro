@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "307-byte Bluetooth HID descriptor (Windows firmware mode). Source: xpadneo docs. 10 buttons, right stick on Rx/Ry, triggers on Generic Desktop Page. Linux firmware mode uses a 335-byte descriptor with 15 buttons.",
   "deviceDescription": "Xbox Wireless Controller",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }

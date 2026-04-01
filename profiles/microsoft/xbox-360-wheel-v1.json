@@ -12,5 +12,5 @@
   "inputReportSize": null,
   "notes": "110-byte descriptor. Source: DJm00n/ControllersInfo xusb_wheel1.",
   "deviceDescription": "Xbox 360 Controller for Windows",
-  "driverMode": "hid"
+  "driverMode": "xinputhid"
 }
