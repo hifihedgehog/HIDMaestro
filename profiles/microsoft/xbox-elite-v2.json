@@ -12,5 +12,6 @@
   "inputReportSize": null,
   "notes": "262-byte XboxGIP HID descriptor (USB/Windows view). See xbox-elite-v2-bt for 1038-byte Bluetooth descriptor with paddles, IMU, media controls. BT PIDs: 0x0B05, 0x0B22.",
   "deviceDescription": "HID-compliant game controller",
-  "triggerMode": "separate"
+  "triggerMode": "separate",
+  "driverMode": "xinputhid"
 }

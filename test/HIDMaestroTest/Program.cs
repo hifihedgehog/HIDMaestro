@@ -713,9 +713,9 @@ class Program
     /// </summary>
     static void CleanupGhostDevices()
     {
-        // Find error-state HID_IG_00 devices
+        // Find error-state HIDMaestro devices (both HID_IG_00 and HIDCLASS enumerators)
         var (_, output) = RunProcess("powershell.exe",
-            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.InstanceId -match 'ROOT.HID_IG_00' -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
+            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { ($_.InstanceId -match 'ROOT.HID_IG_00' -or ($_.InstanceId -match 'ROOT.HIDCLASS' -and $_.FriendlyName -match 'Game Controller|HID-compliant')) -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
             timeoutMs: 15_000);
         if (!string.IsNullOrWhiteSpace(output))
             Console.Write($"(cleaned ghosts) ");
@@ -739,11 +739,99 @@ class Program
     /// </summary>
     static void FixHidChildNames(string name)
     {
-        // Fix BOTH root (ROOT\HID_IG_00) and HID child (HID\HID_IG_00) device names
+        // Fix device names on ALL HIDMaestro devices (HID_IG_00 and HIDCLASS)
         RunProcess("powershell.exe",
-            $"-Command \"Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match 'HID_IG_00' }} | ForEach-Object {{ $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $_.InstanceId; Set-ItemProperty $p -Name FriendlyName -Value '{name}' -Type String -Force -EA SilentlyContinue; Set-ItemProperty $p -Name DeviceDesc -Value '{name}' -Type String -Force -EA SilentlyContinue }}\"",
+            $"-Command \"Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match 'HID_IG_00|HIDCLASS' -and $_.InstanceId -match 'ROOT|HID' }} | ForEach-Object {{ $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $_.InstanceId; Set-ItemProperty $p -Name FriendlyName -Value '{name}' -Type String -Force -EA SilentlyContinue; Set-ItemProperty $p -Name DeviceDesc -Value '{name}' -Type String -Force -EA SilentlyContinue }}\"",
             timeoutMs: 10_000);
     }
+
+    /// <summary>
+    /// Creates a device node with the correct enumerator and hardware ID.
+    /// xinputhid profiles use HID_IG_00 enumerator (triggers xinputhid upper filter).
+    /// Direct HID profiles use HIDClass enumerator (standard HID access).
+    /// </summary>
+    static bool CreateDeviceNode(ControllerProfile profile, string infPath)
+    {
+        string vid = $"{profile.VendorId:X4}";
+        string pid = $"{profile.ProductId:X4}";
+        string desc = profile.ProductString;
+        string enumerator = profile.UsesXinputhid ? "HID_IG_00" : "HIDClass";
+        string hwId = profile.UsesXinputhid
+            ? $"root\\VID_{vid}&PID_{pid}&IG_00"
+            : $"root\\VID_{vid}&PID_{pid}";
+        string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
+
+        // SetupDi P/Invoke for device creation
+        var classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
+        IntPtr dis = SetupDiCreateDeviceInfoList(ref classGuid, IntPtr.Zero);
+        if (dis == new IntPtr(-1)) return false;
+
+        try
+        {
+            var devInfo = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+            // Reuse SP_DEVICE_INTERFACE_DATA layout for DEVINFO_DATA (same first field)
+            byte[] devInfoBuf = new byte[32]; // SP_DEVINFO_DATA
+            int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
+            BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
+            var devInfoHandle = System.Runtime.InteropServices.GCHandle.Alloc(devInfoBuf, GCHandleType.Pinned);
+
+            if (!SetupDiCreateDeviceInfoW_Raw(dis, enumerator, ref classGuid, desc, IntPtr.Zero, 1, devInfoHandle.AddrOfPinnedObject()))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            byte[] hwBytes = Encoding.Unicode.GetBytes(hwMulti);
+            if (!SetupDiSetDeviceRegistryPropertyW_Raw(dis, devInfoHandle.AddrOfPinnedObject(), 1, hwBytes, (uint)hwBytes.Length))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            // DIF_REGISTERDEVICE = 0x19
+            if (!SetupDiCallClassInstaller_Raw(0x19, dis, devInfoHandle.AddrOfPinnedObject()))
+            {
+                devInfoHandle.Free();
+                return false;
+            }
+
+            devInfoHandle.Free();
+
+            // Install driver via UpdateDriverForPlugAndPlayDevicesW
+            UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, "root\\HIDMaestro", infPath, 0, out bool _);
+
+            // Wait for device to enumerate
+            Thread.Sleep(3000);
+
+            // Fix name after xinputhid loads
+            string displayName = profile.DeviceDescription ?? profile.ProductString;
+            FixHidChildNames(displayName);
+
+            return true;
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(dis);
+        }
+    }
+
+    [DllImport("SetupAPI.dll", SetLastError = true)]
+    static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiCreateDeviceInfoW")]
+    static extern bool SetupDiCreateDeviceInfoW_Raw(IntPtr DeviceInfoSet, string DeviceName,
+        ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiSetDeviceRegistryPropertyW")]
+    static extern bool SetupDiSetDeviceRegistryPropertyW_Raw(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
+        int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, EntryPoint = "SetupDiCallClassInstaller")]
+    static extern bool SetupDiCallClassInstaller_Raw(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+
+    [DllImport("newdev.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwndParent, string HardwareId,
+        string FullInfPath, int InstallFlags, out bool RebootRequired);
 
     static bool IsDriverInStore()
     {
@@ -751,7 +839,7 @@ class Program
         return output.Contains("hidmaestro.inf");
     }
 
-    static bool EnsureDriverInstalled()
+    static bool EnsureDriverInstalled(ControllerProfile? profile = null)
     {
         string dllPath = Path.Combine(BuildDir, "HIDMaestro.dll");
         string driverSource = Path.Combine(RepoRoot, "driver", "driver.c");
@@ -777,18 +865,27 @@ class Program
         // Find existing device — only restart if needed
         Console.Write("  Checking device... ");
         string? rootInstId = null;
-        for (int idx = 0; idx < 10; idx++)
+        // Search both enumerator types (xinputhid and direct HID)
+        foreach (string enumer in new[] { "HID_IG_00", "HIDClass" })
         {
-            string candidate = $@"ROOT\HID_IG_00\{idx:D4}";
-            if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
-            { rootInstId = candidate; break; }
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string candidate = $@"ROOT\{enumer}\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                { rootInstId = candidate; break; }
+            }
+            if (rootInstId != null) break;
         }
+        string infPath = Path.Combine(BuildDir, "hidmaestro.inf");
         if (rootInstId != null)
         {
             // Remove and recreate to force fresh WUDFHost with latest DLL
             RunProcess("pnputil.exe", $"/remove-device \"{rootInstId}\" /subtree");
             Thread.Sleep(2000);
-            RunPowerShell("create_node.ps1");
+            if (profile != null)
+                CreateDeviceNode(profile, infPath);
+            else
+                RunPowerShell("create_node.ps1"); // fallback
             Thread.Sleep(3000);
             Console.WriteLine("OK");
         }
@@ -796,7 +893,10 @@ class Program
         {
             // Device doesn't exist — create it
             Console.Write("creating... ");
-            RunPowerShell("create_node.ps1");
+            if (profile != null)
+                CreateDeviceNode(profile, infPath);
+            else
+                RunPowerShell("create_node.ps1"); // fallback
             Thread.Sleep(3000);
             Console.WriteLine("OK");
         }
@@ -1002,7 +1102,7 @@ class Program
         Console.WriteLine("OK");
 
         // Step 2: Build, sign, install driver + create device node
-        if (!EnsureDriverInstalled())
+        if (!EnsureDriverInstalled(profile))
             return Error("Driver build/install failed. Run elevated.");
 
         // Step 3: Wait for HID child + xinputhid, then fix device name
@@ -1010,17 +1110,21 @@ class Program
         Console.Write("  Fixing device name... ");
         string displayName = profile.DeviceDescription ?? profile.ProductString;
         FixHidChildNames(displayName);
-        // Also set on root device
-        for (int idx = 0; idx < 10; idx++)
+        // Also set on root device (search both enumerator types)
+        foreach (string enumer in new[] { "HID_IG_00", "HIDClass" })
         {
-            string rootId = $@"ROOT\HID_IG_00\{idx:D4}";
-            if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
+            for (int idx = 0; idx < 10; idx++)
             {
-                SetBusReportedDeviceDesc(rootId, displayName);
-                SetDeviceFriendlyName(rootId, displayName);
-                break;
+                string rootId = $@"ROOT\{enumer}\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
+                {
+                    SetBusReportedDeviceDesc(rootId, displayName);
+                    SetDeviceFriendlyName(rootId, displayName);
+                    goto nameSetDone;
+                }
             }
         }
+        nameSetDone:
         Console.WriteLine("OK");
 
         // Step 4: Open the HID child device

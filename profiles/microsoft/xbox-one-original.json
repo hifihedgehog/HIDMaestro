@@ -12,5 +12,6 @@
   "inputReportSize": null,
   "notes": "262-byte XboxGIP HID descriptor \u00e2\u20ac\u201d what Windows xinputhid.sys exposes to games. Source: DJm00n/ControllersInfo. Real USB protocol is GIP (0xFF/0x47/0xD0), not HID.",
   "deviceDescription": "HID-compliant game controller",
-  "triggerMode": "separate"
+  "triggerMode": "separate",
+  "driverMode": "xinputhid"
 }

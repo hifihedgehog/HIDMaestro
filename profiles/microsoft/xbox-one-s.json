@@ -12,5 +12,6 @@
   "inputReportSize": null,
   "notes": "262-byte XboxGIP HID descriptor (USB/Windows view). Bluetooth PIDs: 0x02FD (classic), 0x0B20 (BLE). See xbox-one-s-bt profile for Bluetooth descriptor.",
   "deviceDescription": "HID-compliant game controller",
-  "triggerMode": "separate"
+  "triggerMode": "separate",
+  "driverMode": "xinputhid"
 }

@@ -52,6 +52,9 @@ public sealed class ControllerProfile
     [JsonPropertyName("triggerMode")]
     public string? TriggerMode { get; set; }
 
+    [JsonPropertyName("driverMode")]
+    public string? DriverMode { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -62,6 +65,14 @@ public sealed class ControllerProfile
     /// </summary>
     [JsonIgnore]
     public bool HasCombinedTriggers => TriggerMode?.Equals("combined", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>
+    /// Whether this controller uses xinputhid (Xbox One+) or direct HID (Xbox 360, non-Xbox).
+    /// xinputhid: IG_00 enumerator, GIP descriptor, combined DirectInput + separate XInput triggers
+    /// hid: standard HIDCLASS enumerator, controller's native descriptor, direct HID access
+    /// </summary>
+    [JsonIgnore]
+    public bool UsesXinputhid => DriverMode?.Equals("xinputhid", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>Parsed VID as ushort.</summary>
     [JsonIgnore]

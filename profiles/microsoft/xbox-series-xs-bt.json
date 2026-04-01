@@ -12,5 +12,6 @@
   "inputReportSize": 17,
   "notes": "EXACT GIP descriptor (262B) from DsHidMini (proven xinputhid compatible). NO Report IDs. Separate Z/Rz triggers (10-bit). 10 buttons. System menu + battery.",
   "deviceDescription": "HID-compliant game controller",
-  "triggerMode": "separate"
+  "triggerMode": "separate",
+  "driverMode": "xinputhid"
 }

@@ -12,5 +12,6 @@
   "inputReportSize": null,
   "notes": "262-byte XboxGIP HID descriptor. Has profile button. Bluetooth added in later firmware.",
   "deviceDescription": "HID-compliant game controller",
-  "triggerMode": "separate"
+  "triggerMode": "separate",
+  "driverMode": "xinputhid"
 }
