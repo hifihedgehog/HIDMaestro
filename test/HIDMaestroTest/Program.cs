@@ -41,6 +41,9 @@ class Program
     static extern uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_IDW(uint dnDevInst, char[] Buffer, uint BufferLen, uint ulFlags);
+
+    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
         uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
 
@@ -862,11 +865,23 @@ class Program
                         // Set on root
                         CM_Set_DevNode_PropertyW(rootI, ref fKey, 0x12, nb, (uint)nb.Length, 0);
                         CM_Set_DevNode_PropertyW(rootI, ref bKey, 0x12, nb, (uint)nb.Length, 0);
-                        // Set on all children (xinputhid overrides HID child name)
+                        // Set on all children via both CM property AND direct registry
+                        // (xinputhid's cached value overrides CM property, but registry persists)
                         uint curInst = childI;
                         do {
                             CM_Set_DevNode_PropertyW(curInst, ref fKey, 0x12, nb, (uint)nb.Length, 0);
                             CM_Set_DevNode_PropertyW(curInst, ref bKey, 0x12, nb, (uint)nb.Length, 0);
+                            // Direct registry write — survives xinputhid's name override
+                            char[] instIdBuf = new char[256];
+                            uint instIdLen = (uint)instIdBuf.Length;
+                            if (CM_Get_Device_IDW(curInst, instIdBuf, instIdLen, 0) == 0)
+                            {
+                                string childInstId = new string(instIdBuf).TrimEnd('\0');
+                                using var childKey = Registry.LocalMachine.OpenSubKey(
+                                    $@"SYSTEM\CurrentControlSet\Enum\{childInstId}", true);
+                                if (childKey != null)
+                                    childKey.SetValue("FriendlyName", fixName, RegistryValueKind.String);
+                            }
                         } while (CM_Get_Sibling(out curInst, curInst, 0) == 0);
                         nameSet = true;
                     }
