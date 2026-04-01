@@ -613,6 +613,138 @@ class Program
 
     // ── Full build + sign + install pipeline ──
 
+    // ── Device Setup (all-in-code, no external scripts) ──
+
+    /// <summary>
+    /// Ensures GameInputSvc is running and set to Automatic start.
+    /// Required for WGI to discover our device (standard browser mapping).
+    /// </summary>
+    static void EnsureGameInputService()
+    {
+        try
+        {
+            var (_, status) = RunProcess("sc.exe", "query GameInputSvc");
+            if (!status.Contains("RUNNING"))
+            {
+                RunProcess("sc.exe", "config GameInputSvc start= auto");
+                RunProcess("sc.exe", "start GameInputSvc");
+            }
+        }
+        catch { /* Service may not exist on older Windows */ }
+    }
+
+    /// <summary>
+    /// Writes the GameInput registry for WGI Gamepad promotion.
+    /// Key format: HKLM\...\GameInput\Devices\{VID4}{PID4}00010005\Gamepad
+    /// Axis/button indices match WGI RawGameController enumeration order.
+    /// </summary>
+    static void WriteGameInputRegistry(ushort vid, ushort pid)
+    {
+        string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{vid:X4}{pid:X4}00010005";
+        using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
+        // No Description — lets WGI use device's own name instead of VID/PID lookup
+
+        string gpPath = $@"{deviceKey}\Gamepad";
+        string[] subs = { "Menu","View","A","B","X","Y","LeftShoulder","RightShoulder",
+            "LeftThumbstickButton","RightThumbstickButton",
+            "DPadUp","DPadDown","DPadLeft","DPadRight",
+            "LeftTrigger","RightTrigger",
+            "LeftThumbstickX","LeftThumbstickY","RightThumbstickX","RightThumbstickY" };
+        foreach (var sub in subs)
+            Registry.LocalMachine.CreateSubKey($@"{gpPath}\{sub}");
+
+        void SetAxis(string name, int index, bool invert = false)
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            k.SetValue("AxisIndex", index, RegistryValueKind.DWord);
+            if (invert) k.SetValue("Invert", 1, RegistryValueKind.DWord);
+        }
+        void SetButton(string name, int index)
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            k.SetValue("ButtonIndex", index, RegistryValueKind.DWord);
+        }
+        void SetDPad(string name, string position)
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            k.SetValue("SwitchIndex", 0, RegistryValueKind.DWord);
+            k.SetValue("SwitchPosition", position, RegistryValueKind.String);
+            k.SetValue("IncludeAdjacent", 1, RegistryValueKind.DWord);
+        }
+
+        // Axes: WGI RawGameController order for GIP descriptor
+        SetAxis("LeftThumbstickX", 0);
+        SetAxis("LeftThumbstickY", 1, invert: true);
+        SetAxis("RightThumbstickX", 2);
+        SetAxis("RightThumbstickY", 3, invert: true);
+        SetAxis("LeftTrigger", 4);
+        SetAxis("RightTrigger", 5);
+
+        // Buttons
+        SetButton("A", 0); SetButton("B", 1); SetButton("X", 2); SetButton("Y", 3);
+        SetButton("LeftShoulder", 4); SetButton("RightShoulder", 5);
+        SetButton("View", 6); SetButton("Menu", 7);
+        SetButton("LeftThumbstickButton", 8); SetButton("RightThumbstickButton", 9);
+
+        // DPad from hat switch
+        SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
+        SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
+    }
+
+    /// <summary>
+    /// Ensures the shared file exists with open ACLs for the driver timer.
+    /// </summary>
+    static void EnsureSharedFile()
+    {
+        string dir = @"C:\ProgramData\HIDMaestro";
+        Directory.CreateDirectory(dir);
+        string filePath = Path.Combine(dir, "input.bin");
+        if (!File.Exists(filePath))
+        {
+            File.WriteAllBytes(filePath, new byte[72]);
+        }
+        // Grant Everyone full access so WUDFHost (LocalService) can read
+        RunProcess("icacls.exe", $"\"{dir}\" /grant Everyone:(OI)(CI)F /T", timeoutMs: 5000);
+    }
+
+    /// <summary>
+    /// Removes ghost HID_IG_00 devices that are in Error state.
+    /// Does NOT remove working devices.
+    /// </summary>
+    static void CleanupGhostDevices()
+    {
+        // Find error-state HID_IG_00 devices
+        var (_, output) = RunProcess("powershell.exe",
+            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.InstanceId -match 'ROOT.HID_IG_00' -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
+            timeoutMs: 15_000);
+        if (!string.IsNullOrWhiteSpace(output))
+            Console.Write($"(cleaned ghosts) ");
+    }
+
+    /// <summary>
+    /// Kills only WUDFHost processes hosting HIDMaestro DLLs.
+    /// Does NOT kill WUDFHost processes for other devices (e.g., real BT controllers).
+    /// </summary>
+    static void KillOurWUDFHost()
+    {
+        var (_, output) = RunProcess("powershell.exe",
+            "-Command \"Get-Process WUDFHost -EA SilentlyContinue | ForEach-Object { $m = (tasklist /m /fi \\\"PID eq $($_.Id)\\\" 2>&1) -join ' '; if ($m -match 'hidmaestro') { Stop-Process -Id $_.Id -Force -EA SilentlyContinue; Write-Host $_.Id } }\"",
+            timeoutMs: 10_000);
+    }
+
+    /// <summary>
+    /// Overrides xinputhid's device name on all HID child devices.
+    /// xinputhid sets names like "Xbox Wireless Controller" from its INF.
+    /// We override with the profile's deviceDescription via direct registry write.
+    /// </summary>
+    static void FixHidChildNames(string name)
+    {
+        // Fix BOTH root (ROOT\HID_IG_00) and HID child (HID\HID_IG_00) device names
+        RunProcess("powershell.exe",
+            $"-Command \"Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match 'HID_IG_00' }} | ForEach-Object {{ $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $_.InstanceId; Set-ItemProperty $p -Name FriendlyName -Value '{name}' -Type String -Force -EA SilentlyContinue; Set-ItemProperty $p -Name DeviceDesc -Value '{name}' -Type String -Force -EA SilentlyContinue }}\"",
+            timeoutMs: 10_000);
+    }
+
     static bool IsDriverInStore()
     {
         var (_, output) = RunProcess("pnputil.exe", "/enum-drivers");
@@ -642,8 +774,8 @@ class Program
         }
 
         // Driver is installed — restart device to pick up new registry config.
-        Console.Write("  Restarting device... ");
-        // Find our root device dynamically
+        // Find existing device — only restart if needed
+        Console.Write("  Checking device... ");
         string? rootInstId = null;
         for (int idx = 0; idx < 10; idx++)
         {
@@ -652,9 +784,18 @@ class Program
             { rootInstId = candidate; break; }
         }
         if (rootInstId != null)
-            RunProcess("pnputil.exe", $"/restart-device \"{rootInstId}\"");
-        Thread.Sleep(3000);
-        Console.WriteLine("OK");
+        {
+            // Remove and recreate to force fresh WUDFHost with latest DLL
+            RunProcess("pnputil.exe", $"/remove-device \"{rootInstId}\" /subtree");
+            Thread.Sleep(2000);
+            RunPowerShell("create_node.ps1");
+            Thread.Sleep(3000);
+            Console.WriteLine("OK");
+        }
+        else
+        {
+            Console.WriteLine("not found (will be created by deploy)");
+        }
 
         // Set device name on root AND HID child
         Console.Write("  Setting device name... ");
@@ -839,7 +980,15 @@ class Program
             Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal)\n");
         }
 
-        // Step 1: Write descriptor to registry FIRST
+        // Step 0: Pre-flight setup (all in code, no external scripts)
+        Console.Write("  Setting up environment... ");
+        EnsureGameInputService();
+        EnsureSharedFile();
+        CleanupGhostDevices();
+        WriteGameInputRegistry(profile.VendorId, profile.ProductId);
+        Console.WriteLine("OK");
+
+        // Step 1: Write descriptor to registry
         int inputReportLen = ComputeInputReportByteLength(descriptor);
         Console.Write($"  Writing profile to registry (InputReport={inputReportLen}B)... ");
         WriteConfig(descriptor, profile.VendorId, profile.ProductId,
@@ -849,57 +998,26 @@ class Program
         Console.WriteLine("OK");
 
         // Step 2: Build, sign, install driver + create device node
-        // The driver will read the registry config we just wrote
         if (!EnsureDriverInstalled())
             return Error("Driver build/install failed. Run elevated.");
 
-        // Step 3: Wait for HID child + xinputhid to fully load, then fix name
-        Thread.Sleep(3000); // Wait for HID child + xinputhid to enumerate
-        // xinputhid overrides the HID child name to "Xbox Wireless Controller"
-        // We override it back to match the profile's deviceDescription
+        // Step 3: Wait for HID child + xinputhid, then fix device name
+        Thread.Sleep(3000);
         Console.Write("  Fixing device name... ");
+        string displayName = profile.DeviceDescription ?? profile.ProductString;
+        FixHidChildNames(displayName);
+        // Also set on root device
+        for (int idx = 0; idx < 10; idx++)
         {
-            string fixName = profile.DeviceDescription ?? profile.ProductString;
-            // Find our root device dynamically (instance ID increments on recreate)
-            bool nameSet = false;
-            for (int idx = 0; idx < 10; idx++)
+            string rootId = $@"ROOT\HID_IG_00\{idx:D4}";
+            if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
             {
-                string rootId = $@"ROOT\HID_IG_00\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
-                {
-                    if (CM_Get_Child(out uint childI, rootI, 0) == 0)
-                    {
-                        var fKey = new DEVPROPKEY { fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0), pid = 14 };
-                        var bKey = new DEVPROPKEY { fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2), pid = 4 };
-                        byte[] nb = Encoding.Unicode.GetBytes(fixName + "\0");
-                        // Set on root
-                        CM_Set_DevNode_PropertyW(rootI, ref fKey, 0x12, nb, (uint)nb.Length, 0);
-                        CM_Set_DevNode_PropertyW(rootI, ref bKey, 0x12, nb, (uint)nb.Length, 0);
-                        // Set on all children via both CM property AND direct registry
-                        // (xinputhid's cached value overrides CM property, but registry persists)
-                        uint curInst = childI;
-                        do {
-                            CM_Set_DevNode_PropertyW(curInst, ref fKey, 0x12, nb, (uint)nb.Length, 0);
-                            CM_Set_DevNode_PropertyW(curInst, ref bKey, 0x12, nb, (uint)nb.Length, 0);
-                            // Direct registry write — survives xinputhid's name override
-                            char[] instIdBuf = new char[256];
-                            uint instIdLen = (uint)instIdBuf.Length;
-                            if (CM_Get_Device_IDW(curInst, instIdBuf, instIdLen, 0) == 0)
-                            {
-                                string childInstId = new string(instIdBuf).TrimEnd('\0');
-                                using var childKey = Registry.LocalMachine.OpenSubKey(
-                                    $@"SYSTEM\CurrentControlSet\Enum\{childInstId}", true);
-                                if (childKey != null)
-                                    childKey.SetValue("FriendlyName", fixName, RegistryValueKind.String);
-                                    childKey.SetValue("DeviceDesc", fixName, RegistryValueKind.String);
-                            }
-                        } while (CM_Get_Sibling(out curInst, curInst, 0) == 0);
-                        nameSet = true;
-                    }
-                }
+                SetBusReportedDeviceDesc(rootId, displayName);
+                SetDeviceFriendlyName(rootId, displayName);
+                break;
             }
-            Console.WriteLine(nameSet ? "OK" : "FAILED (device not found)");
         }
+        Console.WriteLine("OK");
 
         // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");
