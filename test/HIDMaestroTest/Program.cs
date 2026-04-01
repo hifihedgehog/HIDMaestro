@@ -747,20 +747,11 @@ class Program
         string vid = $"{profile.VendorId:X4}";
         string pid = $"{profile.ProductId:X4}";
         string desc = profile.ProductString;
-        // Always use HID_IG_00 enumerator for Xbox controllers
+        // xinputhid profiles: HID_IG_00 enumerator with IG_00 in hardware ID
+        // Direct HID profiles: HIDClass enumerator, no IG_00
         string enumerator = profile.UsesXinputhid ? "HID_IG_00" : "HIDClass";
-
-        // PIDs in xinputhid's GIP_Hid: use actual PID in hardware ID
-        // PIDs NOT in GIP_Hid (e.g. 360's 028E): use 02FF (generic xinputhid PID)
-        // so xinputhid loads and creates XUSB interface for WGI discovery.
-        // The actual PID reported to apps comes from the driver's HID attributes.
-        string[] gipPids = { "02D1","02DD","02E3","02EA","0B00","0B0A","0B13","02FF" };
-        string hwPid = pid;
-        if (profile.UsesXinputhid && !Array.Exists(gipPids, p => p.Equals(pid, StringComparison.OrdinalIgnoreCase)))
-            hwPid = "02FF"; // Generic xinputhid PID
-
         string hwId = profile.UsesXinputhid
-            ? $"root\\VID_{vid}&PID_{hwPid}&IG_00"
+            ? $"root\\VID_{vid}&PID_{pid}&IG_00"
             : $"root\\VID_{vid}&PID_{pid}";
         string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
 
@@ -1205,8 +1196,9 @@ class Program
         nameSetDone:
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB device for XInput support (Xbox/XInput profiles only)
-        if (profile.UsesXinputhid)
+        // Step 3.5: Create XUSB device for XInput support (Xbox controllers)
+        // All Microsoft Xbox controllers (VID 045E) need XUSB for XInput
+        if (profile.VendorId == 0x045E)
         {
             Console.Write("  Creating XUSB bridge... ");
             Console.WriteLine(CreateXusbDevice() ? "OK" : "already exists");
@@ -1238,28 +1230,36 @@ class Program
             Console.WriteLine("  HID Caps: N/A (XInput-only mode)");
         }
 
-        // Open the XUSB device for XInput input injection
+        // Open OUR XUSB device for XInput input injection (retry up to 3 times)
         Console.Write("  Opening XUSB device... ");
         SafeFileHandle? xh = null;
+        for (int xusbRetry = 0; xusbRetry < 3 && xh == null; xusbRetry++)
         {
-            HidD_GetHidGuid(out Guid _); // just to init
+            if (xusbRetry > 0) Thread.Sleep(2000);
             var xusbGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
             IntPtr dis = SetupDiGetClassDevsW(ref xusbGuid, IntPtr.Zero, IntPtr.Zero,
                 DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
             if (dis != new IntPtr(-1))
             {
+                // Enumerate ALL XUSB interfaces, find the one on ROOT\SYSTEM (our standalone)
                 var did = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
-                if (SetupDiEnumDeviceInterfaces(dis, IntPtr.Zero, ref xusbGuid, 0, ref did))
+                for (uint xusbIdx = 0; xusbIdx < 10; xusbIdx++)
                 {
+                    if (!SetupDiEnumDeviceInterfaces(dis, IntPtr.Zero, ref xusbGuid, xusbIdx, ref did))
+                        break;
                     SetupDiGetDeviceInterfaceDetailW(dis, ref did, IntPtr.Zero, 0, out uint reqSize, IntPtr.Zero);
                     IntPtr detail = Marshal.AllocHGlobal((int)reqSize);
                     Marshal.WriteInt32(detail, 8);
                     if (SetupDiGetDeviceInterfaceDetailW(dis, ref did, detail, reqSize, out _, IntPtr.Zero))
                     {
                         string xpath = Marshal.PtrToStringUni(detail + 4)!;
-                        xh = CreateFileW(xpath, GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-                        if (xh.IsInvalid) xh = null;
+                        // Only open OUR standalone XUSB (root#system), not real controllers
+                        if (xpath.Contains("root#system", StringComparison.OrdinalIgnoreCase))
+                        {
+                            xh = CreateFileW(xpath, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                            if (xh.IsInvalid) xh = null;
+                        }
                     }
                     Marshal.FreeHGlobal(detail);
                 }
