@@ -56,3 +56,19 @@ public class DN5 {
 
 $r = [DN5]::Go("$build\hidmaestro.inf", $vid, $devPid, $prodName)
 Write-Host "Device creation: $r"
+
+# Wait for HID child + xinputhid to fully load, then override the name
+# xinputhid sets "Xbox Wireless Controller" / "Xbox Adaptive Controller" etc.
+# We override with the profile's deviceDescription from registry
+Start-Sleep 5
+$devDesc = try { (Get-ItemProperty "HKLM:\SOFTWARE\HIDMaestro" -EA Stop).DeviceDescription } catch { $null }
+if ($devDesc) {
+    Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {
+        $_.InstanceId -match "HID\\HID_IG_00"
+    } | ForEach-Object {
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($_.InstanceId)"
+        Set-ItemProperty -Path $regPath -Name "FriendlyName" -Value $devDesc -Type String -Force -EA SilentlyContinue
+        Set-ItemProperty -Path $regPath -Name "DeviceDesc" -Value $devDesc -Type String -Force -EA SilentlyContinue
+        Write-Host "  Set name on $($_.InstanceId): $devDesc"
+    }
+}

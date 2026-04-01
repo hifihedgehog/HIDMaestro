@@ -39,6 +39,7 @@ static const GUID XUSB_INTERFACE_CLASS_GUID =
 #define IOCTL_XUSB_GET_BATTERY_INFO     0x8000E018
 #define IOCTL_XUSB_GET_INFORMATION_EX   0x8000E3FC
 #define IOCTL_XUSB_WAIT_FOR_INPUT       0x8000E3AC
+#define IOCTL_XUSB_POWER_INFO          0x80006380  /* xinputhid sends this repeatedly */
 
 /* XUSB report structure (20 bytes — matches XUSB_INTERRUPT_IN_PACKET) */
 #pragma pack(push, 1)
@@ -529,6 +530,31 @@ EvtIoDeviceControl(
     UNREFERENCED_PARAMETER(OutputBufferLength);
     UNREFERENCED_PARAMETER(InputBufferLength);
 
+    /* Log all IOCTLs for debugging xinputhid protocol */
+    {
+        static LONG ioLogCount = 0;
+        if (InterlockedIncrement(&ioLogCount) <= 50) {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\ioctl_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[64];
+                DWORD dummy;
+                ULONG hi = (IoControlCode >> 16) & 0xFFFF;
+                ULONG lo = IoControlCode & 0xFFFF;
+                msg[0] = 'I'; msg[1] = 'O'; msg[2] = ':'; msg[3] = ' ';
+                /* Simple hex encoding */
+                static const char hex[] = "0123456789ABCDEF";
+                msg[4] = hex[(hi>>12)&0xF]; msg[5] = hex[(hi>>8)&0xF];
+                msg[6] = hex[(hi>>4)&0xF]; msg[7] = hex[hi&0xF];
+                msg[8] = hex[(lo>>12)&0xF]; msg[9] = hex[(lo>>8)&0xF];
+                msg[10] = hex[(lo>>4)&0xF]; msg[11] = hex[lo&0xF];
+                msg[12] = '\r'; msg[13] = '\n';
+                WriteFile(hLog, msg, 14, &dummy, NULL);
+                CloseHandle(hLog);
+            }
+        }
+    }
+
     switch (IoControlCode) {
 
     case IOCTL_HID_GET_DEVICE_DESCRIPTOR:
@@ -977,6 +1003,20 @@ EvtIoDeviceControl(
         status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
         if (NT_SUCCESS(status)) completeRequest = FALSE;
         break;
+
+    case IOCTL_XUSB_POWER_INFO: {
+        /* xinputhid sends this repeatedly — return success with zeroed buffer */
+        PVOID outBuf;
+        size_t outSize;
+        status = WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outSize);
+        if (NT_SUCCESS(status)) {
+            RtlZeroMemory(outBuf, outSize);
+            WdfRequestSetInformation(Request, outSize);
+        }
+        break;
+    }
+
+    /* IOCTL_XUSB_GET_LED_STATE already handled above */
 
     case IOCTL_XUSB_GET_INFORMATION_EX: {
         /* 8 bytes: version(2) + unk(2) + count(2) + unk(2) */

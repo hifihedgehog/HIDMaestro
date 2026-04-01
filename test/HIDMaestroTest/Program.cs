@@ -891,6 +891,7 @@ class Program
                                     $@"SYSTEM\CurrentControlSet\Enum\{childInstId}", true);
                                 if (childKey != null)
                                     childKey.SetValue("FriendlyName", fixName, RegistryValueKind.String);
+                                    childKey.SetValue("DeviceDesc", fixName, RegistryValueKind.String);
                             }
                         } while (CM_Get_Sibling(out curInst, curInst, 0) == 0);
                         nameSet = true;
@@ -988,7 +989,7 @@ class Program
         FileStream? sharedFile = null;
         try
         {
-            sharedFile = new FileStream(sharedFilePath, FileMode.Create, FileAccess.ReadWrite,
+            sharedFile = new FileStream(sharedFilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite,
                 FileShare.ReadWrite, 72, FileOptions.WriteThrough);
             // Pre-allocate 72 bytes
             sharedFile.SetLength(72);

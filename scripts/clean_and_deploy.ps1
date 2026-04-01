@@ -16,10 +16,13 @@ Log "=== CLEAN + DEPLOY ==="
 
 # 1. Remove all device nodes
 Log "[1] Removing device nodes..."
-# Remove all possible HID_IG_00 and HIDCLASS instances
-for ($i = 0; $i -lt 10; $i++) {
-    pnputil /remove-device "ROOT\HID_IG_00\$($i.ToString('D4'))" /subtree 2>&1 | Out-Null
-    pnputil /remove-device "ROOT\HIDCLASS\$($i.ToString('D4'))" /subtree 2>&1 | Out-Null
+# Remove only HID_IG_00 devices that are in Error state (ghosts/broken)
+# Leave working devices alone
+Get-PnpDevice -EA SilentlyContinue | Where-Object {
+    $_.InstanceId -match "ROOT\\HID_IG_00" -and $_.Status -ne "OK"
+} | ForEach-Object {
+    Log "  Removing ghost: $($_.InstanceId) ($($_.Status))"
+    pnputil /remove-device $_.InstanceId /subtree 2>&1 | Out-Null
 }
 Start-Sleep 1
 
@@ -79,6 +82,14 @@ if ($addResult -match "Published Name:\s+(oem\d+\.inf)") {
 }
 
 Start-Sleep 1
+
+# 6.5 Pre-create shared file with open ACLs (driver reads this for input data)
+$sharedDir = "C:\ProgramData\HIDMaestro"
+if (-not (Test-Path $sharedDir)) { New-Item -Path $sharedDir -ItemType Directory -Force | Out-Null }
+$sharedFile = "$sharedDir\input.bin"
+if (-not (Test-Path $sharedFile)) { [byte[]]::new(72) | Set-Content -Path $sharedFile -Encoding Byte }
+icacls $sharedDir /grant "Everyone:(OI)(CI)F" /T 2>&1 | Out-Null
+Log "  Shared file ready: $sharedFile"
 
 # 7. Create device node
 Log "[7] Creating device node..."
