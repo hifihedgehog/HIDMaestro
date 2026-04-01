@@ -794,7 +794,11 @@ class Program
         }
         else
         {
-            Console.WriteLine("not found (will be created by deploy)");
+            // Device doesn't exist — create it
+            Console.Write("creating... ");
+            RunPowerShell("create_node.ps1");
+            Thread.Sleep(3000);
+            Console.WriteLine("OK");
         }
 
         // Set device name on root AND HID child
