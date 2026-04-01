@@ -140,16 +140,8 @@ Remove-Item "$build\hidmaestro_xusb.cat" -EA SilentlyContinue
 # Add XUSB driver to store
 pnputil /add-driver "$build\hidmaestro_xusb.inf" 2>&1 | Out-Null
 
-# Kill only the WUDFHost process hosting OUR driver (not others like BT controllers)
-# Find WUDFHost PIDs that have HIDMaestro DLLs loaded
-$wudfProcs = Get-Process WUDFHost -EA SilentlyContinue
-foreach ($proc in $wudfProcs) {
-    $modules = (tasklist /m /fi "PID eq $($proc.Id)" 2>&1) -join " "
-    if ($modules -match "hidmaestro") {
-        Log "  Killing WUDFHost PID $($proc.Id) (has HIDMaestro)"
-        Stop-Process -Id $proc.Id -Force -EA SilentlyContinue
-    }
-}
+# NOTE: NEVER kill WUDFHost. It breaks real BT controllers (Code 43).
+# Device remove/recreate via pnputil handles DLL reload without killing WUDFHost.
 Start-Sleep 2
 
 # Create XUSB device node

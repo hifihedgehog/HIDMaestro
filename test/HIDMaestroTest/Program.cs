@@ -721,16 +721,8 @@ class Program
             Console.Write($"(cleaned ghosts) ");
     }
 
-    /// <summary>
-    /// Kills only WUDFHost processes hosting HIDMaestro DLLs.
-    /// Does NOT kill WUDFHost processes for other devices (e.g., real BT controllers).
-    /// </summary>
-    static void KillOurWUDFHost()
-    {
-        var (_, output) = RunProcess("powershell.exe",
-            "-Command \"Get-Process WUDFHost -EA SilentlyContinue | ForEach-Object { $m = (tasklist /m /fi \\\"PID eq $($_.Id)\\\" 2>&1) -join ' '; if ($m -match 'hidmaestro') { Stop-Process -Id $_.Id -Force -EA SilentlyContinue; Write-Host $_.Id } }\"",
-            timeoutMs: 10_000);
-    }
+    // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
+    // (Code 43 error). Use pnputil /remove-device + recreate instead.
 
     /// <summary>
     /// Overrides xinputhid's device name on all HID child devices.
