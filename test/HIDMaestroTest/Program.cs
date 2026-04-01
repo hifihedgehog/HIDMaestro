@@ -1196,9 +1196,9 @@ class Program
         nameSetDone:
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB device for XInput support (Xbox controllers)
-        // All Microsoft Xbox controllers (VID 045E) need XUSB for XInput
-        if (profile.VendorId == 0x045E)
+        // Step 3.5: Create XUSB device for XInput (only driverMode=hid controllers)
+        // xinputhid controllers get XInput natively — no standalone XUSB needed
+        if (profile.VendorId == 0x045E && !profile.UsesXinputhid)
         {
             Console.Write("  Creating XUSB bridge... ");
             Console.WriteLine(CreateXusbDevice() ? "OK" : "already exists");
