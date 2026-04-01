@@ -932,10 +932,44 @@ class Program
             double lyNorm = 0.5 + 0.46 * Math.Cos(angle);
             uint btnMask = ((int)t % 2 == 0) ? 0x01u : 0x00u; // Toggle button A
 
-            // Combined triggers: 0.5 = centered (both released), 0.0 = LT full, 1.0 = RT full
-            // Separate triggers: 0.0 = released for each
-            double ltVal = profile.HasCombinedTriggers ? 0.5 : 0.0;
-            double rtVal = 0.0; // Not used in combined mode (only leftTrigger/Z matters)
+            // Triggers: cycle through sweep pattern (15s cycle)
+            // Phase 0-3s:  LT pulls 0→full, RT idle
+            // Phase 3-6s:  LT releases full→0, RT idle
+            // Phase 6-9s:  RT pulls 0→full, LT idle
+            // Phase 9-12s: Both pull together 0→full
+            // Phase 12-15s: Both release full→0
+            double triggerPhase = (t % 15.0);
+            double ltVal, rtVal;
+            if (profile.HasCombinedTriggers)
+            {
+                // Combined Z: 0.5=center, 0.0=LT full, 1.0=RT full
+                // Both full = cancel out = center (0.5)
+                if (triggerPhase < 3.0)
+                    ltVal = 0.5 - 0.5 * (triggerPhase / 3.0);         // center → LT full
+                else if (triggerPhase < 6.0)
+                    ltVal = 0.5 * ((triggerPhase - 3.0) / 3.0);       // LT full → center
+                else if (triggerPhase < 9.0)
+                    ltVal = 0.5 + 0.5 * ((triggerPhase - 6.0) / 3.0); // center → RT full
+                else if (triggerPhase < 12.0)
+                    ltVal = 1.0 - 0.5 * ((triggerPhase - 9.0) / 3.0); // RT full → center
+                else
+                    ltVal = 0.5; // both full = cancel = center
+                rtVal = 0.0;
+            }
+            else
+            {
+                // Separate: each 0.0=released, 1.0=full
+                if (triggerPhase < 3.0)
+                    { ltVal = triggerPhase / 3.0; rtVal = 0.0; }
+                else if (triggerPhase < 6.0)
+                    { ltVal = 1.0 - (triggerPhase - 3.0) / 3.0; rtVal = 0.0; }
+                else if (triggerPhase < 9.0)
+                    { ltVal = 0.0; rtVal = (triggerPhase - 6.0) / 3.0; }
+                else if (triggerPhase < 12.0)
+                    { ltVal = (triggerPhase - 9.0) / 3.0; rtVal = 1.0; }  // Both engage
+                else
+                    { ltVal = 1.0 - (triggerPhase - 12.0) / 3.0; rtVal = 1.0 - (triggerPhase - 12.0) / 3.0; } // Both release
+            }
 
             byte[] inputReport = reportBuilder.BuildReport(
                 leftX: lxNorm, leftY: lyNorm,

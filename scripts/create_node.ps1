@@ -25,8 +25,8 @@ public class DN5 {
         // Hardware IDs: multi-string with VID&PID first, then our match ID
         // HID class uses the first HWID to construct child IDs
         // INF matches on root\HIDMaestro (second entry)
-        // Standard hardware ID — WGI standard mapping via GameInput registry
-        string hwMulti = "root\\VID_" + vid + "&PID_" + pid + "\0" + "root\\HIDMaestro" + "\0\0";
+        // IG_00 enables xinputhid for trigger combining in DirectInput + XInput support
+        string hwMulti = "root\\VID_" + vid + "&PID_" + pid + "&IG_00" + "\0" + "root\\HIDMaestro" + "\0\0";
         byte[] hb = Encoding.Unicode.GetBytes(hwMulti);
         IntPtr ds = SetupDiCreateDeviceInfoList(ref g, IntPtr.Zero);
         if (ds == new IntPtr(-1)) return "E1:" + Marshal.GetLastWin32Error();
