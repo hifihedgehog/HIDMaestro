@@ -642,18 +642,28 @@ class Program
         }
 
         // Driver is installed — restart device to pick up new registry config.
-        // Using restart (not remove+recreate) because some descriptors crash
-        // during fresh device creation but work fine on restart.
         Console.Write("  Restarting device... ");
-        RunProcess("pnputil.exe", "/restart-device \"ROOT\\HIDCLASS\\0000\"");
+        // Find our root device dynamically
+        string? rootInstId = null;
+        for (int idx = 0; idx < 10; idx++)
+        {
+            string candidate = $@"ROOT\HID_IG_00\{idx:D4}";
+            if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+            { rootInstId = candidate; break; }
+        }
+        if (rootInstId != null)
+            RunProcess("pnputil.exe", $"/restart-device \"{rootInstId}\"");
         Thread.Sleep(3000);
         Console.WriteLine("OK");
 
-        // Set device name on root AND HID child (xinputhid overrides the child name)
+        // Set device name on root AND HID child
         Console.Write("  Setting device name... ");
         string dispName = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription") ?? "Controller";
-        SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", dispName);
-        SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", dispName);
+        if (rootInstId != null)
+        {
+            SetBusReportedDeviceDesc(rootInstId, dispName);
+            SetDeviceFriendlyName(rootInstId, dispName);
+        }
         // Find and rename the HID child (xinputhid sets it to "Xbox Wireless Controller")
         if (CM_Locate_DevNodeW(out uint rootInst, @"ROOT\HID_IG_00\0000", 0) == 0)
         {
