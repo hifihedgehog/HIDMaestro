@@ -755,9 +755,20 @@ class Program
         string vid = $"{profile.VendorId:X4}";
         string pid = $"{profile.ProductId:X4}";
         string desc = profile.ProductString;
+        // Always use HID_IG_00 enumerator for Xbox controllers
         string enumerator = profile.UsesXinputhid ? "HID_IG_00" : "HIDClass";
+
+        // PIDs in xinputhid's GIP_Hid: use actual PID in hardware ID
+        // PIDs NOT in GIP_Hid (e.g. 360's 028E): use 02FF (generic xinputhid PID)
+        // so xinputhid loads and creates XUSB interface for WGI discovery.
+        // The actual PID reported to apps comes from the driver's HID attributes.
+        string[] gipPids = { "02D1","02DD","02E3","02EA","0B00","0B0A","0B13","02FF" };
+        string hwPid = pid;
+        if (profile.UsesXinputhid && !Array.Exists(gipPids, p => p.Equals(pid, StringComparison.OrdinalIgnoreCase)))
+            hwPid = "02FF"; // Generic xinputhid PID
+
         string hwId = profile.UsesXinputhid
-            ? $"root\\VID_{vid}&PID_{pid}&IG_00"
+            ? $"root\\VID_{vid}&PID_{hwPid}&IG_00"
             : $"root\\VID_{vid}&PID_{pid}";
         string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
 
