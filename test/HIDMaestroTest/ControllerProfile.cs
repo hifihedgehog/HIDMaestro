@@ -49,8 +49,19 @@ public sealed class ControllerProfile
     [JsonPropertyName("deviceDescription")]
     public string? DeviceDescription { get; set; }
 
+    [JsonPropertyName("triggerMode")]
+    public string? TriggerMode { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
+
+    /// <summary>
+    /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
+    /// Combined: Z centers at 50%, LT pulls toward 0%, RT pulls toward 100%.
+    /// Separate: Z and Rz each go 0-100% independently.
+    /// </summary>
+    [JsonIgnore]
+    public bool HasCombinedTriggers => TriggerMode?.Equals("combined", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>Parsed VID as ushort.</summary>
     [JsonIgnore]

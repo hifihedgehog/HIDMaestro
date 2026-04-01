@@ -167,7 +167,130 @@ ReadConfigFromRegistry(
         }
     }
 
+    /* Read InputReportByteLength (REG_DWORD) — for capping SET_FEATURE→input */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"InputReportByteLength", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    if (result == ERROR_SUCCESS && regType == REG_DWORD && dwordVal > 0) {
+        ctx->InputReportByteLength = dwordVal;
+    }
+
     RegCloseKey(hKey);
+}
+
+/* ================================================================== */
+/*  Shared Memory Poll Timer                                           */
+/* ================================================================== */
+
+static void
+EvtSharedMemTimer(
+    _In_ WDFTIMER Timer)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext(WdfTimerGetParentObject(Timer));
+
+    /* Read input data from shared file (C:\ProgramData\HIDMaestro\input.bin) */
+    HANDLE hFile = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\input.bin",
+        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        /* Debug: write error to log file */
+        static LONG debugCount = 0;
+        if (InterlockedIncrement(&debugCount) <= 3) {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[] = "Timer: input.bin open FAILED\r\n";
+                DWORD dummy;
+                WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
+                CloseHandle(hLog);
+            }
+        }
+        return;
+    }
+
+    HIDMAESTRO_SHARED_INPUT shared;
+    DWORD bytesRead = 0;
+    BOOL ok = ReadFile(hFile, &shared, sizeof(shared), &bytesRead, NULL);
+    CloseHandle(hFile);
+
+    /* Debug: log first successful read */
+    {
+        static LONG successCount = 0;
+        if (InterlockedIncrement(&successCount) <= 3) {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[] = "Timer: file read OK\r\n";
+                DWORD dummy;
+                WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
+                CloseHandle(hLog);
+            }
+        }
+    }
+
+    if (!ok || bytesRead < 8) {
+        static LONG debugCount2 = 0;
+        if (InterlockedIncrement(&debugCount2) <= 3) {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[] = "Timer: ReadFile failed\r\n";
+                DWORD dummy;
+                int len = sizeof(msg) - 1;
+                WriteFile(hLog, msg, len, &dummy, NULL);
+                CloseHandle(hLog);
+            }
+        }
+        return;
+    }
+
+    ULONG seqNo = shared.SeqNo;
+    if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
+    ctx->SharedMemSeqNo = seqNo;
+
+    /* Build input report from shared file data */
+    UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
+    ULONG dataLen = shared.DataSize;
+
+    /* Check if descriptor uses Report IDs */
+    BOOLEAN hasReportId = FALSE;
+    for (ULONG i = 0; i < ctx->ReportDescriptorSize - 1; i++) {
+        if (ctx->ReportDescriptor[i] == 0x85 && (i == 0 || ctx->ReportDescriptor[i-1] != 0x09)) { hasReportId = TRUE; break; }
+    }
+
+    /* Cap data to input report size */
+    ULONG maxData;
+    if (hasReportId) {
+        maxData = ctx->InputReportByteLength > 1 ? ctx->InputReportByteLength - 1 : 16;
+    } else {
+        maxData = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+    }
+    if (dataLen > maxData) dataLen = maxData;
+    if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
+
+    ULONG inputSize;
+    if (hasReportId) {
+        inputReport[0] = 0x01; /* Input Report ID */
+        RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
+        inputSize = dataLen + 1;
+    } else {
+        /* No Report IDs (GIP format) — data starts at byte 0 */
+        RtlCopyMemory(inputReport, shared.Data, dataLen);
+        inputSize = dataLen;
+    }
+
+    /* Complete pending READ_REPORT if available */
+    WDFREQUEST pendingRead;
+    if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
+        WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+    } else {
+        /* No pending read — store for later */
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
+        ctx->InputReportSize = inputSize;
+        ctx->InputReportReady = TRUE;
+        WdfWaitLockRelease(ctx->InputLock);
+    }
 }
 
 /* ================================================================== */
@@ -202,6 +325,18 @@ EvtDeviceAdd(
     WDF_IO_QUEUE_CONFIG     queueConfig;
 
     UNREFERENCED_PARAMETER(Driver);
+
+    /* EARLIEST DEBUG - verify EvtDeviceAdd is called */
+    {
+        HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+            FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+        if (hLog != INVALID_HANDLE_VALUE) {
+            char msg[] = "EvtDeviceAdd: ENTERED\r\n";
+            DWORD dummy;
+            WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
+            CloseHandle(hLog);
+        }
+    }
 
     /*
      * Detect device mode: HID minidriver (filter) vs XUSB standalone (function).
@@ -276,6 +411,9 @@ EvtDeviceAdd(
     ctx->HidDeviceAttributes.ProductID     = 0x028E;  /* Xbox 360 Controller */
     ctx->HidDeviceAttributes.VersionNumber = 0x0114;
 
+    /* Default input report byte length (Report ID + data) */
+    ctx->InputReportByteLength = 17; /* safe default */
+
     /* Default product string */
     {
         static const WCHAR defaultStr[] = L"Controller (XBOX 360 For Windows)";
@@ -320,8 +458,56 @@ EvtDeviceAdd(
     WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
                               &ctx->ManualQueue);
+    if (!NT_SUCCESS(status)) return status;
 
-    return status;
+    /* Shared file for data injection (bypasses upper filter drivers) */
+    ctx->SharedMemHandle = NULL;
+    ctx->SharedMemPtr = NULL;
+    ctx->SharedMemSeqNo = 0;
+
+    /* Debug: verify we reach this point */
+    {
+        HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+            FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+        if (hLog != INVALID_HANDLE_VALUE) {
+            char msg[] = "EvtDeviceAdd: reached timer section\r\n";
+            DWORD dummy;
+            WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
+            CloseHandle(hLog);
+        }
+    }
+
+    /* Poll timer: reads shared file every 4ms (~250Hz) for data injection */
+    {
+        WDF_TIMER_CONFIG timerConfig;
+        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerConfig, EvtSharedMemTimer, 4);
+        WDF_OBJECT_ATTRIBUTES timerAttrs;
+        WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
+        timerAttrs.ParentObject = device;
+        status = WdfTimerCreate(&timerConfig, &timerAttrs, &ctx->PollTimer);
+        /* Debug: log timer creation result */
+        {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[64];
+                DWORD dummy;
+                if (NT_SUCCESS(status)) {
+                    char ok[] = "Timer created OK, starting...\r\n";
+                    WriteFile(hLog, ok, sizeof(ok)-1, &dummy, NULL);
+                } else {
+                    char fail[] = "Timer creation FAILED\r\n";
+                    WriteFile(hLog, fail, sizeof(fail)-1, &dummy, NULL);
+                }
+                CloseHandle(hLog);
+            }
+        }
+        if (NT_SUCCESS(status)) {
+            WdfTimerStart(ctx->PollTimer, WDF_REL_TIMEOUT_IN_MS(100));
+        }
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /* ================================================================== */
@@ -468,17 +654,31 @@ EvtIoDeviceControl(
         status = WdfRequestRetrieveInputBuffer(Request, 1, &featureBuf, &featureSize);
         if (!NT_SUCCESS(status)) break;
 
-        /* Build input report: Report ID 1 + feature data bytes */
+        /* Build input report: Report ID 1 + feature data (skip feature Report ID byte) */
         {
             UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
             ULONG inputSize;
+            PUCHAR featureData = (PUCHAR)featureBuf;
+            ULONG  featureDataLen = (ULONG)featureSize;
+
+            /* The HID class includes the Feature Report ID as byte 0 — skip it */
+            if (featureDataLen > 0) {
+                featureData++;
+                featureDataLen--;
+            }
 
             inputReport[0] = 0x01; /* Input Report ID */
-            inputSize = (ULONG)featureSize;
-            if (inputSize > HIDMAESTRO_MAX_REPORT_SIZE - 1)
-                inputSize = HIDMAESTRO_MAX_REPORT_SIZE - 1;
-            RtlCopyMemory(inputReport + 1, featureBuf, inputSize);
-            inputSize += 1;
+
+            /* Cap data to match the declared input report size */
+            {
+                ULONG maxData = ctx->InputReportByteLength > 1
+                    ? ctx->InputReportByteLength - 1 : 16;
+                if (featureDataLen > maxData)
+                    featureDataLen = maxData;
+            }
+
+            RtlCopyMemory(inputReport + 1, featureData, featureDataLen);
+            inputSize = featureDataLen + 1;
 
             if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
                 NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
@@ -497,22 +697,81 @@ EvtIoDeviceControl(
     }
 
     case IOCTL_UMDF_HID_GET_FEATURE:
-    case IOCTL_UMDF_HID_SET_OUTPUT_REPORT:
         status = STATUS_NOT_SUPPORTED;
         break;
 
+    case IOCTL_UMDF_HID_SET_OUTPUT_REPORT: {
+        /*
+         * Same as SET_FEATURE: user-mode sends output report with input data.
+         * We strip the Report ID and deliver as Input Report ID 1.
+         * Using Output Report instead of Feature Report avoids phantom axes
+         * in Chrome's Gamepad API.
+         */
+        PVOID       outBuf;
+        size_t      outBufSize;
+        WDFREQUEST  pendingRead2;
+
+        status = WdfRequestRetrieveInputBuffer(Request, 1, &outBuf, &outBufSize);
+        if (!NT_SUCCESS(status)) break;
+
+        {
+            UCHAR inputReport2[HIDMAESTRO_MAX_REPORT_SIZE];
+            ULONG inputSize2;
+            PUCHAR outData = (PUCHAR)outBuf;
+            ULONG  outDataLen = (ULONG)outBufSize;
+
+            /* Skip the Output Report ID byte */
+            if (outDataLen > 0) { outData++; outDataLen--; }
+
+            inputReport2[0] = 0x01; /* Input Report ID */
+
+            /* Cap to declared input report size */
+            {
+                ULONG maxData = ctx->InputReportByteLength > 1
+                    ? ctx->InputReportByteLength - 1 : 16;
+                if (outDataLen > maxData) outDataLen = maxData;
+            }
+
+            RtlCopyMemory(inputReport2 + 1, outData, outDataLen);
+            inputSize2 = outDataLen + 1;
+
+            if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead2))) {
+                NTSTATUS cs = RequestCopyFromBuffer(pendingRead2, inputReport2, inputSize2);
+                WdfRequestComplete(pendingRead2, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            } else {
+                WdfWaitLockAcquire(ctx->InputLock, NULL);
+                RtlCopyMemory(ctx->InputReport, inputReport2, inputSize2);
+                ctx->InputReportSize = inputSize2;
+                ctx->InputReportReady = TRUE;
+                WdfWaitLockRelease(ctx->InputLock);
+            }
+        }
+
+        status = STATUS_SUCCESS;
+        break;
+    }
+
     case IOCTL_UMDF_HID_GET_INPUT_REPORT: {
-        /* Return the latest input report for polled reading (browser Gamepad API) */
+        /* Return the latest input report for polled reading */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
         if (ctx->InputReportReady) {
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
         } else {
-            /* No data yet — return zeros with Report ID */
-            UCHAR emptyReport[16];
+            /* No data yet — return zeros matching descriptor format */
+            UCHAR emptyReport[HIDMAESTRO_MAX_REPORT_SIZE];
             RtlZeroMemory(emptyReport, sizeof(emptyReport));
-            emptyReport[0] = 0x01; /* Report ID 1 */
-            status = RequestCopyFromBuffer(Request, emptyReport, sizeof(emptyReport));
+            ULONG emptySize = ctx->InputReportByteLength;
+            /* Check if descriptor uses Report IDs */
+            BOOLEAN hasIds = FALSE;
+            for (ULONG i = 0; i < ctx->ReportDescriptorSize - 1; i++) {
+                if (ctx->ReportDescriptor[i] == 0x85) { hasIds = TRUE; break; }
+            }
+            if (hasIds) {
+                emptyReport[0] = 0x01; /* Report ID 1 */
+            }
+            if (emptySize == 0) emptySize = 17; /* safe default for GIP */
+            status = RequestCopyFromBuffer(Request, emptyReport, emptySize);
         }
         WdfWaitLockRelease(ctx->InputLock);
         break;

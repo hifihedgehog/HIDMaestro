@@ -16,7 +16,7 @@ Log "=== CLEAN + DEPLOY ==="
 
 # 1. Remove all device nodes
 Log "[1] Removing device nodes..."
-pnputil /remove-device "ROOT\HIDCLASS\0000" /subtree 2>&1 | Out-Null
+pnputil /remove-device "ROOT\HID_IG_00\0000" /subtree 2>&1 | Out-Null
 pnputil /remove-device "ROOT\HIDCLASS\0001" /subtree 2>&1 | Out-Null
 Start-Sleep 1
 
@@ -84,7 +84,7 @@ Start-Sleep 3
 
 # 8. Verify
 Log "[8] Verifying..."
-$devResult = pnputil /enum-devices /instanceid "ROOT\HIDCLASS\0000" 2>&1 | Out-String
+$devResult = pnputil /enum-devices /instanceid "ROOT\HID_IG_00\0000" 2>&1 | Out-String
 Log $devResult
 
 if ($devResult -match "Status:\s+Started") {

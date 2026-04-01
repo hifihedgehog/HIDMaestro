@@ -159,7 +159,7 @@ class Program
     static extern uint CM_Get_Device_IDW(uint dnDevInst, byte[] buffer, uint bufferLen, uint ulFlags);
 
     /// <summary>
-    /// Finds the current HID child of ROOT\HIDCLASS\0000, adds xinputhid as an
+    /// Finds the current HID child of ROOT\HID_IG_00\0000, adds xinputhid as an
     /// upper filter in its persistent registry, and restarts the device.
     /// Returns true if successful.
     /// </summary>
@@ -233,6 +233,45 @@ class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool HidD_GetAttributes(SafeFileHandle HidDeviceObject,
         ref HIDD_ATTRIBUTES Attributes);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool HidD_GetPreparsedData(SafeFileHandle HidDeviceObject, out IntPtr PreparsedData);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool HidD_FreePreparsedData(IntPtr PreparsedData);
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetCaps(IntPtr PreparsedData, out HIDP_CAPS Capabilities);
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetValueCaps(int ReportType, [Out] byte[] ValueCaps, ref ushort ValueCapsLength, IntPtr PreparsedData);
+
+    [DllImport("hid.dll")]
+    static extern int HidP_GetButtonCaps(int ReportType, [Out] byte[] ButtonCaps, ref ushort ButtonCapsLength, IntPtr PreparsedData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct HIDP_CAPS
+    {
+        public ushort Usage;
+        public ushort UsagePage;
+        public ushort InputReportByteLength;
+        public ushort OutputReportByteLength;
+        public ushort FeatureReportByteLength;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)]
+        public ushort[] Reserved;
+        public ushort NumberLinkCollectionNodes;
+        public ushort NumberInputButtonCaps;
+        public ushort NumberInputValueCaps;
+        public ushort NumberInputDataIndices;
+        public ushort NumberOutputButtonCaps;
+        public ushort NumberOutputValueCaps;
+        public ushort NumberOutputDataIndices;
+        public ushort NumberFeatureButtonCaps;
+        public ushort NumberFeatureValueCaps;
+        public ushort NumberFeatureDataIndices;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct HIDD_ATTRIBUTES
@@ -308,7 +347,7 @@ class Program
         }
     }
 
-    static readonly string[] ElevatedCommands = { "emulate", "xbox", "ds5", "cleanup", "setname" };
+    static readonly string[] ElevatedCommands = { "emulate", "xbox", "ds5", "cleanup", "setname", "readtest" };
 
     static int Main(string[] args)
     {
@@ -346,6 +385,9 @@ class Program
             "info"    => ShowProfile(args.Length > 1 ? args[1] : ""),
             "cleanup" => RunCleanup(),
             "setname" => SetNameTest(args.Length > 1 ? args[1] : "Controller"),
+            "readtest" => ReadTest(),
+            "dump"     => DumpControllers(),
+            "wgi"      => TestWgi(),
             _         => Error($"Unknown command: {args[0]}")
         };
     }
@@ -377,9 +419,139 @@ class Program
         0x0E, 0xB1, 0x02, 0xC0,
     };
 
+    /// <summary>
+    /// Adds a vendor Feature Report (ID 0xFE, 64 bytes) to a profile descriptor
+    /// so we can inject input via HidD_SetFeature. Only adds if the descriptor
+    /// has Report IDs but no existing Feature Report with ID 0xFE.
+    /// </summary>
+    /// <summary>
+    /// Parse HID descriptor to compute input report byte length for Report ID 1.
+    /// Returns total bytes including the Report ID byte.
+    /// </summary>
+    static int ComputeInputReportByteLength(byte[] desc)
+    {
+        int totalBits = 0;
+        int reportSize = 0;
+        int reportCount = 0;
+        int currentReportId = 0;
+        bool hasReportIds = false;
+
+        for (int i = 0; i < desc.Length; )
+        {
+            byte prefix = desc[i];
+            int bSize = prefix & 0x03;
+            if (bSize == 3) bSize = 4;
+            int bType = (prefix >> 2) & 0x03;
+            int bTag = (prefix >> 4) & 0x0F;
+
+            int value = 0;
+            if (i + bSize < desc.Length)
+            {
+                for (int j = 0; j < bSize; j++)
+                    value |= desc[i + 1 + j] << (8 * j);
+            }
+
+            if (bType == 1) // Global
+            {
+                if (bTag == 7) reportSize = value;    // Report Size
+                if (bTag == 9) reportCount = value;   // Report Count
+                if (bTag == 8) { currentReportId = value; hasReportIds = true; } // Report ID
+            }
+            else if (bType == 0) // Main
+            {
+                if (bTag == 8) // Input
+                {
+                    if (!hasReportIds || currentReportId == 1)
+                        totalBits += reportSize * reportCount;
+                }
+            }
+
+            i += 1 + bSize;
+        }
+
+        int totalBytes = (totalBits + 7) / 8;
+        return hasReportIds ? totalBytes + 1 : totalBytes; // +1 for Report ID byte
+    }
+
+    /// <summary>
+    /// Adds a vendor Output Report (ID 0x02) to inject input data via HidD_SetOutputReport.
+    /// Output Reports are NOT enumerated as axes by Chrome's Gamepad API (unlike Feature Reports).
+    /// Sized to match the input report data exactly (15 bytes for Xbox).
+    /// </summary>
+    static byte[] AddOutputReport(byte[] desc)
+    {
+        // Check if already has our output report
+        for (int i = 0; i < desc.Length - 1; i++)
+            if (desc[i] == 0x85 && desc[i+1] == 0x02) return desc;
+
+        bool hasIds = false;
+        for (int i = 0; i < desc.Length - 1; i++)
+            if (desc[i] == 0x85) { hasIds = true; break; }
+        if (!hasIds) return desc;
+
+        // Compute input report data size to match our output report
+        int inputBytes = ComputeInputReportByteLength(desc);
+        int dataBytes = inputBytes > 1 ? inputBytes - 1 : 15; // Subtract Report ID byte
+
+        // Output Report: ID 0x02, exactly inputDataSize vendor bytes
+        byte[] output = {
+            0x85, 0x02,                             // Report ID (2)
+            0x06, 0x00, 0xFF,                       // Usage Page (Vendor)
+            0x09, 0x02,                             // Usage (0x02)
+            0x15, 0x00, 0x26, 0xFF, 0x00,           // Logical 0-255
+            0x75, 0x08,                             // Report Size (8)
+            0x95, (byte)dataBytes,                  // Report Count = input data size
+            0x91, 0x02                              // OUTPUT (Data, Var, Abs)
+        };
+
+        // Insert before the LAST 0xC0
+        int lastC0 = desc.Length - 1;
+        while (lastC0 >= 0 && desc[lastC0] != 0xC0) lastC0--;
+        if (lastC0 < 0) return desc;
+
+        var result = new byte[desc.Length + output.Length];
+        Array.Copy(desc, 0, result, 0, lastC0);
+        Array.Copy(output, 0, result, lastC0, output.Length);
+        result[lastC0 + output.Length] = 0xC0;
+        return result;
+    }
+
+    static byte[] AddFeatureReport(byte[] desc)
+    {
+        // Check if already has our feature report (ID 0x02)
+        for (int i = 0; i < desc.Length - 1; i++)
+            if (desc[i] == 0x85 && desc[i+1] == 0x02) return desc;
+
+        // Check if descriptor has Report IDs (required — can't mix ID/no-ID)
+        bool hasIds = false;
+        for (int i = 0; i < desc.Length - 1; i++)
+            if (desc[i] == 0x85) { hasIds = true; break; }
+        if (!hasIds) return desc; // Can't add Feature Report to no-ID descriptor
+
+        // Use an Output Report (not Feature Report) as the data channel.
+        // Feature Reports create phantom axes in Chrome's Gamepad API.
+        // Output Report ID 0x02 with vendor data — Chrome ignores Output items.
+        byte[] feature = {
+            0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01,
+            0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08,
+            0x95, 0x40, 0x91, 0x02  // 0x91 = Output (not 0xB1 = Feature)
+        };
+
+        // Insert before the LAST 0xC0 (outermost End Collection)
+        int lastC0 = desc.Length - 1;
+        while (lastC0 >= 0 && desc[lastC0] != 0xC0) lastC0--;
+        if (lastC0 < 0) return desc;
+
+        var result = new byte[desc.Length + feature.Length];
+        Array.Copy(desc, 0, result, 0, lastC0);
+        Array.Copy(feature, 0, result, lastC0, feature.Length);
+        result[lastC0 + feature.Length] = 0xC0; // Re-add End Collection
+        return result;
+    }
+
     // ── Registry config ──
 
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null)
+    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
         // Debug: log what we're writing
@@ -390,30 +562,16 @@ class Program
         key.SetValue("VersionNumber", (int)ver, RegistryValueKind.DWord);
         if (productString != null)
             key.SetValue("ProductString", productString, RegistryValueKind.String);
+        if (inputReportByteLength > 0)
+            key.SetValue("InputReportByteLength", inputReportByteLength, RegistryValueKind.DWord);
         // DeviceDescription = what Device Manager / FriendlyName shows
         string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Register OEM joystick name so joy.cpl/DirectInput shows the correct name.
-        // DirectInput reads OEMName from BOTH HKLM and HKCU — HKCU takes priority.
-        {
-            string oemSubKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
-            byte[] oemData = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-            // Write to HKLM
-            using (var oem = Registry.LocalMachine.CreateSubKey(oemSubKey))
-            {
-                oem.SetValue("OEMName", displayName, RegistryValueKind.String);
-                oem.SetValue("OEMData", oemData, RegistryValueKind.Binary);
-            }
-
-            // Write to HKCU (takes priority for DirectInput/joy.cpl)
-            using (var oem = Registry.CurrentUser.CreateSubKey(oemSubKey))
-            {
-                oem.SetValue("OEMName", displayName, RegistryValueKind.String);
-                oem.SetValue("OEMData", oemData, RegistryValueKind.Binary);
-            }
-        }
+        // NOTE: Do NOT write OEMName to the Joystick\OEM registry key.
+        // That key is indexed by VID/PID and affects ALL devices with the same
+        // VID/PID, including real physical controllers. The device name is set
+        // via CM_Set_DevNode_PropertyW on our specific device node instead.
     }
 
     // ── Process runner ──
@@ -477,23 +635,19 @@ class Program
             return output.Contains("Deploy Complete");
         }
 
-        // Driver is installed — just remove and recreate device node
-        // (EvtDeviceAdd re-reads registry config on creation)
-        Console.Write("  Recreating device node... ");
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
-        // Clean up ghost HID children from previous sessions
-        RunPowerShell("cleanup_ghosts.ps1");
-        Thread.Sleep(1000);
-        RunPowerShell("create_node.ps1");
+        // Driver is installed — restart device to pick up new registry config.
+        // Using restart (not remove+recreate) because some descriptors crash
+        // during fresh device creation but work fine on restart.
+        Console.Write("  Restarting device... ");
+        RunProcess("pnputil.exe", "/restart-device \"ROOT\\HIDCLASS\\0000\"");
         Thread.Sleep(3000);
         Console.WriteLine("OK");
 
-        // Set device name properties so Device Manager / joy.cpl shows correct name
+        // Set device name
         Console.Write("  Setting device name... ");
         string dispName = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription") ?? "Controller";
-        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", dispName);
-        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", dispName);
+        SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", dispName);
+        SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", dispName);
         Console.WriteLine("OK");
 
         return true;
@@ -553,14 +707,20 @@ class Program
                     var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
                     if (HidD_GetAttributes(handle, ref attrs))
                     {
-                        // Check for our device by VID/PID match OR by HIDCLASS path (our driver)
-                        bool isOurs = (attrs.VendorID == targetVid && attrs.ProductID == targetPid)
-                            || path.Contains("HIDCLASS", StringComparison.OrdinalIgnoreCase);
-
-                        if (isOurs)
+                        // Prefer our HIDMaestro device (HIDCLASS or IG_ in path) over real hardware
+                        bool isOurDevice = path.Contains("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                            || (path.Contains("IG_", StringComparison.OrdinalIgnoreCase)
+                                && path.Contains("root", StringComparison.OrdinalIgnoreCase));
+                        if (isOurDevice)
                         {
                             Console.WriteLine($"  Found: VID={attrs.VendorID:X4} PID={attrs.ProductID:X4} @ {path}");
                             return handle;
+                        }
+                        if (attrs.VendorID == targetVid && attrs.ProductID == targetPid)
+                        {
+                            // Real hardware — skip
+                            handle.Dispose();
+                            continue;
                         }
                     }
 
@@ -613,17 +773,37 @@ class Program
         Console.WriteLine($"  Profile:  {profile.Id}");
         Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
         Console.WriteLine($"  Product:  {profile.ProductString}");
-        // Use universal descriptor for now — works with joy.cpl and XInput.
-        // TODO: use profile-specific descriptors for browser Gamepad API compatibility
-        byte[] descriptor = UniversalDescriptor;
+        // Use profile descriptor if it has Report IDs (browser-compatible).
+        // Descriptors without Report IDs (like GIP 262-byte) cause HID validation failure.
+        byte[] descriptor;
         bool useNativeHID = false;
-        Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal)\n");
+        byte[]? profileDesc = profile.HasDescriptor ? profile.GetDescriptorBytes() : null;
+        bool descHasReportIds = false;
+        if (profileDesc != null)
+            for (int i = 0; i < profileDesc.Length - 1; i++)
+                if (profileDesc[i] == 0x85) { descHasReportIds = true; break; }
+
+        if (profileDesc != null)
+        {
+            // Use the profile descriptor as-is. Data injection uses shared file,
+            // so no output/feature report injection needed.
+            descriptor = profileDesc;
+            useNativeHID = true;
+            Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (native)\n");
+        }
+        else
+        {
+            descriptor = UniversalDescriptor;
+            Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal)\n");
+        }
 
         // Step 1: Write descriptor to registry FIRST
-        Console.Write("  Writing profile to registry... ");
+        int inputReportLen = ComputeInputReportByteLength(descriptor);
+        Console.Write($"  Writing profile to registry (InputReport={inputReportLen}B)... ");
         WriteConfig(descriptor, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
-            deviceDescription: profile.DeviceDescription);
+            deviceDescription: profile.DeviceDescription,
+            inputReportByteLength: inputReportLen);
         Console.WriteLine("OK");
 
         // Step 2: Build, sign, install driver + create device node
@@ -637,13 +817,26 @@ class Program
         using var h = OpenHidDevice(profile.VendorId, profile.ProductId);
         if (h == null)
         {
-            Console.WriteLine("FAILED");
-            Console.WriteLine("  Device not found. Check Device Manager.");
-            return 1;
+            Console.WriteLine("SKIPPED (xinputhid blocks direct access — XInput-only mode)");
         }
 
-        // XInput is handled by the separate XUSB device (HIDMaestroXUSB.dll)
-        // — no need to inject xinputhid or modify the HID device
+        // Query HID caps for report sizes
+        ushort hidFeatureReportLen = 0;
+        ushort hidInputReportLen = 0;
+        if (h != null && HidD_GetPreparsedData(h, out IntPtr ppd))
+        {
+            HidP_GetCaps(ppd, out HIDP_CAPS caps);
+            hidInputReportLen = caps.InputReportByteLength;
+            hidFeatureReportLen = caps.FeatureReportByteLength;
+            Console.WriteLine($"  HID Caps: Input={caps.InputReportByteLength}B  Output={caps.OutputReportByteLength}B  Feature={caps.FeatureReportByteLength}B");
+            Console.WriteLine($"            Buttons: In={caps.NumberInputButtonCaps} Out={caps.NumberOutputButtonCaps} Feat={caps.NumberFeatureButtonCaps}");
+            Console.WriteLine($"            Values:  In={caps.NumberInputValueCaps} Out={caps.NumberOutputValueCaps} Feat={caps.NumberFeatureValueCaps}");
+            HidD_FreePreparsedData(ppd);
+        }
+        else if (h == null)
+        {
+            Console.WriteLine("  HID Caps: N/A (XInput-only mode)");
+        }
 
         // Open the XUSB device for XInput input injection
         Console.Write("  Opening XUSB device... ");
@@ -675,22 +868,48 @@ class Program
         }
         Console.WriteLine(xh != null ? "OK" : "not found (XInput won't get live data)");
 
-        Console.WriteLine($"\n  Sending input ({(useNativeHID ? "WriteFile" : "SetFeature")}) + XInput. Ctrl+C to stop.\n");
+        // Parse the descriptor to build a generic input report packer
+        // Parse the ORIGINAL profile descriptor (before Feature Report injection)
+        var reportBuilder = HidReportBuilder.Parse(profileDesc ?? descriptor);
+        reportBuilder.PrintLayout();
 
-        // HID report buffer
-        byte[] report;
-        if (useNativeHID)
+        Console.WriteLine("\n  Sending input via SetFeature + XInput. Ctrl+C to stop.\n");
+
+        // Feature report: Report ID 0x02 + enough data for the input report
+        // Output Report buffer
+        int reportBufSize = reportBuilder.InputReportByteSize;
+        if (h != null)
         {
-            // Native descriptor: no Report IDs, send raw via WriteFile
-            // The GIP descriptor input is variable, but we'll send the standard
-            // gamepad data that the descriptor defines
-            report = new byte[16]; // enough for basic gamepad data
+            if (HidD_GetPreparsedData(h, out IntPtr ppd2))
+            {
+                HidP_GetCaps(ppd2, out HIDP_CAPS caps2);
+                if (caps2.OutputReportByteLength > 0)
+                    reportBufSize = caps2.OutputReportByteLength;
+                HidD_FreePreparsedData(ppd2);
+            }
         }
-        else
+        Console.WriteLine($"  Report buffer: {reportBufSize} bytes");
+
+        // Shared memory for data injection (bypasses xinputhid/HidHide upper filters)
+        // Shared file for data injection (driver reads via timer)
+        // Using a temp file instead of Global\ shared memory to avoid privilege issues
+        string sharedFilePath = @"C:\ProgramData\HIDMaestro\input.bin";
+        Directory.CreateDirectory(Path.GetDirectoryName(sharedFilePath)!);
+        IntPtr sharedMemPtr = IntPtr.Zero;
+        int sharedMemSeqNo = 0;
+        FileStream? sharedFile = null;
+        try
         {
-            // Universal descriptor: Feature Report ID 2 + 14 bytes
-            report = new byte[15];
-            report[0] = 0x02;
+            sharedFile = new FileStream(sharedFilePath, FileMode.Create, FileAccess.ReadWrite,
+                FileShare.ReadWrite, 72, FileOptions.WriteThrough);
+            // Pre-allocate 72 bytes
+            sharedFile.SetLength(72);
+            sharedFile.Flush();
+            Console.WriteLine("  Shared file: OK");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Shared file: FAILED ({ex.Message})");
         }
 
         // XUSB input: piggybacked on GET_STATE
@@ -700,55 +919,51 @@ class Program
 
         var sw = Stopwatch.StartNew();
         int count = 0;
+        int failCount = 0;
 
         while (!_cts.Token.IsCancellationRequested)
         {
             double t = sw.Elapsed.TotalSeconds;
             double angle = t * Math.PI * 2 * 0.5;
 
-            // Pack gamepad input — format depends on descriptor type
-            int d = useNativeHID ? 0 : 1; // native: no Report ID prefix; universal: skip ID
+            // Pack gamepad input — data starts after the Report ID byte
+            // Generic descriptor-driven input packing (works for ANY gamepad descriptor)
+            double lxNorm = 0.5 + 0.46 * Math.Sin(angle);  // Left stick circles
+            double lyNorm = 0.5 + 0.46 * Math.Cos(angle);
+            uint btnMask = ((int)t % 2 == 0) ? 0x01u : 0x00u; // Toggle button A
 
-            // Left stick: circles
-            ushort lx = (ushort)(32768 + (int)(30000 * Math.Sin(angle)));
-            ushort ly = (ushort)(32768 + (int)(30000 * Math.Cos(angle)));
-            report[d+0] = (byte)(lx & 0xFF); report[d+1] = (byte)(lx >> 8);
-            report[d+2] = (byte)(ly & 0xFF); report[d+3] = (byte)(ly >> 8);
+            // Combined triggers: 0.5 = centered (both released), 0.0 = LT full, 1.0 = RT full
+            // Separate triggers: 0.0 = released for each
+            double ltVal = profile.HasCombinedTriggers ? 0.5 : 0.0;
+            double rtVal = 0.0; // Not used in combined mode (only leftTrigger/Z matters)
 
-            // Right stick: centered (32768)
-            report[d+4] = 0x00; report[d+5] = 0x80;
-            report[d+6] = 0x00; report[d+7] = 0x80;
+            byte[] inputReport = reportBuilder.BuildReport(
+                leftX: lxNorm, leftY: lyNorm,
+                rightX: 0.5, rightY: 0.5,
+                leftTrigger: ltVal, rightTrigger: rtVal,
+                hatValue: 0, buttonMask: btnMask);
 
-            // Triggers: zero
-            report[d+8] = 0x00; report[d+9] = 0x00;
-            report[d+10] = 0x00; report[d+11] = 0x00;
-
-            // Buttons: toggle A every second
-            int btns = ((int)t % 2 == 0) ? 0x01 : 0x00;
-            if (report.Length > d + 12) report[d+12] = (byte)btns;
-
-            // Hat: neutral
-            if (report.Length > d + 13) report[d+13] = 0x00;
-
-            // Send to HID device
-            bool ok;
-            if (useNativeHID)
+            // Write input data to shared file (driver reads via timer)
+            if (sharedFile != null)
             {
-                // Native descriptor: WriteFile → IOCTL_HID_WRITE_REPORT → driver stores as input
-                ok = WriteFile(h, report, (uint)report.Length, out _, IntPtr.Zero);
+                int dataStart = reportBuilder.InputReportId != 0 ? 1 : 0;
+                int dataLen = Math.Min(inputReport.Length - dataStart, 64);
+                sharedMemSeqNo++;
+                sharedFile.Seek(0, SeekOrigin.Begin);
+                // Layout: SeqNo(4) + DataSize(4) + Data(64) = 72 bytes
+                sharedFile.Write(BitConverter.GetBytes(sharedMemSeqNo));
+                sharedFile.Write(BitConverter.GetBytes(dataLen));
+                sharedFile.Write(inputReport, dataStart, dataLen);
+                sharedFile.Flush();
             }
-            else
-            {
-                // Universal descriptor: HidD_SetFeature(Report ID 2) → driver builds input
-                ok = HidD_SetFeature(h, report, (uint)report.Length);
-            }
+            bool ok = true;
 
             // Send to XUSB device (XInput) — piggyback on GET_STATE
             if (xh != null)
             {
-                int copyOfs = useNativeHID ? 0 : 1;
-                int copyLen = Math.Min(14, report.Length - copyOfs);
-                Array.Copy(report, copyOfs, xusbInput, 3, copyLen);
+                int copyOfs = reportBuilder.InputReportId != 0 ? 1 : 0;
+                int copyLen = Math.Min(14, inputReport.Length - copyOfs);
+                Array.Copy(inputReport, copyOfs, xusbInput, 3, Math.Min(copyLen, xusbInput.Length - 3));
                 DeviceIoControl(xh, 0x8000E00C, xusbInput, (uint)xusbInput.Length,
                     xusbOutput, (uint)xusbOutput.Length, out _, IntPtr.Zero);
             }
@@ -756,9 +971,14 @@ class Program
             if (!ok)
             {
                 int err = Marshal.GetLastWin32Error();
-                if (count == 0)
+                failCount++;
+                if (failCount == 1)
                     Console.Error.WriteLine($"  HID send failed: {err} (0x{err:X})");
-                if (count > 3) break;
+                if (failCount > 100) break; // Only exit after 100 consecutive failures
+            }
+            else
+            {
+                failCount = 0;
             }
 
             count++;
@@ -1077,16 +1297,16 @@ class Program
 
         // Set FriendlyName on root
         Console.Write("  Setting FriendlyName on root... ");
-        SetDeviceFriendlyName(@"ROOT\HIDCLASS\0000", name);
+        SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", name);
         Console.WriteLine();
 
         // Set BusReportedDeviceDesc on root
         Console.Write("  Setting BusReportedDeviceDesc on root... ");
-        SetBusReportedDeviceDesc(@"ROOT\HIDCLASS\0000", name);
+        SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", name);
         Console.WriteLine();
 
         // Verify
-        uint locResult = CM_Locate_DevNodeW(out uint devInst, @"ROOT\HIDCLASS\0000", 0);
+        uint locResult = CM_Locate_DevNodeW(out uint devInst, @"ROOT\HID_IG_00\0000", 0);
         Console.WriteLine($"  Locate root: result={locResult} inst={devInst}");
 
         if (locResult == 0)
@@ -1108,6 +1328,261 @@ class Program
 
         return 0;
     }
+
+    // ── Read Test ──
+
+    static int ReadTest()
+    {
+        Console.WriteLine("-- HID Read Test --\n");
+        ushort vid = 0x045E, pid = 0x0B13;
+
+        using var h = OpenHidDevice(vid, pid);
+        if (h == null) return Error("Device not found");
+
+        if (HidD_GetPreparsedData(h, out IntPtr ppd))
+        {
+            HidP_GetCaps(ppd, out HIDP_CAPS caps);
+            Console.WriteLine($"  Input={caps.InputReportByteLength}B  Feature={caps.FeatureReportByteLength}B");
+            HidD_FreePreparsedData(ppd);
+        }
+
+        // Try to read one input report (blocking, will wait for data)
+        Console.Write("  Reading input report (waiting for data)... ");
+        byte[] buf = new byte[17];
+        bool ok = ReadFile(h, buf, (uint)buf.Length, out uint bytesRead, IntPtr.Zero);
+        if (ok)
+        {
+            Console.WriteLine($"OK ({bytesRead} bytes)");
+            Console.Write("  Data: ");
+            for (int i = 0; i < (int)bytesRead; i++)
+                Console.Write($"{buf[i]:X2} ");
+            Console.WriteLine();
+
+            // Parse axes
+            if (bytesRead >= 9)
+            {
+                ushort lx = (ushort)(buf[1] | (buf[2] << 8));
+                ushort ly = (ushort)(buf[3] | (buf[4] << 8));
+                ushort rx = (ushort)(buf[5] | (buf[6] << 8));
+                ushort ry = (ushort)(buf[7] | (buf[8] << 8));
+                Console.WriteLine($"  LX={lx} LY={ly} RX={rx} RY={ry}");
+            }
+        }
+        else
+        {
+            int err = Marshal.GetLastWin32Error();
+            Console.WriteLine($"FAILED (error {err} / 0x{err:X})");
+        }
+        return 0;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool ReadFile(SafeFileHandle hFile, byte[] lpBuffer,
+        uint nNumberOfBytesToRead, out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
+    // ── WGI Test ──
+
+    static int TestWgi()
+    {
+        Console.WriteLine("-- Windows.Gaming.Input Test --\n");
+
+        // WGI needs event-based discovery. Register for events, then pump messages.
+        var found = new List<Windows.Gaming.Input.RawGameController>();
+        var foundGamepads = new List<Windows.Gaming.Input.Gamepad>();
+
+        Windows.Gaming.Input.RawGameController.RawGameControllerAdded += (_, rc) =>
+        {
+            found.Add(rc);
+            Console.WriteLine($"  [EVENT] RawController added: {rc.DisplayName} VID=0x{rc.HardwareVendorId:X4} PID=0x{rc.HardwareProductId:X4}");
+            Console.WriteLine($"    Axes={rc.AxisCount} Buttons={rc.ButtonCount} Switches={rc.SwitchCount}");
+            var asGamepad = Windows.Gaming.Input.Gamepad.FromGameController(rc);
+            Console.WriteLine($"    IsGamepad: {asGamepad != null}");
+        };
+
+        Windows.Gaming.Input.Gamepad.GamepadAdded += (_, gp) =>
+        {
+            foundGamepads.Add(gp);
+            Console.WriteLine($"  [EVENT] Gamepad added (standard mapping!)");
+        };
+
+        // Check existing devices
+        var existing = Windows.Gaming.Input.RawGameController.RawGameControllers;
+        Console.WriteLine($"Existing RawControllers: {existing.Count}");
+        foreach (var rc in existing)
+        {
+            Console.WriteLine($"  {rc.DisplayName} VID=0x{rc.HardwareVendorId:X4} PID=0x{rc.HardwareProductId:X4}");
+            Console.WriteLine($"    Axes={rc.AxisCount} Buttons={rc.ButtonCount} Switches={rc.SwitchCount}");
+            var asGamepad = Windows.Gaming.Input.Gamepad.FromGameController(rc);
+            Console.WriteLine($"    IsGamepad: {asGamepad != null}");
+        }
+
+        var existingGamepads = Windows.Gaming.Input.Gamepad.Gamepads;
+        Console.WriteLine($"Existing Gamepads: {existingGamepads.Count}");
+
+        // WGI needs a Win32 message pump for device notifications
+        Console.WriteLine("\nPumping messages for 5s...");
+        var sw2 = Stopwatch.StartNew();
+        while (sw2.ElapsedMilliseconds < 5000)
+        {
+            // Win32 PeekMessage/DispatchMessage pump
+            while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, 1)) // PM_REMOVE
+            {
+                TranslateMessage(ref msg);
+                DispatchMessageW(ref msg);
+            }
+            Thread.Sleep(50);
+        }
+
+        Console.WriteLine($"\nFinal: RawControllers={found.Count + existing.Count} Gamepads={foundGamepads.Count + existingGamepads.Count}");
+        return 0;
+    }
+
+    // ── Dump Controllers ──
+
+    static int DumpControllers()
+    {
+        Console.WriteLine("-- HID Controller Dump --\n");
+        HidD_GetHidGuid(out Guid hidGuid);
+        IntPtr dis = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (dis == new IntPtr(-1)) return Error("SetupDi failed");
+
+        for (uint idx = 0; idx < 256; idx++)
+        {
+            var did = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+            if (!SetupDiEnumDeviceInterfaces(dis, IntPtr.Zero, ref hidGuid, idx, ref did)) break;
+
+            SetupDiGetDeviceInterfaceDetailW(dis, ref did, IntPtr.Zero, 0, out uint reqSize, IntPtr.Zero);
+            IntPtr detail = Marshal.AllocHGlobal((int)reqSize);
+            Marshal.WriteInt32(detail, 8);
+            if (!SetupDiGetDeviceInterfaceDetailW(dis, ref did, detail, reqSize, out _, IntPtr.Zero))
+            { Marshal.FreeHGlobal(detail); continue; }
+            string path = Marshal.PtrToStringUni(detail + 4)!;
+            Marshal.FreeHGlobal(detail);
+
+            var handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (handle.IsInvalid) continue;
+
+            var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
+            if (!HidD_GetAttributes(handle, ref attrs)) { handle.Dispose(); continue; }
+
+            // Show game controllers (skip keyboards, mice, etc.)
+            if (HidD_GetPreparsedData(handle, out IntPtr ppd))
+            {
+                HidP_GetCaps(ppd, out HIDP_CAPS caps);
+                // Usage Page 1 (Generic Desktop), Usage 4/5 (Joystick/GamePad)
+                if (caps.UsagePage == 0x01 && (caps.Usage == 0x04 || caps.Usage == 0x05))
+                {
+                    byte[] prodBuf = new byte[256];
+                    HidD_GetProductString(handle, prodBuf, 256);
+                    string prod = System.Text.Encoding.Unicode.GetString(prodBuf).TrimEnd('\0');
+                    Console.WriteLine($"=== {prod} ===");
+                    Console.WriteLine($"  VID=0x{attrs.VendorID:X4} PID=0x{attrs.ProductID:X4} Ver=0x{attrs.VersionNumber:X4}");
+                    Console.WriteLine($"  Input={caps.InputReportByteLength}B Output={caps.OutputReportByteLength}B Feature={caps.FeatureReportByteLength}B");
+                    Console.WriteLine($"  Buttons: In={caps.NumberInputButtonCaps} Out={caps.NumberOutputButtonCaps}");
+                    Console.WriteLine($"  Values:  In={caps.NumberInputValueCaps} Out={caps.NumberOutputValueCaps} Feat={caps.NumberFeatureValueCaps}");
+                    Console.WriteLine($"  Path: {path}");
+
+                    // Dump value caps (axes)
+                    if (caps.NumberInputValueCaps > 0)
+                    {
+                        // HIDP_VALUE_CAPS: UsagePage+0, ReportID+2, IsRange+12, BitSize+18, ReportCount+20,
+                        // LogicalMin+40, LogicalMax+44, NotRange.Usage+56
+                        ushort numVals = caps.NumberInputValueCaps;
+                        byte[] valBuf = new byte[72 * numVals];
+                        HidP_GetValueCaps(0, valBuf, ref numVals, ppd);
+                        Console.WriteLine($"  Input Values ({numVals}):");
+                        for (int v = 0; v < numVals; v++)
+                        {
+                            int o = v * 72;
+                            ushort usagePage = BitConverter.ToUInt16(valBuf, o + 0);
+                            byte reportId = valBuf[o + 2];
+                            bool isRange = valBuf[o + 12] != 0;
+                            ushort bitSize = BitConverter.ToUInt16(valBuf, o + 18);
+                            ushort reportCount = BitConverter.ToUInt16(valBuf, o + 20);
+                            int logMin = BitConverter.ToInt32(valBuf, o + 40);
+                            int logMax = BitConverter.ToInt32(valBuf, o + 44);
+                            ushort usage = BitConverter.ToUInt16(valBuf, o + 56);
+                            Console.WriteLine($"    [{v}] Page=0x{usagePage:X4} Usage=0x{usage:X4} Bits={bitSize} Range=[{logMin}..{logMax}] ID={reportId}");
+                        }
+                    }
+                    if (caps.NumberFeatureValueCaps > 0)
+                    {
+                        ushort numFeatVals = caps.NumberFeatureValueCaps;
+                        byte[] featValBuf = new byte[72 * numFeatVals];
+                        HidP_GetValueCaps(2, featValBuf, ref numFeatVals, ppd);
+                        Console.WriteLine($"  Feature Values ({numFeatVals}):");
+                        for (int v = 0; v < numFeatVals; v++)
+                        {
+                            int o = v * 72;
+                            ushort usagePage = BitConverter.ToUInt16(featValBuf, o + 0);
+                            ushort usage = BitConverter.ToUInt16(featValBuf, o + 56);
+                            ushort bitSize = BitConverter.ToUInt16(featValBuf, o + 18);
+                            Console.WriteLine($"    [{v}] Page=0x{usagePage:X4} Usage=0x{usage:X4} Bits={bitSize}");
+                        }
+                    }
+                    // Dump button caps
+                    if (caps.NumberInputButtonCaps > 0)
+                    {
+                        ushort numBtns = caps.NumberInputButtonCaps;
+                        byte[] btnBuf = new byte[72 * numBtns];
+                        HidP_GetButtonCaps(0, btnBuf, ref numBtns, ppd); // 0 = HidP_Input
+                        Console.WriteLine($"  Input Buttons ({numBtns}):");
+                        for (int b = 0; b < numBtns; b++)
+                        {
+                            int o = b * 72;
+                            ushort usagePage = BitConverter.ToUInt16(btnBuf, o + 0);
+                            bool isRange = btnBuf[o + 6] != 0;
+                            if (isRange)
+                            {
+                                ushort usageMin = BitConverter.ToUInt16(btnBuf, o + 16);
+                                ushort usageMax = BitConverter.ToUInt16(btnBuf, o + 18);
+                                Console.WriteLine($"    [{b}] Page=0x{usagePage:X4} Buttons {usageMin}-{usageMax}");
+                            }
+                            else
+                            {
+                                ushort usage = BitConverter.ToUInt16(btnBuf, o + 16);
+                                Console.WriteLine($"    [{b}] Page=0x{usagePage:X4} Button {usage}");
+                            }
+                        }
+                    }
+                    Console.WriteLine();
+                }
+                HidD_FreePreparsedData(ppd);
+            }
+            handle.Dispose();
+        }
+        SetupDiDestroyDeviceInfoList(dis);
+        return 0;
+    }
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool HidD_GetProductString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
+
+    // Security for shared memory
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool InitializeSecurityDescriptor(byte[] pSecurityDescriptor, uint dwRevision);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool SetSecurityDescriptorDacl(byte[] pSecurityDescriptor, bool bDaclPresent, IntPtr pDacl, bool bDaclDefaulted);
+
+    // Shared memory for driver data injection
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
+        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
+        uint dwFileOffsetHigh, uint dwFileOffsetLow, uint dwNumberOfBytesToMap);
+
+    // Win32 message pump for WGI
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int ptX; public int ptY; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool PeekMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+    [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG lpMsg);
+    [DllImport("user32.dll")] static extern IntPtr DispatchMessageW(ref MSG lpMsg);
 
     // ── Cleanup ──
 

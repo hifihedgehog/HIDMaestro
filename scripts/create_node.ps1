@@ -25,13 +25,16 @@ public class DN5 {
         // Hardware IDs: multi-string with VID&PID first, then our match ID
         // HID class uses the first HWID to construct child IDs
         // INF matches on root\HIDMaestro (second entry)
+        // Standard hardware ID — WGI standard mapping via GameInput registry
         string hwMulti = "root\\VID_" + vid + "&PID_" + pid + "\0" + "root\\HIDMaestro" + "\0\0";
         byte[] hb = Encoding.Unicode.GetBytes(hwMulti);
         IntPtr ds = SetupDiCreateDeviceInfoList(ref g, IntPtr.Zero);
         if (ds == new IntPtr(-1)) return "E1:" + Marshal.GetLastWin32Error();
         try {
             var d = new S { sz = Marshal.SizeOf(typeof(S)) };
-            if (!SetupDiCreateDeviceInfoW(ds, "HIDClass", ref g, desc, IntPtr.Zero, 1, ref d))
+            // Enumerator name becomes part of instance ID and HID child's device interface path.
+            // Including "IG_00" makes Chrome's Raw Input filter it as an XInput device.
+            if (!SetupDiCreateDeviceInfoW(ds, "HID_IG_00", ref g, desc, IntPtr.Zero, 1, ref d))
                 return "E2:0x" + Marshal.GetLastWin32Error().ToString("X");
             // SPDRP_HARDWAREID = 1 (REG_MULTI_SZ)
             if (!SetupDiSetDeviceRegistryPropertyW(ds, ref d, 1, hb, hb.Length))

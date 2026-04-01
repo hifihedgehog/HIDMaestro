@@ -59,6 +59,9 @@ typedef struct _DEVICE_CONTEXT {
     HID_DESCRIPTOR          HidDescriptor;
     HID_DEVICE_ATTRIBUTES   HidDeviceAttributes;
 
+    /* Input report byte length (Report ID + data, from HID caps) */
+    ULONG   InputReportByteLength;
+
     /* Latest raw input report (written by user-mode) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   InputReportSize;
@@ -82,11 +85,26 @@ typedef struct _DEVICE_CONTEXT {
     WDFWAITLOCK InputLock;
     WDFWAITLOCK OutputLock;
 
+    /* Shared memory data injection (bypasses upper filter drivers) */
+    HANDLE  SharedMemHandle;     /* CreateFileMapping handle */
+    PVOID   SharedMemPtr;        /* MapViewOfFile pointer */
+    ULONG   SharedMemSeqNo;      /* Last sequence number we processed */
+    WDFTIMER PollTimer;          /* Periodic timer to check shared memory */
+
     /* Diagnostics */
     LONG    InputReportsSubmitted;
     LONG    OutputReportsReceived;
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
+
+/* Shared memory layout: written by user-mode, read by driver */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_INPUT {
+    volatile ULONG  SeqNo;           /* Incremented each write */
+    ULONG           DataSize;        /* Input report data size (excluding Report ID) */
+    UCHAR           Data[64];        /* Input report data (no Report ID prefix) */
+} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
 
