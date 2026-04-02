@@ -237,11 +237,7 @@ EvtSharedMemTimer(
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG dataLen = shared.DataSize;
 
-    /* Check if descriptor uses Report IDs */
-    BOOLEAN hasReportId = FALSE;
-    for (ULONG i = 0; i < ctx->ReportDescriptorSize - 1; i++) {
-        if (ctx->ReportDescriptor[i] == 0x85 && (i == 0 || ctx->ReportDescriptor[i-1] != 0x09)) { hasReportId = TRUE; break; }
-    }
+    BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
 
     /* Cap data to input report size */
     ULONG maxData;
@@ -255,7 +251,7 @@ EvtSharedMemTimer(
 
     ULONG inputSize;
     if (hasReportId) {
-        inputReport[0] = 0x01; /* Input Report ID */
+        inputReport[0] = ctx->FirstInputReportId;
         RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
         inputSize = dataLen + 1;
     } else {
@@ -366,6 +362,15 @@ EvtDeviceAdd(
 
     /* Read config from registry (overrides defaults if present) */
     ReadConfigFromRegistry(ctx);
+
+    /* Find first Input Report ID from descriptor and cache in context */
+    ctx->FirstInputReportId = 0;
+    for (ULONG ri = 0; ri < ctx->ReportDescriptorSize - 1; ri++) {
+        if (ctx->ReportDescriptor[ri] == 0x85 && (ri == 0 || ctx->ReportDescriptor[ri-1] != 0x09)) {
+            ctx->FirstInputReportId = ctx->ReportDescriptor[ri + 1];
+            break;
+        }
+    }
 
     /*
      * Set BusReportedDeviceDesc so joy.cpl shows the profile name.
@@ -644,7 +649,7 @@ EvtIoDeviceControl(
                 featureDataLen--;
             }
 
-            inputReport[0] = 0x01; /* Input Report ID */
+            inputReport[0] = ctx->FirstInputReportId;
 
             /* Cap data to match the declared input report size */
             {

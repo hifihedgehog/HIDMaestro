@@ -61,6 +61,9 @@ typedef struct _DEVICE_CONTEXT {
     /* Input report byte length (Report ID + data, from HID caps) */
     ULONG   InputReportByteLength;
 
+    /* First Input Report ID from descriptor (0 if no Report IDs) */
+    UCHAR   FirstInputReportId;
+
     /* Latest raw input report (written by user-mode) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   InputReportSize;

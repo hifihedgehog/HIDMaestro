@@ -153,7 +153,16 @@ public class HidReportBuilder
                     switch (bTag)
                     {
                         case 0: // Usage
-                            usages.Add((ushort)value);
+                            if (bSize == 4)
+                            {
+                                // Extended usage: low 16 = usage ID, high 16 = usage page
+                                usagePage = (ushort)(value >> 16);
+                                usages.Add((ushort)(value & 0xFFFF));
+                            }
+                            else
+                            {
+                                usages.Add((ushort)value);
+                            }
                             break;
                         case 1: usageMin = (ushort)value; break;          // Usage Minimum
                         case 2: usageMax = (ushort)value; break;          // Usage Maximum

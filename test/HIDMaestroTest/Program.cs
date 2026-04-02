@@ -438,6 +438,7 @@ class Program
         int reportSize = 0;
         int reportCount = 0;
         int currentReportId = 0;
+        int firstInputReportId = 0;
         bool hasReportIds = false;
 
         for (int i = 0; i < desc.Length; )
@@ -459,13 +460,14 @@ class Program
             {
                 if (bTag == 7) reportSize = value;    // Report Size
                 if (bTag == 9) reportCount = value;   // Report Count
-                if (bTag == 8) { currentReportId = value; hasReportIds = true; } // Report ID
+                if (bTag == 8) { currentReportId = value; if (!hasReportIds) firstInputReportId = value; hasReportIds = true; } // Report ID
             }
             else if (bType == 0) // Main
             {
                 if (bTag == 8) // Input
                 {
-                    if (!hasReportIds || currentReportId == 1)
+                    // Count bits for the first report ID encountered (or all if no IDs)
+                    if (!hasReportIds || currentReportId == firstInputReportId)
                         totalBits += reportSize * reportCount;
                 }
             }
@@ -1120,7 +1122,9 @@ class Program
         Console.WriteLine("OK");
 
         // Step 1: Write descriptor to registry
-        int inputReportLen = ComputeInputReportByteLength(descriptor);
+        int inputReportLen = (profile.InputReportSize ?? 0) > 0
+            ? profile.InputReportSize!.Value
+            : ComputeInputReportByteLength(descriptor);
         Console.Write($"  Writing profile to registry (InputReport={inputReportLen}B)... ");
         WriteConfig(descriptor, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
