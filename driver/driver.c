@@ -945,8 +945,9 @@ EvtIoDeviceControl(
                 case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
             }
             *(USHORT*)&state[0x0B] = buttons;
-            state[0x0D] = (UCHAR)(*(USHORT*)&d[8] >> 8);
-            state[0x0E] = (UCHAR)(*(USHORT*)&d[10] >> 8);
+            /* GIP triggers: 10-bit (0-1023) in bits 0-9. Scale to 0-255 for XInput. */
+            state[0x0D] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
+            state[0x0E] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
             *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
             *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY: negate (HID down=positive, XInput up=positive) */
             *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
