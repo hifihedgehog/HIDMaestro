@@ -259,7 +259,20 @@ public class HidReportBuilder
 
         if (HatSwitch != null)
         {
-            int hatRaw = hatValue; // 0=neutral or 1-8
+            int hatRaw;
+            if (hatValue == 0)
+            {
+                // Neutral: write null state (value outside logical range).
+                // LogMin=1,Max=8: null=0. LogMin=0,Max=7: null=Max+1.
+                hatRaw = HatSwitch.LogicalMin == 0
+                    ? HatSwitch.LogicalMax + 1
+                    : 0;
+            }
+            else
+            {
+                // hatValue 1-8 (N,NE,E,SE,S,SW,W,NW). Shift to descriptor's range.
+                hatRaw = hatValue + HatSwitch.LogicalMin - 1;
+            }
             WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRaw);
         }
 
