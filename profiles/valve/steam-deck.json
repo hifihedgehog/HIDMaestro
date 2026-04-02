@@ -8,7 +8,8 @@
   "manufacturerString": "Valve Software",
   "type": "gamepad",
   "connection": "usb",
-  "descriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
-  "inputReportSize": 64,
-  "notes": "38-byte vendor-specific descriptor. Source: ShadowBlip/InputPlumber. Uses Usage Page 0xFFFF with 64-byte raw reports — all inputs in proprietary binary format."
+  "descriptor": "05010905a101a10009300931150026ff00750895028102c0a10009330934150026ff00750895028102c005010932150026ff007508950181020935150026ff007508950181020939150125083500463b016614007504950181427504950115002500350045006500810305091901291515002501750195158102750395018103c0",
+  "nativeDescriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
+  "inputReportSize": 10,
+  "notes": "Standard HID gamepad descriptor: 6 axes (8-bit), 21 buttons, 1 hat. Native descriptor is vendor-specific 64-byte blob. Steam Deck has 4 paddles, QAM button, trackpads, and gyro not represented here."
 }

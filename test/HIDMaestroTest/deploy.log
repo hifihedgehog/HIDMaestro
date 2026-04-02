@@ -14,24 +14,19 @@
   Published: oem48.inf
   Shared file ready: C:\ProgramData\HIDMaestro\input.bin
 [7] Creating device node...
-  Device creation: OK
-    Set name on HID\HID_IG_00\1&1C925AF2&2F&0000: Controller (XBOX 360 For Windows)
+  Device creation: E2:0x5
 [8] Verifying...
 Microsoft PnP Utility
 
-Instance ID:                ROOT\HID_IG_00\0000
-Device Description:         Game Controller
-Class Name:                 HIDClass
-Class GUID:                 {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
-Manufacturer Name:          HIDMaestro
-Status:                     Started
-Driver Name:                oem48.inf
+No devices were found on the system.
 
+Device node check: Microsoft PnP Utility
 
-SUCCESS: Device is running!
+No devices were found on the system.
+
 
 [9] Deploying XUSB device...
-  Killing WUDFHost PID 45472 (has HIDMaestro)
+  Removed ghost: ROOT\SYSTEM\0001
   XUSB: ROOT\SYSTEM\0001 OK
 
 === DEPLOY COMPLETE ===
