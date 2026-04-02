@@ -29,6 +29,10 @@ static const GUID XUSB_INTERFACE_CLASS_GUID =
 static const GUID USB_DEVICE_INTERFACE_GUID =
     { 0xA5DCBF10, 0x6530, 0x11D2, { 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED } };
 
+/* WinExInput interface GUID — WGI fires GamepadAdded for devices with this interface + &XI_ path */
+static const GUID WINEXINPUT_INTERFACE_GUID =
+    { 0x6C53D5FD, 0x6480, 0x440F, { 0xB6, 0x18, 0x47, 0x67, 0x50, 0xC5, 0xE1, 0xA6 } };
+
 /* XUSB IOCTL codes (from OpenXinput / XInputHooker) */
 #define IOCTL_XUSB_GET_INFORMATION      0x80006000
 #define IOCTL_XUSB_GET_CAPABILITIES     0x8000E004
@@ -358,12 +362,41 @@ EvtDeviceAdd(
     ctx->Device = device;
 
     if (isXusbCompanion) {
-        /* XUSB companion: function driver mode — register XUSB interface, skip HID.
-         * Data comes ONLY via DeviceIoControl (GET_STATE piggyback), NOT shared file.
-         * This avoids format conflicts with the HID device's shared file data. */
+        /* XUSB companion: function driver mode — register XUSB + WinExInput interfaces.
+         * WinExInput interface with XI_ reference string triggers WGI GamepadAdded.
+         * Also set up minimal HID defaults so WGI HID probes don't fail. */
+
+        /* HID defaults (same as main driver) */
+        RtlCopyMemory(ctx->ReportDescriptor, G_DefaultReportDescriptor, sizeof(G_DefaultReportDescriptor));
+        ctx->ReportDescriptorSize = sizeof(G_DefaultReportDescriptor);
+        ctx->HidDescriptor.bLength = 0x09;
+        ctx->HidDescriptor.bDescriptorType = 0x21;
+        ctx->HidDescriptor.bcdHID = 0x0100;
+        ctx->HidDescriptor.bNumDescriptors = 0x01;
+        ctx->HidDescriptor.DescriptorList[0].bReportType = 0x22;
+        ctx->HidDescriptor.DescriptorList[0].wReportLength = (USHORT)ctx->ReportDescriptorSize;
+        ctx->HidDeviceAttributes.Size = sizeof(HID_DEVICE_ATTRIBUTES);
+        ctx->HidDeviceAttributes.VendorID = 0x045E;
+        ctx->HidDeviceAttributes.ProductID = 0x028E;
+        ctx->HidDeviceAttributes.VersionNumber = 0x0114;
+        ctx->InputReportByteLength = 17;
+        {
+            static const WCHAR defaultStr[] = L"Controller (XBOX 360 For Windows)";
+            RtlCopyMemory(ctx->ProductString, defaultStr, sizeof(defaultStr));
+            ctx->ProductStringBytes = sizeof(defaultStr);
+        }
+
         ReadConfigFromRegistry(ctx);
         WdfDeviceCreateDeviceInterface(device,
             (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+
+        /* Register WinExInput interface — WGI monitors this GUID for Gamepad discovery */
+        {
+            UNICODE_STRING refStr;
+            RtlInitUnicodeString(&refStr, L"XI_00");
+            WdfDeviceCreateDeviceInterface(device,
+                (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+        }
 
         status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
         if (!NT_SUCCESS(status)) return status;

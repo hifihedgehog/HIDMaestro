@@ -110,8 +110,9 @@ class Program
             CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
             CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
 
-            // Add xinputhid as upper filter so the device appears in XInput
-            InjectXInputFilter(childInst);
+            // Add upper filter for XInput (only for profiles that use xinputhid/xusb22)
+            if (_upperFilterName != "none")
+                InjectXInputFilter(childInst);
         }
     }
 
@@ -1128,8 +1129,7 @@ class Program
 
         // Step 0: Pre-flight setup (all in code, no external scripts)
         Console.Write("  Setting up environment... ");
-        if (profile.UpperFilterName != null)
-            _upperFilterName = profile.UpperFilterName;
+        _upperFilterName = profile.UpperFilterName ?? "none";
         EnsureGameInputService();
         EnsureSharedFile();
         CleanupGhostDevices();
@@ -1393,6 +1393,19 @@ class Program
                     { ltVal = 1.0 - (triggerPhase - 12.0) / 3.0; rtVal = 1.0 - (triggerPhase - 12.0) / 3.0; } // Both release
             }
 
+            // Separate trigger values for XInput (always independent, regardless of DI triggerMode)
+            double sepLt, sepRt;
+            if (triggerPhase < 3.0)
+                { sepLt = triggerPhase / 3.0; sepRt = 0.0; }
+            else if (triggerPhase < 6.0)
+                { sepLt = 1.0 - (triggerPhase - 3.0) / 3.0; sepRt = 0.0; }
+            else if (triggerPhase < 9.0)
+                { sepLt = 0.0; sepRt = (triggerPhase - 6.0) / 3.0; }
+            else if (triggerPhase < 12.0)
+                { sepLt = (triggerPhase - 9.0) / 3.0; sepRt = 1.0; }
+            else
+                { sepLt = 1.0 - (triggerPhase - 12.0) / 3.0; sepRt = 1.0 - (triggerPhase - 12.0) / 3.0; }
+
             byte[] inputReport = reportBuilder.BuildReport(
                 leftX: lxNorm, leftY: lyNorm,
                 rightX: 0.5, rightY: 0.5,
@@ -1412,7 +1425,7 @@ class Program
                 byte[] gipReport = gipBuilder.BuildReport(
                     leftX: lxNorm, leftY: lyNorm,
                     rightX: 0.5, rightY: 0.5,
-                    leftTrigger: ltVal, rightTrigger: rtVal,
+                    leftTrigger: sepLt, rightTrigger: sepRt,
                     hatValue: 0, buttonMask: btnMask);
                 byte[] gipData = new byte[14];
                 Array.Copy(gipReport, 0, gipData, 0, Math.Min(14, gipReport.Length));
@@ -1472,7 +1485,7 @@ class Program
             count++;
             if (count % 500 == 1)
             {
-                byte[] gr = gipBuilder.BuildReport(leftX: lxNorm, leftY: lyNorm, rightX: 0.5, rightY: 0.5, leftTrigger: ltVal, rightTrigger: rtVal, hatValue: 0, buttonMask: btnMask);
+                byte[] gr = gipBuilder.BuildReport(leftX: lxNorm, leftY: lyNorm, rightX: 0.5, rightY: 0.5, leftTrigger: sepLt, rightTrigger: sepRt, hatValue: 0, buttonMask: btnMask);
                 ushort gLx2 = BitConverter.ToUInt16(gr, 0);
                 ushort gLy2 = BitConverter.ToUInt16(gr, 2);
                 short xLx = (short)((int)gLx2 - 32768);

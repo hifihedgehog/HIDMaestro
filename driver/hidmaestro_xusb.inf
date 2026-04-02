@@ -27,6 +27,7 @@ HIDMaestro.dll = 1
 %ManufacturerName% = Standard,NTamd64
 
 [Standard.NTamd64]
+%DeviceDesc% = XUSB_Install, root\VID_045E&PID_028E&XI_00
 %DeviceDesc% = XUSB_Install, root\HIDMaestroXUSB
 
 [XUSB_Install.NT]
