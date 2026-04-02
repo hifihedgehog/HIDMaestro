@@ -25,6 +25,10 @@ static const WCHAR CONFIG_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\HIDMaest
 static const GUID XUSB_INTERFACE_CLASS_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 
+/* USB device interface GUID — WGI/GameInputSvc discovers Xbox controllers through this */
+static const GUID USB_DEVICE_INTERFACE_GUID =
+    { 0xA5DCBF10, 0x6530, 0x11D2, { 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED } };
+
 /* XUSB IOCTL codes (from OpenXinput / XInputHooker) */
 #define IOCTL_XUSB_GET_INFORMATION      0x80006000
 #define IOCTL_XUSB_GET_CAPABILITIES     0x8000E004
@@ -33,29 +37,10 @@ static const GUID XUSB_INTERFACE_CLASS_GUID =
 #define IOCTL_XUSB_SET_STATE            0x8000A010
 #define IOCTL_XUSB_WAIT_GUIDE           0x8000E014
 
-/* Custom IOCTL for user-mode to submit input data to the XUSB device */
-#define IOCTL_HIDMAESTRO_XUSB_SUBMIT_REPORT \
-    CTL_CODE(FILE_DEVICE_HIDMAESTRO, 0x810, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define IOCTL_XUSB_GET_BATTERY_INFO     0x8000E018
 #define IOCTL_XUSB_GET_INFORMATION_EX   0x8000E3FC
 #define IOCTL_XUSB_WAIT_FOR_INPUT       0x8000E3AC
 #define IOCTL_XUSB_POWER_INFO          0x80006380  /* xinputhid sends this repeatedly */
-
-/* XUSB report structure (20 bytes — matches XUSB_INTERRUPT_IN_PACKET) */
-#pragma pack(push, 1)
-typedef struct _XUSB_REPORT {
-    UCHAR  Id;          /* 0x00 */
-    UCHAR  Size;        /* 0x14 (20) */
-    USHORT Buttons;
-    UCHAR  LeftTrigger;
-    UCHAR  RightTrigger;
-    SHORT  ThumbLX;
-    SHORT  ThumbLY;
-    SHORT  ThumbRX;
-    SHORT  ThumbRY;
-    UCHAR  Reserved[6];
-} XUSB_REPORT;
-#pragma pack(pop)
 
 /* ================================================================== */
 /*  Helper: copy bytes to request output buffer                        */
@@ -339,22 +324,7 @@ EvtDeviceAdd(
         }
     }
 
-    /*
-     * Detect device mode: HID minidriver (filter) vs XUSB standalone (function).
-     * root\HIDMaestro = HID mode — filter under MsHidUmdf
-     * root\HIDMaestroXUSB = XUSB mode — standalone function driver for XInput
-     */
-    /* Device mode determined at compile time.
-     * HIDMaestro.dll = HID minidriver (HIDMAESTRO_XUSB_MODE not defined)
-     * HIDMaestroXUSB.dll = XUSB standalone (HIDMAESTRO_XUSB_MODE defined)
-     */
-#ifdef HIDMAESTRO_XUSB_MODE
-    BOOLEAN isXusbDevice = TRUE;
-    /* XUSB mode: we ARE the function driver. Don't set as filter. */
-#else
-    BOOLEAN isXusbDevice = FALSE;
     WdfFdoInitSetFilter(DeviceInit);
-#endif
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
@@ -364,34 +334,6 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
-    ctx->IsXusbDevice = isXusbDevice;
-
-    if (isXusbDevice) {
-        /* XUSB standalone mode — register XUSB interface, skip HID init */
-        ReadConfigFromRegistry(ctx); /* Read VID/PID for XUSB responses */
-
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-
-        /* Create locks */
-        status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
-        if (!NT_SUCCESS(status)) return status;
-
-        /* Default queue for XUSB IOCTLs */
-        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
-        queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
-        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
-                                  &ctx->DefaultQueue);
-        if (!NT_SUCCESS(status)) return status;
-
-        /* Manual queue for pending requests */
-        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
-        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
-                                  &ctx->ManualQueue);
-        return status;
-    }
-
-    /* HID minidriver mode — full initialization below */
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -441,7 +383,16 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /* XUSB interface is registered on the separate XUSB device, not here */
+    /*
+     * Register XUSB interface on HID device too (acts like xinputhid for
+     * PIDs that xinputhid doesn't support, e.g. Xbox 360 PID 028E).
+     * XInput discovers this interface and sends XUSB IOCTLs which our
+     * EvtIoDeviceControl already handles alongside HID IOCTLs.
+     */
+    WdfDeviceCreateDeviceInterface(device,
+        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    WdfDeviceCreateDeviceInterface(device,
+        (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
@@ -957,28 +908,6 @@ EvtIoDeviceControl(
         break;
     }
 
-    case IOCTL_HIDMAESTRO_XUSB_SUBMIT_REPORT: {
-        /*
-         * User-mode submits raw input report bytes (same format as
-         * the universal HID descriptor: 14 bytes of axis/button data).
-         * Stored in InputReport for GET_STATE to read.
-         */
-        PVOID inBuf;
-        size_t inBufSize;
-        status = WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inBufSize);
-        if (NT_SUCCESS(status)) {
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
-            if (inBufSize > HIDMAESTRO_MAX_REPORT_SIZE)
-                inBufSize = HIDMAESTRO_MAX_REPORT_SIZE;
-            RtlCopyMemory(ctx->InputReport, inBuf, inBufSize);
-            ctx->InputReportSize = (ULONG)inBufSize;
-            ctx->InputReportReady = TRUE;
-            WdfWaitLockRelease(ctx->InputLock);
-            status = STATUS_SUCCESS;
-        }
-        break;
-    }
-
     case IOCTL_XUSB_GET_LED_STATE: {
         /* 3 bytes: version(2) + LED state(1) */
         UCHAR led[3];
@@ -998,12 +927,6 @@ EvtIoDeviceControl(
         break;
     }
 
-    case IOCTL_XUSB_WAIT_GUIDE:
-    case IOCTL_XUSB_WAIT_FOR_INPUT:
-        status = WdfRequestForwardToIoQueue(Request, ctx->ManualQueue);
-        if (NT_SUCCESS(status)) completeRequest = FALSE;
-        break;
-
     case IOCTL_XUSB_POWER_INFO: {
         /* xinputhid sends this repeatedly — return success with zeroed buffer */
         PVOID outBuf;
@@ -1013,18 +936,6 @@ EvtIoDeviceControl(
             RtlZeroMemory(outBuf, outSize);
             WdfRequestSetInformation(Request, outSize);
         }
-        break;
-    }
-
-    /* IOCTL_XUSB_GET_LED_STATE already handled above */
-
-    case IOCTL_XUSB_GET_INFORMATION_EX: {
-        /* 8 bytes: version(2) + unk(2) + count(2) + unk(2) */
-        UCHAR infoEx[8];
-        RtlZeroMemory(infoEx, sizeof(infoEx));
-        *(USHORT*)&infoEx[0] = 0x0101;
-        *(USHORT*)&infoEx[4] = 0x0001; /* count */
-        status = RequestCopyFromBuffer(Request, infoEx, sizeof(infoEx));
         break;
     }
 

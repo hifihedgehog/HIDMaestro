@@ -4,6 +4,7 @@
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x0B12",
+  "driverPid": "0x02FF",
   "productString": "Controller",
   "manufacturerString": "Microsoft",
   "type": "gamepad",
@@ -12,5 +13,6 @@
   "inputReportSize": null,
   "notes": "262-byte XboxGIP HID descriptor (USB/Windows view). See xbox-series-xs-bt profile for Bluetooth descriptor with Share button. Newer Model 1797 uses USB PID 0x0B05, BLE PID 0x0B22.",
   "deviceDescription": "Xbox Controller",
+  "triggerMode": "separate",
   "driverMode": "xinputhid"
 }

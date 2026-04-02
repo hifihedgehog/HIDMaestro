@@ -55,6 +55,10 @@ public sealed class ControllerProfile
     [JsonPropertyName("driverMode")]
     public string? DriverMode { get; set; }
 
+    /// <summary>PID override for hardware ID (driver matching only). Apps still see real PID.</summary>
+    [JsonPropertyName("driverPid")]
+    public string? DriverPid { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -67,12 +71,24 @@ public sealed class ControllerProfile
     public bool HasCombinedTriggers => TriggerMode?.Equals("combined", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>
-    /// Whether this controller uses xinputhid (Xbox One+) or direct HID (Xbox 360, non-Xbox).
-    /// xinputhid: IG_00 enumerator, GIP descriptor, combined DirectInput + separate XInput triggers
-    /// hid: standard HIDCLASS enumerator, controller's native descriptor, direct HID access
+    /// Whether this controller uses an upper filter driver for XInput.
+    /// xinputhid: Xbox One+ controllers (GIP descriptor, xinputhid filter)
+    /// xusb22: Xbox 360 controllers (xusb22 filter)
+    /// hid: no filter, direct HID access only
     /// </summary>
     [JsonIgnore]
     public bool UsesXinputhid => DriverMode?.Equals("xinputhid", StringComparison.OrdinalIgnoreCase) == true;
+
+    [JsonIgnore]
+    public bool UsesXusb22 => DriverMode?.Equals("xusb22", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>Whether this profile uses any upper filter (xinputhid or xusb22).</summary>
+    [JsonIgnore]
+    public bool UsesUpperFilter => UsesXinputhid || UsesXusb22;
+
+    /// <summary>The upper filter service name, or null.</summary>
+    [JsonIgnore]
+    public string? UpperFilterName => UsesXinputhid ? "xinputhid" : UsesXusb22 ? "xusb22" : null;
 
     /// <summary>Parsed VID as ushort.</summary>
     [JsonIgnore]
