@@ -80,44 +80,8 @@ if errorlevel 1 (
 )
 
 copy /y "%DRIVER_DIR%\hidmaestro.inf" "%OUT_DIR%\" >nul
-copy /y "%DRIVER_DIR%\hidmaestro_xusb.inf" "%OUT_DIR%\" >nul
+if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" copy /y "%DRIVER_DIR%\hidmaestro_xusb.inf" "%OUT_DIR%\" >nul
 
 echo.
-echo Building XUSB variant ...
-
-cl.exe /nologo /W4 /GS /Gz /wd4324 ^
-    /D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE ^
-    /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
-    /D HIDMAESTRO_XUSB_MODE ^
-    "/I%UM_INC%" ^
-    "/I%SHARED_INC%" ^
-    "/I%KM_INC%" ^
-    "/I%WDF_INC%" ^
-    "/I%INC_DIR%" ^
-    "/Fo%OUT_DIR%\driver_xusb.obj" ^
-    /c "%DRIVER_DIR%\driver.c"
-
-if errorlevel 1 (
-    echo XUSB COMPILE FAILED
-    exit /b 1
-)
-
-link.exe /nologo /DLL ^
-    "/OUT:%OUT_DIR%\HIDMaestroXUSB.dll" ^
-    "/LIBPATH:%UM_LIB%" ^
-    "/LIBPATH:%WDF_LIB%" ^
-    "%OUT_DIR%\driver_xusb.obj" ^
-    WdfDriverStubUm.lib ^
-    ntdll.lib ^
-    OneCoreUAP.lib ^
-    mincore.lib ^
-    advapi32.lib
-
-if errorlevel 1 (
-    echo XUSB LINK FAILED
-    exit /b 1
-)
-
-echo.
-echo BUILD SUCCEEDED: %OUT_DIR%\%DRIVER_NAME%.dll + HIDMaestroXUSB.dll
+echo BUILD SUCCEEDED: %OUT_DIR%\%DRIVER_NAME%.dll
 echo.

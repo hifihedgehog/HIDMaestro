@@ -64,10 +64,14 @@ typedef struct _DEVICE_CONTEXT {
     /* First Input Report ID from descriptor (0 if no Report IDs) */
     UCHAR   FirstInputReportId;
 
-    /* Latest raw input report (written by user-mode) */
+    /* Latest raw input report for HID READ_REPORT (native descriptor format) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   InputReportSize;
     BOOLEAN InputReportReady;
+
+    /* Latest raw GIP data for XUSB GET_STATE (always 14 bytes GIP format) */
+    UCHAR   XusbReport[14];
+    BOOLEAN XusbReportReady;
 
     /* Product string (returned on IOCTL_HID_GET_STRING) */
     WCHAR   ProductString[128];
@@ -93,18 +97,26 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   SharedMemSeqNo;      /* Last sequence number we processed */
     WDFTIMER PollTimer;          /* Periodic timer to check shared memory */
 
+    /* XInput state file — pre-built XInput state from user-mode */
+    HANDLE  XInputFileHandle;
+    PVOID   XInputFilePtr;
+    ULONG   XInputSeqNo;
+
     /* Diagnostics */
     LONG    InputReportsSubmitted;
     LONG    OutputReportsReceived;
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
-/* Shared memory layout: written by user-mode, read by driver */
+/* Shared memory layout: written by user-mode, read by driver
+ * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
+ * Total size: 4 + 4 + 64 + 14 = 86 bytes */
 #pragma pack(push, 1)
 typedef struct _HIDMAESTRO_SHARED_INPUT {
     volatile ULONG  SeqNo;           /* Incremented each write */
-    ULONG           DataSize;        /* Input report data size (excluding Report ID) */
-    UCHAR           Data[64];        /* Input report data (no Report ID prefix) */
+    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
+    UCHAR           Data[64];        /* HID input report data (native descriptor format) */
+    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
 } HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
 #pragma pack(pop)
 

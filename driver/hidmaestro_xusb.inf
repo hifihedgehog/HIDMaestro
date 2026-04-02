@@ -1,0 +1,72 @@
+;
+; HIDMaestro XUSB Companion — provides XInput interface for driverMode=hid profiles.
+; Same DLL as the HID minidriver, but runs as function driver (not filter).
+; Reads input data from the same shared file as the HID device.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+CatalogFile = hidmaestro_xusb.cat
+DriverVer   = 03/30/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir  = 13
+UMDriverCopy    = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+HIDMaestro.dll = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = XUSB_Install, root\HIDMaestroXUSB
+
+[XUSB_Install.NT]
+CopyFiles = UMDriverCopy
+
+[UMDriverCopy]
+HIDMaestro.dll
+
+[XUSB_Install.NT.HW]
+AddReg = XUSB_HW_AddReg
+
+[XUSB_HW_AddReg]
+HKR,,"XusbMode",0x00010001,1
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)"
+
+[XUSB_Install.NT.Services]
+AddService = WUDFRd,0x000001fa,WUDFRD_Service
+
+[WUDFRD_Service]
+DisplayName    = %WudfRdDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
+
+[XUSB_Install.NT.Wdf]
+UmdfService                 = HIDMaestro, HIDMaestro_UmdfService
+UmdfServiceOrder            = HIDMaestro
+UmdfKernelModeClientPolicy  = AllowKernelModeClients
+UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
+UmdfMethodNeitherAction     = Copy
+UmdfFsContextUsePolicy      = CanUseFsContext2
+
+[HIDMaestro_UmdfService]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary      = %13%\HIDMaestro.dll
+
+[Strings]
+ProviderName     = "HIDMaestro"
+ManufacturerName = "HIDMaestro"
+DeviceDesc       = "HIDMaestro XInput Companion"
+DiskName         = "HIDMaestro Installation Disk"
+WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"

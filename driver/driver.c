@@ -233,13 +233,12 @@ EvtSharedMemTimer(
     if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
     ctx->SharedMemSeqNo = seqNo;
 
-    /* Build input report from shared file data */
+    /* Build HID input report from shared file Data (native descriptor format) */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG dataLen = shared.DataSize;
 
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
 
-    /* Cap data to input report size */
     ULONG maxData;
     if (hasReportId) {
         maxData = ctx->InputReportByteLength > 1 ? ctx->InputReportByteLength - 1 : 16;
@@ -255,10 +254,15 @@ EvtSharedMemTimer(
         RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
         inputSize = dataLen + 1;
     } else {
-        /* No Report IDs (GIP format) — data starts at byte 0 */
         RtlCopyMemory(inputReport, shared.Data, dataLen);
         inputSize = dataLen;
     }
+
+    /* Store GIP data for XUSB GET_STATE (from GipData field in shared struct) */
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    RtlCopyMemory(ctx->XusbReport, shared.GipData, 14);
+    ctx->XusbReportReady = TRUE;
+    WdfWaitLockRelease(ctx->InputLock);
 
     /* Complete pending READ_REPORT if available */
     WDFREQUEST pendingRead;
@@ -320,7 +324,29 @@ EvtDeviceAdd(
         }
     }
 
-    WdfFdoInitSetFilter(DeviceInit);
+    /*
+     * Check if this is the XUSB companion device (function driver mode)
+     * or a HID minidriver device (filter mode under mshidumdf).
+     * XUSB companion INF sets XusbMode=1 in the device's hardware key.
+     * We detect this by querying the hardware ID for "HIDMaestroXUSB".
+     */
+    BOOLEAN isXusbCompanion = FALSE;
+    {
+        WDFMEMORY hwIdMem = NULL;
+        status = WdfFdoInitAllocAndQueryProperty(DeviceInit,
+            DevicePropertyHardwareID, NonPagedPoolNx,
+            WDF_NO_OBJECT_ATTRIBUTES, &hwIdMem);
+        if (NT_SUCCESS(status) && hwIdMem != NULL) {
+            PWCHAR hwIdStr = (PWCHAR)WdfMemoryGetBuffer(hwIdMem, NULL);
+            if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroXUSB") != NULL)
+                isXusbCompanion = TRUE;
+            WdfObjectDelete(hwIdMem);
+        }
+        status = STATUS_SUCCESS; /* Don't propagate query failures */
+    }
+
+    if (!isXusbCompanion)
+        WdfFdoInitSetFilter(DeviceInit);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
@@ -330,6 +356,30 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
+
+    if (isXusbCompanion) {
+        /* XUSB companion: function driver mode — register XUSB interface, skip HID.
+         * Data comes ONLY via DeviceIoControl (GET_STATE piggyback), NOT shared file.
+         * This avoids format conflicts with the HID device's shared file data. */
+        ReadConfigFromRegistry(ctx);
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+
+        status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
+        if (!NT_SUCCESS(status)) return status;
+
+        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+        queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
+        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->DefaultQueue);
+        if (!NT_SUCCESS(status)) return status;
+
+        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
+        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->ManualQueue);
+        if (!NT_SUCCESS(status)) return status;
+        goto start_timer; /* Read GipData from shared file for GET_STATE */
+    }
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -399,6 +449,28 @@ EvtDeviceAdd(
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
 
+    /*
+     * Set BusTypeGuid to USB so WGI/GameInputSvc treats this as a USB device
+     * and probes the XUSB interface for Xbox controller detection.
+     * This is what ViGEmBus does via WdfDeviceSetBusInformationForChildren.
+     */
+    {
+        static const DEVPROPKEY busTypeKey = {
+            { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } },
+            21  /* DEVPKEY_Device_BusTypeGuid = DEVPROPKEY{..., 21} */
+        };
+        /* GUID_BUS_TYPE_USB = {9d7debbc-c85d-11d1-9eb4-006008c3a19a} */
+        static const GUID usbBusType = {
+            0x9d7debbc, 0xc85d, 0x11d1,
+            { 0x9e, 0xb4, 0x00, 0x60, 0x08, 0xc3, 0xa1, 0x9a }
+        };
+        WDF_DEVICE_PROPERTY_DATA propData2;
+        WDF_DEVICE_PROPERTY_DATA_INIT(&propData2, &busTypeKey);
+        propData2.Lcid = LOCALE_NEUTRAL;
+        WdfDeviceAssignProperty(device, &propData2, DEVPROP_TYPE_GUID,
+            sizeof(GUID), (PVOID)&usbBusType);
+    }
+
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
     if (!NT_SUCCESS(status)) return status;
@@ -417,6 +489,7 @@ EvtDeviceAdd(
                               &ctx->ManualQueue);
     if (!NT_SUCCESS(status)) return status;
 
+start_timer:
     /* Shared file for data injection (bypasses upper filter drivers) */
     ctx->SharedMemHandle = NULL;
     ctx->SharedMemPtr = NULL;
@@ -849,37 +922,35 @@ EvtIoDeviceControl(
         ctx->InputReportsSubmitted++;
         *(DWORD*)&state[5] = (DWORD)ctx->InputReportsSubmitted;
 
-        if (ctx->InputReportReady && ctx->InputReportSize >= 12) {
-            PUCHAR d = ctx->InputReport;
-            if (d[0] == 0x01 && ctx->InputReportSize > 12) d++;
-            {
-                UCHAR btnLow = d[12], btnHigh = d[13];
-                UCHAR hat = (btnHigh >> 2) & 0x0F;
-                USHORT buttons = 0;
-                if (btnLow & 0x01) buttons |= 0x1000;
-                if (btnLow & 0x02) buttons |= 0x2000;
-                if (btnLow & 0x04) buttons |= 0x4000;
-                if (btnLow & 0x08) buttons |= 0x8000;
-                if (btnLow & 0x10) buttons |= 0x0100;
-                if (btnLow & 0x20) buttons |= 0x0200;
-                if (btnLow & 0x40) buttons |= 0x0020;
-                if (btnLow & 0x80) buttons |= 0x0010;
-                if (btnHigh & 0x01) buttons |= 0x0040;
-                if (btnHigh & 0x02) buttons |= 0x0080;
-                switch (hat) {
-                    case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
-                    case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
-                    case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
-                    case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
-                }
-                *(USHORT*)&state[0x0B] = buttons;
+        /* Read from XusbReport (always GIP format, 14 bytes) */
+        if (ctx->XusbReportReady) {
+            PUCHAR d = ctx->XusbReport;
+            UCHAR btnLow = d[12], btnHigh = d[13];
+            UCHAR hat = (btnHigh >> 2) & 0x0F;
+            USHORT buttons = 0;
+            if (btnLow & 0x01) buttons |= 0x1000;
+            if (btnLow & 0x02) buttons |= 0x2000;
+            if (btnLow & 0x04) buttons |= 0x4000;
+            if (btnLow & 0x08) buttons |= 0x8000;
+            if (btnLow & 0x10) buttons |= 0x0100;
+            if (btnLow & 0x20) buttons |= 0x0200;
+            if (btnLow & 0x40) buttons |= 0x0020;
+            if (btnLow & 0x80) buttons |= 0x0010;
+            if (btnHigh & 0x01) buttons |= 0x0040;
+            if (btnHigh & 0x02) buttons |= 0x0080;
+            switch (hat) {
+                case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
+                case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
+                case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
+                case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
             }
+            *(USHORT*)&state[0x0B] = buttons;
             state[0x0D] = (UCHAR)(*(USHORT*)&d[8] >> 8);
             state[0x0E] = (UCHAR)(*(USHORT*)&d[10] >> 8);
-            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
-            *(SHORT*)&state[0x11] = (SHORT)((int)(*(USHORT*)&d[2]) - 32768);
-            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
-            *(SHORT*)&state[0x15] = (SHORT)((int)(*(USHORT*)&d[6]) - 32768);
+            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
+            *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY: negate (HID down=positive, XInput up=positive) */
+            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
+            *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY: negate */
         }
         WdfWaitLockRelease(ctx->InputLock);
 

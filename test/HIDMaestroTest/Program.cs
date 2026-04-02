@@ -774,6 +774,13 @@ class Program
             hwId = $"root\\VID_{vid}&PID_{hwPid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
+        else if (profile.VendorId == 0x045E)
+        {
+            // Xbox without upper filter: use IG_00 so Chrome filters from RawInput
+            enumerator = "HID_IG_00";
+            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
+            classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
+        }
         else
         {
             // Standard HID device (non-Xbox, no upper filter)
@@ -805,6 +812,14 @@ class Program
             {
                 devInfoHandle.Free();
                 return false;
+            }
+
+            // Set compatible IDs — USB\MS_COMP_XUSB10 helps WGI identify Xbox controllers
+            if (!profile.UsesUpperFilter && profile.VendorId == 0x045E)
+            {
+                string compatMulti = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0\0";
+                byte[] compatBytes = Encoding.Unicode.GetBytes(compatMulti);
+                SetupDiSetDeviceRegistryPropertyW_Raw(dis, devInfoHandle.AddrOfPinnedObject(), 2, compatBytes, (uint)compatBytes.Length);
             }
 
             // DIF_REGISTERDEVICE = 0x19
@@ -1161,6 +1176,51 @@ class Program
         FixHidChildNames(displayName);
         Console.WriteLine("OK");
 
+        // Step 3.5: Create XUSB companion for XInput (driverMode=hid Xbox controllers only)
+        if (!profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        {
+            Console.Write("  Creating XUSB companion... ");
+            // Check if already exists
+            bool xusbExists = false;
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string candidate = $@"ROOT\SYSTEM\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                {
+                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                    if (info.Contains("XInput") || info.Contains("HIDMaestro"))
+                    {
+                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"");
+                        xusbExists = true;
+                        break;
+                    }
+                }
+            }
+            if (!xusbExists)
+            {
+                var sysGuid = new Guid("4D36E97D-E325-11CE-BFC1-08002BE10318");
+                IntPtr dis2 = SetupDiCreateDeviceInfoList(ref sysGuid, IntPtr.Zero);
+                if (dis2 != new IntPtr(-1))
+                {
+                    byte[] diBuf = new byte[32];
+                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf, 0);
+                    var diHandle = System.Runtime.InteropServices.GCHandle.Alloc(diBuf, GCHandleType.Pinned);
+                    string xusbHw = "root\\HIDMaestroXUSB\0\0";
+                    byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
+                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "System", ref sysGuid,
+                        "HIDMaestro XInput Companion", IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
+                    {
+                        SetupDiSetDeviceRegistryPropertyW_Raw(dis2, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
+                        SetupDiCallClassInstaller_Raw(0x19, dis2, diHandle.AddrOfPinnedObject());
+                    }
+                    diHandle.Free();
+                    SetupDiDestroyDeviceInfoList(dis2);
+                    Thread.Sleep(3000);
+                }
+            }
+            Console.WriteLine("OK");
+        }
+
         // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");
         using var h = OpenHidDevice(profile.VendorId, profile.ProductId);
@@ -1187,12 +1247,57 @@ class Program
             Console.WriteLine("  HID Caps: N/A (XInput-only mode)");
         }
 
+        // Open XUSB companion for direct XInput data injection (driverMode=hid only)
+        SafeFileHandle? xh = null;
         if (profile.UsesUpperFilter)
+        {
             Console.WriteLine($"  XInput: via {profile.UpperFilterName} upper filter");
+        }
+        else if (profile.VendorId == 0x045E)
+        {
+            Console.Write("  Opening XUSB interface... ");
+            var xusbGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
+            for (int retry = 0; retry < 3 && xh == null; retry++)
+            {
+                if (retry > 0) Thread.Sleep(2000);
+                IntPtr xDis = SetupDiGetClassDevsW(ref xusbGuid, IntPtr.Zero, IntPtr.Zero,
+                    DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+                if (xDis != new IntPtr(-1))
+                {
+                    var xDid = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+                    for (uint xi = 0; xi < 10; xi++)
+                    {
+                        if (!SetupDiEnumDeviceInterfaces(xDis, IntPtr.Zero, ref xusbGuid, xi, ref xDid))
+                            break;
+                        SetupDiGetDeviceInterfaceDetailW(xDis, ref xDid, IntPtr.Zero, 0, out uint xReq, IntPtr.Zero);
+                        IntPtr xDetail = Marshal.AllocHGlobal((int)xReq);
+                        Marshal.WriteInt32(xDetail, 8);
+                        if (SetupDiGetDeviceInterfaceDetailW(xDis, ref xDid, xDetail, xReq, out _, IntPtr.Zero))
+                        {
+                            string xPath = Marshal.PtrToStringUni(xDetail + 4)!;
+                            // Open our device's XUSB interface (ROOT#HID_IG_00 or ROOT#SYSTEM)
+                            if (xPath.Contains("root#", StringComparison.OrdinalIgnoreCase))
+                            {
+                                xh = CreateFileW(xPath, GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                                if (xh.IsInvalid) xh = null;
+                            }
+                        }
+                        Marshal.FreeHGlobal(xDetail);
+                    }
+                    SetupDiDestroyDeviceInfoList(xDis);
+                }
+            }
+            Console.WriteLine(xh != null ? "OK" : "not found");
+        }
 
         // Parse the descriptor to build a generic input report packer
         // Parse the ORIGINAL profile descriptor (before Feature Report injection)
         var reportBuilder = HidReportBuilder.Parse(profileDesc ?? descriptor);
+
+        // GIP builder: used for XUSB GET_STATE data (always GIP format regardless of profile descriptor)
+        byte[] gipDescBytes = Convert.FromHexString("05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0");
+        var gipBuilder = HidReportBuilder.Parse(gipDescBytes);
         reportBuilder.PrintLayout();
 
         Console.WriteLine("\n  Sending input via SetFeature + XInput. Ctrl+C to stop.\n");
@@ -1225,7 +1330,7 @@ class Program
             sharedFile = new FileStream(sharedFilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite,
                 FileShare.ReadWrite, 72, FileOptions.WriteThrough);
             // Pre-allocate 72 bytes
-            sharedFile.SetLength(72);
+            sharedFile.SetLength(86); // SeqNo(4) + DataSize(4) + Data(64) + GipData(14)
             sharedFile.Flush();
             Console.WriteLine("  Shared file: OK");
         }
@@ -1294,20 +1399,62 @@ class Program
                 leftTrigger: ltVal, rightTrigger: rtVal,
                 hatValue: 0, buttonMask: btnMask);
 
-            // Write input data to shared file (driver reads via timer)
+            // Write to shared file: SeqNo(4) + DataSize(4) + Data(64) + GipData(14) = 86 bytes
+            // Data = native HID report (for DirectInput via HID READ_REPORT)
+            // GipData = GIP format (for XInput via XUSB GET_STATE)
             if (sharedFile != null)
             {
+                // Native HID report (from descriptor's format)
                 int dataStart = reportBuilder.InputReportId != 0 ? 1 : 0;
                 int dataLen = Math.Min(inputReport.Length - dataStart, 64);
+
+                // GIP data: build using GIP descriptor parser (identical to xinputhid path)
+                byte[] gipReport = gipBuilder.BuildReport(
+                    leftX: lxNorm, leftY: lyNorm,
+                    rightX: 0.5, rightY: 0.5,
+                    leftTrigger: ltVal, rightTrigger: rtVal,
+                    hatValue: 0, buttonMask: btnMask);
+                byte[] gipData = new byte[14];
+                Array.Copy(gipReport, 0, gipData, 0, Math.Min(14, gipReport.Length));
+
                 sharedMemSeqNo++;
                 sharedFile.Seek(0, SeekOrigin.Begin);
-                // Layout: SeqNo(4) + DataSize(4) + Data(64) = 72 bytes
-                sharedFile.Write(BitConverter.GetBytes(sharedMemSeqNo));
-                sharedFile.Write(BitConverter.GetBytes(dataLen));
-                sharedFile.Write(inputReport, dataStart, dataLen);
+                sharedFile.Write(BitConverter.GetBytes(sharedMemSeqNo));  // 4 bytes
+                sharedFile.Write(BitConverter.GetBytes(dataLen));          // 4 bytes
+                byte[] padded = new byte[64];
+                Array.Copy(inputReport, dataStart, padded, 0, dataLen);
+                sharedFile.Write(padded);                                  // 64 bytes
+                sharedFile.Write(gipData);                                 // 14 bytes
                 sharedFile.Flush();
             }
             bool ok = true;
+
+            // Send GIP-format data to XUSB companion for XInput
+            if (xh != null)
+            {
+                byte[] xusbIn = new byte[17];
+                xusbIn[0] = 0x01; xusbIn[1] = 0x01; xusbIn[2] = 0x00; // GET_STATE header
+                // GIP layout: LX(2) LY(2) RX(2) RY(2) LT(2) RT(2) BtnLow(1) BtnHigh(1)
+                ushort xLx = (ushort)(lxNorm * 65535);
+                ushort xLy = (ushort)(lyNorm * 65535);
+                ushort xRx = (ushort)(0.5 * 65535);
+                ushort xRy = (ushort)(0.5 * 65535);
+                ushort xLt = (ushort)(ltVal * 1023);  // 10-bit trigger
+                ushort xRt = (ushort)(rtVal * 1023);
+                BitConverter.GetBytes(xLx).CopyTo(xusbIn, 3);
+                BitConverter.GetBytes(xLy).CopyTo(xusbIn, 5);
+                BitConverter.GetBytes(xRx).CopyTo(xusbIn, 7);
+                BitConverter.GetBytes(xRy).CopyTo(xusbIn, 9);
+                BitConverter.GetBytes(xLt).CopyTo(xusbIn, 11);
+                BitConverter.GetBytes(xRt).CopyTo(xusbIn, 13);
+                byte btnLow = 0;
+                if ((btnMask & 0x01) != 0) btnLow |= 0x01; // A
+                xusbIn[15] = btnLow;
+                xusbIn[16] = 0;
+                byte[] xusbOut = new byte[29];
+                DeviceIoControl(xh, 0x8000E00C, xusbIn, (uint)xusbIn.Length,
+                    xusbOut, (uint)xusbOut.Length, out _, IntPtr.Zero);
+            }
 
             if (!ok)
             {
@@ -1323,8 +1470,15 @@ class Program
             }
 
             count++;
-            if (count % 100 == 0)
-                Console.Write($"\r  Reports: {count}  t={t:F1}s  ");
+            if (count % 500 == 1)
+            {
+                byte[] gr = gipBuilder.BuildReport(leftX: lxNorm, leftY: lyNorm, rightX: 0.5, rightY: 0.5, leftTrigger: ltVal, rightTrigger: rtVal, hatValue: 0, buttonMask: btnMask);
+                ushort gLx2 = BitConverter.ToUInt16(gr, 0);
+                ushort gLy2 = BitConverter.ToUInt16(gr, 2);
+                short xLx = (short)((int)gLx2 - 32768);
+                short xLy = (short)((int)gLy2 - 32768);
+                Console.Write($"\r  #{count} gip[0-3]: {gLx2:X4} {gLy2:X4}  xi: {xLx} {xLy}  lx={lxNorm:F3} ly={lyNorm:F3}  ");
+            }
 
             Thread.Sleep(4); // ~250 Hz
         }
