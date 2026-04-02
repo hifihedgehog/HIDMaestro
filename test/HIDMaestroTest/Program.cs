@@ -1133,11 +1133,7 @@ class Program
         EnsureGameInputService();
         EnsureSharedFile();
         CleanupGhostDevices();
-        // GameInput registry: only for profiles WITHOUT upper filter (driverMode=hid)
-        // xinputhid profiles get WGI via WinExInput interface, not GameInput
-        // Avoiding GameInput for xinputhid prevents SDL3 GameInput driver from claiming the device
-        if (!profile.UsesUpperFilter)
-            WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
+        WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
         Console.WriteLine("OK");
 
         // Step 1: Write descriptor to registry

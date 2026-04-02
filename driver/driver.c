@@ -598,7 +598,7 @@ EvtIoDeviceControl(
     /* Log all IOCTLs for debugging xinputhid protocol */
     {
         static LONG ioLogCount = 0;
-        if (InterlockedIncrement(&ioLogCount) <= 50) {
+        if (InterlockedIncrement(&ioLogCount) <= 500) {
             HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\ioctl_debug.txt",
                 FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
             if (hLog != INVALID_HANDLE_VALUE) {
