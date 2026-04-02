@@ -8,7 +8,8 @@
   "manufacturerString": "DragonRise Inc.",
   "type": "gamepad",
   "connection": "usb",
-  "descriptor": "05010904a101a10275089505150026ff00350046ff00093009300930093009318102750495012507463b0165140900814265007501950a2501450105091901290a81020600ff7501950a2501450109018102c0a1027508950446ff0026ff0009029102c0c0",
-  "inputReportSize": null,
-  "notes": "101-byte descriptor. Reconstructed from kernel hid-dr.c. THE most common cheap USB gamepad chipset — used by millions of generic USB gamepads worldwide."
+  "descriptor": "05010904a101a10275089505150026ff00350046ff00093009310933093409328102750495012507463b0165140939814265007501950a2501450105091901290a81020600ff7501950a2501450109018102c0c0",
+  "nativeDescriptor": "05010904a101a10275089505150026ff00350046ff00093009300930093009318102750495012507463b0165140900814265007501950a2501450105091901290a81020600ff7501950a2501450109018102c0a1027508950446ff0026ff0009029102c0c0",
+  "inputReportSize": 8,
+  "notes": "Fixed descriptor with correct usages (X,Y,Rx,Ry,Z). Native descriptor has famous firmware bug: Usage(X) duplicated 4 times. THE most common cheap USB gamepad chipset — used by millions of generic USB gamepads worldwide."
 }
