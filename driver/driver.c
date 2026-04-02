@@ -268,13 +268,16 @@ EvtSharedMemTimer(
     ctx->XusbReportReady = TRUE;
     WdfWaitLockRelease(ctx->InputLock);
 
-    /* Complete pending READ_REPORT if available */
-    WDFREQUEST pendingRead;
-    if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
-        WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-    } else {
-        /* No pending read — store for later */
+    /* Complete ALL pending READ_REPORT requests (multiple consumers: xinputhid, GameInput, etc.) */
+    {
+        WDFREQUEST pendingRead;
+        ULONG completed = 0;
+        while (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+            NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
+            WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            completed++;
+        }
+        /* Also store for polled GET_INPUT_REPORT */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
