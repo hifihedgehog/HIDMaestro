@@ -359,23 +359,21 @@ EvtDeviceAdd(
     BOOLEAN isXusbCompanion = FALSE;
     BOOLEAN isGamepadCompanion = FALSE;
     {
-        WDFMEMORY hwIdMem = NULL;
-        status = WdfFdoInitAllocAndQueryProperty(DeviceInit,
-            DevicePropertyHardwareID, NonPagedPoolNx,
-            WDF_NO_OBJECT_ATTRIBUTES, &hwIdMem);
-        if (NT_SUCCESS(status) && hwIdMem != NULL) {
-            PWCHAR hwIdStr = (PWCHAR)WdfMemoryGetBuffer(hwIdMem, NULL);
-            if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroGamepad") != NULL)
-                isGamepadCompanion = TRUE;
-            else if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroXUSB") != NULL)
+        /* Detect companion by device class. System class = companion, HIDClass = main.
+         * All other detection methods (hardware ID query, registry key) are unreliable
+         * for UMDF2 System-class devices during WdfFdoInit stage. */
+        WDFMEMORY clsMem = NULL;
+        if (NT_SUCCESS(WdfFdoInitAllocAndQueryProperty(DeviceInit,
+            DevicePropertyClassName, NonPagedPoolNx,
+            WDF_NO_OBJECT_ATTRIBUTES, &clsMem)) && clsMem != NULL) {
+            PWCHAR clsName = (PWCHAR)WdfMemoryGetBuffer(clsMem, NULL);
+            if (clsName && wcsstr(clsName, L"System") != NULL)
                 isXusbCompanion = TRUE;
-            WdfObjectDelete(hwIdMem);
+            WdfObjectDelete(clsMem);
         }
-        status = STATUS_SUCCESS; /* Don't propagate query failures */
     }
 
-    if (!isXusbCompanion)
-        WdfFdoInitSetFilter(DeviceInit);
+    WdfFdoInitSetFilter(DeviceInit);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
@@ -411,12 +409,12 @@ EvtDeviceAdd(
             ctx->ProductStringBytes = sizeof(defaultStr);
         }
 
-        ctx->IsXusbCompanion = TRUE;
-        ReadConfigFromRegistry(ctx);
-        /* XUSB for WGI detection + WinExInput for browser GamepadAdded.
-         * GET_STATE returns NOT CONNECTED to prevent duplicate XInput slot. */
+        /* Do NOT read config — keep defaults (045E:028E) so companion has different
+         * VID/PID from main device. Prevents GameInput deduplication. */
         WdfDeviceCreateDeviceInterface(device,
             (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+
+        /* Register WinExInput interface — WGI monitors this GUID for Gamepad discovery */
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
@@ -537,10 +535,21 @@ EvtDeviceAdd(
      * GameInput/SDL3 checks BusTypeGuid to determine how to read HID reports.
      * Without this, children have GUID_BUS_TYPE_HID and GameInput reads zeros.
      */
-    /* BusTypeGuid cannot be set from UMDF2 — WdfDeviceSetBusInformationForChildren is KMDF-only.
-     * HID children get GUID_BUS_TYPE_HID from mshidumdf. GameInput/SDL3 may read zeros
-     * through xinputhid on HID-bus devices. This is a platform limitation for ROOT-enumerated
-     * virtual HID devices with xinputhid upper filter. */
+    /* Register XUSB + WinExInput on ALL devices (main HID + companion).
+     * For the main HID device: enables direct XUSB IOCTL handling.
+     * For the companion: provides XInput slot + WGI browser detection.
+     * WdfFdoInitAllocAndQueryProperty is unreliable in UMDF2, so we
+     * can't conditionally register. Registering on all devices is safe. */
+    WdfDeviceCreateDeviceInterface(device,
+        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    WdfDeviceCreateDeviceInterface(device,
+        (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
+    {
+        UNICODE_STRING refStr;
+        RtlInitUnicodeString(&refStr, L"XI_00");
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+    }
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
@@ -987,8 +996,6 @@ EvtIoDeviceControl(
         UCHAR state[29];
         RtlZeroMemory(state, sizeof(state));
         *(USHORT*)&state[0] = 0x0101;
-        /* Companion: NOT CONNECTED (prevents duplicate XInput slot).
-         * WGI still detects via WinExInput interface. */
         state[2] = 0x01; /* CONNECTED */
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);
