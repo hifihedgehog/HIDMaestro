@@ -357,6 +357,7 @@ EvtDeviceAdd(
      * We detect this by querying the hardware ID for "HIDMaestroXUSB".
      */
     BOOLEAN isXusbCompanion = FALSE;
+    BOOLEAN isGamepadCompanion = FALSE;
     {
         WDFMEMORY hwIdMem = NULL;
         status = WdfFdoInitAllocAndQueryProperty(DeviceInit,
@@ -364,7 +365,9 @@ EvtDeviceAdd(
             WDF_NO_OBJECT_ATTRIBUTES, &hwIdMem);
         if (NT_SUCCESS(status) && hwIdMem != NULL) {
             PWCHAR hwIdStr = (PWCHAR)WdfMemoryGetBuffer(hwIdMem, NULL);
-            if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroXUSB") != NULL)
+            if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroGamepad") != NULL)
+                isGamepadCompanion = TRUE;
+            else if (hwIdStr && wcsstr(hwIdStr, L"HIDMaestroXUSB") != NULL)
                 isXusbCompanion = TRUE;
             WdfObjectDelete(hwIdMem);
         }
@@ -520,10 +523,13 @@ EvtDeviceAdd(
      * XInput discovers this interface and sends XUSB IOCTLs which our
      * EvtIoDeviceControl already handles alongside HID IOCTLs.
      */
-    WdfDeviceCreateDeviceInterface(device,
-        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-    WdfDeviceCreateDeviceInterface(device,
-        (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
+    /* Gamepad companion: no XUSB/USB interfaces (clean HID device for GameInput/SDL3) */
+    if (!isGamepadCompanion) {
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
+    }
 
     /*
      * Set BusTypeGuid to USB for child devices (created by mshidumdf).

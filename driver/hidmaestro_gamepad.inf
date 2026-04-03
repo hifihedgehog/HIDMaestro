@@ -1,0 +1,79 @@
+;
+; HIDMaestro Gamepad Companion — standalone HID gamepad for GameInput/SDL3.
+; Same DLL as the main HID minidriver. No xinputhid, readable by GameInput.
+; Provides SDL3/GameInput data while main device handles XInput via xinputhid.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %ProviderName%
+CatalogFile = hidmaestro_gamepad.cat
+DriverVer   = 03/30/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir  = 13
+UMDriverCopy    = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+HIDMaestro.dll = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = Gamepad_Install, root\HIDMaestroGamepad
+
+[Gamepad_Install.NT]
+CopyFiles = UMDriverCopy
+
+[UMDriverCopy]
+HIDMaestro.dll
+
+[Gamepad_Install.NT.HW]
+AddReg = Gamepad_HW_AddReg
+
+[Gamepad_HW_AddReg]
+HKR,,"LowerFilters",0x00010008,"WUDFRd"
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)"
+
+[Gamepad_Install.NT.Services]
+AddService = mshidumdf,0x000001fa,mshidumdf_Service
+AddService = WUDFRd,0x000001f8,WUDFRD_Service
+
+[mshidumdf_Service]
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %10%\System32\Drivers\mshidumdf.sys
+
+[WUDFRD_Service]
+DisplayName    = %WudfRdDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
+
+[Gamepad_Install.NT.Wdf]
+UmdfService                 = HIDMaestro, HIDMaestro_UmdfService
+UmdfServiceOrder            = HIDMaestro
+UmdfKernelModeClientPolicy  = AllowKernelModeClients
+UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
+UmdfMethodNeitherAction     = Copy
+UmdfFsContextUsePolicy      = CanUseFsContext2
+
+[HIDMaestro_UmdfService]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary      = %13%\HIDMaestro.dll
+
+[Strings]
+ProviderName     = "HIDMaestro"
+ManufacturerName = "HIDMaestro"
+DeviceDesc       = "HIDMaestro Gamepad"
+DiskName         = "HIDMaestro Installation Disk"
+WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"

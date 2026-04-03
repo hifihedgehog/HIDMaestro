@@ -1251,6 +1251,53 @@ class Program
             Console.WriteLine("OK");
         }
 
+        // Step 3.6: Create Gamepad companion for GameInput/SDL3 (xinputhid profiles only)
+        // xinputhid blocks HID reading for GameInput. A separate HID device without xinputhid
+        // provides data to GameInput/SDL3 directly.
+        if (profile.UsesUpperFilter)
+        {
+            Console.Write("  Creating Gamepad companion... ");
+            bool gpExists = false;
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                {
+                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                    if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
+                    {
+                        gpExists = true;
+                        break;
+                    }
+                }
+            }
+            if (!gpExists)
+            {
+                var hidGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
+                IntPtr dis3 = SetupDiCreateDeviceInfoList(ref hidGuid, IntPtr.Zero);
+                if (dis3 != new IntPtr(-1))
+                {
+                    byte[] diBuf3 = new byte[32];
+                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf3, 0);
+                    var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
+                    string gpVid = $"{profile.VendorId:X4}";
+                    string gpPid = $"{profile.ProductId:X4}";
+                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                    byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
+                    if (SetupDiCreateDeviceInfoW_Raw(dis3, "HIDClass", ref hidGuid,
+                        "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
+                    {
+                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
+                        SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject());
+                    }
+                    diHandle3.Free();
+                    SetupDiDestroyDeviceInfoList(dis3);
+                    Thread.Sleep(3000);
+                }
+            }
+            Console.WriteLine("OK");
+        }
+
         // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");
         using var h = OpenHidDevice(profile.VendorId, profile.ProductId);
