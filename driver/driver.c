@@ -468,12 +468,33 @@ EvtDeviceAdd(
     /* Read config from registry (overrides defaults if present) */
     ReadConfigFromRegistry(ctx);
 
-    /* Find first Input Report ID from descriptor and cache in context */
+    /* Find first Input Report ID from the FIRST Application Collection only.
+     * For dual-collection descriptors, Col2 may have a Report ID that we
+     * must NOT use for Col1's reports. Stop scanning at the first End Collection
+     * that closes the top-level Application Collection. */
     ctx->FirstInputReportId = 0;
-    for (ULONG ri = 0; ri < ctx->ReportDescriptorSize - 1; ri++) {
-        if (ctx->ReportDescriptor[ri] == 0x85 && (ri == 0 || ctx->ReportDescriptor[ri-1] != 0x09)) {
-            ctx->FirstInputReportId = ctx->ReportDescriptor[ri + 1];
-            break;
+    {
+        int colDepth = 0;
+        BOOLEAN inFirstCollection = FALSE;
+        for (ULONG ri = 0; ri < ctx->ReportDescriptorSize - 1; ri++) {
+            UCHAR prefix = ctx->ReportDescriptor[ri];
+            int bSize = prefix & 0x03;
+            if (bSize == 3) bSize = 4;
+            int bType = (prefix >> 2) & 0x03;
+            int bTag = (prefix >> 4) & 0x0F;
+            if (bType == 0 && bTag == 10) { /* Collection */
+                colDepth++;
+                if (colDepth == 1) inFirstCollection = TRUE;
+            }
+            if (bType == 0 && bTag == 12) { /* End Collection */
+                colDepth--;
+                if (colDepth == 0 && inFirstCollection) break; /* Done with first collection */
+            }
+            if (inFirstCollection && prefix == 0x85 && (ri == 0 || ctx->ReportDescriptor[ri-1] != 0x09)) {
+                ctx->FirstInputReportId = ctx->ReportDescriptor[ri + 1];
+                break;
+            }
+            ri += bSize; /* Skip value bytes */
         }
     }
 
