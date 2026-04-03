@@ -1133,7 +1133,11 @@ class Program
         EnsureGameInputService();
         EnsureSharedFile();
         CleanupGhostDevices();
-        WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
+        // Skip GameInput registry for xinputhid profiles — GameInput can't read from
+        // ROOT-enumerated devices. Without registry, GameInput won't claim as Gamepad,
+        // letting SDL3 fall through to XInput which works.
+        if (!profile.UsesUpperFilter)
+            WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
         Console.WriteLine("OK");
 
         // Step 1: Write descriptor to registry
