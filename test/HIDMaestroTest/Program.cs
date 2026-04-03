@@ -1251,51 +1251,85 @@ class Program
             Console.WriteLine("OK");
         }
 
-        // Step 3.6: Create Gamepad companion for GameInput/SDL3 (xinputhid profiles only)
-        // xinputhid blocks HID reading for GameInput. A separate HID device without xinputhid
-        // provides data to GameInput/SDL3 directly.
-        if (profile.UsesUpperFilter)
+        // Step 3.6: Create ViGEmBus Xbox 360 target for GameInput/SDL3
+        // GameInput can't read from UMDF2 virtual HID devices (HID bus type).
+        // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
+        SafeFileHandle? vigemHandle = null;
+        uint vigemSerial = 0;
+        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
         {
-            Console.Write("  Creating Gamepad companion... ");
-            bool gpExists = false;
-            for (int idx = 0; idx < 10; idx++)
+            Console.Write("  Creating ViGEmBus target... ");
+            try
             {
-                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                // Open ViGEmBus device
+                var vigemGuid = new Guid("96E42B22-F5E9-42F8-B043-ED0F932F014F");
+                IntPtr vDis = SetupDiGetClassDevsW(ref vigemGuid, IntPtr.Zero, IntPtr.Zero,
+                    DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+                if (vDis != new IntPtr(-1))
                 {
-                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
-                    if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
+                    var vDid = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+                    if (SetupDiEnumDeviceInterfaces(vDis, IntPtr.Zero, ref vigemGuid, 0, ref vDid))
                     {
-                        gpExists = true;
-                        break;
+                        SetupDiGetDeviceInterfaceDetailW(vDis, ref vDid, IntPtr.Zero, 0, out uint vReq, IntPtr.Zero);
+                        IntPtr vDetail = Marshal.AllocHGlobal((int)vReq);
+                        Marshal.WriteInt32(vDetail, 8);
+                        if (SetupDiGetDeviceInterfaceDetailW(vDis, ref vDid, vDetail, vReq, out _, IntPtr.Zero))
+                        {
+                            string vPath = Marshal.PtrToStringUni(vDetail + 4)!;
+                            vigemHandle = CreateFileW(vPath, GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                            if (vigemHandle.IsInvalid) vigemHandle = null;
+                        }
+                        Marshal.FreeHGlobal(vDetail);
+                    }
+                    SetupDiDestroyDeviceInfoList(vDis);
+                }
+
+                if (vigemHandle != null)
+                {
+                    // Check version
+                    byte[] verBuf = new byte[8]; // VIGEM_CHECK_VERSION: Size(4) + Version(4)
+                    BitConverter.GetBytes(8).CopyTo(verBuf, 0);
+                    BitConverter.GetBytes(0x0001).CopyTo(verBuf, 4);
+                    DeviceIoControl(vigemHandle, 0x002AA00C, verBuf, (uint)verBuf.Length,
+                        null, 0, out _, IntPtr.Zero);
+
+                    // Plugin Xbox 360 target
+                    vigemSerial = 1;
+                    byte[] plugBuf = new byte[16]; // Size(4) + SerialNo(4) + TargetType(4) + VID(2) + PID(2)
+                    BitConverter.GetBytes(16).CopyTo(plugBuf, 0);
+                    BitConverter.GetBytes(vigemSerial).CopyTo(plugBuf, 4);
+                    BitConverter.GetBytes(0).CopyTo(plugBuf, 8); // Xbox360Wired = 0
+                    // Use default 045E:028E — SDL3 routes Xbox 360 through XInput (works)
+                    // Xbox One PIDs get routed through GameInput (zeros on virtual devices)
+                    bool plugOk = DeviceIoControl(vigemHandle, 0x002AA004, plugBuf, (uint)plugBuf.Length,
+                        null, 0, out _, IntPtr.Zero);
+                    if (plugOk)
+                    {
+                        // Wait for device to be ready
+                        byte[] waitBuf = new byte[8]; // Size(4) + SerialNo(4)
+                        BitConverter.GetBytes(8).CopyTo(waitBuf, 0);
+                        BitConverter.GetBytes(vigemSerial).CopyTo(waitBuf, 4);
+                        DeviceIoControl(vigemHandle, 0x002AA010, waitBuf, (uint)waitBuf.Length,
+                            null, 0, out _, IntPtr.Zero);
+                        Thread.Sleep(1000);
+                        Console.WriteLine("OK");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"FAILED (err={Marshal.GetLastWin32Error()})");
+                        vigemSerial = 0;
                     }
                 }
-            }
-            if (!gpExists)
-            {
-                var hidGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
-                IntPtr dis3 = SetupDiCreateDeviceInfoList(ref hidGuid, IntPtr.Zero);
-                if (dis3 != new IntPtr(-1))
+                else
                 {
-                    byte[] diBuf3 = new byte[32];
-                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf3, 0);
-                    var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
-                    string gpVid = $"{profile.VendorId:X4}";
-                    string gpPid = $"{profile.ProductId:X4}";
-                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
-                    byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
-                    if (SetupDiCreateDeviceInfoW_Raw(dis3, "HIDClass", ref hidGuid,
-                        "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
-                    {
-                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
-                        SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject());
-                    }
-                    diHandle3.Free();
-                    SetupDiDestroyDeviceInfoList(dis3);
-                    Thread.Sleep(3000);
+                    Console.WriteLine("ViGEmBus not found");
                 }
             }
-            Console.WriteLine("OK");
+            catch (Exception ex)
+            {
+                Console.WriteLine($"FAILED: {ex.Message}");
+            }
         }
 
         // Step 4: Open the HID child device
@@ -1550,6 +1584,35 @@ class Program
                     xusbOut, (uint)xusbOut.Length, out _, IntPtr.Zero);
             }
 
+            // Submit report to ViGEmBus target for GameInput/SDL3
+            if (vigemHandle != null && vigemSerial > 0)
+            {
+                // XUSB_SUBMIT_REPORT: Size(4) + SerialNo(4) + XUSB_REPORT(12)
+                // XUSB_REPORT: wButtons(2) + bLeftTrigger(1) + bRightTrigger(1) +
+                //              sThumbLX(2) + sThumbLY(2) + sThumbRX(2) + sThumbRY(2)
+                byte[] vrBuf = new byte[20];
+                BitConverter.GetBytes(20).CopyTo(vrBuf, 0);
+                BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
+                // Buttons
+                ushort vrButtons = 0;
+                if ((btnMask & 0x01) != 0) vrButtons |= 0x1000; // A
+                BitConverter.GetBytes(vrButtons).CopyTo(vrBuf, 8);
+                // Triggers (0-255)
+                vrBuf[10] = (byte)(sepLt * 255);
+                vrBuf[11] = (byte)(sepRt * 255);
+                // Sticks (signed -32768 to 32767)
+                short vrLx = (short)((lxNorm - 0.5) * 2 * 32767);
+                short vrLy = (short)((0.5 - lyNorm) * 2 * 32767); // Invert Y
+                short vrRx = 0;
+                short vrRy = 0;
+                BitConverter.GetBytes(vrLx).CopyTo(vrBuf, 12);
+                BitConverter.GetBytes(vrLy).CopyTo(vrBuf, 14);
+                BitConverter.GetBytes(vrRx).CopyTo(vrBuf, 16);
+                BitConverter.GetBytes(vrRy).CopyTo(vrBuf, 18);
+                DeviceIoControl(vigemHandle, 0x002AA808, vrBuf, (uint)vrBuf.Length,
+                    null, 0, out _, IntPtr.Zero);
+            }
+
             if (!ok)
             {
                 int err = Marshal.GetLastWin32Error();
@@ -1578,6 +1641,18 @@ class Program
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
+
+        // Unplug ViGEmBus target
+        if (vigemHandle != null && vigemSerial > 0)
+        {
+            byte[] unplugBuf = new byte[8]; // Size(4) + SerialNo(4)
+            BitConverter.GetBytes(8).CopyTo(unplugBuf, 0);
+            BitConverter.GetBytes(vigemSerial).CopyTo(unplugBuf, 4);
+            DeviceIoControl(vigemHandle, 0x002AA008, unplugBuf, (uint)unplugBuf.Length,
+                null, 0, out _, IntPtr.Zero);
+            vigemHandle.Dispose();
+        }
+
         return 0;
     }
 
