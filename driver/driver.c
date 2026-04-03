@@ -268,14 +268,33 @@ EvtSharedMemTimer(
     ctx->XusbReportReady = TRUE;
     WdfWaitLockRelease(ctx->InputLock);
 
-    /* Complete ALL pending READ_REPORT requests (multiple consumers: xinputhid, GameInput, etc.) */
+    /* Build Col2 report (Report ID 0x20) with same gamepad data */
+    UCHAR col2Report[HIDMAESTRO_MAX_REPORT_SIZE];
+    ULONG col2Size = 0;
+    /* Only build Col2 if descriptor is large enough to have dual collections (>300 bytes) */
+    if (ctx->ReportDescriptorSize > 300) {
+        col2Report[0] = 0x20; /* Report ID */
+        /* Copy first 15 bytes of GIP data (sticks + triggers + buttons + hat) */
+        ULONG col2Data = 15;
+        if (col2Data > sizeof(shared.Data)) col2Data = sizeof(shared.Data);
+        RtlCopyMemory(col2Report + 1, shared.Data, col2Data);
+        col2Size = col2Data + 1;
+    }
+
+    /* Complete ALL pending READ_REPORT requests, alternating between Col1 and Col2 */
     {
         WDFREQUEST pendingRead;
-        ULONG completed = 0;
         while (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+            /* Send Col1 (GIP, no Report ID) */
             NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-            completed++;
+
+            /* Send Col2 (Report ID 0x20) if available */
+            if (col2Size > 0 &&
+                NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+                cs = RequestCopyFromBuffer(pendingRead, col2Report, col2Size);
+                WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            }
         }
         /* Also store for polled GET_INPUT_REPORT */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
@@ -486,26 +505,14 @@ EvtDeviceAdd(
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
 
     /*
-     * Set BusTypeGuid to USB so WGI/GameInputSvc treats this as a USB device
-     * and probes the XUSB interface for Xbox controller detection.
-     * This is what ViGEmBus does via WdfDeviceSetBusInformationForChildren.
+     * Set BusTypeGuid to USB for child devices (created by mshidumdf).
+     * GameInput/SDL3 checks BusTypeGuid to determine how to read HID reports.
+     * Without this, children have GUID_BUS_TYPE_HID and GameInput reads zeros.
      */
-    {
-        static const DEVPROPKEY busTypeKey = {
-            { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } },
-            21  /* DEVPKEY_Device_BusTypeGuid = DEVPROPKEY{..., 21} */
-        };
-        /* GUID_BUS_TYPE_USB = {9d7debbc-c85d-11d1-9eb4-006008c3a19a} */
-        static const GUID usbBusType = {
-            0x9d7debbc, 0xc85d, 0x11d1,
-            { 0x9e, 0xb4, 0x00, 0x60, 0x08, 0xc3, 0xa1, 0x9a }
-        };
-        WDF_DEVICE_PROPERTY_DATA propData2;
-        WDF_DEVICE_PROPERTY_DATA_INIT(&propData2, &busTypeKey);
-        propData2.Lcid = LOCALE_NEUTRAL;
-        WdfDeviceAssignProperty(device, &propData2, DEVPROP_TYPE_GUID,
-            sizeof(GUID), (PVOID)&usbBusType);
-    }
+    /* BusTypeGuid cannot be set from UMDF2 — WdfDeviceSetBusInformationForChildren is KMDF-only.
+     * HID children get GUID_BUS_TYPE_HID from mshidumdf. GameInput/SDL3 may read zeros
+     * through xinputhid on HID-bus devices. This is a platform limitation for ROOT-enumerated
+     * virtual HID devices with xinputhid upper filter. */
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);

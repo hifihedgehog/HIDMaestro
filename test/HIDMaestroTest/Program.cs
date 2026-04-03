@@ -1174,6 +1174,36 @@ class Program
         // Final name fix after xinputhid grandchild has fully appeared
         Thread.Sleep(2000);
         FixHidChildNames(displayName);
+
+        // Set BusTypeGuid to USB on ROOT device and HID children
+        // GameInput uses BusTypeGuid to determine how to read HID reports
+        {
+            var busTypeKey = new DEVPROPKEY
+            {
+                fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+                pid = 21 // DEVPKEY_Device_BusTypeGuid
+            };
+            byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
+            // DEVPROP_TYPE_GUID = 0x0D
+            foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
+            {
+                for (int idx = 0; idx < 10; idx++)
+                {
+                    string devId = $@"ROOT\{enumer}\{idx:D4}";
+                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
+                    {
+                        CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
+                            usbBusGuid, (uint)usbBusGuid.Length, 0);
+                        // Also set on HID child
+                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
+                        {
+                            CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
+                                usbBusGuid, (uint)usbBusGuid.Length, 0);
+                        }
+                    }
+                }
+            }
+        }
         Console.WriteLine("OK");
 
         // Step 3.5: Create XUSB companion for XInput (driverMode=hid Xbox controllers only)
