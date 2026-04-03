@@ -1323,11 +1323,15 @@ class Program
 
         // Parse the descriptor to build a generic input report packer
         // Parse the ORIGINAL profile descriptor (before Feature Report injection)
-        var reportBuilder = HidReportBuilder.Parse(profileDesc ?? descriptor);
-
-        // GIP builder: used for XUSB GET_STATE data (always GIP format regardless of profile descriptor)
+        // GIP builder: used for XUSB GET_STATE data AND as report builder for xinputhid profiles
         byte[] gipDescBytes = Convert.FromHexString("05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0");
         var gipBuilder = HidReportBuilder.Parse(gipDescBytes);
+
+        // For xinputhid profiles, use GIP builder as report builder (Col1, no Report ID)
+        // For other profiles, parse the profile descriptor directly
+        var reportBuilder = profile.UsesUpperFilter
+            ? gipBuilder
+            : HidReportBuilder.Parse(profileDesc ?? descriptor);
         reportBuilder.PrintLayout();
 
         Console.WriteLine("\n  Sending input via SetFeature + XInput. Ctrl+C to stop.\n");
