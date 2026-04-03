@@ -411,11 +411,12 @@ EvtDeviceAdd(
             ctx->ProductStringBytes = sizeof(defaultStr);
         }
 
+        ctx->IsXusbCompanion = TRUE;
         ReadConfigFromRegistry(ctx);
+        /* XUSB for WGI detection + WinExInput for browser GamepadAdded.
+         * GET_STATE returns NOT CONNECTED to prevent duplicate XInput slot. */
         WdfDeviceCreateDeviceInterface(device,
             (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-
-        /* Register WinExInput interface — WGI monitors this GUID for Gamepad discovery */
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
@@ -986,6 +987,8 @@ EvtIoDeviceControl(
         UCHAR state[29];
         RtlZeroMemory(state, sizeof(state));
         *(USHORT*)&state[0] = 0x0101;
+        /* Companion: NOT CONNECTED (prevents duplicate XInput slot).
+         * WGI still detects via WinExInput interface. */
         state[2] = 0x01; /* CONNECTED */
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);

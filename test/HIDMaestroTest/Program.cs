@@ -1152,8 +1152,10 @@ class Program
         // from claiming as Gamepad while keeping xinputhid working.
         // xinputhid checks hardware ID (PID 02FF), not HID attributes.
         // 045E:0001 = Microsoft mouse (not a gamepad in GameInput's database)
-        ushort hidVid = profile.VendorId;
-        ushort hidPid = profile.ProductId;
+        // HID attributes PID=0001: prevents GameInput from claiming as Gamepad.
+        // xinputhid matches by hardware ID (PID 02FF), ignores HID attributes.
+        ushort hidVid = profile.UsesUpperFilter ? (ushort)0x045E : profile.VendorId;
+        ushort hidPid = profile.UsesUpperFilter ? (ushort)0x0001 : profile.ProductId;
         WriteConfig(descriptor, hidVid, hidPid,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
