@@ -1256,7 +1256,7 @@ class Program
         // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
         SafeFileHandle? vigemHandle = null;
         uint vigemSerial = 0;
-        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        if (false && profile.UsesUpperFilter && profile.VendorId == 0x045E) // DISABLED for testing
         {
             Console.Write("  Creating ViGEmBus target... ");
             try
@@ -1299,9 +1299,9 @@ class Program
                     byte[] plugBuf = new byte[16]; // Size(4) + SerialNo(4) + TargetType(4) + VID(2) + PID(2)
                     BitConverter.GetBytes(16).CopyTo(plugBuf, 0);
                     BitConverter.GetBytes(vigemSerial).CopyTo(plugBuf, 4);
-                    BitConverter.GetBytes(0).CopyTo(plugBuf, 8); // Xbox360Wired = 0
-                    // Use default 045E:028E — SDL3 routes Xbox 360 through XInput (works)
-                    // Xbox One PIDs get routed through GameInput (zeros on virtual devices)
+                    BitConverter.GetBytes(2).CopyTo(plugBuf, 8); // DualShock4Wired = 2
+                    BitConverter.GetBytes(profile.VendorId).CopyTo(plugBuf, 12);
+                    BitConverter.GetBytes(profile.ProductId).CopyTo(plugBuf, 14);
                     bool plugOk = DeviceIoControl(vigemHandle, 0x002AA004, plugBuf, (uint)plugBuf.Length,
                         null, 0, out _, IntPtr.Zero);
                     if (plugOk)
@@ -1587,29 +1587,25 @@ class Program
             // Submit report to ViGEmBus target for GameInput/SDL3
             if (vigemHandle != null && vigemSerial > 0)
             {
-                // XUSB_SUBMIT_REPORT: Size(4) + SerialNo(4) + XUSB_REPORT(12)
-                // XUSB_REPORT: wButtons(2) + bLeftTrigger(1) + bRightTrigger(1) +
-                //              sThumbLX(2) + sThumbLY(2) + sThumbRX(2) + sThumbRY(2)
-                byte[] vrBuf = new byte[20];
-                BitConverter.GetBytes(20).CopyTo(vrBuf, 0);
+                // DS4_SUBMIT_REPORT: Size(4) + SerialNo(4) + DS4_REPORT(9) = 17 bytes
+                // DS4_REPORT: bThumbLX(1) + bThumbLY(1) + bThumbRX(1) + bThumbRY(1) +
+                //             wButtons(2) + bSpecial(1) + bTriggerL(1) + bTriggerR(1)
+                byte[] vrBuf = new byte[17];
+                BitConverter.GetBytes(17).CopyTo(vrBuf, 0);
                 BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
-                // Buttons
-                ushort vrButtons = 0;
-                if ((btnMask & 0x01) != 0) vrButtons |= 0x1000; // A
-                BitConverter.GetBytes(vrButtons).CopyTo(vrBuf, 8);
-                // Triggers (0-255)
-                vrBuf[10] = (byte)(sepLt * 255);
-                vrBuf[11] = (byte)(sepRt * 255);
-                // Sticks (signed -32768 to 32767)
-                short vrLx = (short)((lxNorm - 0.5) * 2 * 32767);
-                short vrLy = (short)((0.5 - lyNorm) * 2 * 32767); // Invert Y
-                short vrRx = 0;
-                short vrRy = 0;
-                BitConverter.GetBytes(vrLx).CopyTo(vrBuf, 12);
-                BitConverter.GetBytes(vrLy).CopyTo(vrBuf, 14);
-                BitConverter.GetBytes(vrRx).CopyTo(vrBuf, 16);
-                BitConverter.GetBytes(vrRy).CopyTo(vrBuf, 18);
-                DeviceIoControl(vigemHandle, 0x002AA808, vrBuf, (uint)vrBuf.Length,
+                // Sticks: 8-bit unsigned (0=left/up, 128=center, 255=right/down)
+                vrBuf[8] = (byte)(lxNorm * 255);      // LX
+                vrBuf[9] = (byte)(lyNorm * 255);       // LY
+                vrBuf[10] = 128;                        // RX center
+                vrBuf[11] = 128;                        // RY center
+                // Buttons: lower 4 bits = D-pad (8=none), upper bits = face buttons
+                ushort ds4Buttons = 0x08; // D-pad none
+                if ((btnMask & 0x01) != 0) ds4Buttons |= 0x20; // Cross
+                BitConverter.GetBytes(ds4Buttons).CopyTo(vrBuf, 12);
+                vrBuf[14] = 0; // bSpecial
+                vrBuf[15] = (byte)(sepLt * 255); // LT
+                vrBuf[16] = (byte)(sepRt * 255); // RT
+                DeviceIoControl(vigemHandle, 0x002AA80C, vrBuf, (uint)vrBuf.Length,
                     null, 0, out _, IntPtr.Zero);
             }
 
