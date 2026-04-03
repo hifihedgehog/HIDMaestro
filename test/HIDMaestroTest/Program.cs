@@ -110,9 +110,9 @@ class Program
             CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
             CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
 
-            // Add upper filter for XInput (only for profiles that use xinputhid/xusb22)
-            if (_upperFilterName != "none")
-                InjectXInputFilter(childInst);
+            // xinputhid auto-loads via PnP matching (driverPid=02FF in hardware ID).
+            // Manual injection is NOT needed and causes device restart that kills
+            // SDL3/WGI connections. Only inject for non-auto-matching profiles.
         }
     }
 
@@ -1145,7 +1145,16 @@ class Program
             ? profile.InputReportSize!.Value
             : ComputeInputReportByteLength(descriptor);
         Console.Write($"  Writing profile to registry (InputReport={inputReportLen}B)... ");
-        WriteConfig(descriptor, profile.VendorId, profile.ProductId,
+        // For xinputhid profiles, set HID attributes VID/PID to 0 to prevent
+        // GameInput from claiming as Gamepad. SDL3 falls through to XInput.
+        // Real identity comes from hardware ID, OEMName, and WinExInput companion.
+        // Use a non-gamepad Microsoft VID/PID in HID attributes to prevent GameInput
+        // from claiming as Gamepad while keeping xinputhid working.
+        // xinputhid checks hardware ID (PID 02FF), not HID attributes.
+        // 045E:0001 = Microsoft mouse (not a gamepad in GameInput's database)
+        ushort hidVid = profile.VendorId;
+        ushort hidPid = profile.ProductId;
+        WriteConfig(descriptor, hidVid, hidPid,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
             inputReportByteLength: inputReportLen);
@@ -1210,8 +1219,9 @@ class Program
         }
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB companion for XInput (driverMode=hid Xbox controllers only)
-        if (!profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        // Step 3.5: Create XUSB companion for browser WGI (WinExInput) and XInput (driverMode=hid)
+        // xinputhid profiles with non-standard HID PID also need this for WinExInput
+        if (profile.VendorId == 0x045E)
         {
             Console.Write("  Creating XUSB companion... ");
             // Check if already exists
