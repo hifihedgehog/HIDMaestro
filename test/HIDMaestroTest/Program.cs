@@ -1133,11 +1133,10 @@ class Program
         EnsureGameInputService();
         EnsureSharedFile();
         CleanupGhostDevices();
-        // Skip GameInput registry for xinputhid profiles — GameInput can't read from
-        // ROOT-enumerated devices. Without registry, GameInput won't claim as Gamepad,
-        // letting SDL3 fall through to XInput which works.
-        if (!profile.UsesUpperFilter)
-            WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
+        // GameInput registry sets the Gamepad flag so SDL3 uses GetGamepadState (live data)
+        // instead of GetControllerAxisState (zeros). Security fix (GA for Everyone) enables
+        // non-elevated GameInput reading.
+        WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
         Console.WriteLine("OK");
 
         // Step 1: Write descriptor to registry
@@ -1297,7 +1296,7 @@ class Program
         // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
         SafeFileHandle? vigemHandle = null;
         uint vigemSerial = 0;
-        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        if (false) // ViGEmBus DISABLED - security fix makes GameInput work directly
         {
             Console.Write("  Creating ViGEmBus target... ");
             try

@@ -56,7 +56,7 @@ AddReg = HIDMaestro_HW_AddReg
 ; Lower filters: WUDFRd (UMDF reflector) loads our UMDF2 driver
 HKR,,"LowerFilters",0x00010008,"WUDFRd"
 ; Security: allow all users access (needed for WGI/GameInput non-elevated discovery)
-HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)"
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
 [HIDMaestro_Install.NT.Services]
 ; MsHidUmdf is the HID pass-through function driver
