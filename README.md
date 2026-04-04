@@ -46,6 +46,30 @@ A second discovery enables single-entry browser detection. By using `VID_*&PID_*
 
 The key insight: SDL3 has fallback backends. When HIDAPI skips a device, SDL3's RawInput backend detects it independently by VID/PID.
 
+## Comparison with Existing Projects
+
+| Feature | HIDMaestro | ViGEmBus | DsHidMini | vJoy | VHF |
+|---------|-----------|----------|-----------|------|-----|
+| **Kernel driver required** | No | Yes (KMDF) | No (UMDF2) | Yes (KMDF) | Yes (KMDF) |
+| **EV certificate required** | No | Yes | No | Yes | Yes |
+| **Physical hardware required** | No | No | Yes (DS3) | No | No |
+| **Arbitrary controller identity** | Yes (JSON profiles) | No (Xbox 360 + DS4 only) | No (DS3 modes only) | No (fixed joystick) | Yes (but kernel-only) |
+| **Bluetooth bus type spoofing** | Yes | No | No (real BT via BthPS3) | No | No |
+| **Single browser gamepad entry** | Yes | Yes | N/A | No | N/A |
+| **XInput** | Yes | Yes | Yes (XIH mode) | No | Depends on descriptor |
+| **DirectInput** | Yes (5 axes) | Yes | Yes | Yes | Depends on descriptor |
+| **SDL3/HIDAPI with correct identity** | Yes (BT bus type) | Partial | Yes (real HW) | Generic only | No |
+| **Hot-plug (no reboot)** | Yes | Yes | N/A (real HW) | No | Yes |
+| **Data-driven profiles** | Yes (any controller) | No (2 types) | No (5 fixed modes) | No (1 type) | N/A (framework) |
+| **Open source** | Yes (MIT) | Yes (BSD-3) | Yes (BSD-3) | Yes (MIT) | No (Microsoft) |
+| **Status** | Active | Retired | Active | Stale | Shipping (in-box) |
+
+**What only HIDMaestro does:**
+- Spoofs Bluetooth bus type from user-mode (BTHLEDEVICE CompatibleIDs)
+- Achieves single browser entry without kernel driver (&IG_ enumerator trick)
+- Emulates any controller from a JSON profile without kernel components
+- Full API coverage (DirectInput + XInput + SDL3 + Browser) from pure user-mode
+
 ## Architecture
 
 ```
