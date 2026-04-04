@@ -57,7 +57,7 @@ The key insight: SDL3 has fallback backends. When HIDAPI skips a device, SDL3's 
 | **Bluetooth bus type spoofing** | Yes | No | No (real BT via BthPS3) | No | No |
 | **Single browser gamepad entry** | Yes | Yes | N/A | No | N/A |
 | **XInput** | Yes | Yes | Yes (XIH mode) | No | Depends on descriptor |
-| **DirectInput** | Yes (5 axes) | Yes | Yes | Yes | Depends on descriptor |
+| **DirectInput** | Yes | Yes | Yes | Yes | Depends on descriptor |
 | **SDL3/HIDAPI with correct identity** | Yes (BT bus type) | Partial | Yes (real HW) | Generic only | No |
 | **Hot-plug (no reboot)** | Yes | Yes | N/A (real HW) | No | Yes |
 | **Data-driven profiles** | Yes (any controller) | No (2 types) | No (5 fixed modes) | No (1 type) | N/A (framework) |
