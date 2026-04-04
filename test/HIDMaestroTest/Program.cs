@@ -1156,15 +1156,21 @@ class Program
         // PID 0001 isn't in SDL3's controller DB → RawInput entry is generic.
         // XInput provides live data as separate device.
         // TODO: Identity fix requires kernel bus driver for real transport.
-        // Write REAL VID/PID first (gamepad companion reads this during startup)
-        WriteConfig(descriptor, profile.VendorId, profile.ProductId,
+        // Write BLE descriptor + real VID/PID (companion reads this at startup)
+        // BLE descriptor has Report ID 0x01 which HIDAPI can parse correctly
+        byte[] bleDesc = profile.UsesUpperFilter ? Convert.FromHexString(
+            "05010905a10185010901a10009300931150027ffff0000950275108102c00901a10009320935150027ffff0000950275108102c0050209c5150026ff039501750a810215002500750695018103050209c4150026ff039501750a81021500250075069501810305010939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0"
+        ) : descriptor;
+        int bleReportLen = profile.UsesUpperFilter ? 17 : inputReportLen; // Report ID + 16 data
+        WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
-            inputReportByteLength: inputReportLen);
+            inputReportByteLength: bleReportLen);
         Console.WriteLine("OK");
 
-        // Step 1.5: Create Gamepad companion FIRST (reads real VID/PID from registry)
-        // SDL3 DirectInput reads this device (no xinputhid blocking).
+        // Step 1.5: Create Gamepad companion with BLE descriptor (HIDAPI-compatible)
+        // Companion reads VID/PID + descriptor from registry at startup.
+        // Write BLE descriptor first, create companion, then overwrite for main device.
         if (profile.UsesUpperFilter)
         {
             Console.Write("  Creating Gamepad companion... ");
@@ -1499,10 +1505,10 @@ class Program
         byte[] gipDescBytes = Convert.FromHexString("05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0");
         var gipBuilder = HidReportBuilder.Parse(gipDescBytes);
 
-        // For xinputhid profiles, use GIP builder as report builder (Col1, no Report ID)
+        // For xinputhid profiles with companion, use BLE descriptor builder (Report ID 0x01)
         // For other profiles, parse the profile descriptor directly
         var reportBuilder = profile.UsesUpperFilter
-            ? gipBuilder
+            ? HidReportBuilder.Parse(bleDesc)
             : HidReportBuilder.Parse(profileDesc ?? descriptor);
         reportBuilder.PrintLayout();
 
