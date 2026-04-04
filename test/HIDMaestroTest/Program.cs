@@ -1151,8 +1151,13 @@ class Program
         // from claiming as Gamepad while keeping xinputhid working.
         // xinputhid checks hardware ID (PID 02FF), not HID attributes.
         // 045E:0001 = Microsoft mouse (not a gamepad in GameInput's database)
-        ushort hidVid = profile.VendorId;
-        ushort hidPid = profile.ProductId;
+        // PID 0001 for xinputhid profiles: prevents RawInput zero-data entry.
+        // xinputhid blocks RawInput ReadFile (by design for Xbox controllers).
+        // PID 0001 isn't in SDL3's controller DB → RawInput entry is generic.
+        // XInput provides live data as separate device.
+        // TODO: Identity fix requires kernel bus driver for real transport.
+        ushort hidVid = profile.UsesUpperFilter ? (ushort)0x045E : profile.VendorId;
+        ushort hidPid = profile.UsesUpperFilter ? (ushort)0x0001 : profile.ProductId;
         WriteConfig(descriptor, hidVid, hidPid,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
