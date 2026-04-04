@@ -729,9 +729,9 @@ class Program
     /// </summary>
     static void CleanupGhostDevices()
     {
-        // Find error-state HIDMaestro devices (both HID_IG_00 and HIDCLASS enumerators)
+        // Find error-state HIDMaestro devices (exclude Gamepad companion from cleanup)
         var (_, output) = RunProcess("powershell.exe",
-            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { ($_.InstanceId -match 'ROOT.(HID_IG_00|HIDCLASS|XNACOMPOSITE)' -and $_.FriendlyName -match 'Game Controller|HID-compliant|Xbox 360|HIDMaestro') -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
+            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { ($_.InstanceId -match 'ROOT.(HID_IG_00|XNACOMPOSITE)' -and $_.FriendlyName -match 'Game Controller|HID-compliant|Xbox 360|HIDMaestro') -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
             timeoutMs: 15_000);
         if (!string.IsNullOrWhiteSpace(output))
             Console.Write($"(cleaned ghosts) ");
@@ -908,8 +908,8 @@ class Program
         // Find existing device — only restart if needed
         Console.Write("  Checking device... ");
         string? rootInstId = null;
-        // Search both enumerator types (xinputhid and direct HID)
-        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
+        // Search enumerator types (skip HIDClass — gamepad companion lives there)
+        foreach (string enumer in new[] { "HID_IG_00", "XnaComposite" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
@@ -989,9 +989,9 @@ class Program
     {
         Console.Write("  Restarting device node... ");
 
-        // Remove existing nodes
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
-        RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
+        // Remove existing nodes (but NOT HIDCLASS — gamepad companion lives there)
+        // RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
+        // RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
         Thread.Sleep(1000);
 
         // Recreate via the create_node.ps1 script
@@ -1156,39 +1156,70 @@ class Program
         // PID 0001 isn't in SDL3's controller DB → RawInput entry is generic.
         // XInput provides live data as separate device.
         // TODO: Identity fix requires kernel bus driver for real transport.
-        ushort hidVid = profile.UsesUpperFilter ? (ushort)0x045E : profile.VendorId;
-        ushort hidPid = profile.UsesUpperFilter ? (ushort)0x0001 : profile.ProductId;
-        WriteConfig(descriptor, hidVid, hidPid,
+        // Write REAL VID/PID first (gamepad companion reads this during startup)
+        WriteConfig(descriptor, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
             inputReportByteLength: inputReportLen);
         Console.WriteLine("OK");
 
-        // Step 1.5: Restart GameInputSvc to create a window where GameInput
-        // hasn't yet enumerated our device. RawInput+XInput claim first.
-        RunProcess("sc.exe", "stop GameInputSvc", timeoutMs: 5000);
-        Thread.Sleep(500);
-        RunProcess("sc.exe", "start GameInputSvc", timeoutMs: 5000);
-
-        // Step 1.6: Cycle BLE GATT HID parent BEFORE creating our device.
-        // This ensures GameInput caches the BLE node first. When our device appears,
-        // GameInput deduplicates (same VID/PID) and skips ours. XInput gets our device.
-        // SDL3 shows BLE identity (from GameInput) + XInput data (from our device).
-        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        // Step 1.5: Create Gamepad companion FIRST (reads real VID/PID from registry)
+        // SDL3 DirectInput reads this device (no xinputhid blocking).
+        if (profile.UsesUpperFilter)
         {
-            var (_, bleSearch) = RunProcess("powershell.exe",
-                $"-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match '00001812.*{profile.VendorId:X4}.*{profile.ProductId:X4}' -and $_.InstanceId -match 'BTHLEDevice' }} | Select-Object -First 1 -ExpandProperty InstanceId\"",
-                timeoutMs: 5000);
-            string bleId = bleSearch.Trim();
-            if (!string.IsNullOrEmpty(bleId) && bleId.Contains("BTHLEDevice"))
+            Console.Write("  Creating Gamepad companion... ");
+            bool gpExists = false;
+            for (int idx = 0; idx < 10; idx++)
             {
-                Console.Write("  Priming BLE node... ");
-                RunProcess("pnputil.exe", $"/disable-device \"{bleId}\"", timeoutMs: 5000);
-                Thread.Sleep(1000);
-                RunProcess("pnputil.exe", $"/enable-device \"{bleId}\"", timeoutMs: 5000);
-                Thread.Sleep(2000); // Let GameInput enumerate it
-                Console.WriteLine("OK");
+                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                {
+                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                    if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
+                    { gpExists = true; break; }
+                }
             }
+            if (!gpExists)
+            {
+                var hidGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
+                IntPtr dis3 = SetupDiCreateDeviceInfoList(ref hidGuid, IntPtr.Zero);
+                if (dis3 != new IntPtr(-1))
+                {
+                    byte[] diBuf3 = new byte[32];
+                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf3, 0);
+                    var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
+                    string gpVid = $"{profile.VendorId:X4}";
+                    string gpPid = $"{profile.ProductId:X4}";
+                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                    byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
+                    if (SetupDiCreateDeviceInfoW_Raw(dis3, "HIDClass", ref hidGuid,
+                        "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
+                    {
+                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
+                        SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject());
+                    }
+                    diHandle3.Free();
+                    SetupDiDestroyDeviceInfoList(dis3);
+                }
+            }
+            // Restart companion to load with real VID/PID
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                {
+                    RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                    Thread.Sleep(2000);
+                    break;
+                }
+            }
+            Console.WriteLine("OK");
+
+            // NOW overwrite registry with PID 0001 for the main xinputhid device
+            WriteConfig(descriptor, (ushort)0x045E, (ushort)0x0001,
+                productString: profile.ProductString,
+                deviceDescription: profile.DeviceDescription,
+                inputReportByteLength: inputReportLen);
         }
 
         // Step 2: Build, sign, install driver + create device node
@@ -1295,6 +1326,8 @@ class Program
             }
             Console.WriteLine("OK");
         }
+
+        // (Gamepad companion already created in Step 1.5)
 
         // Step 3.6: Create ViGEmBus Xbox 360 target for GameInput/SDL3
         // GameInput can't read from UMDF2 virtual HID devices (HID bus type).
