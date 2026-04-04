@@ -411,6 +411,7 @@ EvtDeviceAdd(
 
         /* Do NOT read config — keep defaults (045E:028E) so companion has different
          * VID/PID from main device. Prevents GameInput deduplication. */
+        ReadConfigFromRegistry(ctx);
         WdfDeviceCreateDeviceInterface(device,
             (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
 

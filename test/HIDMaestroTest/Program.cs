@@ -1152,15 +1152,40 @@ class Program
         // from claiming as Gamepad while keeping xinputhid working.
         // xinputhid checks hardware ID (PID 02FF), not HID attributes.
         // 045E:0001 = Microsoft mouse (not a gamepad in GameInput's database)
-        // PID 0001: prevents GameInput from claiming as Gamepad. SDL3 falls to XInput.
-        // xinputhid matches by hardware ID (PID 02FF), ignores HID attributes.
-        ushort hidVid = profile.UsesUpperFilter ? (ushort)0x045E : profile.VendorId;
-        ushort hidPid = profile.UsesUpperFilter ? (ushort)0x0001 : profile.ProductId;
+        ushort hidVid = profile.VendorId;
+        ushort hidPid = profile.ProductId;
         WriteConfig(descriptor, hidVid, hidPid,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
             inputReportByteLength: inputReportLen);
         Console.WriteLine("OK");
+
+        // Step 1.5: Restart GameInputSvc to create a window where GameInput
+        // hasn't yet enumerated our device. RawInput+XInput claim first.
+        RunProcess("sc.exe", "stop GameInputSvc", timeoutMs: 5000);
+        Thread.Sleep(500);
+        RunProcess("sc.exe", "start GameInputSvc", timeoutMs: 5000);
+
+        // Step 1.6: Cycle BLE GATT HID parent BEFORE creating our device.
+        // This ensures GameInput caches the BLE node first. When our device appears,
+        // GameInput deduplicates (same VID/PID) and skips ours. XInput gets our device.
+        // SDL3 shows BLE identity (from GameInput) + XInput data (from our device).
+        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
+        {
+            var (_, bleSearch) = RunProcess("powershell.exe",
+                $"-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match '00001812.*{profile.VendorId:X4}.*{profile.ProductId:X4}' -and $_.InstanceId -match 'BTHLEDevice' }} | Select-Object -First 1 -ExpandProperty InstanceId\"",
+                timeoutMs: 5000);
+            string bleId = bleSearch.Trim();
+            if (!string.IsNullOrEmpty(bleId) && bleId.Contains("BTHLEDevice"))
+            {
+                Console.Write("  Priming BLE node... ");
+                RunProcess("pnputil.exe", $"/disable-device \"{bleId}\"", timeoutMs: 5000);
+                Thread.Sleep(1000);
+                RunProcess("pnputil.exe", $"/enable-device \"{bleId}\"", timeoutMs: 5000);
+                Thread.Sleep(2000); // Let GameInput enumerate it
+                Console.WriteLine("OK");
+            }
+        }
 
         // Step 2: Build, sign, install driver + create device node
         if (!EnsureDriverInstalled(profile))
