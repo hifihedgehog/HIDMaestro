@@ -10,7 +10,7 @@ Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 03/30/2026,1.0.0.0
+DriverVer   = 04/04/2026,1.1.0.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -21,7 +21,7 @@ UMDriverCopy    = 13
 1 = %DiskName%
 
 [SourceDisksFiles]
-HIDMaestroCompanion.dll = 1
+HMXInput.dll = 1
 
 [Manufacturer]
 %ManufacturerName% = Standard,NTamd64
@@ -34,14 +34,14 @@ HIDMaestroCompanion.dll = 1
 CopyFiles = UMDriverCopy
 
 [UMDriverCopy]
-HIDMaestroCompanion.dll
+HMXInput.dll
 
 [XUSB_Install.NT.HW]
 AddReg = XUSB_HW_AddReg
 
 [XUSB_HW_AddReg]
 HKR,,"XusbMode",0x00010001,1
-HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)"
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
 [XUSB_Install.NT.Services]
 AddService = WUDFRd,0x000001fa,WUDFRD_Service
@@ -54,16 +54,16 @@ ErrorControl   = 1
 ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
 
 [XUSB_Install.NT.Wdf]
-UmdfService                 = HIDMaestroCompanion, HIDMaestroCompanion_UmdfService
-UmdfServiceOrder            = HIDMaestroCompanion
+UmdfService                 = HMXInput, HMXInput_UmdfService
+UmdfServiceOrder            = HMXInput
 UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
 
-[HIDMaestroCompanion_UmdfService]
+[HMXInput_UmdfService]
 UmdfLibraryVersion = 2.15.0
-ServiceBinary      = %13%\HIDMaestroCompanion.dll
+ServiceBinary      = %13%\HMXInput.dll
 
 [Strings]
 ProviderName     = "HIDMaestro"

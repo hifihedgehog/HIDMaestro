@@ -771,7 +771,10 @@ class Program
         Guid classGuid;
         if (profile.UsesUpperFilter)
         {
-            enumerator = "HID_IG_00";
+            // Enumerator must contain &IG_ so the HID child's device path
+            // includes "&IG_" — HIDAPI skips devices with "&IG_" in the path,
+            // preventing SDL3 from seeing the main device (companion handles SDL3).
+            enumerator = $"VID_{vid}&PID_{hwPid}&IG_00";
             hwId = $"root\\VID_{vid}&PID_{hwPid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
@@ -909,7 +912,9 @@ class Program
         Console.Write("  Checking device... ");
         string? rootInstId = null;
         // Search enumerator types (skip HIDClass — gamepad companion lives there)
-        foreach (string enumer in new[] { "HID_IG_00", "XnaComposite" })
+        // Include VID_*&IG_00 enumerators for xinputhid profiles
+        foreach (string enumer in new[] { "HID_IG_00", "XnaComposite",
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
@@ -1158,8 +1163,15 @@ class Program
         // TODO: Identity fix requires kernel bus driver for real transport.
         // Write BLE descriptor + real VID/PID (companion reads this at startup)
         // BLE descriptor has Report ID 0x01 which HIDAPI can parse correctly
+        // BLE descriptor for companion: 5 DirectInput axes (matches real Xbox xinputhid).
+        // Usage 0x05 (Game Pad) for WGI GamepadAdded. Companion enumerator has
+        // &IG_00 so Chrome RawInput skips it (only STANDARD GAMEPAD shows).
+        // HIDAPI also skips &IG_, but SDL3 RawInput backend detects by VID/PID.
         byte[] bleDesc = profile.UsesUpperFilter ? Convert.FromHexString(
-            "05010905a10185010901a10009300931150027ffff0000950275108102c00901a10009320935150027ffff0000950275108102c0050209c5150026ff039501750a810215002500750695018103050209c4150026ff039501750a81021500250075069501810305010939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0"
+            "05010905a10185010901a10009300931150027ffff0000950275108102c0" +
+            "0901a10009330934150027ffff0000950275108102c0" +
+            "05010932150026ff039501750a81021500250075069501810305010935150026ff039501750a8102150025007506950181030501" +
+            "0939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0"
         ) : descriptor;
         int bleReportLen = profile.UsesUpperFilter ? 17 : inputReportLen; // Report ID + 16 data
         WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
@@ -1175,15 +1187,22 @@ class Program
         {
             Console.Write("  Creating Gamepad companion... ");
             bool gpExists = false;
-            for (int idx = 0; idx < 10; idx++)
+            string gpVidSearch = $"{profile.VendorId:X4}";
+            string gpPidSearch = $"{profile.ProductId:X4}";
+            // Search both old (HIDCLASS) and new (VID_*&IG_00) enumerators
+            foreach (string pfx in new[] { "HIDCLASS", $"VID_{gpVidSearch}&PID_{gpPidSearch}&IG_00" })
             {
-                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                for (int idx = 0; idx < 10; idx++)
                 {
-                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
-                    if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
-                    { gpExists = true; break; }
+                    string candidate = $@"ROOT\{pfx}\{idx:D4}";
+                    if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                    {
+                        var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                        if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
+                        { gpExists = true; break; }
+                    }
                 }
+                if (gpExists) break;
             }
             if (!gpExists)
             {
@@ -1196,12 +1215,23 @@ class Program
                     var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
                     string gpVid = $"{profile.VendorId:X4}";
                     string gpPid = $"{profile.ProductId:X4}";
-                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                    // Enumerator includes &IG_00 so HID child path contains "&IG_".
+                    // Chrome RawInput skips &IG_ devices (XInput handles them).
+                    // HIDAPI also skips &IG_, but SDL3 RawInput backend still detects
+                    // and maps by VID/PID from controller database.
+                    string gpEnumerator = $"VID_{gpVid}&PID_{gpPid}&IG_00";
+                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}&IG_00\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
                     byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
-                    if (SetupDiCreateDeviceInfoW_Raw(dis3, "HIDClass", ref hidGuid,
+                    if (SetupDiCreateDeviceInfoW_Raw(dis3, gpEnumerator, ref hidGuid,
                         "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
                     {
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
+                        // Set CompatibleIDs with BTHLEDEVICE so HIDAPI detects bus_type=BLUETOOTH.
+                        // SDL3's Xbox HIDAPI driver uses hardcoded BT parsing for BT devices,
+                        // which correctly handles our BLE HID report format.
+                        string gpCompat = $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                        byte[] gpCompatBytes = Encoding.Unicode.GetBytes(gpCompat);
+                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 2, gpCompatBytes, (uint)gpCompatBytes.Length);
                         SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject());
                     }
                     diHandle3.Free();
@@ -1209,15 +1239,20 @@ class Program
                 }
             }
             // Restart companion to load with real VID/PID
-            for (int idx = 0; idx < 10; idx++)
+            foreach (string pfx2 in new[] { $"VID_{gpVidSearch}&PID_{gpPidSearch}&IG_00", "HIDCLASS" })
             {
-                string candidate = $@"ROOT\HIDCLASS\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                bool found = false;
+                for (int idx = 0; idx < 10; idx++)
                 {
-                    RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
-                    Thread.Sleep(2000);
-                    break;
+                    string candidate = $@"ROOT\{pfx2}\{idx:D4}";
+                    if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                    {
+                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                        Thread.Sleep(2000);
+                        found = true; break;
+                    }
                 }
+                if (found) break;
             }
             Console.WriteLine("OK");
 
@@ -1225,8 +1260,10 @@ class Program
         }
 
         // Step 2: Build, sign, install driver + create main device node
-        // Skip main device for xinputhid profiles when companion exists
-        // (companion provides SDL3 identity, XUSB companion provides XInput)
+        // For xinputhid profiles: companion-only approach.
+        // Companion provides SDL3 + DirectInput + browser.
+        // XInput comes from XUSB companion (separate device).
+        // No main device with xinputhid — it blocks DirectInput data flow for virtual devices.
         if (!profile.UsesUpperFilter)
         {
             if (!EnsureDriverInstalled(profile))
@@ -1234,15 +1271,7 @@ class Program
         }
         else
         {
-            // Just ensure driver INF is installed (no device node)
-            string infPath2 = Path.Combine(BuildDir, "hidmaestro.inf");
-            if (!File.Exists(infPath2))
-            {
-                var (_, buildOut) = RunProcess("powershell.exe",
-                    $"-ExecutionPolicy Bypass -File \"{Path.Combine(ScriptsDir, "full_deploy.ps1")}\" -SkipBuild",
-                    timeoutMs: 120_000, showOutput: true);
-            }
-            Console.WriteLine("  Skipping main device (companion provides SDL3 data)");
+            Console.WriteLine("  Companion-only mode (no xinputhid main device)");
         }
 
         // Step 3: Wait for HID child + xinputhid, then fix device name
@@ -1251,7 +1280,8 @@ class Program
         string displayName = profile.DeviceDescription ?? profile.ProductString;
         FixHidChildNames(displayName);
         // Also set on root device (search both enumerator types)
-        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
+        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
@@ -1279,7 +1309,8 @@ class Program
             };
             byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
             // DEVPROP_TYPE_GUID = 0x0D
-            foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
+            foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
             {
                 for (int idx = 0; idx < 10; idx++)
                 {
@@ -1341,6 +1372,22 @@ class Program
                     diHandle.Free();
                     SetupDiDestroyDeviceInfoList(dis2);
                     Thread.Sleep(3000);
+                }
+            }
+            // Restart XUSB companion to trigger driver binding
+            // (DIF_REGISTERDEVICE alone doesn't install the driver)
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string candidate = $@"ROOT\SYSTEM\{idx:D4}";
+                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                {
+                    var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
+                    if (info.Contains("XInput") || info.Contains("HIDMaestro"))
+                    {
+                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                        Thread.Sleep(3000);
+                        break;
+                    }
                 }
             }
             Console.WriteLine("OK");
@@ -1504,6 +1551,12 @@ class Program
         // GIP builder: used for XUSB GET_STATE data AND as report builder for xinputhid profiles
         byte[] gipDescBytes = Convert.FromHexString("05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0");
         var gipBuilder = HidReportBuilder.Parse(gipDescBytes);
+        Console.WriteLine("  GIP builder layout:");
+        gipBuilder.PrintLayout();
+        Console.WriteLine($"    RightTrigger: {(gipBuilder.RightTrigger != null ? $"bit {gipBuilder.RightTrigger.BitOffset}, {gipBuilder.RightTrigger.BitSize}b" : "NULL!")}");
+        // Quick test: build with RT=0.8 and check bytes 10-11
+        byte[] testGip = gipBuilder.BuildReport(rightTrigger: 0.8);
+        Console.WriteLine($"    Test RT=0.8: bytes[10-11] = 0x{testGip[10]:X2}{testGip[11]:X2} = {(testGip[10] | (testGip[11] << 8)) & 0x3FF}");
 
         // For xinputhid profiles with companion, use BLE descriptor builder (Report ID 0x01)
         // For other profiles, parse the profile descriptor directly
@@ -1605,7 +1658,10 @@ class Program
                     { ltVal = 1.0 - (triggerPhase - 12.0) / 3.0; rtVal = 1.0 - (triggerPhase - 12.0) / 3.0; } // Both release
             }
 
-            // Separate trigger values for XInput (always independent, regardless of DI triggerMode)
+            // Separate trigger values: sequential ramp pattern
+            // Phase 0-3: LT up, RT=0. Phase 3-6: LT down, RT=0.
+            // Phase 6-9: LT=0, RT up. Phase 9-12: LT up, RT holds.
+            // Phase 12-15: both ramp down together.
             double sepLt, sepRt;
             if (triggerPhase < 3.0)
                 { sepLt = triggerPhase / 3.0; sepRt = 0.0; }
@@ -1621,7 +1677,7 @@ class Program
             byte[] inputReport = reportBuilder.BuildReport(
                 leftX: lxNorm, leftY: lyNorm,
                 rightX: 0.5, rightY: 0.5,
-                leftTrigger: ltVal, rightTrigger: rtVal,
+                leftTrigger: sepLt, rightTrigger: sepRt,
                 hatValue: 0, buttonMask: btnMask);
 
             // Write to shared file: SeqNo(4) + DataSize(4) + Data(64) + GipData(14) = 86 bytes
@@ -1641,6 +1697,16 @@ class Program
                     hatValue: 0, buttonMask: btnMask);
                 byte[] gipData = new byte[14];
                 Array.Copy(gipReport, 0, gipData, 0, Math.Min(14, gipReport.Length));
+
+                // Debug: log trigger values once
+                if (sharedMemSeqNo == 100)
+                {
+                    string dbg = $"sepLt={sepLt:F3} sepRt={sepRt:F3} gipReport.Len={gipReport.Length} " +
+                        $"bytes[8-11]={gipReport[8]:X2}{gipReport[9]:X2}{gipReport[10]:X2}{gipReport[11]:X2} " +
+                        $"gipData[8-11]={gipData[8]:X2}{gipData[9]:X2}{gipData[10]:X2}{gipData[11]:X2}\n" +
+                        $"RightTrigger={gipBuilder.RightTrigger?.BitOffset},{gipBuilder.RightTrigger?.BitSize}\n";
+                    File.WriteAllText(@"C:\ProgramData\HIDMaestro\trigger_debug.txt", dbg);
+                }
 
                 sharedMemSeqNo++;
                 sharedFile.Seek(0, SeekOrigin.Begin);

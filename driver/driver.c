@@ -237,17 +237,27 @@ EvtSharedMemTimer(
     if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
     ctx->SharedMemSeqNo = seqNo;
 
-    /* Build HID input report from shared file Data (native descriptor format) */
+    /* Build HID input report from shared file Data (native descriptor format).
+     * Report MUST be exactly InputReportByteLength bytes — HidClass rejects
+     * short reports.  Zero-fill first, then overlay actual data. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
+    RtlZeroMemory(inputReport, sizeof(inputReport));
     ULONG dataLen = shared.DataSize;
 
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
 
+    ULONG expectedSize;
+    if (hasReportId) {
+        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+    } else {
+        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+    }
+
     ULONG maxData;
     if (hasReportId) {
-        maxData = ctx->InputReportByteLength > 1 ? ctx->InputReportByteLength - 1 : 16;
+        maxData = expectedSize > 1 ? expectedSize - 1 : 16;
     } else {
-        maxData = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+        maxData = expectedSize;
     }
     if (dataLen > maxData) dataLen = maxData;
     if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
@@ -256,10 +266,10 @@ EvtSharedMemTimer(
     if (hasReportId) {
         inputReport[0] = ctx->FirstInputReportId;
         RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
-        inputSize = dataLen + 1;
+        inputSize = expectedSize; /* Always send full expected length */
     } else {
         RtlCopyMemory(inputReport, shared.Data, dataLen);
-        inputSize = dataLen;
+        inputSize = expectedSize; /* Always send full expected length */
     }
 
     /* Store GIP data for XUSB GET_STATE (from GipData field in shared struct) */
@@ -536,15 +546,13 @@ EvtDeviceAdd(
      * GameInput/SDL3 checks BusTypeGuid to determine how to read HID reports.
      * Without this, children have GUID_BUS_TYPE_HID and GameInput reads zeros.
      */
-    /* Register XUSB + WinExInput on ALL devices (main HID + companion).
-     * For the main HID device: enables direct XUSB IOCTL handling.
-     * For the companion: provides XInput slot + WGI browser detection.
-     * WdfFdoInitAllocAndQueryProperty is unreliable in UMDF2, so we
-     * can't conditionally register. Registering on all devices is safe. */
-    WdfDeviceCreateDeviceInterface(device,
-        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    /* Register USB + WinExInput interfaces.
+     * NO XUSB here — XUSB companion (HMXInput.dll) handles XInput exclusively.
+     * Registering XUSB here would create duplicate XInput controller slots. */
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
+    /* WinExInput — WGI needs this on the device with HID Game Pad identity
+     * for GamepadAdded to fire (Chrome browser STANDARD GAMEPAD entry). */
     {
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
@@ -723,7 +731,8 @@ EvtIoDeviceControl(
         if (ctx->InputReportReady) {
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
-            ctx->InputReportReady = FALSE;
+            /* Do NOT clear InputReportReady — GET_INPUT_REPORT needs it too.
+             * Timer updates the data every 4ms regardless. */
             WdfWaitLockRelease(ctx->InputLock);
         } else {
             WdfWaitLockRelease(ctx->InputLock);
@@ -737,42 +746,12 @@ EvtIoDeviceControl(
 
     case IOCTL_HID_WRITE_REPORT: {
         /*
-         * Two uses:
-         * 1. Game writing output report (we store for later retrieval)
-         * 2. User-mode writing input report via HidD_SetOutputReport
-         *    (we treat as input data — complete pending READ_REPORT)
-         *
-         * Since this is a virtual device, ALL write reports are treated
-         * as input data to feed to the HID class. This is the raw pipe:
-         * user-mode calls HidD_SetOutputReport() with packed report bytes,
-         * we store them, and complete the next HID_READ_REPORT with them.
+         * Output reports from applications (e.g. rumble, LED control).
+         * Accept silently — all input data comes from the shared file timer.
+         * DO NOT treat writes as input: SDL3/HIDAPI sends GIP init commands
+         * via WriteFile that would corrupt pending READ_REPORT requests.
+         * Future: forward output data to real controller via shared memory.
          */
-        PVOID       inBuf;
-        size_t      inBufSize;
-        WDFREQUEST  pendingRead;
-
-        status = WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inBufSize);
-        if (!NT_SUCCESS(status)) break;
-
-        if (inBufSize > HIDMAESTRO_MAX_REPORT_SIZE) {
-            status = STATUS_BUFFER_OVERFLOW;
-            break;
-        }
-
-        /* Fast path: complete pending HID_READ_REPORT directly */
-        if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-            NTSTATUS copyStatus = RequestCopyFromBuffer(pendingRead, inBuf, inBufSize);
-            WdfRequestComplete(pendingRead,
-                NT_SUCCESS(copyStatus) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-        } else {
-            /* No pending read — store for later */
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
-            RtlCopyMemory(ctx->InputReport, inBuf, inBufSize);
-            ctx->InputReportSize = (ULONG)inBufSize;
-            ctx->InputReportReady = TRUE;
-            WdfWaitLockRelease(ctx->InputLock);
-        }
-
         status = STATUS_SUCCESS;
         break;
     }
@@ -1035,6 +1014,33 @@ EvtIoDeviceControl(
             *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY: negate */
         }
         WdfWaitLockRelease(ctx->InputLock);
+
+        /* Debug: log trigger values once */
+        {
+            static LONG dbgCount = 0;
+            if (InterlockedIncrement(&dbgCount) == 50) {
+                HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\xusb_state.txt",
+                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+                if (hLog != INVALID_HANDLE_VALUE) {
+                    char msg[100];
+                    int len = 0;
+                    msg[len++]='L';msg[len++]='T';msg[len++]='=';
+                    UCHAR ltv = state[0x0D]; msg[len++]='0'+(ltv/100)%10; msg[len++]='0'+(ltv/10)%10; msg[len++]='0'+ltv%10;
+                    msg[len++]=' ';msg[len++]='R';msg[len++]='T';msg[len++]='=';
+                    UCHAR rtv = state[0x0E]; msg[len++]='0'+(rtv/100)%10; msg[len++]='0'+(rtv/10)%10; msg[len++]='0'+rtv%10;
+                    msg[len++]=' ';msg[len++]='d';msg[len++]='[';msg[len++]='1';msg[len++]='0';msg[len++]=']';msg[len++]='=';
+                    if (ctx->XusbReportReady) {
+                        UCHAR v10 = ctx->XusbReport[10]; msg[len++]='0'+(v10/100)%10;msg[len++]='0'+(v10/10)%10;msg[len++]='0'+v10%10;
+                        msg[len++]=' ';msg[len++]='d';msg[len++]='[';msg[len++]='1';msg[len++]='1';msg[len++]=']';msg[len++]='=';
+                        UCHAR v11 = ctx->XusbReport[11]; msg[len++]='0'+(v11/100)%10;msg[len++]='0'+(v11/10)%10;msg[len++]='0'+v11%10;
+                    }
+                    msg[len++]='\r';msg[len++]='\n';
+                    DWORD dummy;
+                    WriteFile(hLog, msg, len, &dummy, NULL);
+                    CloseHandle(hLog);
+                }
+            }
+        }
 
         /* Copy state to output buffer */
         {
