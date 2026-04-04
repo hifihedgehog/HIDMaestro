@@ -1297,7 +1297,7 @@ class Program
         // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
         SafeFileHandle? vigemHandle = null;
         uint vigemSerial = 0;
-        if (false && profile.UsesUpperFilter && profile.VendorId == 0x045E) // DISABLED for testing
+        if (profile.UsesUpperFilter && profile.VendorId == 0x045E)
         {
             Console.Write("  Creating ViGEmBus target... ");
             try
@@ -1341,8 +1341,8 @@ class Program
                     BitConverter.GetBytes(16).CopyTo(plugBuf, 0);
                     BitConverter.GetBytes(vigemSerial).CopyTo(plugBuf, 4);
                     BitConverter.GetBytes(2).CopyTo(plugBuf, 8); // DualShock4Wired = 2
-                    BitConverter.GetBytes(profile.VendorId).CopyTo(plugBuf, 12);
-                    BitConverter.GetBytes(profile.ProductId).CopyTo(plugBuf, 14);
+                    BitConverter.GetBytes((ushort)0x045E).CopyTo(plugBuf, 12); // VID
+                    BitConverter.GetBytes((ushort)0xFFFE).CopyTo(plugBuf, 14); // PID FFFE (our INF matches)
                     bool plugOk = DeviceIoControl(vigemHandle, 0x002AA004, plugBuf, (uint)plugBuf.Length,
                         null, 0, out _, IntPtr.Zero);
                     if (plugOk)
