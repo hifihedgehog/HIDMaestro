@@ -40,7 +40,7 @@ AddReg = Gamepad_HW_AddReg
 
 [Gamepad_HW_AddReg]
 HKR,,"LowerFilters",0x00010008,"WUDFRd"
-HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;WD)"
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
 [Gamepad_Install.NT.Services]
 AddService = mshidumdf,0x000001fa,mshidumdf_Service

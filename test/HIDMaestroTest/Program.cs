@@ -1215,16 +1215,29 @@ class Program
             }
             Console.WriteLine("OK");
 
-            // NOW overwrite registry with PID 0001 for the main xinputhid device
-            WriteConfig(descriptor, (ushort)0x045E, (ushort)0x0001,
-                productString: profile.ProductString,
-                deviceDescription: profile.DeviceDescription,
-                inputReportByteLength: inputReportLen);
+            // Registry keeps real VID/PID (companion reads it)
         }
 
-        // Step 2: Build, sign, install driver + create device node
-        if (!EnsureDriverInstalled(profile))
-            return Error("Driver build/install failed. Run elevated.");
+        // Step 2: Build, sign, install driver + create main device node
+        // Skip main device for xinputhid profiles when companion exists
+        // (companion provides SDL3 identity, XUSB companion provides XInput)
+        if (!profile.UsesUpperFilter)
+        {
+            if (!EnsureDriverInstalled(profile))
+                return Error("Driver build/install failed. Run elevated.");
+        }
+        else
+        {
+            // Just ensure driver INF is installed (no device node)
+            string infPath2 = Path.Combine(BuildDir, "hidmaestro.inf");
+            if (!File.Exists(infPath2))
+            {
+                var (_, buildOut) = RunProcess("powershell.exe",
+                    $"-ExecutionPolicy Bypass -File \"{Path.Combine(ScriptsDir, "full_deploy.ps1")}\" -SkipBuild",
+                    timeoutMs: 120_000, showOutput: true);
+            }
+            Console.WriteLine("  Skipping main device (companion provides SDL3 data)");
+        }
 
         // Step 3: Wait for HID child + xinputhid, then fix device name
         Thread.Sleep(3000);
