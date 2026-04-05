@@ -1,7 +1,8 @@
 ;
-; HIDMaestro XUSB Companion — provides XInput interface for driverMode=hid profiles.
-; Same DLL as the HID minidriver, but runs as function driver (not filter).
-; Reads input data from the same shared file as the HID device.
+; HIDMaestro XUSB/WinExInput Companion — provides XInput + browser detection.
+; Compiled from driver.c with HIDMAESTRO_XUSB_MODE (function driver, no filter).
+; Registers XUSB (XInput) + WinExInput (WGI GamepadAdded) interfaces.
+; Reads input data from shared file for XInput GET_STATE responses.
 ;
 
 [Version]

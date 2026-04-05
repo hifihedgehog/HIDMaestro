@@ -106,13 +106,12 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
     if (!NT_SUCCESS(status)) return status;
 
-    /* Register WinExInput only (for WGI GamepadAdded / browser STANDARD GAMEPAD).
-     * NO XUSB — xinputhid provides XInput directly on the HID child via driverPid 02FF. */
+    /* Register XUSB (for XInput) + WinExInput (for browser STANDARD GAMEPAD). */
     {
+        NTSTATUS s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
-        NTSTATUS s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
-        NTSTATUS s2 = s1;
+        NTSTATUS s2 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
 
         /* VID/PID debug removed — was causing scope issues */
 

@@ -384,10 +384,11 @@ EvtDeviceAdd(
     ctx->Device = device;
 
 #ifdef HIDMAESTRO_XUSB_MODE
-    /* WinExInput companion mode — function driver for WGI/browser detection.
-     * NO XUSB — xinputhid provides XInput directly on the HID child.
+    /* XUSB + WinExInput companion mode — function driver for XInput + browser.
+     * XUSB provides XInput data (read from shared file via timer).
      * WinExInput triggers WGI GamepadAdded for browser STANDARD GAMEPAD. */
     ReadConfigFromRegistry(ctx);
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
     {
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
