@@ -1700,7 +1700,7 @@ class Program
         uint vigemSerial = 0;
         // ViGEmBus for Xbox 360 HID-mode: creates virtual Xbox 360 PDO with USB bus type.
         // DI sees 5 axes (XInput mapping). WGI sees separate triggers. No HID device needed.
-        bool useVigemBus = profile?.CompanionOnly == true && profile.VendorId == 0x045E;
+        bool useVigemBus = false; // Disabled — companion XUSB provides XInput directly
         if (useVigemBus)
         {
             Console.Write("  Creating ViGEmBus Xbox 360 target... ");
