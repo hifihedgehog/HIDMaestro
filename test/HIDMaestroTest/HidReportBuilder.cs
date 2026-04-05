@@ -263,8 +263,19 @@ public class HidReportBuilder
         WriteField(LeftStickY, leftY);
         WriteField(RightStickX, rightX);
         WriteField(RightStickY, rightY);
-        WriteField(LeftTrigger, leftTrigger);
-        WriteField(RightTrigger, rightTrigger);
+        if (RightTrigger != null)
+        {
+            // Separate triggers: write each independently
+            WriteField(LeftTrigger, leftTrigger);
+            WriteField(RightTrigger, rightTrigger);
+        }
+        else if (LeftTrigger != null)
+        {
+            // Combined trigger (Xbox 360 style): single Z axis
+            // Center = 0.5 (both released). LT pulls toward 0, RT pulls toward 1.
+            double combined = 0.5 + (rightTrigger - leftTrigger) * 0.5;
+            WriteField(LeftTrigger, Math.Clamp(combined, 0.0, 1.0));
+        }
 
         if (HatSwitch != null)
         {

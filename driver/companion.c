@@ -33,6 +33,8 @@ static const GUID WINEXINPUT_GUID =
 
 typedef struct _COMPANION_CTX {
     ULONG PacketCount;
+    USHORT VendorId;
+    USHORT ProductId;
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -80,7 +82,24 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;
 
-    GetCompanionCtx(device)->PacketCount = 0;
+    {
+        PCOMPANION_CTX ctx = GetCompanionCtx(device);
+        ctx->PacketCount = 0;
+        ctx->VendorId = 0x045E;   /* defaults */
+        ctx->ProductId = 0x028E;
+
+        /* Read VID/PID from registry (set by test app) */
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->VendorId = (USHORT)val;
+            sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->ProductId = (USHORT)val;
+            RegCloseKey(hKey);
+        }
+    }
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
     queueConfig.EvtIoDeviceControl = CompanionIoControl;
@@ -91,7 +110,26 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
      * (driver.c) because WGI needs it on the device with HID Game Pad identity. */
     {
         NTSTATUS s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
-        NTSTATUS s2 = s1; /* no WinExInput here */
+        NTSTATUS s2 = s1;
+
+        /* Log VID/PID for debugging */
+        {
+            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            if (hLog != INVALID_HANDLE_VALUE) {
+                char msg[80]; char* p = msg;
+                *p++='V';*p++='I';*p++='D';*p++='=';
+                USHORT v = ctx->VendorId;
+                for (int k=3;k>=0;k--) { int n=(v>>(k*4))&0xF; *p++=(char)(n<10?'0'+n:'A'+n-10); }
+                *p++=' ';*p++='P';*p++='I';*p++='D';*p++='=';
+                USHORT q = ctx->ProductId;
+                for (int k=3;k>=0;k--) { int n=(q>>(k*4))&0xF; *p++=(char)(n<10?'0'+n:'A'+n-10); }
+                *p++='\r';*p++='\n';
+                DWORD dummy;
+                WriteFile(hLog, msg, (int)(p-msg), &dummy, NULL);
+                CloseHandle(hLog);
+            }
+        }
 
         /* Debug log */
         HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
@@ -152,8 +190,8 @@ void CompanionIoControl(
         *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 */
         info[2] = 0x01;                /* deviceIndex = 1 controller */
         info[4] = 0x00;                /* unk2 — bit 7 clear = don't skip */
-        *(USHORT*)&info[8] = 0x045E;   /* VendorID */
-        *(USHORT*)&info[10] = 0x0B13;  /* ProductID */
+        *(USHORT*)&info[8] = ctx->VendorId;
+        *(USHORT*)&info[10] = ctx->ProductId;
         CopyToRequest(Request, info, 12);
         break;
     }
@@ -246,8 +284,8 @@ void CompanionIoControl(
         RtlZeroMemory(infoEx, sizeof(infoEx));
         *(USHORT*)&infoEx[0] = 0x0101;
         infoEx[2] = 0x01;
-        *(USHORT*)&infoEx[8] = 0x045E;
-        *(USHORT*)&infoEx[10] = 0x0B13;
+        *(USHORT*)&infoEx[8] = ctx->VendorId;
+        *(USHORT*)&infoEx[10] = ctx->ProductId;
         ULONG outLen = OutputBufferLength < 64 ? (ULONG)OutputBufferLength : 64;
         CopyToRequest(Request, infoEx, outLen);
         break;

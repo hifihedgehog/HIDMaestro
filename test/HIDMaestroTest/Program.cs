@@ -729,12 +729,23 @@ class Program
     /// </summary>
     static void CleanupGhostDevices()
     {
-        // Find error-state HIDMaestro devices (exclude Gamepad companion from cleanup)
+        // Remove ALL HIDMaestro devices (any enumerator, any state, any PID).
+        // This prevents stale devices from previous profiles contaminating the current one.
+        // Searches: ROOT\VID_*, ROOT\HID_IG_00, ROOT\HIDCLASS, ROOT\XnaComposite,
+        // and their HID children. NEVER touches ROOT\SYSTEM (ViGEmBus, HidHide).
         var (_, output) = RunProcess("powershell.exe",
-            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { ($_.InstanceId -match 'ROOT.(HID_IG_00|XNACOMPOSITE)' -and $_.FriendlyName -match 'Game Controller|HID-compliant|Xbox 360|HIDMaestro') -and $_.Status -ne 'OK' } | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
+            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { " +
+            "$_.InstanceId -like 'ROOT\\VID_*' -or " +
+            "$_.InstanceId -like 'ROOT\\HID_IG*' -or " +
+            "$_.InstanceId -like 'ROOT\\HIDCLASS*' -or " +
+            "$_.InstanceId -like 'ROOT\\XnaComposite*' -or " +
+            "($_.InstanceId -like 'HID\\VID_045E*&IG_00*' -and $_.InstanceId -notlike 'HID\\{*') -or " +
+            "$_.InstanceId -like 'HID\\HIDCLASS*' -or " +
+            "$_.InstanceId -like 'HID\\HID_IG*' " +
+            "} | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
             timeoutMs: 15_000);
         if (!string.IsNullOrWhiteSpace(output))
-            Console.Write($"(cleaned ghosts) ");
+            Console.Write($"(cleaned) ");
     }
 
     // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
@@ -1138,6 +1149,10 @@ class Program
         EnsureGameInputService();
         EnsureSharedFile();
         CleanupGhostDevices();
+        // Also clean XUSB companions (only HIDMaestro, NEVER ViGEmBus/HidHide)
+        RunProcess("powershell.exe",
+            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.InstanceId -like 'ROOT\\SYSTEM*' -and $_.FriendlyName -like '*HIDMaestro*' } | ForEach-Object { pnputil /remove-device $_.InstanceId 2>&1 }\"",
+            timeoutMs: 10_000);
         // GameInput registry sets the Gamepad flag so SDL3 uses GetGamepadState (live data)
         // instead of GetControllerAxisState (zeros). Security fix (GA for Everyone) enables
         // non-elevated GameInput reading.
@@ -1246,11 +1261,12 @@ class Program
                         "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
                     {
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
-                        // Set CompatibleIDs with BTHLEDEVICE so HIDAPI detects bus_type=BLUETOOTH.
-                        // SDL3's Xbox HIDAPI driver uses hardcoded BT parsing for BT devices,
-                        // which correctly handles our BLE HID report format.
-                        string gpCompat = $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
-                        byte[] gpCompatBytes = Encoding.Unicode.GetBytes(gpCompat);
+                        // Set CompatibleIDs — only add BTHLEDEVICE for Bluetooth profiles.
+                        // USB profiles should NOT spoof BT (causes SDL3 misidentification).
+                        string gpCompatBase = $"root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                        if (profile.Connection == "bluetooth")
+                            gpCompatBase = $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}\0" + gpCompatBase;
+                        byte[] gpCompatBytes = Encoding.Unicode.GetBytes(gpCompatBase);
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 2, gpCompatBytes, (uint)gpCompatBytes.Length);
                         SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject());
                     }

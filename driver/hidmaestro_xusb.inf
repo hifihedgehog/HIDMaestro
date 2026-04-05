@@ -10,7 +10,7 @@ Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 04/04/2026,1.1.0.0
+DriverVer   = 03/30/2026,1.0.0.0
 PnpLockdown = 1
 
 [DestinationDirs]
