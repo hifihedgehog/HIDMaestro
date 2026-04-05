@@ -1290,19 +1290,11 @@ class Program
         int bleReportLen;
         if (profile.UsesUpperFilter)
         {
-            var descList = new List<byte>(descriptor);
-            // Insert "85 01" (Report ID 1) after the first Application Collection (A1 01)
-            for (int di = 0; di < descList.Count - 1; di++)
-            {
-                if (descList[di] == 0xA1 && descList[di + 1] == 0x01)
-                {
-                    descList.Insert(di + 2, 0x01);
-                    descList.Insert(di + 2, 0x85);
-                    break;
-                }
-            }
-            bleDesc = descList.ToArray();
-            bleReportLen = inputReportLen + 1; // +1 for Report ID byte
+            // Use native descriptor as-is (NO Report ID injection).
+            // xinputhid expects GIP format without Report ID.
+            // Report ID injection breaks xinputhid's GIP parsing → dead XInput.
+            bleDesc = descriptor;
+            bleReportLen = inputReportLen;
         }
         else
         {
