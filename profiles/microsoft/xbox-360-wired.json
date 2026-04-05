@@ -13,6 +13,5 @@
   "notes": "Xbox 360 native 5-axis descriptor (combined Z trigger, 10 buttons). No xinputhid. XUSB IOCTLs handled by our driver through mshidumdf passthrough. Dual-format shared file (HID + GIP).",
   "deviceDescription": "Controller (XBOX 360 For Windows)",
   "triggerMode": "combined",
-  "driverMode": "xinputhid",
-  "driverPid": "0x02FF"
+  "driverMode": "hid"
 }

@@ -731,21 +731,42 @@ class Program
     {
         // Remove ALL HIDMaestro devices (any enumerator, any state, any PID).
         // This prevents stale devices from previous profiles contaminating the current one.
-        // Searches: ROOT\VID_*, ROOT\HID_IG_00, ROOT\HIDCLASS, ROOT\XnaComposite,
-        // and their HID children. NEVER touches ROOT\SYSTEM (ViGEmBus, HidHide).
-        var (_, output) = RunProcess("powershell.exe",
-            "-Command \"Get-PnpDevice -EA SilentlyContinue | Where-Object { " +
-            "$_.InstanceId -like 'ROOT\\VID_*' -or " +
-            "$_.InstanceId -like 'ROOT\\HID_IG*' -or " +
-            "$_.InstanceId -like 'ROOT\\HIDCLASS*' -or " +
-            "$_.InstanceId -like 'ROOT\\XnaComposite*' -or " +
-            "($_.InstanceId -like 'HID\\VID_045E*&IG_00*' -and $_.InstanceId -notlike 'HID\\{*') -or " +
-            "$_.InstanceId -like 'HID\\HIDCLASS*' -or " +
-            "$_.InstanceId -like 'HID\\HID_IG*' " +
-            "} | ForEach-Object { pnputil /remove-device $_.InstanceId /subtree 2>&1 }\"",
-            timeoutMs: 15_000);
-        if (!string.IsNullOrWhiteSpace(output))
-            Console.Write($"(cleaned) ");
+        // NEVER touches ROOT\SYSTEM (ViGEmBus, HidHide).
+        string[] prefixes = {
+            @"ROOT\VID_", @"ROOT\HID_IG_00", @"ROOT\HIDCLASS",
+            @"ROOT\XnaComposite"
+        };
+        foreach (var prefix in prefixes)
+        {
+            for (int idx = 0; idx < 10; idx++)
+            {
+                string instId = $@"{prefix}\{idx:D4}";
+                if (prefix.StartsWith(@"ROOT\VID_"))
+                {
+                    // VID_ prefix: scan for any VID pattern
+                    // Use CM_Locate to check existence
+                    break; // handled below
+                }
+                if (CM_Locate_DevNodeW(out uint _, instId, 0) == 0)
+                {
+                    RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                }
+            }
+        }
+        // VID_*&IG_00 and VID_*&PID_* patterns — enumerate all ROOT\VID_ devices
+        var (_, devList) = RunProcess("pnputil.exe", "/enum-devices /class System /class HIDClass", timeoutMs: 10000);
+        foreach (var line in devList.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("Instance ID:"))
+            {
+                var instId = trimmed.Substring("Instance ID:".Length).Trim();
+                if (instId.StartsWith(@"ROOT\VID_", StringComparison.OrdinalIgnoreCase))
+                {
+                    RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                }
+            }
+        }
     }
 
     // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
