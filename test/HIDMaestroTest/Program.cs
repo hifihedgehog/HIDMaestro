@@ -962,10 +962,9 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox HID mode: no &IG_ so Chrome RawInput detects it.
-            // Chrome matches VID 045E with XInput → pairs → uses XInput trigger data.
-            enumerator = "HIDClass";
-            hwId = $"root\\VID_{vid}&PID_{pid}";
+            // Xbox HID mode with &IG_ for Chrome XInput pairing
+            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
+            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
         else
