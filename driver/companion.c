@@ -112,24 +112,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         NTSTATUS s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
         NTSTATUS s2 = s1;
 
-        /* Log VID/PID for debugging */
-        {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[80]; char* p = msg;
-                *p++='V';*p++='I';*p++='D';*p++='=';
-                USHORT v = ctx->VendorId;
-                for (int k=3;k>=0;k--) { int n=(v>>(k*4))&0xF; *p++=(char)(n<10?'0'+n:'A'+n-10); }
-                *p++=' ';*p++='P';*p++='I';*p++='D';*p++='=';
-                USHORT q = ctx->ProductId;
-                for (int k=3;k>=0;k--) { int n=(q>>(k*4))&0xF; *p++=(char)(n<10?'0'+n:'A'+n-10); }
-                *p++='\r';*p++='\n';
-                DWORD dummy;
-                WriteFile(hLog, msg, (int)(p-msg), &dummy, NULL);
-                CloseHandle(hLog);
-            }
-        }
+        /* VID/PID debug removed — was causing scope issues */
 
         /* Debug log */
         HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
@@ -252,6 +235,27 @@ void CompanionIoControl(
             *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));
             *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
             *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));
+        }
+        /* Debug: log GET_STATE trigger values */
+        {
+            static LONG gsCount = 0;
+            if (InterlockedIncrement(&gsCount) == 100) {
+                HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\getstate_debug.txt",
+                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+                if (hLog != INVALID_HANDLE_VALUE) {
+                    char msg[60]; char *p = msg;
+                    *p++='L';*p++='T';*p++='=';
+                    UCHAR ltv = state[0x0D];
+                    *p++='0'+(ltv/100)%10;*p++='0'+(ltv/10)%10;*p++='0'+ltv%10;
+                    *p++=' ';*p++='R';*p++='T';*p++='=';
+                    UCHAR rtv = state[0x0E];
+                    *p++='0'+(rtv/100)%10;*p++='0'+(rtv/10)%10;*p++='0'+rtv%10;
+                    *p++='\r';*p++='\n';
+                    DWORD dummy;
+                    WriteFile(hLog, msg, (int)(p-msg), &dummy, NULL);
+                    CloseHandle(hLog);
+                }
+            }
         }
         CopyToRequest(Request, state, 29);
         break;

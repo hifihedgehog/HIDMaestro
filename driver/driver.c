@@ -459,9 +459,11 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /* Register USB + WinExInput interfaces ONLY.
-     * NO XUSB — XUSB companion (HMXInput.dll) handles XInput exclusively.
-     * Registering XUSB here creates duplicate XInput controller slots. */
+    /* Register XUSB + USB + WinExInput interfaces.
+     * XUSB here provides XInput→DI mapping (suppresses raw HID in DirectInput = 5 axes).
+     * XUSB companion (HMXInput.dll) should NOT be created when this device has XUSB. */
+    WdfDeviceCreateDeviceInterface(device,
+        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
     /* WinExInput — WGI needs this on the device with HID Game Pad identity

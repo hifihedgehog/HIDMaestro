@@ -1247,25 +1247,23 @@ class Program
         // RawInput/Windows backend which maps by VID/PID, not descriptor parsing.
         // DirectInput reads this descriptor directly — must match real hardware
         // (correct axis count, button count, trigger mode).
+        // Companion BLE descriptor for xinputhid profiles:
+        // Usage 0x05 (Game Pad), Report ID 0x01, 17 bytes.
+        // Rx/Ry right stick, Z/Rz separate triggers (Generic Desktop).
+        // XInput→DI mapping on the same device suppresses this in DirectInput → 5 axes.
+        // Chrome uses XInput (separate LT/RT) because &IG_ is in the path.
+        // Non-xinputhid profiles use native descriptor directly.
         byte[] bleDesc;
         int bleReportLen;
         if (profile.UsesUpperFilter)
         {
-            // Inject Report ID 0x01 into the native descriptor.
-            // Insert "85 01" (Report ID 1) after the first Application Collection tag.
-            var descList = new List<byte>(descriptor);
-            // Find first 0xA1 0x01 (Collection Application)
-            for (int di = 0; di < descList.Count - 1; di++)
-            {
-                if (descList[di] == 0xA1 && descList[di + 1] == 0x01)
-                {
-                    descList.Insert(di + 2, 0x01); // Report ID value
-                    descList.Insert(di + 2, 0x85); // Report ID tag
-                    break;
-                }
-            }
-            bleDesc = descList.ToArray();
-            bleReportLen = inputReportLen + 1; // +1 for Report ID byte
+            bleDesc = Convert.FromHexString(
+                "05010905a10185010901a10009300931150027ffff0000950275108102c0" +
+                "0901a10009330934150027ffff0000950275108102c0" +
+                "05010932150026ff039501750a8102150025007506950181030501" +
+                "0935150026ff039501750a8102150025007506950181030501" +
+                "0939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0");
+            bleReportLen = 17;
         }
         else
         {
@@ -1430,9 +1428,10 @@ class Program
         }
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB companion for browser WGI (WinExInput) and XInput (driverMode=hid)
-        // xinputhid profiles with non-standard HID PID also need this for WinExInput
-        if (profile.VendorId == 0x045E)
+        // Step 3.5: Create XUSB companion for XInput (driverMode=hid only).
+        // For xinputhid profiles, the companion HID device handles XUSB directly.
+        // Only non-xinputhid Xbox profiles need a separate XUSB companion.
+        if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
             Console.Write("  Creating XUSB companion... ");
             // Ensure XUSB driver is in the store
