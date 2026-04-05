@@ -805,8 +805,18 @@ class Program
                 if (classKey == null) continue;
                 foreach (var subName in classKey.GetSubKeyNames())
                 {
-                    if (subName.Contains("ROOT#VID_") || subName.Contains("ROOT#HIDCLASS") ||
-                        subName.Contains("ROOT#HID_IG"))
+                    // Clean our devices but NEVER ViGEmBus/HidHide (ROOT#SYSTEM#0000, #0001)
+                    bool isOurDevice = subName.Contains("ROOT#VID_") || subName.Contains("ROOT#HIDCLASS") ||
+                        subName.Contains("ROOT#HID_IG");
+                    // For ROOT#SYSTEM, only clean entries beyond index 1 (0000=ViGEmBus, 0001=HidHide)
+                    if (!isOurDevice && subName.Contains("ROOT#SYSTEM#"))
+                    {
+                        // Check if it's index >= 2
+                        var match = System.Text.RegularExpressions.Regex.Match(subName, @"ROOT#SYSTEM#(\d+)");
+                        if (match.Success && int.Parse(match.Groups[1].Value) >= 2)
+                            isOurDevice = true;
+                    }
+                    if (isOurDevice)
                     {
                         try { classKey.DeleteSubKeyTree(subName); } catch { }
                     }
