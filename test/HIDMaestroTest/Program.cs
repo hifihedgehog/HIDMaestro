@@ -164,6 +164,75 @@ class Program
     static extern uint CM_Get_Device_IDW(uint dnDevInst, byte[] buffer, uint bufferLen, uint ulFlags);
 
     /// <summary>
+    /// Adds HMBtnFix UMDF2 filter on the HID child to patch xinputhid's 16-button
+    /// descriptor to 10 buttons. Configures WUDFRd service parameters.
+    /// </summary>
+    static void AddBtnFixFilter(string hidChildInstanceId)
+    {
+        string[] parts = hidChildInstanceId.Split('\\');
+        if (parts.Length < 3) return;
+        string enumPath = $@"SYSTEM\CurrentControlSet\Enum\{parts[0]}\{parts[1]}\{parts[2]}";
+
+        // Find HMBtnFix.dll in the driver store
+        string? btnFixDll = null;
+        string storePath = @"C:\Windows\System32\DriverStore\FileRepository";
+        foreach (var dir in Directory.GetDirectories(storePath, "hidmaestro_btnfix*"))
+        {
+            string candidate = Path.Combine(dir, "HMBtnFix.dll");
+            if (File.Exists(candidate)) { btnFixDll = candidate; break; }
+        }
+        if (btnFixDll == null)
+        {
+            // Try build directory
+            btnFixDll = Path.Combine(BuildDir, "HMBtnFix.dll");
+            if (!File.Exists(btnFixDll)) { Console.WriteLine("  BtnFix: DLL not found"); return; }
+        }
+
+        // 1. Create UMDF service entry
+        using (var svcKey = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\HMBtnFix"))
+        {
+            svcKey.SetValue("DisplayName", "HIDMaestro Button Fix", RegistryValueKind.String);
+            svcKey.SetValue("Type", 1, RegistryValueKind.DWord);
+            svcKey.SetValue("Start", 3, RegistryValueKind.DWord);
+            svcKey.SetValue("ErrorControl", 1, RegistryValueKind.DWord);
+        }
+        using (var wdfKey = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\HMBtnFix\Parameters\Wdf"))
+        {
+            wdfKey.SetValue("WdfMajorVersion", 2, RegistryValueKind.DWord);
+            wdfKey.SetValue("WdfMinorVersion", 15, RegistryValueKind.DWord);
+        }
+
+        // 2. Configure WUDFRd on the device's parameters
+        using (var dpKey = Registry.LocalMachine.CreateSubKey($@"{enumPath}\Device Parameters\WudfRd"))
+        {
+            // UMDF service definition
+            using (var svcDef = Registry.LocalMachine.CreateSubKey($@"{enumPath}\Device Parameters\WudfRd\UmdfService\HMBtnFix"))
+            {
+                svcDef.SetValue("UmdfLibraryVersion", "2.15.0", RegistryValueKind.String);
+                svcDef.SetValue("ServiceBinary", btnFixDll, RegistryValueKind.String);
+            }
+            dpKey.SetValue("UmdfServiceOrder", new string[] { "HMBtnFix" }, RegistryValueKind.MultiString);
+            dpKey.SetValue("UmdfKernelModeClientPolicy", 1, RegistryValueKind.DWord); // AllowKernelModeClients
+            dpKey.SetValue("UmdfFileObjectPolicy", 2, RegistryValueKind.DWord); // AllowNullAndUnknownFileObjects
+            dpKey.SetValue("UmdfMethodNeitherAction", 1, RegistryValueKind.DWord); // Copy
+            dpKey.SetValue("UmdfFsContextUsePolicy", 1, RegistryValueKind.DWord); // CanUseFsContext2
+        }
+
+        // 3. Add WUDFRd to UpperFilters
+        using (var key = Registry.LocalMachine.OpenSubKey(enumPath, writable: true))
+        {
+            if (key == null) return;
+            var existing = key.GetValue("UpperFilters") as string[];
+            if (existing != null && existing.Contains("WUDFRd")) return; // Already present
+            var newFilters = (existing ?? Array.Empty<string>()).ToList();
+            newFilters.Add("WUDFRd"); // Add after xinputhid
+            key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
+        }
+
+        Console.Write($"  BtnFix filter configured on {hidChildInstanceId}... ");
+    }
+
+    /// <summary>
     /// Finds the current HID child of ROOT\HID_IG_00\0000, adds xinputhid as an
     /// upper filter in its persistent registry, and restarts the device.
     /// Returns true if successful.
@@ -1478,6 +1547,49 @@ class Program
         // Final name fix after xinputhid grandchild has fully appeared
         Thread.Sleep(2000);
         FixHidChildNames(displayName);
+
+        // Xbox 360 xinputhid: BtnFix filter (DISABLED — needs proper INF installation)
+        if (false && profile.UsesXinputhid && profile.ProductId == 0x028E)
+        {
+            // Find the xinputhid HID child (HID\VID_045E&PID_02FF&IG_00\...)
+            var hidChild = System.Diagnostics.Process.GetCurrentProcess(); // placeholder
+            string? hidChildId = null;
+            using (var hidEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\HID"))
+            {
+                if (hidEnum != null)
+                {
+                    foreach (var sub in hidEnum.GetSubKeyNames())
+                    {
+                        if (sub.Contains("VID_045E") && sub.Contains("PID_02FF") && sub.Contains("IG_00"))
+                        {
+                            using var devKey = hidEnum.OpenSubKey(sub);
+                            if (devKey != null)
+                            {
+                                foreach (var inst in devKey.GetSubKeyNames())
+                                {
+                                    hidChildId = $@"HID\{sub}\{inst}";
+                                    break;
+                                }
+                            }
+                            if (hidChildId != null) break;
+                        }
+                    }
+                }
+            }
+            if (hidChildId != null)
+            {
+                Console.Write("  Adding BtnFix filter... ");
+                try
+                {
+                    AddBtnFixFilter(hidChildId);
+                    // Restart HID child for filter to load
+                    RunProcess("pnputil.exe", $"/restart-device \"{hidChildId}\"", timeoutMs: 5000);
+                    Thread.Sleep(3000);
+                    Console.WriteLine("OK");
+                }
+                catch (Exception ex) { Console.WriteLine($"FAILED: {ex.Message}"); }
+            }
+        }
 
         // Set BusTypeGuid to USB on ROOT device and HID children
         // GameInput uses BusTypeGuid to determine how to read HID reports
