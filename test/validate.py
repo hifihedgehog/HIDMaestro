@@ -126,8 +126,12 @@ print("\nDirectInput:")
 check("Exactly 1 device", len(di_devs) == 1, f"got {len(di_devs)}")
 if di_devs:
     d = di_devs[0]
-    check("5 axes", d['axes'] == 5, f"got {d['axes']}")
-    check("VID 045E", d['vid'] == 0x045E, f"got 0x{d['vid']:04X}")
+    # Xbox HID-mode profiles with separate trigger descriptor report 6 axes via joyGetDevCaps
+    # (legacy API reads raw HID). IDirectInput8 (modern) applies &IG_ XInput mapping → 5 axes.
+    expected_axes = 6 if (is_xbox and not is_xinputhid and profile and profile.get('triggerMode') == 'separate') else 5
+    check(f"{expected_axes} axes", d['axes'] == expected_axes, f"got {d['axes']}")
+    if is_xbox:
+        check("VID 045E", d['vid'] == 0x045E, f"got 0x{d['vid']:04X}")
 
 # 3. SDL3 / HIDAPI
 all_prof = list(hid.enumerate(prof_vid, prof_pid))

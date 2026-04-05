@@ -371,7 +371,19 @@ EvtDeviceAdd(
      * No companion type detection needed. */
 
 #ifndef HIDMAESTRO_XUSB_MODE
-    WdfFdoInitSetFilter(DeviceInit);
+    /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
+     * This tells DI to use XInput mapping (5 axes) instead of raw HID. */
+    {
+        HKEY hFm; DWORD functionMode = 0;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                functionMode = val;
+            RegCloseKey(hFm);
+        }
+        if (!functionMode)
+            WdfFdoInitSetFilter(DeviceInit);
+    }
 #endif
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
@@ -495,9 +507,9 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /* Register XUSB + USB + WinExInput interfaces.
-     * XUSB here provides XInput→DI mapping (suppresses raw HID in DirectInput = 5 axes).
-     * XUSB companion (HMXInput.dll) should NOT be created when this device has XUSB. */
+    /* Register XUSB + USB interfaces (succeeds in function mode only).
+     * When visible to PnP, XUSB triggers DI's XInput mapping (5 axes).
+     * In filter mode these calls succeed but PnP suppresses the interfaces. */
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
     WdfDeviceCreateDeviceInterface(device,

@@ -568,9 +568,12 @@ class Program
 
     // ── Registry config ──
 
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0)
+    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0, bool functionMode = false)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
+        // FunctionMode: skip filter mode so driver can register XUSB on HID device.
+        // Needed for Xbox 360 HID mode: XUSB on HID → DI uses XInput mapping (5 axes).
+        key.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
         // Debug: log what we're writing
         Console.Write($"  [descriptor: {descriptor.Length}B, bytes[15]=0x{descriptor[15]:X2}, bytes[16]=0x{descriptor[16]:X2}] ");
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
@@ -1321,10 +1324,14 @@ class Program
             bleDesc = descriptor;
             bleReportLen = inputReportLen;
         }
+        // FunctionMode for Xbox HID profiles: skip filter mode so XUSB registers on
+        // the HID device itself. DI sees XUSB → uses XInput mapping (5 axes, 10 buttons).
+        bool funcMode = profile.VendorId == 0x045E && !profile.UsesUpperFilter;
         WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
-            inputReportByteLength: bleReportLen);
+            inputReportByteLength: bleReportLen,
+            functionMode: funcMode);
         Console.WriteLine("OK");
 
         // Step 1.5: Create Gamepad companion with BLE descriptor (HIDAPI-compatible)
