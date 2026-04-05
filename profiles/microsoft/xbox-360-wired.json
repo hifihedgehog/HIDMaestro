@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-wired",
-  "name": "Xbox 360 Controller (Wired)",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x028E",
-  "productString": "Controller (XBOX 360 For Windows)",
-  "manufacturerString": "\u00a9Microsoft Corporation",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150027ffff000095017510810205010939150125083500463b016614007504950181427504950115002500350045006500810105091901290a150025017501950a810275069501150025008101c0",
-  "inputReportSize": 13,
-  "deviceDescription": "Controller (XBOX 360 For Windows)",
-  "triggerMode": "combined",
-  "driverMode": "xinputhid",
-  "driverPid": "0x02FF"
-}
+{"id":"xbox-360-wired","name":"Xbox 360 Controller (Wired)","vendor":"Microsoft","vid":"0x045E","pid":"0x028E","productString":"Controller (XBOX 360 For Windows)","manufacturerString":"\u00a9Microsoft Corporation","type":"gamepad","connection":"usb","descriptor":"05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150027ffff000095017510810205010939150125083500463b016614007504950181427504950115002500350045006500810105091901290a150025017501950a810275069501150025008101c0","inputReportSize":13,"deviceDescription":"Controller (XBOX 360 For Windows)","triggerMode":"combined","driverMode":"xinputhid","driverPid":"0x02FF"}

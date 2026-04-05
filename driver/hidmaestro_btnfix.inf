@@ -10,7 +10,7 @@ ClassGuid   = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
 Provider    = %ProviderName%
 ExtensionId = {A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 CatalogFile = hidmaestro_btnfix.cat
-DriverVer   = 04/05/2026,1.0.0.0
+DriverVer   = 04/05/2026,1.0.4.0
 PnpLockdown = 1
 
 [DestinationDirs]
