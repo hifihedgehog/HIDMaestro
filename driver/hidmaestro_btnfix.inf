@@ -1,13 +1,14 @@
 ;
-; HIDMaestro Button Fix — UMDF2 upper filter on xinputhid HID child.
+; HIDMaestro Button Fix — Extension INF adding UMDF2 upper filter to xinputhid HID child.
 ; Patches HID descriptor button count from 16 to 10 (Xbox 360 fidelity).
 ;
 
 [Version]
 Signature   = "$WINDOWS NT$"
-Class       = HIDClass
-ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Class       = Extension
+ClassGuid   = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
 Provider    = %ProviderName%
+ExtensionId = {A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 CatalogFile = hidmaestro_btnfix.cat
 DriverVer   = 04/05/2026,1.0.0.0
 PnpLockdown = 1
@@ -35,16 +36,15 @@ CopyFiles = FilterCopy
 HMBtnFix.dll
 
 [BtnFix_Install.NT.HW]
-AddReg = BtnFix_HW_AddReg
+AddReg = BtnFix_AddReg
 
-[BtnFix_HW_AddReg]
+[BtnFix_AddReg]
 HKR,,"UpperFilters",0x00010008,"WUDFRd"
 
 [BtnFix_Install.NT.Services]
-AddService = WUDFRd,0x000001f8,WUDFRD_Service
-AddService = ,0x00000002
+AddService = WUDFRd,0x000001f8,WUDFRD_ServiceInstall
 
-[WUDFRD_Service]
+[WUDFRD_ServiceInstall]
 DisplayName    = %WudfRdDesc%
 ServiceType    = 1
 StartType      = 3
@@ -52,20 +52,20 @@ ErrorControl   = 1
 ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
 
 [BtnFix_Install.NT.Wdf]
-UmdfService                 = HMBtnFix, HMBtnFix_UmdfService
+UmdfService                 = HMBtnFix, HMBtnFix_Install
 UmdfServiceOrder            = HMBtnFix
 UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
 
-[HMBtnFix_UmdfService]
+[HMBtnFix_Install]
 UmdfLibraryVersion = 2.15.0
 ServiceBinary      = %13%\HMBtnFix.dll
 
 [Strings]
 ProviderName     = "HIDMaestro"
 ManufacturerName = "HIDMaestro"
-DeviceDesc       = "HIDMaestro Button Fix Filter"
+DeviceDesc       = "HIDMaestro Button Fix"
 DiskName         = "HIDMaestro Installation Disk"
 WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"
