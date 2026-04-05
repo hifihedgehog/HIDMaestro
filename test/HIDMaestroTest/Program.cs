@@ -1197,13 +1197,21 @@ class Program
             string sysId = $@"ROOT\SYSTEM\{idx:D4}";
             if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
             {
-                // Check friendly name via registry (pnputil /enum-devices /instanceid not supported on all Windows)
+                // Check device identity via registry
                 try
                 {
                     using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{sysId}");
-                    string? friendlyName = key?.GetValue("FriendlyName") as string;
-                    if (friendlyName != null && friendlyName.Contains("HIDMaestro"))
-                        RunProcess("pnputil.exe", $"/remove-device \"{sysId}\"", timeoutMs: 5000);
+                    if (key != null)
+                    {
+                        string? fn = key.GetValue("FriendlyName") as string;
+                        string? dd = key.GetValue("DeviceDesc") as string;
+                        string?[] hwIds = key.GetValue("HardwareID") as string[] ?? Array.Empty<string>();
+                        bool isOurs = (fn != null && fn.Contains("HIDMaestro")) ||
+                                      (dd != null && dd.Contains("HIDMaestro")) ||
+                                      hwIds.Any(h => h != null && h.Contains("HIDMaestro"));
+                        if (isOurs)
+                            RunProcess("pnputil.exe", $"/remove-device \"{sysId}\"", timeoutMs: 5000);
+                    }
                 }
                 catch { }
             }
