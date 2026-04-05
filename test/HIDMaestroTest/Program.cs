@@ -753,20 +753,31 @@ class Program
                 }
             }
         }
-        // VID_*&IG_00 and VID_*&PID_* patterns — enumerate all ROOT\VID_ devices
-        var (_, devList) = RunProcess("pnputil.exe", "/enum-devices /class System /class HIDClass", timeoutMs: 10000);
-        foreach (var line in devList.Split('\n'))
+        // VID_*&IG_00 and VID_*&PID_* patterns — scan registry for ROOT\VID_ enumerators
+        try
         {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith("Instance ID:"))
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey != null)
             {
-                var instId = trimmed.Substring("Instance ID:".Length).Trim();
-                if (instId.StartsWith(@"ROOT\VID_", StringComparison.OrdinalIgnoreCase))
+                foreach (var subName in enumKey.GetSubKeyNames())
                 {
-                    RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                    if (subName.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Found a VID_ enumerator — remove all device instances under it
+                        using var vidKey = enumKey.OpenSubKey(subName);
+                        if (vidKey != null)
+                        {
+                            foreach (var instName in vidKey.GetSubKeyNames())
+                            {
+                                string instId = $@"ROOT\{subName}\{instName}";
+                                RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                            }
+                        }
+                    }
                 }
             }
         }
+        catch { }
     }
 
     // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
@@ -1176,9 +1187,15 @@ class Program
             string sysId = $@"ROOT\SYSTEM\{idx:D4}";
             if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
             {
-                var (_, sysInfo) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{sysId}\"");
-                if (sysInfo.Contains("HIDMaestro"))
-                    RunProcess("pnputil.exe", $"/remove-device \"{sysId}\"", timeoutMs: 5000);
+                // Check friendly name via registry (pnputil /enum-devices /instanceid not supported on all Windows)
+                try
+                {
+                    using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{sysId}");
+                    string? friendlyName = key?.GetValue("FriendlyName") as string;
+                    if (friendlyName != null && friendlyName.Contains("HIDMaestro"))
+                        RunProcess("pnputil.exe", $"/remove-device \"{sysId}\"", timeoutMs: 5000);
+                }
+                catch { }
             }
         }
         // GameInput registry sets the Gamepad flag so SDL3 uses GetGamepadState (live data)
