@@ -588,11 +588,33 @@ class Program
         string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Write OEMName to the Joystick\OEM registry — joy.cpl reads from here.
-        // This is indexed by VID/PID, so a real controller reconnecting will overwrite.
+        // Write OEMName + OEMData to Joystick\OEM registry.
+        // OEMData dwNumButtons overrides joyGetDevCaps button count (HID mode only).
         string oemKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
         using var oemReg = Registry.CurrentUser.CreateSubKey(oemKey);
         oemReg?.SetValue("OEMName", displayName, RegistryValueKind.String);
+
+        // Also write to HKLM for OEMData (HKCU doesn't have OEMData support)
+        try
+        {
+            using var oemLm = Registry.LocalMachine.CreateSubKey(
+                $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}");
+            oemLm?.SetValue("OEMName", displayName, RegistryValueKind.String);
+            // OEMData: JOY_HWS flags + dwNumButtons
+            // flags: HASZ(1)+HASR(2)+HASU(4)+HASPOV(0x10)+ISGAMEPAD(0x1000) = 0x1017
+            byte[] oemData = new byte[8];
+            BitConverter.GetBytes(0x00001017).CopyTo(oemData, 0);
+            BitConverter.GetBytes(10).CopyTo(oemData, 4); // 10 buttons
+            oemLm?.SetValue("OEMData", oemData, RegistryValueKind.Binary);
+
+            // Axis Selection: hide axis 5 (Rz) by remapping to vendor usage
+            // This makes joyGetDevCaps report 5 axes instead of 6 (XUSB mapper only)
+            using var axKey = Registry.LocalMachine.CreateSubKey(
+                $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}\Axes\5");
+            axKey?.SetValue("", "Hidden", RegistryValueKind.String);
+            axKey?.SetValue("Attributes", new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x01, 0x00 }, RegistryValueKind.Binary);
+        }
+        catch { /* Requires elevation — set via deploy script */ }
     }
 
     // ── Process runner ──

@@ -900,7 +900,7 @@ EvtIoDeviceControl(
         *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
         caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
         caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF3FF;  /* wButtons mask (all) */
+        *(USHORT*)&caps[4] = 0xF3FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY */
         caps[6] = 0xFF;                /* bLeftTrigger */
         caps[7] = 0xFF;                /* bRightTrigger */
         *(SHORT*)&caps[8]  = 32767;    /* ThumbLX */
