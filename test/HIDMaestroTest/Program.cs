@@ -1492,8 +1492,8 @@ class Program
         // Step 3.5: Create XUSB/WinExInput companion for browser detection.
         // For xinputhid profiles, xinputhid provides XInput (via driverPid 02FF).
         // Companion provides WinExInput for WGI GamepadAdded (browser STANDARD GAMEPAD).
-        // XusbNeeded=0 for xinputhid (avoid duplicate XInput), =1 for HID mode.
-        if (profile.VendorId == 0x045E)
+        // Skip for companionOnly profiles — ViGEmBus provides XInput + DI + WGI.
+        if (profile.VendorId == 0x045E && !profile.CompanionOnly)
         {
             bool xusbNeeded = !profile.UsesXinputhid; // HID mode needs companion XInput; xinputhid provides its own
             using (var cfgKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
@@ -1567,9 +1567,12 @@ class Program
         // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
         SafeFileHandle? vigemHandle = null;
         uint vigemSerial = 0;
-        if (false) // ViGEmBus DISABLED - security fix makes GameInput work directly
+        // ViGEmBus for Xbox 360 HID-mode: creates virtual Xbox 360 PDO with USB bus type.
+        // DI sees 5 axes (XInput mapping). WGI sees separate triggers. No HID device needed.
+        bool useVigemBus = profile?.CompanionOnly == true && profile.VendorId == 0x045E;
+        if (useVigemBus)
         {
-            Console.Write("  Creating ViGEmBus target... ");
+            Console.Write("  Creating ViGEmBus Xbox 360 target... ");
             try
             {
                 // Open ViGEmBus device
@@ -1605,14 +1608,14 @@ class Program
                     DeviceIoControl(vigemHandle, 0x002AA00C, verBuf, (uint)verBuf.Length,
                         null, 0, out _, IntPtr.Zero);
 
-                    // Plugin Xbox 360 target
+                    // Plugin Xbox 360 target (type 0 = Xbox360Wired)
                     vigemSerial = 1;
                     byte[] plugBuf = new byte[16]; // Size(4) + SerialNo(4) + TargetType(4) + VID(2) + PID(2)
                     BitConverter.GetBytes(16).CopyTo(plugBuf, 0);
                     BitConverter.GetBytes(vigemSerial).CopyTo(plugBuf, 4);
-                    BitConverter.GetBytes(2).CopyTo(plugBuf, 8); // DualShock4Wired = 2
+                    BitConverter.GetBytes(0).CopyTo(plugBuf, 8); // Xbox360Wired = 0
                     BitConverter.GetBytes((ushort)0x045E).CopyTo(plugBuf, 12); // VID
-                    BitConverter.GetBytes((ushort)0xFFFE).CopyTo(plugBuf, 14); // PID FFFE (our INF matches)
+                    BitConverter.GetBytes((ushort)0x028E).CopyTo(plugBuf, 14); // PID
                     bool plugOk = DeviceIoControl(vigemHandle, 0x002AA004, plugBuf, (uint)plugBuf.Length,
                         null, 0, out _, IntPtr.Zero);
                     if (plugOk)
@@ -1642,6 +1645,10 @@ class Program
                 Console.WriteLine($"FAILED: {ex.Message}");
             }
         }
+
+        // Debug: log ViGEmBus state
+        File.WriteAllText(@"C:\ProgramData\HIDMaestro\vigem_init.txt",
+            $"useVigemBus={useVigemBus} handle={vigemHandle != null && !vigemHandle.IsInvalid} serial={vigemSerial}\n");
 
         // Step 4: Open the HID child device
         Console.Write("  Opening HID device... ");
@@ -1771,6 +1778,7 @@ class Program
             Console.WriteLine($"  Shared file: FAILED ({ex.Message})");
         }
 
+        File.WriteAllText(@"C:\ProgramData\HIDMaestro\loop_start.txt", "LOOP STARTING\n");
         var sw = Stopwatch.StartNew();
         int count = 0;
         int failCount = 0;
@@ -1918,29 +1926,64 @@ class Program
                     xusbOut, (uint)xusbOut.Length, out _, IntPtr.Zero);
             }
 
-            // Submit report to ViGEmBus target for GameInput/SDL3
+            // Submit report to ViGEmBus target
             if (vigemHandle != null && vigemSerial > 0)
             {
-                // DS4_SUBMIT_REPORT: Size(4) + SerialNo(4) + DS4_REPORT(9) = 17 bytes
-                // DS4_REPORT: bThumbLX(1) + bThumbLY(1) + bThumbRX(1) + bThumbRY(1) +
-                //             wButtons(2) + bSpecial(1) + bTriggerL(1) + bTriggerR(1)
-                byte[] vrBuf = new byte[17];
-                BitConverter.GetBytes(17).CopyTo(vrBuf, 0);
-                BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
-                // Sticks: 8-bit unsigned (0=left/up, 128=center, 255=right/down)
-                vrBuf[8] = (byte)(lxNorm * 255);      // LX
-                vrBuf[9] = (byte)(lyNorm * 255);       // LY
-                vrBuf[10] = 128;                        // RX center
-                vrBuf[11] = 128;                        // RY center
-                // Buttons: lower 4 bits = D-pad (8=none), upper bits = face buttons
-                ushort ds4Buttons = 0x08; // D-pad none
-                if ((btnMask & 0x01) != 0) ds4Buttons |= 0x20; // Cross
-                BitConverter.GetBytes(ds4Buttons).CopyTo(vrBuf, 12);
-                vrBuf[14] = 0; // bSpecial
-                vrBuf[15] = (byte)(sepLt * 255); // LT
-                vrBuf[16] = (byte)(sepRt * 255); // RT
-                DeviceIoControl(vigemHandle, 0x002AA80C, vrBuf, (uint)vrBuf.Length,
-                    null, 0, out _, IntPtr.Zero);
+                if (count == 10 && useVigemBus)
+                {
+                    // Test submit with properly formed buffer
+                    byte[] testBuf = new byte[20];
+                    BitConverter.GetBytes(20).CopyTo(testBuf, 0);
+                    BitConverter.GetBytes(vigemSerial).CopyTo(testBuf, 4);
+                    testBuf[10] = 128; // LT=128
+                    testBuf[11] = 64;  // RT=64
+                    bool submitOk = DeviceIoControl(vigemHandle, 0x002AA808, testBuf, 20, null, 0, out uint dummy, IntPtr.Zero);
+                    File.WriteAllText(@"C:\ProgramData\HIDMaestro\vigem_debug.txt",
+                        $"vigemHandle={!vigemHandle.IsInvalid} serial={vigemSerial} useVigem={useVigemBus} submitTest={submitOk} err={Marshal.GetLastWin32Error()}\n");
+                }
+                if (useVigemBus)
+                {
+                    // XUSB_SUBMIT_REPORT: Size(4) + SerialNo(4) + XUSB_REPORT(12) = 20 bytes
+                    // XUSB_REPORT: wButtons(2) + bLT(1) + bRT(1) + sLX(2) + sLY(2) + sRX(2) + sRY(2)
+                    byte[] vrBuf = new byte[20];
+                    BitConverter.GetBytes(20).CopyTo(vrBuf, 0);
+                    BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
+                    // Buttons
+                    ushort xButtons = 0;
+                    if ((btnMask & 0x01) != 0) xButtons |= 0x1000; // A
+                    if ((btnMask & 0x02) != 0) xButtons |= 0x2000; // B
+                    if ((btnMask & 0x04) != 0) xButtons |= 0x4000; // X
+                    if ((btnMask & 0x08) != 0) xButtons |= 0x8000; // Y
+                    BitConverter.GetBytes(xButtons).CopyTo(vrBuf, 8);
+                    vrBuf[10] = (byte)(sepLt * 255); // LT
+                    vrBuf[11] = (byte)(sepRt * 255); // RT
+                    // Sticks: signed 16-bit (-32768 to 32767)
+                    short lx = (short)((lxNorm - 0.5) * 65534);
+                    short ly = (short)((0.5 - lyNorm) * 65534); // Y inverted
+                    BitConverter.GetBytes(lx).CopyTo(vrBuf, 12);
+                    BitConverter.GetBytes(ly).CopyTo(vrBuf, 14);
+                    // RX/RY = center (0)
+                    DeviceIoControl(vigemHandle, 0x002AA808, vrBuf, (uint)vrBuf.Length,
+                        null, 0, out _, IntPtr.Zero);
+                }
+                else
+                {
+                    // DS4_SUBMIT_REPORT (legacy path)
+                    byte[] vrBuf = new byte[17];
+                    BitConverter.GetBytes(17).CopyTo(vrBuf, 0);
+                    BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
+                    vrBuf[8] = (byte)(lxNorm * 255);
+                    vrBuf[9] = (byte)(lyNorm * 255);
+                    vrBuf[10] = 128; vrBuf[11] = 128;
+                    ushort ds4Buttons = 0x08;
+                    if ((btnMask & 0x01) != 0) ds4Buttons |= 0x20;
+                    BitConverter.GetBytes(ds4Buttons).CopyTo(vrBuf, 12);
+                    vrBuf[14] = 0;
+                    vrBuf[15] = (byte)(sepLt * 255);
+                    vrBuf[16] = (byte)(sepRt * 255);
+                    DeviceIoControl(vigemHandle, 0x002AA80C, vrBuf, (uint)vrBuf.Length,
+                        null, 0, out _, IntPtr.Zero);
+                }
             }
 
             if (!ok)
@@ -1981,6 +2024,13 @@ class Program
             DeviceIoControl(vigemHandle, 0x002AA008, unplugBuf, (uint)unplugBuf.Length,
                 null, 0, out _, IntPtr.Zero);
             vigemHandle.Dispose();
+        }
+
+        // Restore HidHide state on exit
+        {
+            string hidHideCli = @"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe";
+            if (File.Exists(hidHideCli))
+                RunProcess(hidHideCli, "--cloak-off --inv-off", timeoutMs: 3000);
         }
 
         return 0;
