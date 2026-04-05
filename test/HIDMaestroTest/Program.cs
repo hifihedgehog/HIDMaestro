@@ -1222,6 +1222,49 @@ class Program
                     break;
                 }
             }
+            // For combined trigger profiles (Xbox 360): split single Z (16-bit)
+            // into Z (10-bit) + Rz (10-bit) so Chrome gets separate trigger values.
+            // The companion's HID device must expose separate triggers for browser.
+            // DirectInput comes from XInput→DI mapping (always 5 axes combined).
+            if (profile.TriggerMode == "combined")
+            {
+                // Find the single Z axis: "05 01 09 32 15 00 27 FF FF 00 00 95 01 75 10 81 02"
+                // Replace with: Z (10-bit) + padding(6) + Rz (10-bit) + padding(6)
+                // Same total bits: 16 → 10+6+10+6 = 32 (adds 16 bits = 2 bytes to report)
+                // Actually, keep same report size by making Z and Rz each 8-bit:
+                // "09 32 15 00 25 FF 75 08 95 01 81 02  09 35 15 00 25 FF 75 08 95 01 81 02"
+                // This replaces the single 16-bit Z with two 8-bit axes, same total bits.
+                byte[] oldZ = { 0x05, 0x01, 0x09, 0x32, 0x15, 0x00, 0x27, 0xFF, 0xFF, 0x00, 0x00, 0x95, 0x01, 0x75, 0x10, 0x81, 0x02 };
+                byte[] newZRz = {
+                    0x05, 0x01,                         // Usage Page (Generic Desktop)
+                    0x09, 0x32,                         // Usage (Z) - left trigger
+                    0x15, 0x00,                         // Logical Min (0)
+                    0x26, 0xFF, 0x00,                   // Logical Max (255) — 2-byte to avoid signed -1
+                    0x75, 0x08,                         // Report Size (8)
+                    0x95, 0x01,                         // Report Count (1)
+                    0x81, 0x02,                         // Input (Data,Var,Abs)
+                    0x09, 0x35,                         // Usage (Rz) - right trigger
+                    0x15, 0x00,                         // Logical Min (0)
+                    0x26, 0xFF, 0x00,                   // Logical Max (255)
+                    0x75, 0x08,                         // Report Size (8)
+                    0x95, 0x01,                         // Report Count (1)
+                    0x81, 0x02,                         // Input (Data,Var,Abs)
+                };
+                // Find and replace in descList
+                for (int si = 0; si <= descList.Count - oldZ.Length; si++)
+                {
+                    bool match = true;
+                    for (int k = 0; k < oldZ.Length && match; k++)
+                        if (descList[si + k] != oldZ[k]) match = false;
+                    if (match)
+                    {
+                        descList.RemoveRange(si, oldZ.Length);
+                        descList.InsertRange(si, newZRz);
+                        break;
+                    }
+                }
+            }
+
             bleDesc = descList.ToArray();
             bleReportLen = inputReportLen + 1; // +1 for Report ID byte
         }
@@ -1751,6 +1794,10 @@ class Program
                 int dataLen = Math.Min(inputReport.Length - dataStart, 64);
 
                 // GIP data: build using GIP descriptor parser (identical to xinputhid path)
+                // Debug: log once to verify separate triggers
+                if (sharedMemSeqNo == 200)
+                    File.WriteAllText(@"C:\ProgramData\HIDMaestro\gip_debug.txt",
+                        $"sepLt={sepLt:F3} sepRt={sepRt:F3} gipBuilder.LT={gipBuilder.LeftTrigger?.BitOffset},{gipBuilder.LeftTrigger?.BitSize} RT={gipBuilder.RightTrigger?.BitOffset},{gipBuilder.RightTrigger?.BitSize}\n");
                 byte[] gipReport = gipBuilder.BuildReport(
                     leftX: lxNorm, leftY: lyNorm,
                     rightX: 0.5, rightY: 0.5,
