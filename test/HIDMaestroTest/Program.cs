@@ -1428,10 +1428,9 @@ class Program
         }
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB companion for XInput (driverMode=hid only).
-        // For xinputhid profiles, the companion HID device handles XUSB directly.
-        // Only non-xinputhid Xbox profiles need a separate XUSB companion.
-        if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
+        // Step 3.5: Create XUSB companion for XInput.
+        // Uses driver.c compiled with HIDMAESTRO_XUSB_MODE (function driver, can register XUSB).
+        if (profile.VendorId == 0x045E)
         {
             Console.Write("  Creating XUSB companion... ");
             // Ensure XUSB driver is in the store

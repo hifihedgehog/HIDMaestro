@@ -370,7 +370,9 @@ EvtDeviceAdd(
      * XUSB companion uses HMXInput.dll — separate DLL, no shared code.
      * No companion type detection needed. */
 
+#ifndef HIDMAESTRO_XUSB_MODE
     WdfFdoInitSetFilter(DeviceInit);
+#endif
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
@@ -380,6 +382,28 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
+
+#ifdef HIDMAESTRO_XUSB_MODE
+    /* XUSB standalone mode — function driver for XInput.
+     * Register XUSB interface, read config, set up timer, skip HID init. */
+    ReadConfigFromRegistry(ctx);
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    {
+        UNICODE_STRING refStr;
+        RtlInitUnicodeString(&refStr, L"XI_00");
+        WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+    }
+    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
+    if (!NT_SUCCESS(status)) return status;
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+    queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
+    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, &ctx->DefaultQueue);
+    if (!NT_SUCCESS(status)) return status;
+    WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
+    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, &ctx->ManualQueue);
+    if (!NT_SUCCESS(status)) return status;
+    goto xusb_start_timer;
+#endif
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -493,6 +517,9 @@ EvtDeviceAdd(
                               &ctx->ManualQueue);
     if (!NT_SUCCESS(status)) return status;
 
+#ifdef HIDMAESTRO_XUSB_MODE
+xusb_start_timer:
+#endif
     /* Shared file for data injection (bypasses upper filter drivers) */
     ctx->SharedMemHandle = NULL;
     ctx->SharedMemPtr = NULL;
