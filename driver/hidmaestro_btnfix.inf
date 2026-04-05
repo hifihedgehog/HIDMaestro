@@ -42,7 +42,7 @@ AddReg = BtnFix_AddReg
 HKR,,"UpperFilters",0x00010008,"WUDFRd"
 
 [BtnFix_Install.NT.Services]
-AddService = WUDFRd,0x000001f8,WUDFRD_ServiceInstall
+AddService = WUDFRd,,WUDFRD_ServiceInstall
 
 [WUDFRD_ServiceInstall]
 DisplayName    = %WudfRdDesc%

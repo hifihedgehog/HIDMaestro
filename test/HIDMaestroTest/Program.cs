@@ -962,12 +962,10 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox without upper filter: enumerator must contain &IG_ so the HID
-            // child path has "&IG_" — SDL3 HIDAPI skips devices with "&IG_" in path,
-            // preventing its Xbox 360 protocol driver from claiming our HID device
-            // (which would block XInput fallback and produce zero input).
-            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
-            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
+            // Xbox HID mode: no &IG_ so Chrome RawInput detects it.
+            // Chrome matches VID 045E with XInput → pairs → uses XInput trigger data.
+            enumerator = "HIDClass";
+            hwId = $"root\\VID_{vid}&PID_{pid}";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
         else
