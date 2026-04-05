@@ -366,22 +366,9 @@ EvtDeviceAdd(
      * XUSB companion INF sets XusbMode=1 in the device's hardware key.
      * We detect this by querying the hardware ID for "HIDMaestroXUSB".
      */
-    BOOLEAN isXusbCompanion = FALSE;
-    BOOLEAN isGamepadCompanion = FALSE;
-    {
-        /* Detect companion by device class. System class = companion, HIDClass = main.
-         * All other detection methods (hardware ID query, registry key) are unreliable
-         * for UMDF2 System-class devices during WdfFdoInit stage. */
-        WDFMEMORY clsMem = NULL;
-        if (NT_SUCCESS(WdfFdoInitAllocAndQueryProperty(DeviceInit,
-            DevicePropertyClassName, NonPagedPoolNx,
-            WDF_NO_OBJECT_ATTRIBUTES, &clsMem)) && clsMem != NULL) {
-            PWCHAR clsName = (PWCHAR)WdfMemoryGetBuffer(clsMem, NULL);
-            if (clsName && wcsstr(clsName, L"System") != NULL)
-                isXusbCompanion = TRUE;
-            WdfObjectDelete(clsMem);
-        }
-    }
+    /* HIDMaestro.dll only loads for HIDClass devices (gamepad companion).
+     * XUSB companion uses HMXInput.dll — separate DLL, no shared code.
+     * No companion type detection needed. */
 
     WdfFdoInitSetFilter(DeviceInit);
 
@@ -393,61 +380,6 @@ EvtDeviceAdd(
     ctx = GetDeviceContext(device);
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
-
-    if (isXusbCompanion) {
-        /* XUSB companion: function driver mode — register XUSB + WinExInput interfaces.
-         * WinExInput interface with XI_ reference string triggers WGI GamepadAdded.
-         * Also set up minimal HID defaults so WGI HID probes don't fail. */
-
-        /* HID defaults (same as main driver) */
-        RtlCopyMemory(ctx->ReportDescriptor, G_DefaultReportDescriptor, sizeof(G_DefaultReportDescriptor));
-        ctx->ReportDescriptorSize = sizeof(G_DefaultReportDescriptor);
-        ctx->HidDescriptor.bLength = 0x09;
-        ctx->HidDescriptor.bDescriptorType = 0x21;
-        ctx->HidDescriptor.bcdHID = 0x0100;
-        ctx->HidDescriptor.bNumDescriptors = 0x01;
-        ctx->HidDescriptor.DescriptorList[0].bReportType = 0x22;
-        ctx->HidDescriptor.DescriptorList[0].wReportLength = (USHORT)ctx->ReportDescriptorSize;
-        ctx->HidDeviceAttributes.Size = sizeof(HID_DEVICE_ATTRIBUTES);
-        ctx->HidDeviceAttributes.VendorID = 0x045E;
-        ctx->HidDeviceAttributes.ProductID = 0x028E;
-        ctx->HidDeviceAttributes.VersionNumber = 0x0114;
-        ctx->InputReportByteLength = 17;
-        {
-            static const WCHAR defaultStr[] = L"Controller (XBOX 360 For Windows)";
-            RtlCopyMemory(ctx->ProductString, defaultStr, sizeof(defaultStr));
-            ctx->ProductStringBytes = sizeof(defaultStr);
-        }
-
-        /* Do NOT read config — keep defaults (045E:028E) so companion has different
-         * VID/PID from main device. Prevents GameInput deduplication. */
-        ReadConfigFromRegistry(ctx);
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-
-        /* Register WinExInput interface — WGI monitors this GUID for Gamepad discovery */
-        {
-            UNICODE_STRING refStr;
-            RtlInitUnicodeString(&refStr, L"XI_00");
-            WdfDeviceCreateDeviceInterface(device,
-                (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
-        }
-
-        status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
-        if (!NT_SUCCESS(status)) return status;
-
-        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
-        queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
-        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
-                                  &ctx->DefaultQueue);
-        if (!NT_SUCCESS(status)) return status;
-
-        WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
-        status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES,
-                                  &ctx->ManualQueue);
-        if (!NT_SUCCESS(status)) return status;
-        goto start_timer; /* Read GipData from shared file for GET_STATE */
-    }
 
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
@@ -527,28 +459,9 @@ EvtDeviceAdd(
             ctx->ProductStringBytes, ctx->ProductString);
     }
 
-    /*
-     * Register XUSB interface on HID device too (acts like xinputhid for
-     * PIDs that xinputhid doesn't support, e.g. Xbox 360 PID 028E).
-     * XInput discovers this interface and sends XUSB IOCTLs which our
-     * EvtIoDeviceControl already handles alongside HID IOCTLs.
-     */
-    /* Gamepad companion: no XUSB/USB interfaces (clean HID device for GameInput/SDL3) */
-    if (!isGamepadCompanion) {
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
-    }
-
-    /*
-     * Set BusTypeGuid to USB for child devices (created by mshidumdf).
-     * GameInput/SDL3 checks BusTypeGuid to determine how to read HID reports.
-     * Without this, children have GUID_BUS_TYPE_HID and GameInput reads zeros.
-     */
-    /* Register USB + WinExInput interfaces.
-     * NO XUSB here — XUSB companion (HMXInput.dll) handles XInput exclusively.
-     * Registering XUSB here would create duplicate XInput controller slots. */
+    /* Register USB + WinExInput interfaces ONLY.
+     * NO XUSB — XUSB companion (HMXInput.dll) handles XInput exclusively.
+     * Registering XUSB here creates duplicate XInput controller slots. */
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
     /* WinExInput — WGI needs this on the device with HID Game Pad identity
@@ -578,7 +491,6 @@ EvtDeviceAdd(
                               &ctx->ManualQueue);
     if (!NT_SUCCESS(status)) return status;
 
-start_timer:
     /* Shared file for data injection (bypasses upper filter drivers) */
     ctx->SharedMemHandle = NULL;
     ctx->SharedMemPtr = NULL;

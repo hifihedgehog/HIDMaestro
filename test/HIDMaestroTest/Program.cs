@@ -1163,17 +1163,37 @@ class Program
         // TODO: Identity fix requires kernel bus driver for real transport.
         // Write BLE descriptor + real VID/PID (companion reads this at startup)
         // BLE descriptor has Report ID 0x01 which HIDAPI can parse correctly
-        // BLE descriptor for companion: 5 DirectInput axes (matches real Xbox xinputhid).
-        // Usage 0x05 (Game Pad) for WGI GamepadAdded. Companion enumerator has
-        // &IG_00 so Chrome RawInput skips it (only STANDARD GAMEPAD shows).
-        // HIDAPI also skips &IG_, but SDL3 RawInput backend detects by VID/PID.
-        byte[] bleDesc = profile.UsesUpperFilter ? Convert.FromHexString(
-            "05010905a10185010901a10009300931150027ffff0000950275108102c0" +
-            "0901a10009330934150027ffff0000950275108102c0" +
-            "05010932150026ff039501750a81021500250075069501810305010935150026ff039501750a8102150025007506950181030501" +
-            "0939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0"
-        ) : descriptor;
-        int bleReportLen = profile.UsesUpperFilter ? 17 : inputReportLen; // Report ID + 16 data
+        // Companion descriptor: use the profile's native descriptor directly.
+        // For xinputhid profiles, prepend Report ID 0x01 to make mshidumdf happy.
+        // The companion is hidden from HIDAPI (&IG_), so SDL3 sees it through
+        // RawInput/Windows backend which maps by VID/PID, not descriptor parsing.
+        // DirectInput reads this descriptor directly — must match real hardware
+        // (correct axis count, button count, trigger mode).
+        byte[] bleDesc;
+        int bleReportLen;
+        if (profile.UsesUpperFilter)
+        {
+            // Inject Report ID 0x01 into the native descriptor.
+            // Insert "85 01" (Report ID 1) after the first Application Collection tag.
+            var descList = new List<byte>(descriptor);
+            // Find first 0xA1 0x01 (Collection Application)
+            for (int di = 0; di < descList.Count - 1; di++)
+            {
+                if (descList[di] == 0xA1 && descList[di + 1] == 0x01)
+                {
+                    descList.Insert(di + 2, 0x01); // Report ID value
+                    descList.Insert(di + 2, 0x85); // Report ID tag
+                    break;
+                }
+            }
+            bleDesc = descList.ToArray();
+            bleReportLen = inputReportLen + 1; // +1 for Report ID byte
+        }
+        else
+        {
+            bleDesc = descriptor;
+            bleReportLen = inputReportLen;
+        }
         WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
