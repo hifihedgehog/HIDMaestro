@@ -10,6 +10,7 @@
   "connection": "usb",
   "descriptor": "05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c0050109320935150027ffff000095027510810205010939150125083500463b016614007504950181427504950115002500350045006500810105091901290a150025017501950a810275069501150025008101c0",
   "inputReportSize": 15,
+  "notes": "Xbox 360 with separate Z/Rz triggers. 6 HID axes (matches DsHidMini XIH mode and xusb22.sys HID descriptor). 10 buttons. Browser separate B6/B7. The 5-axis count is exclusive to xusb22.sys KMDF kernel driver DI mapping.",
   "deviceDescription": "Controller (XBOX 360 For Windows)",
   "triggerMode": "separate",
   "driverMode": "hid"
