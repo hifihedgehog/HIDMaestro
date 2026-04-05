@@ -962,7 +962,7 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox HID mode with &IG_ for Chrome XInput pairing
+            // Xbox HID mode: &IG_ for Chrome XInput pairing + SDL3 HIDAPI skip
             enumerator = $"VID_{vid}&PID_{pid}&IG_00";
             hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
