@@ -1247,23 +1247,27 @@ class Program
         // RawInput/Windows backend which maps by VID/PID, not descriptor parsing.
         // DirectInput reads this descriptor directly — must match real hardware
         // (correct axis count, button count, trigger mode).
-        // Companion BLE descriptor for xinputhid profiles:
-        // Usage 0x05 (Game Pad), Report ID 0x01, 17 bytes.
-        // Rx/Ry right stick, Z/Rz separate triggers (Generic Desktop).
-        // XInput→DI mapping on the same device suppresses this in DirectInput → 5 axes.
-        // Chrome uses XInput (separate LT/RT) because &IG_ is in the path.
-        // Non-xinputhid profiles use native descriptor directly.
+        // Companion descriptor: inject Report ID 0x01 into the profile's native descriptor.
+        // This preserves the profile's exact axis count, button count, and trigger mode.
+        // The companion is hidden from Chrome RawInput (&IG_), so Chrome uses XInput
+        // for triggers (separate LT/RT). DirectInput sees the native layout.
         byte[] bleDesc;
         int bleReportLen;
         if (profile.UsesUpperFilter)
         {
-            bleDesc = Convert.FromHexString(
-                "05010905a10185010901a10009300931150027ffff0000950275108102c0" +
-                "0901a10009330934150027ffff0000950275108102c0" +
-                "05010932150026ff039501750a8102150025007506950181030501" +
-                "0935150026ff039501750a8102150025007506950181030501" +
-                "0939150125083500463b016614007504950181427504950115002500350045006500810305091901290f150025017501950f810215002500750195018103050c0ab2001500250195017501810215002500750795018103c0");
-            bleReportLen = 17;
+            var descList = new List<byte>(descriptor);
+            // Insert "85 01" (Report ID 1) after the first Application Collection (A1 01)
+            for (int di = 0; di < descList.Count - 1; di++)
+            {
+                if (descList[di] == 0xA1 && descList[di + 1] == 0x01)
+                {
+                    descList.Insert(di + 2, 0x01);
+                    descList.Insert(di + 2, 0x85);
+                    break;
+                }
+            }
+            bleDesc = descList.ToArray();
+            bleReportLen = inputReportLen + 1; // +1 for Report ID byte
         }
         else
         {

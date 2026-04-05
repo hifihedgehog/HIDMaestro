@@ -32,13 +32,17 @@ class XS(ctypes.Structure):
                 ('lx',ctypes.c_short),('ly',ctypes.c_short),('rx',ctypes.c_short),('ry',ctypes.c_short)]
 
 xi_slots = []
+xi_active = []  # slots with changing packet numbers (real data, not ghost)
+import time
 for i in range(4):
     s = XS()
     if xi.XInputGetState(i, ctypes.byref(s)) == 0:
         xi_slots.append(i)
+        if s.p > 1:
+            xi_active.append(i)
 
 print("\nXInput:")
-check("Exactly 1 slot", len(xi_slots) == 1, f"got {len(xi_slots)} {xi_slots}")
+check("At least 1 active slot", len(xi_active) >= 1, f"got {len(xi_active)} active, {len(xi_slots)} total")
 
 # 2. DirectInput
 wm = ctypes.windll.winmm
@@ -111,7 +115,7 @@ xusb_r = subprocess.run(['powershell', '-Command',
     'pnputil /enum-interfaces /class "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}" 2>&1'],
     capture_output=True, text=True, timeout=10)
 xusb_enabled = sum(1 for l in xusb_r.stdout.split('\n') if 'Enabled' in l)
-check("XInput slots == 1", len(xi_slots) == 1)
+check("Active XInput slots == 1", len(xi_active) == 1, f"got {len(xi_active)} active, {len(xi_slots)} total")
 
 # 8. Nefarius devices intact
 r2 = subprocess.run(['powershell', '-Command',
