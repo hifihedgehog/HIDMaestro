@@ -788,6 +788,32 @@ class Program
             }
         }
         catch { }
+
+        // Clean ghost device interface registrations (WinExInput, USB, XUSB)
+        // These persist from previous driver versions and cause WGI to override XInput triggers
+        string[] interfaceGuids = {
+            @"{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
+            @"{a5dcbf10-6530-11d2-901f-00c04fb951ed}", // USB
+            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
+        };
+        foreach (var guid in interfaceGuids)
+        {
+            try
+            {
+                using var classKey = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
+                if (classKey == null) continue;
+                foreach (var subName in classKey.GetSubKeyNames())
+                {
+                    if (subName.Contains("ROOT#VID_") || subName.Contains("ROOT#HIDCLASS") ||
+                        subName.Contains("ROOT#HID_IG"))
+                    {
+                        try { classKey.DeleteSubKeyTree(subName); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
     }
 
     // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
