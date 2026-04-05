@@ -957,14 +957,16 @@ EvtIoDeviceControl(
                 case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
                 case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
             }
-            *(USHORT*)&state[0x0B] = buttons;
+            /* GamepadState0101 layout: version(2) status(1) unk(2) pkt(4) GAMEPAD(12)
+             * GAMEPAD starts at offset 9: wButtons(2) bLT(1) bRT(1) sLX(2) sLY(2) sRX(2) sRY(2) */
+            *(USHORT*)&state[0x09] = buttons;
             /* GIP triggers: 10-bit (0-1023) in bits 0-9. Scale to 0-255 for XInput. */
-            state[0x0D] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
-            state[0x0E] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
-            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
-            *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY: negate (HID down=positive, XInput up=positive) */
-            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
-            *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY: negate */
+            state[0x0B] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
+            state[0x0C] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
+            *(SHORT*)&state[0x0D] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
+            *(SHORT*)&state[0x0F] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY */
+            *(SHORT*)&state[0x11] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
+            *(SHORT*)&state[0x13] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY */
         }
         WdfWaitLockRelease(ctx->InputLock);
 

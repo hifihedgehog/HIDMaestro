@@ -998,48 +998,57 @@ class Program
             return output.Contains("Deploy Complete");
         }
 
-        // Driver is installed — restart device to pick up new registry config.
-        // Find existing device — only restart if needed
-        Console.Write("  Checking device... ");
+        // companionOnly: skip main HID device — XUSB companion provides DI + XInput + browser.
+        // Real Xbox 360 uses xusb22.sys (no HID at all). DI reads from XInput (5 axes).
         string? rootInstId = null;
-        // Search enumerator types (skip HIDClass — gamepad companion lives there)
-        // Include VID_*&PID_*&IG_00 enumerators for Xbox profiles
-        foreach (string enumer in new[] { "HID_IG_00", "XnaComposite",
-            $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
-            "VID_045E&PID_028E&IG_00" })
+        if (profile?.CompanionOnly == true)
         {
-            for (int idx = 0; idx < 10; idx++)
-            {
-                string candidate = $@"ROOT\{enumer}\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
-                { rootInstId = candidate; break; }
-            }
-            if (rootInstId != null) break;
-        }
-        string infPath = Path.Combine(BuildDir, "hidmaestro.inf");
-        if (rootInstId != null)
-        {
-            // Remove and recreate to force fresh WUDFHost with latest DLL
-            RunProcess("pnputil.exe", $"/remove-device \"{rootInstId}\" /subtree");
-            Thread.Sleep(2000);
-            if (profile != null)
-                CreateDeviceNode(profile, infPath);
-            else
-                RunPowerShell("create_node.ps1"); // fallback
-            Thread.Sleep(3000);
-            Console.WriteLine("OK");
+            Console.WriteLine("  Companion-only mode (no main HID device)");
         }
         else
         {
-            // Device doesn't exist — create it
-            Console.Write("creating... ");
-            if (profile != null)
-                CreateDeviceNode(profile, infPath);
+            // Driver is installed — restart device to pick up new registry config.
+            // Find existing device — only restart if needed
+            Console.Write("  Checking device... ");
+            // Search enumerator types (skip HIDClass — gamepad companion lives there)
+            // Include VID_*&PID_*&IG_00 enumerators for Xbox profiles
+            foreach (string enumer in new[] { "HID_IG_00", "XnaComposite",
+                $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00",
+                "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
+                "VID_045E&PID_028E&IG_00" })
+            {
+                for (int idx = 0; idx < 10; idx++)
+                {
+                    string candidate = $@"ROOT\{enumer}\{idx:D4}";
+                    if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                    { rootInstId = candidate; break; }
+                }
+                if (rootInstId != null) break;
+            }
+            string infPath = Path.Combine(BuildDir, "hidmaestro.inf");
+            if (rootInstId != null)
+            {
+                // Remove and recreate to force fresh WUDFHost with latest DLL
+                RunProcess("pnputil.exe", $"/remove-device \"{rootInstId}\" /subtree");
+                Thread.Sleep(2000);
+                if (profile != null)
+                    CreateDeviceNode(profile, infPath);
+                else
+                    RunPowerShell("create_node.ps1"); // fallback
+                Thread.Sleep(3000);
+                Console.WriteLine("OK");
+            }
             else
-                RunPowerShell("create_node.ps1"); // fallback
-            Thread.Sleep(3000);
-            Console.WriteLine("OK");
+            {
+                // Device doesn't exist — create it
+                Console.Write("creating... ");
+                if (profile != null)
+                    CreateDeviceNode(profile, infPath);
+                else
+                    RunPowerShell("create_node.ps1"); // fallback
+                Thread.Sleep(3000);
+                Console.WriteLine("OK");
+            }
         }
 
         // Set device name on root AND HID child

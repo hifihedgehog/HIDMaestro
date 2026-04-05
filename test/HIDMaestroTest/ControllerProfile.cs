@@ -62,6 +62,12 @@ public sealed class ControllerProfile
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>If true, skip main HID device — use XUSB companion only.
+    /// DI reads from XInput (5 axes), browser reads from XInput (separate triggers).
+    /// Used for Xbox 360 where real hardware uses xusb22.sys (no HID).</summary>
+    [JsonPropertyName("companionOnly")]
+    public bool CompanionOnly { get; set; }
+
     /// <summary>
     /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
     /// Combined: Z centers at 50%, LT pulls toward 0%, RT pulls toward 100%.

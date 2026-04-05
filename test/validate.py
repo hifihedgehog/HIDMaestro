@@ -1,8 +1,10 @@
 """HIDMaestro full fidelity validation script.
 Run after deploying any profile to verify all APIs pass.
-Usage: python validate.py
+Usage: python validate.py [profile-id]
+
+Detects the active profile automatically from registry if not specified.
 """
-import ctypes, sys, subprocess, os
+import ctypes, sys, subprocess, os, json, time
 
 try:
     import hid
@@ -20,9 +22,49 @@ def check(name, condition, detail=""):
     print(f"  [{icon}] {name}{(' - ' + detail) if detail else ''}")
     return condition
 
+# Load profile info
+profile = None
+profile_id = sys.argv[1] if len(sys.argv) > 1 else None
+profiles_dir = os.path.join(os.path.dirname(__file__), '..', 'profiles')
+for root, dirs, files in os.walk(profiles_dir):
+    for f in files:
+        if f.endswith('.json') and f not in ('schema.json', 'scraped_descriptors.json'):
+            try:
+                p = json.load(open(os.path.join(root, f)))
+                if profile_id and p.get('id') == profile_id:
+                    profile = p
+                    break
+            except: pass
+    if profile: break
+
+# Auto-detect from registry VID/PID if no profile specified
+if not profile:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\HIDMaestro") as k:
+            reg_vid = winreg.QueryValueEx(k, "VendorId")[0]
+            reg_pid = winreg.QueryValueEx(k, "ProductId")[0]
+        for root, dirs, files in os.walk(profiles_dir):
+            for f in files:
+                if f.endswith('.json') and f not in ('schema.json',):
+                    try:
+                        p = json.load(open(os.path.join(root, f)))
+                        if int(p.get('vid','0'), 16) == reg_vid and int(p.get('pid','0'), 16) == reg_pid:
+                            profile = p; break
+                    except: pass
+            if profile: break
+    except: pass
+
+is_xbox = profile and int(profile.get('vid','0'), 16) == 0x045E if profile else False
+is_xinputhid = profile and profile.get('driverMode') == 'xinputhid' if profile else False
+is_bluetooth = profile and profile.get('connection') == 'bluetooth' if profile else False
+expect_xinput = is_xbox  # Xbox profiles get XInput via companion or xinputhid
+prof_vid = int(profile['vid'], 16) if profile else 0x045E
+prof_pid = int(profile['pid'], 16) if profile else 0x028E
+prof_name = profile.get('name', 'Unknown') if profile else 'Unknown'
 
 print("=" * 55)
-print("  HIDMaestro Validation")
+print(f"  HIDMaestro Validation — {prof_name}")
 print("=" * 55)
 
 # 1. XInput
@@ -32,8 +74,7 @@ class XS(ctypes.Structure):
                 ('lx',ctypes.c_short),('ly',ctypes.c_short),('rx',ctypes.c_short),('ry',ctypes.c_short)]
 
 xi_slots = []
-xi_active = []  # slots with changing packet numbers (real data, not ghost)
-import time
+xi_active = []
 for i in range(4):
     s = XS()
     if xi.XInputGetState(i, ctypes.byref(s)) == 0:
@@ -42,7 +83,27 @@ for i in range(4):
             xi_active.append(i)
 
 print("\nXInput:")
-check("At least 1 active slot", len(xi_active) >= 1, f"got {len(xi_active)} active, {len(xi_slots)} total")
+if expect_xinput:
+    check("At least 1 active slot", len(xi_active) >= 1, f"got {len(xi_active)} active, {len(xi_slots)} total")
+else:
+    check("0 XInput slots (non-Xbox)", len(xi_slots) == 0, f"got {len(xi_slots)}")
+
+# 1b. XInput trigger separation (Xbox profiles only)
+if expect_xinput and xi_active:
+    # Read triggers over time to verify LT and RT are independent
+    lt_vals, rt_vals = [], []
+    for _ in range(20):
+        s = XS()
+        if xi.XInputGetState(xi_active[0], ctypes.byref(s)) == 0:
+            lt_vals.append(s.lt)
+            rt_vals.append(s.rt)
+        time.sleep(0.1)
+    lt_range = max(lt_vals) - min(lt_vals)
+    rt_range = max(rt_vals) - min(rt_vals)
+    # If triggers are combined/mirrored, LT==RT at every sample
+    all_equal = all(lt == rt for lt, rt in zip(lt_vals, rt_vals))
+    check("XInput triggers are separate (LT != RT)", not all_equal,
+          f"LT range={lt_range} RT range={rt_range}")
 
 # 2. DirectInput
 wm = ctypes.windll.winmm
@@ -69,17 +130,18 @@ if di_devs:
     check("VID 045E", d['vid'] == 0x045E, f"got 0x{d['vid']:04X}")
 
 # 3. SDL3 / HIDAPI
-all_045e = list(hid.enumerate(0x045E))
-sdl_visible = [d for d in all_045e if '&IG_' not in d['path'].decode().upper()]
-sdl_045e = [d for d in all_045e if d['product_id'] in (0x0B13, 0x02FD, 0x028E)]
+all_prof = list(hid.enumerate(prof_vid, prof_pid))
+sdl_visible = [d for d in all_prof if '&IG_' not in d['path'].decode().upper()]
 
 print("\nSDL3/HIDAPI:")
-check("1 device for profile VID/PID", len(sdl_045e) >= 1, f"got {len(sdl_045e)}")
-if sdl_045e:
-    d = sdl_045e[0]
-    check("Bus type BLUETOOTH", d['bus_type'] == 2, f"got {d['bus_type']}")
-    check("Path has &IG_", '&IG_' in d['path'].decode().upper())
-check("0 visible to HIDAPI (no &IG_)", len(sdl_visible) == 0, f"got {len(sdl_visible)}")
+check("1 device for profile VID/PID", len(all_prof) >= 1, f"got {len(all_prof)}")
+if all_prof:
+    d = all_prof[0]
+    if is_bluetooth and is_xbox:
+        check("Bus type BLUETOOTH", d['bus_type'] == 2, f"got {d['bus_type']}")
+    if is_xbox:
+        check("Path has &IG_", '&IG_' in d['path'].decode().upper())
+        check("0 visible to HIDAPI (no &IG_)", len(sdl_visible) == 0, f"got {len(sdl_visible)}")
 
 # 4. Browser (Chrome RawInput simulation)
 raw_gamepads = []
@@ -90,10 +152,14 @@ for d in hid.enumerate():
             raw_gamepads.append(f"VID={d['vendor_id']:04X} PID={d['product_id']:04X}")
 
 print("\nBrowser:")
-check("0 Chrome RawInput gamepads", len(raw_gamepads) == 0,
-      f"got {len(raw_gamepads)}: {raw_gamepads}" if raw_gamepads else "")
-browser_total = len(raw_gamepads) + (1 if xi_slots else 0)
-check("1 total browser entry", browser_total == 1, f"got {browser_total}")
+if is_xbox:
+    check("0 Chrome RawInput gamepads", len(raw_gamepads) == 0,
+          f"got {len(raw_gamepads)}: {raw_gamepads}" if raw_gamepads else "")
+    browser_total = len(raw_gamepads) + (1 if xi_slots else 0)
+    check("1 total browser entry", browser_total == 1, f"got {browser_total}")
+else:
+    # Non-Xbox: 1 RawInput gamepad expected
+    check("1 Chrome RawInput gamepad", len(raw_gamepads) == 1, f"got {len(raw_gamepads)}")
 
 # 5. WinExInput
 r = subprocess.run(['powershell', '-Command',
@@ -104,10 +170,11 @@ winex = sum(1 for l in r.stdout.split('\n') if 'Enabled' in l)
 print("\nWGI/WinExInput:")
 check("At least 1 enabled", winex >= 1, f"got {winex}")
 
-# 6. BTHLEDEVICE spoof
-print("\nBTHLEDEVICE spoof:")
-if sdl_045e:
-    check("HIDAPI bus_type=2 (BT)", sdl_045e[0]['bus_type'] == 2)
+# 6. BTHLEDEVICE spoof (Xbox BT only)
+if is_bluetooth and is_xbox:
+    print("\nBTHLEDEVICE spoof:")
+    if all_prof:
+        check("HIDAPI bus_type=2 (BT)", all_prof[0]['bus_type'] == 2)
 
 # 7. No duplicate XInput
 print("\nDuplicates:")
