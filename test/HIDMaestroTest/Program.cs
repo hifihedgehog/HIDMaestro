@@ -359,6 +359,16 @@ class Program
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; _cts.Cancel(); };
 
+        // Single-instance: kill any other HIDMaestroTest processes
+        int myPid = Environment.ProcessId;
+        foreach (var proc in System.Diagnostics.Process.GetProcessesByName("HIDMaestroTest"))
+        {
+            if (proc.Id != myPid)
+            {
+                try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+            }
+        }
+
         // Auto-elevate for commands that need admin
         if (args.Length > 0 && ElevatedCommands.Contains(args[0].ToLower()) && !IsElevated())
         {
