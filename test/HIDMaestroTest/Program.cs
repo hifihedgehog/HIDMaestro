@@ -789,12 +789,11 @@ class Program
         }
         catch { }
 
-        // Clean ghost device interface registrations (WinExInput, USB, XUSB)
-        // These persist from previous driver versions and cause WGI to override XInput triggers
+        // Clean ghost XUSB interface registrations only.
+        // XUSB ghosts cause dead XInput slots. WinExInput must be PRESERVED
+        // for browser STANDARD GAMEPAD detection (xinputhid registers it).
         string[] interfaceGuids = {
-            @"{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
-            @"{a5dcbf10-6530-11d2-901f-00c04fb951ed}", // USB
-            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
+            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB only
         };
         foreach (var guid in interfaceGuids)
         {
