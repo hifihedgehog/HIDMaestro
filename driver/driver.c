@@ -409,8 +409,10 @@ EvtDeviceAdd(
                 xusbNeeded = val;
             RegCloseKey(hCfg);
         }
-        if (xusbNeeded)
-            WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+        /* Always register XUSB — companion and bridge both need it for XInput.
+         * For xinputhid profiles, duplicate XUSB is handled by companion being on
+         * a different device than the xinputhid HID child. */
+        WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
