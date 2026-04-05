@@ -1470,8 +1470,9 @@ class Program
         }
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB companion for XInput.
-        // Uses driver.c compiled with HIDMAESTRO_XUSB_MODE (function driver, can register XUSB).
+        // Step 3.5: Create XUSB/WinExInput companion for browser detection.
+        // For xinputhid profiles, xinputhid provides XInput (via driverPid 02FF).
+        // Companion provides WinExInput for WGI GamepadAdded (browser STANDARD GAMEPAD).
         if (profile.VendorId == 0x045E)
         {
             Console.Write("  Creating XUSB companion... ");
