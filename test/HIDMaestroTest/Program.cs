@@ -1351,12 +1351,13 @@ class Program
                     var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
                     string gpVid = $"{profile.VendorId:X4}";
                     string gpPid = $"{profile.ProductId:X4}";
-                    // Enumerator includes &IG_00 so HID child path contains "&IG_".
-                    // Chrome RawInput skips &IG_ devices (XInput handles them).
-                    // HIDAPI also skips &IG_, but SDL3 RawInput backend still detects
-                    // and maps by VID/PID from controller database.
-                    string gpEnumerator = $"VID_{gpVid}&PID_{gpPid}&IG_00";
-                    string gpHw = $"root\\VID_{gpVid}&PID_{gpPid}&IG_00\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
+                    // Use driverPid (02FF) in enumerator so xinputhid matches and provides
+                    // live XInput data. xinputhid's XInput→DI mapping suppresses raw HID → 5 axes.
+                    // Real PID comes from HID attributes (set by WriteConfig).
+                    string hwPid = profile.DriverPid != null
+                        ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
+                    string gpEnumerator = $"VID_{gpVid}&PID_{hwPid}&IG_00";
+                    string gpHw = $"root\\VID_{gpVid}&PID_{hwPid}&IG_00\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
                     byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
                     if (SetupDiCreateDeviceInfoW_Raw(dis3, gpEnumerator, ref hidGuid,
                         "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
@@ -1376,7 +1377,9 @@ class Program
                 }
             }
             // Restart companion to load with real VID/PID
-            foreach (string pfx2 in new[] { $"VID_{gpVidSearch}&PID_{gpPidSearch}&IG_00", "HIDCLASS" })
+            string hwPidSearch = profile.DriverPid != null
+                ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPidSearch;
+            foreach (string pfx2 in new[] { $"VID_{gpVidSearch}&PID_{hwPidSearch}&IG_00", $"VID_{gpVidSearch}&PID_{gpPidSearch}&IG_00", "HIDCLASS" })
             {
                 bool found = false;
                 for (int idx = 0; idx < 10; idx++)
