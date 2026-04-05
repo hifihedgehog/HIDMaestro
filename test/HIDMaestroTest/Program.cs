@@ -868,8 +868,11 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox without upper filter: use IG_00 so Chrome filters from RawInput
-            enumerator = "HID_IG_00";
+            // Xbox without upper filter: enumerator must contain &IG_ so the HID
+            // child path has "&IG_" — SDL3 HIDAPI skips devices with "&IG_" in path,
+            // preventing its Xbox 360 protocol driver from claiming our HID device
+            // (which would block XInput fallback and produce zero input).
+            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
             hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
@@ -1000,9 +1003,11 @@ class Program
         Console.Write("  Checking device... ");
         string? rootInstId = null;
         // Search enumerator types (skip HIDClass — gamepad companion lives there)
-        // Include VID_*&IG_00 enumerators for xinputhid profiles
+        // Include VID_*&PID_*&IG_00 enumerators for Xbox profiles
         foreach (string enumer in new[] { "HID_IG_00", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
+            $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00",
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
+            "VID_045E&PID_028E&IG_00" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
@@ -1046,7 +1051,13 @@ class Program
             SetDeviceFriendlyName(rootInstId, dispName);
         }
         // Find and rename the HID child (xinputhid sets it to "Xbox Wireless Controller")
-        if (CM_Locate_DevNodeW(out uint rootInst, @"ROOT\HID_IG_00\0000", 0) == 0)
+        // Use rootInstId if found, otherwise search known enumerators
+        uint rootInst = 0;
+        if (rootInstId != null)
+            CM_Locate_DevNodeW(out rootInst, rootInstId, 0);
+        else
+            CM_Locate_DevNodeW(out rootInst, @"ROOT\HID_IG_00\0000", 0);
+        if (rootInst != 0)
         {
             if (CM_Get_Child(out uint childInst, rootInst, 0) == 0)
             {
@@ -1465,9 +1476,13 @@ class Program
         // Step 3.5: Create XUSB/WinExInput companion for browser detection.
         // For xinputhid profiles, xinputhid provides XInput (via driverPid 02FF).
         // Companion provides WinExInput for WGI GamepadAdded (browser STANDARD GAMEPAD).
+        // XusbNeeded=0 for xinputhid (avoid duplicate XInput), =1 for HID mode.
         if (profile.VendorId == 0x045E)
         {
-            Console.Write("  Creating XUSB companion... ");
+            bool xusbNeeded = !profile.UsesXinputhid; // HID mode needs companion XInput; xinputhid provides its own
+            using (var cfgKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
+                cfgKey.SetValue("XusbNeeded", xusbNeeded ? 1 : 0, RegistryValueKind.DWord);
+            Console.Write($"  Creating XUSB companion (XusbNeeded={xusbNeeded})... ");
             // Ensure XUSB driver is in the store
             string xusbInf = Path.Combine(BuildDir, "hidmaestro_xusb.inf");
             if (File.Exists(xusbInf))

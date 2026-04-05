@@ -386,9 +386,20 @@ EvtDeviceAdd(
 #ifdef HIDMAESTRO_XUSB_MODE
     /* XUSB + WinExInput companion mode — function driver for XInput + browser.
      * XUSB provides XInput data (read from shared file via timer).
-     * WinExInput triggers WGI GamepadAdded for browser STANDARD GAMEPAD. */
+     * WinExInput triggers WGI GamepadAdded for browser STANDARD GAMEPAD.
+     * XusbNeeded=0 means xinputhid provides XInput — skip XUSB to avoid duplicate. */
     ReadConfigFromRegistry(ctx);
-    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    {
+        HKEY hCfg; DWORD xusbNeeded = 1;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hCfg, L"XusbNeeded", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                xusbNeeded = val;
+            RegCloseKey(hCfg);
+        }
+        if (xusbNeeded)
+            WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    }
     {
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
