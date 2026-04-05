@@ -962,9 +962,12 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox HID mode: &IG_ for Chrome XInput pairing + SDL3 HIDAPI skip
-            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
-            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
+            // Xbox HID mode: &IG_ so Chrome filters from RawInput.
+            // NO VID_045E in path so WGI doesn't recognize as Xbox HID.
+            // Chrome sees XInput only (companion) → separate triggers.
+            // DI reads HID (combined Z = 5 axes, 10 buttons via HID attributes VID 045E).
+            enumerator = "HIDMaestro&IG_00";
+            hwId = $"root\\HIDMaestro&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
         else
