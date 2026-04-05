@@ -411,11 +411,11 @@ EvtDeviceAdd(
         }
         if (xusbNeeded)
             WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-    }
-    {
-        UNICODE_STRING refStr;
-        RtlInitUnicodeString(&refStr, L"XI_00");
-        WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+        {
+            UNICODE_STRING refStr;
+            RtlInitUnicodeString(&refStr, L"XI_00");
+            WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+        }
     }
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
     if (!NT_SUCCESS(status)) return status;

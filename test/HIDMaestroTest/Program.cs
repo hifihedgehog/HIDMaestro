@@ -1492,8 +1492,7 @@ class Program
         // Step 3.5: Create XUSB/WinExInput companion for browser detection.
         // For xinputhid profiles, xinputhid provides XInput (via driverPid 02FF).
         // Companion provides WinExInput for WGI GamepadAdded (browser STANDARD GAMEPAD).
-        // Skip for companionOnly profiles — ViGEmBus provides XInput + DI + WGI.
-        if (profile.VendorId == 0x045E && !profile.CompanionOnly)
+        if (profile.VendorId == 0x045E)
         {
             bool xusbNeeded = !profile.UsesXinputhid; // HID mode needs companion XInput; xinputhid provides its own
             using (var cfgKey = Registry.LocalMachine.CreateSubKey(REG_PATH))

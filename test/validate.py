@@ -126,7 +126,11 @@ print("\nDirectInput:")
 check("Exactly 1 device", len(di_devs) == 1, f"got {len(di_devs)}")
 if di_devs:
     d = di_devs[0]
-    check("5 axes", d['axes'] == 5, f"got {d['axes']}")
+    # Xbox 360 HID mode: 6 axes (separate Z/Rz triggers required for browser fidelity).
+    # Real 360 has 5 via xusb22.sys (no HID) but UMDF2 virtual devices must use HID.
+    # xinputhid profiles: 5 axes (xinputhid's XInput mapping suppresses raw HID).
+    expected_axes = 5 if (is_xinputhid or not is_xbox) else 6
+    check(f"{expected_axes} axes", d['axes'] == expected_axes, f"got {d['axes']}")
     if is_xbox:
         check("VID 045E", d['vid'] == 0x045E, f"got 0x{d['vid']:04X}")
 
