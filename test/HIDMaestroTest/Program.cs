@@ -1336,6 +1336,10 @@ class Program
         if (profile.VendorId == 0x045E)
         {
             Console.Write("  Creating XUSB companion... ");
+            // Ensure XUSB driver is in the store
+            string xusbInf = Path.Combine(BuildDir, "hidmaestro_xusb.inf");
+            if (File.Exists(xusbInf))
+                RunProcess("pnputil.exe", $"/add-driver \"{xusbInf}\" /install", timeoutMs: 10000);
             // Check if already exists
             bool xusbExists = false;
             for (int idx = 0; idx < 10; idx++)
