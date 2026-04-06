@@ -18,8 +18,56 @@
 
 #include "driver.h"
 
-/* Registry path for device configuration */
+/* Default registry path (single-instance fallback) */
 static const WCHAR CONFIG_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\HIDMaestro";
+
+/* Initialize per-instance paths from ControllerIndex.
+ * Reads ControllerIndex from device HW key (written by test app at device creation).
+ * Falls back to index 0 / legacy global paths if not found. */
+static VOID
+InitInstancePaths(
+    _In_ PDEVICE_CONTEXT ctx,
+    _In_ WDFDEVICE       device)
+{
+    ULONG index = 0;
+
+    /* Try reading ControllerIndex from device's HW registry key */
+    {
+        WDFKEY hKey;
+        if (NT_SUCCESS(WdfDeviceOpenRegistryKey(device, PLUGPLAY_REGKEY_DEVICE,
+                KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hKey))) {
+            UNICODE_STRING valueName;
+            RtlInitUnicodeString(&valueName, L"ControllerIndex");
+            ULONG val = 0;
+            if (NT_SUCCESS(WdfRegistryQueryULong(hKey, &valueName, &val)))
+                index = val;
+            WdfRegistryClose(hKey);
+        }
+    }
+
+    ctx->ControllerIndex = index;
+
+    /* Build per-instance registry path: SOFTWARE\HIDMaestro\Controller<N> */
+    {
+        static const WCHAR prefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
+        WCHAR *p = ctx->ConfigRegPath;
+        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
+        p += (sizeof(prefix) / 2) - 1;
+        *p++ = L'0' + (WCHAR)(index % 10);
+        *p = 0;
+    }
+
+    /* Build per-instance shared file path: C:\ProgramData\HIDMaestro\input_<N>.bin */
+    {
+        static const WCHAR prefix[] = L"C:\\ProgramData\\HIDMaestro\\input_";
+        WCHAR *p = ctx->SharedFilePath;
+        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
+        p += (sizeof(prefix) / 2) - 1;
+        *p++ = L'0' + (WCHAR)(index % 10);
+        static const WCHAR suffix[] = L".bin";
+        RtlCopyMemory(p, suffix, sizeof(suffix));
+    }
+}
 
 /* XUSB interface GUID — xinput1_4.dll enumerates this to find Xbox controllers */
 static const GUID XUSB_INTERFACE_CLASS_GUID =
@@ -93,10 +141,14 @@ ReadConfigFromRegistry(
     DWORD   binSize;
     DWORD   regType;
 
-    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
+    /* Try per-instance key first, fall back to legacy global key */
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
                            0, KEY_READ, &hKey);
     if (result != ERROR_SUCCESS) {
-        return; /* No config key — use defaults */
+        result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro",
+                               0, KEY_READ, &hKey);
+        if (result != ERROR_SUCCESS)
+            return; /* No config key — use defaults */
     }
 
     /* Read ReportDescriptor (REG_BINARY) */
@@ -178,8 +230,8 @@ EvtSharedMemTimer(
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(WdfTimerGetParentObject(Timer));
 
-    /* Read input data from shared file (C:\ProgramData\HIDMaestro\input.bin) */
-    HANDLE hFile = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\input.bin",
+    /* Read input data from per-instance shared file */
+    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
         GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
         /* Debug: write error to log file */
@@ -397,7 +449,10 @@ EvtDeviceAdd(
     DWORD functionMode = 0;
     {
         HKEY hFm;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
+        /* FunctionMode is read BEFORE device creation — ctx not yet available.
+         * Use Controller0 as default (test app writes here for the primary device). */
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro\\Controller0", 0, KEY_READ, &hFm) == ERROR_SUCCESS
+            || RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
             DWORD val, sz = sizeof(val);
             if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
                 functionMode = val;
@@ -425,6 +480,9 @@ EvtDeviceAdd(
     RtlZeroMemory(ctx, sizeof(DEVICE_CONTEXT));
     ctx->Device = device;
 
+    /* Initialize per-instance paths (registry key, shared file) from ControllerIndex */
+    InitInstancePaths(ctx, device);
+
 #ifdef HIDMAESTRO_XUSB_MODE
     /* XUSB + WinExInput companion mode — function driver for XInput + browser.
      * XUSB provides XInput data (read from shared file via timer).
@@ -433,7 +491,7 @@ EvtDeviceAdd(
     ReadConfigFromRegistry(ctx);
     {
         HKEY hCfg; DWORD xusbNeeded = 1;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
             DWORD val, sz = sizeof(val);
             if (RegQueryValueExW(hCfg, L"XusbNeeded", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
                 xusbNeeded = val;
@@ -459,7 +517,7 @@ EvtDeviceAdd(
                 /* Read our instance ID from SOFTWARE\HIDMaestro\CompanionInstanceId
                  * (written by test app when creating the companion device) */
                 HKEY hCfg2;
-                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg2) == ERROR_SUCCESS) {
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hCfg2) == ERROR_SUCCESS) {
                     DWORD sz2 = sizeof(compInstId);
                     RegQueryValueExW(hCfg2, L"CompanionInstanceId", NULL, NULL, (LPBYTE)compInstId, &sz2);
                     RegCloseKey(hCfg2);
@@ -504,9 +562,8 @@ EvtDeviceAdd(
                 }
             }
         }
-        /* Only register WinExInput if XUSB is NOT registered.
-         * Both on same device causes XInput to create 2 slots (duplicate). */
-        if (!xusbNeeded)
+        /* Always register WinExInput — needed for WGI GamepadAdded (browser detection).
+         * Main device's WinExInput is suppressed by PnP under mshidumdf. */
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
@@ -624,7 +681,7 @@ EvtDeviceAdd(
         /* Force XUSB interface into DeviceClasses registry. */
         {
             HKEY hCfg;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
                 WCHAR devId[256];
                 DWORD sz = sizeof(devId);
                 if (RegQueryValueExW(hCfg, L"DeviceInstanceId", NULL, NULL, (LPBYTE)devId, &sz) == ERROR_SUCCESS) {

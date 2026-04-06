@@ -102,6 +102,11 @@ typedef struct _DEVICE_CONTEXT {
     PVOID   XInputFilePtr;
     ULONG   XInputSeqNo;
 
+    /* Multi-instance: controller index (0, 1, 2, 3) */
+    ULONG   ControllerIndex;
+    WCHAR   ConfigRegPath[64];      /* e.g. L"SOFTWARE\\HIDMaestro\\Controller0" */
+    WCHAR   SharedFilePath[128];    /* e.g. L"C:\\ProgramData\\HIDMaestro\\input_0.bin" */
+
     /* Diagnostics */
     LONG    InputReportsSubmitted;
     LONG    OutputReportsReceived;

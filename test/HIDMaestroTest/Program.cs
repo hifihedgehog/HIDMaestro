@@ -29,6 +29,12 @@ class Program
 {
     const string REG_PATH = @"SOFTWARE\HIDMaestro";
 
+    /// <summary>Returns the per-instance registry path for a controller index.</summary>
+    static string RegPathForIndex(int index) => $@"SOFTWARE\HIDMaestro\Controller{index}";
+
+    /// <summary>Returns the per-instance shared file path for a controller index.</summary>
+    static string SharedFileForIndex(int index) => $@"C:\ProgramData\HIDMaestro\input_{index}.bin";
+
     // ── P/Invoke: CfgMgr32 for device property setting ──
 
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -640,15 +646,22 @@ class Program
 
     // ── Registry config ──
 
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0, bool functionMode = false)
+    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0, bool functionMode = false, int controllerIndex = 0)
     {
-        using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
-        // DeviceInstanceId: used by driver to create XUSB registry entry
-        // (PnP suppresses WDF XUSB registration under mshidumdf)
-        key.SetValue("DeviceInstanceId", $@"ROOT\VID_{vid:X4}&PID_{pid:X4}&IG_00\0000", RegistryValueKind.String);
-        // FunctionMode: skip filter mode so driver can register XUSB on HID device.
-        // Needed for Xbox 360 HID mode: XUSB on HID → DI uses XInput mapping (5 axes).
+        // Write to per-instance key AND legacy global key (for backward compat)
+        string instanceRegPath = RegPathForIndex(controllerIndex);
+        using var key = Registry.LocalMachine.CreateSubKey(instanceRegPath);
+        // Also write to legacy global key for single-instance fallback
+        using var legacyKey = Registry.LocalMachine.CreateSubKey(REG_PATH);
+        string instanceSuffix = controllerIndex > 0 ? $"\\{controllerIndex:D4}" : "\\0000";
+        key.SetValue("DeviceInstanceId", $@"ROOT\VID_{vid:X4}&PID_{pid:X4}&IG_00{instanceSuffix}", RegistryValueKind.String);
         key.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
+        // Copy to legacy key for index 0
+        if (controllerIndex == 0)
+        {
+            legacyKey.SetValue("DeviceInstanceId", key.GetValue("DeviceInstanceId")!, RegistryValueKind.String);
+            legacyKey.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
+        }
         // Debug: log what we're writing
         Console.Write($"  [descriptor: {descriptor.Length}B, bytes[15]=0x{descriptor[15]:X2}, bytes[16]=0x{descriptor[16]:X2}] ");
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
@@ -822,15 +835,19 @@ class Program
     /// <summary>
     /// Ensures the shared file exists with open ACLs for the driver timer.
     /// </summary>
-    static void EnsureSharedFile()
+    static void EnsureSharedFile(int controllerIndex = 0)
     {
         string dir = @"C:\ProgramData\HIDMaestro";
         Directory.CreateDirectory(dir);
-        string filePath = Path.Combine(dir, "input.bin");
+        string filePath = SharedFileForIndex(controllerIndex);
         if (!File.Exists(filePath))
         {
-            File.WriteAllBytes(filePath, new byte[72]);
+            File.WriteAllBytes(filePath, new byte[86]);
         }
+        // Also create legacy path for backward compat
+        string legacyPath = Path.Combine(dir, "input.bin");
+        if (!File.Exists(legacyPath))
+            File.WriteAllBytes(legacyPath, new byte[86]);
         // Grant Everyone full access so WUDFHost (LocalService) can read
         RunProcess("icacls.exe", $"\"{dir}\" /grant Everyone:(OI)(CI)F /T", timeoutMs: 5000);
     }
@@ -1152,7 +1169,9 @@ class Program
 
         // Set device name on root AND HID child
         Console.Write("  Setting device name... ");
-        string dispName = (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription") ?? "Controller";
+        string dispName = (string?)Registry.LocalMachine.OpenSubKey(RegPathForIndex(0))?.GetValue("DeviceDescription")
+            ?? (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription")
+            ?? "Controller";
         if (rootInstId != null)
         {
             SetBusReportedDeviceDesc(rootInstId, dispName);
@@ -1637,8 +1656,11 @@ class Program
             // Companion provides XInput via XUSB. Main device XUSB is non-functional (mshidumdf blocks IOCTLs).
             // xinputhid mode: xinputhid provides XInput directly.
             bool xusbNeeded = !profile.UsesXinputhid;
-            using (var cfgKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
+            using (var cfgKey = Registry.LocalMachine.CreateSubKey(RegPathForIndex(0)))
                 cfgKey.SetValue("XusbNeeded", xusbNeeded ? 1 : 0, RegistryValueKind.DWord);
+            // Legacy fallback
+            using (var legKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
+                legKey.SetValue("XusbNeeded", xusbNeeded ? 1 : 0, RegistryValueKind.DWord);
             Console.Write($"  Creating XUSB companion (XusbNeeded={xusbNeeded})... ");
             // Ensure XUSB driver is in the store
             string xusbInf = Path.Combine(BuildDir, "hidmaestro_xusb.inf");
@@ -1692,8 +1714,10 @@ class Program
                     var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
                     if (info.Contains("XInput") || info.Contains("HIDMaestro"))
                     {
-                        using (var cfgKey2 = Registry.LocalMachine.CreateSubKey(REG_PATH))
+                        using (var cfgKey2 = Registry.LocalMachine.CreateSubKey(RegPathForIndex(0)))
                             cfgKey2.SetValue("CompanionInstanceId", candidate, RegistryValueKind.String);
+                        using (var legKey2 = Registry.LocalMachine.CreateSubKey(REG_PATH))
+                            legKey2.SetValue("CompanionInstanceId", candidate, RegistryValueKind.String);
                         RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
                         Thread.Sleep(3000);
                         // Fix XUSB DeviceClasses SymbolicLink — PnP leaves it empty for root UMDF2.
@@ -1932,7 +1956,8 @@ class Program
         // Shared memory for data injection (bypasses xinputhid/HidHide upper filters)
         // Shared file for data injection (driver reads via timer)
         // Using a temp file instead of Global\ shared memory to avoid privilege issues
-        string sharedFilePath = @"C:\ProgramData\HIDMaestro\input.bin";
+        int ctrlIndex = 0; // TODO: pass controller index for multi-instance
+        string sharedFilePath = SharedFileForIndex(ctrlIndex);
         Directory.CreateDirectory(Path.GetDirectoryName(sharedFilePath)!);
         IntPtr sharedMemPtr = IntPtr.Zero;
         int sharedMemSeqNo = 0;
