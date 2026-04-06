@@ -30,7 +30,7 @@ Most solutions get one or two APIs right. HIDMaestro gets all of them simultaneo
 |-----|-------------------------|
 | **DirectInput** | Correct axes, buttons, POV, VID/PID |
 | **XInput** | Separate triggers, proper button mapping, single slot |
-| **SDL3/HIDAPI** | Correct identity, Bluetooth bus type spoof |
+| **SDL3/HIDAPI** | Correct identity, Bluetooth bus type when tested |
 | **Browser Gamepad** | STANDARD GAMEPAD with separate triggers |
 | **WGI (GameInput)** | Proper Gamepad promotion via GameInput registry |
 
@@ -173,8 +173,8 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 ## Credits
 
 - **[DsHidMini](https://github.com/nefarius/DsHidMini)** by Nefarius Software Solutions — Pioneered the UMDF2 + xinputhid architecture for virtual game controllers on Windows. HIDMaestro builds on this foundational approach.
-- **[HIDAPI](https://github.com/libusb/hidapi)** — The bus type detection mechanism that enables the BTHLEDEVICE spoofing technique.
-- **[SDL3](https://github.com/libsdl-org/SDL)** — Multi-backend fallback architecture that enables the &IG_ trick.
+- **[HIDAPI](https://github.com/libusb/hidapi)** — Bus type detection behavior that informed the BTHLEDEVICE spoofing technique.
+- **[SDL3](https://github.com/libsdl-org/SDL)** — Multi-backend fallback behavior that informed the &IG_ enumerator trick. SDL3 is not a dependency — HIDMaestro is validated against it.
 
 ## License
 
