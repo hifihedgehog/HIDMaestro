@@ -18,10 +18,10 @@ Every existing virtual controller solution requires you to give something up:
 ## What Makes It Different
 
 ### No Kernel Driver
-HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. A standard code signing certificate (or even a self-signed test cert during development) is all it takes.
+HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. HIDMaestro is designed to work with locally generated self-signed test certificates; no purchased EV certificate is required.
 
 ### Exact Hardware Identity
-Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -172,7 +172,15 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 
 ## Validation Results
 
-Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200). Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
+Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with test signing enabled and a locally generated self-signed certificate trusted on the machine. Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
+
+### Summary
+
+| Profile | DirectInput | XInput | SDL3 | Browser | WGI |
+|---------|------------|--------|------|---------|-----|
+| Xbox 360 Wired | 5 axes, 10 btns | 1 slot, separate triggers | &IG_ path, USB | STANDARD GAMEPAD, separate | 1 interface |
+| Xbox Series BT | 5 axes, 16 btns | 1 slot, separate triggers | &IG_ path, Bluetooth | STANDARD GAMEPAD, separate | 1+ interfaces |
+| DualSense (PS5) | 6 axes, 15 btns | N/A | USB | Detected | N/A |
 
 ### Xbox 360 Controller (Wired)
 
