@@ -316,6 +316,15 @@ EvtSharedMemTimer(
 }
 
 /* ================================================================== */
+/* SelfManagedIo: retry XUSB interface enable after device fully starts */
+static NTSTATUS EvtSelfManagedIoInit(_In_ WDFDEVICE Device)
+{
+    /* Re-enable XUSB interface after PnP finishes device start.
+     * WDF might allow the enable at this point even if it was suppressed during DeviceAdd. */
+    WdfDeviceSetDeviceInterfaceState(Device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
+    return STATUS_SUCCESS;
+}
+
 /*  DriverEntry                                                        */
 /* ================================================================== */
 
@@ -388,6 +397,14 @@ EvtDeviceAdd(
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
 
+    /* SelfManagedIo callback: retry XUSB interface enable after device starts */
+    {
+        WDF_PNPPOWER_EVENT_CALLBACKS pnpCallbacks;
+        WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
+        pnpCallbacks.EvtDeviceSelfManagedIoInit = EvtSelfManagedIoInit;
+        WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
+    }
+
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;
 
@@ -409,11 +426,8 @@ EvtDeviceAdd(
                 xusbNeeded = val;
             RegCloseKey(hCfg);
         }
-        /* Always register XUSB — companion and bridge both need it for XInput.
-         * For xinputhid profiles, duplicate XUSB is handled by companion being on
-         * a different device than the xinputhid HID child. */
-        WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-        WdfDeviceSetDeviceInterfaceState(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
+        if (xusbNeeded)
+            WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
@@ -551,10 +565,15 @@ EvtDeviceAdd(
     }
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
-    /* WinExInput: SKIP on main HID device — companion provides WinExInput.
-     * If WinExInput is on the HID device, WGI reads HID combined Z triggers.
-     * With WinExInput only on companion (which has XUSB), WGI might
-     * read from companion's XUSB instead → separate triggers. */
+    /* WinExInput — needed for browser GamepadAdded detection.
+     * For xinputhid profiles, xinputhid blocks HID ReadFile so WGI reads XInput
+     * (separate triggers) instead of HID. WinExInput on main device is safe. */
+    {
+        UNICODE_STRING refStr;
+        RtlInitUnicodeString(&refStr, L"XI_00");
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
+    }
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
