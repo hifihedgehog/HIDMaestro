@@ -27,6 +27,7 @@ public class HidReportBuilder
     public InputField? RightStickY { get; private set; }
     public InputField? LeftTrigger { get; private set; }
     public InputField? RightTrigger { get; private set; }
+    public InputField? CombinedTrigger { get; private set; } // Z axis for DI combined trigger
     public InputField? HatSwitch { get; private set; }
     public List<InputField> Buttons { get; } = new();
 
@@ -135,7 +136,7 @@ public class HidReportBuilder
                     {
                         case 0: usagePage = (ushort)value; break;         // Usage Page
                         case 1: logicalMin = signedValue; break;          // Logical Min
-                        case 2: logicalMax = signedValue; break;          // Logical Max
+                        case 2: logicalMax = (logicalMin >= 0 && signedValue < 0) ? value : signedValue; break; // Logical Max (unsigned if min>=0)
                         case 7: reportSize = value; break;                // Report Size
                         case 8: // Report ID
                             reportId = (byte)value;
@@ -211,6 +212,11 @@ public class HidReportBuilder
                             RightTrigger ??= f;
                         break;
                     case 0x39: HatSwitch ??= f; break;     // Hat Switch
+                    case 0x40:                               // Vx — hidden separate LT for WGI
+                        CombinedTrigger ??= LeftTrigger;     // Save Z as combined before override
+                        LeftTrigger = f; break;
+                    case 0x41:                               // Vy — hidden separate RT for WGI
+                        RightTrigger = f; break;
                 }
             }
             else if (f.UsagePage == 0x02) // Simulation
@@ -263,7 +269,15 @@ public class HidReportBuilder
         WriteField(LeftStickY, leftY);
         WriteField(RightStickX, rightX);
         WriteField(RightStickY, rightY);
-        if (RightTrigger != null)
+        if (CombinedTrigger != null && RightTrigger != null)
+        {
+            // Dual mode: combined Z for DI + separate Vx/Vy for WGI
+            double combined = 0.5 + (rightTrigger - leftTrigger) * 0.5;
+            WriteField(CombinedTrigger, Math.Clamp(combined, 0.0, 1.0));
+            WriteField(LeftTrigger, leftTrigger);
+            WriteField(RightTrigger, rightTrigger);
+        }
+        else if (RightTrigger != null)
         {
             // Separate triggers: write each independently
             WriteField(LeftTrigger, leftTrigger);

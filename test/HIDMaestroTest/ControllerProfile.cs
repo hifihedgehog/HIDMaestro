@@ -59,6 +59,17 @@ public sealed class ControllerProfile
     [JsonPropertyName("driverPid")]
     public string? DriverPid { get; set; }
 
+    /// <summary>PID override for HID attributes. Prevents GameInput from matching the real PID.
+    /// Used when we need WGI to use our custom GameInput mapping instead of the built-in one.</summary>
+    [JsonPropertyName("hidPid")]
+    public string? HidPid { get; set; }
+
+    /// <summary>If true, delete the GameInput registry entry for this VID/PID.
+    /// Prevents WGI from claiming the HID device as Gamepad, forcing Chrome to use XInput only.
+    /// This gives separate browser triggers without needing 6 axes in the HID descriptor.</summary>
+    [JsonPropertyName("skipGameInput")]
+    public bool SkipGameInput { get; set; }
+
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -103,6 +114,10 @@ public sealed class ControllerProfile
     /// <summary>Parsed PID as ushort.</summary>
     [JsonIgnore]
     public ushort ProductId => Convert.ToUInt16(Pid, 16);
+
+    /// <summary>Effective PID for HID attributes. Uses hidPid override if set, otherwise real PID.</summary>
+    [JsonIgnore]
+    public ushort HidProductId => HidPid != null ? Convert.ToUInt16(HidPid, 16) : ProductId;
 
     /// <summary>Device Manager display name. Uses deviceDescription if set, otherwise productString.</summary>
     [JsonIgnore]

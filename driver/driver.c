@@ -281,14 +281,25 @@ EvtSharedMemTimer(
     /* Build Col2 report (Report ID 0x20) with same gamepad data */
     UCHAR col2Report[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG col2Size = 0;
-    /* Only build Col2 if descriptor is large enough to have dual collections (>300 bytes) */
-    if (ctx->ReportDescriptorSize > 300) {
-        col2Report[0] = 0x20; /* Report ID */
-        /* Copy first 15 bytes of GIP data (sticks + triggers + buttons + hat) */
-        ULONG col2Data = 15;
-        if (col2Data > sizeof(shared.Data)) col2Data = sizeof(shared.Data);
-        RtlCopyMemory(col2Report + 1, shared.Data, col2Data);
-        col2Size = col2Data + 1;
+    /* Build Col2 if descriptor has a second TLC (Report ID 0x20).
+     * Check if Report ID 0x20 exists in the descriptor. */
+    if (ctx->ReportDescriptorSize > 130) {
+        /* Check if descriptor contains Report ID 0x20 (0x85 0x20) */
+        BOOLEAN hasCol2 = FALSE;
+        for (ULONG i = 0; i + 1 < ctx->ReportDescriptorSize; i++) {
+            if (ctx->ReportDescriptor[i] == 0x85 && ctx->ReportDescriptor[i+1] == 0x20) {
+                hasCol2 = TRUE; break;
+            }
+        }
+        if (hasCol2) {
+            col2Report[0] = 0x20; /* Report ID */
+            /* Write separate trigger data: Brake(LT) and Accelerator(RT) as 16-bit values */
+            USHORT lt16 = (USHORT)((*(USHORT*)&shared.GipData[8] & 0x03FF) * 65535 / 1023);
+            USHORT rt16 = (USHORT)((*(USHORT*)&shared.GipData[10] & 0x03FF) * 65535 / 1023);
+            *(USHORT*)&col2Report[1] = lt16;
+            *(USHORT*)&col2Report[3] = rt16;
+            col2Size = 5; /* Report ID + Brake(2) + Accel(2) */
+        }
     }
 
     /* Complete ALL pending READ_REPORT requests, alternating between Col1 and Col2 */
@@ -381,9 +392,11 @@ EvtDeviceAdd(
 
 #ifndef HIDMAESTRO_XUSB_MODE
     /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
-     * This tells DI to use XInput mapping (5 axes) instead of raw HID. */
+     * This tells DI to use XInput mapping (5 axes) instead of raw HID.
+     * Also used later to skip WinExInput on main device (companion handles it). */
+    DWORD functionMode = 0;
     {
-        HKEY hFm; DWORD functionMode = 0;
+        HKEY hFm;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hFm) == ERROR_SUCCESS) {
             DWORD val, sz = sizeof(val);
             if (RegQueryValueExW(hFm, L"FunctionMode", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
@@ -426,8 +439,74 @@ EvtDeviceAdd(
                 xusbNeeded = val;
             RegCloseKey(hCfg);
         }
-        if (xusbNeeded)
+        if (xusbNeeded) {
             WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+            WdfDeviceSetDeviceInterfaceState(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
+            /* Fix XUSB DeviceClasses SymbolicLink — PnP leaves it empty for root UMDF2.
+             * Without SymbolicLink, WGI XusbGameControllerProvider can't open the interface.
+             * Query our instance ID, build the symbolic link path, and write it. */
+            {
+                WCHAR instId[256] = {0};
+                ULONG instLen = sizeof(instId);
+                if (NT_SUCCESS(WdfDeviceQueryProperty(device, DevicePropertyPhysicalDeviceObjectName,
+                        sizeof(instId), instId, &instLen)) && instId[0]) {
+                    /* instId = "\Device\00000123" — we need the PnP instance ID instead */
+                }
+                /* Use IoGetDeviceProperty or registry to get instance ID */
+                HKEY hEnum;
+                WCHAR enumPath[512];
+                WCHAR compInstId[256] = {0};
+                /* Read our instance ID from SOFTWARE\HIDMaestro\CompanionInstanceId
+                 * (written by test app when creating the companion device) */
+                HKEY hCfg2;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg2) == ERROR_SUCCESS) {
+                    DWORD sz2 = sizeof(compInstId);
+                    RegQueryValueExW(hCfg2, L"CompanionInstanceId", NULL, NULL, (LPBYTE)compInstId, &sz2);
+                    RegCloseKey(hCfg2);
+                }
+                if (compInstId[0]) {
+                    /* Build DeviceClasses path: ##?#ROOT#SYSTEM#XXXX#{xusb-guid}\##?#ROOT#SYSTEM#XXXX#{xusb-guid} */
+                    WCHAR idHash[256];
+                    WCHAR *s = compInstId, *d = idHash;
+                    while (*s) { *d++ = (*s == L'\\') ? L'#' : *s; s++; }
+                    *d = 0;
+
+                    WCHAR regPath[1024];
+                    static const WCHAR prefix[] = L"SYSTEM\\CurrentControlSet\\Control\\DeviceClasses\\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\##?#";
+                    static const WCHAR guid[] = L"#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
+                    WCHAR *p = regPath;
+                    RtlCopyMemory(p, prefix, sizeof(prefix)-2); p += (sizeof(prefix)/2)-1;
+                    WCHAR *h = idHash; while (*h) *p++ = *h++;
+                    RtlCopyMemory(p, guid, sizeof(guid)-2); p += (sizeof(guid)/2)-1;
+                    /* Append \##?#<hash>#{guid} for the sub-key */
+                    *p++ = L'\\'; *p++ = L'#'; *p++ = L'#'; *p++ = L'?'; *p++ = L'#';
+                    h = idHash; while (*h) *p++ = *h++;
+                    RtlCopyMemory(p, guid, sizeof(guid)); p += (sizeof(guid)/2)-1;
+                    *p = 0;
+
+                    HKEY hKey;
+                    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, regPath, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+                        DWORD enabled = 1;
+                        RegSetValueExW(hKey, L"DeviceEnabled", 0, REG_DWORD, (LPBYTE)&enabled, sizeof(enabled));
+                        /* SymbolicLink = \\?\ROOT#SYSTEM#XXXX#{xusb-guid} */
+                        WCHAR symLink[512];
+                        WCHAR *sl = symLink;
+                        static const WCHAR slPrefix[] = L"\\\\?\\";
+                        RtlCopyMemory(sl, slPrefix, sizeof(slPrefix)-2); sl += 4;
+                        h = idHash; while (*h) *sl++ = *h++;
+                        static const WCHAR slGuid[] = L"#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
+                        RtlCopyMemory(sl, slGuid, sizeof(slGuid)); sl += (sizeof(slGuid)/2)-1;
+                        *sl = 0;
+                        RegSetValueExW(hKey, L"SymbolicLink", 0, REG_SZ, (LPBYTE)symLink,
+                            (DWORD)((wcslen(symLink)+1)*sizeof(WCHAR)));
+                        RegCloseKey(hKey);
+                    }
+                }
+            }
+        }
+        /* Only register WinExInput if XUSB is NOT registered.
+         * Both on same device causes XInput to create 2 slots (duplicate). */
+        if (!xusbNeeded)
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
@@ -526,48 +605,61 @@ EvtDeviceAdd(
 
     /* Register XUSB + USB interfaces (succeeds in function mode only).
      * When visible to PnP, XUSB triggers DI's XInput mapping (5 axes).
-     * In filter mode these calls succeed but PnP suppresses the interfaces. */
-    WdfDeviceCreateDeviceInterface(device,
-        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
-    /* Try to explicitly enable the XUSB interface in case PnP suppressed it */
-    WdfDeviceSetDeviceInterfaceState(device,
-        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
-    /* Force XUSB interface into DeviceClasses registry.
-     * PnP suppresses WDF's XUSB registration under mshidumdf. We write
-     * the registry entry directly so DI sees XUSB at enumeration time. */
+     * In filter mode these calls succeed but PnP suppresses the interfaces.
+     * For FunctionMode: SKIP XUSB on main device — companion provides XUSB.
+     * XUSB here causes WGI to claim the HID device as Gamepad → reads HID
+     * combined Z trigger instead of companion's separate XInput triggers. */
+#ifdef HIDMAESTRO_XUSB_MODE
+    /* Only companion registers XUSB. Main device MUST NOT register XUSB because
+     * mshidumdf corrupts XUSB IOCTLs, and XInput picks the first XUSB it finds.
+     * If main device has XUSB, XInput talks to it instead of the companion → garbage. */
+#else
+    if (0) /* XUSB disabled on main device — companion handles it */
+#endif
     {
-        HKEY hCfg;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
-            WCHAR devId[256];
-            DWORD sz = sizeof(devId);
-            if (RegQueryValueExW(hCfg, L"DeviceInstanceId", NULL, NULL, (LPBYTE)devId, &sz) == ERROR_SUCCESS) {
-                WCHAR devIdHash[256];
-                WCHAR *src = devId, *dst = devIdHash;
-                while (*src) { *dst++ = (*src == L'\\') ? L'#' : *src; src++; }
-                *dst = 0;
-                /* Build: SYSTEM\CCS\Control\DeviceClasses\{XUSB}\##?#<hash>#{XUSB}\# */
-                WCHAR path[1024];
-                WCHAR *p = path;
-                static const WCHAR prefix[] = L"SYSTEM\\CurrentControlSet\\Control\\DeviceClasses\\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\##?#";
-                static const WCHAR guid[] = L"#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\#";
-                RtlCopyMemory(p, prefix, sizeof(prefix)-2); p += (sizeof(prefix)/2)-1;
-                WCHAR *h = devIdHash; while (*h) *p++ = *h++;
-                RtlCopyMemory(p, guid, sizeof(guid)); p += (sizeof(guid)/2)-1;
-                HKEY hKey;
-                if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-                    DWORD enabled = 1;
-                    RegSetValueExW(hKey, L"DeviceEnabled", 0, REG_DWORD, (LPBYTE)&enabled, sizeof(enabled));
-                    RegCloseKey(hKey);
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+        WdfDeviceSetDeviceInterfaceState(device,
+            (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
+        /* Force XUSB interface into DeviceClasses registry. */
+        {
+            HKEY hCfg;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+                WCHAR devId[256];
+                DWORD sz = sizeof(devId);
+                if (RegQueryValueExW(hCfg, L"DeviceInstanceId", NULL, NULL, (LPBYTE)devId, &sz) == ERROR_SUCCESS) {
+                    WCHAR devIdHash[256];
+                    WCHAR *src = devId, *dst = devIdHash;
+                    while (*src) { *dst++ = (*src == L'\\') ? L'#' : *src; src++; }
+                    *dst = 0;
+                    WCHAR path[1024];
+                    WCHAR *p = path;
+                    static const WCHAR prefix[] = L"SYSTEM\\CurrentControlSet\\Control\\DeviceClasses\\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\##?#";
+                    static const WCHAR guid[] = L"#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\#";
+                    RtlCopyMemory(p, prefix, sizeof(prefix)-2); p += (sizeof(prefix)/2)-1;
+                    WCHAR *h = devIdHash; while (*h) *p++ = *h++;
+                    RtlCopyMemory(p, guid, sizeof(guid)); p += (sizeof(guid)/2)-1;
+                    HKEY hKey;
+                    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+                        DWORD enabled = 1;
+                        RegSetValueExW(hKey, L"DeviceEnabled", 0, REG_DWORD, (LPBYTE)&enabled, sizeof(enabled));
+                        RegCloseKey(hKey);
+                    }
                 }
+                RegCloseKey(hCfg);
             }
-            RegCloseKey(hCfg);
         }
+        WdfDeviceCreateDeviceInterface(device,
+            (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
     }
-    WdfDeviceCreateDeviceInterface(device,
-        (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
     /* WinExInput — needed for browser GamepadAdded detection.
      * For xinputhid profiles, xinputhid blocks HID ReadFile so WGI reads XInput
-     * (separate triggers) instead of HID. WinExInput on main device is safe. */
+     * (separate triggers) instead of HID. WinExInput on main device is safe.
+     * For FunctionMode (Xbox HID without xinputhid): SKIP — companion has WinExInput.
+     * If we register here, WGI reads HID combined Z → browser triggers combined. */
+#ifndef HIDMAESTRO_XUSB_MODE
+    /* Main device: register WinExInput for WGI GamepadAdded. */
+#endif
     {
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
@@ -1002,6 +1094,24 @@ EvtIoDeviceControl(
         /* Read from XusbReport (always GIP format, 14 bytes) */
         if (ctx->XusbReportReady) {
             PUCHAR d = ctx->XusbReport;
+            /* Debug: dump raw GIP data once */
+            {
+                static LONG dumpCount = 0;
+                if (InterlockedIncrement(&dumpCount) == 50) {
+                    HANDLE hDbg = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\gip_raw_dump.txt",
+                        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+                    if (hDbg != INVALID_HANDLE_VALUE) {
+                        char msg[128]; int n = 0;
+                        for (int i = 0; i < 14; i++) {
+                            static const char hex[] = "0123456789ABCDEF";
+                            msg[n++] = hex[d[i] >> 4]; msg[n++] = hex[d[i] & 0xF]; msg[n++] = ' ';
+                        }
+                        msg[n++] = '\r'; msg[n++] = '\n';
+                        DWORD dummy; WriteFile(hDbg, msg, n, &dummy, NULL);
+                        CloseHandle(hDbg);
+                    }
+                }
+            }
             UCHAR btnLow = d[12], btnHigh = d[13];
             UCHAR hat = (btnHigh >> 2) & 0x0F;
             USHORT buttons = 0;
@@ -1021,19 +1131,39 @@ EvtIoDeviceControl(
                 case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
                 case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
             }
-            /* GamepadState0101 layout: version(2) status(1) unk(2) pkt(4) GAMEPAD(12)
-             * GAMEPAD starts at offset 9: wButtons(2) bLT(1) bRT(1) sLX(2) sLY(2) sRX(2) sRY(2) */
-            *(USHORT*)&state[0x09] = buttons;
-            /* GIP triggers: 10-bit (0-1023) in bits 0-9. Scale to 0-255 for XInput. */
-            state[0x0B] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
-            state[0x0C] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
-            *(SHORT*)&state[0x0D] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
-            *(SHORT*)&state[0x0F] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY */
-            *(SHORT*)&state[0x11] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
-            *(SHORT*)&state[0x13] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY */
+            /* GamepadState0101 layout (29 bytes):
+             * 0x00: Version(2) 0x02: Status(1) 0x03: unk(2) 0x05: Packet(4)
+             * 0x09: unk(2) — 2 reserved bytes before GAMEPAD
+             * 0x0B: wButtons(2) 0x0D: bLT(1) 0x0E: bRT(1)
+             * 0x0F: sLX(2) 0x11: sLY(2) 0x13: sRX(2) 0x15: sRY(2) */
+            *(USHORT*)&state[0x0B] = buttons;
+            state[0x0D] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
+            state[0x0E] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
+            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);       /* LX */
+            *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));    /* LY */
+            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);    /* RX */
+            *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY */
         }
         WdfWaitLockRelease(ctx->InputLock);
 
+        /* Debug: dump the full state buffer being returned */
+        {
+            static LONG stateDumpCount = 0;
+            if (InterlockedIncrement(&stateDumpCount) == 200) {
+                HANDLE hDbg = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\state_dump.txt",
+                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+                if (hDbg != INVALID_HANDLE_VALUE) {
+                    char msg[128]; int n = 0;
+                    for (int i = 0; i < 29; i++) {
+                        static const char hex[] = "0123456789ABCDEF";
+                        msg[n++] = hex[state[i] >> 4]; msg[n++] = hex[state[i] & 0xF]; msg[n++] = ' ';
+                    }
+                    msg[n++] = '\r'; msg[n++] = '\n';
+                    DWORD dummy; WriteFile(hDbg, msg, n, &dummy, NULL);
+                    CloseHandle(hDbg);
+                }
+            }
+        }
         /* Debug: log trigger values once */
         {
             static LONG dbgCount = 0;

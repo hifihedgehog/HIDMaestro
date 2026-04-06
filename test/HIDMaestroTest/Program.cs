@@ -34,6 +34,9 @@ class Program
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 
+    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint CM_Register_Device_InterfaceW(uint dnDevInst, ref Guid InterfaceClassGuid, string? pszReference, IntPtr pszDeviceInterface, ref uint pulLength, uint ulFlags);
+
     [DllImport("CfgMgr32.dll", SetLastError = true)]
     static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
@@ -792,9 +795,11 @@ class Program
 
         if (combinedTriggers)
         {
-            // Xbox 360: 5 axes (LX, LY, RX, RY, Z-combined). Map both triggers to axis 4.
-            SetAxis("LeftTrigger", 4);
-            SetAxis("RightTrigger", 4);
+            // Combined Z for DI (axis 4) + hidden Vx/Vy for WGI separate triggers (axes 5/6).
+            // DI ignores velocity usages (Vx=0x40, Vy=0x41) → 5 axes.
+            // GameInput sees all HID axes → Vx at index 5, Vy at index 6.
+            SetAxis("LeftTrigger", 5);
+            SetAxis("RightTrigger", 6);
         }
         else
         {
@@ -1419,6 +1424,7 @@ class Program
         // the HID device itself. DI sees XUSB → uses XInput mapping (5 axes, 10 buttons).
         bool funcMode = profile.VendorId == 0x045E && !profile.UsesUpperFilter;
         WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
+
             productString: profile.ProductString,
             deviceDescription: profile.DeviceDescription,
             inputReportByteLength: bleReportLen,
@@ -1628,7 +1634,9 @@ class Program
         // Companion provides WinExInput for WGI GamepadAdded (browser STANDARD GAMEPAD).
         if (profile.VendorId == 0x045E)
         {
-            bool xusbNeeded = !profile.UsesXinputhid; // HID mode needs companion XInput; xinputhid provides its own
+            // Companion provides XInput via XUSB. Main device XUSB is non-functional (mshidumdf blocks IOCTLs).
+            // xinputhid mode: xinputhid provides XInput directly.
+            bool xusbNeeded = !profile.UsesXinputhid;
             using (var cfgKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
                 cfgKey.SetValue("XusbNeeded", xusbNeeded ? 1 : 0, RegistryValueKind.DWord);
             Console.Write($"  Creating XUSB companion (XusbNeeded={xusbNeeded})... ");
@@ -1679,13 +1687,45 @@ class Program
             for (int idx = 0; idx < 10; idx++)
             {
                 string candidate = $@"ROOT\SYSTEM\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                if (CM_Locate_DevNodeW(out uint compInst, candidate, 0) == 0)
                 {
                     var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
                     if (info.Contains("XInput") || info.Contains("HIDMaestro"))
                     {
+                        using (var cfgKey2 = Registry.LocalMachine.CreateSubKey(REG_PATH))
+                            cfgKey2.SetValue("CompanionInstanceId", candidate, RegistryValueKind.String);
                         RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
                         Thread.Sleep(3000);
+                        // Fix XUSB DeviceClasses SymbolicLink — PnP leaves it empty for root UMDF2.
+                        // Without SymbolicLink, WGI XusbGameControllerProvider can't discover the companion.
+                        if (xusbNeeded)
+                        {
+                            string instHash = candidate.Replace('\\', '#');
+                            string xusbClassKey = $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}}";
+                            // Find the XUSB entry for this companion
+                            using var classRoot = Registry.LocalMachine.OpenSubKey(xusbClassKey);
+                            if (classRoot != null)
+                            {
+                                foreach (string entry in classRoot.GetSubKeyNames())
+                                {
+                                    if (entry.Contains(instHash, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        // Fix the SymbolicLink in the sub-sub-key
+                                        foreach (string sub in Registry.LocalMachine.OpenSubKey($@"{xusbClassKey}\{entry}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                                        {
+                                            using var subKey = Registry.LocalMachine.OpenSubKey($@"{xusbClassKey}\{entry}\{sub}", true);
+                                            if (subKey != null)
+                                            {
+                                                string symLink = $@"\\?\{instHash.ToLower()}#{{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}}";
+                                                subKey.SetValue("SymbolicLink", symLink, RegistryValueKind.String);
+                                                subKey.SetValue("DeviceEnabled", 1, RegistryValueKind.DWord);
+                                                Console.Write("(XUSB SymLink fixed) ");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -1997,28 +2037,38 @@ class Program
                 int dataStart = reportBuilder.InputReportId != 0 ? 1 : 0;
                 int dataLen = Math.Min(inputReport.Length - dataStart, 64);
 
-                // GIP data: build using GIP descriptor parser (identical to xinputhid path)
-                // Debug: log once to verify separate triggers
-                if (sharedMemSeqNo == 200)
-                    File.WriteAllText(@"C:\ProgramData\HIDMaestro\gip_debug.txt",
-                        $"sepLt={sepLt:F3} sepRt={sepRt:F3} gipBuilder.LT={gipBuilder.LeftTrigger?.BitOffset},{gipBuilder.LeftTrigger?.BitSize} RT={gipBuilder.RightTrigger?.BitOffset},{gipBuilder.RightTrigger?.BitSize}\n");
-                byte[] gipReport = gipBuilder.BuildReport(
-                    leftX: lxNorm, leftY: lyNorm,
-                    rightX: 0.5, rightY: 0.5,
-                    leftTrigger: sepLt, rightTrigger: sepRt,
-                    hatValue: 0, buttonMask: btnMask);
+                // Build GipData manually with exact layout companion expects:
+                // Bytes 0-1: LX (16-bit unsigned, 0-65535)
+                // Bytes 2-3: LY (16-bit unsigned, 0-65535)
+                // Bytes 4-5: RX (16-bit unsigned, 0-65535)
+                // Bytes 6-7: RY (16-bit unsigned, 0-65535)
+                // Bytes 8-9: LT (10-bit, 0-1023, in low 10 bits of LE ushort)
+                // Bytes 10-11: RT (10-bit, 0-1023, in low 10 bits of LE ushort)
+                // Byte 12: btnLow (A=0x01, B=0x02, X=0x04, Y=0x08, LB=0x10, RB=0x20, LS=0x40, RS=0x80)
+                // Byte 13: btnHigh (Back=0x01, Start=0x02, hat in bits 2-5)
                 byte[] gipData = new byte[14];
-                Array.Copy(gipReport, 0, gipData, 0, Math.Min(14, gipReport.Length));
-
-                // Debug: log trigger values once
-                if (sharedMemSeqNo == 100)
-                {
-                    string dbg = $"sepLt={sepLt:F3} sepRt={sepRt:F3} gipReport.Len={gipReport.Length} " +
-                        $"bytes[8-11]={gipReport[8]:X2}{gipReport[9]:X2}{gipReport[10]:X2}{gipReport[11]:X2} " +
-                        $"gipData[8-11]={gipData[8]:X2}{gipData[9]:X2}{gipData[10]:X2}{gipData[11]:X2}\n" +
-                        $"RightTrigger={gipBuilder.RightTrigger?.BitOffset},{gipBuilder.RightTrigger?.BitSize}\n";
-                    File.WriteAllText(@"C:\ProgramData\HIDMaestro\trigger_debug.txt", dbg);
-                }
+                BitConverter.GetBytes((ushort)(lxNorm * 65535)).CopyTo(gipData, 0);
+                BitConverter.GetBytes((ushort)(lyNorm * 65535)).CopyTo(gipData, 2);
+                BitConverter.GetBytes((ushort)(0.5 * 65535)).CopyTo(gipData, 4);
+                BitConverter.GetBytes((ushort)(0.5 * 65535)).CopyTo(gipData, 6);
+                BitConverter.GetBytes((ushort)(sepLt * 1023)).CopyTo(gipData, 8);
+                BitConverter.GetBytes((ushort)(sepRt * 1023)).CopyTo(gipData, 10);
+                byte btnLow = 0;
+                if ((btnMask & 0x001) != 0) btnLow |= 0x01; // A
+                if ((btnMask & 0x002) != 0) btnLow |= 0x02; // B
+                if ((btnMask & 0x004) != 0) btnLow |= 0x04; // X
+                if ((btnMask & 0x008) != 0) btnLow |= 0x08; // Y
+                if ((btnMask & 0x010) != 0) btnLow |= 0x10; // LB
+                if ((btnMask & 0x020) != 0) btnLow |= 0x20; // RB
+                if ((btnMask & 0x100) != 0) btnLow |= 0x40; // LS (button 9)
+                if ((btnMask & 0x200) != 0) btnLow |= 0x80; // RS (button 10)
+                gipData[12] = btnLow;
+                byte btnHigh = 0;
+                if ((btnMask & 0x040) != 0) btnHigh |= 0x01; // Back (button 7)
+                if ((btnMask & 0x080) != 0) btnHigh |= 0x02; // Start (button 8)
+                // Hat: 0=neutral, encode in bits 2-5
+                // (hatValue already 0 in test pattern)
+                gipData[13] = btnHigh;
 
                 sharedMemSeqNo++;
                 sharedFile.Seek(0, SeekOrigin.Begin);
@@ -2033,6 +2083,7 @@ class Program
             bool ok = true;
 
             // Send GIP-format data to XUSB companion for XInput
+            // Uses SEPARATE trigger values (sepLt/sepRt), not combined ltVal.
             if (xh != null)
             {
                 byte[] xusbIn = new byte[17];
@@ -2042,8 +2093,8 @@ class Program
                 ushort xLy = (ushort)(lyNorm * 65535);
                 ushort xRx = (ushort)(0.5 * 65535);
                 ushort xRy = (ushort)(0.5 * 65535);
-                ushort xLt = (ushort)(ltVal * 1023);  // 10-bit trigger
-                ushort xRt = (ushort)(rtVal * 1023);
+                ushort xLt = (ushort)(sepLt * 1023);  // 10-bit separate trigger
+                ushort xRt = (ushort)(sepRt * 1023);
                 BitConverter.GetBytes(xLx).CopyTo(xusbIn, 3);
                 BitConverter.GetBytes(xLy).CopyTo(xusbIn, 5);
                 BitConverter.GetBytes(xRx).CopyTo(xusbIn, 7);

@@ -44,6 +44,22 @@ AddReg = XUSB_HW_AddReg
 HKR,,"XusbMode",0x00010001,1
 HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
+[XUSB_Install.NT.Interfaces]
+AddInterface = {EC87F1E3-C13B-4100-B5F7-8B84D54260CB},,XUSB_Interface
+AddInterface = {6C53D5FD-6480-440F-B618-476750C5E1A6},"XI_00",WinExInput_Interface
+
+[XUSB_Interface]
+AddReg = XUSB_Interface_AddReg
+
+[XUSB_Interface_AddReg]
+HKR,,"DeviceEnabled",0x00010001,1
+
+[WinExInput_Interface]
+AddReg = WinExInput_Interface_AddReg
+
+[WinExInput_Interface_AddReg]
+HKR,,"DeviceEnabled",0x00010001,1
+
 [XUSB_Install.NT.Services]
 AddService = WUDFRd,0x000001fa,WUDFRD_Service
 
