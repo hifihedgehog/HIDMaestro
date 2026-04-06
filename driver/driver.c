@@ -514,6 +514,9 @@ EvtDeviceAdd(
      * In filter mode these calls succeed but PnP suppresses the interfaces. */
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    /* Try to explicitly enable the XUSB interface in case PnP suppressed it */
+    WdfDeviceSetDeviceInterfaceState(device,
+        (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
     /* Force XUSB interface into DeviceClasses registry.
      * PnP suppresses WDF's XUSB registration under mshidumdf. We write
      * the registry entry directly so DI sees XUSB at enumeration time. */
