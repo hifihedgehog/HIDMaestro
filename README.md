@@ -23,8 +23,8 @@ HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regula
 ### Exact Hardware Identity
 Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
-### Every API at Once
-Most solutions get one or two APIs right. HIDMaestro gets all of them simultaneously:
+### Cross-API Coverage
+Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
 
 | API | What HIDMaestro Delivers |
 |-----|-------------------------|
@@ -42,17 +42,17 @@ Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection 
 
 ## Novel Techniques
 
-HIDMaestro introduces several techniques that have never been published or used in any open-source project.
+HIDMaestro uses several techniques we haven't seen documented elsewhere in the virtual controller space.
 
 ### Velocity Usage Descriptor Trick
 
-**The breakthrough that makes Xbox 360 emulation perfect.**
+**The technique that makes Xbox 360 trigger fidelity possible across all APIs.**
 
 Real Xbox 360 controllers have a combined trigger axis (Z) in DirectInput — both triggers share one axis. But browsers and WGI need separate trigger values. Every previous solution had to choose: correct DI (5 axes, combined) or correct browser (separate triggers, 6 axes).
 
 HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput doesn't map velocity usages to any axis slot — it sees 5 axes. GameInput/WGI enumerates them as additional axes and reads real separate trigger data via the GameInput registry mapping.
 
-**Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor. No other virtual controller has achieved this.**
+**Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.**
 
 ### BTHLEDEVICE Bus Type Spoofing
 
@@ -121,7 +121,7 @@ User-Mode Test App
 - **XInput** ← XUSB GET_STATE ← companion reads GipData from shared file
 - **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
 - **Browser** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
-- **Bluetooth ID** ��� HIDAPI checks CompatibleIDs → reports bus_type=BT
+- **Bluetooth ID** — HIDAPI checks CompatibleIDs, reports bus_type=BT
 
 ## Getting Started
 
