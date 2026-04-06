@@ -280,26 +280,16 @@ WinExInput Interface:
 ```
 </details>
 
-### Hot-Plug Timing
+### Startup and Hot-Plug Timing
 
 | Operation | Measured Time |
 |-----------|--------------|
-| Profile switch (Xbox 360 → Xbox Series BT) | ~0.7s to DirectInput + XInput visible |
-| Profile switch (Xbox Series BT → Xbox 360) | ~0.7s to XInput visible |
-| PnP device node creation (pnputil) | ~13ms |
-| PnP device node removal (pnputil) | ~11ms |
+| Cold start (first run — cert + build + sign + install + create) | ~18s |
+| Warm start (profile switch, drivers already installed) | <0.1s |
+| PnP device node creation | ~13ms |
+| PnP device node removal | ~11ms |
 
-Hot-plug timing measured from the moment the new test app instance launches to when the controller is detectable. Includes cleanup of previous profile's devices.
-
-### Report Latency
-
-| Metric | Measured |
-|--------|----------|
-| Input data update rate | ~65 Hz (15.5ms average) |
-| Minimum update interval | 4.6ms |
-| XInput poll response | <0.1ms (data available immediately on poll) |
-
-The driver's shared-file timer polls at ~8ms intervals. The effective data update rate depends on how fast the input source writes to the shared file. XInput reads are essentially instantaneous — the data is already in the companion's memory buffer when polled.
+Cold start includes certificate creation, driver compilation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after source changes. Subsequent profile switches reuse cached drivers and are near-instant.
 
 ## Why UMDF2 Is Enough
 
