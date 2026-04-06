@@ -136,18 +136,47 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Signs DLLs with the test certificate.</summary>
+    /// <summary>Ensures the test signing certificate exists. Creates it if missing.</summary>
+    public static void EnsureTestCertificate()
+    {
+        // Check if cert already exists in CurrentUser\My
+        var (rc, output) = Run("powershell -NoProfile -Command \"Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -eq 'CN=HIDMaestroTestCert' } | Select-Object -First 1 | ForEach-Object { $_.Thumbprint }\"");
+        if (rc == 0 && output.Trim().Length >= 40)
+            return; // Already exists
+
+        Console.Write("  Creating test certificate... ");
+        string certFile = Path.Combine(Path.GetTempPath(), "HIDMaestroTestCert.cer");
+
+        // Create self-signed code signing cert in CurrentUser\My (has private key)
+        Run("powershell -NoProfile -Command \"" +
+            "New-SelfSignedCertificate -Type Custom -Subject 'CN=HIDMaestroTestCert' " +
+            "-FriendlyName 'HIDMaestro Test Signing' -CertStoreLocation 'Cert:\\CurrentUser\\My' " +
+            "-KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3') | " +
+            $"Export-Certificate -FilePath '{certFile}'\"");
+
+        // Trust the cert for driver loading
+        Run($"certutil -f -addstore Root \"{certFile}\"");
+        Run($"certutil -f -addstore TrustedPublisher \"{certFile}\"");
+
+        try { File.Delete(certFile); } catch { }
+        Console.WriteLine("OK");
+    }
+
+    /// <summary>Signs DLLs with the test certificate from CurrentUser\My store.</summary>
     public static bool SignDrivers()
     {
+        EnsureTestCertificate();
+
         string signtool = Path.Combine(WdkRoot, "bin", WdkVer, "x64", "signtool.exe");
         if (!File.Exists(signtool)) { Console.WriteLine("  signtool not found"); return false; }
 
+        // Sign from CurrentUser\My store (where the private key lives)
         foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
         {
             string path = Path.Combine(BuildDir, dll);
             if (!File.Exists(path)) continue;
-            var (rc, _) = Run($"\"{signtool}\" sign /a /s PrivateCertStore /n HIDMaestroTestCert /fd SHA256 \"{path}\"");
-            if (rc != 0) return false;
+            var (rc, output) = Run($"\"{signtool}\" sign /a /s My /n HIDMaestroTestCert /fd SHA256 \"{path}\"");
+            if (rc != 0) { Console.WriteLine($"  Sign failed for {dll}: {output}"); return false; }
         }
         return true;
     }
@@ -175,7 +204,7 @@ public static class DriverBuilder
 
         // Sign catalogs
         foreach (string cat in Directory.GetFiles(BuildDir, "*.cat"))
-            Run($"\"{signtool}\" sign /a /s PrivateCertStore /n HIDMaestroTestCert /fd SHA256 \"{cat}\"");
+            Run($"\"{signtool}\" sign /a /s My /n HIDMaestroTestCert /fd SHA256 \"{cat}\"");
 
         return true;
     }

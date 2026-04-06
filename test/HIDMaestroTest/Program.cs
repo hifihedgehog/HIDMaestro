@@ -453,7 +453,9 @@ class Program
                 try { proc.Kill(); proc.WaitForExit(3000); killedOther = true; } catch { }
             }
         }
-        // Always clean orphaned devices at startup — handles crashes, force-kills, reboots
+        // Always clean orphaned virtual controller devices at startup.
+        // Only removes VID_ devices (virtual controllers), NOT ROOT\SYSTEM companions.
+        // Companions are managed by the emulate flow, not startup cleanup.
         {
             try
             {
@@ -465,13 +467,6 @@ class Program
                                 RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
             }
             catch { }
-            // Also remove companions
-            for (int i = 2; i <= 10; i++)
-            {
-                string sysId = $@"ROOT\SYSTEM\{i:D4}";
-                if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
-                    RunProcess("pnputil.exe", $"/remove-device \"{sysId}\" /subtree", timeoutMs: 5000);
-            }
         }
 
         // Auto-elevate for commands that need admin
