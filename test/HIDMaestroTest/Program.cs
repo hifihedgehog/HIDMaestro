@@ -199,11 +199,7 @@ class Program
         key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
 
         // Restart the device to load the filter
-        // pnputil /restart-device doesn't work well here, so we disable/enable
-        RunProcess("pnputil.exe", $"/disable-device \"{instanceId}\"");
-        Thread.Sleep(500);
-        RunProcess("pnputil.exe", $"/enable-device \"{instanceId}\"");
-        Thread.Sleep(1000);
+        DeviceManager.RestartDevice(instanceId);
     }
 
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -311,8 +307,7 @@ class Program
         key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
 
         // Restart the HID child to load the new filter
-        RunProcess("pnputil.exe", $"/restart-device \"{instanceId}\"");
-        Thread.Sleep(2000);
+        DeviceManager.RestartDevice(instanceId);
 
         return true;
     }
@@ -782,13 +777,13 @@ class Program
                     if (isController || isCompanion)
                     {
                         foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
+                            DeviceManager.RemoveDevice($@"ROOT\{sub}\{inst}", timeoutMs: 3000);
                     }
                     if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
                     {
                         foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
                             if (int.TryParse(inst, out int idx) && idx >= 2)
-                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
+                                DeviceManager.RemoveDevice($@"ROOT\SYSTEM\{inst}", timeoutMs: 3000);
                     }
                 }
             }
@@ -1035,10 +1030,45 @@ class Program
     /// </summary>
     static void FixHidChildNames(string name)
     {
-        // Fix device names on ALL HIDMaestro devices (HID_IG_00 and HIDCLASS)
-        RunProcess("powershell.exe",
-            $"-Command \"Get-PnpDevice -Class HIDClass -Status OK -EA SilentlyContinue | Where-Object {{ $_.InstanceId -match 'HID_IG_00|HIDCLASS' -and $_.InstanceId -match 'ROOT|HID' }} | ForEach-Object {{ $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $_.InstanceId; Set-ItemProperty $p -Name FriendlyName -Value '{name}' -Type String -Force -EA SilentlyContinue; Set-ItemProperty $p -Name DeviceDesc -Value '{name}' -Type String -Force -EA SilentlyContinue }}\"",
-            timeoutMs: 10_000);
+        // Fix device names using CM APIs — no PowerShell spawning
+        var fnKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 14 // DEVPKEY_Device_FriendlyName
+        };
+        var ddKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 2 // DEVPKEY_Device_DeviceDesc
+        };
+        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+
+        // Find all ROOT\VID_* and ROOT\HMCompanion devices and their HID children
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey == null) return;
+            foreach (var sub in enumKey.GetSubKeyNames())
+            {
+                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                {
+                    string devId = $@"ROOT\{sub}\{inst}";
+                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
+                    {
+                        CM_Set_DevNode_PropertyW(devInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+                        CM_Set_DevNode_PropertyW(devInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+                        // Also fix HID child
+                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
+                        {
+                            CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+                            CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
     }
 
     /// <summary>
@@ -1131,7 +1161,7 @@ class Program
             if (!profile.UsesUpperFilter)
             {
                 string instId = $@"ROOT\XNACOMPOSITE\0000";
-                RunProcess("pnputil.exe", $"/restart-device \"{instId}\"");
+                DeviceManager.RestartDevice(instId);
             }
 
             // Wait for HID child to enumerate (event-driven, no sleep)
@@ -1656,7 +1686,7 @@ class Program
                     string candidate = $@"ROOT\{pfx2}\{idx:D4}";
                     if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
                     {
-                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                        DeviceManager.RestartDevice(candidate);
                         Thread.Sleep(2000);
                         found = true; break;
                     }
@@ -1745,7 +1775,7 @@ class Program
                 {
                     AddBtnFixFilter(hidChildId);
                     // Restart HID child for filter to load
-                    RunProcess("pnputil.exe", $"/restart-device \"{hidChildId}\"", timeoutMs: 5000);
+                    DeviceManager.RestartDevice(hidChildId);
                     Thread.Sleep(3000);
                     Console.WriteLine("OK");
                 }
@@ -1819,7 +1849,7 @@ class Program
                             RunProcess("pnputil.exe", $"/remove-device \"{candidate}\" /subtree /force", timeoutMs: 5000);
                             continue; // Don't set xusbExists, let creation code handle it
                         }
-                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                        DeviceManager.RestartDevice(candidate);
                         xusbExists = true;
                         break;
                     }
@@ -1854,8 +1884,7 @@ class Program
                         string xid = $@"ROOT\XNACOMPOSITE\{ri:D4}";
                         if (CM_Locate_DevNodeW(out uint _, xid, 0) == 0)
                         {
-                            RunProcess("pnputil.exe", $"/disable-device \"{xid}\"", timeoutMs: 5000);
-                            RunProcess("pnputil.exe", $"/enable-device \"{xid}\"", timeoutMs: 5000);
+                            DeviceManager.RestartDevice(xid);
                         }
                     }
                 }
@@ -1874,7 +1903,7 @@ class Program
                             cfgKey2.SetValue("CompanionInstanceId", candidate, RegistryValueKind.String);
                         using (var legKey2 = Registry.LocalMachine.CreateSubKey(REG_PATH))
                             legKey2.SetValue("CompanionInstanceId", candidate, RegistryValueKind.String);
-                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
+                        DeviceManager.RestartDevice(candidate);
                         Thread.Sleep(3000);
                         // Fix XUSB DeviceClasses SymbolicLink — PnP leaves it empty for root UMDF2.
                         // Without SymbolicLink, WGI XusbGameControllerProvider can't discover the companion.
@@ -2402,7 +2431,7 @@ class Program
         }
 
         Console.Write("\n  Cleaning up devices... ");
-        // Quick cleanup for live switch — just remove device nodes
+        // Fast cleanup using CM APIs — no pnputil process spawning
         try
         {
             using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
@@ -2413,7 +2442,7 @@ class Program
                         || sub.Equals("HMCompanion", StringComparison.OrdinalIgnoreCase)
                         || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase))
                         foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 3000);
+                            DeviceManager.RemoveDevice($@"ROOT\{sub}\{inst}", timeoutMs: 3000);
                 }
         }
         catch { }

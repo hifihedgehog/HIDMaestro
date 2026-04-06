@@ -213,6 +213,25 @@ public static class DeviceManager
         return WaitForDeviceRemoval(instanceId, timeoutMs);
     }
 
+    [DllImport("CfgMgr32.dll")]
+    static extern uint CM_Disable_DevNode(uint dnDevInst, uint ulFlags);
+
+    [DllImport("CfgMgr32.dll")]
+    static extern uint CM_Enable_DevNode(uint dnDevInst, uint ulFlags);
+
+    /// <summary>
+    /// Restarts a device by disabling and re-enabling it. No process spawning.
+    /// </summary>
+    public static bool RestartDevice(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS)
+            return false;
+        CM_Disable_DevNode(devInst, 0);
+        Thread.Sleep(100); // Brief pause for PnP to process
+        CM_Enable_DevNode(devInst, 0);
+        return true;
+    }
+
     /// <summary>
     /// Finds the HID child device instance ID for a given parent.
     /// Returns null if no child found.
