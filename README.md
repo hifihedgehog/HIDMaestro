@@ -289,7 +289,17 @@ WinExInput Interface:
 | PnP device node creation (pnputil) | ~13ms |
 | PnP device node removal (pnputil) | ~11ms |
 
-Measured from the moment the new test app instance launches to when the controller is detectable by DirectInput and XInput. Includes cleanup of previous profile's devices.
+Hot-plug timing measured from the moment the new test app instance launches to when the controller is detectable. Includes cleanup of previous profile's devices.
+
+### Report Latency
+
+| Metric | Measured |
+|--------|----------|
+| Input data update rate | ~65 Hz (15.5ms average) |
+| Minimum update interval | 4.6ms |
+| XInput poll response | <0.1ms (data available immediately on poll) |
+
+The driver's shared-file timer polls at ~8ms intervals. The effective data update rate depends on how fast the input source writes to the shared file. XInput reads are essentially instantaneous — the data is already in the companion's memory buffer when polled.
 
 ## Why UMDF2 Is Enough
 
