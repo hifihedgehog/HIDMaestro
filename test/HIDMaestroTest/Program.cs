@@ -878,7 +878,7 @@ class Program
                 }
                 if (CM_Locate_DevNodeW(out uint _, instId, 0) == 0)
                 {
-                    RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                    DeviceManager.RemoveDevice(instId);
                 }
             }
         }
@@ -899,7 +899,7 @@ class Program
                             foreach (var instName in vidKey.GetSubKeyNames())
                             {
                                 string instId = $@"ROOT\{subName}\{instName}";
-                                RunProcess("pnputil.exe", $"/remove-device \"{instId}\" /subtree", timeoutMs: 5000);
+                                DeviceManager.RemoveDevice(instId);
                             }
                         }
                     }
@@ -1053,8 +1053,12 @@ class Program
                 RunProcess("pnputil.exe", $"/restart-device \"{instId}\"");
             }
 
-            // Wait for device to enumerate
-            Thread.Sleep(3000);
+            // Wait for HID child to enumerate (event-driven, no sleep)
+            string devInstId = profile.UsesUpperFilter
+                ? $@"ROOT\VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00\0000"
+                : $@"ROOT\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00\0000";
+            if (!DeviceManager.WaitForHidChild(devInstId))
+                Console.Write("(HID child timeout) ");
 
             // Fix name after xinputhid loads
             string displayName = profile.DeviceDescription ?? profile.ProductString;
@@ -1145,8 +1149,7 @@ class Program
             if (rootInstId != null)
             {
                 // Remove and recreate to force fresh WUDFHost with latest DLL
-                RunProcess("pnputil.exe", $"/remove-device \"{rootInstId}\" /subtree");
-                Thread.Sleep(2000);
+                DeviceManager.RemoveDevice(rootInstId);
                 if (profile != null)
                     CreateDeviceNode(profile, infPath);
                 else
@@ -1229,7 +1232,6 @@ class Program
         RunPowerShell("create_node.ps1");
 
         Console.WriteLine("OK");
-        Thread.Sleep(3000); // Wait for HID child to enumerate
     }
 
     // ── Find and open HID child device ──
@@ -1383,7 +1385,7 @@ class Program
                                       (dd != null && dd.Contains("HIDMaestro")) ||
                                       hwIds.Any(h => h != null && h.Contains("HIDMaestro"));
                         if (isOurs)
-                            RunProcess("pnputil.exe", $"/remove-device \"{sysId}\"", timeoutMs: 5000);
+                            DeviceManager.RemoveDevice(sysId);
                     }
                 }
                 catch { }
