@@ -453,26 +453,24 @@ class Program
                 try { proc.Kill(); proc.WaitForExit(3000); killedOther = true; } catch { }
             }
         }
-        // If we killed another instance, retry cleanup until orphaned devices are gone
-        if (killedOther)
+        // Always clean orphaned devices at startup — handles crashes, force-kills, reboots
         {
-            for (int attempt = 0; attempt < 10; attempt++)
+            try
             {
-                CleanupGhostDevices();
-                // Check if any HIDMaestro VID_ devices remain
-                bool anyLeft = false;
-                try
-                {
-                    using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-                    if (enumKey != null)
-                        foreach (var sub in enumKey.GetSubKeyNames())
-                            if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
-                                if (CM_Locate_DevNodeW(out uint _, $@"ROOT\{sub}\0000", 0) == 0)
-                                    anyLeft = true;
-                }
-                catch { }
-                if (!anyLeft) break;
-                Thread.Sleep(500);
+                using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+                if (enumKey != null)
+                    foreach (var sub in enumKey.GetSubKeyNames())
+                        if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
+                            foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
+            }
+            catch { }
+            // Also remove companions
+            for (int i = 2; i <= 10; i++)
+            {
+                string sysId = $@"ROOT\SYSTEM\{i:D4}";
+                if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
+                    RunProcess("pnputil.exe", $"/remove-device \"{sysId}\" /subtree", timeoutMs: 5000);
             }
         }
 

@@ -12,7 +12,7 @@ namespace HIDMaestroTest;
 public static class DriverBuilder
 {
     static readonly string RepoRoot = Path.GetFullPath(Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
     static readonly string BuildDir = Path.Combine(RepoRoot, "build");
     static readonly string DriverDir = Path.Combine(RepoRoot, "driver");
     static readonly string IncludeDir = Path.Combine(RepoRoot, "include");
@@ -38,20 +38,30 @@ public static class DriverBuilder
 
     static (int exitCode, string output) Run(string cmd, int timeoutMs = 60_000)
     {
-        var psi = new ProcessStartInfo
+        // Write command to a temp batch file to avoid quoting issues with cmd /c
+        string batFile = Path.Combine(Path.GetTempPath(), $"hm_build_{Guid.NewGuid():N}.cmd");
+        File.WriteAllText(batFile, $"@echo off\r\n{cmd}\r\n");
+        try
         {
-            FileName = "cmd.exe",
-            Arguments = $"/c {cmd}",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        using var proc = Process.Start(psi)!;
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(timeoutMs);
-        return (proc.ExitCode, stdout + stderr);
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c \"{batFile}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using var proc = Process.Start(psi)!;
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit(timeoutMs);
+            return (proc.ExitCode, stdout + stderr);
+        }
+        finally
+        {
+            try { File.Delete(batFile); } catch { }
+        }
     }
 
     /// <summary>Builds HIDMaestro.dll (main HID driver) from driver.c.</summary>
