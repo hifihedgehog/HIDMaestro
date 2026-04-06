@@ -640,6 +640,9 @@ class Program
     static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0, bool functionMode = false)
     {
         using var key = Registry.LocalMachine.CreateSubKey(REG_PATH);
+        // DeviceInstanceId: used by driver to create XUSB registry entry
+        // (PnP suppresses WDF XUSB registration under mshidumdf)
+        key.SetValue("DeviceInstanceId", $@"ROOT\VID_{vid:X4}&PID_{pid:X4}&IG_00\0000", RegistryValueKind.String);
         // FunctionMode: skip filter mode so driver can register XUSB on HID device.
         // Needed for Xbox 360 HID mode: XUSB on HID → DI uses XInput mapping (5 axes).
         key.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
@@ -962,12 +965,9 @@ class Program
         }
         else if (profile.VendorId == 0x045E)
         {
-            // Xbox HID mode: &IG_ so Chrome filters from RawInput.
-            // NO VID_045E in path so WGI doesn't recognize as Xbox HID.
-            // Chrome sees XInput only (companion) → separate triggers.
-            // DI reads HID (combined Z = 5 axes, 10 buttons via HID attributes VID 045E).
-            enumerator = "HIDMaestro&IG_00";
-            hwId = $"root\\HIDMaestro&IG_00";
+            // Xbox HID mode: &IG_ for Chrome/SDL3 filtering + FunctionMode enables WinExInput
+            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
+            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
             classGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da"); // HIDClass
         }
         else

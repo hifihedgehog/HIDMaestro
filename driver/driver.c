@@ -514,16 +514,43 @@ EvtDeviceAdd(
      * In filter mode these calls succeed but PnP suppresses the interfaces. */
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+    /* Force XUSB interface into DeviceClasses registry.
+     * PnP suppresses WDF's XUSB registration under mshidumdf. We write
+     * the registry entry directly so DI sees XUSB at enumeration time. */
+    {
+        HKEY hCfg;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+            WCHAR devId[256];
+            DWORD sz = sizeof(devId);
+            if (RegQueryValueExW(hCfg, L"DeviceInstanceId", NULL, NULL, (LPBYTE)devId, &sz) == ERROR_SUCCESS) {
+                WCHAR devIdHash[256];
+                WCHAR *src = devId, *dst = devIdHash;
+                while (*src) { *dst++ = (*src == L'\\') ? L'#' : *src; src++; }
+                *dst = 0;
+                /* Build: SYSTEM\CCS\Control\DeviceClasses\{XUSB}\##?#<hash>#{XUSB}\# */
+                WCHAR path[1024];
+                WCHAR *p = path;
+                static const WCHAR prefix[] = L"SYSTEM\\CurrentControlSet\\Control\\DeviceClasses\\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\##?#";
+                static const WCHAR guid[] = L"#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}\\#";
+                RtlCopyMemory(p, prefix, sizeof(prefix)-2); p += (sizeof(prefix)/2)-1;
+                WCHAR *h = devIdHash; while (*h) *p++ = *h++;
+                RtlCopyMemory(p, guid, sizeof(guid)); p += (sizeof(guid)/2)-1;
+                HKEY hKey;
+                if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+                    DWORD enabled = 1;
+                    RegSetValueExW(hKey, L"DeviceEnabled", 0, REG_DWORD, (LPBYTE)&enabled, sizeof(enabled));
+                    RegCloseKey(hKey);
+                }
+            }
+            RegCloseKey(hCfg);
+        }
+    }
     WdfDeviceCreateDeviceInterface(device,
         (LPGUID)&USB_DEVICE_INTERFACE_GUID, NULL);
-    /* WinExInput — WGI needs this on the device with HID Game Pad identity
-     * for GamepadAdded to fire (Chrome browser STANDARD GAMEPAD entry). */
-    {
-        UNICODE_STRING refStr;
-        RtlInitUnicodeString(&refStr, L"XI_00");
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
-    }
+    /* WinExInput: SKIP on main HID device — companion provides WinExInput.
+     * If WinExInput is on the HID device, WGI reads HID combined Z triggers.
+     * With WinExInput only on companion (which has XUSB), WGI might
+     * read from companion's XUSB instead → separate triggers. */
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
