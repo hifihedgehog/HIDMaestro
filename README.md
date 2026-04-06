@@ -13,7 +13,7 @@ Every existing virtual controller solution requires you to give something up:
 - **DsHidMini** creates virtual controllers but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
 - **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
-**HIDMaestro needs none of that.** It runs entirely in user mode. It signs with any code signing certificate. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
+**HIDMaestro needs none of that.** It runs entirely in user mode. It works with self-signed test certificates — no purchased certificate required. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
 
 ## What Makes It Different
 
@@ -21,7 +21,7 @@ Every existing virtual controller solution requires you to give something up:
 HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. A standard code signing certificate (or even a self-signed test cert during development) is all it takes.
 
 ### Exact Hardware Identity
-Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -81,7 +81,7 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 | Kernel driver required | **No** | Yes | No (UMDF2) | Yes |
 | EV certificate required | **No** | Yes | No | Yes |
 | Physical hardware required | **No** | No | Yes (DS3) | No |
-| Arbitrary controller identity | **Yes** | No (2 types) | No (DS3 only) | No (fixed) |
+| Profile-defined controller identity | **Yes** | No (2 types) | No (DS3 only) | No (fixed) |
 | Bluetooth bus type spoof | **Yes** | No | No | No |
 | Single browser gamepad entry | **Yes** | Yes | N/A | No |
 | XInput with separate triggers | **Yes** | Yes | Yes | No |
@@ -309,6 +309,43 @@ The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as chil
 - **Auth-chip controllers.** Some platforms (PS4/PS5 online, Nintendo Switch Online) require cryptographic authentication from the controller hardware. HIDMaestro cannot replicate authentication chips.
 - **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output — vendor extensions require per-controller work.
 - **XUSB companion creates a second device node.** Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager.
+
+## How to Reproduce the Validation
+
+Each validation result above was produced with these tools:
+
+| Check | Tool | Command / Method |
+|-------|------|-----------------|
+| DirectInput axes/buttons | Python `ctypes` + `winmm.joyGetDevCapsW` | `validate.py` |
+| XInput slots/triggers | Python `ctypes` + `xinput1_4.XInputGetState` | `validate.py` |
+| SDL3/HIDAPI identity | Python `hid.enumerate()` | `validate.py` |
+| Browser Gamepad | Chrome/Edge → `navigator.getGamepads()` | Manual or `gamepad_test.html` |
+| WGI/WinExInput | `pnputil /enum-interfaces` | `validate.py` |
+| Device tree | `Get-PnpDevice` (PowerShell) | Manual |
+| joy.cpl | Windows Game Controllers control panel | Manual |
+
+To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python test/validate.py <profile-id>` in a separate terminal.
+
+## Glossary
+
+| Term | Meaning |
+|------|---------|
+| **XUSB** | Xbox USB protocol. The device interface GUID (`{EC87F1E3-...}`) that `xinput1_4.dll` discovers to find Xbox controllers. |
+| **WinExInput** | Windows Extended Input. A device interface GUID (`{6C53D5FD-...}`) that WGI uses to fire `GamepadAdded` events for browser detection. |
+| **XUSB Companion** | A separate UMDF2 device (`HMXInput.dll`) that handles XUSB IOCTLs for XInput. Needed because `mshidumdf` suppresses XUSB on HID devices. |
+| **GameInput mapping** | Registry entries at `HKLM\...\GameInput\Devices\{VID}{PID}...` that tell WGI how to map HID axes/buttons to the Gamepad interface. |
+| **&IG_** | "Interface Group" marker in Xbox device paths. Chrome and HIDAPI skip devices with this in the path; SDL3 falls through to its RawInput backend. |
+| **Vx/Vy** | HID velocity usages (0x40/0x41). Invisible to DirectInput's axis mapper but enumerated by GameInput — used to carry separate trigger values. |
+| **mshidumdf** | Microsoft's kernel-mode HID minidriver proxy that hosts UMDF2 HID drivers. |
+
+## Security and Scope
+
+HIDMaestro replicates the public-facing identity and input/output behavior of game controllers. It does **not**:
+
+- Replicate cryptographic authentication (PS4/PS5 auth chips, Nintendo Switch pairing)
+- Implement vendor-private protocols unless explicitly added to a profile
+- Bypass anti-cheat systems (virtual devices are detectable by kernel-level anti-cheat)
+- Modify or intercept data from physical controllers
 
 ## Credits
 
