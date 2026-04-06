@@ -1,8 +1,8 @@
 # HIDMaestro
 
-**The first virtual game controller that's indistinguishable from real hardware — without kernel drivers, EV certificates, or reboots.**
+**A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.**
 
-HIDMaestro creates virtual game controllers that work perfectly across every Windows input API. Games, emulators, browsers, and input libraries all see genuine hardware. No compromises, no workarounds, no kernel mode.
+HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines.
 
 ## Why This Matters
 
@@ -13,7 +13,7 @@ Every existing virtual controller solution requires you to give something up:
 - **DsHidMini** creates virtual controllers but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
 - **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
-**HIDMaestro needs none of that.** It runs entirely in user mode. It signs with any code signing certificate. It creates and removes controllers instantly without rebooting. And every API — DirectInput, XInput, SDL3, Chrome Gamepad API — sees exactly what real hardware would produce.
+**HIDMaestro needs none of that.** It runs entirely in user mode. It signs with any code signing certificate. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
 
 ## What Makes It Different
 
@@ -21,7 +21,7 @@ Every existing virtual controller solution requires you to give something up:
 HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. A standard code signing certificate (or even a self-signed test cert during development) is all it takes.
 
 ### Exact Hardware Identity
-Pick any controller — Xbox 360, Xbox Series X, DualSense, flight stick, racing wheel — and HIDMaestro becomes that controller. Not "similar to" or "compatible with." The exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Every API at Once
 Most solutions get one or two APIs right. HIDMaestro gets all of them simultaneously:
@@ -169,6 +169,25 @@ Controller profiles are JSON files in `profiles/`:
 ```
 
 The descriptor field contains the raw HID report descriptor as hex. The test app parses it, builds input reports, and feeds data through the shared file. Adding a new controller is a matter of capturing its descriptor and writing a JSON file.
+
+## Why UMDF2 Is Enough
+
+A common assumption is that virtual game controllers require kernel-mode drivers. Here's why UMDF2 works:
+
+- **HID class driver is already in the kernel.** Windows ships `mshidumdf.sys` which acts as a kernel-mode HID minidriver proxy. Our UMDF2 DLL runs in user mode but the HID class stack sees a real HID device.
+- **XInput discovery uses device interfaces, not bus type.** `xinput1_4.dll` finds controllers through the XUSB device interface GUID. A UMDF2 driver can register this interface from user mode.
+- **GameInput reads HID reports, not driver internals.** WGI/GameInput reads from the HID preparsed data and report descriptors — it doesn't care whether the underlying driver is kernel or user mode.
+- **SDL3 and HIDAPI check device paths and attributes.** Bus type, VID/PID, and device path strings are all settable from user mode via SetupDI and CM APIs.
+
+The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as children of a bus, or intercept internal kernel IOCTLs. HIDMaestro works around this by using a companion device for XUSB and root-enumerated device nodes for the HID stack.
+
+## Known Limitations
+
+- **No force feedback / haptics output passthrough yet.** The driver accepts SET_STATE (rumble) IOCTLs but doesn't forward them to physical hardware. This is a data-routing feature, not an architectural limitation.
+- **Single instance per profile currently.** Multi-controller support (e.g., four Xbox 360 controllers simultaneously) has foundational support in the code but is not yet validated end-to-end.
+- **Auth-chip controllers.** Some platforms (PS4/PS5 online, Nintendo Switch Online) require cryptographic authentication from the controller hardware. HIDMaestro cannot replicate authentication chips.
+- **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output — vendor extensions require per-controller work.
+- **XUSB companion creates a second device node.** Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager.
 
 ## Credits
 
