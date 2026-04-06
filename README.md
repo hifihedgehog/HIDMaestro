@@ -172,7 +172,7 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 
 ## Validation Results
 
-Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with test signing enabled and a locally generated self-signed certificate trusted on the machine. Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
+Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally generated self-signed certificate added to the machine's Root and TrustedPublisher stores (no `bcdedit /set testsigning` required). Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
 
 ### Summary
 
