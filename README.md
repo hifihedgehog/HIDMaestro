@@ -170,6 +170,51 @@ Controller profiles are JSON files in `profiles/`:
 
 The descriptor field contains the raw HID report descriptor as hex. The test app parses it, builds input reports, and feeds data through the shared file. Adding a new controller is a matter of capturing its descriptor and writing a JSON file.
 
+## Validation Results
+
+Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200). Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
+
+### Xbox 360 Controller (Wired)
+
+| Check | Result |
+|-------|--------|
+| DirectInput axes | 5 (X, Y, Rx, Ry, Z combined) |
+| DirectInput buttons | 10 |
+| DirectInput VID:PID | 045E:028E |
+| XInput slots | 1 |
+| XInput triggers | Separate (LT and RT independent) |
+| SDL3/HIDAPI | Detected via XInput, &IG_ path |
+| Browser Gamepad | "Xbox 360 Controller (XInput STANDARD GAMEPAD)" |
+| Browser triggers | Separate (via Vx/Vy + GameInput mapping) |
+| WGI/WinExInput | 1 enabled interface |
+| Duplicates | None |
+
+### Xbox Series X|S Controller (Bluetooth)
+
+| Check | Result |
+|-------|--------|
+| DirectInput axes | 5 |
+| DirectInput buttons | 16 (Win11 xinputhid standard) |
+| DirectInput VID:PID | 045E:0B13 |
+| XInput slots | 1 |
+| XInput triggers | Separate |
+| SDL3/HIDAPI | bus_type = Bluetooth |
+| BTHLEDEVICE spoof | Confirmed (HIDAPI bus_type=2) |
+| Browser Gamepad | Detected, separate triggers |
+| WGI/WinExInput | 1+ enabled interfaces |
+| Duplicates | None |
+
+### Hot-Plug Timing
+
+| Operation | Measured Time |
+|-----------|--------------|
+| Profile switch (Xbox 360 → Xbox Series BT) | ~0.7s to DirectInput + XInput visible |
+| Profile switch (Xbox Series BT → Xbox 360) | ~0.7s to XInput visible |
+| PnP device node creation (pnputil) | ~13ms |
+| PnP device node removal (pnputil) | ~11ms |
+
+Measured from the moment the new test app instance launches to when the controller is detectable by DirectInput and XInput. Includes cleanup of previous profile's devices.
+
 ## Why UMDF2 Is Enough
 
 A common assumption is that virtual game controllers require kernel-mode drivers. Here's why UMDF2 works:
