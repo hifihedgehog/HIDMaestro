@@ -89,6 +89,43 @@ class Program
         }
     }
 
+    static void SetDeviceDescription(string instanceId, string description)
+    {
+        // CM_Set_DevNode_PropertyW for DeviceDesc is overridden by INF string reference.
+        // Write directly to the Enum registry key instead.
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                $@"SYSTEM\CurrentControlSet\Enum\{instanceId}", writable: true);
+            if (key != null)
+            {
+                key.SetValue("DeviceDesc", description, RegistryValueKind.String);
+                key.SetValue("FriendlyName", description, RegistryValueKind.String);
+            }
+            // Also set on HID child
+            if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == 0
+                && CM_Get_Child(out uint childInst, devInst, 0) == 0)
+            {
+                uint idLen = 0;
+                CM_Get_Device_ID_Size(out idLen, childInst, 0);
+                var buf = new char[idLen + 1];
+                CM_Get_Device_IDW(childInst, buf, (uint)buf.Length, 0);
+                string childId = new string(buf, 0, (int)idLen);
+                using var childKey = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Enum\{childId}", writable: true);
+                if (childKey != null)
+                {
+                    childKey.SetValue("DeviceDesc", description, RegistryValueKind.String);
+                    childKey.SetValue("FriendlyName", description, RegistryValueKind.String);
+                }
+            }
+        }
+        catch { }
+    }
+
+    [DllImport("CfgMgr32.dll")]
+    static extern uint CM_Get_Device_ID_Size(out uint pulLen, uint dnDevInst, uint ulFlags);
+
     static void SetDeviceFriendlyName(string rootInstanceId, string name)
     {
         // DEVPKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
@@ -685,33 +722,17 @@ class Program
         string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Write OEMName + OEMData to Joystick\OEM registry.
-        // OEMData dwNumButtons overrides joyGetDevCaps button count (HID mode only).
-        string oemKey = $@"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
-        using var oemReg = Registry.CurrentUser.CreateSubKey(oemKey);
-        oemReg?.SetValue("OEMName", displayName, RegistryValueKind.String);
-
-        // Also write to HKLM for OEMData (HKCU doesn't have OEMData support)
+        // Write OEMName to Joystick\OEM registry (display name in joy.cpl).
+        string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
         try
         {
-            using var oemLm = Registry.LocalMachine.CreateSubKey(
-                $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}");
+            using var oemLm = Registry.LocalMachine.CreateSubKey(oemKeyPath);
             oemLm?.SetValue("OEMName", displayName, RegistryValueKind.String);
-            // OEMData: JOY_HWS flags + dwNumButtons
-            // flags: HASZ(1)+HASR(2)+HASU(4)+HASPOV(0x10)+ISGAMEPAD(0x1000) = 0x1017
-            byte[] oemData = new byte[8];
-            BitConverter.GetBytes(0x00001017).CopyTo(oemData, 0);
-            BitConverter.GetBytes(10).CopyTo(oemData, 4); // 10 buttons
-            oemLm?.SetValue("OEMData", oemData, RegistryValueKind.Binary);
-
-            // Axis Selection: hide axis 5 (Rz) by remapping to vendor usage
-            // This makes joyGetDevCaps report 5 axes instead of 6 (XUSB mapper only)
-            using var axKey = Registry.LocalMachine.CreateSubKey(
-                $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}\Axes\5");
-            axKey?.SetValue("", "Hidden", RegistryValueKind.String);
-            axKey?.SetValue("Attributes", new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x01, 0x00 }, RegistryValueKind.Binary);
+            // Remove any stale OEMData/Axes entries from previous versions
+            oemLm?.DeleteValue("OEMData", false);
+            try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", false); } catch { }
         }
-        catch { /* Requires elevation — set via deploy script */ }
+        catch { }
     }
 
     // ── Process runner ──
@@ -1220,6 +1241,7 @@ class Program
             ?? "Controller";
         if (rootInstId != null)
         {
+            SetDeviceDescription(rootInstId, dispName);
             SetBusReportedDeviceDesc(rootInstId, dispName);
             SetDeviceFriendlyName(rootInstId, dispName);
         }
@@ -1598,9 +1620,11 @@ class Program
         Console.Write("  Fixing device name... ");
         string displayName = profile.DeviceDescription ?? profile.ProductString;
         FixHidChildNames(displayName);
-        // Also set on root device (search both enumerator types)
+        // Also set on root device (search all possible enumerator types)
         foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
+            $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00",
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
+            "VID_045E&PID_028E&IG_00" })
         {
             for (int idx = 0; idx < 10; idx++)
             {

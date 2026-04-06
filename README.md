@@ -206,11 +206,14 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200). Each profile was de
 
 ### Screenshots
 
-**Xbox 360 Wired — joy.cpl**
-![joy.cpl showing Xbox 360 controller](docs/screenshot-joycpl-360-wired.png)
+**Xbox Series X|S Bluetooth** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+![Xbox Series BT across all tools](docs/screenshot-xbox-series-bt.png)
 
-**Xbox Series X|S Bluetooth — joy.cpl**
-![joy.cpl showing Xbox Series controller](docs/screenshot-joycpl-series-bt.png)
+**Xbox 360 Wired** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+![Xbox 360 Wired across all tools](docs/screenshot-xbox-360-wired.png)
+
+**DualSense (PS5)** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+![DualSense across all tools](docs/screenshot-dualsense.png)
 
 ### Tool Output Logs
 
