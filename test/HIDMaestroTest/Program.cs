@@ -1098,24 +1098,14 @@ class Program
 
     static bool EnsureDriverInstalled(ControllerProfile? profile = null)
     {
-        string dllPath = Path.Combine(BuildDir, "HIDMaestro.dll");
-        string driverSource = Path.Combine(RepoRoot, "driver", "driver.c");
-        string driverHeader = Path.Combine(RepoRoot, "driver", "driver.h");
-
-        bool needsBuild = !File.Exists(dllPath) ||
-            File.GetLastWriteTime(driverSource) > File.GetLastWriteTime(dllPath) ||
-            File.GetLastWriteTime(driverHeader) > File.GetLastWriteTime(dllPath);
-
-        bool driverInstalled = IsDriverInStore();
+        bool needsBuild = DriverBuilder.NeedsBuild();
+        bool driverInstalled = DriverBuilder.IsDriverInstalled();
 
         if (needsBuild || !driverInstalled)
         {
-            // Full deploy: build + sign + install + create node
-            string skipArg = needsBuild ? "" : "-SkipBuild";
-            var (_, output) = RunProcess("powershell.exe",
-                $"-ExecutionPolicy Bypass -File \"{Path.Combine(ScriptsDir, "full_deploy.ps1")}\" {skipArg}",
-                timeoutMs: 120_000, showOutput: true);
-            return output.Contains("Deploy Complete");
+            Console.WriteLine("  Driver deploy needed...");
+            if (!DriverBuilder.FullDeploy(rebuild: needsBuild))
+                return false;
         }
 
         // companionOnly: skip main HID device — XUSB companion provides DI + XInput + browser.
