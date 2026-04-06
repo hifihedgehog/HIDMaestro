@@ -136,30 +136,71 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Ensures the test signing certificate exists. Creates it if missing.</summary>
+    /// <summary>Ensures the test signing certificate exists and is trusted. Creates if missing.</summary>
     public static void EnsureTestCertificate()
     {
-        // Check if cert already exists in CurrentUser\My
-        var (rc, output) = Run("powershell -NoProfile -Command \"Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -eq 'CN=HIDMaestroTestCert' } | Select-Object -First 1 | ForEach-Object { $_.Thumbprint }\"");
-        if (rc == 0 && output.Trim().Length >= 40)
-            return; // Already exists
+        using var myStore = new System.Security.Cryptography.X509Certificates.X509Store(
+            System.Security.Cryptography.X509Certificates.StoreName.My,
+            System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
+        myStore.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
+        var existing = myStore.Certificates.Find(
+            System.Security.Cryptography.X509Certificates.X509FindType.FindBySubjectName,
+            "HIDMaestroTestCert", false);
 
-        Console.Write("  Creating test certificate... ");
-        string certFile = Path.Combine(Path.GetTempPath(), "HIDMaestroTestCert.cer");
+        System.Security.Cryptography.X509Certificates.X509Certificate2? cert = null;
 
-        // Create self-signed code signing cert in CurrentUser\My (has private key)
-        Run("powershell -NoProfile -Command \"" +
-            "New-SelfSignedCertificate -Type Custom -Subject 'CN=HIDMaestroTestCert' " +
-            "-FriendlyName 'HIDMaestro Test Signing' -CertStoreLocation 'Cert:\\CurrentUser\\My' " +
-            "-KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3') | " +
-            $"Export-Certificate -FilePath '{certFile}'\"");
+        if (existing.Count > 0)
+        {
+            cert = existing[0];
+        }
+        else
+        {
+            Console.Write("  Creating test certificate... ");
+            // Create via PowerShell (only API for self-signed on older .NET)
+            Run("powershell -NoProfile -Command \"" +
+                "New-SelfSignedCertificate -Type Custom -Subject 'CN=HIDMaestroTestCert' " +
+                "-FriendlyName 'HIDMaestro Test Signing' -CertStoreLocation 'Cert:\\CurrentUser\\My' " +
+                "-KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3')\"");
 
-        // Trust the cert for driver loading
-        Run($"certutil -f -addstore Root \"{certFile}\"");
-        Run($"certutil -f -addstore TrustedPublisher \"{certFile}\"");
+            myStore.Close();
+            using var myStore2 = new System.Security.Cryptography.X509Certificates.X509Store(
+                System.Security.Cryptography.X509Certificates.StoreName.My,
+                System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
+            myStore2.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
+            var created = myStore2.Certificates.Find(
+                System.Security.Cryptography.X509Certificates.X509FindType.FindBySubjectName,
+                "HIDMaestroTestCert", false);
+            if (created.Count > 0) cert = created[0];
+            Console.Write("OK ");
+        }
+        myStore.Close();
 
-        try { File.Delete(certFile); } catch { }
-        Console.WriteLine("OK");
+        if (cert == null) { Console.WriteLine("  CERT CREATION FAILED"); return; }
+
+        // Trust the cert in LocalMachine Root and TrustedPublisher using .NET APIs
+        // (avoids certutil/PowerShell elevation issues)
+        foreach (var storeName in new[] {
+            System.Security.Cryptography.X509Certificates.StoreName.Root,
+            System.Security.Cryptography.X509Certificates.StoreName.TrustedPublisher })
+        {
+            try
+            {
+                using var store = new System.Security.Cryptography.X509Certificates.X509Store(
+                    storeName, System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+                store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadWrite);
+                var found = store.Certificates.Find(
+                    System.Security.Cryptography.X509Certificates.X509FindType.FindByThumbprint,
+                    cert.Thumbprint, false);
+                if (found.Count == 0)
+                    store.Add(cert);
+                store.Close();
+            }
+            catch (Exception ex)
+            {
+                Console.Write($"(trust {storeName} failed: {ex.Message}) ");
+            }
+        }
+        Console.WriteLine("  Certificate ready.");
     }
 
     /// <summary>Signs DLLs with the test certificate from CurrentUser\My store.</summary>
@@ -216,7 +257,12 @@ public static class DriverBuilder
         {
             string path = Path.Combine(BuildDir, inf);
             if (!File.Exists(path)) continue;
-            Run($"pnputil /add-driver \"{path}\" /install", timeoutMs: 15_000);
+            var (rc, output) = Run($"pnputil /add-driver \"{path}\" /install", timeoutMs: 15_000);
+            if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
+            {
+                Console.WriteLine($"\n    pnputil failed for {inf}: {output.Trim()}");
+                return false;
+            }
         }
         return true;
     }

@@ -2273,9 +2273,41 @@ class Program
                 RunProcess(hidHideCli, "--cloak-off --inv-off", timeoutMs: 3000);
         }
 
-        // Clean up virtual devices on exit
+        // Clean up virtual devices on exit — use pnputil which forces WUDFHost unload
         Console.Write("\n  Cleaning up devices... ");
-        CleanupGhostDevices();
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey != null)
+            {
+                foreach (var sub in enumKey.GetSubKeyNames())
+                {
+                    if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
+                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
+                    if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
+                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            if (int.TryParse(inst, out int idx) && idx >= 2)
+                                if (CM_Locate_DevNodeW(out uint _, $@"ROOT\SYSTEM\{inst}", 0) == 0)
+                                    RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
+                }
+            }
+        }
+        catch { }
+        // Also clean interface registries
+        foreach (var guid in new[] { "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
+        {
+            try
+            {
+                using var classKey = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
+                if (classKey != null)
+                    foreach (var sub in classKey.GetSubKeyNames())
+                        if (sub.Contains("ROOT#"))
+                            try { classKey.DeleteSubKeyTree(sub); } catch { }
+            }
+            catch { }
+        }
         Console.WriteLine("OK");
 
         return 0;
