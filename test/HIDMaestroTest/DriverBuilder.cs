@@ -38,15 +38,15 @@ public static class DriverBuilder
 
     static (int exitCode, string output) Run(string cmd, int timeoutMs = 60_000)
     {
-        // Write command to a temp batch file to avoid quoting issues with cmd /c
-        string batFile = Path.Combine(Path.GetTempPath(), $"hm_build_{Guid.NewGuid():N}.cmd");
+        // Use a temp batch file to handle complex quoting (vcvarsall paths with spaces).
+        // The batch file inherits the caller's elevation since UseShellExecute=false.
+        string batFile = Path.Combine(Path.GetTempPath(), $"hm_{Guid.NewGuid():N}.cmd");
         File.WriteAllText(batFile, $"@echo off\r\n{cmd}\r\n");
         try
         {
             var psi = new ProcessStartInfo
             {
-                FileName = "cmd.exe",
-                Arguments = $"/c \"{batFile}\"",
+                FileName = batFile,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -256,16 +256,16 @@ public static class DriverBuilder
             Console.WriteLine("OK");
         }
 
+        Console.Write("  Removing old packages... ");
+        RemoveOldDriverPackages();
+        Console.WriteLine("OK");
+
         Console.Write("  Signing... ");
         if (!SignDrivers()) return false;
         Console.WriteLine("OK");
 
         Console.Write("  Generating catalogs... ");
         GenerateCatalogs();
-        Console.WriteLine("OK");
-
-        Console.Write("  Removing old packages... ");
-        RemoveOldDriverPackages();
         Console.WriteLine("OK");
 
         Console.Write("  Installing drivers... ");

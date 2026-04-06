@@ -562,8 +562,10 @@ EvtDeviceAdd(
                 }
             }
         }
-        /* Always register WinExInput — needed for WGI GamepadAdded (browser detection).
-         * Main device's WinExInput is suppressed by PnP under mshidumdf. */
+        /* Register WinExInput only when XUSB is needed (non-xinputhid profiles).
+         * For xinputhid profiles (XusbNeeded=0), xinputhid provides both XInput
+         * AND WinExInput. Companion WinExInput would create a duplicate XInput slot. */
+        if (xusbNeeded)
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");

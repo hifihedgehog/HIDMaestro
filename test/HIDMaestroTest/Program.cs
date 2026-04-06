@@ -453,18 +453,35 @@ class Program
                 try { proc.Kill(); proc.WaitForExit(3000); killedOther = true; } catch { }
             }
         }
-        // Always clean orphaned virtual controller devices at startup.
-        // Only removes VID_ devices (virtual controllers), NOT ROOT\SYSTEM companions.
-        // Companions are managed by the emulate flow, not startup cleanup.
+        // Always clean ALL orphaned HIDMaestro devices at startup — controllers AND companions.
+        // Uses event-driven DeviceManager.RemoveDevice which waits for actual removal.
         {
             try
             {
                 using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
                 if (enumKey != null)
+                {
                     foreach (var sub in enumKey.GetSubKeyNames())
+                    {
                         if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
+                        {
                             foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
+                                DeviceManager.RemoveDevice($@"ROOT\{sub}\{inst}");
+                        }
+                        if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
+                        {
+                            foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            {
+                                if (int.TryParse(inst, out int idx) && idx >= 2)
+                                {
+                                    string sysId = $@"ROOT\SYSTEM\{inst}";
+                                    if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
+                                        DeviceManager.RemoveDevice(sysId);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             catch { }
         }
@@ -930,11 +947,11 @@ class Program
         }
         catch { }
 
-        // Clean ghost XUSB interface registrations only.
-        // XUSB ghosts cause dead XInput slots. WinExInput must be PRESERVED
-        // for browser STANDARD GAMEPAD detection (xinputhid registers it).
+        // Clean ALL ghost interface registrations — XUSB and WinExInput.
+        // Both cause duplicate XInput slots if left behind.
         string[] interfaceGuids = {
-            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB only
+            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
+            @"{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
         };
         foreach (var guid in interfaceGuids)
         {
