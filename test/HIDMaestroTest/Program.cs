@@ -441,6 +441,8 @@ class Program
     const uint FILE_SHARE_RW = 3;
 
     static CancellationTokenSource _cts = new();
+    static volatile string? _switchToProfile = null;
+    static bool _driversInstalled = false; // Skip FullDeploy on live switches
 
     static bool IsElevated()
     {
@@ -521,7 +523,7 @@ class Program
 
         return args[0].ToLower() switch
         {
-            "emulate" => EmulateProfile(args.Length > 1 ? args[1] : ""),
+            "emulate" => EmulateWithSwitching(args.Length > 1 ? args[1] : ""),
             "xbox"    => TestXbox360(),
             "ds5"     => TestDualSense(),
             "list"    => ListProfiles(),
@@ -1177,14 +1179,18 @@ class Program
 
     static bool EnsureDriverInstalled(ControllerProfile? profile = null)
     {
-        bool needsBuild = DriverBuilder.NeedsBuild();
-        bool driverInstalled = DriverBuilder.IsDriverInstalled();
-
-        if (needsBuild || !driverInstalled)
+        if (!_driversInstalled)
         {
-            Console.WriteLine("  Driver deploy needed...");
-            if (!DriverBuilder.FullDeploy(rebuild: needsBuild))
-                return false;
+            bool needsBuild = DriverBuilder.NeedsBuild();
+            bool driverInstalled = DriverBuilder.IsDriverInstalled();
+
+            if (needsBuild || !driverInstalled)
+            {
+                Console.WriteLine("  Driver deploy needed...");
+                if (!DriverBuilder.FullDeploy(rebuild: needsBuild))
+                    return false;
+            }
+            _driversInstalled = true;
         }
 
         // companionOnly: skip main HID device — XUSB companion provides DI + XInput + browser.
@@ -1340,20 +1346,12 @@ class Program
                     var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
                     if (HidD_GetAttributes(handle, ref attrs))
                     {
-                        // Prefer our HIDMaestro device (HIDCLASS or IG_ in path) over real hardware
-                        bool isOurDevice = path.Contains("HIDCLASS", StringComparison.OrdinalIgnoreCase)
-                            || (path.Contains("IG_", StringComparison.OrdinalIgnoreCase)
-                                && path.Contains("root", StringComparison.OrdinalIgnoreCase));
-                        if (isOurDevice)
+                        // Match by VID/PID AND verify it's our root-enumerated device
+                        if (attrs.VendorID == targetVid && attrs.ProductID == targetPid
+                            && path.Contains("root", StringComparison.OrdinalIgnoreCase))
                         {
                             Console.WriteLine($"  Found: VID={attrs.VendorID:X4} PID={attrs.ProductID:X4} @ {path}");
                             return handle;
-                        }
-                        if (attrs.VendorID == targetVid && attrs.ProductID == targetPid)
-                        {
-                            // Real hardware — skip
-                            handle.Dispose();
-                            continue;
                         }
                     }
 
@@ -1371,6 +1369,70 @@ class Program
         }
 
         return null;
+    }
+
+    // ── Live profile switching ──
+
+    static int EmulateWithSwitching(string initialProfileId)
+    {
+        string currentProfileId = initialProfileId;
+
+        // Start console input thread for live profile switching
+        var inputThread = new Thread(() =>
+        {
+            while (!_cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    string? line = Console.ReadLine();
+                    if (line == null) break;
+                    line = line.Trim();
+                    if (string.IsNullOrEmpty(line)) continue;
+                    if (line.Equals("quit", StringComparison.OrdinalIgnoreCase) ||
+                        line.Equals("exit", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _cts.Cancel();
+                        break;
+                    }
+                    // Treat input as profile ID to switch to
+                    _switchToProfile = line;
+                }
+                catch { break; }
+            }
+        }) { IsBackground = true, Name = "ProfileSwitchInput" };
+        inputThread.Start();
+
+        while (!_cts.Token.IsCancellationRequested)
+        {
+            _switchToProfile = null;
+
+            int result = EmulateProfile(currentProfileId);
+
+            // Check if we're switching profiles or exiting
+            string? nextProfile = _switchToProfile;
+            if (nextProfile != null && !_cts.Token.IsCancellationRequested)
+            {
+                var switchSw = Stopwatch.StartNew();
+                // Verify the profile exists before switching
+                var db = ProfileDatabase.Load(GetProfilesDir());
+                var next = db.GetById(nextProfile) ?? db.Search(nextProfile).FirstOrDefault();
+                if (next != null && next.HasDescriptor)
+                {
+                    Console.WriteLine($"\n  === Switching to {next.Name} ===");
+                    currentProfileId = next.Id;
+                    continue; // Loop back to EmulateProfile with new ID
+                }
+                else
+                {
+                    Console.WriteLine($"\n  Profile '{nextProfile}' not found or has no descriptor. Still running {currentProfileId}.");
+                    _switchToProfile = null;
+                    continue;
+                }
+            }
+            break; // Ctrl+C or error — exit
+        }
+
+        return 0;
     }
 
     // ── Emulate any profile ──
@@ -1402,6 +1464,7 @@ class Program
         if (!profile.HasDescriptor)
             return Error($"Profile '{profile.Id}' has no HID descriptor. Cannot emulate.\n  This profile needs a descriptor captured from physical hardware.");
 
+        var setupSw = Stopwatch.StartNew();
         Console.WriteLine($"-- Emulating: {profile.Name} --\n");
         Console.WriteLine($"  Profile:  {profile.Id}");
         Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
@@ -2029,7 +2092,9 @@ class Program
             : HidReportBuilder.Parse(profileDesc ?? descriptor);
         reportBuilder.PrintLayout();
 
-        Console.WriteLine("\n  Sending input via SetFeature + XInput. Ctrl+C to stop.\n");
+        setupSw.Stop();
+        Console.WriteLine($"\n  Setup complete in {setupSw.ElapsedMilliseconds}ms");
+        Console.WriteLine("  Sending input. Type a profile ID to switch, 'quit' to exit.\n");
         timeBeginPeriod(1); // Enable 1ms timer resolution for 1000 Hz loop
 
         // Feature report: Report ID 0x02 + enough data for the input report
@@ -2075,7 +2140,7 @@ class Program
         int count = 0;
         int failCount = 0;
 
-        while (!_cts.Token.IsCancellationRequested)
+        while (!_cts.Token.IsCancellationRequested && _switchToProfile == null)
         {
             double t = sw.Elapsed.TotalSeconds;
             double angle = t * Math.PI * 2 * 0.5;
@@ -2337,7 +2402,21 @@ class Program
         }
 
         Console.Write("\n  Cleaning up devices... ");
-        RemoveAllHIDMaestroDevices();
+        // Quick cleanup for live switch — just remove device nodes
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey != null)
+                foreach (var sub in enumKey.GetSubKeyNames())
+                {
+                    if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HMCompanion", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase))
+                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 3000);
+                }
+        }
+        catch { }
         Console.WriteLine("OK");
 
         return 0;
