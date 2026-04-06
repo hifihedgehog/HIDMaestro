@@ -413,6 +413,7 @@ EvtDeviceAdd(
          * For xinputhid profiles, duplicate XUSB is handled by companion being on
          * a different device than the xinputhid HID child. */
         WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL);
+        WdfDeviceSetDeviceInterfaceState(device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
         {
             UNICODE_STRING refStr;
             RtlInitUnicodeString(&refStr, L"XI_00");
