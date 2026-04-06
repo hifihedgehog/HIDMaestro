@@ -436,6 +436,7 @@ class Program
     {
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; _cts.Cancel(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { RemoveAllHIDMaestroDevices(); } catch { } };
 
         // Safety net: clean up devices if the process exits unexpectedly
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
@@ -453,38 +454,7 @@ class Program
                 try { proc.Kill(); proc.WaitForExit(3000); killedOther = true; } catch { }
             }
         }
-        // Always clean ALL orphaned HIDMaestro devices at startup — controllers AND companions.
-        // Uses event-driven DeviceManager.RemoveDevice which waits for actual removal.
-        {
-            try
-            {
-                using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-                if (enumKey != null)
-                {
-                    foreach (var sub in enumKey.GetSubKeyNames())
-                    {
-                        // Remove ALL HIDMaestro devices: VID_ controllers, XnaComposite companions, System companions
-                        bool shouldClean = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                            || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase);
-                        if (shouldClean)
-                        {
-                            foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
-                        }
-                        // Also clean legacy System-class companions (index >= 2, skip ViGEmBus/HidHide)
-                        if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
-                        {
-                            foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                            {
-                                if (int.TryParse(inst, out int idx) && idx >= 2)
-                                    RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
+        RemoveAllHIDMaestroDevices();
 
         // Auto-elevate for commands that need admin
         if (args.Length > 0 && ElevatedCommands.Contains(args[0].ToLower()) && !IsElevated())
@@ -766,6 +736,50 @@ class Program
         if (showOutput && !string.IsNullOrWhiteSpace(combined))
             Console.WriteLine(combined.TrimEnd());
         return (proc.ExitCode, combined);
+    }
+
+    /// <summary>Removes ALL HIDMaestro virtual devices, companions, and interface registries.</summary>
+    static void RemoveAllHIDMaestroDevices()
+    {
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey != null)
+            {
+                foreach (var sub in enumKey.GetSubKeyNames())
+                {
+                    bool isController = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
+                    bool isCompanion = sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HMCompanion", StringComparison.OrdinalIgnoreCase);
+                    if (isController || isCompanion)
+                    {
+                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
+                    }
+                    if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                            if (int.TryParse(inst, out int idx) && idx >= 2)
+                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
+                    }
+                }
+            }
+        }
+        catch { }
+        // Clean interface registries (XUSB + WinExInput)
+        foreach (var guid in new[] { "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
+        {
+            try
+            {
+                using var classKey = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
+                if (classKey != null)
+                    foreach (var sub in classKey.GetSubKeyNames())
+                        if (sub.Contains("ROOT#"))
+                            try { classKey.DeleteSubKeyTree(sub); } catch { }
+            }
+            catch { }
+        }
     }
 
     static void RunPowerShell(string script, bool showOutput = false)
@@ -1721,8 +1735,8 @@ class Program
             }
             if (!xusbExists)
             {
-                // XnaComposite class — must match hidmaestro_xusb.inf
-                var sysGuid = new Guid("D61CA365-5AF4-4486-998B-9DB4734C6CA3");
+                // System class device + XnaComposite INF driver. PnP matches by hardware ID.
+                var sysGuid = new Guid("4D36E97D-E325-11CE-BFC1-08002BE10318");
                 IntPtr dis2 = SetupDiCreateDeviceInfoList(ref sysGuid, IntPtr.Zero);
                 if (dis2 != new IntPtr(-1))
                 {
@@ -1731,7 +1745,7 @@ class Program
                     var diHandle = System.Runtime.InteropServices.GCHandle.Alloc(diBuf, GCHandleType.Pinned);
                     string xusbHw = "root\\HIDMaestroXUSB\0\0";
                     byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
-                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "XnaComposite", ref sysGuid,
+                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "HMCompanion", ref sysGuid,
                         "HIDMaestro XInput Companion", IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
                     {
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis2, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
@@ -1739,12 +1753,23 @@ class Program
                     }
                     diHandle.Free();
                     SetupDiDestroyDeviceInfoList(dis2);
-                    Thread.Sleep(3000);
+                    // Force driver installation + restart any XnaComposite devices
+                    string xusbInfPath = Path.Combine(BuildDir, "hidmaestro_xusb.inf");
+                    RunProcess("pnputil.exe", $"/add-driver \"{xusbInfPath}\" /install", timeoutMs: 10000);
+                    // Restart all XnaComposite devices to pick up the driver
+                    for (int ri = 0; ri < 5; ri++)
+                    {
+                        string xid = $@"ROOT\XNACOMPOSITE\{ri:D4}";
+                        if (CM_Locate_DevNodeW(out uint _, xid, 0) == 0)
+                        {
+                            RunProcess("pnputil.exe", $"/disable-device \"{xid}\"", timeoutMs: 5000);
+                            RunProcess("pnputil.exe", $"/enable-device \"{xid}\"", timeoutMs: 5000);
+                        }
+                    }
                 }
             }
             // Restart XUSB companion to trigger driver binding
-            // Search both ROOT\SYSTEM and ROOT\XNACOMPOSITE (class depends on creation)
-            foreach (string prefix in new[] { @"ROOT\SYSTEM", @"ROOT\XNACOMPOSITE" })
+            foreach (string prefix in new[] { @"ROOT\HMCompanion", @"ROOT\SYSTEM", @"ROOT\XNACOMPOSITE" })
             for (int idx = 0; idx < 10; idx++)
             {
                 string candidate = $@"{prefix}\{idx:D4}";
@@ -1922,9 +1947,9 @@ class Program
         {
             Console.Write("  Opening XUSB interface... ");
             var xusbGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
-            for (int retry = 0; retry < 3 && xh == null; retry++)
+            for (int retry = 0; retry < 30 && xh == null; retry++)
             {
-                if (retry > 0) Thread.Sleep(2000);
+                if (retry > 0) Thread.Sleep(500);
                 IntPtr xDis = SetupDiGetClassDevsW(ref xusbGuid, IntPtr.Zero, IntPtr.Zero,
                     DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
                 if (xDis != new IntPtr(-1))
@@ -2281,41 +2306,8 @@ class Program
                 RunProcess(hidHideCli, "--cloak-off --inv-off", timeoutMs: 3000);
         }
 
-        // Clean up virtual devices on exit — use pnputil which forces WUDFHost unload
         Console.Write("\n  Cleaning up devices... ");
-        try
-        {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (enumKey != null)
-            {
-                foreach (var sub in enumKey.GetSubKeyNames())
-                {
-                    if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
-                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                            RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
-                    if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
-                        foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                            if (int.TryParse(inst, out int idx) && idx >= 2)
-                                if (CM_Locate_DevNodeW(out uint _, $@"ROOT\SYSTEM\{inst}", 0) == 0)
-                                    RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
-                }
-            }
-        }
-        catch { }
-        // Also clean interface registries
-        foreach (var guid in new[] { "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
-        {
-            try
-            {
-                using var classKey = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
-                if (classKey != null)
-                    foreach (var sub in classKey.GetSubKeyNames())
-                        if (sub.Contains("ROOT#"))
-                            try { classKey.DeleteSubKeyTree(sub); } catch { }
-            }
-            catch { }
-        }
+        RemoveAllHIDMaestroDevices();
         Console.WriteLine("OK");
 
         return 0;

@@ -322,11 +322,12 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Checks if any HIDMaestro driver is in the driver store.</summary>
+    /// <summary>Checks if ALL required HIDMaestro drivers are in the store.</summary>
     public static bool IsDriverInstalled()
     {
         var (_, output) = Run("pnputil /enum-drivers");
-        return output.Contains("hidmaestro", StringComparison.OrdinalIgnoreCase);
+        return output.Contains("hidmaestro.inf", StringComparison.OrdinalIgnoreCase)
+            && output.Contains("hidmaestro_xusb.inf", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Checks if source files are newer than built DLLs.</summary>
