@@ -13,12 +13,12 @@ Every existing virtual controller solution requires you to give something up:
 - **DsHidMini** creates virtual controllers but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
 - **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
-**HIDMaestro needs none of that.** It runs entirely in user mode. It works with self-signed test certificates — no purchased certificate required. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
+**HIDMaestro needs none of that.** It runs entirely in user mode. It works with locally generated self-signed certificates trusted by the target machine — no purchased certificate and no Windows test-signing boot mode required. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
 
 ## What Makes It Different
 
 ### No Kernel Driver
-HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. HIDMaestro is designed to work with locally generated self-signed test certificates; no purchased EV certificate is required.
+HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. HIDMaestro is designed to work with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
 
 ### Exact Hardware Identity
 Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
@@ -141,7 +141,7 @@ python test\validate.py xbox-360-wired
 ```
 
 The test app is fully self-contained. On first run it:
-1. Creates a test signing certificate (if needed)
+1. Creates a locally trusted self-signed certificate (if needed)
 2. Builds the driver DLLs from source
 3. Signs everything
 4. Installs driver packages
