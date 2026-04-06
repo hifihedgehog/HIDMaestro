@@ -767,7 +767,7 @@ xusb_start_timer:
     /* Poll timer: reads shared file every 4ms (~250Hz) for data injection */
     {
         WDF_TIMER_CONFIG timerConfig;
-        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerConfig, EvtSharedMemTimer, 4);
+        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerConfig, EvtSharedMemTimer, 1);
         WDF_OBJECT_ATTRIBUTES timerAttrs;
         WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
         timerAttrs.ParentObject = device;

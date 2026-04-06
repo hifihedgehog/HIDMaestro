@@ -319,6 +319,11 @@ class Program
 
     // ── P/Invoke ──
 
+    [DllImport("winmm.dll")]
+    static extern uint timeBeginPeriod(uint uPeriod);
+    [DllImport("winmm.dll")]
+    static extern uint timeEndPeriod(uint uPeriod);
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFileW(
         string lpFileName, uint dwDesiredAccess, uint dwShareMode,
@@ -2025,6 +2030,7 @@ class Program
         reportBuilder.PrintLayout();
 
         Console.WriteLine("\n  Sending input via SetFeature + XInput. Ctrl+C to stop.\n");
+        timeBeginPeriod(1); // Enable 1ms timer resolution for 1000 Hz loop
 
         // Feature report: Report ID 0x02 + enough data for the input report
         // Output Report buffer
@@ -2307,7 +2313,7 @@ class Program
                 Console.Write($"\r  #{count} gip[0-3]: {gLx2:X4} {gLy2:X4}  xi: {xLx} {xLy}  lx={lxNorm:F3} ly={lyNorm:F3}  ");
             }
 
-            Thread.Sleep(4); // ~250 Hz
+            Thread.Sleep(1); // ~1000 Hz with timeBeginPeriod(1)
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
@@ -2460,7 +2466,7 @@ class Program
             if (count % 100 == 0)
                 Console.Write($"\r  Reports: {count}  LX={lx,5} LY={ly,5}  ");
 
-            Thread.Sleep(4); // ~250 Hz
+            Thread.Sleep(1); // ~1000 Hz with timeBeginPeriod(1)
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
