@@ -466,7 +466,7 @@ class Program
                         if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
                         {
                             foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
-                                DeviceManager.RemoveDevice($@"ROOT\{sub}\{inst}");
+                                RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
                         }
                         if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
                         {
@@ -475,8 +475,10 @@ class Program
                                 if (int.TryParse(inst, out int idx) && idx >= 2)
                                 {
                                     string sysId = $@"ROOT\SYSTEM\{inst}";
-                                    if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
-                                        DeviceManager.RemoveDevice(sysId);
+                                    // Force full removal: pnputil + delete registry entry
+                                    RunProcess("pnputil.exe", $"/remove-device \"{sysId}\" /subtree /force", timeoutMs: 5000);
+                                    // If device node still exists in Error state, nuke the registry
+                                    try { Registry.LocalMachine.DeleteSubKeyTree($@"SYSTEM\CurrentControlSet\Enum\ROOT\SYSTEM\{inst}", false); } catch { }
                                 }
                             }
                         }

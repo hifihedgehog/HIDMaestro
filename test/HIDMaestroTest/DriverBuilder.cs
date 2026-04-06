@@ -177,28 +177,29 @@ public static class DriverBuilder
 
         if (cert == null) { Console.WriteLine("  CERT CREATION FAILED"); return; }
 
-        // Trust the cert in LocalMachine Root and TrustedPublisher using .NET APIs
-        // (avoids certutil/PowerShell elevation issues)
-        foreach (var storeName in new[] {
-            System.Security.Cryptography.X509Certificates.StoreName.Root,
-            System.Security.Cryptography.X509Certificates.StoreName.TrustedPublisher })
+        // Trust the cert by exporting and importing via certutil (runs in-process, inherits elevation)
+        string exportPath = Path.Combine(Path.GetTempPath(), "HIDMaestroTestCert.cer");
+        try
         {
-            try
+            File.WriteAllBytes(exportPath, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
+            // Use Process.Start directly (not Run/batch) to inherit elevation properly
+            foreach (string store in new[] { "Root", "TrustedPublisher" })
             {
-                using var store = new System.Security.Cryptography.X509Certificates.X509Store(
-                    storeName, System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
-                store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadWrite);
-                var found = store.Certificates.Find(
-                    System.Security.Cryptography.X509Certificates.X509FindType.FindByThumbprint,
-                    cert.Thumbprint, false);
-                if (found.Count == 0)
-                    store.Add(cert);
-                store.Close();
+                // UseShellExecute=true so certutil inherits proper elevation
+                var certutilPsi = new ProcessStartInfo
+                {
+                    FileName = "certutil.exe",
+                    Arguments = $"-f -addstore {store} \"{exportPath}\"",
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using var p = Process.Start(certutilPsi)!;
+                p.WaitForExit(10_000);
             }
-            catch (Exception ex)
-            {
-                Console.Write($"(trust {storeName} failed: {ex.Message}) ");
-            }
+        }
+        finally
+        {
+            try { File.Delete(exportPath); } catch { }
         }
         Console.WriteLine("  Certificate ready.");
     }
