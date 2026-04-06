@@ -1,140 +1,174 @@
 # HIDMaestro
 
-Universal game controller emulation for Windows. One virtual device, every API — DirectInput, XInput, SDL3, and browser Gamepad API — with exact hardware identity match.
+**The first virtual game controller that's indistinguishable from real hardware — without kernel drivers, EV certificates, or reboots.**
 
-## What It Does
+HIDMaestro creates virtual game controllers that work perfectly across every Windows input API. Games, emulators, browsers, and input libraries all see genuine hardware. No compromises, no workarounds, no kernel mode.
 
-HIDMaestro creates a virtual HID controller that is indistinguishable from real hardware across all Windows input APIs. Feed it data from any source — a physical controller, network stream, automation script — and every game, emulator, and browser sees a genuine controller.
+## Why This Matters
 
-- **DirectInput**: Correct axis count, button count, and VID/PID
-- **XInput**: Full gamepad with triggers, sticks, and rumble capability
-- **SDL3/HIDAPI**: Correct controller identity with Bluetooth bus type
-- **Browser Gamepad API**: Single STANDARD GAMEPAD entry with vibration
-- **No kernel driver**: Pure UMDF2 user-mode architecture
-- **No EV certificate**: Self-signed test certificates work
-- **No reboot**: Hot-plug device creation and removal
+Every existing virtual controller solution requires you to give something up:
 
-## Novel Technique: BTHLEDEVICE Bus Type Spoofing
+- **vJoy** needs a kernel driver that breaks with every Windows update. Community forks have to re-sign constantly. And it always shows up as "vJoy Device" — never as a real controller.
+- **ViGEmBus** needs a kernel driver AND an EV code signing certificate ($300+/year). It was retired because of these maintenance burdens.
+- **DsHidMini** only works with physical DualShock 3 hardware. No virtual controllers.
+- **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
-HIDMaestro introduces a previously undocumented technique for making virtual HID devices appear as Bluetooth controllers to HIDAPI and SDL3, **without any Bluetooth hardware, drivers, or kernel components**.
+**HIDMaestro needs none of that.** It runs entirely in user mode. It signs with any code signing certificate. It creates and removes controllers instantly without rebooting. And every API — DirectInput, XInput, SDL3, Chrome Gamepad API — sees exactly what real hardware would produce.
 
-### The Discovery
+## What Makes It Different
 
-HIDAPI's Windows backend detects bus type by checking the parent device node's **CompatibleIDs** registry property for the string `BTHLEDEVICE`. This property can be set from user-mode on ROOT-enumerated devices via `SetupDiSetDeviceRegistryPropertyW` with `SPDRP_COMPATIBLEIDS`.
+### No Kernel Driver
+HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. A standard code signing certificate (or even a self-signed test cert during development) is all it takes.
 
-By including `BTHLEDEVICE\{00001812-0000-1000-8000-00805f9b34fb}` in the CompatibleIDs at device creation time, HIDAPI reports `bus_type = HID_API_BUS_BLUETOOTH` — causing SDL3 to use its Bluetooth Xbox controller parsing path (hardcoded byte offsets) instead of the GIP wire protocol parser (which produces zeros for virtual devices).
+### Exact Hardware Identity
+Pick any controller — Xbox 360, Xbox Series X, DualSense, flight stick, racing wheel — and HIDMaestro becomes that controller. Not "similar to" or "compatible with." The exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
-### Why This Matters
+### Every API at Once
+Most solutions get one or two APIs right. HIDMaestro gets all of them simultaneously:
 
-Prior to this discovery, achieving Bluetooth identity on a virtual controller required a kernel-mode bus driver (KMDF) to set `DEVPKEY_Device_BusTypeGuid` via `WdfDeviceSetBusInformationForChildren`. This technique eliminates that requirement entirely.
+| API | What HIDMaestro Delivers |
+|-----|-------------------------|
+| **DirectInput** | Correct axes, buttons, POV, VID/PID |
+| **XInput** | Separate triggers, proper button mapping, single slot |
+| **SDL3/HIDAPI** | Correct identity, Bluetooth bus type spoof |
+| **Browser Gamepad** | STANDARD GAMEPAD with separate triggers |
+| **WGI (GameInput)** | Proper Gamepad promotion via GameInput registry |
 
-| Approach | Requires | Bus Type Target |
-|----------|----------|-----------------|
-| KMDF bus driver | Kernel driver + EV cert | `DEVPKEY_Device_BusTypeGuid` (for GameInput) |
-| **BTHLEDEVICE CompatibleIDs** | **User-mode only** | **HIDAPI `bus_type` (for SDL3)** |
+### Instant Hot-Plug
+Create a controller in milliseconds. Remove it in milliseconds. Switch between profiles — Xbox 360 to Xbox Series X to DualSense — with zero downtime and zero reboots. The previous controller vanishes cleanly and the new one appears immediately.
 
-No existing open-source project (ViGEmBus, DsHidMini, VHF, or others) uses this technique. HIDAPI performs no validation on the CompatibleIDs — it trusts the string match unconditionally.
+### Profile-Based
+Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory already includes Xbox 360, Xbox One, Xbox Series X|S, Elite controllers, and more.
 
-### The &IG_ Enumerator Trick
+## Novel Techniques
 
-A second discovery enables single-entry browser detection. By using `VID_*&PID_*&IG_00` as the device enumerator name, the HID child's device path contains `&IG_`, which:
+HIDMaestro introduces several techniques that have never been published or used in any open-source project.
 
-- **Chrome RawInput** skips (prevents duplicate raw HID gamepad entry)
-- **HIDAPI** skips (by design for XInput-handled devices)
-- **SDL3 RawInput backend** still detects the device (falls through from HIDAPI, maps by VID/PID from controller database)
-- **WGI** still fires GamepadAdded (uses WinExInput interface, not device path)
+### Velocity Usage Descriptor Trick
 
-The key insight: SDL3 has fallback backends. When HIDAPI skips a device, SDL3's RawInput backend detects it independently by VID/PID.
+**The breakthrough that makes Xbox 360 emulation perfect.**
 
-## Comparison with Existing Projects
+Real Xbox 360 controllers have a combined trigger axis (Z) in DirectInput — both triggers share one axis. But browsers and WGI need separate trigger values. Every previous solution had to choose: correct DI (5 axes, combined) or correct browser (separate triggers, 6 axes).
 
-| Feature | HIDMaestro | ViGEmBus | DsHidMini | vJoy | VHF |
-|---------|-----------|----------|-----------|------|-----|
-| **Kernel driver required** | No | Yes (KMDF) | No (UMDF2) | Yes (KMDF) | Yes (KMDF) |
-| **EV certificate required** | No | Yes | No | Yes | Yes |
-| **Physical hardware required** | No | No | Yes (DS3) | No | No |
-| **Arbitrary controller identity** | Yes (JSON profiles) | No (Xbox 360 + DS4 only) | No (DS3 modes only) | No (fixed joystick) | Yes (but kernel-only) |
-| **Bluetooth bus type spoofing** | Yes | No | No (real BT via BthPS3) | No | No |
-| **Single browser gamepad entry** | Yes | Yes | N/A | No | N/A |
-| **XInput** | Yes | Yes | Yes (XIH mode) | No | Depends on descriptor |
-| **DirectInput** | Yes | Yes | Yes | Yes | Depends on descriptor |
-| **SDL3/HIDAPI with correct identity** | Yes (BT bus type) | Partial | Yes (real HW) | Generic only | No |
-| **Hot-plug (no reboot)** | Yes | Yes | N/A (real HW) | No | Yes |
-| **Data-driven profiles** | Yes (any controller) | No (2 types) | No (5 fixed modes) | No (1 type) | N/A (framework) |
-| **Open source** | Yes (MIT) | Yes (BSD-3) | Yes (BSD-3) | Yes (MIT) | No (Microsoft) |
-| **Status** | Active | Retired | Active | Stale | Shipping (in-box) |
+HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput doesn't map velocity usages to any axis slot — it sees 5 axes. GameInput/WGI enumerates them as additional axes and reads real separate trigger data via the GameInput registry mapping.
 
-**What only HIDMaestro does:**
-- Spoofs Bluetooth bus type from user-mode (BTHLEDEVICE CompatibleIDs)
-- Achieves single browser entry without kernel driver (&IG_ enumerator trick)
-- Emulates any controller from a JSON profile without kernel components
-- Full API coverage (DirectInput + XInput + SDL3 + Browser) from pure user-mode
+**Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor. No other virtual controller has achieved this.**
+
+### BTHLEDEVICE Bus Type Spoofing
+
+HIDAPI detects Bluetooth controllers by checking for `BTHLEDEVICE` in the device's CompatibleIDs. HIDMaestro sets this property from user mode during device creation — no Bluetooth hardware, no kernel bus driver.
+
+SDL3 then uses its Bluetooth-specific controller parsing path, which handles the descriptor correctly. Without this spoof, SDL3's default parser produces zeros for certain virtual device configurations.
+
+### &IG_ Enumerator Trick
+
+By using `VID_*&PID_*&IG_00` as the device enumerator, the HID child's device path contains `&IG_`. This has three simultaneous effects:
+
+- **Chrome RawInput** skips it (prevents duplicate gamepad entries)
+- **HIDAPI** skips it (by design for XInput-handled devices)
+- **SDL3** still detects it (falls through to RawInput backend, maps by VID/PID)
+
+One string in a device path controls three different detection paths across three different libraries.
+
+### GameInput Registry Override
+
+Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro writes custom mappings that point the trigger axes to the velocity usage indices (5 and 6 instead of the default combined axis 4). This makes WGI's Gamepad object read actual separate trigger values from the Vx/Vy fields.
+
+## Comparison
+
+| Feature | HIDMaestro | ViGEmBus | DsHidMini | vJoy |
+|---------|-----------|----------|-----------|------|
+| Kernel driver required | **No** | Yes | No (UMDF2) | Yes |
+| EV certificate required | **No** | Yes | No | Yes |
+| Physical hardware required | **No** | No | Yes (DS3) | No |
+| Arbitrary controller identity | **Yes** | No (2 types) | No (DS3 only) | No (fixed) |
+| Bluetooth bus type spoof | **Yes** | No | No | No |
+| Single browser gamepad entry | **Yes** | Yes | N/A | No |
+| XInput with separate triggers | **Yes** | Yes | Yes | No |
+| DirectInput with correct axes | **Yes** | Yes | Yes | Partial |
+| SDL3 with correct identity | **Yes** | Partial | Yes (real HW) | No |
+| Hot-plug without reboot | **Yes** | Yes | N/A | No |
+| Data-driven profiles | **Yes** | No | No | No |
+| Status | **Active** | Retired | Active | Stale |
 
 ## Architecture
 
 ```
-                    +---------------------------+
-                    |    Shared File (input.bin) |
-                    |  SeqNo + HID Data + GIP   |
-                    +---------------------------+
-                           |             |
-                    +------+------+  +---+----+
-                    | Companion   |  | XUSB   |
-                    | HIDMaestro  |  | HMXInput|
-                    | .dll        |  | .dll   |
-                    +------+------+  +---+----+
-                           |             |
-                    +------+------+  +---+----+
-                    | ROOT\VID_*  |  | ROOT\  |
-                    | &IG_00\0000 |  | SYSTEM |
-                    | (HIDClass)  |  | (System)|
-                    +------+------+  +--------+
-                           |             |
-                      SDL3/DInput     XInput
-                      WGI/Browser     Browser
+User-Mode Test App
+  │ Writes input data to per-controller shared file
+  │ Manages device lifecycle (create, configure, remove)
+  │
+  ├──► Shared File (input_0.bin)
+  │     SeqNo(4) + HID Report(64) + GIP Data(14) = 86 bytes
+  │
+  ├──► Main HID Device (HIDMaestro.dll via mshidumdf)
+  │     ROOT\VID_045E&PID_028E&IG_00\0000
+  │     ├─ HID descriptor with Vx/Vy velocity triggers
+  │     ├─ Timer reads shared file → HID READ_REPORT
+  │     ├─ USB + WinExInput interfaces
+  │     └─ BTHLEDEVICE CompatibleIDs (Bluetooth profiles)
+  │
+  └──► XUSB Companion (HMXInput.dll, XnaComposite class)
+        ROOT\HMCompanion\0000
+        ├─ XUSB interface → XInput discovery
+        ├─ WinExInput interface → WGI GamepadAdded
+        ├─ Timer reads GipData from shared file
+        └─ Handles GET_STATE/GET_CAPABILITIES/SET_STATE IOCTLs
 ```
 
-**Gamepad Companion** (`HIDMaestro.dll` via `mshidumdf`):
-- UMDF2 HID minidriver with timer-based input from shared file
-- Registers USB + WinExInput interfaces (no XUSB — prevents duplicate XInput)
-- BLE-compatible HID descriptor with Report ID 0x01
-- BTHLEDEVICE CompatibleIDs for Bluetooth bus type spoofing
+**Data flows:**
+- **DirectInput** ← HID READ_REPORT ← shared file (combined Z + Vx/Vy in descriptor)
+- **XInput** ← XUSB GET_STATE ← companion reads GipData from shared file
+- **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
+- **Browser** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
+- **Bluetooth ID** ��� HIDAPI checks CompatibleIDs → reports bus_type=BT
 
-**XUSB Companion** (`HMXInput.dll`):
-- Separate System-class UMDF2 function driver
-- Handles XUSB IOCTLs (GET_STATE, GET_CAPABILITIES, GET_INFORMATION)
-- Reads GIP-format data from shared file for XInput delivery
-- Registers XUSB interface only
+## Getting Started
 
-## Building
+Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10
 
-Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0
+```bash
+# Build and run (self-contained — handles cert, build, sign, install automatically)
+cd test\HIDMaestroTest
+dotnet build -c Debug
+bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
 
-```batch
-# Build main driver
-scripts\build.cmd
-
-# Build XUSB companion
-# (see tmp\build_companion.cmd for reference)
-```
-
-## Testing
-
-```batch
-# Run Xbox Series X|S BT profile
-test\HIDMaestroTest\bin\Debug\net10.0-windows\win-x64\HIDMaestroTest.exe emulate xbox-series-xs-bt
+# List available profiles
+HIDMaestroTest.exe list
 
 # Validate all APIs
-python test\validate.py
+python test\validate.py xbox-360-wired
 ```
+
+The test app is fully self-contained. On first run it:
+1. Creates a test signing certificate (if needed)
+2. Builds the driver DLLs from source
+3. Signs everything
+4. Installs driver packages
+5. Creates the virtual controller
+6. Starts feeding test input data
+
+No external scripts, no manual setup, no popups. Just the one console window.
 
 ## Profile System
 
-Controller profiles are JSON files in `profiles/` containing:
-- VID/PID and product strings
-- Raw HID report descriptor
-- Trigger mode (separate/combined)
-- Driver mode (xinputhid/hid)
+Controller profiles are JSON files in `profiles/`:
+
+```json
+{
+  "id": "xbox-360-wired",
+  "name": "Xbox 360 Controller (Wired)",
+  "vid": "0x045E",
+  "pid": "0x028E",
+  "productString": "Controller (XBOX 360 For Windows)",
+  "descriptor": "05010905a101a100093009311500...",
+  "inputReportSize": 18,
+  "triggerMode": "combined",
+  "connection": "usb"
+}
+```
+
+The descriptor field contains the raw HID report descriptor as hex. The test app parses it, builds input reports, and feeds data through the shared file. Adding a new controller is a matter of capturing its descriptor and writing a JSON file.
 
 ## Credits
 
