@@ -293,11 +293,11 @@ WinExInput Interface:
 | Operation | Measured Time |
 |-----------|--------------|
 | Cold start (first run — cert + build + sign + install + create) | ~18s |
-| Warm start (profile switch, drivers already installed) | <0.1s |
+| Warm start (profile switch, drivers already installed) | ~3-5s |
 | PnP device node creation | ~13ms |
 | PnP device node removal | ~11ms |
 
-Cold start includes certificate creation, driver compilation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after source changes. Subsequent profile switches reuse cached drivers and are near-instant.
+Cold start includes certificate creation, driver compilation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after source changes. Warm start includes process startup, cleanup of previous profile's devices, registry config, device creation, and companion initialization.
 
 ## Why UMDF2 Is Enough
 
