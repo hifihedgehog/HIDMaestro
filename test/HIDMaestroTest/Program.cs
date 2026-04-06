@@ -463,23 +463,21 @@ class Program
                 {
                     foreach (var sub in enumKey.GetSubKeyNames())
                     {
-                        if (sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
+                        // Remove ALL HIDMaestro devices: VID_ controllers, XnaComposite companions, System companions
+                        bool shouldClean = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                            || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase);
+                        if (shouldClean)
                         {
                             foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
                                 RunProcess("pnputil.exe", $"/remove-device \"ROOT\\{sub}\\{inst}\" /subtree", timeoutMs: 5000);
                         }
+                        // Also clean legacy System-class companions (index >= 2, skip ViGEmBus/HidHide)
                         if (sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase))
                         {
                             foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
                             {
                                 if (int.TryParse(inst, out int idx) && idx >= 2)
-                                {
-                                    string sysId = $@"ROOT\SYSTEM\{inst}";
-                                    // Force full removal: pnputil + delete registry entry
-                                    RunProcess("pnputil.exe", $"/remove-device \"{sysId}\" /subtree /force", timeoutMs: 5000);
-                                    // If device node still exists in Error state, nuke the registry
-                                    try { Registry.LocalMachine.DeleteSubKeyTree($@"SYSTEM\CurrentControlSet\Enum\ROOT\SYSTEM\{inst}", false); } catch { }
-                                }
+                                    RunProcess("pnputil.exe", $"/remove-device \"ROOT\\SYSTEM\\{inst}\" /subtree", timeoutMs: 5000);
                             }
                         }
                     }
@@ -1709,7 +1707,13 @@ class Program
                     var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
                     if (info.Contains("XInput") || info.Contains("HIDMaestro"))
                     {
-                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"");
+                        // Check if device is in Error state — if so, remove it and create fresh
+                        if (info.Contains("Error") || info.Contains("Problem"))
+                        {
+                            RunProcess("pnputil.exe", $"/remove-device \"{candidate}\" /subtree /force", timeoutMs: 5000);
+                            continue; // Don't set xusbExists, let creation code handle it
+                        }
+                        RunProcess("pnputil.exe", $"/restart-device \"{candidate}\"", timeoutMs: 5000);
                         xusbExists = true;
                         break;
                     }
@@ -1717,7 +1721,8 @@ class Program
             }
             if (!xusbExists)
             {
-                var sysGuid = new Guid("4D36E97D-E325-11CE-BFC1-08002BE10318");
+                // XnaComposite class — must match hidmaestro_xusb.inf
+                var sysGuid = new Guid("D61CA365-5AF4-4486-998B-9DB4734C6CA3");
                 IntPtr dis2 = SetupDiCreateDeviceInfoList(ref sysGuid, IntPtr.Zero);
                 if (dis2 != new IntPtr(-1))
                 {
@@ -1726,7 +1731,7 @@ class Program
                     var diHandle = System.Runtime.InteropServices.GCHandle.Alloc(diBuf, GCHandleType.Pinned);
                     string xusbHw = "root\\HIDMaestroXUSB\0\0";
                     byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
-                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "System", ref sysGuid,
+                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "XnaComposite", ref sysGuid,
                         "HIDMaestro XInput Companion", IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
                     {
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis2, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
@@ -1738,10 +1743,11 @@ class Program
                 }
             }
             // Restart XUSB companion to trigger driver binding
-            // (DIF_REGISTERDEVICE alone doesn't install the driver)
+            // Search both ROOT\SYSTEM and ROOT\XNACOMPOSITE (class depends on creation)
+            foreach (string prefix in new[] { @"ROOT\SYSTEM", @"ROOT\XNACOMPOSITE" })
             for (int idx = 0; idx < 10; idx++)
             {
-                string candidate = $@"ROOT\SYSTEM\{idx:D4}";
+                string candidate = $@"{prefix}\{idx:D4}";
                 if (CM_Locate_DevNodeW(out uint compInst, candidate, 0) == 0)
                 {
                     var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
