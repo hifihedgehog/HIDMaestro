@@ -437,6 +437,12 @@ class Program
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; _cts.Cancel(); };
 
+        // Safety net: clean up devices if the process exits unexpectedly
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { CleanupGhostDevices(); } catch { }
+        };
+
         // Single-instance: kill any other HIDMaestroTest processes
         int myPid = Environment.ProcessId;
         foreach (var proc in System.Diagnostics.Process.GetProcessesByName("HIDMaestroTest"))
@@ -2233,6 +2239,11 @@ class Program
             if (File.Exists(hidHideCli))
                 RunProcess(hidHideCli, "--cloak-off --inv-off", timeoutMs: 3000);
         }
+
+        // Clean up virtual devices on exit
+        Console.Write("\n  Cleaning up devices... ");
+        CleanupGhostDevices();
+        Console.WriteLine("OK");
 
         return 0;
     }
