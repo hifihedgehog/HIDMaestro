@@ -204,6 +204,79 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200). Each profile was de
 | WGI/WinExInput | 1+ enabled interfaces |
 | Duplicates | None |
 
+### Screenshots
+
+**Xbox 360 Wired — joy.cpl**
+![joy.cpl showing Xbox 360 controller](docs/screenshot-joycpl-360-wired.png)
+
+**Xbox Series X|S Bluetooth — joy.cpl**
+![joy.cpl showing Xbox Series controller](docs/screenshot-joycpl-series-bt.png)
+
+### Tool Output Logs
+
+<details>
+<summary>HIDAPI enumeration — Xbox 360 Wired (click to expand)</summary>
+
+```
+VID=0x045E PID=0x028E
+  Product: Controller (XBOX 360 For Windows)
+  Usage: page=0x0001 usage=0x0005
+  Bus type: 1 (USB)
+  Path: \\?\HID#VID_045E&PID_028E&IG_00#...
+  &IG_ in path: True
+```
+</details>
+
+<details>
+<summary>HIDAPI enumeration — Xbox Series BT (click to expand)</summary>
+
+```
+VID=0x045E PID=0x0B13
+  Product: HID-compliant game controller
+  Bus type: 2 (Bluetooth)
+  &IG_ in path: True
+```
+</details>
+
+<details>
+<summary>XInput state — Xbox 360 Wired (click to expand)</summary>
+
+```
+Slot 0: Connected  LT=87 RT=87 LX=3080 LY=29988 Buttons=0x1000
+Slot 1: Not connected
+Slot 2: Not connected
+Slot 3: Not connected
+```
+</details>
+
+<details>
+<summary>PnP device tree — Xbox 360 Wired (click to expand)</summary>
+
+```
+Status Class        FriendlyName                  InstanceId
+------ -----        ------------                  ----------
+OK     HIDClass     Game Controller               ROOT\VID_045E&PID_028E&IG_00\0000
+OK     XnaComposite HIDMaestro XInput Companion   ROOT\HMCOMPANION\0000
+OK     HIDClass     HID-compliant game controller HID\VID_045E&PID_028E&IG_00\...
+```
+</details>
+
+<details>
+<summary>XUSB + WinExInput interfaces (click to expand)</summary>
+
+```
+XUSB Interface:
+  Path:   \\?\ROOT#HMCOMPANION#0000#{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}
+  Device: ROOT\HMCOMPANION\0000
+  Status: Enabled
+
+WinExInput Interface:
+  Path:   \\?\ROOT#HMCOMPANION#0000#{6c53d5fd-6480-440f-b618-476750c5e1a6}\XI_00
+  Device: ROOT\HMCOMPANION\0000
+  Status: Enabled
+```
+</details>
+
 ### Hot-Plug Timing
 
 | Operation | Measured Time |
