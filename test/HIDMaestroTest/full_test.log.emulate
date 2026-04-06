@@ -1,17 +1,0 @@
-=== HIDMaestro Test Client ===
-
--- Emulating: Xbox One Controller (Original, Model 1537) --
-
-  Profile:  xbox-one-original
-  VID:PID:  0x045E:0x02D1
-  Product:  Controller
-  Using universal descriptor (116 bytes)
-
-  Writing profile to registry... OK
-  Recreating device node... OK
-  Opening HID device...   Found: VID=045E PID=02D1 @ \\?\hid#hidclass#1&2d595ca7&46&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}
-
-  Sending input via feature reports. Open joy.cpl to watch.
-  Ctrl+C to stop.
-
-  Reports: 100  t=1.0s    Reports: 200  t=2.4s    Reports: 300  t=3.6s    Reports: 400  t=4.6s    Reports: 500  t=5.5s    Reports: 600  t=7.0s    Reports: 700  t=8.6s    Reports: 800  t=9.9s    Reports: 900  t=10.9s    Reports: 1000  t=12.5s    Reports: 1100  t=14.0s    Reports: 1200  t=15.2s    Reports: 1300  t=16.1s    Reports: 1400  t=17.1s    Reports: 1500  t=18.6s    Reports: 1600  t=19.9s    Reports: 1700  t=20.8s    Reports: 1800  t=22.4s    Reports: 1900  t=23.8s    Reports: 2000  t=25.0s    Reports: 2100  t=26.1s    Reports: 2200  t=27.3s    Reports: 2300  t=28.1s    Reports: 2400  t=29.0s    Reports: 2500  t=29.9s    Reports: 2600  t=30.6s    Reports: 2700  t=31.4s    Reports: 2800  t=32.1s    Reports: 2900  t=32.8s    Reports: 3000  t=34.0s    Reports: 3100  t=35.0s    Reports: 3200  t=35.9s    Reports: 3300  t=37.3s    Reports: 3400  t=38.8s    Reports: 3500  t=40.0s    Reports: 3600  t=41.0s    Reports: 3700  t=42.4s    Reports: 3800  t=43.9s    Reports: 3900  t=45.1s    Reports: 4000  t=46.1s    Reports: 4100  t=47.7s    Reports: 4200  t=49.3s    Reports: 4300  t=50.4s    Reports: 4400  t=51.5s    Reports: 4500  t=52.6s    Reports: 4600  t=54.1s    Reports: 4700  t=55.5s    Reports: 4800  t=56.6s    Reports: 4900  t=58.2s    Reports: 5000  t=59.4s    Reports: 5100  t=60.4s    Reports: 5200  t=61.5s    Reports: 5300  t=62.5s    Reports: 5400  t=63.3s    Reports: 5500  t=64.4s    Reports: 5600  t=65.3s    Reports: 5700  t=66.5s    Reports: 5800  t=67.8s    Reports: 5900  t=68.7s    Reports: 6000  t=70.1s    Reports: 6100  t=71.2s    Reports: 6200  t=72.2s    Reports: 6300  t=73.2s    Reports: 6400  t=73.9s    Reports: 6500  t=74.8s    Reports: 6600  t=75.9s    Reports: 6700  t=77.5s    Reports: 6800  t=79.0s    Reports: 6900  t=80.1s    Reports: 7000  t=81.0s    Reports: 7100  t=81.9s    Reports: 7200  t=82.9s    Reports: 7300  t=83.9s    Reports: 7400  t=84.9s    Reports: 7500  t=86.0s    Reports: 7600  t=86.8s    Reports: 7700  t=87.5s    Reports: 7800  t=88.3s    Reports: 7900  t=89.4s    Reports: 8000  t=90.7s    Reports: 8100  t=91.7s    Reports: 8200  t=93.1s    Reports: 8300  t=94.6s    Reports: 8400  t=95.6s  

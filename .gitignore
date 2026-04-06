@@ -6,4 +6,9 @@ test/HIDMaestroTest/publish_out/
 *.cat
 *.user
 *.suo
+*.obj
+*.log
+*.log.*
 .vs/
+publish_out/
+xinput/
