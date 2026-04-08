@@ -1060,25 +1060,26 @@ class Program
         SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
     }
 
-    // ── Shared memory IPC (replaces high-frequency file writes) ──
-    // Per-controller named section in Global\ namespace, pagefile-backed.
-    // Layout matches HIDMAESTRO_SHARED_INPUT in driver.h: 86 bytes.
-    //   [0..3]   ULONG SeqNo (volatile, seqlock — odd = mid-write)
-    //   [4..7]   ULONG DataSize
-    //   [8..71]  UCHAR Data[64]
-    //   [72..85] UCHAR GipData[14]
+    // ── Shared memory IPC ──
+    // The actual IPC implementation lives in HIDMaestro.Internal.SharedMemoryIO.
+    // These thin forwarders preserve the existing test-app call sites while
+    // the SDK extraction is in progress. Direct callers should switch to
+    // SharedMemoryIO directly.
 
-    const int SHARED_INPUT_SIZE = 86;
-    static readonly Dictionary<int, IntPtr> _mappingHandles = new();
-    static readonly Dictionary<int, IntPtr> _mappingViews = new();
+    const int SHARED_INPUT_SIZE = SharedMemoryIO.SHARED_INPUT_SIZE;
 
-    [StructLayout(LayoutKind.Sequential)]
-    struct SECURITY_ATTRIBUTES { public uint nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+    static IntPtr EnsureSharedMapping(int controllerIndex)
+        => SharedMemoryIO.EnsureInputMapping(controllerIndex);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
-        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
+    static void WriteSharedInput(IntPtr view, ref uint seqNo, byte[] data, int dataLen, byte[] gipData)
+        => SharedMemoryIO.WriteInputFrame(view, ref seqNo, data, dataLen, gipData);
 
+    static void CleanupSharedMappings()
+        => SharedMemoryIO.Cleanup();
+
+    // P/Invokes still used by other parts of Program.cs (e.g. rumbletest
+    // checkout, hidorder probes, ad-hoc enumeration). These will move into
+    // SharedMemoryIO or a NativeMethods file as the extraction continues.
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
         uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
@@ -1086,120 +1087,11 @@ class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
 
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        string StringSecurityDescriptor, uint StringSDRevision,
-        out IntPtr SecurityDescriptor, IntPtr SecurityDescriptorSize);
-
-    [DllImport("kernel32.dll")]
-    static extern IntPtr LocalFree(IntPtr hMem);
-
-    /// <summary>Returns the view pointer for the given controller's shared mapping.
-    /// Creates the mapping if it doesn't exist yet. Returned pointer is valid for
-    /// the lifetime of the process (until cleanup at exit).</summary>
-    static IntPtr EnsureSharedMapping(int controllerIndex)
-    {
-        if (_mappingViews.TryGetValue(controllerIndex, out IntPtr existing))
-            return existing;
-
-        string name = $@"Global\HIDMaestroInput{controllerIndex}";
-
-        // SDDL: SYSTEM full, Admins full, LocalService FULL (so the driver can
-        // bump the OutputDebug counter), World read.
-        // LocalService is what WUDFHost runs as for UMDF2 reflector.
-        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
-        IntPtr sd = IntPtr.Zero;
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero))
-            throw new System.ComponentModel.Win32Exception();
-
-        SECURITY_ATTRIBUTES sa = new()
-        {
-            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            lpSecurityDescriptor = sd,
-            bInheritHandle = 0,
-        };
-        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
-        Marshal.StructureToPtr(sa, saPtr, false);
-
-        IntPtr hMap;
-        try
-        {
-            hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
-                0x04 /* PAGE_READWRITE */, 0, SHARED_INPUT_SIZE, name);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(saPtr);
-            LocalFree(sd);
-        }
-
-        if (hMap == IntPtr.Zero)
-            throw new System.ComponentModel.Win32Exception();
-
-        IntPtr view = MapViewOfFile(hMap, 0x04 /* FILE_MAP_WRITE */ | 0x02 /* FILE_MAP_READ */,
-            0, 0, (UIntPtr)SHARED_INPUT_SIZE);
-        if (view == IntPtr.Zero)
-        {
-            int err = Marshal.GetLastWin32Error();
-            CloseHandleNative(hMap);
-            throw new System.ComponentModel.Win32Exception(err);
-        }
-
-        // Zero-init (CreateFileMapping pages start zero, but be explicit).
-        // Importantly, set SeqNo to 0 — the driver detects "no change" on equal seq.
-        for (int i = 0; i < SHARED_INPUT_SIZE; i++)
-            Marshal.WriteByte(view, i, 0);
-
-        _mappingHandles[controllerIndex] = hMap;
-        _mappingViews[controllerIndex] = view;
-        return view;
-    }
-
     [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
     static extern bool CloseHandleNative(IntPtr hObject);
 
     [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "OpenFileMappingW", CharSet = CharSet.Unicode)]
     static extern IntPtr OpenFileMappingNative(uint dwDesiredAccess, bool bInheritHandle, string lpName);
-
-    /// <summary>Atomically publishes a new shared-input snapshot using a seqlock.
-    /// Single-writer (input loop) → many-readers (driver + companion) is safe lock-free.</summary>
-    static void WriteSharedInput(IntPtr view, ref uint seqNo, byte[] data, int dataLen, byte[] gipData)
-    {
-        // 1. Mark write in progress (odd seqNo)
-        uint pending = seqNo + 1;
-        Marshal.WriteInt32(view, 0, (int)pending);
-        Thread.MemoryBarrier();
-
-        // 2. Write payload (DataSize, Data, GipData)
-        Marshal.WriteInt32(view, 4, dataLen);
-        for (int i = 0; i < 64; i++)
-            Marshal.WriteByte(view, 8 + i, i < dataLen ? data[i] : (byte)0);
-        for (int i = 0; i < 14; i++)
-            Marshal.WriteByte(view, 72 + i, gipData[i]);
-
-        // 3. Mark write complete (even seqNo)
-        Thread.MemoryBarrier();
-        seqNo = pending + 1;
-        Marshal.WriteInt32(view, 0, (int)seqNo);
-    }
-
-    /// <summary>Releases all mappings on process exit.</summary>
-    static void CleanupSharedMappings()
-    {
-        foreach (var view in _mappingViews.Values)
-            if (view != IntPtr.Zero) UnmapViewOfFile(view);
-        _mappingViews.Clear();
-        foreach (var h in _mappingHandles.Values)
-            if (h != IntPtr.Zero) CloseHandleNative(h);
-        _mappingHandles.Clear();
-
-        foreach (var view in _outputViews.Values)
-            if (view != IntPtr.Zero) UnmapViewOfFile(view);
-        _outputViews.Clear();
-        foreach (var h in _outputHandles.Values)
-            if (h != IntPtr.Zero) CloseHandleNative(h);
-        _outputHandles.Clear();
-    }
 
     /* ========================================================================
      * OUTPUT PASSTHROUGH READER
@@ -1220,70 +1112,15 @@ class Program
      * Total: 264 bytes.
      * ====================================================================== */
 
-    const int SHARED_OUTPUT_SIZE = 4 + 1 + 1 + 2 + 256;
-    const byte OUT_SOURCE_HID_OUTPUT  = 0;
-    const byte OUT_SOURCE_HID_FEATURE = 1;
-    const byte OUT_SOURCE_XINPUT      = 2;
+    const int SHARED_OUTPUT_SIZE = SharedMemoryIO.SHARED_OUTPUT_SIZE;
+    const byte OUT_SOURCE_HID_OUTPUT  = SharedMemoryIO.OUT_SOURCE_HID_OUTPUT;
+    const byte OUT_SOURCE_HID_FEATURE = SharedMemoryIO.OUT_SOURCE_HID_FEATURE;
+    const byte OUT_SOURCE_XINPUT      = SharedMemoryIO.OUT_SOURCE_XINPUT;
 
-    static readonly Dictionary<int, IntPtr> _outputHandles = new();
-    static readonly Dictionary<int, IntPtr> _outputViews = new();
-
-    /// <summary>Create-or-open the output mapping for the given controller.
-    /// Returns the read view pointer; caller polls SeqNo for new packets.</summary>
+    /// <summary>Forwards to <see cref="SharedMemoryIO.EnsureOutputMapping"/>.
+    /// Kept as a thin wrapper while orchestration extraction is in progress.</summary>
     static IntPtr EnsureOutputMapping(int controllerIndex)
-    {
-        if (_outputViews.TryGetValue(controllerIndex, out IntPtr existing))
-            return existing;
-
-        string name = $@"Global\HIDMaestroOutput{controllerIndex}";
-
-        // OUTPUT direction: WUDFHost (LocalService) needs WRITE access — it's
-        // the producer for this section. Grant LS full access (GA), unlike
-        // the input direction where LS is read-only.
-        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out IntPtr sd, IntPtr.Zero))
-            throw new System.ComponentModel.Win32Exception();
-
-        SECURITY_ATTRIBUTES sa = new()
-        {
-            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            lpSecurityDescriptor = sd,
-            bInheritHandle = 0,
-        };
-        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
-        Marshal.StructureToPtr(sa, saPtr, false);
-
-        IntPtr hMap;
-        try
-        {
-            // CreateFileMapping with an existing name opens the existing object,
-            // matching the driver's intent (whichever side calls first wins; the
-            // other just attaches). PAGE_READWRITE so the read view sees writes.
-            hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
-                0x04 /* PAGE_READWRITE */, 0, SHARED_OUTPUT_SIZE, name);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(saPtr);
-            LocalFree(sd);
-        }
-        if (hMap == IntPtr.Zero)
-            throw new System.ComponentModel.Win32Exception();
-
-        IntPtr view = MapViewOfFile(hMap,
-            0x04 /* FILE_MAP_WRITE */ | 0x02 /* FILE_MAP_READ */,
-            0, 0, (UIntPtr)SHARED_OUTPUT_SIZE);
-        if (view == IntPtr.Zero)
-        {
-            int err = Marshal.GetLastWin32Error();
-            CloseHandleNative(hMap);
-            throw new System.ComponentModel.Win32Exception(err);
-        }
-
-        _outputHandles[controllerIndex] = hMap;
-        _outputViews[controllerIndex] = view;
-        return view;
-    }
+        => SharedMemoryIO.EnsureOutputMapping(controllerIndex);
 
     /// <summary>Polls the output mapping for the given controller and prints
     /// each new packet. Runs on a background thread until the cancellation
