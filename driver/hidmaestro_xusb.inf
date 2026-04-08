@@ -1,8 +1,8 @@
 ;
 ; HIDMaestro XUSB/WinExInput Companion — provides XInput + browser detection.
-; Compiled from driver.c with HIDMAESTRO_XUSB_MODE (function driver, no filter).
+; Built from driver/companion.c into HMXInput.dll (function driver, no filter).
 ; Registers XUSB (XInput) + WinExInput (WGI GamepadAdded) interfaces.
-; Reads input data from shared file for XInput GET_STATE responses.
+; Reads gamepad state from per-instance shared memory (Global\HIDMaestroInput<N>).
 ;
 
 [Version]

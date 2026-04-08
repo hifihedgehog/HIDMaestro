@@ -2508,11 +2508,6 @@ class Program
             inputReportByteLength: bleReportLen,
             functionMode: funcMode,
             controllerIndex: controllerIndex);
-        // XusbNeeded gates main device's XUSB registration (in the dead
-        // #ifdef HIDMAESTRO_XUSB_MODE block — kept for safety, harmless).
-        // The XUSB companion is created conditionally below based on UsesUpperFilter.
-        using (var cfgKey = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex)))
-            cfgKey.SetValue("XusbNeeded", 0, RegistryValueKind.DWord);
         Console.WriteLine("OK");
 
         // Ensure driver packages are in the store BEFORE creating any devices.
@@ -2767,12 +2762,6 @@ class Program
         // XUSB companion in that case produces a duplicate XInput slot.
         if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
-            // XUSB companion handles XInput — tell main device NOT to register XUSB
-            // (avoids duplicate XInput slot from main device's driver)
-            using (var cfgKey = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex)))
-                cfgKey.SetValue("XusbNeeded", 0, RegistryValueKind.DWord);
-            using (var legKey = Registry.LocalMachine.CreateSubKey(REG_PATH))
-                legKey.SetValue("XusbNeeded", 0, RegistryValueKind.DWord);
             Console.Write($"  Creating XUSB companion {controllerIndex}... ");
             // Each controller gets its own XUSB companion for independent XInput slots.
             // Check if THIS controller's companion already exists
