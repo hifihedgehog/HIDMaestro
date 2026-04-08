@@ -1566,6 +1566,82 @@ class Program
     /// We override with the profile's deviceDescription via direct registry write.
     /// </summary>
     /// <summary>
+    /// Final-pass friendly-name application for a specific controllerIndex.
+    /// Used by EmulateWithSwitching after Phase 1 to overcome a race where
+    /// per-controller renames during setup get clobbered by PnP driver-bind
+    /// on the first controller. Iterates ALL ROOT\* device classes
+    /// (VID_*&IG_00, HMCOMPANION, HIDClass) and matches by Device Parameters\
+    /// ControllerIndex.
+    /// </summary>
+    static void ApplyFriendlyNameForController(int controllerIndex, string name)
+    {
+        var fnKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 14
+        };
+        var ddKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
+            pid = 2
+        };
+        var brddKey = new DEVPROPKEY
+        {
+            fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
+            pid = 4
+        };
+        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+
+        void Apply(uint inst)
+        {
+            CM_Set_DevNode_PropertyW(inst, ref fnKey,   0x12, strBytes, (uint)strBytes.Length, 0);
+            CM_Set_DevNode_PropertyW(inst, ref ddKey,   0x12, strBytes, (uint)strBytes.Length, 0);
+            CM_Set_DevNode_PropertyW(inst, ref brddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
+        }
+
+        try
+        {
+            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (rootEnum == null) return;
+            foreach (var sub in rootEnum.GetSubKeyNames())
+            {
+                // Match HIDMaestro device classes only — never touch VHF/HidHide etc.
+                bool isOurClass = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
+                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase);
+                if (!isOurClass) continue;
+
+                using var subKey = rootEnum.OpenSubKey(sub);
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
+                {
+                    using var dpKey = Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                    if (dpKey == null) continue;
+                    var ci = dpKey.GetValue("ControllerIndex");
+                    int actual = ci is int v ? v : -1;
+                    if (actual != controllerIndex) continue;
+
+                    string instId = $@"ROOT\{sub}\{inst}";
+                    if (CM_Locate_DevNodeW(out uint devInst, instId, 0) != 0) continue;
+
+                    // Root device
+                    Apply(devInst);
+
+                    // Walk children (HID grandchildren etc.) and apply to all
+                    if (CM_Get_Child(out uint child, devInst, 0) == 0)
+                    {
+                        uint cur = child;
+                        do { Apply(cur); }
+                        while (CM_Get_Sibling(out cur, cur, 0) == 0);
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Sets the FriendlyName and DeviceDesc on the HIDMaestro root device(s)
     /// belonging to a specific controllerIndex (matched via Device Parameters
     /// registry value), and on their HID children. With controllerIndex=-1
@@ -1945,22 +2021,15 @@ class Program
         string dispName = (string?)Registry.LocalMachine.OpenSubKey(RegPathForIndex(controllerIndex))?.GetValue("DeviceDescription")
             ?? (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription")
             ?? "Controller";
-        if (rootInstId != null)
-        {
-            SetDeviceDescription(rootInstId, dispName);
-            SetBusReportedDeviceDesc(rootInstId, dispName);
-            SetDeviceFriendlyName(rootInstId, dispName);
-        }
-        // Find and rename the HID child (xinputhid sets it to "Xbox Wireless Controller")
-        // Use rootInstId if found, otherwise search known enumerators
+
+        // If rootInstId wasn't captured from the existing-device claim above
+        // (i.e. CreateDeviceNode just made a new one), find OUR new instance
+        // by ControllerIndex BEFORE renaming. Without this, the rename runs
+        // against null and the root device gets stuck with the INF default
+        // name "Game Controller".
         uint rootInst = 0;
-        if (rootInstId != null)
+        if (rootInstId == null)
         {
-            CM_Locate_DevNodeW(out rootInst, rootInstId, 0);
-        }
-        else
-        {
-            // Find our device by scanning for one with matching ControllerIndex
             string? enumer = profile?.UsesUpperFilter == true
                 ? $"VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00"
                 : $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00";
@@ -1979,6 +2048,18 @@ class Program
             }
             catch { }
         }
+        else
+        {
+            CM_Locate_DevNodeW(out rootInst, rootInstId, 0);
+        }
+
+        if (rootInstId != null)
+        {
+            SetDeviceDescription(rootInstId, dispName);
+            SetBusReportedDeviceDesc(rootInstId, dispName);
+            SetDeviceFriendlyName(rootInstId, dispName);
+        }
+
         if (rootInst != 0)
         {
             if (CM_Get_Child(out uint childInst, rootInst, 0) == 0)
@@ -2148,6 +2229,26 @@ class Program
             Console.WriteLine($"\n  --- Controller {i}: {currentIds[i]} ---");
             EmulateProfile(currentIds[i], controllerIndex: i, setupOnly: true);
         }
+
+        // Phase 1.5: Re-apply friendly names AFTER all setup is complete.
+        // The per-controller rename inside EmulateProfile races with PnP
+        // driver-bind for the FIRST controller — its CM_Set_DevNode_PropertyW
+        // calls happen before the new device's binding settles, so the
+        // FriendlyName/DeviceDesc writes get lost. Re-applying here, after
+        // all PnP activity is done, makes the writes stick reliably.
+        Console.Write("\n  Finalizing device names... ");
+        Thread.Sleep(2000);
+        {
+            var nameDb = ProfileDatabase.Load(GetProfilesDir());
+            for (int i = 0; i < currentIds.Length && i < 4; i++)
+            {
+                var p = nameDb.GetById(currentIds[i]);
+                if (p == null) continue;
+                string name = p.DeviceDescription ?? p.ProductString ?? "Controller";
+                ApplyFriendlyNameForController(i, name);
+            }
+        }
+        Console.WriteLine("OK");
 
         // Phase 2: Run input loops concurrently. inputLoopOnly=true skips ALL device
         // setup (Steps 0-3.6) and only opens handles + runs the input loop.
