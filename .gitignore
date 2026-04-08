@@ -12,3 +12,7 @@ test/HIDMaestroTest/publish_out/
 .vs/
 publish_out/
 xinput/
+
+# Python
+__pycache__/
+*.pyc
