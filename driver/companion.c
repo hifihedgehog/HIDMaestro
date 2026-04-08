@@ -40,8 +40,12 @@ typedef struct _COMPANION_CTX {
     ULONG ControllerIndex;
     WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
     WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
+    WCHAR OutputMappingName[64]; /* e.g. L"Global\HIDMaestroOutput0" */
     HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
     PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
+    HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
+    PVOID OutputMemPtr;        /* MapViewOfFile RW pointer for output */
+    ULONG OutputSeqNoLocal;    /* Last value we wrote (always increment) */
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -53,7 +57,22 @@ typedef struct {
     UCHAR Data[64];
     UCHAR GipData[14];
 } SHARED_INPUT;
+
+/* Mirror of HIDMAESTRO_SHARED_OUTPUT in driver.h. Companion does not include
+ * driver.h (it has its own context type and doesn't pull in HID headers), so
+ * the layout is duplicated here. Keep in sync. */
+typedef struct {
+    volatile ULONG SeqNo;
+    UCHAR  Source;       /* 0=HID output, 1=HID feature, 2=XInput rumble */
+    UCHAR  ReportId;
+    USHORT DataSize;
+    UCHAR  Data[256];
+} SHARED_OUTPUT;
 #pragma pack(pop)
+
+#define OUT_SOURCE_HID_OUTPUT  0
+#define OUT_SOURCE_HID_FEATURE 1
+#define OUT_SOURCE_XINPUT      2
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
@@ -64,9 +83,7 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
 
 static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 {
-    /* Lazy-open named section. RAM-only — no disk fallback.
-     * Test app creates the section before this device's first IOCTL,
-     * but we retry on every call until the section appears. */
+    /* Lazy-open named section. RAM-only — no disk fallback. */
     if (ctx->SharedMemPtr == NULL) {
         HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
         if (h == NULL) return FALSE;
@@ -97,6 +114,54 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
     PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
+    if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
+    if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
+}
+
+/* Open the per-controller output section. The test app pre-creates it with
+ * a permissive SDDL; we just attach. WUDFHost runs as LocalService and
+ * cannot create Global\ sections itself (no SeCreateGlobalPrivilege). */
+static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
+{
+    if (ctx->OutputMemPtr != NULL) return TRUE;
+
+    HANDLE h = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE,
+                                ctx->OutputMappingName);
+    if (h == NULL) return FALSE;
+
+    PVOID v = MapViewOfFile(h, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(SHARED_OUTPUT));
+    if (v == NULL) { CloseHandle(h); return FALSE; }
+
+    ctx->OutputMemHandle = h;
+    ctx->OutputMemPtr = v;
+    return TRUE;
+}
+
+static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
+                          const UCHAR *data, ULONG dataSize)
+{
+    if (!EnsureOutputMapping(ctx)) return;
+    if (dataSize > sizeof(((SHARED_OUTPUT*)0)->Data))
+        dataSize = sizeof(((SHARED_OUTPUT*)0)->Data);
+
+    volatile SHARED_OUTPUT *dst = (volatile SHARED_OUTPUT *)ctx->OutputMemPtr;
+
+    /* The companion has a single XUSB queue serializing IOCTLs per device,
+     * so two PublishOutput calls on the same controller can't race here.
+     * The driver and companion both write to the same section but they're
+     * delivering DIFFERENT events at different times — the latest-wins
+     * semantics are what the consumer wants either way. */
+    dst->Source = source;
+    dst->ReportId = reportId;
+    dst->DataSize = (USHORT)dataSize;
+    for (ULONG i = 0; i < dataSize; i++) dst->Data[i] = data[i];
+    MemoryBarrier();
+    /* Read-modify-write SeqNo from the section itself so we never go
+     * backwards relative to whatever the driver wrote. */
+    ULONG next = dst->SeqNo + 1;
+    if (next <= ctx->OutputSeqNoLocal) next = ctx->OutputSeqNoLocal + 1;
+    ctx->OutputSeqNoLocal = next;
+    dst->SeqNo = next;
 }
 
 NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
@@ -152,6 +217,13 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             static const WCHAR mapPrefix[] = L"Global\\HIDMaestroInput";
             p = ctx->SharedMappingName;
             for (int i = 0; mapPrefix[i]; i++) *p++ = mapPrefix[i];
+            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
+            *p = L'\0';
+
+            /* OUTPUT mapping: Global\HIDMaestroOutput<N> */
+            static const WCHAR outPrefix[] = L"Global\\HIDMaestroOutput";
+            p = ctx->OutputMappingName;
+            for (int i = 0; outPrefix[i]; i++) *p++ = outPrefix[i];
             *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
             *p = L'\0';
         }
@@ -294,7 +366,21 @@ void CompanionIoControl(
         break;
     }
 
-    case IOCTL_XUSB_SET_STATE:
+    case IOCTL_XUSB_SET_STATE: {
+        /* XInput rumble. Forward the wire-format vibration packet to the
+         * output shared section as source=XInput. The consumer interprets
+         * the bytes (typical packet is 5 bytes: cmd + size + lo motor +
+         * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION). */
+        PVOID rumbleBuf; size_t rumbleSize;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &rumbleBuf, &rumbleSize))
+            && rumbleSize >= 1) {
+            PublishOutput(ctx, OUT_SOURCE_XINPUT, 0,
+                          (const UCHAR*)rumbleBuf, (ULONG)rumbleSize);
+        }
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+        break;
+    }
+
     case IOCTL_XUSB_POWER_INFO:
         WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
         break;

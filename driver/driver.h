@@ -106,6 +106,14 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   ControllerIndex;
     WCHAR   ConfigRegPath[64];      /* e.g. L"SOFTWARE\\HIDMaestro\\Controller0" */
     WCHAR   SharedMappingName[64];  /* e.g. L"Global\\HIDMaestroInput0" */
+    WCHAR   OutputMappingName[64];  /* e.g. L"Global\\HIDMaestroOutput0" */
+
+    /* Output channel — host→device pass-through (rumble, haptics, FFB, LED).
+     * Driver/companion are dumb pass-throughs; the consumer (PadForge or test
+     * app) opens this section read-only and decodes by (Source, ReportId). */
+    HANDLE  OutputMemHandle;
+    PVOID   OutputMemPtr;
+    ULONG   OutputSeqNoLocal;       /* Last value we wrote (so we always increment) */
 
     /* Diagnostics */
     LONG    InputReportsSubmitted;
@@ -123,6 +131,37 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
     UCHAR           Data[64];        /* HID input report data (native descriptor format) */
     UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
 } HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
+
+/* Output passthrough section: written by driver/companion, read by consumer.
+ * Game sends rumble/haptics/FFB → we capture bytes and publish here.
+ * Latest-wins (no ring): old commands are stale and shouldn't be replayed.
+ * Total size: 4 + 1 + 1 + 2 + 256 = 264 bytes
+ *
+ * Source enum tells the consumer which API the game used:
+ *   0 = HID output report  (HidD_SetOutputReport, dinput8 PID, HIDAPI write)
+ *   1 = HID feature report (HidD_SetFeature)
+ *   2 = XInput rumble      (XInputSetState — companion-side)
+ *
+ * For Source=HID*, ReportId is the HID Report ID byte (0 if none).
+ * For Source=XInputRumble, ReportId is reserved (0); Data is the 5-byte
+ *   XINPUT_VIBRATION-style payload from the IOCTL_XUSB_SET_STATE input buffer.
+ *
+ * Consumer is expected to interpret bytes per (profile, Source, ReportId).
+ * The driver does NOT classify rumble vs haptic vs adaptive trigger — that
+ * distinction is semantic and lives in the consumer. */
+#define HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT   0
+#define HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE  1
+#define HIDMAESTRO_OUTPUT_SOURCE_XINPUT       2
+
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_OUTPUT {
+    volatile ULONG  SeqNo;           /* Incremented each write */
+    UCHAR           Source;          /* HIDMAESTRO_OUTPUT_SOURCE_* */
+    UCHAR           ReportId;        /* HID Report ID (0 if descriptor uses no IDs) */
+    USHORT          DataSize;        /* Bytes valid in Data[] */
+    UCHAR           Data[256];       /* Raw output payload */
+} HIDMAESTRO_SHARED_OUTPUT, *PHIDMAESTRO_SHARED_OUTPUT;
 #pragma pack(pop)
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)

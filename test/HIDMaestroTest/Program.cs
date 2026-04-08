@@ -400,36 +400,53 @@ class Program
     {
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; _cts.Cancel(); };
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { RemoveAllHIDMaestroDevices(); } catch { } };
 
-        // Safety net: clean up devices if the process exits unexpectedly
-        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-        {
-            try { CleanupGhostDevices(); } catch { }
-            try { CleanupSharedMappings(); } catch { }
-        };
+        // Output-passthrough sender runs SIDE-BY-SIDE with an active emulate
+        // session — it must NOT kill the running test app, must NOT clean up
+        // devices on exit, and does not need elevation.
+        bool isRumbleTest = args.Length > 0 && args[0].Equals("rumbletest", StringComparison.OrdinalIgnoreCase);
 
-            // Single-instance: kill any other HIDMaestroTest processes
-        int myPid = Environment.ProcessId;
-        foreach (var proc in System.Diagnostics.Process.GetProcessesByName("HIDMaestroTest"))
+        if (!isRumbleTest)
         {
-            if (proc.Id != myPid)
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { RemoveAllHIDMaestroDevices(); } catch { } };
+
+            // Safety net: clean up devices if the process exits unexpectedly
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
-                try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                try { CleanupGhostDevices(); } catch { }
+                try { CleanupSharedMappings(); } catch { }
+            };
+        }
+
+        if (!isRumbleTest)
+        {
+            // Single-instance: kill any other HIDMaestroTest processes
+            int myPid = Environment.ProcessId;
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("HIDMaestroTest"))
+            {
+                if (proc.Id != myPid)
+                {
+                    try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                }
+            }
+            // Elevate immediately — everything we do needs admin
+            if (!IsElevated())
+            {
+                Console.WriteLine("  Requesting elevation (admin required)...\n");
+                return RelaunchElevated(args);
             }
         }
-        // Elevate immediately — everything we do needs admin
-        if (!IsElevated())
-        {
-            Console.WriteLine("  Requesting elevation (admin required)...\n");
-            return RelaunchElevated(args);
-        }
 
-        // Clean up any leftover devices from previous sessions (now elevated)
-        RemoveAllHIDMaestroDevices();
-        DeviceManager.RemoveOrphanHidChildren();
-        CleanStaleXusbInterfaces();
-        DisableGhostXusbInterfaces();
+        // Clean up any leftover devices from previous sessions (now elevated).
+        // Skip for rumbletest — it runs side-by-side with an emulate session
+        // and must not touch the devices that session is driving.
+        if (!isRumbleTest)
+        {
+            RemoveAllHIDMaestroDevices();
+            DeviceManager.RemoveOrphanHidChildren();
+            CleanStaleXusbInterfaces();
+            DisableGhostXusbInterfaces();
+        }
 
         if (args.Length == 0)
         {
@@ -454,6 +471,7 @@ class Program
             "readtest" => ReadTest(),
             "dump"     => DumpControllers(),
             "wgi"      => TestWgi(),
+            "rumbletest" => RumbleTest(args.Skip(1).ToArray()),
             _         => Error($"Unknown command: {args[0]}")
         };
     }
@@ -1085,9 +1103,10 @@ class Program
 
         string name = $@"Global\HIDMaestroInput{controllerIndex}";
 
-        // SDDL: SYSTEM full, Admins full, LocalService read, World read.
+        // SDDL: SYSTEM full, Admins full, LocalService FULL (so the driver can
+        // bump the OutputDebug counter), World read.
         // LocalService is what WUDFHost runs as for UMDF2 reflector.
-        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;LS)(A;;GR;;;WD)";
+        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
         IntPtr sd = IntPtr.Zero;
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero))
             throw new System.ComponentModel.Win32Exception();
@@ -1138,6 +1157,9 @@ class Program
     [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
     static extern bool CloseHandleNative(IntPtr hObject);
 
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "OpenFileMappingW", CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenFileMappingNative(uint dwDesiredAccess, bool bInheritHandle, string lpName);
+
     /// <summary>Atomically publishes a new shared-input snapshot using a seqlock.
     /// Single-writer (input loop) → many-readers (driver + companion) is safe lock-free.</summary>
     static void WriteSharedInput(IntPtr view, ref uint seqNo, byte[] data, int dataLen, byte[] gipData)
@@ -1169,6 +1191,264 @@ class Program
         foreach (var h in _mappingHandles.Values)
             if (h != IntPtr.Zero) CloseHandleNative(h);
         _mappingHandles.Clear();
+
+        foreach (var view in _outputViews.Values)
+            if (view != IntPtr.Zero) UnmapViewOfFile(view);
+        _outputViews.Clear();
+        foreach (var h in _outputHandles.Values)
+            if (h != IntPtr.Zero) CloseHandleNative(h);
+        _outputHandles.Clear();
+    }
+
+    /* ========================================================================
+     * OUTPUT PASSTHROUGH READER
+     *
+     * The driver and companion publish captured rumble / haptics / FFB / LED
+     * commands into Global\HIDMaestroOutput<N>. We open the section read-only
+     * (creating it if neither the driver nor companion has yet — that lets us
+     * start the reader before the first output report arrives) and poll for
+     * SeqNo changes. Each new packet is decoded by (Source, ReportId) and
+     * printed.
+     *
+     * The struct mirrors HIDMAESTRO_SHARED_OUTPUT in driver.h:
+     *   ULONG  SeqNo
+     *   UCHAR  Source        (0=HID output, 1=HID feature, 2=XInput rumble)
+     *   UCHAR  ReportId
+     *   USHORT DataSize
+     *   UCHAR  Data[256]
+     * Total: 264 bytes.
+     * ====================================================================== */
+
+    const int SHARED_OUTPUT_SIZE = 4 + 1 + 1 + 2 + 256;
+    const byte OUT_SOURCE_HID_OUTPUT  = 0;
+    const byte OUT_SOURCE_HID_FEATURE = 1;
+    const byte OUT_SOURCE_XINPUT      = 2;
+
+    static readonly Dictionary<int, IntPtr> _outputHandles = new();
+    static readonly Dictionary<int, IntPtr> _outputViews = new();
+
+    /// <summary>Create-or-open the output mapping for the given controller.
+    /// Returns the read view pointer; caller polls SeqNo for new packets.</summary>
+    static IntPtr EnsureOutputMapping(int controllerIndex)
+    {
+        if (_outputViews.TryGetValue(controllerIndex, out IntPtr existing))
+            return existing;
+
+        string name = $@"Global\HIDMaestroOutput{controllerIndex}";
+
+        // OUTPUT direction: WUDFHost (LocalService) needs WRITE access — it's
+        // the producer for this section. Grant LS full access (GA), unlike
+        // the input direction where LS is read-only.
+        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out IntPtr sd, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+
+        SECURITY_ATTRIBUTES sa = new()
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = sd,
+            bInheritHandle = 0,
+        };
+        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        Marshal.StructureToPtr(sa, saPtr, false);
+
+        IntPtr hMap;
+        try
+        {
+            // CreateFileMapping with an existing name opens the existing object,
+            // matching the driver's intent (whichever side calls first wins; the
+            // other just attaches). PAGE_READWRITE so the read view sees writes.
+            hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
+                0x04 /* PAGE_READWRITE */, 0, SHARED_OUTPUT_SIZE, name);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(saPtr);
+            LocalFree(sd);
+        }
+        if (hMap == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception();
+
+        IntPtr view = MapViewOfFile(hMap,
+            0x04 /* FILE_MAP_WRITE */ | 0x02 /* FILE_MAP_READ */,
+            0, 0, (UIntPtr)SHARED_OUTPUT_SIZE);
+        if (view == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            CloseHandleNative(hMap);
+            throw new System.ComponentModel.Win32Exception(err);
+        }
+
+        _outputHandles[controllerIndex] = hMap;
+        _outputViews[controllerIndex] = view;
+        return view;
+    }
+
+    /// <summary>Polls the output mapping for the given controller and prints
+    /// each new packet. Runs on a background thread until the cancellation
+    /// token fires. Profile is used for human-readable decoding.</summary>
+    static void RunOutputReader(int controllerIndex, ControllerProfile profile, CancellationToken ct)
+    {
+        IntPtr view;
+        try { view = EnsureOutputMapping(controllerIndex); }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [out{controllerIndex}] reader failed to open mapping: {ex.Message}");
+            return;
+        }
+
+        uint lastSeq = 0;
+        byte[] data = new byte[256];
+        string label = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
+
+        // Initial sample so we don't fire on whatever's already there.
+        lastSeq = (uint)Marshal.ReadInt32(view, 0);
+
+        while (!ct.IsCancellationRequested)
+        {
+            uint seq1 = (uint)Marshal.ReadInt32(view, 0);
+            if (seq1 == lastSeq) { Thread.Sleep(4); continue; }
+
+            // Seqlock read: sample, copy, sample, retry on mismatch.
+            byte source = 0, reportId = 0;
+            ushort size = 0;
+            int retries = 4;
+            uint seq2;
+            do
+            {
+                source = Marshal.ReadByte(view, 4);
+                reportId = Marshal.ReadByte(view, 5);
+                size = (ushort)Marshal.ReadInt16(view, 6);
+                if (size > 256) size = 256;
+                for (int i = 0; i < size; i++)
+                    data[i] = Marshal.ReadByte(view, 8 + i);
+                Thread.MemoryBarrier();
+                seq2 = (uint)Marshal.ReadInt32(view, 0);
+                if (seq1 == seq2) break;
+                seq1 = seq2;
+            } while (--retries > 0);
+
+            lastSeq = seq2;
+            DecodeAndPrintOutput(controllerIndex, label, profile, source, reportId, data, size);
+        }
+    }
+
+    /// <summary>Profile-aware decode for human-readable display. Falls back to
+    /// hex dump for unknown shapes. The actual byte forwarding to a real
+    /// consumer (PadForge) is the caller's job — this method is just for
+    /// verification that capture is working end-to-end.</summary>
+    static void DecodeAndPrintOutput(int idx, string label, ControllerProfile profile,
+                                      byte source, byte reportId, byte[] data, int size)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"  [out{idx} {label}] ");
+
+        switch (source)
+        {
+            case OUT_SOURCE_XINPUT:
+            {
+                // XInput SetState wire format from xinput1_4 → XUSB driver:
+                // Most observed packets are 5 bytes: cmd(1) + size(1) + lo(1) + hi(1) + reserved(1).
+                // Some clients send the raw 4-byte XINPUT_VIBRATION (lo=u16, hi=u16) as-is.
+                // We display both interpretations so it's obvious which the game used.
+                int lo = -1, hi = -1;
+                if (size >= 5) { lo = data[2]; hi = data[3]; }
+                else if (size >= 4) { lo = data[0] | (data[1] << 8); hi = data[2] | (data[3] << 8); }
+                if (lo >= 0)
+                    sb.Append($"XInput rumble: lo={lo} hi={hi}  ({size} bytes)");
+                else
+                    sb.Append($"XInput rumble: {size} bytes  {ToHex(data, size)}");
+                break;
+            }
+            case OUT_SOURCE_HID_FEATURE:
+                sb.Append($"HID Feature reportId=0x{reportId:X2} size={size}  {ToHex(data, Math.Min(size, 32))}");
+                break;
+            case OUT_SOURCE_HID_OUTPUT:
+            default:
+            {
+                // Profile-specific decoding for the well-known shapes.
+                if (TryDecodeDualSenseOutput(profile, reportId, data, size, sb)) break;
+                if (TryDecodeXboxRumbleHidOutput(profile, reportId, data, size, sb)) break;
+                sb.Append($"HID Output reportId=0x{reportId:X2} size={size}  {ToHex(data, Math.Min(size, 32))}");
+                break;
+            }
+        }
+
+        Console.WriteLine(sb.ToString());
+    }
+
+    /// <summary>DualSense / DualShock 4 output report 0x02 (USB) / 0x31 (BT):
+    /// motors at byte 1-2, adaptive triggers starting around byte 10, LED later.
+    /// Layout per the Sony HID spec / nondrum's reverse-engineering. We surface
+    /// the high-value fields; full layout is the consumer's problem.</summary>
+    static bool TryDecodeDualSenseOutput(ControllerProfile p, byte reportId, byte[] d, int size, StringBuilder sb)
+    {
+        if (p == null) return false;
+        bool isSony = (p.VendorId == 0x054C);
+        if (!isSony) return false;
+        if (reportId != 0x02 && reportId != 0x05 && reportId != 0x31) return false;
+
+        // Sony report 0x02 starts with a flag mask byte; motors live at +2/+3 from start
+        // for both DualSense and DS4 reduced reports. We don't try to be perfect — we
+        // surface enough for verification.
+        if (size < 4)
+        {
+            sb.Append($"Sony reportId=0x{reportId:X2} short ({size} bytes)");
+            return true;
+        }
+
+        int rumbleR = d[2];
+        int rumbleL = d[3];
+        sb.Append($"Sony rumble  L={rumbleL,3}  R={rumbleR,3}  reportId=0x{reportId:X2}  size={size}");
+
+        // DualSense adaptive triggers: bytes 10..21 = right trigger, 22..32 = left trigger.
+        // Mode is byte 0 of each block. Only show if any non-zero.
+        if (size >= 33)
+        {
+            byte rTrigMode = d[10];
+            byte lTrigMode = d[22];
+            if (rTrigMode != 0 || lTrigMode != 0)
+                sb.Append($"  triggerL=mode{lTrigMode:X2} triggerR=mode{rTrigMode:X2}");
+        }
+
+        // LED color (DualSense): bytes 44..46 RGB if set
+        if (size >= 47)
+        {
+            byte r = d[44], g = d[45], b = d[46];
+            if ((r | g | b) != 0)
+                sb.Append($"  LED=#{r:X2}{g:X2}{b:X2}");
+        }
+        return true;
+    }
+
+    /// <summary>Xbox HID output report — Xbox Series controllers in BT mode use
+    /// HID output report 0x03 for rumble. The xinputhid driver translates
+    /// XInputSetState into this report shape.</summary>
+    static bool TryDecodeXboxRumbleHidOutput(ControllerProfile p, byte reportId, byte[] d, int size, StringBuilder sb)
+    {
+        if (p == null) return false;
+        if (p.VendorId != 0x045E) return false;
+        if (reportId != 0x03 && reportId != 0x00) return false;
+        if (size < 4) return false;
+
+        // Xbox HID rumble (Bluetooth): typical layout is enable_mask(1) + L_trig(1) +
+        // R_trig(1) + L_motor(1) + R_motor(1) + duration(1) + start_delay(1) + loop_count(1)
+        // We display the four amplitude bytes.
+        sb.Append($"Xbox HID rumble reportId=0x{reportId:X2} size={size}  ");
+        sb.Append($"enable=0x{d[0]:X2} ltrig={d[1],3} rtrig={d[2],3} lmot={d[3],3}");
+        if (size >= 5) sb.Append($" rmot={d[4],3}");
+        return true;
+    }
+
+    static string ToHex(byte[] data, int size)
+    {
+        var s = new StringBuilder(size * 3);
+        for (int i = 0; i < size; i++)
+        {
+            if (i > 0) s.Append(' ');
+            s.Append(data[i].ToString("X2"));
+        }
+        return s.ToString();
     }
 
     /// <summary>
@@ -2254,6 +2534,8 @@ class Program
         // setup (Steps 0-3.6) and only opens handles + runs the input loop.
         Console.WriteLine($"\n  All controllers ready. Starting input loops...\n");
         var threads = new List<Thread>();
+        var outputThreads = new List<Thread>();
+        var phase2Db = ProfileDatabase.Load(GetProfilesDir());
         for (int i = 0; i < currentIds.Length && i < 4; i++)
         {
             int idx = i;
@@ -2264,6 +2546,20 @@ class Program
             }) { IsBackground = true, Name = $"Controller_{idx}" };
             thread.Start();
             threads.Add(thread);
+
+            // Output passthrough reader: tail Global\HIDMaestroOutput<N> for any
+            // rumble/haptics/FFB the host sends to this virtual controller, and
+            // print a profile-aware summary. The driver/companion are the writers.
+            var profile = phase2Db.GetById(pid);
+            if (profile != null)
+            {
+                var outThread = new Thread(() =>
+                {
+                    RunOutputReader(idx, profile, _cts.Token);
+                }) { IsBackground = true, Name = $"Output_{idx}" };
+                outThread.Start();
+                outputThreads.Add(outThread);
+            }
         }
 
         // Wait for quit
@@ -2424,6 +2720,11 @@ class Program
         Console.Write("  Setting up environment... ");
         EnsureGameInputService();
         EnsureSharedMapping(controllerIndex);
+        // Pre-create the output passthrough section so the driver/companion
+        // (running as LocalService in WUDFHost without SeCreateGlobalPrivilege)
+        // can OpenFileMapping it. Test app is the only entity that can create
+        // Global\ named sections in this scenario.
+        try { EnsureOutputMapping(controllerIndex); } catch { }
         if (controllerIndex == 0 && !_ghostsCleanedThisSession)
         {
             CleanupGhostDevices();
@@ -3406,6 +3707,178 @@ class Program
 
         Console.WriteLine($"\nFinal: RawControllers={found.Count + existing.Count} Gamepads={foundGamepads.Count + existingGamepads.Count}");
         return 0;
+    }
+
+    // ── Rumble / output passthrough sender (verification only) ──
+
+    [DllImport("XInput1_4.dll", EntryPoint = "XInputSetState")]
+    static extern uint XInputSetState(uint dwUserIndex, ref XINPUT_VIBRATION pVibration);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct XINPUT_VIBRATION
+    {
+        public ushort wLeftMotorSpeed;
+        public ushort wRightMotorSpeed;
+    }
+
+    /// <summary>Sends a rumble or HID output report to a virtual controller for
+    /// end-to-end verification of the output passthrough channel. Usage:
+    ///   rumbletest xinput &lt;slot&gt;            — XInputSetState on XInput slot
+    ///   rumbletest hid &lt;vid&gt; &lt;pid&gt; &lt;reportId&gt; &lt;hex...&gt;
+    /// </summary>
+    static int RumbleTest(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            Console.WriteLine("Usage:");
+            Console.WriteLine("  rumbletest xinput <slot>                    — pulse XInput rumble on slot");
+            Console.WriteLine("  rumbletest hid <vid_hex> <pid_hex> <reportId_hex> <hex bytes...>");
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  rumbletest xinput 0");
+            Console.WriteLine("  rumbletest hid 054C 0CE6 02 FF 80 80 00 00 00 00 00 00 00");
+            return 1;
+        }
+
+        if (args[0] == "xinput")
+        {
+            uint slot = args.Length > 1 ? uint.Parse(args[1]) : 0;
+            Console.WriteLine($"XInputSetState slot={slot}: pulsing rumble for 1.5s...");
+            var v = new XINPUT_VIBRATION { wLeftMotorSpeed = 0xC000, wRightMotorSpeed = 0x4000 };
+            uint r = XInputSetState(slot, ref v);
+            Console.WriteLine($"  → return: 0x{r:X8} ({(r == 0 ? "ERROR_SUCCESS" : "ERROR")})");
+            Thread.Sleep(1500);
+            v = new XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = 0 };
+            XInputSetState(slot, ref v);
+            Console.WriteLine("  Stopped.");
+            return r == 0 ? 0 : 2;
+        }
+
+        if (args[0] == "checkout")
+        {
+            int idx = args.Length > 1 ? int.Parse(args[1]) : 0;
+            string mn = $@"Global\HIDMaestroOutput{idx}";
+            const uint FILE_MAP_READ = 0x0004;
+            IntPtr h = OpenFileMappingNative(FILE_MAP_READ, false, mn);
+            if (h == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                Console.WriteLine($"OpenFileMapping('{mn}') FAILED  err={err}");
+                return 2;
+            }
+            IntPtr v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, (UIntPtr)SHARED_OUTPUT_SIZE);
+            if (v == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                Console.WriteLine($"MapViewOfFile FAILED  err={err}");
+                CloseHandleNative(h);
+                return 3;
+            }
+            uint seq = (uint)Marshal.ReadInt32(v, 0);
+            byte src = Marshal.ReadByte(v, 4);
+            byte rid = Marshal.ReadByte(v, 5);
+            ushort sz = (ushort)Marshal.ReadInt16(v, 6);
+            Console.WriteLine($"  {mn}:  SeqNo={seq}  Source={src}  ReportId=0x{rid:X2}  DataSize={sz}");
+            if (sz > 0 && sz <= 256)
+            {
+                byte[] data = new byte[Math.Min((int)sz, 32)];
+                for (int i = 0; i < data.Length; i++) data[i] = Marshal.ReadByte(v, 8 + i);
+                Console.WriteLine($"  Data: {string.Join(" ", data.Select(b => b.ToString("X2")))}");
+            }
+            UnmapViewOfFile(v);
+            CloseHandleNative(h);
+            return 0;
+        }
+
+        if (args[0] == "hid" && args.Length >= 4)
+        {
+            ushort vid = ushort.Parse(args[1], System.Globalization.NumberStyles.HexNumber);
+            ushort pid = ushort.Parse(args[2], System.Globalization.NumberStyles.HexNumber);
+            byte reportId = byte.Parse(args[3], System.Globalization.NumberStyles.HexNumber);
+            var payload = new List<byte> { reportId };
+            for (int i = 4; i < args.Length; i++)
+                payload.Add(byte.Parse(args[i], System.Globalization.NumberStyles.HexNumber));
+
+            Console.WriteLine($"HID write VID=0x{vid:X4} PID=0x{pid:X4} reportId=0x{reportId:X2} ({payload.Count} bytes)");
+            var path = FindHidDevicePath(vid, pid);
+            if (path == null) { Console.WriteLine("  ERROR: device not found"); return 2; }
+            Console.WriteLine($"  Path: {path}");
+
+            using var h = OpenHidDevice(path);
+            if (h == null || h.IsInvalid) { Console.WriteLine("  ERROR: open failed"); return 3; }
+
+            // HidD_SetOutputReport sends the bytes as an output report.
+            byte[] buf = payload.ToArray();
+            bool ok = HidD_SetOutputReport(h, buf, (uint)buf.Length);
+            Console.WriteLine($"  HidD_SetOutputReport → {ok}");
+            return ok ? 0 : 4;
+        }
+
+        Console.WriteLine($"Unknown rumbletest mode: {args[0]}");
+        return 1;
+    }
+
+    /// <summary>Walks the HID device interface set looking for a device whose
+    /// declared HID attributes match VID/PID. We can't rely on the PnP path
+    /// because virtual devices using ROOT\HIDCLASS don't encode VID/PID in
+    /// the path — we have to actually open the device and query
+    /// HidD_GetAttributes. The 'skipPathContains' filter avoids matching
+    /// IG_-filtered Xbox HID children when targeting non-XInput profiles.</summary>
+    static string? FindHidDevicePath(ushort vid, ushort pid)
+    {
+        Guid hidGuid;
+        HidD_GetHidGuid(out hidGuid);
+        IntPtr devs = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero,
+            0x10 /* DIGCF_DEVICEINTERFACE */ | 0x02 /* DIGCF_PRESENT */);
+        if (devs == new IntPtr(-1)) return null;
+
+        try
+        {
+            var ifData = new SP_DEVICE_INTERFACE_DATA();
+            ifData.cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>();
+            uint i = 0;
+            while (SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref hidGuid, i++, ref ifData))
+            {
+                SetupDiGetDeviceInterfaceDetailW(devs, ref ifData, IntPtr.Zero, 0, out uint needed, IntPtr.Zero);
+                if (needed == 0) continue;
+                IntPtr detail = Marshal.AllocHGlobal((int)needed);
+                try
+                {
+                    Marshal.WriteInt32(detail, 0, IntPtr.Size == 8 ? 8 : 6);
+                    if (!SetupDiGetDeviceInterfaceDetailW(devs, ref ifData, detail, needed, out _, IntPtr.Zero))
+                        continue;
+                    string? path = Marshal.PtrToStringUni(detail + 4);
+                    if (path == null) continue;
+
+                    // Open with no access bits (just enough to query attributes — no exclusive lock)
+                    var h = CreateFileW(path, 0, 0x03 /* SHARE_RW */, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+                    if (h.IsInvalid) continue;
+
+                    var attrs = new HIDD_ATTRIBUTES();
+                    attrs.Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>();
+                    bool ok = HidD_GetAttributes(h, ref attrs);
+                    h.Dispose();
+                    if (ok && attrs.VendorID == vid && attrs.ProductID == pid)
+                        return path;
+                }
+                finally { Marshal.FreeHGlobal(detail); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(devs); }
+        return null;
+    }
+
+
+    static SafeFileHandle? OpenHidDevice(string path)
+    {
+        const uint GENERIC_READ = 0x80000000;
+        const uint GENERIC_WRITE = 0x40000000;
+        const uint FILE_SHARE_READ = 0x00000001;
+        const uint FILE_SHARE_WRITE = 0x00000002;
+        const uint OPEN_EXISTING = 3;
+        var handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (handle.IsInvalid) return null;
+        return handle;
     }
 
     // ── Dump Controllers ──

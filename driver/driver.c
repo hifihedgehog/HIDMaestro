@@ -68,6 +68,17 @@ InitInstancePaths(
         *p++ = L'0' + (WCHAR)(index % 10);
         *p = 0;
     }
+
+    /* Build per-instance OUTPUT mapping name: Global\HIDMaestroOutput<N>.
+     * Driver writes captured output reports here; consumer reads. */
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroOutput";
+        WCHAR *p = ctx->OutputMappingName;
+        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
+        p += (sizeof(prefix) / 2) - 1;
+        *p++ = L'0' + (WCHAR)(index % 10);
+        *p = 0;
+    }
 }
 
 /* XUSB interface GUID — xinput1_4.dll enumerates this to find Xbox controllers */
@@ -248,14 +259,80 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     if (h == NULL) return FALSE;
 
     PVOID view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(HIDMAESTRO_SHARED_INPUT));
-    if (view == NULL) {
-        CloseHandle(h);
-        return FALSE;
-    }
+    if (view == NULL) { CloseHandle(h); return FALSE; }
 
     ctx->SharedMemHandle = h;
     ctx->SharedMemPtr = view;
     return TRUE;
+}
+
+/* Open the OUTPUT section. The test app pre-creates the named section with
+ * a permissive SDDL during EmulateProfile setup; we just attach with R/W
+ * access. Pagefile-backed, RAM-only. We retry on every capture call until
+ * the section appears (test app may not have created it yet at first IOCTL).
+ *
+ * IMPORTANT: WUDFHost runs as LocalService which lacks SeCreateGlobalPrivilege,
+ * so the driver CANNOT CreateFileMapping in the Global\ namespace — only
+ * the test app (running elevated) can. */
+static BOOLEAN
+EnsureOutputMapping(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->OutputMemPtr != NULL) return TRUE;
+
+    HANDLE h = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE,
+                                ctx->OutputMappingName);
+    if (h == NULL) return FALSE;
+
+    PVOID view = MapViewOfFile(h, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0,
+                               sizeof(HIDMAESTRO_SHARED_OUTPUT));
+    if (view == NULL) { CloseHandle(h); return FALSE; }
+
+    ctx->OutputMemHandle = h;
+    ctx->OutputMemPtr = view;
+    return TRUE;
+}
+
+/* Publish a captured output report to the shared section.
+ * Source: HIDMAESTRO_OUTPUT_SOURCE_*  reportId: HID Report ID byte (0 if none)
+ * data/size: payload (size will be clamped to 256). Seqlock-write pattern
+ * mirrors the input direction's seqlock-read in driver/companion. */
+static VOID
+PublishOutput(_In_ PDEVICE_CONTEXT ctx,
+              _In_ UCHAR Source,
+              _In_ UCHAR ReportId,
+              _In_reads_bytes_(DataSize) const UCHAR *Data,
+              _In_ ULONG DataSize)
+{
+    if (DataSize > sizeof(((HIDMAESTRO_SHARED_OUTPUT*)0)->Data))
+        DataSize = sizeof(((HIDMAESTRO_SHARED_OUTPUT*)0)->Data);
+
+    /* Serialize writers (the queue dispatches IOCTLs in parallel, so two
+     * threads can call PublishOutput concurrently). The reader is in another
+     * process and uses the seqlock pattern (sample, copy, sample, retry). */
+    WdfWaitLockAcquire(ctx->OutputLock, NULL);
+
+    if (!EnsureOutputMapping(ctx)) {
+        WdfWaitLockRelease(ctx->OutputLock);
+        return;
+    }
+
+    volatile HIDMAESTRO_SHARED_OUTPUT *dst =
+        (volatile HIDMAESTRO_SHARED_OUTPUT *)ctx->OutputMemPtr;
+
+    /* Matches the input direction's seqlock convention: writer increments
+     * SeqNo AFTER the payload is fully written; reader samples SeqNo, copies,
+     * samples SeqNo again, and retries if they differ. */
+    dst->Source = Source;
+    dst->ReportId = ReportId;
+    dst->DataSize = (USHORT)DataSize;
+    for (ULONG i = 0; i < DataSize; i++) dst->Data[i] = Data[i];
+    MemoryBarrier();
+    ctx->OutputSeqNoLocal++;
+    dst->SeqNo = ctx->OutputSeqNoLocal;
+
+    WdfWaitLockRelease(ctx->OutputLock);
+
+    InterlockedIncrement(&ctx->OutputReportsReceived);
 }
 
 /* Read shared input via memory mapping. RAM-only — no disk fallback.
@@ -393,6 +470,8 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     PDEVICE_CONTEXT ctx = GetDeviceContext((WDFDEVICE)Object);
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
+    if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
+    if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
 }
 
 /* ================================================================== */
@@ -602,6 +681,8 @@ EvtDeviceAdd(
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
     if (!NT_SUCCESS(status)) return status;
+    status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->OutputLock);
+    if (!NT_SUCCESS(status)) return status;
 
     /* Default queue (parallel) — HID IOCTLs from MsHidUmdf */
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
@@ -730,67 +811,50 @@ EvtIoDeviceControl(
 
     case IOCTL_HID_WRITE_REPORT: {
         /*
-         * Output reports from applications (e.g. rumble, LED control).
-         * Accept silently — all input data comes from the shared file timer.
-         * DO NOT treat writes as input: SDL3/HIDAPI sends GIP init commands
-         * via WriteFile that would corrupt pending READ_REPORT requests.
-         * Future: forward output data to real controller via shared memory.
+         * HID write path — used by HIDAPI / SDL3 / WriteFile to send output
+         * reports (DualSense report 0x02 haptics+triggers+LED, generic LED
+         * control, etc). The first byte is the HID Report ID (0 if the
+         * descriptor uses no IDs). Forward to the output shared section so
+         * the consumer (PadForge) can deliver it to real hardware.
          */
+        PVOID  wrBuf;
+        size_t wrSize;
+        status = WdfRequestRetrieveInputBuffer(Request, 1, &wrBuf, &wrSize);
+        if (!NT_SUCCESS(status)) break;
+
+        {
+            const UCHAR *p = (const UCHAR *)wrBuf;
+            UCHAR  reportId = (wrSize > 0) ? p[0] : 0;
+            const UCHAR *payload = (wrSize > 0) ? p + 1 : p;
+            ULONG payloadLen = (ULONG)((wrSize > 0) ? wrSize - 1 : 0);
+            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
+                          reportId, payload, payloadLen);
+        }
         status = STATUS_SUCCESS;
         break;
     }
 
     case IOCTL_UMDF_HID_SET_FEATURE: {
         /*
-         * User-mode calls HidD_SetFeature with Report ID 2.
-         * The feature data IS the input report payload.
-         * We prepend Report ID 1 and deliver as input.
+         * HidD_SetFeature path. DualSense and DualShock 4 use feature reports
+         * for some configuration writes; some HID stacks route data here.
+         * Forward to the output shared section tagged as a feature report so
+         * the consumer can distinguish from regular output reports.
          */
-        PVOID       featureBuf;
-        size_t      featureSize;
-        WDFREQUEST  pendingRead;
+        PVOID  featureBuf;
+        size_t featureSize;
 
         status = WdfRequestRetrieveInputBuffer(Request, 1, &featureBuf, &featureSize);
         if (!NT_SUCCESS(status)) break;
 
-        /* Build input report: Report ID 1 + feature data (skip feature Report ID byte) */
         {
-            UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
-            ULONG inputSize;
-            PUCHAR featureData = (PUCHAR)featureBuf;
-            ULONG  featureDataLen = (ULONG)featureSize;
-
-            /* The HID class includes the Feature Report ID as byte 0 — skip it */
-            if (featureDataLen > 0) {
-                featureData++;
-                featureDataLen--;
-            }
-
-            inputReport[0] = ctx->FirstInputReportId;
-
-            /* Cap data to match the declared input report size */
-            {
-                ULONG maxData = ctx->InputReportByteLength > 1
-                    ? ctx->InputReportByteLength - 1 : 16;
-                if (featureDataLen > maxData)
-                    featureDataLen = maxData;
-            }
-
-            RtlCopyMemory(inputReport + 1, featureData, featureDataLen);
-            inputSize = featureDataLen + 1;
-
-            if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-                NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
-                WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-            } else {
-                WdfWaitLockAcquire(ctx->InputLock, NULL);
-                RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
-                ctx->InputReportSize = inputSize;
-                ctx->InputReportReady = TRUE;
-                WdfWaitLockRelease(ctx->InputLock);
-            }
+            const UCHAR *p = (const UCHAR *)featureBuf;
+            UCHAR  reportId = (featureSize > 0) ? p[0] : 0;
+            const UCHAR *payload = (featureSize > 0) ? p + 1 : p;
+            ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
+            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE,
+                          reportId, payload, payloadLen);
         }
-
         status = STATUS_SUCCESS;
         break;
     }
@@ -801,51 +865,28 @@ EvtIoDeviceControl(
 
     case IOCTL_UMDF_HID_SET_OUTPUT_REPORT: {
         /*
-         * Same as SET_FEATURE: user-mode sends output report with input data.
-         * We strip the Report ID and deliver as Input Report ID 1.
-         * Using Output Report instead of Feature Report avoids phantom axes
-         * in Chrome's Gamepad API.
+         * The HID class delivers HidD_SetOutputReport here as a HID_XFER_PACKET.
+         * dinput8 also routes generated PID effect output reports through this
+         * IOCTL when a game calls IDirectInputEffect::Start. Forward the bytes
+         * to the output shared section.
+         *
+         * UMDF2 input buffer layout for HID_XFER_PACKET-style IOCTLs is just
+         * the raw report bytes (Report ID byte first if descriptor uses IDs).
          */
-        PVOID       outBuf;
-        size_t      outBufSize;
-        WDFREQUEST  pendingRead2;
+        PVOID  outBuf;
+        size_t outBufSize;
 
         status = WdfRequestRetrieveInputBuffer(Request, 1, &outBuf, &outBufSize);
         if (!NT_SUCCESS(status)) break;
 
         {
-            UCHAR inputReport2[HIDMAESTRO_MAX_REPORT_SIZE];
-            ULONG inputSize2;
-            PUCHAR outData = (PUCHAR)outBuf;
-            ULONG  outDataLen = (ULONG)outBufSize;
-
-            /* Skip the Output Report ID byte */
-            if (outDataLen > 0) { outData++; outDataLen--; }
-
-            inputReport2[0] = 0x01; /* Input Report ID */
-
-            /* Cap to declared input report size */
-            {
-                ULONG maxData = ctx->InputReportByteLength > 1
-                    ? ctx->InputReportByteLength - 1 : 16;
-                if (outDataLen > maxData) outDataLen = maxData;
-            }
-
-            RtlCopyMemory(inputReport2 + 1, outData, outDataLen);
-            inputSize2 = outDataLen + 1;
-
-            if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead2))) {
-                NTSTATUS cs = RequestCopyFromBuffer(pendingRead2, inputReport2, inputSize2);
-                WdfRequestComplete(pendingRead2, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-            } else {
-                WdfWaitLockAcquire(ctx->InputLock, NULL);
-                RtlCopyMemory(ctx->InputReport, inputReport2, inputSize2);
-                ctx->InputReportSize = inputSize2;
-                ctx->InputReportReady = TRUE;
-                WdfWaitLockRelease(ctx->InputLock);
-            }
+            const UCHAR *p = (const UCHAR *)outBuf;
+            UCHAR  reportId = (outBufSize > 0) ? p[0] : 0;
+            const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
+            ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
+            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
+                          reportId, payload, payloadLen);
         }
-
         status = STATUS_SUCCESS;
         break;
     }
@@ -1016,18 +1057,16 @@ EvtIoDeviceControl(
     }
 
     case IOCTL_XUSB_SET_STATE: {
-        /* Dual purpose: vibration (5 bytes) or input submission (>5 bytes) */
+        /* XInput rumble. The XUSB protocol defines a 5-byte vibration packet
+         * here (the actual XINPUT_VIBRATION struct is 4 bytes wLeft+wRight,
+         * but the wire format the driver receives is the 5-byte cmd packet).
+         * Forward to the output shared section tagged as XInput so the
+         * consumer can distinguish from HID output reports. */
         PVOID setBuf; size_t setBufSize;
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &setBuf, &setBufSize))
-            && setBufSize > 5) {
-            WdfWaitLockAcquire(ctx->InputLock, NULL);
-            ULONG copySize = (ULONG)setBufSize;
-            if (copySize > HIDMAESTRO_MAX_REPORT_SIZE)
-                copySize = HIDMAESTRO_MAX_REPORT_SIZE;
-            RtlCopyMemory(ctx->InputReport, setBuf, copySize);
-            ctx->InputReportSize = copySize;
-            ctx->InputReportReady = TRUE;
-            WdfWaitLockRelease(ctx->InputLock);
+            && setBufSize >= 1) {
+            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_XINPUT,
+                          0, (const UCHAR *)setBuf, (ULONG)setBufSize);
         }
         status = STATUS_SUCCESS;
         break;
