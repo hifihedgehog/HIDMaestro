@@ -18,14 +18,14 @@
 <pre id="status">Waiting for gamepadconnected event...</pre>
 <pre id="readings">No readings yet.</pre>
 <script>
-// This page is loaded via --app=file://... by scripts/verify.py.
-// It collects 30 samples of navigator.getGamepads() over ~3 seconds and POSTs
-// the results back to the local HTTP server the launcher started.
+// This page is served by scripts/browser_check/launcher.py over HTTP and
+// loaded by Edge/Chrome via --app=http://127.0.0.1:<port>/. Same-origin
+// fetch() to /result lets us POST gamepad readings without CORS issues.
 //
 // We deliberately probe what real web pages see — same code path as
 // gamepad-tester.com / hardwaretester.com / PadForge web UI etc.
 
-const SERVER_URL = "http://127.0.0.1:8765/result";
+const SERVER_URL = "/result";
 const SAMPLE_COUNT = 30;
 const SAMPLE_INTERVAL_MS = 100;
 
@@ -33,6 +33,12 @@ const status = document.getElementById('status');
 const readings = document.getElementById('readings');
 const samples = [];
 let gamepadEverSeen = false;
+
+// Title-based progress markers — survive even if fetch is blocked
+function mark(s) { document.title = 'HM:' + s; }
+mark('script_start');
+window.addEventListener('error', e => mark('err:' + (e.message || 'unknown').slice(0, 40)));
+window.addEventListener('unhandledrejection', e => mark('rej:' + ((e.reason && e.reason.toString()) || 'unknown').slice(0, 40)));
 
 // Chrome requires gamepadconnected event before navigator.getGamepads()
 // returns non-null entries. Some browsers also require a user gesture first.
@@ -46,6 +52,7 @@ window.addEventListener('gamepaddisconnected', (e) => {
 });
 
 function sample() {
+  mark('sample_' + samples.length);
   const pads = navigator.getGamepads();
   const live = [];
   for (const p of pads) {
@@ -79,6 +86,7 @@ function sample() {
 }
 
 function finish() {
+  mark('finish_start');
   // Compute "live" determination: at least one gamepad whose axes vary across samples
   const padCount = Math.max(0, ...samples.map(s => s.pads.length));
   let liveCount = 0;
@@ -104,14 +112,17 @@ function finish() {
   };
 
   // POST result to launcher and signal done
+  mark('about_to_fetch');
   fetch(SERVER_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(result),
-  }).catch(() => {}).finally(() => {
-    document.title = 'HIDMAESTRO_BROWSER_CHECK_DONE';
-    status.textContent = `Done. ${liveCount}/${padCount} live gamepad(s).`;
-  });
+  }).then(() => mark('fetch_ok'))
+    .catch(e => mark('fetch_err:' + (e.message || 'unknown').slice(0, 40)))
+    .finally(() => {
+      document.title = 'HIDMAESTRO_BROWSER_CHECK_DONE';
+      status.textContent = `Done. ${liveCount}/${padCount} live gamepad(s).`;
+    });
 }
 
 // Start sampling immediately (don't wait for gamepadconnected — Chrome may

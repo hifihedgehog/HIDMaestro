@@ -34,15 +34,35 @@ from pathlib import Path
 
 PORT = 8765
 RESULT_PATH = "/result"
+INDEX_PATH = "/"
 DONE_TITLE = "HIDMAESTRO_BROWSER_CHECK_DONE"
 INDEX_HTML = Path(__file__).parent / "index.html"
 
 
-class _ResultHandler(http.server.BaseHTTPRequestHandler):
-    """Tiny HTTP server that captures the JSON result POSTed by index.html."""
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """Serves index.html on GET / and captures result on POST /result.
+
+    Serving the page from the same HTTP server (instead of file://) keeps
+    everything same-origin, avoiding fetch() CORS issues that broke previous
+    file:// + cross-origin attempts."""
     server_version = "HIDMaestroVerify/1.0"
 
-    def do_POST(self):  # noqa: N802 (stdlib API)
+    def do_GET(self):  # noqa: N802 (stdlib API)
+        if self.path != INDEX_PATH and self.path != "/index.html":
+            self.send_error(404); return
+        try:
+            with open(INDEX_HTML, "rb") as f:
+                body = f.read()
+        except OSError as e:
+            self.send_error(500, str(e)); return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # noqa: N802
         if self.path != RESULT_PATH:
             self.send_error(404); return
         length = int(self.headers.get("Content-Length", "0"))
@@ -51,16 +71,7 @@ class _ResultHandler(http.server.BaseHTTPRequestHandler):
             self.server.result = json.loads(body.decode())  # type: ignore[attr-defined]
         except Exception as e:
             self.server.result = {"error": f"bad json: {e}"}  # type: ignore[attr-defined]
-        # Response headers (CORS allows file:// origin)
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-
-    def do_OPTIONS(self):  # noqa: N802
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def log_message(self, format, *args):  # noqa: A002 (stdlib API)
@@ -94,7 +105,7 @@ def _port_free(port: int) -> bool:
             return False
 
 
-def run_browser_check(timeout_s: float = 12.0) -> dict:
+def run_browser_check(timeout_s: float = 20.0) -> dict:
     """Launch a browser, collect gamepad readings, return structured result."""
     if not INDEX_HTML.exists():
         return {"available": False, "error": f"index.html not found at {INDEX_HTML}"}
@@ -106,8 +117,8 @@ def run_browser_check(timeout_s: float = 12.0) -> dict:
     if not _port_free(PORT):
         return {"available": False, "error": f"port {PORT} in use (another verify.py running?)"}
 
-    # Start HTTP server
-    httpd = socketserver.TCPServer(("127.0.0.1", PORT), _ResultHandler)
+    # Start HTTP server (also serves index.html on GET /)
+    httpd = socketserver.TCPServer(("127.0.0.1", PORT), _Handler)
     httpd.result = None  # type: ignore[attr-defined]
     httpd.timeout = 0.2
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -117,17 +128,24 @@ def run_browser_check(timeout_s: float = 12.0) -> dict:
     import tempfile
     profile_dir = tempfile.mkdtemp(prefix="hidmaestro_browsercheck_")
 
-    # --app= launches a frameless single-page window
-    # --user-data-dir= isolates the temporary profile
-    # --no-first-run skips welcome dialogs
-    # --window-size keeps the window small
+    # --app= launches a frameless single-page window pointing at our HTTP server.
+    # Serving from http://127.0.0.1 (not file://) keeps everything same-origin
+    # so fetch() to /result works without CORS preflight problems.
+    #
+    # Background-throttling flags are CRITICAL: Chromium throttles setTimeout
+    # to 1Hz when the window isn't focused, which makes our 30-sample/100ms
+    # poll loop take 30 seconds instead of 3. Since the launcher's window has
+    # no user interaction and may not have focus, throttling kicks in fast.
     cmd = [
         browser,
-        f"--app=file:///{INDEX_HTML.as_posix().lstrip('/')}",
+        f"--app=http://127.0.0.1:{PORT}/",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=Translate,OptimizationHints",
+        "--disable-features=Translate,OptimizationHints,CalculateNativeWinOcclusion",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
         "--window-size=400,300",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

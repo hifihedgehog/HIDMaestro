@@ -214,14 +214,14 @@ def check_browser() -> dict:
 #  Main
 # ---------------------------------------------------------------------------
 
-TARGET_AXES = 5
-TARGET_DI_COUNT = 1
-TARGET_BROWSER = 1
+TARGET_AXES = 5  # Xbox controllers expose 5 axes (X,Y,Z,Rx,Ry); DualSense=6
 
 
 def main():
     wait = 0
     repeats = 4
+    controllers = 1   # number of HIDMaestro controllers expected to be running
+    target_axes = TARGET_AXES
 
     args = sys.argv[1:]
     i = 0
@@ -230,8 +230,15 @@ def main():
             wait = int(args[i + 1]); i += 2
         elif args[i] == "--repeat" and i + 1 < len(args):
             repeats = int(args[i + 1]); i += 2
+        elif args[i] in ("--controllers", "-n") and i + 1 < len(args):
+            controllers = int(args[i + 1]); i += 2
+        elif args[i] == "--axes" and i + 1 < len(args):
+            target_axes = int(args[i + 1]); i += 2
         else:
             i += 1
+
+    target_di_count = controllers
+    target_browser = controllers
 
     if wait > 0:
         print(f"Waiting {wait}s...")
@@ -257,26 +264,27 @@ def main():
     # -- DirectInput --
     di = check_directinput(repeats)
     print(f"  DirectInput: ", end="")
-    if di["count"] == TARGET_DI_COUNT:
-        d = di["devices"][0]
-        ax_ok = d["axes"] == TARGET_AXES
-        if ax_ok and d["moving"]:
-            print(f"PASS  VID=0x{d['vid']:04X} PID=0x{d['pid']:04X} "
-                  f"Axes={d['axes']} Btn={d['buttons']} moving")
-        elif ax_ok:
-            print(f"WARN  {d['axes']} axes but center (no movement)")
+    if di["count"] == target_di_count:
+        # All devices must have correct axes count and at least one must show movement
+        wrong_axes = [d for d in di["devices"] if d["axes"] != target_axes]
+        any_moving = any(d["moving"] for d in di["devices"])
+        if not wrong_axes and any_moving:
+            ids = ", ".join(f"VID=0x{d['vid']:04X} PID=0x{d['pid']:04X}" for d in di["devices"])
+            print(f"PASS  {di['count']} device(s) Axes={target_axes} ({ids})")
+        elif not wrong_axes:
+            print(f"WARN  {di['count']} device(s) {target_axes} axes but no movement")
         else:
-            print(f"FAIL  axes={d['axes']} (want {TARGET_AXES})")
-            failures.append(f"DirectInput axes={d['axes']} (want {TARGET_AXES})")
+            print(f"FAIL  axes mismatch: {[d['axes'] for d in di['devices']]} (want {target_axes})")
+            failures.append(f"DirectInput axes mismatch (want {target_axes})")
     elif di["count"] == 0:
         print("FAIL  no devices")
         failures.append("DirectInput: no devices")
     else:
-        print(f"FAIL  {di['count']} devices (want {TARGET_DI_COUNT})")
+        print(f"FAIL  {di['count']} devices (want {target_di_count})")
         for d in di["devices"]:
             print(f"    Joy{d['id']}: VID=0x{d['vid']:04X} PID=0x{d['pid']:04X} "
                   f"Axes={d['axes']}")
-        failures.append(f"DirectInput: {di['count']} devices (want {TARGET_DI_COUNT})")
+        failures.append(f"DirectInput: {di['count']} devices (want {target_di_count})")
 
     # -- HIDAPI / SDL3 --
     hi = check_hidapi()
@@ -289,14 +297,13 @@ def main():
         ig_devs = [d for d in hi["devices"] if d["ig_filtered"]]
         non_ig = [d for d in hi["devices"] if not d["ig_filtered"]]
         if len(non_ig) == 0 and len(ig_devs) > 0:
-            d = ig_devs[0]
-            print(f"OK    PID=0x{d['pid']:04X} Bus={d['bus']} IG=True "
-                  f"(SDL3 uses XInput backend)")
-        elif len(non_ig) == 1 and hi["live_data"]:
-            d = non_ig[0]
-            print(f"PASS  PID=0x{d['pid']:04X} Bus={d['bus']} live data")
-        elif len(non_ig) > 1:
-            print(f"FAIL  {len(non_ig)} visible devices (want 0 or 1)")
+            ids = ", ".join(f"PID=0x{d['pid']:04X}" for d in ig_devs)
+            print(f"OK    {len(ig_devs)} dev IG=True ({ids}) — SDL3 uses XInput backend")
+        elif len(non_ig) == controllers and hi["live_data"]:
+            ids = ", ".join(f"PID=0x{d['pid']:04X} Bus={d['bus']}" for d in non_ig)
+            print(f"PASS  {len(non_ig)} dev live ({ids})")
+        elif len(non_ig) > controllers:
+            print(f"FAIL  {len(non_ig)} visible devices (want {controllers} or all IG-filtered)")
             failures.append(f"HIDAPI: {len(non_ig)} non-IG devices")
         else:
             print(f"WARN  {hi['total_045e']} device(s), no live data")
@@ -310,24 +317,31 @@ def main():
         pads = br.get("pads", 0)
         live = br.get("live", 0)
         snap = br.get("snapshot", [])
-        if pads == TARGET_BROWSER and live > 0:
+        if pads == target_browser and live > 0:
             if snap:
-                ident = snap[0].get("id", "?")
-                ident_short = ident[:60] + ("..." if len(ident) > 60 else "")
-                axes = snap[0].get("axes", [])
-                axes_str = ",".join(f"{a:+.2f}" for a in axes[:2])
-                print(f"PASS  {pads} pad live ({br['browser']}) [{axes_str}] {ident_short}")
+                summary_lines = []
+                for s in snap[:target_browser]:
+                    ident = s.get("id", "?")
+                    ident_short = ident[:55] + ("..." if len(ident) > 55 else "")
+                    axes = s.get("axes", [])
+                    axes_str = ",".join(f"{a:+.2f}" for a in axes[:2])
+                    summary_lines.append(f"[{axes_str}] {ident_short}")
+                first = summary_lines[0]
+                rest = summary_lines[1:]
+                print(f"PASS  {pads} pad(s) live ({br['browser']}) {first}")
+                for line in rest:
+                    print(f"                                   {line}")
             else:
-                print(f"PASS  {pads} pad live ({br['browser']})")
-        elif pads == TARGET_BROWSER and live == 0:
-            print(f"FAIL  {pads} pad detected but axes static (no live data)")
+                print(f"PASS  {pads} pad(s) live ({br['browser']})")
+        elif pads == target_browser and live == 0:
+            print(f"FAIL  {pads} pad(s) detected but axes static (no live data)")
             failures.append("Browser: gamepad present but data is static")
         elif pads == 0:
             print("FAIL  no gamepad detected")
             failures.append("Browser: no gamepad detected")
         else:
-            print(f"FAIL  {pads} pads detected (want {TARGET_BROWSER})")
-            failures.append(f"Browser: {pads} pads (want {TARGET_BROWSER})")
+            print(f"FAIL  {pads} pads detected (want {target_browser})")
+            failures.append(f"Browser: {pads} pads (want {target_browser})")
 
     # -- Summary --
     print()

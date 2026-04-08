@@ -1565,9 +1565,18 @@ class Program
     /// xinputhid sets names like "Xbox Wireless Controller" from its INF.
     /// We override with the profile's deviceDescription via direct registry write.
     /// </summary>
-    static void FixHidChildNames(string name)
+    /// <summary>
+    /// Sets the FriendlyName and DeviceDesc on the HIDMaestro root device(s)
+    /// belonging to a specific controllerIndex (matched via Device Parameters
+    /// registry value), and on their HID children. With controllerIndex=-1
+    /// (legacy behavior) updates ALL HIDMaestro VID_ devices — used only by
+    /// single-controller paths that don't need filtering.
+    ///
+    /// Multi-controller MUST pass the explicit index to avoid one controller's
+    /// setup overwriting an earlier controller's friendly name.
+    /// </summary>
+    static void FixHidChildNames(string name, int controllerIndex = -1)
     {
-        // Fix device names using CM APIs — no PowerShell spawning
         var fnKey = new DEVPROPKEY
         {
             fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
@@ -1580,7 +1589,7 @@ class Program
         };
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
 
-        // Find all ROOT\VID_* and ROOT\HMCompanion devices and their HID children
+        // Find ROOT\VID_* devices, optionally filtered by Device Parameters\ControllerIndex
         try
         {
             using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
@@ -1588,14 +1597,27 @@ class Program
             foreach (var sub in enumKey.GetSubKeyNames())
             {
                 if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
-                foreach (var inst in Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}")?.GetSubKeyNames() ?? Array.Empty<string>())
+                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}");
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
                 {
+                    // If a controllerIndex was requested, skip devices that don't match.
+                    if (controllerIndex >= 0)
+                    {
+                        using var dpKey = Registry.LocalMachine.OpenSubKey(
+                            $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                        if (dpKey == null) continue;
+                        var ci = dpKey.GetValue("ControllerIndex");
+                        // Treat missing as index 0 so single-controller setup still works
+                        int actual = ci is int v ? v : 0;
+                        if (actual != controllerIndex) continue;
+                    }
+
                     string devId = $@"ROOT\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
                     {
                         CM_Set_DevNode_PropertyW(devInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
                         CM_Set_DevNode_PropertyW(devInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-                        // Also fix HID child
                         if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
                         {
                             CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
@@ -1809,9 +1831,10 @@ class Program
                     Console.Write("(HID child timeout) ");
             }
 
-            // Fix name after xinputhid loads
+            // Fix name after xinputhid loads — filter by controllerIndex so
+            // multi-controller doesn't overwrite a sibling controller's name
             string displayName = profile.DeviceDescription ?? profile.ProductString;
-            FixHidChildNames(displayName);
+            FixHidChildNames(displayName, controllerIndex);
 
             return true;
         }
@@ -2504,32 +2527,47 @@ class Program
             Console.WriteLine("  Companion-only mode (no xinputhid main device)");
         }
 
-        // Step 3: Wait for HID child + xinputhid, then fix device name
+        // Step 3: Wait for HID child + xinputhid, then fix device name.
+        // Pass controllerIndex so we ONLY rename our own controller's devices
+        // — never overwrite a sibling controller's friendly name in multi mode.
         Thread.Sleep(3000);
         Console.Write("  Fixing device name... ");
         string displayName = profile.DeviceDescription ?? profile.ProductString;
-        FixHidChildNames(displayName);
-        // Also set on root device (search all possible enumerator types)
-        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
-            "VID_045E&PID_028E&IG_00" })
+        FixHidChildNames(displayName, controllerIndex);
+        // Also set on root device — locate it via Device Parameters\ControllerIndex
+        // so multi-controller doesn't grab the wrong root.
         {
-            for (int idx = 0; idx < 10; idx++)
+            bool found = false;
+            try
             {
-                string rootId = $@"ROOT\{enumer}\{idx:D4}";
-                if (CM_Locate_DevNodeW(out uint rootI, rootId, 0) == 0)
+                using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+                if (rootEnum != null)
                 {
-                    SetBusReportedDeviceDesc(rootId, displayName);
-                    SetDeviceFriendlyName(rootId, displayName);
-                    goto nameSetDone;
+                    foreach (var sub in rootEnum.GetSubKeyNames())
+                    {
+                        if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                        using var subKey = rootEnum.OpenSubKey(sub);
+                        if (subKey == null) continue;
+                        foreach (var inst in subKey.GetSubKeyNames())
+                        {
+                            using var dpKey = Registry.LocalMachine.OpenSubKey(
+                                $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                            int actual = (dpKey?.GetValue("ControllerIndex") is int v) ? v : 0;
+                            if (actual != controllerIndex) continue;
+                            string rootId = $@"ROOT\{sub}\{inst}";
+                            SetBusReportedDeviceDesc(rootId, displayName);
+                            SetDeviceFriendlyName(rootId, displayName);
+                            found = true; break;
+                        }
+                        if (found) break;
+                    }
                 }
             }
+            catch { }
         }
-        nameSetDone:
         // Final name fix after xinputhid grandchild has fully appeared
         Thread.Sleep(2000);
-        FixHidChildNames(displayName);
+        FixHidChildNames(displayName, controllerIndex);
 
         // Xbox 360 xinputhid: BtnFix filter (DISABLED — needs proper INF installation)
         if (false && profile.UsesXinputhid && profile.ProductId == 0x028E)
