@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HIDMaestro Browser Gamepad Check</title>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee;
+         display: flex; flex-direction: column; align-items: center;
+         padding: 20px; }
+  h1 { color: #fff; }
+  pre { background: #0f3460; padding: 16px; border-radius: 8px; }
+  .live { color: #4ade80; }
+  .static { color: #f87171; }
+</style>
+</head>
+<body>
+<h1>HIDMaestro Browser Gamepad Check</h1>
+<pre id="status">Waiting for gamepadconnected event...</pre>
+<pre id="readings">No readings yet.</pre>
+<script>
+// This page is loaded via --app=file://... by scripts/verify.py.
+// It collects 30 samples of navigator.getGamepads() over ~3 seconds and POSTs
+// the results back to the local HTTP server the launcher started.
+//
+// We deliberately probe what real web pages see — same code path as
+// gamepad-tester.com / hardwaretester.com / PadForge web UI etc.
+
+const SERVER_URL = "http://127.0.0.1:8765/result";
+const SAMPLE_COUNT = 30;
+const SAMPLE_INTERVAL_MS = 100;
+
+const status = document.getElementById('status');
+const readings = document.getElementById('readings');
+const samples = [];
+let gamepadEverSeen = false;
+
+// Chrome requires gamepadconnected event before navigator.getGamepads()
+// returns non-null entries. Some browsers also require a user gesture first.
+window.addEventListener('gamepadconnected', (e) => {
+  gamepadEverSeen = true;
+  status.textContent = `Gamepad connected: ${e.gamepad.id} (index ${e.gamepad.index})`;
+});
+
+window.addEventListener('gamepaddisconnected', (e) => {
+  status.textContent = `Gamepad disconnected: index ${e.gamepad.index}`;
+});
+
+function sample() {
+  const pads = navigator.getGamepads();
+  const live = [];
+  for (const p of pads) {
+    if (p) {
+      live.push({
+        index: p.index,
+        id: p.id,
+        connected: p.connected,
+        mapping: p.mapping,
+        timestamp: p.timestamp,
+        buttons: p.buttons.map(b => ({ pressed: b.pressed, value: b.value })),
+        axes: Array.from(p.axes),
+      });
+    }
+  }
+  samples.push({ t: performance.now(), pads: live });
+
+  // Update visible readings (helps debugging if launched manually)
+  if (live.length > 0) {
+    const p = live[0];
+    readings.textContent = `id: ${p.id}\nmapping: ${p.mapping}\n` +
+      `axes: ${p.axes.map(a => a.toFixed(3)).join(', ')}\n` +
+      `triggers: B6=${p.buttons[6]?.value.toFixed(2)} B7=${p.buttons[7]?.value.toFixed(2)}`;
+  }
+
+  if (samples.length >= SAMPLE_COUNT) {
+    finish();
+  } else {
+    setTimeout(sample, SAMPLE_INTERVAL_MS);
+  }
+}
+
+function finish() {
+  // Compute "live" determination: at least one gamepad whose axes vary across samples
+  const padCount = Math.max(0, ...samples.map(s => s.pads.length));
+  let liveCount = 0;
+  if (padCount > 0) {
+    for (let i = 0; i < padCount; i++) {
+      const ax0Set = new Set(), ax1Set = new Set();
+      for (const s of samples) {
+        const p = s.pads[i];
+        if (!p) continue;
+        ax0Set.add(p.axes[0]?.toFixed(3));
+        ax1Set.add(p.axes[1]?.toFixed(3));
+      }
+      if (ax0Set.size > 1 || ax1Set.size > 1) liveCount++;
+    }
+  }
+
+  const result = {
+    gamepadEverSeen,
+    samples: samples.length,
+    padCount,
+    liveCount,
+    finalSnapshot: samples[samples.length - 1]?.pads ?? [],
+  };
+
+  // POST result to launcher and signal done
+  fetch(SERVER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(result),
+  }).catch(() => {}).finally(() => {
+    document.title = 'HIDMAESTRO_BROWSER_CHECK_DONE';
+    status.textContent = `Done. ${liveCount}/${padCount} live gamepad(s).`;
+  });
+}
+
+// Start sampling immediately (don't wait for gamepadconnected — Chrome may
+// have already enumerated the gamepad before our handler ran).
+setTimeout(sample, 100);
+</script>
+</body>
+</html>

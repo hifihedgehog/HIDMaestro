@@ -189,21 +189,25 @@ def check_hidapi() -> dict:
 
 
 # ---------------------------------------------------------------------------
-#  Browser / WGI (WinExInput interface)
+#  Browser (real Chromium navigator.getGamepads via headless launcher)
 # ---------------------------------------------------------------------------
 
 def check_browser() -> dict:
-    winexinput_guid = "{6c53d5fd-6480-440f-b618-476750c5e1a6}"
+    """Launch a real browser at scripts/browser_check/index.html and read what
+    navigator.getGamepads() returns. This is the only way to know whether the
+    browser path is actually working — different controllers use different
+    Chromium gamepad source backends (XInput / WGI / RawInput / HID), and the
+    backend choice can't be inferred from any single OS API.
+
+    Cold-start cost: a fresh Edge profile takes ~6-8s to initialize before
+    JavaScript starts running, so the timeout has headroom."""
     try:
-        r = subprocess.run(
-            ["powershell", "-Command",
-             f'pnputil /enum-interfaces /class "{winexinput_guid}" 2>&1'],
-            capture_output=True, text=True, timeout=10,
-        )
-        enabled = sum(1 for line in r.stdout.split("\n") if "Enabled" in line)
-        return {"winexinput_enabled": enabled}
+        # Inline import so verify.py still runs even if browser_check is missing
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent / "browser_check"))
+        from launcher import run_browser_check  # type: ignore
+        return run_browser_check(timeout_s=20.0)
     except Exception as e:
-        return {"winexinput_enabled": 0, "error": str(e)}
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------------------
@@ -297,17 +301,33 @@ def main():
         else:
             print(f"WARN  {hi['total_045e']} device(s), no live data")
 
-    # -- Browser --
+    # -- Browser (real Chromium navigator.getGamepads via headless launcher) --
+    print("  Browser:     ", end="", flush=True)
     br = check_browser()
-    enabled = br["winexinput_enabled"]
-    if enabled == TARGET_BROWSER:
-        print(f"  Browser:     PASS  {enabled} WinExInput interface(s)")
-    elif enabled > TARGET_BROWSER:
-        print(f"  Browser:     FAIL  {enabled} WinExInput (want {TARGET_BROWSER})")
-        failures.append(f"Browser: {enabled} WinExInput (want {TARGET_BROWSER})")
+    if not br.get("available"):
+        print(f"SKIP  ({br.get('error', 'unavailable')})")
     else:
-        print(f"  Browser:     FAIL  {enabled} WinExInput (want {TARGET_BROWSER})")
-        failures.append(f"Browser: {enabled} WinExInput (want {TARGET_BROWSER})")
+        pads = br.get("pads", 0)
+        live = br.get("live", 0)
+        snap = br.get("snapshot", [])
+        if pads == TARGET_BROWSER and live > 0:
+            if snap:
+                ident = snap[0].get("id", "?")
+                ident_short = ident[:60] + ("..." if len(ident) > 60 else "")
+                axes = snap[0].get("axes", [])
+                axes_str = ",".join(f"{a:+.2f}" for a in axes[:2])
+                print(f"PASS  {pads} pad live ({br['browser']}) [{axes_str}] {ident_short}")
+            else:
+                print(f"PASS  {pads} pad live ({br['browser']})")
+        elif pads == TARGET_BROWSER and live == 0:
+            print(f"FAIL  {pads} pad detected but axes static (no live data)")
+            failures.append("Browser: gamepad present but data is static")
+        elif pads == 0:
+            print("FAIL  no gamepad detected")
+            failures.append("Browser: no gamepad detected")
+        else:
+            print(f"FAIL  {pads} pads detected (want {TARGET_BROWSER})")
+            failures.append(f"Browser: {pads} pads (want {TARGET_BROWSER})")
 
     # -- Summary --
     print()

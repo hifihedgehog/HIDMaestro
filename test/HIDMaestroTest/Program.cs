@@ -33,9 +33,6 @@ class Program
     /// <summary>Returns the per-instance registry path for a controller index.</summary>
     static string RegPathForIndex(int index) => $@"SOFTWARE\HIDMaestro\Controller{index}";
 
-    /// <summary>Returns the per-instance shared file path for a controller index.</summary>
-    static string SharedFileForIndex(int index) => $@"C:\ProgramData\HIDMaestro\input_{index}.bin";
-
     // ── P/Invoke: CfgMgr32 for device property setting ──
 
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -1042,31 +1039,6 @@ class Program
         // DPad from hat switch
         SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
         SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
-    }
-
-    /// <summary>
-    /// Ensures the shared file exists with open ACLs for the driver timer.
-    /// Also creates the named shared-memory section that drivers prefer over the file.
-    /// </summary>
-    static void EnsureSharedFile(int controllerIndex = 0)
-    {
-        string dir = @"C:\ProgramData\HIDMaestro";
-        Directory.CreateDirectory(dir);
-        string filePath = SharedFileForIndex(controllerIndex);
-        if (!File.Exists(filePath))
-        {
-            File.WriteAllBytes(filePath, new byte[86]);
-        }
-        // Also create legacy path for backward compat
-        string legacyPath = Path.Combine(dir, "input.bin");
-        if (!File.Exists(legacyPath))
-            File.WriteAllBytes(legacyPath, new byte[86]);
-        // Grant Everyone full access so WUDFHost (LocalService) can read the file fallback
-        RunProcess("icacls.exe", $"\"{dir}\" /grant Everyone:(OI)(CI)F /T", timeoutMs: 5000);
-
-        // Create the named shared-memory section (preferred IPC channel).
-        // Pagefile-backed (no disk I/O at all). The driver opens by name.
-        EnsureSharedMapping(controllerIndex);
     }
 
     // ── Shared memory IPC (replaces high-frequency file writes) ──
@@ -2327,7 +2299,7 @@ class Program
         // Step 0: Pre-flight setup (all in code, no external scripts)
         Console.Write("  Setting up environment... ");
         EnsureGameInputService();
-        EnsureSharedFile(controllerIndex);
+        EnsureSharedMapping(controllerIndex);
         if (controllerIndex == 0 && !_ghostsCleanedThisSession)
         {
             CleanupGhostDevices();
@@ -2412,9 +2384,9 @@ class Program
             inputReportByteLength: bleReportLen,
             functionMode: funcMode,
             controllerIndex: controllerIndex);
-        // Set XusbNeeded BEFORE main device creation so driver reads correct value.
-        // Non-xinputhid Xbox: companion handles XInput, main device must NOT register XUSB.
-        // xinputhid: xinputhid handles XInput, no XUSB needed on main device either.
+        // XusbNeeded gates main device's XUSB registration (in the dead
+        // #ifdef HIDMAESTRO_XUSB_MODE block — kept for safety, harmless).
+        // The XUSB companion is created conditionally below based on UsesUpperFilter.
         using (var cfgKey = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex)))
             cfgKey.SetValue("XusbNeeded", 0, RegistryValueKind.DWord);
         Console.WriteLine("OK");
@@ -2634,10 +2606,11 @@ class Program
         }
         Console.WriteLine("OK");
 
-        // Step 3.5: Create XUSB companion for XInput (non-xinputhid Xbox profiles only).
-        // xinputhid provides XInput on each main device independently. No companion needed.
-        // Non-xinputhid (funcMode, e.g. Xbox 360 Wired): companion provides XInput.
-        if (profile.VendorId == 0x045E)
+        // Step 3.5: Create XUSB companion for XInput — non-xinputhid Xbox profiles ONLY.
+        // For xinputhid profiles (Xbox Series BT, etc.), xinputhid auto-loads on the
+        // HID child of the gamepad companion and provides XInput itself. Creating an
+        // XUSB companion in that case produces a duplicate XInput slot.
+        if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
             // XUSB companion handles XInput — tell main device NOT to register XUSB
             // (avoids duplicate XInput slot from main device's driver)
@@ -2843,7 +2816,7 @@ class Program
         Console.WriteLine($"  Report buffer: {reportBufSize} bytes");
 
         // Shared memory IPC: pagefile-backed named section in Global\ namespace.
-        // Driver opens by name (no disk I/O at all). Created in EnsureSharedFile().
+        // Driver opens by name. RAM-only — no disk I/O.
         int ctrlIndex = controllerIndex;
         IntPtr sharedView = IntPtr.Zero;
         uint sharedMemSeqNo = 0;

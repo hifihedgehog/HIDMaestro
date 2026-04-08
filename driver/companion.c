@@ -1,7 +1,8 @@
 /*
  * HIDMaestro Companion — UMDF2 driver for XUSB XInput + WinExInput.
- * Registers XUSB (conditionally via XusbNeeded) + WinExInput interfaces.
- * Reads gamepad state from shared file (C:\ProgramData\HIDMaestro\input_N.bin).
+ * Registers XUSB and WinExInput device interfaces.
+ * Reads gamepad state from a per-instance pagefile-backed shared section
+ * (Global\HIDMaestroInput<N>) — RAM-only, no disk I/O.
  * No HID, no filter mode — runs as System-class function driver.
  */
 
@@ -37,7 +38,6 @@ typedef struct _COMPANION_CTX {
     USHORT VendorId;
     USHORT ProductId;
     ULONG ControllerIndex;
-    WCHAR SharedFilePath[128]; /* legacy fallback path */
     WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
     WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
     HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
@@ -64,45 +64,31 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
 
 static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 {
-    /* Lazy-open named section (preferred path). The test app creates it
-     * before our device is created, but we re-try here in case the section
-     * appears later. */
+    /* Lazy-open named section. RAM-only — no disk fallback.
+     * Test app creates the section before this device's first IOCTL,
+     * but we retry on every call until the section appears. */
     if (ctx->SharedMemPtr == NULL) {
         HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
-        if (h != NULL) {
-            PVOID v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SHARED_INPUT));
-            if (v != NULL) { ctx->SharedMemHandle = h; ctx->SharedMemPtr = v; }
-            else CloseHandle(h);
-        }
+        if (h == NULL) return FALSE;
+        PVOID v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SHARED_INPUT));
+        if (v == NULL) { CloseHandle(h); return FALSE; }
+        ctx->SharedMemHandle = h;
+        ctx->SharedMemPtr = v;
     }
 
-    if (ctx->SharedMemPtr != NULL) {
-        /* Seqlock read: retry if writer was mid-update */
-        volatile SHARED_INPUT* src = (volatile SHARED_INPUT*)ctx->SharedMemPtr;
-        ULONG seq1, seq2;
-        int retries = 4;
-        UCHAR tmp[14];
-        do {
-            seq1 = src->SeqNo;
-            MemoryBarrier();
-            for (int i = 0; i < 14; i++) tmp[i] = src->GipData[i];
-            MemoryBarrier();
-            seq2 = src->SeqNo;
-        } while (seq1 != seq2 && --retries > 0);
-        for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
-        return TRUE;
-    }
-
-    /* Legacy file fallback */
-    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
-        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
-    SHARED_INPUT shared;
-    DWORD bytesRead = 0;
-    BOOL ok = ReadFile(hFile, &shared, sizeof(shared), &bytesRead, NULL);
-    CloseHandle(hFile);
-    if (!ok || bytesRead < 72 + 14) return FALSE;
-    RtlCopyMemory(gipOut, shared.GipData, 14);
+    /* Seqlock read: retry if writer was mid-update */
+    volatile SHARED_INPUT* src = (volatile SHARED_INPUT*)ctx->SharedMemPtr;
+    ULONG seq1, seq2;
+    int retries = 4;
+    UCHAR tmp[14];
+    do {
+        seq1 = src->SeqNo;
+        MemoryBarrier();
+        for (int i = 0; i < 14; i++) tmp[i] = src->GipData[i];
+        MemoryBarrier();
+        seq2 = src->SeqNo;
+    } while (seq1 != seq2 && --retries > 0);
+    for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
     return TRUE;
 }
 
@@ -162,16 +148,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
             *p = L'\0';
 
-            /* Shared file: C:\ProgramData\HIDMaestro\input_<N>.bin (legacy) */
-            static const WCHAR filePrefix[] = L"C:\\ProgramData\\HIDMaestro\\input_";
-            static const WCHAR fileSuffix[] = L".bin";
-            p = ctx->SharedFilePath;
-            for (int i = 0; filePrefix[i]; i++) *p++ = filePrefix[i];
-            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
-            for (int i = 0; fileSuffix[i]; i++) *p++ = fileSuffix[i];
-            *p = L'\0';
-
-            /* Memory-mapped section: Global\HIDMaestroInput<N> (preferred) */
+            /* Memory-mapped section: Global\HIDMaestroInput<N> (RAM-only IPC) */
             static const WCHAR mapPrefix[] = L"Global\\HIDMaestroInput";
             p = ctx->SharedMappingName;
             for (int i = 0; mapPrefix[i]; i++) *p++ = mapPrefix[i];
@@ -205,56 +182,15 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
     if (!NT_SUCCESS(status)) return status;
 
-    /* Register XUSB (conditionally) + WinExInput interfaces */
+    /* XUSB companion always registers XUSB (its sole purpose) and WinExInput
+     * (so the browser Gamepad API gets a GamepadAdded event for this controller).
+     * The test app only creates this companion for non-xinputhid profiles —
+     * xinputhid profiles have xinputhid auto-load on the HID child instead. */
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
     {
-        PCOMPANION_CTX dbgCtx = GetCompanionCtx(device);
-        NTSTATUS s1 = STATUS_SUCCESS;
-        NTSTATUS s2;
-
-        /* XUSB companion ALWAYS registers XUSB — that's its sole purpose.
-         * The XusbNeeded flag controls the MAIN device's XUSB registration
-         * (to avoid duplicate XInput slots), not the companion's. */
-        DWORD xusbNeeded = 1;
-        s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
-
-        /* Always register WinExInput for browser gamepad API */
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
-        s2 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
-
-        /* Debug log — FILE_SHARE_WRITE allows multiple companions to append */
-        HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
-            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 0, NULL);
-        if (hLog != INVALID_HANDLE_VALUE) {
-            char msg[200];
-            char* p = msg;
-            RtlCopyMemory(p, "idx=", 4); p += 4;
-            *p++ = (char)('0' + dbgCtx->ControllerIndex % 10);
-            *p++ = ' ';
-            RtlCopyMemory(p, "xusb=", 5); p += 5;
-            *p++ = xusbNeeded ? '1' : '0';
-            *p++ = ' ';
-            RtlCopyMemory(p, "file=", 5); p += 5;
-            for (int fi = 0; fi < 30 && dbgCtx->SharedFilePath[fi]; fi++)
-                *p++ = (char)(dbgCtx->SharedFilePath[fi] & 0x7F);
-            *p++ = ' ';
-            RtlCopyMemory(p, "s1=", 3); p += 3;
-            /* Simple hex output */
-            for (int k = 7; k >= 0; k--) {
-                int nib = (s1 >> (k*4)) & 0xF;
-                *p++ = (char)(nib < 10 ? '0'+nib : 'A'+nib-10);
-            }
-            *p++ = ' '; *p++ = 's'; *p++ = '2'; *p++ = '=';
-            for (int k = 7; k >= 0; k--) {
-                int nib = (s2 >> (k*4)) & 0xF;
-                *p++ = (char)(nib < 10 ? '0'+nib : 'A'+nib-10);
-            }
-            *p++ = '\r'; *p++ = '\n';
-            int len = (int)(p - msg);
-            DWORD dummy;
-            WriteFile(hLog, msg, len, &dummy, NULL);
-            CloseHandle(hLog);
-        }
+        WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
     }
 
     return STATUS_SUCCESS;
@@ -353,27 +289,6 @@ void CompanionIoControl(
             *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));
             *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
             *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));
-        }
-        /* Debug: log GET_STATE trigger values */
-        {
-            static LONG gsCount = 0;
-            if (InterlockedIncrement(&gsCount) == 100) {
-                HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\getstate_debug.txt",
-                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-                if (hLog != INVALID_HANDLE_VALUE) {
-                    char msg[60]; char *p = msg;
-                    *p++='L';*p++='T';*p++='=';
-                    UCHAR ltv = state[0x0D];
-                    *p++='0'+(ltv/100)%10;*p++='0'+(ltv/10)%10;*p++='0'+ltv%10;
-                    *p++=' ';*p++='R';*p++='T';*p++='=';
-                    UCHAR rtv = state[0x0E];
-                    *p++='0'+(rtv/100)%10;*p++='0'+(rtv/10)%10;*p++='0'+rtv%10;
-                    *p++='\r';*p++='\n';
-                    DWORD dummy;
-                    WriteFile(hLog, msg, (int)(p-msg), &dummy, NULL);
-                    CloseHandle(hLog);
-                }
-            }
         }
         CopyToRequest(Request, state, 29);
         break;

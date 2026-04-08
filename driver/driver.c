@@ -57,22 +57,9 @@ InitInstancePaths(
         *p = 0;
     }
 
-    /* Build per-instance shared file path: C:\ProgramData\HIDMaestro\input_<N>.bin */
-    {
-        static const WCHAR prefix[] = L"C:\\ProgramData\\HIDMaestro\\input_";
-        WCHAR *p = ctx->SharedFilePath;
-        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
-        p += (sizeof(prefix) / 2) - 1;
-        *p++ = L'0' + (WCHAR)(index % 10);
-        static const WCHAR suffix[] = L".bin";
-        RtlCopyMemory(p, suffix, sizeof(suffix));
-    }
-
     /* Build per-instance memory-mapped section name: Global\HIDMaestroInput<N>.
-     * This is the primary IPC channel — the test app creates a pagefile-backed
-     * section, the driver maps a read view, and we poll it in the timer.
-     * Falls back to the file path above if OpenFileMappingW fails (e.g. test
-     * app hasn't created the section yet, or running with old test app). */
+     * IPC channel — the test app creates a pagefile-backed section, the driver
+     * maps a read view, and we poll it in the timer. RAM-only, no disk. */
     {
         static const WCHAR prefix[] = L"Global\\HIDMaestroInput";
         WCHAR *p = ctx->SharedMappingName;
@@ -268,40 +255,29 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     return TRUE;
 }
 
-/* Read shared input via memory mapping (preferred) or file (legacy fallback).
+/* Read shared input via memory mapping. RAM-only — no disk fallback.
  * Output: *out is filled with the shared struct on success. */
 static BOOLEAN
 ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
 {
     /* Lazy open: try the mapping on every tick until it succeeds.
      * The test app may create the section after the device starts. */
-    if (ctx->SharedMemPtr == NULL)
-        TryOpenSharedMapping(ctx);
+    if (ctx->SharedMemPtr == NULL && !TryOpenSharedMapping(ctx))
+        return FALSE;
 
-    if (ctx->SharedMemPtr != NULL) {
-        /* Seqlock-style read: retry until SeqNo is stable across the copy.
-         * Single writer / many readers, lock-free. */
-        volatile HIDMAESTRO_SHARED_INPUT *src = (volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr;
-        ULONG seq1, seq2;
-        int retries = 4;
-        do {
-            seq1 = src->SeqNo;
-            MemoryBarrier();
-            RtlCopyMemory(out, (const void *)src, sizeof(*out));
-            MemoryBarrier();
-            seq2 = src->SeqNo;
-        } while (seq1 != seq2 && --retries > 0);
-        return TRUE;
-    }
-
-    /* Fallback: read from per-instance file (legacy path) */
-    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
-        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
-    DWORD bytesRead = 0;
-    BOOL ok = ReadFile(hFile, out, sizeof(*out), &bytesRead, NULL);
-    CloseHandle(hFile);
-    return ok && bytesRead >= 8;
+    /* Seqlock-style read: retry until SeqNo is stable across the copy.
+     * Single writer / many readers, lock-free. */
+    volatile HIDMAESTRO_SHARED_INPUT *src = (volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr;
+    ULONG seq1, seq2;
+    int retries = 4;
+    do {
+        seq1 = src->SeqNo;
+        MemoryBarrier();
+        RtlCopyMemory(out, (const void *)src, sizeof(*out));
+        MemoryBarrier();
+        seq2 = src->SeqNo;
+    } while (seq1 != seq2 && --retries > 0);
+    return TRUE;
 }
 
 static void
@@ -458,27 +434,8 @@ EvtDeviceAdd(
 
     UNREFERENCED_PARAMETER(Driver);
 
-    /* EARLIEST DEBUG - verify EvtDeviceAdd is called */
-    {
-        HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-            FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-        if (hLog != INVALID_HANDLE_VALUE) {
-            char msg[] = "EvtDeviceAdd: ENTERED\r\n";
-            DWORD dummy;
-            WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
-            CloseHandle(hLog);
-        }
-    }
-
-    /*
-     * Check if this is the XUSB companion device (function driver mode)
-     * or a HID minidriver device (filter mode under mshidumdf).
-     * XUSB companion INF sets XusbMode=1 in the device's hardware key.
-     * We detect this by querying the hardware ID for "HIDMaestroXUSB".
-     */
     /* HIDMaestro.dll only loads for HIDClass devices (gamepad companion).
-     * XUSB companion uses HMXInput.dll — separate DLL, no shared code.
-     * No companion type detection needed. */
+     * XUSB companion uses HMXInput.dll — separate DLL, no shared code. */
 
 #ifndef HIDMAESTRO_XUSB_MODE
     /* FunctionMode=1 skips filter mode so we can register XUSB on the HID device.
@@ -810,24 +767,12 @@ EvtDeviceAdd(
 #ifdef HIDMAESTRO_XUSB_MODE
 xusb_start_timer:
 #endif
-    /* Shared file for data injection (bypasses upper filter drivers) */
+    /* Shared memory section for data injection (bypasses upper filter drivers) */
     ctx->SharedMemHandle = NULL;
     ctx->SharedMemPtr = NULL;
     ctx->SharedMemSeqNo = 0;
 
-    /* Debug: verify we reach this point */
-    {
-        HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-            FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-        if (hLog != INVALID_HANDLE_VALUE) {
-            char msg[] = "EvtDeviceAdd: reached timer section\r\n";
-            DWORD dummy;
-            WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
-            CloseHandle(hLog);
-        }
-    }
-
-    /* Poll timer: reads shared file every 4ms (~250Hz) for data injection */
+    /* Poll timer: reads shared section every 1ms for data injection */
     {
         WDF_TIMER_CONFIG timerConfig;
         WDF_TIMER_CONFIG_INIT_PERIODIC(&timerConfig, EvtSharedMemTimer, 1);
@@ -835,23 +780,6 @@ xusb_start_timer:
         WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
         timerAttrs.ParentObject = device;
         status = WdfTimerCreate(&timerConfig, &timerAttrs, &ctx->PollTimer);
-        /* Debug: log timer creation result */
-        {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[64];
-                DWORD dummy;
-                if (NT_SUCCESS(status)) {
-                    char ok[] = "Timer created OK, starting...\r\n";
-                    WriteFile(hLog, ok, sizeof(ok)-1, &dummy, NULL);
-                } else {
-                    char fail[] = "Timer creation FAILED\r\n";
-                    WriteFile(hLog, fail, sizeof(fail)-1, &dummy, NULL);
-                }
-                CloseHandle(hLog);
-            }
-        }
         if (NT_SUCCESS(status)) {
             WdfTimerStart(ctx->PollTimer, WDF_REL_TIMEOUT_IN_MS(100));
         }
@@ -878,31 +806,6 @@ EvtIoDeviceControl(
 
     UNREFERENCED_PARAMETER(OutputBufferLength);
     UNREFERENCED_PARAMETER(InputBufferLength);
-
-    /* Log all IOCTLs for debugging xinputhid protocol */
-    {
-        static LONG ioLogCount = 0;
-        if (InterlockedIncrement(&ioLogCount) <= 500) {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\ioctl_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[64];
-                DWORD dummy;
-                ULONG hi = (IoControlCode >> 16) & 0xFFFF;
-                ULONG lo = IoControlCode & 0xFFFF;
-                msg[0] = 'I'; msg[1] = 'O'; msg[2] = ':'; msg[3] = ' ';
-                /* Simple hex encoding */
-                static const char hex[] = "0123456789ABCDEF";
-                msg[4] = hex[(hi>>12)&0xF]; msg[5] = hex[(hi>>8)&0xF];
-                msg[6] = hex[(hi>>4)&0xF]; msg[7] = hex[hi&0xF];
-                msg[8] = hex[(lo>>12)&0xF]; msg[9] = hex[(lo>>8)&0xF];
-                msg[10] = hex[(lo>>4)&0xF]; msg[11] = hex[lo&0xF];
-                msg[12] = '\r'; msg[13] = '\n';
-                WriteFile(hLog, msg, 14, &dummy, NULL);
-                CloseHandle(hLog);
-            }
-        }
-    }
 
     switch (IoControlCode) {
 
@@ -1216,24 +1119,6 @@ EvtIoDeviceControl(
         /* Read from XusbReport (always GIP format, 14 bytes) */
         if (ctx->XusbReportReady) {
             PUCHAR d = ctx->XusbReport;
-            /* Debug: dump raw GIP data once */
-            {
-                static LONG dumpCount = 0;
-                if (InterlockedIncrement(&dumpCount) == 50) {
-                    HANDLE hDbg = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\gip_raw_dump.txt",
-                        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-                    if (hDbg != INVALID_HANDLE_VALUE) {
-                        char msg[128]; int n = 0;
-                        for (int i = 0; i < 14; i++) {
-                            static const char hex[] = "0123456789ABCDEF";
-                            msg[n++] = hex[d[i] >> 4]; msg[n++] = hex[d[i] & 0xF]; msg[n++] = ' ';
-                        }
-                        msg[n++] = '\r'; msg[n++] = '\n';
-                        DWORD dummy; WriteFile(hDbg, msg, n, &dummy, NULL);
-                        CloseHandle(hDbg);
-                    }
-                }
-            }
             UCHAR btnLow = d[12], btnHigh = d[13];
             UCHAR hat = (btnHigh >> 2) & 0x0F;
             USHORT buttons = 0;
@@ -1267,51 +1152,6 @@ EvtIoDeviceControl(
             *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));    /* RY */
         }
         WdfWaitLockRelease(ctx->InputLock);
-
-        /* Debug: dump the full state buffer being returned */
-        {
-            static LONG stateDumpCount = 0;
-            if (InterlockedIncrement(&stateDumpCount) == 200) {
-                HANDLE hDbg = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\state_dump.txt",
-                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-                if (hDbg != INVALID_HANDLE_VALUE) {
-                    char msg[128]; int n = 0;
-                    for (int i = 0; i < 29; i++) {
-                        static const char hex[] = "0123456789ABCDEF";
-                        msg[n++] = hex[state[i] >> 4]; msg[n++] = hex[state[i] & 0xF]; msg[n++] = ' ';
-                    }
-                    msg[n++] = '\r'; msg[n++] = '\n';
-                    DWORD dummy; WriteFile(hDbg, msg, n, &dummy, NULL);
-                    CloseHandle(hDbg);
-                }
-            }
-        }
-        /* Debug: log trigger values once */
-        {
-            static LONG dbgCount = 0;
-            if (InterlockedIncrement(&dbgCount) == 50) {
-                HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\xusb_state.txt",
-                    FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-                if (hLog != INVALID_HANDLE_VALUE) {
-                    char msg[100];
-                    int len = 0;
-                    msg[len++]='L';msg[len++]='T';msg[len++]='=';
-                    UCHAR ltv = state[0x0D]; msg[len++]='0'+(ltv/100)%10; msg[len++]='0'+(ltv/10)%10; msg[len++]='0'+ltv%10;
-                    msg[len++]=' ';msg[len++]='R';msg[len++]='T';msg[len++]='=';
-                    UCHAR rtv = state[0x0E]; msg[len++]='0'+(rtv/100)%10; msg[len++]='0'+(rtv/10)%10; msg[len++]='0'+rtv%10;
-                    msg[len++]=' ';msg[len++]='d';msg[len++]='[';msg[len++]='1';msg[len++]='0';msg[len++]=']';msg[len++]='=';
-                    if (ctx->XusbReportReady) {
-                        UCHAR v10 = ctx->XusbReport[10]; msg[len++]='0'+(v10/100)%10;msg[len++]='0'+(v10/10)%10;msg[len++]='0'+v10%10;
-                        msg[len++]=' ';msg[len++]='d';msg[len++]='[';msg[len++]='1';msg[len++]='1';msg[len++]=']';msg[len++]='=';
-                        UCHAR v11 = ctx->XusbReport[11]; msg[len++]='0'+(v11/100)%10;msg[len++]='0'+(v11/10)%10;msg[len++]='0'+v11%10;
-                    }
-                    msg[len++]='\r';msg[len++]='\n';
-                    DWORD dummy;
-                    WriteFile(hLog, msg, len, &dummy, NULL);
-                    CloseHandle(hLog);
-                }
-            }
-        }
 
         /* Copy state to output buffer */
         {
