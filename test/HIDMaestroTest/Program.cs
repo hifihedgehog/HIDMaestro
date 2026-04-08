@@ -2532,31 +2532,43 @@ class Program
         // Step 1.5: Create Gamepad companion for SDL3 HIDAPI identity.
         // The companion provides correct VID/PID + BTHLEDEVICE bus type so SDL3's
         // HIDAPI backend claims it and shows the correct controller name.
-        // For xinputhid profiles: set Joystick_DoNotEnumerate=1 to suppress DI duplicate
-        // (main device handles DirectInput via xinputhid).
+        // Multi-controller: each controllerIndex gets its OWN companion instance.
+        // We claim an existing companion only if its Device Parameters\ControllerIndex
+        // matches ours; otherwise we create a fresh device and write ControllerIndex
+        // to identify it. This mirrors the CreateDeviceNode pattern for non-xinputhid.
         if (profile.UsesUpperFilter)
         {
-            Console.Write("  Creating Gamepad companion... ");
-            bool gpExists = false;
-            string gpVidSearch = $"{profile.VendorId:X4}";
-            string gpPidSearch = $"{profile.ProductId:X4}";
-            // Search both old (HIDCLASS) and new (VID_*&IG_00) enumerators
-            foreach (string pfx in new[] { "HIDCLASS", $"VID_{gpVidSearch}&PID_{gpPidSearch}&IG_00" })
+            Console.Write($"  Creating Gamepad companion {controllerIndex}... ");
+            string gpVid = $"{profile.VendorId:X4}";
+            string gpPid = $"{profile.ProductId:X4}";
+            string hwPid = profile.DriverPid != null
+                ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
+            string gpEnumerator = $"VID_{gpVid}&PID_{hwPid}&IG_00";
+
+            // 1. Look for an existing companion already claimed by THIS controllerIndex
+            string? gpInstId = null;
+            try
             {
-                for (int idx = 0; idx < 10; idx++)
+                using var gpEnum = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Enum\ROOT\{gpEnumerator}");
+                if (gpEnum != null)
                 {
-                    string candidate = $@"ROOT\{pfx}\{idx:D4}";
-                    if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                    foreach (var inst in gpEnum.GetSubKeyNames())
                     {
-                        var (_, info) = RunProcess("pnputil.exe", $"/enum-devices /instanceid \"{candidate}\"");
-                        if (info.Contains("Gamepad") || info.Contains("HIDMaestroGamepad"))
-                        { gpExists = true; break; }
+                        string candidate = $@"ROOT\{gpEnumerator}\{inst}";
+                        if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
+                        using var dp = gpEnum.OpenSubKey($@"{inst}\Device Parameters");
+                        var ci = dp?.GetValue("ControllerIndex");
+                        if (ci is int civ && civ == controllerIndex)
+                        { gpInstId = candidate; break; }
                     }
                 }
-                if (gpExists) break;
             }
-            if (!gpExists)
+            catch { }
+
+            if (gpInstId == null)
             {
+                // 2. No existing match — create a new companion device.
                 var hidGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
                 IntPtr dis3 = SetupDiCreateDeviceInfoList(ref hidGuid, IntPtr.Zero);
                 if (dis3 != new IntPtr(-1))
@@ -2564,19 +2576,13 @@ class Program
                     byte[] diBuf3 = new byte[32];
                     BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf3, 0);
                     var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
-                    string gpVid = $"{profile.VendorId:X4}";
-                    string gpPid = $"{profile.ProductId:X4}";
-                    string hwPid = profile.DriverPid != null
-                        ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
-                    string gpEnumerator = $"VID_{gpVid}&PID_{hwPid}&IG_00";
                     string gpHw = $"root\\VID_{gpVid}&PID_{hwPid}&IG_00\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
                     byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
                     if (SetupDiCreateDeviceInfoW_Raw(dis3, gpEnumerator, ref hidGuid,
                         "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
                     {
                         SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
-                        // Set CompatibleIDs — only add BTHLEDEVICE for Bluetooth profiles.
-                        // USB profiles should NOT spoof BT (causes SDL3 misidentification).
+                        // CompatibleIDs — only spoof BTHLEDEVICE for Bluetooth profiles
                         string gpCompatBase = $"root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
                         if (profile.Connection == "bluetooth")
                             gpCompatBase = $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}\0" + gpCompatBase;
@@ -2588,30 +2594,40 @@ class Program
                     diHandle3.Free();
                     SetupDiDestroyDeviceInfoList(dis3);
                 }
-            }
-            // Restart companion to load with real VID/PID
-            string restartHwPid = profile.DriverPid != null
-                ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : $"{profile.ProductId:X4}";
-            foreach (string pfx2 in new[] { $"VID_{profile.VendorId:X4}&PID_{restartHwPid}&IG_00", "HIDCLASS" })
-            {
-                bool found = false;
-                for (int idx = 0; idx < 10; idx++)
+
+                // 3. Find the freshly-created instance: live device with no
+                //    ControllerIndex yet. Same trick CreateDeviceNode uses.
+                try
                 {
-                    string candidate = $@"ROOT\{pfx2}\{idx:D4}";
-                    if (CM_Locate_DevNodeW(out uint _, candidate, 0) == 0)
+                    using var gpEnum = Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{gpEnumerator}");
+                    if (gpEnum != null)
                     {
-                        DeviceManager.RestartDevice(candidate);
-                        Thread.Sleep(2000);
-                        found = true; break;
+                        foreach (var inst in gpEnum.GetSubKeyNames())
+                        {
+                            string candidate = $@"ROOT\{gpEnumerator}\{inst}";
+                            if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
+                            string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{candidate}\Device Parameters";
+                            using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
+                            if (dpKey.GetValue("ControllerIndex") == null)
+                            {
+                                dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+                                gpInstId = candidate;
+                                break;
+                            }
+                        }
                     }
                 }
-                if (found) break;
+                catch { }
             }
-            // For xinputhid profiles: suppress DI duplicate from companion.
-            // Main device provides DirectInput. Companion only provides HIDAPI identity.
-            // Companion uses HIDCLASS enumerator — no xinputhid, no extra XInput/DI.
-            // No need for Joystick_DoNotEnumerate since HIDCLASS children don't trigger
-            // xinputhid and DirectInput won't see them as gamepads without &IG_00.
+
+            // 4. Restart THIS controller's companion so it picks up the latest
+            //    descriptor + VID/PID from the per-instance registry config.
+            if (gpInstId != null)
+            {
+                DeviceManager.RestartDevice(gpInstId);
+                Thread.Sleep(2000);
+            }
             Console.WriteLine("OK");
 
             // Registry keeps real VID/PID (companion reads it)
