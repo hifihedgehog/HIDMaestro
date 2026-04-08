@@ -398,7 +398,10 @@ void CompanionIoControl(
 
     case IOCTL_XUSB_WAIT_GUIDE:
     case IOCTL_XUSB_WAIT_FOR_INPUT:
-        WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+        /* Return INVALID_DEVICE_REQUEST so xinput1_4 falls back to GET_STATE polling.
+         * Returning STATUS_DEVICE_NOT_READY makes xinput1_4 think the device is
+         * broken and it stops polling entirely (data freezes). */
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
         break;
 
     case IOCTL_XUSB_GET_INFORMATION_EX: {
