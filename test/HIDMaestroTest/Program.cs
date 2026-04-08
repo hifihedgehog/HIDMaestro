@@ -2504,10 +2504,39 @@ class Program
         consoleThread.Start();
 
         // Phase 1: Set up all controllers SEQUENTIALLY (no races)
+        // For Xbox profiles we wait for xinput1_4 to actually claim a slot
+        // before moving to the next controller, otherwise xinputhid (slow)
+        // and our XUSB companion (fast) race for slot 0 and the slot order
+        // doesn't match the creation order. ViGEmBus / vJoy don't have this
+        // problem because they only use one transport — we have two.
+        var phase1Db = ProfileDatabase.Load(GetProfilesDir());
         for (int i = 0; i < currentIds.Length && i < 4; i++)
         {
             Console.WriteLine($"\n  --- Controller {i}: {currentIds[i]} ---");
+            var phase1Profile = phase1Db.GetById(currentIds[i]);
+            int slotsBefore = ProfileTakesXInputSlot(phase1Profile)
+                ? CountConnectedXInputSlots() : -1;
+
             EmulateProfile(currentIds[i], controllerIndex: i, setupOnly: true);
+
+            if (slotsBefore >= 0)
+            {
+                Console.Write($"  Waiting for XInput slot... ");
+                // Poll up to 15s for a new slot to come online. xinputhid
+                // typically settles in 2-5s; XUSB companion in <1s.
+                var sw = Stopwatch.StartNew();
+                int slotsAfter = slotsBefore;
+                while (sw.ElapsedMilliseconds < 15000)
+                {
+                    slotsAfter = CountConnectedXInputSlots();
+                    if (slotsAfter > slotsBefore) break;
+                    Thread.Sleep(100);
+                }
+                if (slotsAfter > slotsBefore)
+                    Console.WriteLine($"slot claimed in {sw.ElapsedMilliseconds}ms ({slotsBefore}→{slotsAfter})");
+                else
+                    Console.WriteLine($"TIMEOUT after {sw.ElapsedMilliseconds}ms — slot order may be non-deterministic");
+            }
         }
 
         // Phase 1.5: Re-apply friendly names AFTER all setup is complete.
@@ -3714,12 +3743,53 @@ class Program
     [DllImport("XInput1_4.dll", EntryPoint = "XInputSetState")]
     static extern uint XInputSetState(uint dwUserIndex, ref XINPUT_VIBRATION pVibration);
 
+    [DllImport("XInput1_4.dll", EntryPoint = "XInputGetState")]
+    static extern uint XInputGetState(uint dwUserIndex, out XINPUT_STATE pState);
+
     [StructLayout(LayoutKind.Sequential)]
     struct XINPUT_VIBRATION
     {
         public ushort wLeftMotorSpeed;
         public ushort wRightMotorSpeed;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct XINPUT_STATE
+    {
+        public uint dwPacketNumber;
+        // We don't care about the gamepad fields for slot enumeration —
+        // the return code (0 = ERROR_SUCCESS / connected; 1167 = NOT_CONNECTED)
+        // is all we need. The struct just needs to be large enough.
+        public ushort wButtons;
+        public byte bLeftTrigger;
+        public byte bRightTrigger;
+        public short sThumbLX;
+        public short sThumbLY;
+        public short sThumbRX;
+        public short sThumbRY;
+    }
+
+    /// <summary>Returns the number of XInput slots currently reporting as
+    /// connected (0..4). Used to wait for a freshly-created Xbox profile to
+    /// claim its slot before the next profile is created — without this,
+    /// xinput1_4's enumeration order is determined by which transport
+    /// (xinputhid vs XUSB) finishes registering first, not by our setup
+    /// order, leading to non-intuitive slot assignments.</summary>
+    static int CountConnectedXInputSlots()
+    {
+        int count = 0;
+        for (uint slot = 0; slot < 4; slot++)
+        {
+            if (XInputGetState(slot, out _) == 0) count++;
+        }
+        return count;
+    }
+
+    /// <summary>True if the profile is for a controller that registers as
+    /// an XInput device. Sony / generic HID profiles return false (they
+    /// don't take XInput slots, so there's nothing to wait for).</summary>
+    static bool ProfileTakesXInputSlot(ControllerProfile? p) =>
+        p != null && p.VendorId == 0x045E;
 
     /// <summary>Sends a rumble or HID output report to a virtual controller for
     /// end-to-end verification of the output passthrough channel. Usage:
