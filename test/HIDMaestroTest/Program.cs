@@ -76,26 +76,7 @@ class Program
     }
 
     static void SetBusReportedDeviceDesc(string instanceId, string description)
-    {
-        // DEVPKEY_Device_BusReportedDeviceDesc = {540b947e-8b40-45bc-a8a2-6a0b894cbda2}, 4
-        var key = new DEVPROPKEY
-        {
-            fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
-            pid = 4
-        };
-
-        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return;
-
-        byte[] strBytes = Encoding.Unicode.GetBytes(description + "\0");
-        // DEVPROP_TYPE_STRING = 0x12
-        CM_Set_DevNode_PropertyW(devInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
-
-        // Also set on HID child
-        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-        {
-            CM_Set_DevNode_PropertyW(childInst, ref key, 0x12, strBytes, (uint)strBytes.Length, 0);
-        }
-    }
+        => DeviceProperties.SetBusReportedDeviceDesc(instanceId, description);
 
     static void SetDeviceDescription(string instanceId, string description)
     {
@@ -136,38 +117,8 @@ class Program
 
     static void SetDeviceFriendlyName(string rootInstanceId, string name)
     {
-        // DEVPKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
-        var fnKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 14
-        };
-        // DEVPKEY_Device_DeviceDesc = {a45c254e-df1c-4efd-8020-67d146a850e0}, 2
-        var ddKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 2
-        };
-        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
-
-        uint locResult = CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0);
-        if (locResult != 0) { Console.Error.Write($"(locate={locResult}) "); return; }
-
-        // Set both FriendlyName and DeviceDesc on root — eliminates all
-        // "HIDMaestro Virtual HID Device" appearances
-        CM_Set_DevNode_PropertyW(devInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-        CM_Set_DevNode_PropertyW(devInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-
-        // Set on HID child too
-        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-        {
-            CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-            CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-
-            // xinputhid auto-loads via PnP matching (driverPid=02FF in hardware ID).
-            // Manual injection is NOT needed and causes device restart that kills
-            // SDL3/WGI connections. Only inject for non-auto-matching profiles.
-        }
+        if (!DeviceProperties.SetDeviceFriendlyName(rootInstanceId, name))
+            Console.Error.Write("(locate failed) ");
     }
 
     /// <summary>
@@ -1678,151 +1629,13 @@ class Program
     // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
     // (Code 43 error). Use pnputil /remove-device + recreate instead.
 
-    /// <summary>
-    /// Overrides xinputhid's device name on all HID child devices.
-    /// xinputhid sets names like "Xbox Wireless Controller" from its INF.
-    /// We override with the profile's deviceDescription via direct registry write.
-    /// </summary>
-    /// <summary>
-    /// Final-pass friendly-name application for a specific controllerIndex.
-    /// Used by EmulateWithSwitching after Phase 1 to overcome a race where
-    /// per-controller renames during setup get clobbered by PnP driver-bind
-    /// on the first controller. Iterates ALL ROOT\* device classes
-    /// (VID_*&IG_00, HMCOMPANION, HIDClass) and matches by Device Parameters\
-    /// ControllerIndex.
-    /// </summary>
+    /// <summary>Forwards to <see cref="DeviceProperties.ApplyFriendlyNameForController"/>.</summary>
     static void ApplyFriendlyNameForController(int controllerIndex, string name)
-    {
-        var fnKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 14
-        };
-        var ddKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 2
-        };
-        var brddKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
-            pid = 4
-        };
-        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+        => DeviceProperties.ApplyFriendlyNameForController(controllerIndex, name);
 
-        void Apply(uint inst)
-        {
-            CM_Set_DevNode_PropertyW(inst, ref fnKey,   0x12, strBytes, (uint)strBytes.Length, 0);
-            CM_Set_DevNode_PropertyW(inst, ref ddKey,   0x12, strBytes, (uint)strBytes.Length, 0);
-            CM_Set_DevNode_PropertyW(inst, ref brddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-        }
-
-        try
-        {
-            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (rootEnum == null) return;
-            foreach (var sub in rootEnum.GetSubKeyNames())
-            {
-                // Match HIDMaestro device classes only — never touch VHF/HidHide etc.
-                bool isOurClass = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase);
-                if (!isOurClass) continue;
-
-                using var subKey = rootEnum.OpenSubKey(sub);
-                if (subKey == null) continue;
-                foreach (var inst in subKey.GetSubKeyNames())
-                {
-                    using var dpKey = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
-                    if (dpKey == null) continue;
-                    var ci = dpKey.GetValue("ControllerIndex");
-                    int actual = ci is int v ? v : -1;
-                    if (actual != controllerIndex) continue;
-
-                    string instId = $@"ROOT\{sub}\{inst}";
-                    if (CM_Locate_DevNodeW(out uint devInst, instId, 0) != 0) continue;
-
-                    // Root device
-                    Apply(devInst);
-
-                    // Walk children (HID grandchildren etc.) and apply to all
-                    if (CM_Get_Child(out uint child, devInst, 0) == 0)
-                    {
-                        uint cur = child;
-                        do { Apply(cur); }
-                        while (CM_Get_Sibling(out cur, cur, 0) == 0);
-                    }
-                }
-            }
-        }
-        catch { }
-    }
-
-    /// <summary>
-    /// Sets the FriendlyName and DeviceDesc on the HIDMaestro root device(s)
-    /// belonging to a specific controllerIndex (matched via Device Parameters
-    /// registry value), and on their HID children. With controllerIndex=-1
-    /// (legacy behavior) updates ALL HIDMaestro VID_ devices — used only by
-    /// single-controller paths that don't need filtering.
-    ///
-    /// Multi-controller MUST pass the explicit index to avoid one controller's
-    /// setup overwriting an earlier controller's friendly name.
-    /// </summary>
+    /// <summary>Forwards to <see cref="DeviceProperties.FixHidChildNames"/>.</summary>
     static void FixHidChildNames(string name, int controllerIndex = -1)
-    {
-        var fnKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 14 // DEVPKEY_Device_FriendlyName
-        };
-        var ddKey = new DEVPROPKEY
-        {
-            fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-            pid = 2 // DEVPKEY_Device_DeviceDesc
-        };
-        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
-
-        // Find ROOT\VID_* devices, optionally filtered by Device Parameters\ControllerIndex
-        try
-        {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (enumKey == null) return;
-            foreach (var sub in enumKey.GetSubKeyNames())
-            {
-                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
-                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}");
-                if (subKey == null) continue;
-                foreach (var inst in subKey.GetSubKeyNames())
-                {
-                    // If a controllerIndex was requested, skip devices that don't match.
-                    if (controllerIndex >= 0)
-                    {
-                        using var dpKey = Registry.LocalMachine.OpenSubKey(
-                            $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
-                        if (dpKey == null) continue;
-                        var ci = dpKey.GetValue("ControllerIndex");
-                        // Treat missing as index 0 so single-controller setup still works
-                        int actual = ci is int v ? v : 0;
-                        if (actual != controllerIndex) continue;
-                    }
-
-                    string devId = $@"ROOT\{sub}\{inst}";
-                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
-                    {
-                        CM_Set_DevNode_PropertyW(devInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-                        CM_Set_DevNode_PropertyW(devInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                        {
-                            CM_Set_DevNode_PropertyW(childInst, ref fnKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-                            CM_Set_DevNode_PropertyW(childInst, ref ddKey, 0x12, strBytes, (uint)strBytes.Length, 0);
-                        }
-                    }
-                }
-            }
-        }
-        catch { }
-    }
+        => DeviceProperties.FixHidChildNames(name, controllerIndex);
 
     /// <summary>
     /// Creates a device node with the correct enumerator and hardware ID.
