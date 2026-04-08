@@ -105,7 +105,8 @@ typedef struct _DEVICE_CONTEXT {
     /* Multi-instance: controller index (0, 1, 2, 3) */
     ULONG   ControllerIndex;
     WCHAR   ConfigRegPath[64];      /* e.g. L"SOFTWARE\\HIDMaestro\\Controller0" */
-    WCHAR   SharedFilePath[128];    /* e.g. L"C:\\ProgramData\\HIDMaestro\\input_0.bin" */
+    WCHAR   SharedFilePath[128];    /* e.g. L"C:\\ProgramData\\HIDMaestro\\input_0.bin" (legacy fallback) */
+    WCHAR   SharedMappingName[64];  /* e.g. L"Global\\HIDMaestroInput0" */
 
     /* Diagnostics */
     LONG    InputReportsSubmitted;

@@ -67,6 +67,20 @@ InitInstancePaths(
         static const WCHAR suffix[] = L".bin";
         RtlCopyMemory(p, suffix, sizeof(suffix));
     }
+
+    /* Build per-instance memory-mapped section name: Global\HIDMaestroInput<N>.
+     * This is the primary IPC channel — the test app creates a pagefile-backed
+     * section, the driver maps a read view, and we poll it in the timer.
+     * Falls back to the file path above if OpenFileMappingW fails (e.g. test
+     * app hasn't created the section yet, or running with old test app). */
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroInput";
+        WCHAR *p = ctx->SharedMappingName;
+        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
+        p += (sizeof(prefix) / 2) - 1;
+        *p++ = L'0' + (WCHAR)(index % 10);
+        *p = 0;
+    }
 }
 
 /* XUSB interface GUID — xinput1_4.dll enumerates this to find Xbox controllers */
@@ -235,66 +249,69 @@ ReadConfigFromRegistry(
 /*  Shared Memory Poll Timer                                           */
 /* ================================================================== */
 
+/* Try to open and map the named section. Returns TRUE on success.
+ * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
+static BOOLEAN
+TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
+{
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
+    if (h == NULL) return FALSE;
+
+    PVOID view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(HIDMAESTRO_SHARED_INPUT));
+    if (view == NULL) {
+        CloseHandle(h);
+        return FALSE;
+    }
+
+    ctx->SharedMemHandle = h;
+    ctx->SharedMemPtr = view;
+    return TRUE;
+}
+
+/* Read shared input via memory mapping (preferred) or file (legacy fallback).
+ * Output: *out is filled with the shared struct on success. */
+static BOOLEAN
+ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
+{
+    /* Lazy open: try the mapping on every tick until it succeeds.
+     * The test app may create the section after the device starts. */
+    if (ctx->SharedMemPtr == NULL)
+        TryOpenSharedMapping(ctx);
+
+    if (ctx->SharedMemPtr != NULL) {
+        /* Seqlock-style read: retry until SeqNo is stable across the copy.
+         * Single writer / many readers, lock-free. */
+        volatile HIDMAESTRO_SHARED_INPUT *src = (volatile HIDMAESTRO_SHARED_INPUT *)ctx->SharedMemPtr;
+        ULONG seq1, seq2;
+        int retries = 4;
+        do {
+            seq1 = src->SeqNo;
+            MemoryBarrier();
+            RtlCopyMemory(out, (const void *)src, sizeof(*out));
+            MemoryBarrier();
+            seq2 = src->SeqNo;
+        } while (seq1 != seq2 && --retries > 0);
+        return TRUE;
+    }
+
+    /* Fallback: read from per-instance file (legacy path) */
+    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
+        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD bytesRead = 0;
+    BOOL ok = ReadFile(hFile, out, sizeof(*out), &bytesRead, NULL);
+    CloseHandle(hFile);
+    return ok && bytesRead >= 8;
+}
+
 static void
 EvtSharedMemTimer(
     _In_ WDFTIMER Timer)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(WdfTimerGetParentObject(Timer));
 
-    /* Read input data from per-instance shared file */
-    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
-        GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        /* Debug: write error to log file */
-        static LONG debugCount = 0;
-        if (InterlockedIncrement(&debugCount) <= 3) {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[] = "Timer: input.bin open FAILED\r\n";
-                DWORD dummy;
-                WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
-                CloseHandle(hLog);
-            }
-        }
-        return;
-    }
-
     HIDMAESTRO_SHARED_INPUT shared;
-    DWORD bytesRead = 0;
-    BOOL ok = ReadFile(hFile, &shared, sizeof(shared), &bytesRead, NULL);
-    CloseHandle(hFile);
-
-    /* Debug: log first successful read */
-    {
-        static LONG successCount = 0;
-        if (InterlockedIncrement(&successCount) <= 3) {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[] = "Timer: file read OK\r\n";
-                DWORD dummy;
-                WriteFile(hLog, msg, sizeof(msg)-1, &dummy, NULL);
-                CloseHandle(hLog);
-            }
-        }
-    }
-
-    if (!ok || bytesRead < 8) {
-        static LONG debugCount2 = 0;
-        if (InterlockedIncrement(&debugCount2) <= 3) {
-            HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\timer_debug.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
-            if (hLog != INVALID_HANDLE_VALUE) {
-                char msg[] = "Timer: ReadFile failed\r\n";
-                DWORD dummy;
-                int len = sizeof(msg) - 1;
-                WriteFile(hLog, msg, len, &dummy, NULL);
-                CloseHandle(hLog);
-            }
-        }
-        return;
-    }
+    if (!ReadSharedInput(ctx, &shared)) return;
 
     ULONG seqNo = shared.SeqNo;
     if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
@@ -390,6 +407,16 @@ EvtSharedMemTimer(
 }
 
 /* ================================================================== */
+/* Context cleanup: unmap shared memory section on device teardown */
+static EVT_WDF_OBJECT_CONTEXT_CLEANUP EvtDeviceContextCleanup;
+static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext((WDFDEVICE)Object);
+    if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
+    if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
+}
+
+/* ================================================================== */
 /* SelfManagedIo: retry XUSB interface enable after device fully starts */
 static NTSTATUS EvtSelfManagedIoInit(_In_ WDFDEVICE Device)
 {
@@ -475,6 +502,7 @@ EvtDeviceAdd(
 #endif
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
+    attributes.EvtCleanupCallback = EvtDeviceContextCleanup;
 
     /* SelfManagedIo callback: retry XUSB interface enable after device starts */
     {

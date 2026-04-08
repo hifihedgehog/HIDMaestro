@@ -14,6 +14,7 @@
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
 
 static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
@@ -36,8 +37,11 @@ typedef struct _COMPANION_CTX {
     USHORT VendorId;
     USHORT ProductId;
     ULONG ControllerIndex;
-    WCHAR SharedFilePath[128]; /* e.g. L"C:\ProgramData\HIDMaestro\input_0.bin" */
+    WCHAR SharedFilePath[128]; /* legacy fallback path */
     WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
+    WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
+    HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
+    PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -58,9 +62,39 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
 }
 
-static BOOLEAN ReadGipData(const WCHAR* sharedFilePath, UCHAR gipOut[14])
+static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 {
-    HANDLE hFile = CreateFileW(sharedFilePath,
+    /* Lazy-open named section (preferred path). The test app creates it
+     * before our device is created, but we re-try here in case the section
+     * appears later. */
+    if (ctx->SharedMemPtr == NULL) {
+        HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
+        if (h != NULL) {
+            PVOID v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SHARED_INPUT));
+            if (v != NULL) { ctx->SharedMemHandle = h; ctx->SharedMemPtr = v; }
+            else CloseHandle(h);
+        }
+    }
+
+    if (ctx->SharedMemPtr != NULL) {
+        /* Seqlock read: retry if writer was mid-update */
+        volatile SHARED_INPUT* src = (volatile SHARED_INPUT*)ctx->SharedMemPtr;
+        ULONG seq1, seq2;
+        int retries = 4;
+        UCHAR tmp[14];
+        do {
+            seq1 = src->SeqNo;
+            MemoryBarrier();
+            for (int i = 0; i < 14; i++) tmp[i] = src->GipData[i];
+            MemoryBarrier();
+            seq2 = src->SeqNo;
+        } while (seq1 != seq2 && --retries > 0);
+        for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
+        return TRUE;
+    }
+
+    /* Legacy file fallback */
+    HANDLE hFile = CreateFileW(ctx->SharedFilePath,
         GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return FALSE;
     SHARED_INPUT shared;
@@ -70,6 +104,13 @@ static BOOLEAN ReadGipData(const WCHAR* sharedFilePath, UCHAR gipOut[14])
     if (!ok || bytesRead < 72 + 14) return FALSE;
     RtlCopyMemory(gipOut, shared.GipData, 14);
     return TRUE;
+}
+
+void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
+{
+    PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
+    if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
+    if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
 }
 
 NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
@@ -82,6 +123,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     UNREFERENCED_PARAMETER(Driver);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
+    attributes.EvtCleanupCallback = CompanionDeviceCleanup;
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;
 
@@ -120,13 +162,20 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
             *p = L'\0';
 
-            /* Shared file: C:\ProgramData\HIDMaestro\input_<N>.bin */
+            /* Shared file: C:\ProgramData\HIDMaestro\input_<N>.bin (legacy) */
             static const WCHAR filePrefix[] = L"C:\\ProgramData\\HIDMaestro\\input_";
             static const WCHAR fileSuffix[] = L".bin";
             p = ctx->SharedFilePath;
             for (int i = 0; filePrefix[i]; i++) *p++ = filePrefix[i];
             *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
             for (int i = 0; fileSuffix[i]; i++) *p++ = fileSuffix[i];
+            *p = L'\0';
+
+            /* Memory-mapped section: Global\HIDMaestroInput<N> (preferred) */
+            static const WCHAR mapPrefix[] = L"Global\\HIDMaestroInput";
+            p = ctx->SharedMappingName;
+            for (int i = 0; mapPrefix[i]; i++) *p++ = mapPrefix[i];
+            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
             *p = L'\0';
         }
 
@@ -275,7 +324,7 @@ void CompanionIoControl(
         *(DWORD*)&state[5] = ctx->PacketCount;
 
         UCHAR gip[14];
-        if (ReadGipData(ctx->SharedFilePath, gip)) {
+        if (ReadGipData(ctx, gip)) {
             PUCHAR d = gip;
             /* Button remapping: GIP button byte → XInput button bits */
             UCHAR btnLow = d[12], btnHigh = d[13];

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -408,6 +409,7 @@ class Program
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {
             try { CleanupGhostDevices(); } catch { }
+            try { CleanupSharedMappings(); } catch { }
         };
 
             // Single-instance: kill any other HIDMaestroTest processes
@@ -1044,6 +1046,7 @@ class Program
 
     /// <summary>
     /// Ensures the shared file exists with open ACLs for the driver timer.
+    /// Also creates the named shared-memory section that drivers prefer over the file.
     /// </summary>
     static void EnsureSharedFile(int controllerIndex = 0)
     {
@@ -1058,8 +1061,142 @@ class Program
         string legacyPath = Path.Combine(dir, "input.bin");
         if (!File.Exists(legacyPath))
             File.WriteAllBytes(legacyPath, new byte[86]);
-        // Grant Everyone full access so WUDFHost (LocalService) can read
+        // Grant Everyone full access so WUDFHost (LocalService) can read the file fallback
         RunProcess("icacls.exe", $"\"{dir}\" /grant Everyone:(OI)(CI)F /T", timeoutMs: 5000);
+
+        // Create the named shared-memory section (preferred IPC channel).
+        // Pagefile-backed (no disk I/O at all). The driver opens by name.
+        EnsureSharedMapping(controllerIndex);
+    }
+
+    // ── Shared memory IPC (replaces high-frequency file writes) ──
+    // Per-controller named section in Global\ namespace, pagefile-backed.
+    // Layout matches HIDMAESTRO_SHARED_INPUT in driver.h: 86 bytes.
+    //   [0..3]   ULONG SeqNo (volatile, seqlock — odd = mid-write)
+    //   [4..7]   ULONG DataSize
+    //   [8..71]  UCHAR Data[64]
+    //   [72..85] UCHAR GipData[14]
+
+    const int SHARED_INPUT_SIZE = 86;
+    static readonly Dictionary<int, IntPtr> _mappingHandles = new();
+    static readonly Dictionary<int, IntPtr> _mappingViews = new();
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES { public uint nLength; public IntPtr lpSecurityDescriptor; public int bInheritHandle; }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
+        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
+        uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string StringSecurityDescriptor, uint StringSDRevision,
+        out IntPtr SecurityDescriptor, IntPtr SecurityDescriptorSize);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr hMem);
+
+    /// <summary>Returns the view pointer for the given controller's shared mapping.
+    /// Creates the mapping if it doesn't exist yet. Returned pointer is valid for
+    /// the lifetime of the process (until cleanup at exit).</summary>
+    static IntPtr EnsureSharedMapping(int controllerIndex)
+    {
+        if (_mappingViews.TryGetValue(controllerIndex, out IntPtr existing))
+            return existing;
+
+        string name = $@"Global\HIDMaestroInput{controllerIndex}";
+
+        // SDDL: SYSTEM full, Admins full, LocalService read, World read.
+        // LocalService is what WUDFHost runs as for UMDF2 reflector.
+        const string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;LS)(A;;GR;;;WD)";
+        IntPtr sd = IntPtr.Zero;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+
+        SECURITY_ATTRIBUTES sa = new()
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = sd,
+            bInheritHandle = 0,
+        };
+        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        Marshal.StructureToPtr(sa, saPtr, false);
+
+        IntPtr hMap;
+        try
+        {
+            hMap = CreateFileMappingW(new IntPtr(-1), saPtr,
+                0x04 /* PAGE_READWRITE */, 0, SHARED_INPUT_SIZE, name);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(saPtr);
+            LocalFree(sd);
+        }
+
+        if (hMap == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception();
+
+        IntPtr view = MapViewOfFile(hMap, 0x04 /* FILE_MAP_WRITE */ | 0x02 /* FILE_MAP_READ */,
+            0, 0, (UIntPtr)SHARED_INPUT_SIZE);
+        if (view == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            CloseHandleNative(hMap);
+            throw new System.ComponentModel.Win32Exception(err);
+        }
+
+        // Zero-init (CreateFileMapping pages start zero, but be explicit).
+        // Importantly, set SeqNo to 0 — the driver detects "no change" on equal seq.
+        for (int i = 0; i < SHARED_INPUT_SIZE; i++)
+            Marshal.WriteByte(view, i, 0);
+
+        _mappingHandles[controllerIndex] = hMap;
+        _mappingViews[controllerIndex] = view;
+        return view;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
+    static extern bool CloseHandleNative(IntPtr hObject);
+
+    /// <summary>Atomically publishes a new shared-input snapshot using a seqlock.
+    /// Single-writer (input loop) → many-readers (driver + companion) is safe lock-free.</summary>
+    static void WriteSharedInput(IntPtr view, ref uint seqNo, byte[] data, int dataLen, byte[] gipData)
+    {
+        // 1. Mark write in progress (odd seqNo)
+        uint pending = seqNo + 1;
+        Marshal.WriteInt32(view, 0, (int)pending);
+        Thread.MemoryBarrier();
+
+        // 2. Write payload (DataSize, Data, GipData)
+        Marshal.WriteInt32(view, 4, dataLen);
+        for (int i = 0; i < 64; i++)
+            Marshal.WriteByte(view, 8 + i, i < dataLen ? data[i] : (byte)0);
+        for (int i = 0; i < 14; i++)
+            Marshal.WriteByte(view, 72 + i, gipData[i]);
+
+        // 3. Mark write complete (even seqNo)
+        Thread.MemoryBarrier();
+        seqNo = pending + 1;
+        Marshal.WriteInt32(view, 0, (int)seqNo);
+    }
+
+    /// <summary>Releases all mappings on process exit.</summary>
+    static void CleanupSharedMappings()
+    {
+        foreach (var view in _mappingViews.Values)
+            if (view != IntPtr.Zero) UnmapViewOfFile(view);
+        _mappingViews.Clear();
+        foreach (var h in _mappingHandles.Values)
+            if (h != IntPtr.Zero) CloseHandleNative(h);
+        _mappingHandles.Clear();
     }
 
     /// <summary>
@@ -2705,27 +2842,19 @@ class Program
         }
         Console.WriteLine($"  Report buffer: {reportBufSize} bytes");
 
-        // Shared memory for data injection (bypasses xinputhid/HidHide upper filters)
-        // Shared file for data injection (driver reads via timer)
-        // Using a temp file instead of Global\ shared memory to avoid privilege issues
+        // Shared memory IPC: pagefile-backed named section in Global\ namespace.
+        // Driver opens by name (no disk I/O at all). Created in EnsureSharedFile().
         int ctrlIndex = controllerIndex;
-        string sharedFilePath = SharedFileForIndex(ctrlIndex);
-        Directory.CreateDirectory(Path.GetDirectoryName(sharedFilePath)!);
-        IntPtr sharedMemPtr = IntPtr.Zero;
-        int sharedMemSeqNo = 0;
-        FileStream? sharedFile = null;
+        IntPtr sharedView = IntPtr.Zero;
+        uint sharedMemSeqNo = 0;
         try
         {
-            sharedFile = new FileStream(sharedFilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite,
-                FileShare.ReadWrite, 72, FileOptions.WriteThrough);
-            // Pre-allocate 72 bytes
-            sharedFile.SetLength(86); // SeqNo(4) + DataSize(4) + Data(64) + GipData(14)
-            sharedFile.Flush();
-            Console.WriteLine("  Shared file: OK");
+            sharedView = EnsureSharedMapping(ctrlIndex);
+            Console.WriteLine($"  Shared memory: OK (Global\\HIDMaestroInput{ctrlIndex})");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  Shared file: FAILED ({ex.Message})");
+            Console.WriteLine($"  Shared memory: FAILED ({ex.Message})");
         }
 
         var sw = Stopwatch.StartNew();
@@ -2808,24 +2937,23 @@ class Program
                 leftTrigger: sepLt, rightTrigger: sepRt,
                 hatValue: 0, buttonMask: btnMask);
 
-            // Write to shared file: SeqNo(4) + DataSize(4) + Data(64) + GipData(14) = 86 bytes
+            // Publish to shared memory section: 86 bytes via seqlock.
             // Data = native HID report (for DirectInput via HID READ_REPORT)
             // GipData = GIP format (for XInput via XUSB GET_STATE)
-            if (sharedFile != null)
+            if (sharedView != IntPtr.Zero)
             {
-                // Native HID report (from descriptor's format)
                 int dataStart = reportBuilder.InputReportId != 0 ? 1 : 0;
                 int dataLen = Math.Min(inputReport.Length - dataStart, 64);
 
-                // Build GipData manually with exact layout companion expects:
-                // Bytes 0-1: LX (16-bit unsigned, 0-65535)
-                // Bytes 2-3: LY (16-bit unsigned, 0-65535)
-                // Bytes 4-5: RX (16-bit unsigned, 0-65535)
-                // Bytes 6-7: RY (16-bit unsigned, 0-65535)
-                // Bytes 8-9: LT (10-bit, 0-1023, in low 10 bits of LE ushort)
-                // Bytes 10-11: RT (10-bit, 0-1023, in low 10 bits of LE ushort)
-                // Byte 12: btnLow (A=0x01, B=0x02, X=0x04, Y=0x08, LB=0x10, RB=0x20, LS=0x40, RS=0x80)
-                // Byte 13: btnHigh (Back=0x01, Start=0x02, hat in bits 2-5)
+                // Build GipData with exact layout the companion expects:
+                // [0..1]  LX (16-bit unsigned)
+                // [2..3]  LY (16-bit unsigned)
+                // [4..5]  RX (16-bit unsigned)
+                // [6..7]  RY (16-bit unsigned)
+                // [8..9]  LT (10-bit in low bits)
+                // [10..11] RT (10-bit in low bits)
+                // [12]    btnLow (A=0x01, B=0x02, X=0x04, Y=0x08, LB=0x10, RB=0x20, LS=0x40, RS=0x80)
+                // [13]    btnHigh (Back=0x01, Start=0x02, hat in bits 2-5)
                 byte[] gipData = new byte[14];
                 BitConverter.GetBytes((ushort)(lxNorm * 65535)).CopyTo(gipData, 0);
                 BitConverter.GetBytes((ushort)(lyNorm * 65535)).CopyTo(gipData, 2);
@@ -2846,19 +2974,14 @@ class Program
                 byte btnHigh = 0;
                 if ((btnMask & 0x040) != 0) btnHigh |= 0x01; // Back (button 7)
                 if ((btnMask & 0x080) != 0) btnHigh |= 0x02; // Start (button 8)
-                // Hat: 0=neutral, encode in bits 2-5
-                // (hatValue already 0 in test pattern)
                 gipData[13] = btnHigh;
 
-                sharedMemSeqNo++;
-                sharedFile.Seek(0, SeekOrigin.Begin);
-                sharedFile.Write(BitConverter.GetBytes(sharedMemSeqNo));  // 4 bytes
-                sharedFile.Write(BitConverter.GetBytes(dataLen));          // 4 bytes
-                byte[] padded = new byte[64];
-                Array.Copy(inputReport, dataStart, padded, 0, dataLen);
-                sharedFile.Write(padded);                                  // 64 bytes
-                sharedFile.Write(gipData);                                 // 14 bytes
-                sharedFile.Flush();
+                // Native HID payload extracted from inputReport (skip Report ID byte if present)
+                byte[] nativeData = new byte[dataLen];
+                Array.Copy(inputReport, dataStart, nativeData, 0, dataLen);
+
+                // Atomic seqlock publish — single-writer, lock-free, no disk I/O
+                WriteSharedInput(sharedView, ref sharedMemSeqNo, nativeData, dataLen, gipData);
             }
             bool ok = true;
 
@@ -3289,22 +3412,6 @@ class Program
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool HidD_GetProductString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
-
-    // Security for shared memory
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    static extern bool InitializeSecurityDescriptor(byte[] pSecurityDescriptor, uint dwRevision);
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    static extern bool SetSecurityDescriptorDacl(byte[] pSecurityDescriptor, bool bDaclPresent, IntPtr pDacl, bool bDaclDefaulted);
-
-    // Shared memory for driver data injection
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
-        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
-        uint dwFileOffsetHigh, uint dwFileOffsetLow, uint dwNumberOfBytesToMap);
 
     // Win32 message pump for WGI
     [StructLayout(LayoutKind.Sequential)]
