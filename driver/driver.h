@@ -73,9 +73,17 @@ typedef struct _DEVICE_CONTEXT {
     UCHAR   XusbReport[14];
     BOOLEAN XusbReportReady;
 
-    /* Product string (returned on IOCTL_HID_GET_STRING) */
+    /* Product string (returned on IOCTL_HID_GET_STRING / HID_STRING_ID_IPRODUCT) */
     WCHAR   ProductString[128];
     ULONG   ProductStringBytes; /* size in bytes including null terminator */
+
+    /* Serial number string (returned on IOCTL_HID_GET_STRING / HID_STRING_ID_ISERIALNUMBER).
+     * Built per-instance from ControllerIndex so SDL3/HIDAPI/PadForge can
+     * disambiguate two virtual controllers that share VID/PID/ProductString
+     * (e.g. 2× DualSense). Without a unique serial, hid_enumerate buckets
+     * them as one device. */
+    WCHAR   SerialString[64];
+    ULONG   SerialStringBytes;
 
     /* Latest raw output report (received from HID class) */
     UCHAR   OutputReport[HIDMAESTRO_MAX_REPORT_SIZE];

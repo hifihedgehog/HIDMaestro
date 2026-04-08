@@ -50,6 +50,33 @@ typedef struct _COMPANION_CTX {
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
 
+/* Append the decimal representation of a ULONG to a wide-string buffer.
+ * Self-contained — companion doesn't link MSVCRT, no swprintf available.
+ * Lets the section/registry-path builders support indices > 9 so the
+ * test app and SDK aren't capped at 4 controllers. */
+static VOID
+AppendUlongDecimal(WCHAR *dest, ULONG value, SIZE_T maxChars)
+{
+    SIZE_T len = 0;
+    while (len < maxChars && dest[len] != 0) len++;
+    if (len + 1 >= maxChars) return;
+
+    WCHAR tmp[16];
+    int n = 0;
+    if (value == 0) {
+        tmp[n++] = L'0';
+    } else {
+        while (value > 0 && n < 15) {
+            tmp[n++] = L'0' + (WCHAR)(value % 10);
+            value /= 10;
+        }
+    }
+    while (n > 0 && len + 1 < maxChars) {
+        dest[len++] = tmp[--n];
+    }
+    dest[len] = 0;
+}
+
 #pragma pack(push, 1)
 typedef struct {
     ULONG SeqNo;
@@ -204,28 +231,27 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             }
         }
 
-        /* Build per-instance paths */
+        /* Build per-instance paths. Multi-digit indices supported. */
         {
-            /* Registry: SOFTWARE\HIDMaestro\Controller<N> */
             static const WCHAR prefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
-            WCHAR *p = ctx->ConfigRegPath;
-            for (int i = 0; prefix[i]; i++) *p++ = prefix[i];
-            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
-            *p = L'\0';
-
-            /* Memory-mapped section: Global\HIDMaestroInput<N> (RAM-only IPC) */
+            SIZE_T cap = sizeof(ctx->ConfigRegPath) / sizeof(WCHAR);
+            for (int i = 0; prefix[i]; i++) ctx->ConfigRegPath[i] = prefix[i];
+            ctx->ConfigRegPath[(sizeof(prefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->ConfigRegPath, ctx->ControllerIndex, cap);
+        }
+        {
             static const WCHAR mapPrefix[] = L"Global\\HIDMaestroInput";
-            p = ctx->SharedMappingName;
-            for (int i = 0; mapPrefix[i]; i++) *p++ = mapPrefix[i];
-            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
-            *p = L'\0';
-
-            /* OUTPUT mapping: Global\HIDMaestroOutput<N> */
+            SIZE_T cap = sizeof(ctx->SharedMappingName) / sizeof(WCHAR);
+            for (int i = 0; mapPrefix[i]; i++) ctx->SharedMappingName[i] = mapPrefix[i];
+            ctx->SharedMappingName[(sizeof(mapPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->SharedMappingName, ctx->ControllerIndex, cap);
+        }
+        {
             static const WCHAR outPrefix[] = L"Global\\HIDMaestroOutput";
-            p = ctx->OutputMappingName;
-            for (int i = 0; outPrefix[i]; i++) *p++ = outPrefix[i];
-            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
-            *p = L'\0';
+            SIZE_T cap = sizeof(ctx->OutputMappingName) / sizeof(WCHAR);
+            for (int i = 0; outPrefix[i]; i++) ctx->OutputMappingName[i] = outPrefix[i];
+            ctx->OutputMappingName[(sizeof(outPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->OutputMappingName, ctx->ControllerIndex, cap);
         }
 
         /* Read VID/PID from per-instance registry (falls back to global) */

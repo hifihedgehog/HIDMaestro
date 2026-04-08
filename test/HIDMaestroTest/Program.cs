@@ -2504,27 +2504,36 @@ class Program
         }) { IsBackground = true, Name = "ConsoleInput" };
         consoleThread.Start();
 
-        // Phase 1: Set up all controllers SEQUENTIALLY (no races)
-        // For Xbox profiles we wait for xinput1_4 to actually claim a slot
-        // before moving to the next controller, otherwise xinputhid (slow)
-        // and our XUSB companion (fast) race for slot 0 and the slot order
-        // doesn't match the creation order. ViGEmBus / vJoy don't have this
-        // problem because they only use one transport — we have two.
+        // Phase 1: Set up all controllers SEQUENTIALLY (no races).
+        // No artificial cap on count — XInput tops out at 4 slots (Microsoft's
+        // limit, not ours), but DInput / HIDAPI / WGI / browser see all
+        // controllers regardless. Xbox profiles past slot 4 still get a
+        // working virtual device, just no XInput visibility.
+        //
+        // For Xbox profiles WITH a free XInput slot, wait for xinput1_4 to
+        // claim it before moving on, otherwise xinputhid (slow) and our XUSB
+        // companion (fast) race for slot 0 and the order doesn't match the
+        // creation order. Once XInput is full (4/4), we skip the wait — no
+        // slot will ever be claimed, so waiting would deadlock for 15s.
         var phase1Db = ProfileDatabase.Load(GetProfilesDir());
-        for (int i = 0; i < currentIds.Length && i < 4; i++)
+        for (int i = 0; i < currentIds.Length; i++)
         {
             Console.WriteLine($"\n  --- Controller {i}: {currentIds[i]} ---");
             var phase1Profile = phase1Db.GetById(currentIds[i]);
-            int slotsBefore = ProfileTakesXInputSlot(phase1Profile)
-                ? CountConnectedXInputSlots() : -1;
+            bool isXboxProfile = ProfileTakesXInputSlot(phase1Profile);
+            int slotsBefore = isXboxProfile ? CountConnectedXInputSlots() : -1;
+            bool xinputFull = isXboxProfile && slotsBefore >= 4;
 
             EmulateProfile(currentIds[i], controllerIndex: i, setupOnly: true);
 
-            if (slotsBefore >= 0)
+            if (xinputFull)
+            {
+                Console.WriteLine($"  XInput is full ({slotsBefore}/4) — controller {i} will be visible via DI/HIDAPI/Browser only.");
+            }
+            else if (slotsBefore >= 0)
             {
                 Console.Write($"  Waiting for XInput slot... ");
-                // Poll up to 15s for a new slot to come online. xinputhid
-                // typically settles in 2-5s; XUSB companion in <1s.
+                // Poll up to 15s for a new slot. xinputhid: 2-5s; XUSB: <1s.
                 var sw = Stopwatch.StartNew();
                 int slotsAfter = slotsBefore;
                 while (sw.ElapsedMilliseconds < 15000)
@@ -2550,7 +2559,7 @@ class Program
         Thread.Sleep(2000);
         {
             var nameDb = ProfileDatabase.Load(GetProfilesDir());
-            for (int i = 0; i < currentIds.Length && i < 4; i++)
+            for (int i = 0; i < currentIds.Length; i++)
             {
                 var p = nameDb.GetById(currentIds[i]);
                 if (p == null) continue;
@@ -2566,7 +2575,7 @@ class Program
         var threads = new List<Thread>();
         var outputThreads = new List<Thread>();
         var phase2Db = ProfileDatabase.Load(GetProfilesDir());
-        for (int i = 0; i < currentIds.Length && i < 4; i++)
+        for (int i = 0; i < currentIds.Length; i++)
         {
             int idx = i;
             string pid = currentIds[i];
@@ -3824,6 +3833,83 @@ class Program
             return r == 0 ? 0 : 2;
         }
 
+        if (args[0] == "serials")
+        {
+            // Walk every HID device matching the given VID/PID and dump
+            // (path, attributes, manufacturer, product, serial). Used to
+            // verify that two virtual controllers with the same VID/PID
+            // are disambiguated by HidD_GetSerialNumberString — that's the
+            // string SDL3 / HIDAPI / PadForge use as the unique key.
+            if (args.Length < 3)
+            {
+                Console.WriteLine("usage: rumbletest serials <vid_hex> <pid_hex>");
+                Console.WriteLine("example: rumbletest serials 054C 0CE6");
+                return 1;
+            }
+            ushort vid = ushort.Parse(args[1], System.Globalization.NumberStyles.HexNumber);
+            ushort pid = ushort.Parse(args[2], System.Globalization.NumberStyles.HexNumber);
+
+            Guid hidGuid;
+            HidD_GetHidGuid(out hidGuid);
+            IntPtr devs = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero,
+                0x10 | 0x02 /* DIGCF_DEVICEINTERFACE | DIGCF_PRESENT */);
+            if (devs == new IntPtr(-1)) { Console.WriteLine("SetupDiGetClassDevs failed"); return 2; }
+
+            int found = 0;
+            try
+            {
+                var ifData = new SP_DEVICE_INTERFACE_DATA();
+                ifData.cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>();
+                uint i = 0;
+                while (SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref hidGuid, i++, ref ifData))
+                {
+                    SetupDiGetDeviceInterfaceDetailW(devs, ref ifData, IntPtr.Zero, 0, out uint needed, IntPtr.Zero);
+                    if (needed == 0) continue;
+                    IntPtr detail = Marshal.AllocHGlobal((int)needed);
+                    try
+                    {
+                        Marshal.WriteInt32(detail, 0, IntPtr.Size == 8 ? 8 : 6);
+                        if (!SetupDiGetDeviceInterfaceDetailW(devs, ref ifData, detail, needed, out _, IntPtr.Zero))
+                            continue;
+                        string? path = Marshal.PtrToStringUni(detail + 4);
+                        if (path == null) continue;
+
+                        var h = CreateFileW(path, 0, 0x03, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                        if (h.IsInvalid) continue;
+                        try
+                        {
+                            var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
+                            if (!HidD_GetAttributes(h, ref attrs)) continue;
+                            if (attrs.VendorID != vid || attrs.ProductID != pid) continue;
+
+                            found++;
+                            byte[] buf = new byte[512];
+                            string serial = HidD_GetSerialNumberString(h, buf, (uint)buf.Length)
+                                ? UnicodeBufToString(buf) : "(none)";
+                            string product = HidD_GetProductString(h, buf, (uint)buf.Length)
+                                ? UnicodeBufToString(buf) : "(none)";
+                            string manuf = HidD_GetManufacturerString(h, buf, (uint)buf.Length)
+                                ? UnicodeBufToString(buf) : "(none)";
+
+                            Console.WriteLine($"#{found}");
+                            Console.WriteLine($"  path:    {path}");
+                            Console.WriteLine($"  vid/pid: 0x{attrs.VendorID:X4}/0x{attrs.ProductID:X4}  ver=0x{attrs.VersionNumber:X4}");
+                            Console.WriteLine($"  manuf:   {manuf}");
+                            Console.WriteLine($"  product: {product}");
+                            Console.WriteLine($"  serial:  {serial}");
+                            Console.WriteLine();
+                        }
+                        finally { h.Dispose(); }
+                    }
+                    finally { Marshal.FreeHGlobal(detail); }
+                }
+            }
+            finally { SetupDiDestroyDeviceInfoList(devs); }
+
+            Console.WriteLine($"Total {found} HID device(s) matching VID=0x{vid:X4} PID=0x{pid:X4}");
+            return 0;
+        }
+
         if (args[0] == "createprobe")
         {
             // Empirically check which steps of CreateDeviceNode actually need admin.
@@ -4148,6 +4234,23 @@ class Program
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool HidD_GetProductString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool HidD_GetSerialNumberString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool HidD_GetManufacturerString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
+
+    /// <summary>Decodes a UTF-16LE buffer (as returned by HidD_Get*String) into a
+    /// string, stopping at the first NUL char.</summary>
+    static string UnicodeBufToString(byte[] buf)
+    {
+        int n = 0;
+        while (n + 1 < buf.Length && (buf[n] != 0 || buf[n + 1] != 0)) n += 2;
+        return System.Text.Encoding.Unicode.GetString(buf, 0, n);
+    }
 
     // Win32 message pump for WGI
     [StructLayout(LayoutKind.Sequential)]

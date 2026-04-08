@@ -21,6 +21,32 @@
 /* Default registry path (single-instance fallback) */
 static const WCHAR CONFIG_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\HIDMaestro";
 
+/* Append the decimal representation of a ULONG to a wide-string buffer.
+ * Self-contained — no C runtime dependency. The driver doesn't link against
+ * MSVCRT, so swprintf/wsprintf aren't available. Buffer must be NUL-terminated. */
+static VOID
+AppendUlongDecimal(_Inout_ WCHAR *dest, _In_ ULONG value, _In_ SIZE_T maxChars)
+{
+    SIZE_T len = 0;
+    while (len < maxChars && dest[len] != 0) len++;
+    if (len + 1 >= maxChars) return;
+
+    WCHAR tmp[16];
+    int n = 0;
+    if (value == 0) {
+        tmp[n++] = L'0';
+    } else {
+        while (value > 0 && n < 15) {
+            tmp[n++] = L'0' + (WCHAR)(value % 10);
+            value /= 10;
+        }
+    }
+    while (n > 0 && len + 1 < maxChars) {
+        dest[len++] = tmp[--n];
+    }
+    dest[len] = 0;
+}
+
 /* Initialize per-instance paths from ControllerIndex.
  * Reads ControllerIndex from device HW key (written by test app at device creation).
  * Falls back to index 0 / legacy global paths if not found. */
@@ -47,37 +73,52 @@ InitInstancePaths(
 
     ctx->ControllerIndex = index;
 
-    /* Build per-instance registry path: SOFTWARE\HIDMaestro\Controller<N> */
+    /* Build per-instance paths. Multi-digit indices fully supported — there's
+     * no artificial cap on controller count. XInput tops out at 4 slots
+     * (Microsoft's limit, not ours), but DInput / HIDAPI / WGI / browser
+     * see all virtual controllers regardless of count. */
     {
         static const WCHAR prefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
-        WCHAR *p = ctx->ConfigRegPath;
-        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
-        p += (sizeof(prefix) / 2) - 1;
-        *p++ = L'0' + (WCHAR)(index % 10);
-        *p = 0;
+        SIZE_T cap = sizeof(ctx->ConfigRegPath) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->ConfigRegPath, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->ConfigRegPath, index, cap);
     }
-
-    /* Build per-instance memory-mapped section name: Global\HIDMaestroInput<N>.
-     * IPC channel — the test app creates a pagefile-backed section, the driver
-     * maps a read view, and we poll it in the timer. RAM-only, no disk. */
     {
         static const WCHAR prefix[] = L"Global\\HIDMaestroInput";
-        WCHAR *p = ctx->SharedMappingName;
-        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
-        p += (sizeof(prefix) / 2) - 1;
-        *p++ = L'0' + (WCHAR)(index % 10);
-        *p = 0;
+        SIZE_T cap = sizeof(ctx->SharedMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->SharedMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->SharedMappingName, index, cap);
     }
-
-    /* Build per-instance OUTPUT mapping name: Global\HIDMaestroOutput<N>.
-     * Driver writes captured output reports here; consumer reads. */
     {
         static const WCHAR prefix[] = L"Global\\HIDMaestroOutput";
-        WCHAR *p = ctx->OutputMappingName;
-        RtlCopyMemory(p, prefix, sizeof(prefix) - 2);
-        p += (sizeof(prefix) / 2) - 1;
-        *p++ = L'0' + (WCHAR)(index % 10);
-        *p = 0;
+        SIZE_T cap = sizeof(ctx->OutputMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->OutputMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->OutputMappingName, index, cap);
+    }
+
+    /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
+     * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
+     * to distinguish identical controllers; without it, two virtual DualSense
+     * with the same VID/PID/ProductString get bucketed as one device by
+     * hid_enumerate. The exact format isn't part of any contract — consumers
+     * are expected to treat the string as opaque. */
+    {
+        static const WCHAR prefix[] = L"HM-CTL-";
+        SIZE_T cap = sizeof(ctx->SerialString) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->SerialString, prefix, sizeof(prefix));
+        /* Zero-pad to 4 digits */
+        if (index < 1000) {
+            SIZE_T len = (sizeof(prefix) / sizeof(WCHAR)) - 1;
+            if (index < 10)   { ctx->SerialString[len++] = L'0'; ctx->SerialString[len++] = L'0'; ctx->SerialString[len++] = L'0'; }
+            else if (index < 100)  { ctx->SerialString[len++] = L'0'; ctx->SerialString[len++] = L'0'; }
+            else if (index < 1000) { ctx->SerialString[len++] = L'0'; }
+            ctx->SerialString[len] = 0;
+        }
+        AppendUlongDecimal(ctx->SerialString, index, cap);
+        /* Compute byte length including the trailing NUL */
+        SIZE_T slen = 0;
+        while (slen < cap && ctx->SerialString[slen] != 0) slen++;
+        ctx->SerialStringBytes = (ULONG)((slen + 1) * sizeof(WCHAR));
     }
 }
 
@@ -757,30 +798,48 @@ EvtIoDeviceControl(
 
     case IOCTL_HID_GET_STRING: {
         /*
-         * The string ID is passed in the lower 16 bits of the input value.
-         * For UMDF2, retrieve it from the input buffer.
-         * HID_STRING_ID_IMANUFACTURER = 1
-         * HID_STRING_ID_IPRODUCT = 2
-         * HID_STRING_ID_ISERIALNUMBER = 3
-         * We return the product string for all queries — this is what
-         * joy.cpl and games see.
+         * The input buffer's low 16 bits identify which device-level string
+         * the HID class wants. The values aren't the documented HID_STRING_ID_*
+         * constants from the WDK headers (1/2/3) — under MsHidUmdf the HID
+         * class actually sends 14/15/16 for manufacturer/product/serial. Both
+         * the constant-form and the actual-observed-form are accepted in case
+         * the mapping changes between Windows versions.
+         *
+         * For SERIAL (16 or 3) we return a UNIQUE per-instance serial built
+         * from ControllerIndex. Without this, two virtual controllers that
+         * share VID/PID/ProductString (e.g. 2× DualSense) get bucketed as
+         * one device by SDL3/HIDAPI's hid_enumerate, which uses the serial
+         * string as the disambiguator. PadForge has the same problem.
+         *
+         * For all other string IDs we return the product string — that's
+         * what joy.cpl and games display.
          */
-        PVOID   inBuf = NULL;
-        size_t  inBufSize = 0;
-        ULONG   stringId = 0;
+        PVOID  inBuf = NULL;
+        size_t inBufSize = 0;
+        ULONG  stringId = 0;
 
-        /* Try to get string ID from input buffer */
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, sizeof(ULONG), &inBuf, &inBufSize))) {
-            stringId = *(ULONG*)inBuf;
+            stringId = *(ULONG*)inBuf & 0xFFFF;
         }
 
-        /* Return product string for all string types */
-        status = RequestCopyFromBuffer(Request,
-            ctx->ProductString, ctx->ProductStringBytes);
+        BOOLEAN isSerial = (stringId == 16 || stringId == 3 /* HID_STRING_ID_ISERIALNUMBER */);
+        if (isSerial && ctx->SerialStringBytes > 0) {
+            status = RequestCopyFromBuffer(Request,
+                ctx->SerialString, ctx->SerialStringBytes);
+        } else {
+            status = RequestCopyFromBuffer(Request,
+                ctx->ProductString, ctx->ProductStringBytes);
+        }
         break;
     }
 
     case IOCTL_HID_GET_INDEXED_STRING: {
+        /* IOCTL_HID_GET_INDEXED_STRING is for raw HID descriptor string
+         * indices (the iManufacturer/iProduct/iSerialNumber fields in the
+         * HID device descriptor). Our descriptor doesn't declare any string
+         * indices, so this path is rarely hit; HidClass routes the named
+         * string queries through IOCTL_HID_GET_STRING instead, where we
+         * handle the per-instance serial. Fall back to ProductString. */
         status = RequestCopyFromBuffer(Request,
             ctx->ProductString, ctx->ProductStringBytes);
         break;
