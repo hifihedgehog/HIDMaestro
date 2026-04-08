@@ -35,6 +35,9 @@ typedef struct _COMPANION_CTX {
     ULONG PacketCount;
     USHORT VendorId;
     USHORT ProductId;
+    ULONG ControllerIndex;
+    WCHAR SharedFilePath[128]; /* e.g. L"C:\ProgramData\HIDMaestro\input_0.bin" */
+    WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -55,9 +58,9 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
 }
 
-static BOOLEAN ReadGipData(UCHAR gipOut[14])
+static BOOLEAN ReadGipData(const WCHAR* sharedFilePath, UCHAR gipOut[14])
 {
-    HANDLE hFile = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\input.bin",
+    HANDLE hFile = CreateFileW(sharedFilePath,
         GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return FALSE;
     SHARED_INPUT shared;
@@ -85,12 +88,59 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     {
         PCOMPANION_CTX ctx = GetCompanionCtx(device);
         ctx->PacketCount = 0;
-        ctx->VendorId = 0x045E;   /* defaults */
+        ctx->VendorId = 0x045E;
         ctx->ProductId = 0x028E;
+        ctx->ControllerIndex = 0;
 
-        /* Read VID/PID from registry (set by test app) */
+        /* Read ControllerIndex from Device Parameters.
+         * Try WDF API first, fall back to direct registry via device instance ID
+         * parsed from WdfDeviceGetDeviceProperty. */
+        {
+            NTSTATUS rkStatus;
+            WDFKEY hkDevice;
+            rkStatus = WdfDeviceOpenRegistryKey(device, PLUGPLAY_REGKEY_DEVICE,
+                KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hkDevice);
+            if (NT_SUCCESS(rkStatus))
+            {
+                UNICODE_STRING valueName;
+                RtlInitUnicodeString(&valueName, L"ControllerIndex");
+                ULONG idx = 0;
+                if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx)))
+                    ctx->ControllerIndex = idx;
+                WdfRegistryClose(hkDevice);
+            }
+        }
+
+        /* Build per-instance paths */
+        {
+            /* Registry: SOFTWARE\HIDMaestro\Controller<N> */
+            static const WCHAR prefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
+            WCHAR *p = ctx->ConfigRegPath;
+            for (int i = 0; prefix[i]; i++) *p++ = prefix[i];
+            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
+            *p = L'\0';
+
+            /* Shared file: C:\ProgramData\HIDMaestro\input_<N>.bin */
+            static const WCHAR filePrefix[] = L"C:\\ProgramData\\HIDMaestro\\input_";
+            static const WCHAR fileSuffix[] = L".bin";
+            p = ctx->SharedFilePath;
+            for (int i = 0; filePrefix[i]; i++) *p++ = filePrefix[i];
+            *p++ = L'0' + (WCHAR)(ctx->ControllerIndex % 10);
+            for (int i = 0; fileSuffix[i]; i++) *p++ = fileSuffix[i];
+            *p = L'\0';
+        }
+
+        /* Read VID/PID from per-instance registry (falls back to global) */
         HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->VendorId = (USHORT)val;
+            sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->ProductId = (USHORT)val;
+            RegCloseKey(hKey);
+        } else if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             DWORD val, sz = sizeof(val);
             if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
                 ctx->VendorId = (USHORT)val;
@@ -106,22 +156,52 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
     if (!NT_SUCCESS(status)) return status;
 
-    /* Register XUSB (for XInput) + WinExInput (for browser STANDARD GAMEPAD). */
+    /* Register XUSB (conditionally) + WinExInput interfaces */
     {
-        NTSTATUS s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
+        PCOMPANION_CTX dbgCtx = GetCompanionCtx(device);
+        NTSTATUS s1 = STATUS_SUCCESS;
+        NTSTATUS s2;
+
+        /* Check XusbNeeded from per-instance config — default 1 (register XUSB).
+         * For xinputhid profiles (XusbNeeded=0), xinputhid already provides XInput
+         * on the HID child, so skip XUSB to avoid a duplicate XInput slot. */
+        DWORD xusbNeeded = 1;
+        {
+            HKEY hCfg;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, dbgCtx->ConfigRegPath, 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
+                DWORD val, sz = sizeof(val);
+                if (RegQueryValueExW(hCfg, L"XusbNeeded", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                    xusbNeeded = val;
+                RegCloseKey(hCfg);
+            }
+        }
+
+        if (xusbNeeded) {
+            s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
+        }
+
+        /* Always register WinExInput for browser gamepad API */
         UNICODE_STRING refStr;
         RtlInitUnicodeString(&refStr, L"XI_00");
-        NTSTATUS s2 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
+        s2 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
 
-        /* VID/PID debug removed — was causing scope issues */
-
-        /* Debug log */
+        /* Debug log — FILE_SHARE_WRITE allows multiple companions to append */
         HANDLE hLog = CreateFileW(L"C:\\ProgramData\\HIDMaestro\\companion_debug.txt",
-            FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+            FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 0, NULL);
         if (hLog != INVALID_HANDLE_VALUE) {
             char msg[200];
             char* p = msg;
-            RtlCopyMemory(p, "CompanionDeviceAdd: s1=", 23); p += 23;
+            RtlCopyMemory(p, "idx=", 4); p += 4;
+            *p++ = (char)('0' + dbgCtx->ControllerIndex % 10);
+            *p++ = ' ';
+            RtlCopyMemory(p, "xusb=", 5); p += 5;
+            *p++ = xusbNeeded ? '1' : '0';
+            *p++ = ' ';
+            RtlCopyMemory(p, "file=", 5); p += 5;
+            for (int fi = 0; fi < 30 && dbgCtx->SharedFilePath[fi]; fi++)
+                *p++ = (char)(dbgCtx->SharedFilePath[fi] & 0x7F);
+            *p++ = ' ';
+            RtlCopyMemory(p, "s1=", 3); p += 3;
             /* Simple hex output */
             for (int k = 7; k >= 0; k--) {
                 int nib = (s1 >> (k*4)) & 0xF;
@@ -172,7 +252,7 @@ void CompanionIoControl(
         UCHAR info[12];
         RtlZeroMemory(info, sizeof(info));
         *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 */
-        info[2] = 0x01;                /* deviceIndex = 1 controller */
+        info[2] = 0x01; /* device count — always 1 (each companion hosts one controller) */
         info[4] = 0x00;                /* unk2 — bit 7 clear = don't skip */
         *(USHORT*)&info[8] = ctx->VendorId;
         *(USHORT*)&info[10] = ctx->ProductId;
@@ -207,7 +287,7 @@ void CompanionIoControl(
         *(DWORD*)&state[5] = ctx->PacketCount;
 
         UCHAR gip[14];
-        if (ReadGipData(gip)) {
+        if (ReadGipData(ctx->SharedFilePath, gip)) {
             PUCHAR d = gip;
             /* Button remapping: GIP button byte → XInput button bits */
             UCHAR btnLow = d[12], btnHigh = d[13];

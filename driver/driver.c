@@ -382,9 +382,9 @@ EvtSharedMemTimer(
 /* SelfManagedIo: retry XUSB interface enable after device fully starts */
 static NTSTATUS EvtSelfManagedIoInit(_In_ WDFDEVICE Device)
 {
-    /* Re-enable XUSB interface after PnP finishes device start.
-     * WDF might allow the enable at this point even if it was suppressed during DeviceAdd. */
-    WdfDeviceSetDeviceInterfaceState(Device, (LPGUID)&XUSB_INTERFACE_CLASS_GUID, NULL, TRUE);
+    UNREFERENCED_PARAMETER(Device);
+    /* XUSB interface is NOT registered on the main device — companion handles it.
+     * Do NOT re-enable stale XUSB interfaces here. */
     return STATUS_SUCCESS;
 }
 
@@ -482,6 +482,25 @@ EvtDeviceAdd(
 
     /* Initialize per-instance paths (registry key, shared file) from ControllerIndex */
     InitInstancePaths(ctx, device);
+
+    /* Detect gamepad companion (root\HIDMaestroGamepad) — must NOT register WinExInput.
+     * WinExInput on the companion creates a 3rd browser entry; only the main device
+     * (or XUSB companion) should provide it. */
+    BOOLEAN isGamepadCompanion = FALSE;
+    {
+        WCHAR hwId[256] = {0};
+        ULONG hwIdLen = 0;
+        if (NT_SUCCESS(WdfDeviceQueryProperty(device, DevicePropertyHardwareID,
+                sizeof(hwId), hwId, &hwIdLen)) && hwId[0]) {
+            /* Multi-string: scan all entries */
+            for (WCHAR *p = hwId; *p; p += wcslen(p) + 1) {
+                if (wcsstr(p, L"HIDMaestroGamepad")) {
+                    isGamepadCompanion = TRUE;
+                    break;
+                }
+            }
+        }
+    }
 
 #ifdef HIDMAESTRO_XUSB_MODE
     /* XUSB + WinExInput companion mode — function driver for XInput + browser.
@@ -715,9 +734,12 @@ EvtDeviceAdd(
      * For xinputhid profiles, xinputhid blocks HID ReadFile so WGI reads XInput
      * (separate triggers) instead of HID. WinExInput on main device is safe.
      * For FunctionMode (Xbox HID without xinputhid): SKIP — companion has WinExInput.
-     * If we register here, WGI reads HID combined Z → browser triggers combined. */
+     * If we register here, WGI reads HID combined Z → browser triggers combined.
+     * Gamepad companion (HIDMaestroGamepad) must NEVER register WinExInput —
+     * it would create a 3rd browser entry. Only the main device provides it. */
 #ifndef HIDMAESTRO_XUSB_MODE
-    /* Main device: register WinExInput for WGI GamepadAdded. */
+    /* Main device: register WinExInput for WGI GamepadAdded (skip for gamepad companion). */
+    if (!isGamepadCompanion)
 #endif
     {
         UNICODE_STRING refStr;

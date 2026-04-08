@@ -100,7 +100,7 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Builds HMXInput.dll (XUSB companion) from driver.c with XUSB_MODE.</summary>
+    /// <summary>Builds HMXInput.dll (XUSB companion) from companion.c.</summary>
     public static bool BuildCompanion()
     {
         string vcvars = FindVcvars() ?? throw new Exception("Visual Studio not found");
@@ -113,14 +113,13 @@ public static class DriverBuilder
         string umLib = Path.Combine(WdkRoot, "Lib", WdkVer, "um", "x64");
         string wdfLib = Path.Combine(WdkRoot, "Lib", "wdf", "umdf", "x64", UmdfVer);
 
-        string src = Path.Combine(DriverDir, "driver.c");
-        string obj = Path.Combine(BuildDir, "xusb_driver.obj");
+        string src = Path.Combine(DriverDir, "companion.c");
+        string obj = Path.Combine(BuildDir, "companion.obj");
         string dll = Path.Combine(BuildDir, "HMXInput.dll");
 
         string compileCmd = $"\"{vcvars}\" amd64 >nul 2>&1 && cl.exe /nologo /W4 /GS /Gz /wd4324 /wd4101 " +
             $"/D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 " +
-            $"/D HIDMAESTRO_XUSB_MODE " +
-            $"\"/I{umInc}\" \"/I{sharedInc}\" \"/I{kmInc}\" \"/I{wdfInc}\" \"/I{IncludeDir}\" " +
+            $"\"/I{umInc}\" \"/I{sharedInc}\" \"/I{kmInc}\" \"/I{wdfInc}\" " +
             $"\"/Fo{obj}\" /c \"{src}\"";
 
         var (rc, output) = Run(compileCmd);
@@ -337,7 +336,7 @@ public static class DriverBuilder
         if (!File.Exists(dll)) return true;
 
         var dllTime = File.GetLastWriteTime(dll);
-        foreach (string src in new[] { "driver.c", "driver.h" })
+        foreach (string src in new[] { "driver.c", "driver.h", "companion.c" })
         {
             string path = Path.Combine(DriverDir, src);
             if (File.Exists(path) && File.GetLastWriteTime(path) > dllTime)
