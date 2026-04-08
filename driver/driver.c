@@ -189,6 +189,17 @@ ReadConfigFromRegistry(
         ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
     }
 
+    /* Read HidAttrPid (REG_DWORD) — overrides ProductID in HID attributes only.
+     * Companion still reads ProductId for XUSB identity.
+     * PID 0x0001 prevents GameInput/HIDAPI from claiming xinputhid devices,
+     * so SDL3 falls through to XInput backend (correct identity). */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"HidAttrPid", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    if (result == ERROR_SUCCESS && regType == REG_DWORD) {
+        ctx->HidDeviceAttributes.ProductID = (USHORT)dwordVal;
+    }
+
     /* Read VersionNumber (REG_DWORD) */
     dwordSize = sizeof(dwordVal);
     result = RegQueryValueExW(hKey, L"VersionNumber", NULL,
@@ -738,8 +749,10 @@ EvtDeviceAdd(
      * Gamepad companion (HIDMaestroGamepad) must NEVER register WinExInput —
      * it would create a 3rd browser entry. Only the main device provides it. */
 #ifndef HIDMAESTRO_XUSB_MODE
-    /* Main device: register WinExInput for WGI GamepadAdded (skip for gamepad companion). */
-    if (!isGamepadCompanion)
+    /* Main device: register WinExInput for WGI GamepadAdded.
+     * Skip for: gamepad companion (would create duplicate browser entry)
+     *           function mode (XUSB companion provides WinExInput instead) */
+    if (!isGamepadCompanion && !functionMode)
 #endif
     {
         UNICODE_STRING refStr;

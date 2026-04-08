@@ -1,7 +1,7 @@
 /*
  * HIDMaestro Companion — UMDF2 driver for XUSB XInput + WinExInput.
- * Registers XUSB + WinExInput interfaces and handles XUSB IOCTLs.
- * Reads gamepad state from shared file (C:\ProgramData\HIDMaestro\input.bin).
+ * Registers XUSB (conditionally via XusbNeeded) + WinExInput interfaces.
+ * Reads gamepad state from shared file (C:\ProgramData\HIDMaestro\input_N.bin).
  * No HID, no filter mode — runs as System-class function driver.
  */
 
@@ -162,23 +162,11 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         NTSTATUS s1 = STATUS_SUCCESS;
         NTSTATUS s2;
 
-        /* Check XusbNeeded from per-instance config — default 1 (register XUSB).
-         * For xinputhid profiles (XusbNeeded=0), xinputhid already provides XInput
-         * on the HID child, so skip XUSB to avoid a duplicate XInput slot. */
+        /* XUSB companion ALWAYS registers XUSB — that's its sole purpose.
+         * The XusbNeeded flag controls the MAIN device's XUSB registration
+         * (to avoid duplicate XInput slots), not the companion's. */
         DWORD xusbNeeded = 1;
-        {
-            HKEY hCfg;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, dbgCtx->ConfigRegPath, 0, KEY_READ, &hCfg) == ERROR_SUCCESS) {
-                DWORD val, sz = sizeof(val);
-                if (RegQueryValueExW(hCfg, L"XusbNeeded", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
-                    xusbNeeded = val;
-                RegCloseKey(hCfg);
-            }
-        }
-
-        if (xusbNeeded) {
-            s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
-        }
+        s1 = WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
 
         /* Always register WinExInput for browser gamepad API */
         UNICODE_STRING refStr;

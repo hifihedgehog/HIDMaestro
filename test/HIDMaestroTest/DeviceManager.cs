@@ -39,6 +39,9 @@ public static class DeviceManager
     [DllImport("CfgMgr32.dll")]
     static extern uint CM_Unregister_Notification(IntPtr NotifyContext);
 
+    [DllImport("CfgMgr32.dll")]
+    static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+
     [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Get_Device_ID_Size(out uint pulLen, uint dnDevInst, uint ulFlags);
 
@@ -286,6 +289,10 @@ public static class DeviceManager
     static extern IntPtr SetupDiGetClassDevsW(IntPtr ClassGuid, IntPtr Enumerator,
         IntPtr hwndParent, uint Flags);
 
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiGetClassDevsW")]
+    static extern IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, uint Enumerator,
+        IntPtr hwndParent, uint Flags);
+
     [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
         IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
@@ -296,8 +303,101 @@ public static class DeviceManager
     [DllImport("SetupAPI.dll", SetLastError = true)]
     static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
+    [DllImport("SetupAPI.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex, IntPtr DeviceInfoData);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceInstanceIdW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
+        [Out] char[] DeviceInstanceId, uint DeviceInstanceIdSize, out uint RequiredSize);
+
+    [DllImport("SetupAPI.dll", SetLastError = true)]
+    static extern bool SetupDiRemoveDevice(IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
+        uint Property, out uint PropertyRegDataType, byte[]? PropertyBuffer, uint PropertyBufferSize, out uint RequiredSize);
+
     const uint DIGCF_ALLCLASSES = 0x04;
     const int DIF_REMOVE = 0x05;
+    const uint SPDRP_INSTALL_STATE = 0x22;
+
+    /// <summary>
+    /// Removes ALL ghost devices matching the given instance ID prefixes.
+    /// Uses SetupDiRemoveDevice (direct API, not DIF_REMOVE) which works on ghost/phantom devices
+    /// that DIF_REMOVE and pnputil fail to remove. Enumerates ALL devices (including non-present)
+    /// via SetupDiGetClassDevs(DIGCF_ALLCLASSES) and removes those with InstallState=false.
+    /// </summary>
+    public static int RemoveGhostDevices(string[] instanceIdPrefixes)
+    {
+        int removed = 0;
+        // GhostBuster pattern: Guid.Empty by ref + DIGCF_ALLCLASSES enumerates ALL devices
+        // including phantoms. Ghost = CM_Get_DevNode_Status fails. Remove via SetupDiRemoveDevice
+        // on the SAME DevInfoSet handle (critical — separate handles don't work).
+        Guid nullGuid = Guid.Empty;
+        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, 0, IntPtr.Zero, DIGCF_ALLCLASSES);
+        if (dis == new IntPtr(-1)) return 0;
+
+        try
+        {
+            int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
+            byte[] devInfoBuf = new byte[devInfoSize];
+            var devInfoHandle = System.Runtime.InteropServices.GCHandle.Alloc(devInfoBuf, System.Runtime.InteropServices.GCHandleType.Pinned);
+
+            try
+            {
+                uint index = 0;
+                while (true)
+                {
+                    BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
+                    if (!SetupDiEnumDeviceInfo(dis, index, devInfoHandle.AddrOfPinnedObject()))
+                        break;
+
+                    char[] idBuf = new char[512];
+                    if (SetupDiGetDeviceInstanceIdW(dis, devInfoHandle.AddrOfPinnedObject(), idBuf, (uint)idBuf.Length, out uint idLen))
+                    {
+                        string instanceId = new string(idBuf, 0, (int)idLen - 1);
+
+                        bool isOurs = false;
+                        foreach (string prefix in instanceIdPrefixes)
+                        {
+                            if (instanceId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            { isOurs = true; break; }
+                        }
+
+                        if (isOurs)
+                        {
+                            // GhostBuster ghost detection: CM_Get_DevNode_Status failure = ghost
+                            // SP_DEVINFO_DATA layout: cbSize(4) + ClassGuid(16) + DevInst(4) + Reserved(ptr)
+                            uint devInst = BitConverter.ToUInt32(devInfoBuf, 20);
+                            bool isGhost = CM_Get_DevNode_Status(out _, out _,
+                                devInst, 0) != CR_SUCCESS;
+
+                            if (isGhost)
+                            {
+                                if (SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
+                                {
+                                    System.Console.Error.WriteLine($"    Ghost removed: {instanceId}");
+                                    removed++;
+                                }
+                            }
+                        }
+                    }
+
+                    index++;
+                }
+            }
+            finally
+            {
+                devInfoHandle.Free();
+            }
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(dis);
+        }
+
+        return removed;
+    }
 
     /// <summary>
     /// Removes a device and all its children, waits for removal to complete.
@@ -318,9 +418,42 @@ public static class DeviceManager
             WaitForDeviceRemoval(childId, 2000);
         }
 
-        // Step 2: Remove the parent
+        // Step 2: Try DIF_REMOVE first (proper PnP removal)
         DifRemoveDevice(instanceId);
-        return WaitForDeviceRemoval(instanceId, timeoutMs);
+        WaitForDeviceRemoval(instanceId, timeoutMs);
+
+        // Step 3: pnputil as second pass — always try for ROOT devices
+        // DIF_REMOVE often reports success but leaves phantom devices in the Enum registry.
+        // pnputil /remove-device is more thorough for ghost cleanup.
+        if (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
+            instanceId.StartsWith("HID\\", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "pnputil.exe",
+                    Arguments = $"/remove-device \"{instanceId}\"",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using var proc = System.Diagnostics.Process.Start(psi);
+                if (proc != null)
+                {
+                    proc.StandardOutput.ReadToEnd();
+                    proc.StandardError.ReadToEnd();
+                    proc.WaitForExit(5000);
+                }
+            }
+            catch { }
+        }
+
+        // Step 4: Final check
+        bool removed = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS
+                    && CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS;
+        return removed;
     }
 
     /// <summary>
@@ -357,16 +490,21 @@ public static class DeviceManager
     }
 
     /// <summary>
-    /// Performs DIF_REMOVE on a single device via SetupAPI, with CM API fallback.
+    /// Removes a single device via SetupDiRemoveDevice (same as devcon remove).
+    /// This is more thorough than DIF_REMOVE — it bypasses class installers and
+    /// directly removes the device node, preventing ghost entries on UMDF devices.
+    /// Falls back to CM_Disable + CM_Uninstall if SetupAPI fails.
     /// </summary>
     static void DifRemoveDevice(string instanceId)
     {
-        // Try to locate the devnode (live or phantom)
         uint devInst = 0;
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
                     || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;
 
-        IntPtr dis = SetupDiGetClassDevsW(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
+        // Use Guid.Empty + DIGCF_ALLCLASSES to enumerate ALL devices including phantoms.
+        // This is critical — a device-class-specific DevInfoSet won't find phantoms.
+        Guid nullGuid = Guid.Empty;
+        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, 0, IntPtr.Zero, DIGCF_ALLCLASSES);
         if (dis == new IntPtr(-1))
         {
             if (located)
@@ -379,7 +517,6 @@ public static class DeviceManager
 
         try
         {
-            // SP_DEVINFO_DATA: cbSize (4) + ClassGuid (16) + DevInst (4) + Reserved (IntPtr)
             int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
             byte[] devInfoBuf = new byte[devInfoSize];
             BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
@@ -397,7 +534,14 @@ public static class DeviceManager
                     return;
                 }
 
-                SetupDiCallClassInstaller(DIF_REMOVE, dis, devInfoHandle.AddrOfPinnedObject());
+                // SetupDiRemoveDevice — direct removal like devcon.exe.
+                // Unlike DIF_REMOVE (class installer), this fully removes the device
+                // node and registry entries, preventing ghosts on UMDF devices.
+                if (!SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
+                {
+                    // Fallback to DIF_REMOVE if direct removal fails
+                    SetupDiCallClassInstaller(DIF_REMOVE, dis, devInfoHandle.AddrOfPinnedObject());
+                }
             }
             finally
             {

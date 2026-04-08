@@ -332,16 +332,24 @@ public static class DriverBuilder
     /// <summary>Checks if source files are newer than built DLLs.</summary>
     public static bool NeedsBuild()
     {
-        string dll = Path.Combine(BuildDir, "HIDMaestro.dll");
-        if (!File.Exists(dll)) return true;
+        string mainDll = Path.Combine(BuildDir, "HIDMaestro.dll");
+        string companionDll = Path.Combine(BuildDir, "HMXInput.dll");
+        if (!File.Exists(mainDll) || !File.Exists(companionDll)) return true;
 
-        var dllTime = File.GetLastWriteTime(dll);
-        foreach (string src in new[] { "driver.c", "driver.h", "companion.c" })
+        // Check driver.c/driver.h against HIDMaestro.dll
+        var mainTime = File.GetLastWriteTime(mainDll);
+        foreach (string src in new[] { "driver.c", "driver.h" })
         {
             string path = Path.Combine(DriverDir, src);
-            if (File.Exists(path) && File.GetLastWriteTime(path) > dllTime)
+            if (File.Exists(path) && File.GetLastWriteTime(path) > mainTime)
                 return true;
         }
+        // Check companion.c against HMXInput.dll
+        var companionTime = File.GetLastWriteTime(companionDll);
+        string companionSrc = Path.Combine(DriverDir, "companion.c");
+        if (File.Exists(companionSrc) && File.GetLastWriteTime(companionSrc) > companionTime)
+            return true;
+
         return false;
     }
 }
