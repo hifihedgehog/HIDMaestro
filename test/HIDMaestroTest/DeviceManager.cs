@@ -28,9 +28,6 @@ public static class DeviceManager
     static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
     [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Query_And_Remove_SubTreeW(uint dnDevInst, IntPtr pVetoType, IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
-
-    [DllImport("CfgMgr32.dll")]
     static extern uint CM_Uninstall_DevNode(uint dnDevInst, uint ulFlags);
 
     [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
@@ -285,10 +282,6 @@ public static class DeviceManager
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr SetupDiGetClassDevsW(IntPtr ClassGuid, IntPtr Enumerator,
-        IntPtr hwndParent, uint Flags);
-
     [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiGetClassDevsW")]
     static extern IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, uint Enumerator,
         IntPtr hwndParent, uint Flags);
@@ -313,13 +306,8 @@ public static class DeviceManager
     [DllImport("SetupAPI.dll", SetLastError = true)]
     static extern bool SetupDiRemoveDevice(IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        uint Property, out uint PropertyRegDataType, byte[]? PropertyBuffer, uint PropertyBufferSize, out uint RequiredSize);
-
     const uint DIGCF_ALLCLASSES = 0x04;
     const int DIF_REMOVE = 0x05;
-    const uint SPDRP_INSTALL_STATE = 0x22;
 
     /// <summary>
     /// Removes ALL ghost devices matching the given instance ID prefixes.

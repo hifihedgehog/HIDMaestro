@@ -172,49 +172,6 @@ class Program
     }
 
     /// <summary>
-    /// Adds xinputhid as an upper filter on the HID child device, making it
-    /// visible to XInput applications. This is how real Xbox controllers work:
-    /// xinputhid.sys loads as an upper filter and registers with XInput.
-    /// </summary>
-    /// <summary>
-    /// Adds xinputhid as an upper filter on the HID child device via the
-    /// persistent device registry, then restarts the device so the filter loads.
-    /// This makes the device visible to XInput applications.
-    /// </summary>
-    static string _upperFilterName = "xinputhid"; // default; set per profile
-
-    static void InjectXInputFilter(uint childDevInst)
-    {
-        string filterName = _upperFilterName;
-
-        byte[] idBuf = new byte[512];
-        CM_Get_Device_IDW(childDevInst, idBuf, (uint)idBuf.Length / 2, 0);
-        string instanceId = Encoding.Unicode.GetString(idBuf).TrimEnd('\0');
-        if (string.IsNullOrEmpty(instanceId)) return;
-
-        string[] parts = instanceId.Split('\\');
-        if (parts.Length < 3) return;
-
-        string regPath = $@"SYSTEM\CurrentControlSet\Enum\{parts[0]}\{parts[1]}\{parts[2]}";
-        using var key = Registry.LocalMachine.OpenSubKey(regPath, writable: true);
-        if (key == null) return;
-
-        var existing = key.GetValue("UpperFilters") as string[];
-        if (existing != null && existing.Any(f => f.Equals(filterName, StringComparison.OrdinalIgnoreCase)))
-            return; // Already present
-
-        var newFilters = (existing ?? Array.Empty<string>()).ToList();
-        newFilters.Add(filterName);
-        key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
-
-        // Restart the device to load the filter
-        DeviceManager.RestartDevice(instanceId);
-    }
-
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern uint CM_Get_Device_IDW(uint dnDevInst, byte[] buffer, uint bufferLen, uint ulFlags);
-
-    /// <summary>
     /// Adds HMBtnFix UMDF2 filter on the HID child to patch xinputhid's 16-button
     /// descriptor to 10 buttons. Configures WUDFRd service parameters.
     /// </summary>
@@ -281,44 +238,6 @@ class Program
         }
 
         Console.Write($"  BtnFix filter configured on {hidChildInstanceId}... ");
-    }
-
-    /// <summary>
-    /// Finds the current HID child of ROOT\HID_IG_00\0000, adds xinputhid as an
-    /// upper filter in its persistent registry, and restarts the device.
-    /// Returns true if successful.
-    /// </summary>
-    static bool EnableXInputOnHidChild()
-    {
-        // Find the active HID child instance ID
-        var (_, output) = RunProcess("powershell.exe",
-            "-NoProfile -Command \"Get-PnpDevice | Where-Object { $_.InstanceId -like 'HID\\HIDCLASS\\*' -and $_.Status -eq 'OK' } | Select-Object -ExpandProperty InstanceId\"");
-        string instanceId = output.Trim();
-        if (string.IsNullOrEmpty(instanceId) || !instanceId.StartsWith("HID\\")) return false;
-
-        // Parse: HID\HIDCLASS\1&xxx&yyy&0000
-        string[] parts = instanceId.Split('\\');
-        if (parts.Length < 3) return false;
-
-        // Open device enum registry key
-        string regPath = $@"SYSTEM\CurrentControlSet\Enum\{parts[0]}\{parts[1]}\{parts[2]}";
-        using var key = Registry.LocalMachine.OpenSubKey(regPath, writable: true);
-        if (key == null) return false;
-
-        // Check if xinputhid already present
-        var existing = key.GetValue("UpperFilters") as string[];
-        if (existing != null && existing.Any(f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase)))
-            return true; // Already configured
-
-        // Add xinputhid
-        var newFilters = (existing ?? Array.Empty<string>()).ToList();
-        newFilters.Add("xinputhid");
-        key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
-
-        // Restart the HID child to load the new filter
-        DeviceManager.RestartDevice(instanceId);
-
-        return true;
     }
 
     // ── P/Invoke ──
@@ -493,12 +412,11 @@ class Program
 
             // Single-instance: kill any other HIDMaestroTest processes
         int myPid = Environment.ProcessId;
-        bool killedOther = false;
         foreach (var proc in System.Diagnostics.Process.GetProcessesByName("HIDMaestroTest"))
         {
             if (proc.Id != myPid)
             {
-                try { proc.Kill(); proc.WaitForExit(3000); killedOther = true; } catch { }
+                try { proc.Kill(); proc.WaitForExit(3000); } catch { }
             }
         }
         // Elevate immediately — everything we do needs admin
@@ -2224,22 +2142,14 @@ class Program
         Console.WriteLine($"  Profile:  {profile.Id}");
         Console.WriteLine($"  VID:PID:  0x{profile.VendorId:X4}:0x{profile.ProductId:X4}");
         Console.WriteLine($"  Product:  {profile.ProductString}");
-        // Use profile descriptor if it has Report IDs (browser-compatible).
-        // Descriptors without Report IDs (like GIP 262-byte) cause HID validation failure.
         byte[] descriptor;
-        bool useNativeHID = false;
         byte[]? profileDesc = profile.HasDescriptor ? profile.GetDescriptorBytes() : null;
-        bool descHasReportIds = false;
-        if (profileDesc != null)
-            for (int i = 0; i < profileDesc.Length - 1; i++)
-                if (profileDesc[i] == 0x85) { descHasReportIds = true; break; }
 
         if (profileDesc != null)
         {
             // Use the profile descriptor as-is. Data injection uses shared file,
             // so no output/feature report injection needed.
             descriptor = profileDesc;
-            useNativeHID = true;
             Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (native)\n");
         }
         else
@@ -2271,9 +2181,6 @@ class Program
         // Only need to parse descriptors, open handles, and run the input loop.
         SafeFileHandle? h = null;
         SafeFileHandle? xh = null;
-        SafeFileHandle? vigemHandle = null;
-        uint vigemSerial = 0;
-        bool useVigemBus = false;
         ushort hidFeatureReportLen = 0;
         ushort hidInputReportLen = 0;
 
@@ -2282,7 +2189,6 @@ class Program
 
         // Step 0: Pre-flight setup (all in code, no external scripts)
         Console.Write("  Setting up environment... ");
-        _upperFilterName = profile.UpperFilterName ?? "none";
         EnsureGameInputService();
         EnsureSharedFile(controllerIndex);
         if (controllerIndex == 0 && !_ghostsCleanedThisSession)
@@ -2688,88 +2594,6 @@ class Program
 
         // (Gamepad companion already created in Step 1.5)
 
-        // Step 3.6: Create ViGEmBus Xbox 360 target for GameInput/SDL3
-        // GameInput can't read from UMDF2 virtual HID devices (HID bus type).
-        // ViGEmBus creates PDOs with USB bus type that GameInput CAN read.
-        // ViGEmBus for Xbox 360 HID-mode: creates virtual Xbox 360 PDO with USB bus type.
-        // DI sees 5 axes (XInput mapping). WGI sees separate triggers. No HID device needed.
-        // (vigemHandle/vigemSerial/useVigemBus declared above, disabled)
-        if (useVigemBus)
-        {
-            Console.Write("  Creating ViGEmBus Xbox 360 target... ");
-            try
-            {
-                // Open ViGEmBus device
-                var vigemGuid = new Guid("96E42B22-F5E9-42F8-B043-ED0F932F014F");
-                IntPtr vDis = SetupDiGetClassDevsW(ref vigemGuid, IntPtr.Zero, IntPtr.Zero,
-                    DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-                if (vDis != new IntPtr(-1))
-                {
-                    var vDid = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
-                    if (SetupDiEnumDeviceInterfaces(vDis, IntPtr.Zero, ref vigemGuid, 0, ref vDid))
-                    {
-                        SetupDiGetDeviceInterfaceDetailW(vDis, ref vDid, IntPtr.Zero, 0, out uint vReq, IntPtr.Zero);
-                        IntPtr vDetail = Marshal.AllocHGlobal((int)vReq);
-                        Marshal.WriteInt32(vDetail, 8);
-                        if (SetupDiGetDeviceInterfaceDetailW(vDis, ref vDid, vDetail, vReq, out _, IntPtr.Zero))
-                        {
-                            string vPath = Marshal.PtrToStringUni(vDetail + 4)!;
-                            vigemHandle = CreateFileW(vPath, GENERIC_READ | GENERIC_WRITE,
-                                FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-                            if (vigemHandle.IsInvalid) vigemHandle = null;
-                        }
-                        Marshal.FreeHGlobal(vDetail);
-                    }
-                    SetupDiDestroyDeviceInfoList(vDis);
-                }
-
-                if (vigemHandle != null)
-                {
-                    // Check version
-                    byte[] verBuf = new byte[8]; // VIGEM_CHECK_VERSION: Size(4) + Version(4)
-                    BitConverter.GetBytes(8).CopyTo(verBuf, 0);
-                    BitConverter.GetBytes(0x0001).CopyTo(verBuf, 4);
-                    DeviceIoControl(vigemHandle, 0x002AA00C, verBuf, (uint)verBuf.Length,
-                        null, 0, out _, IntPtr.Zero);
-
-                    // Plugin Xbox 360 target (type 0 = Xbox360Wired)
-                    vigemSerial = 1;
-                    byte[] plugBuf = new byte[16]; // Size(4) + SerialNo(4) + TargetType(4) + VID(2) + PID(2)
-                    BitConverter.GetBytes(16).CopyTo(plugBuf, 0);
-                    BitConverter.GetBytes(vigemSerial).CopyTo(plugBuf, 4);
-                    BitConverter.GetBytes(0).CopyTo(plugBuf, 8); // Xbox360Wired = 0
-                    BitConverter.GetBytes((ushort)0x045E).CopyTo(plugBuf, 12); // VID
-                    BitConverter.GetBytes((ushort)0x028E).CopyTo(plugBuf, 14); // PID
-                    bool plugOk = DeviceIoControl(vigemHandle, 0x002AA004, plugBuf, (uint)plugBuf.Length,
-                        null, 0, out _, IntPtr.Zero);
-                    if (plugOk)
-                    {
-                        // Wait for device to be ready
-                        byte[] waitBuf = new byte[8]; // Size(4) + SerialNo(4)
-                        BitConverter.GetBytes(8).CopyTo(waitBuf, 0);
-                        BitConverter.GetBytes(vigemSerial).CopyTo(waitBuf, 4);
-                        DeviceIoControl(vigemHandle, 0x002AA010, waitBuf, (uint)waitBuf.Length,
-                            null, 0, out _, IntPtr.Zero);
-                        Thread.Sleep(1000);
-                        Console.WriteLine("OK");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"FAILED (err={Marshal.GetLastWin32Error()})");
-                        vigemSerial = 0;
-                    }
-                }
-                else
-                {
-                    Console.WriteLine("ViGEmBus not found");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"FAILED: {ex.Message}");
-            }
-        }
-
         } // end if (!inputLoopOnly) — skip device setup for Phase 2
 
         // Step 4: Open the HID child device (runs for both setup and inputLoopOnly)
@@ -3066,64 +2890,6 @@ class Program
                     xusbOut, (uint)xusbOut.Length, out _, IntPtr.Zero);
             }
 
-            // Submit report to ViGEmBus target
-            if (vigemHandle != null && vigemSerial > 0)
-            {
-                if (count == 10 && useVigemBus)
-                {
-                    // Test submit with properly formed buffer
-                    byte[] testBuf = new byte[20];
-                    BitConverter.GetBytes(20).CopyTo(testBuf, 0);
-                    BitConverter.GetBytes(vigemSerial).CopyTo(testBuf, 4);
-                    testBuf[10] = 128; // LT=128
-                    testBuf[11] = 64;  // RT=64
-                    DeviceIoControl(vigemHandle, 0x002AA808, testBuf, 20, null, 0, out uint dummy, IntPtr.Zero);
-                }
-                if (useVigemBus)
-                {
-                    // XUSB_SUBMIT_REPORT: Size(4) + SerialNo(4) + XUSB_REPORT(12) = 20 bytes
-                    // XUSB_REPORT: wButtons(2) + bLT(1) + bRT(1) + sLX(2) + sLY(2) + sRX(2) + sRY(2)
-                    byte[] vrBuf = new byte[20];
-                    BitConverter.GetBytes(20).CopyTo(vrBuf, 0);
-                    BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
-                    // Buttons
-                    ushort xButtons = 0;
-                    if ((btnMask & 0x01) != 0) xButtons |= 0x1000; // A
-                    if ((btnMask & 0x02) != 0) xButtons |= 0x2000; // B
-                    if ((btnMask & 0x04) != 0) xButtons |= 0x4000; // X
-                    if ((btnMask & 0x08) != 0) xButtons |= 0x8000; // Y
-                    BitConverter.GetBytes(xButtons).CopyTo(vrBuf, 8);
-                    vrBuf[10] = (byte)(sepLt * 255); // LT
-                    vrBuf[11] = (byte)(sepRt * 255); // RT
-                    // Sticks: signed 16-bit (-32768 to 32767)
-                    short lx = (short)((lxNorm - 0.5) * 65534);
-                    short ly = (short)((0.5 - lyNorm) * 65534); // Y inverted
-                    BitConverter.GetBytes(lx).CopyTo(vrBuf, 12);
-                    BitConverter.GetBytes(ly).CopyTo(vrBuf, 14);
-                    // RX/RY = center (0)
-                    DeviceIoControl(vigemHandle, 0x002AA808, vrBuf, (uint)vrBuf.Length,
-                        null, 0, out _, IntPtr.Zero);
-                }
-                else
-                {
-                    // DS4_SUBMIT_REPORT (legacy path)
-                    byte[] vrBuf = new byte[17];
-                    BitConverter.GetBytes(17).CopyTo(vrBuf, 0);
-                    BitConverter.GetBytes(vigemSerial).CopyTo(vrBuf, 4);
-                    vrBuf[8] = (byte)(lxNorm * 255);
-                    vrBuf[9] = (byte)(lyNorm * 255);
-                    vrBuf[10] = 128; vrBuf[11] = 128;
-                    ushort ds4Buttons = 0x08;
-                    if ((btnMask & 0x01) != 0) ds4Buttons |= 0x20;
-                    BitConverter.GetBytes(ds4Buttons).CopyTo(vrBuf, 12);
-                    vrBuf[14] = 0;
-                    vrBuf[15] = (byte)(sepLt * 255);
-                    vrBuf[16] = (byte)(sepRt * 255);
-                    DeviceIoControl(vigemHandle, 0x002AA80C, vrBuf, (uint)vrBuf.Length,
-                        null, 0, out _, IntPtr.Zero);
-                }
-            }
-
             if (!ok)
             {
                 int err = Marshal.GetLastWin32Error();
@@ -3152,17 +2918,6 @@ class Program
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
-
-        // Unplug ViGEmBus target
-        if (vigemHandle != null && vigemSerial > 0)
-        {
-            byte[] unplugBuf = new byte[8]; // Size(4) + SerialNo(4)
-            BitConverter.GetBytes(8).CopyTo(unplugBuf, 0);
-            BitConverter.GetBytes(vigemSerial).CopyTo(unplugBuf, 4);
-            DeviceIoControl(vigemHandle, 0x002AA008, unplugBuf, (uint)unplugBuf.Length,
-                null, 0, out _, IntPtr.Zero);
-            vigemHandle.Dispose();
-        }
 
         // Restore HidHide state on exit
         {
