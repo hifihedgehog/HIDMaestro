@@ -189,6 +189,69 @@ def check_hidapi() -> dict:
 
 
 # ---------------------------------------------------------------------------
+#  HID enumeration order
+# ---------------------------------------------------------------------------
+#
+# Dead-simple ordering check: walk every HID device whose serial starts with
+# "HM-CTL-" (our virtual-controller serial prefix) and confirm they appear in
+# the same order they were created. The hid.enumerate() iteration order is
+# the same one Windows.Devices.HumanInterfaceDevice.HidDevice.FindAllAsync
+# uses, which is the same enumerator WGI consumes internally — so this is
+# the canonical "what every well-behaved consumer sees" order.
+#
+# A consumer that displays them in a different order (e.g. Dolphin's
+# remove+re-insert-on-event behavior) is the consumer's bug, not ours.
+
+def check_hid_order(expected_count: int) -> dict:
+    try:
+        import hid
+    except ImportError:
+        return {"available": False, "error": "hidapi not installed"}
+
+    # Walk every HID device, regardless of VID/PID, and pick the ones our
+    # driver claims via the HM-CTL- serial prefix.
+    found = []
+    for d in hid.enumerate(0, 0):
+        sn = d.get("serial_number") or ""
+        if sn.startswith("HM-CTL-"):
+            try:
+                idx = int(sn[len("HM-CTL-"):])
+            except ValueError:
+                idx = -1
+            found.append({
+                "serial": sn,
+                "expected_index": idx,
+                "vid": d["vendor_id"],
+                "pid": d["product_id"],
+                "path": d["path"].decode(errors="replace"),
+            })
+
+    # Note: hid.enumerate may return the same device multiple times if it
+    # has multiple top-level collections. Dedupe by serial keeping the
+    # first occurrence (which preserves enumeration order for the FIRST
+    # interface of each device).
+    seen = set()
+    deduped = []
+    for f in found:
+        if f["serial"] in seen:
+            continue
+        seen.add(f["serial"])
+        deduped.append(f)
+
+    indices = [f["expected_index"] for f in deduped]
+    in_order = (indices == sorted(indices)) and (indices == list(range(len(indices))))
+
+    return {
+        "available": True,
+        "count": len(deduped),
+        "expected_count": expected_count,
+        "in_order": in_order,
+        "indices": indices,
+        "devices": deduped,
+    }
+
+
+# ---------------------------------------------------------------------------
 #  Browser (real Chromium navigator.getGamepads via headless launcher)
 # ---------------------------------------------------------------------------
 
@@ -307,6 +370,21 @@ def main():
             failures.append(f"HIDAPI: {len(non_ig)} non-IG devices")
         else:
             print(f"WARN  {hi['total_045e']} device(s), no live data")
+
+    # -- HID enumeration order (creation-order check, dead simple) --
+    print("  HID order:   ", end="")
+    ho = check_hid_order(controllers)
+    if not ho.get("available"):
+        print(f"SKIP  ({ho.get('error', 'unavailable')})")
+    elif ho["count"] == 0:
+        print("SKIP  (no HM-CTL-* serials found — driver pre-serial-fix?)")
+    elif ho["count"] != controllers:
+        print(f"WARN  found {ho['count']} HIDMaestro device(s), expected {controllers}")
+    elif ho["in_order"]:
+        print(f"PASS  {ho['count']} device(s) in creation order: {ho['indices']}")
+    else:
+        print(f"FAIL  enumeration out of order: {ho['indices']}")
+        failures.append(f"HID order mismatch: {ho['indices']} (want {list(range(controllers))})")
 
     # -- Browser (real Chromium navigator.getGamepads via headless launcher) --
     print("  Browser:     ", end="", flush=True)

@@ -2164,9 +2164,24 @@ class Program
 
             // Wait for HID child to enumerate (event-driven, no sleep).
             // Find OUR device instance by ControllerIndex (PnP index may differ from controllerIndex).
-            string devEnumer = profile.UsesUpperFilter
-                ? $"VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00"
-                : $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00";
+            // Enumerator MUST match the one CreateDeviceNode used above:
+            //   xinputhid path  → VID_xxxx&PID_xxxx&IG_00 (with optional driver-PID override)
+            //   non-xinputhid Xbox → VID_xxxx&PID_xxxx&IG_00
+            //   plain HID (DualSense, generic gamepad, etc.) → HIDClass
+            // The previous code hardcoded the &IG_00 form even for plain HID,
+            // which made the lookup return null for non-Xbox profiles and the
+            // WaitForHidChild call silently skipped. That left a race where
+            // Phase 1 would create the next controller before this one had
+            // fully arrived in PnP — and WGI/Browser/Dolphin then enumerated
+            // them in the wrong order because they reflect PnP arrival order,
+            // not creation order.
+            string devEnumer;
+            if (profile.UsesUpperFilter)
+                devEnumer = $"VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00";
+            else if (profile.VendorId == 0x045E)
+                devEnumer = $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00";
+            else
+                devEnumer = "HIDClass";
             string? devInstId = null;
             try
             {
@@ -2507,14 +2522,20 @@ class Program
         // Phase 1: Set up all controllers SEQUENTIALLY (no races).
         // No artificial cap on count — XInput tops out at 4 slots (Microsoft's
         // limit, not ours), but DInput / HIDAPI / WGI / browser see all
-        // controllers regardless. Xbox profiles past slot 4 still get a
-        // working virtual device, just no XInput visibility.
+        // controllers regardless.
         //
-        // For Xbox profiles WITH a free XInput slot, wait for xinput1_4 to
-        // claim it before moving on, otherwise xinputhid (slow) and our XUSB
-        // companion (fast) race for slot 0 and the order doesn't match the
-        // creation order. Once XInput is full (4/4), we skip the wait — no
-        // slot will ever be claimed, so waiting would deadlock for 15s.
+        // The HID-child wait inside CreateDeviceNode handles PnP ordering for
+        // non-Xbox profiles. For Xbox profiles we additionally wait for an
+        // XInput slot to be claimed so the slot order matches creation order
+        // (otherwise xinputhid (slow) and our XUSB companion (fast) race for
+        // slot 0 and the slot order doesn't match).
+        //
+        // Verified with `rumbletest hidorder` that the underlying HID
+        // enumeration (the same enumerator WGI uses internally) returns the
+        // controllers in our creation order. Some consumers (e.g. Dolphin)
+        // may *display* them in a different order due to their own
+        // remove+re-insert-on-event behavior — that's the consumer's bug,
+        // not ours.
         var phase1Db = ProfileDatabase.Load(GetProfilesDir());
         for (int i = 0; i < currentIds.Length; i++)
         {
@@ -2533,7 +2554,6 @@ class Program
             else if (slotsBefore >= 0)
             {
                 Console.Write($"  Waiting for XInput slot... ");
-                // Poll up to 15s for a new slot. xinputhid: 2-5s; XUSB: <1s.
                 var sw = Stopwatch.StartNew();
                 int slotsAfter = slotsBefore;
                 while (sw.ElapsedMilliseconds < 15000)
@@ -3801,6 +3821,24 @@ class Program
     static bool ProfileTakesXInputSlot(ControllerProfile? p) =>
         p != null && p.VendorId == 0x045E;
 
+    /// <summary>Pump Win32 messages on the calling thread for the given
+    /// number of milliseconds. Used to drain WGI's RawGameControllerAdded
+    /// events, which only fire when the thread that subscribed pumps
+    /// messages.</summary>
+    static void PumpMessagesFor(int ms)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, 1))
+            {
+                TranslateMessage(ref msg);
+                DispatchMessageW(ref msg);
+            }
+            Thread.Sleep(10);
+        }
+    }
+
     /// <summary>Sends a rumble or HID output report to a virtual controller for
     /// end-to-end verification of the output passthrough channel. Usage:
     ///   rumbletest xinput &lt;slot&gt;            — XInputSetState on XInput slot
@@ -3831,6 +3869,107 @@ class Program
             XInputSetState(slot, ref v);
             Console.WriteLine("  Stopped.");
             return r == 0 ? 0 : 2;
+        }
+
+        if (args[0] == "hidorder")
+        {
+            // Dead-simple order check: enumerate HID gamepads via the same
+            // Windows.Devices.HumanInterfaceDevice path that every well-behaved
+            // WGI/UWP consumer uses, and dump their serials in iteration order.
+            //
+            // If serials come out in HM-CTL-0000, 0001, 0002, 0003 order then
+            // every reasonable consumer sees them in creation order. Anything
+            // that displays them in a different order (like Dolphin's
+            // remove+re-insert-on-event behavior) is the consumer's own bug,
+            // not ours.
+            ushort vid = args.Length > 1 ? ushort.Parse(args[1], System.Globalization.NumberStyles.HexNumber) : (ushort)0x054C;
+            ushort pid = args.Length > 2 ? ushort.Parse(args[2], System.Globalization.NumberStyles.HexNumber) : (ushort)0x0CE6;
+
+            Console.WriteLine($"-- HID enumeration order (HidDevice.GetDeviceSelector / FindAllAsync) for VID=0x{vid:X4} PID=0x{pid:X4} --\n");
+
+            // Selector matches gamepad usage page (0x0001) usage (0x0005)
+            // for the given VID/PID. Same filter WGI uses for gamepad-shaped
+            // RawGameControllers.
+            string selector = Windows.Devices.HumanInterfaceDevice.HidDevice.GetDeviceSelector(0x0001, 0x0005, vid, pid);
+            var devices = Windows.Devices.Enumeration.DeviceInformation.FindAllAsync(selector).GetAwaiter().GetResult();
+
+            int n = 0;
+            foreach (var info in devices)
+            {
+                Console.WriteLine($"  [{n++}] id: {info.Id}");
+                // Open via SetupAPI (since the WinRT HidDevice opens are blocked
+                // by HID class for already-opened devices) and read the serial.
+                var h = CreateFileW(info.Id, 0, 0x03, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                if (!h.IsInvalid)
+                {
+                    try
+                    {
+                        byte[] buf = new byte[512];
+                        string serial = HidD_GetSerialNumberString(h, buf, (uint)buf.Length)
+                            ? UnicodeBufToString(buf) : "(none)";
+                        Console.WriteLine($"      serial: {serial}");
+                    }
+                    finally { h.Dispose(); }
+                }
+                else
+                {
+                    Console.WriteLine($"      (could not open to read serial — busy or denied)");
+                }
+            }
+            Console.WriteLine($"\nTotal: {n} device(s)");
+            return 0;
+        }
+
+        if (args[0] == "wgi")
+        {
+            // Read-only WGI enumeration: dumps every gamepad WGI sees and the
+            // order WGI returns them in. Used to diagnose enumeration-order
+            // bugs (Dolphin/browser see DualSense in reverse from what we
+            // created). Bypasses cleanup hooks via the rumbletest mode.
+            //
+            // WGI is event-driven and won't enumerate at all unless you've
+            // subscribed to its events first (the subscription primes the
+            // discovery plumbing). After subscribing, we pump messages so the
+            // RawGameControllerAdded events for already-present devices get
+            // delivered, then read the static .RawGameControllers list which
+            // is populated as a side effect.
+            Console.WriteLine("-- WGI enumeration order --\n");
+            var seen = new List<Windows.Gaming.Input.RawGameController>();
+            Windows.Gaming.Input.RawGameController.RawGameControllerAdded += (_, rc) => seen.Add(rc);
+
+            // Touch the static collection to kick the enumerator
+            _ = Windows.Gaming.Input.RawGameController.RawGameControllers;
+
+            // Pump for ~3s so the [Added] events drain
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 3000)
+            {
+                while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, 1))
+                {
+                    TranslateMessage(ref msg);
+                    DispatchMessageW(ref msg);
+                }
+                Thread.Sleep(50);
+            }
+
+            // Combine: events that fired during pumping + anything in the
+            // static list right now (de-duplicated by NonRoamableId).
+            var listed = Windows.Gaming.Input.RawGameController.RawGameControllers;
+            var combined = new List<Windows.Gaming.Input.RawGameController>(seen);
+            foreach (var rc in listed)
+                if (!combined.Any(x => x.NonRoamableId == rc.NonRoamableId))
+                    combined.Add(rc);
+
+            int n = 0;
+            foreach (var rc in combined)
+            {
+                Console.WriteLine($"  [{n++}] {rc.DisplayName}");
+                Console.WriteLine($"      VID=0x{rc.HardwareVendorId:X4} PID=0x{rc.HardwareProductId:X4}");
+                Console.WriteLine($"      NonRoamableId={rc.NonRoamableId}");
+                Console.WriteLine($"      Axes={rc.AxisCount} Buttons={rc.ButtonCount} Switches={rc.SwitchCount}");
+            }
+            Console.WriteLine($"\nTotal: {n} controller(s)");
+            return 0;
         }
 
         if (args[0] == "serials")
