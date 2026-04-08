@@ -5,7 +5,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace HIDMaestroTest;
+namespace HIDMaestro.Internal;
 
 /// <summary>
 /// A controller profile loaded from the profiles database.

@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
-namespace HIDMaestroTest;
+namespace HIDMaestro.Internal;
 
 /// <summary>
 /// Builds, signs, and installs HIDMaestro driver DLLs.

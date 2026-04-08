@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace HIDMaestroTest;
+namespace HIDMaestro.Internal;
 
 /// <summary>
 /// Parses a HID report descriptor and builds input reports with correct bit packing.

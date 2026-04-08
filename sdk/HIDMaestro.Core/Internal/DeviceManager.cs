@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Win32;
 
-namespace HIDMaestroTest;
+namespace HIDMaestro.Internal;
 
 /// <summary>
 /// Event-driven PnP device management using CM_Register_Notification.

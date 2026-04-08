@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Library identity -->
+    <AssemblyName>HIDMaestro.Core</AssemblyName>
+    <RootNamespace>HIDMaestro</RootNamespace>
+    <Description>HIDMaestro UMDF2 virtual HID controller engine — embed in your app to create exact-fidelity virtual game controllers.</Description>
+
+    <!-- Pack everything (driver DLLs, INF, CAT, profile JSONs) inside the
+         assembly as embedded resources so single-file publishing in the
+         consuming app picks them up automatically — no sibling files. -->
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Driver runtime files. Copied from build/ at csproj-load time so the
+         embedded payload always matches the latest driver build. -->
+    <EmbeddedResource Include="Resources\**\*" />
+  </ItemGroup>
+
+</Project>

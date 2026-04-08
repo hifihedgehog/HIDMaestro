@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
+using HIDMaestro.Internal;
 
 namespace HIDMaestroTest;
 
@@ -3821,6 +3822,81 @@ class Program
             XInputSetState(slot, ref v);
             Console.WriteLine("  Stopped.");
             return r == 0 ? 0 : 2;
+        }
+
+        if (args[0] == "createprobe")
+        {
+            // Empirically check which steps of CreateDeviceNode actually need admin.
+            // Run this from a non-elevated shell to find out what gates the device
+            // creation API on standard-user contexts. We test each call in isolation
+            // and report the exact Win32 error so we know whether a service-based
+            // architecture is needed for unprivileged consumers, or whether the
+            // existing direct path works post-install.
+            Console.WriteLine($"Running as elevated: {IsElevated()}");
+            Console.WriteLine();
+
+            // Step 1: Build a device info set for HIDClass
+            Guid hidClass = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
+            IntPtr dis = SetupDiCreateDeviceInfoList(ref hidClass, IntPtr.Zero);
+            if (dis == new IntPtr(-1))
+            {
+                Console.WriteLine($"FAIL  SetupDiCreateDeviceInfoList  err={Marshal.GetLastWin32Error()}");
+                return 2;
+            }
+            Console.WriteLine("OK    SetupDiCreateDeviceInfoList");
+
+            try
+            {
+                // Step 2: Create a device info entry (in-memory only at this stage)
+                byte[] devInfoBuf = new byte[32];
+                int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
+                BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
+                var diHandle = GCHandle.Alloc(devInfoBuf, GCHandleType.Pinned);
+                try
+                {
+                    string enumer = "VID_DEAD&PID_BEEF&IG_00";  // bogus, won't conflict
+                    string desc = "HIDMaestro probe device";
+                    if (!SetupDiCreateDeviceInfoW_Raw(dis, enumer, ref hidClass, desc, IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
+                    {
+                        Console.WriteLine($"FAIL  SetupDiCreateDeviceInfoW          err={Marshal.GetLastWin32Error()}");
+                        return 3;
+                    }
+                    Console.WriteLine("OK    SetupDiCreateDeviceInfoW");
+
+                    // Step 3: Set hardware ID property
+                    string hwMulti = $"root\\VID_DEAD&PID_BEEF&IG_00\0root\\HIDMaestroProbe\0\0";
+                    byte[] hwBytes = Encoding.Unicode.GetBytes(hwMulti);
+                    if (!SetupDiSetDeviceRegistryPropertyW_Raw(dis, diHandle.AddrOfPinnedObject(), 1, hwBytes, (uint)hwBytes.Length))
+                    {
+                        Console.WriteLine($"FAIL  SetupDiSetDeviceRegistryPropertyW  err={Marshal.GetLastWin32Error()}");
+                        return 4;
+                    }
+                    Console.WriteLine("OK    SetupDiSetDeviceRegistryPropertyW");
+
+                    // Step 4: The big one. DIF_REGISTERDEVICE actually creates the
+                    // root-enumerated PnP node. This is where SeLoadDriverPrivilege
+                    // is documented to be required.
+                    if (!SetupDiCallClassInstaller_Raw(0x19, dis, diHandle.AddrOfPinnedObject()))
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        Console.WriteLine($"FAIL  DIF_REGISTERDEVICE                err={err}  (0x{err:X8})");
+                        if (err == 5) Console.WriteLine("        ERROR_ACCESS_DENIED — needs admin / SeLoadDriverPrivilege");
+                        if (err == 1314) Console.WriteLine("        ERROR_PRIVILEGE_NOT_HELD — needs SeLoadDriverPrivilege");
+                        return 5;
+                    }
+                    Console.WriteLine("OK    DIF_REGISTERDEVICE  *** device created ***");
+
+                    // Step 5: cleanup — REMOVE the probe device immediately
+                    SetupDiCallClassInstaller_Raw(0x05, dis, diHandle.AddrOfPinnedObject()); // DIF_REMOVE
+                    Console.WriteLine("OK    DIF_REMOVE  (cleanup)");
+                }
+                finally { diHandle.Free(); }
+            }
+            finally { SetupDiDestroyDeviceInfoList(dis); }
+
+            Console.WriteLine();
+            Console.WriteLine("RESULT: device creation works in this context");
+            return 0;
         }
 
         if (args[0] == "checkout")
