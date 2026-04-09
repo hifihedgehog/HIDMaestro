@@ -476,8 +476,17 @@ internal static class DeviceOrchestrator
                     byte[] gpCompatBytes = Encoding.Unicode.GetBytes(gpCompatBase);
                     SetupDiSetDeviceRegistryPropertyW(dis, diHandle.AddrOfPinnedObject(), 2, gpCompatBytes, (uint)gpCompatBytes.Length);
 
+                    // DIF_REGISTERDEVICE creates the devnode in the PnP tree.
+                    // PnP then handles driver install asynchronously via its own
+                    // co-installer chain. We deliberately do NOT call the
+                    // deprecated DIF_INSTALLDEVICE here — doing so races with
+                    // PnP's async install and can leave the second BT virtual
+                    // controller flagged DN_LIAR (0x100) on its DevNodeStatus,
+                    // which Windows reports as "needs reboot" in Device Manager
+                    // and prevents xinputhid from binding cleanly. The 3-second
+                    // settle wait in SetupController.Step 4 gives PnP time to
+                    // finish the async install before we touch the device again.
                     SetupDiCallClassInstaller(0x19, dis, diHandle.AddrOfPinnedObject()); // DIF_REGISTERDEVICE
-                    SetupDiCallClassInstaller(0x02, dis, diHandle.AddrOfPinnedObject()); // DIF_INSTALLDEVICE
                 }
                 diHandle.Free();
                 SetupDiDestroyDeviceInfoList(dis);
