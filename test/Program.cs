@@ -164,9 +164,10 @@ class Program
         // kicks in. After observing zero, send 'park off' over stdin to
         // start the circle.
         bool startPaused = profileIds.Contains("--paused-at-zero");
-        profileIds = profileIds.Where(p => p != "--paused-at-zero").ToArray();
+        bool startMarked = profileIds.Contains("--mark");
+        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
         if (profileIds.Length == 0)
-            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] <profile-id> [profile-id ...]");
+            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] <profile-id> [profile-id ...]");
 
         using var ctx = new HMContext();
         int loaded = ctx.LoadDefaultProfiles();
@@ -195,6 +196,16 @@ class Program
         Console.Write("  Finalizing device names... ");
         ctx.FinalizeNames();
         Console.WriteLine("OK");
+
+        // --mark: auto-activate mark mode before the pattern threads start, so
+        // each controller's pattern thread comes up with MarkButton=i set and
+        // begins submitting the marker frame on its first iteration. Used by
+        // automated diagnostics that can't reliably send "mark" via stdin.
+        if (startMarked)
+        {
+            for (int i = 0; i < slots.Count; i++) slots[i].MarkButton = i;
+            Console.WriteLine($"  --mark: marked {slots.Count} controller(s) — each holds button=its index");
+        }
 
         Console.WriteLine($"\n  All {slots.Count} controller(s) ready.\n");
 
