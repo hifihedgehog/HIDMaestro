@@ -424,8 +424,55 @@ class Program
             "dump"     => DumpControllers(),
             "wgi"      => TestWgi(),
             "rumbletest" => RumbleTest(args.Skip(1).ToArray()),
+            "sdk-demo"   => SdkDemo(args.Skip(1).ToArray()),
             _         => Error($"Unknown command: {args[0]}")
         };
+    }
+
+    /// <summary>Minimal SDK consumer demo — exercises HMContext → CreateController → SubmitState.
+    /// Creates 1 DualSense, feeds a left-stick circle for 5s, then cleans up.</summary>
+    static int SdkDemo(string[] args)
+    {
+        string profileId = args.Length > 0 ? args[0] : "dualsense";
+        Console.WriteLine("=== HIDMaestro SDK Demo ===\n");
+
+        using var ctx = new HIDMaestro.HMContext();
+        int loaded = ctx.LoadProfilesFromDirectory(GetProfilesDir());
+        Console.WriteLine($"  Loaded {loaded} profiles");
+
+        Console.Write("  Installing driver... ");
+        ctx.InstallDriver();
+        Console.WriteLine("OK");
+
+        var profile = ctx.GetProfile(profileId);
+        if (profile == null) return Error($"Profile '{profileId}' not found");
+
+        Console.Write($"  Creating controller ({profile.Name})... ");
+        using var ctrl = ctx.CreateController(profile);
+        Console.WriteLine("OK");
+
+        Console.WriteLine("  Sending input (left stick circle, 5s)...");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int frame = 0;
+        while (sw.ElapsedMilliseconds < 5000)
+        {
+            double t = sw.Elapsed.TotalSeconds * 2 * Math.PI;
+            var state = new HIDMaestro.HMGamepadState
+            {
+                LeftStickX = (float)Math.Cos(t),
+                LeftStickY = (float)Math.Sin(t),
+            };
+            ctrl.SubmitState(in state);
+            frame++;
+            Thread.Sleep(4);
+        }
+        Console.WriteLine($"  Sent {frame} frames ({frame * 1000.0 / sw.ElapsedMilliseconds:F0} Hz)");
+
+        Console.Write("  Disposing... ");
+        ctrl.Dispose();
+        ctx.Dispose();
+        Console.WriteLine("OK\n=== Demo complete ===");
+        return 0;
     }
 
     static int Error(string msg) { Console.Error.WriteLine($"ERROR: {msg}"); return 1; }

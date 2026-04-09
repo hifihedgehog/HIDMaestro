@@ -13,7 +13,7 @@ public static class DriverBuilder
 {
     static readonly string RepoRoot = Path.GetFullPath(Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
-    static readonly string BuildDir = Path.Combine(RepoRoot, "build");
+    public static readonly string BuildDir = Path.Combine(RepoRoot, "build");
     static readonly string DriverDir = Path.Combine(RepoRoot, "driver");
     static readonly string IncludeDir = Path.Combine(RepoRoot, "include");
 

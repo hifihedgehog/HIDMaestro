@@ -81,8 +81,19 @@ public sealed class HMContext : IDisposable
     public void InstallDriver()
     {
         ThrowIfDisposed();
-        // TODO: implement once driver bytes are embedded as resources
-        throw new NotImplementedException("InstallDriver — pending resource embedding");
+        // The DriverBuilder currently sources the driver binaries from the
+        // repo's build/ directory rather than embedded resources. Resource
+        // embedding (so the SDK is single-file deployable) is a planned
+        // follow-up — this still works correctly when the SDK is consumed
+        // from a checkout of the HIDMaestro repo, which is the intended
+        // initial use case (PadForge integration).
+        if (DriverBuilder.NeedsBuild() || !DriverBuilder.IsDriverInstalled())
+        {
+            if (!DriverBuilder.FullDeploy(rebuild: DriverBuilder.NeedsBuild()))
+                throw new InvalidOperationException(
+                    "Driver build/install failed. Run elevated and check the build log " +
+                    "in the repo's build/ directory.");
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -152,8 +163,8 @@ public sealed class HMContext : IDisposable
     // ════════════════════════════════════════════════════════════════════
 
     /// <summary>Create a new virtual controller using the given profile.
-    /// Allocates the next free controller index (0..3), creates the device
-    /// node via SetupAPI, sets up per-controller shared memory sections for
+    /// Allocates the next free controller index, creates the device node
+    /// via SetupAPI, sets up per-controller shared memory sections for
     /// input and output, and waits for any XInput slot claim before
     /// returning. Requires admin.
     ///
@@ -161,19 +172,62 @@ public sealed class HMContext : IDisposable
     /// <see cref="HMController.SubmitState"/>. Dispose the returned
     /// controller to remove the device, or dispose the entire context to
     /// remove all controllers it owns.</para>
+    ///
+    /// <para><b>Profile support (current):</b> plain HID profiles
+    /// (DualSense, third-party gamepads — anything with no upper filter and
+    /// non-Microsoft VID) are fully supported. Xbox-family profiles
+    /// (xinputhid wrapper companion or XUSB system-class companion) require
+    /// orchestration code that has not yet been ported into the SDK; calling
+    /// this with an Xbox profile throws <see cref="NotSupportedException"/>.
+    /// The test app (HIDMaestroTest.exe emulate) handles Xbox profiles today
+    /// via its own orchestrator and is the reference implementation.</para>
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="UnauthorizedAccessException">The calling process is not elevated.</exception>
-    /// <exception cref="InvalidOperationException">All four controller slots are in use.</exception>
+    /// <exception cref="NotSupportedException">The profile is an Xbox-family
+    /// profile whose orchestration is not yet ported into the SDK.</exception>
+    /// <exception cref="InvalidOperationException">Driver install failed or
+    /// device node creation failed.</exception>
     public HMController CreateController(HMProfile profile)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
         ThrowIfDisposed();
-        // TODO: implement once orchestration is extracted
-        throw new NotImplementedException("CreateController — pending orchestration extraction");
+
+        // Allocate the next free controller index. Linear scan from 0 — there
+        // is no upper bound (the unlimited-controllers fix in d0ce7fe removed
+        // every i<4 cap on our side). XInput's 4-slot limit only constrains
+        // Xbox-family profiles which aren't supported here yet.
+        int index;
+        lock (_lock)
+        {
+            index = 0;
+            while (_controllers.ContainsKey(index)) index++;
+        }
+
+        // The driver INF lives next to the driver binaries in the repo's
+        // build/ directory. This will move to embedded-resource extraction
+        // when single-file SDK deployment is implemented.
+        string infPath = System.IO.Path.Combine(
+            Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
+
+        string instanceId;
+        try
+        {
+            instanceId = Internal.DeviceOrchestrator.SetupController(
+                index, profile.Inner, infPath);
+        }
+        catch
+        {
+            // Best-effort cleanup of any partial state, then rethrow.
+            try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
+            throw;
+        }
+
+        var controller = new HMController(this, index, profile, instanceId);
+        lock (_lock) _controllers[index] = controller;
+        return controller;
     }
 
     /// <summary>All currently-live controllers owned by this context.</summary>
@@ -186,7 +240,7 @@ public sealed class HMContext : IDisposable
     internal void OnControllerDisposing(HMController controller)
     {
         lock (_lock) _controllers.Remove(controller.Index);
-        // TODO: free shared memory + remove device node once orchestration is extracted
+        Internal.DeviceOrchestrator.TeardownController(controller.Index, controller.InstanceId);
     }
 
     private void ThrowIfDisposed()
