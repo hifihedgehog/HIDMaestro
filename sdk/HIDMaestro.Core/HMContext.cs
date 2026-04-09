@@ -246,6 +246,48 @@ public sealed class HMContext : IDisposable
         return controller;
     }
 
+    /// <summary>Create a controller pinned to a specific index. Used by live
+    /// profile-switching workflows where the consumer wants to dispose the
+    /// existing controller at index N and replace it with one running a
+    /// different profile while keeping the same N. The index must be free
+    /// (the previous controller at that index must already be disposed).</summary>
+    /// <exception cref="InvalidOperationException">If the index is already
+    /// in use by another live controller.</exception>
+    public HMController CreateControllerAt(int index, HMProfile profile)
+    {
+        if (profile == null) throw new ArgumentNullException(nameof(profile));
+        if (!profile.IsDeployable)
+            throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
+        if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
+        ThrowIfDisposed();
+
+        lock (_lock)
+        {
+            if (_controllers.ContainsKey(index))
+                throw new InvalidOperationException(
+                    $"Controller index {index} is already in use. Dispose the existing controller first.");
+        }
+
+        string infPath = System.IO.Path.Combine(
+            Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
+
+        string? instanceId;
+        try
+        {
+            instanceId = Internal.DeviceOrchestrator.SetupController(
+                index, profile.Inner, infPath);
+        }
+        catch
+        {
+            try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
+            throw;
+        }
+
+        var controller = new HMController(this, index, profile, instanceId);
+        lock (_lock) _controllers[index] = controller;
+        return controller;
+    }
+
     /// <summary>All currently-live controllers owned by this context.</summary>
     public IReadOnlyCollection<HMController> ActiveControllers
     {

@@ -119,6 +119,20 @@ class Program
     }
 
     // ── emulate ──
+    //
+    // Per-controller pattern threads + per-controller cancellation tokens so
+    // individual controllers can be disposed/replaced live without disturbing
+    // the others. Output passthrough is wired via HMController.OutputReceived
+    // — every rumble/haptic/FFB packet from any host app is decoded and
+    // printed to the console with profile context, so the host→virtual
+    // direction can be verified end-to-end without launching a real game.
+
+    sealed class RunningController
+    {
+        public HMController Ctrl = default!;
+        public CancellationTokenSource Cts = new();
+        public Thread? Thread;
+    }
 
     static int Emulate(string[] profileIds)
     {
@@ -134,51 +148,147 @@ class Program
         Console.WriteLine("OK");
 
         // Phase 1: create all controllers sequentially
-        var controllers = new List<HMController>();
+        var slots = new List<RunningController>();
         for (int i = 0; i < profileIds.Length; i++)
         {
             var profile = ctx.GetProfile(profileIds[i]);
             if (profile == null) return Error($"Profile not found: {profileIds[i]}");
             Console.WriteLine($"  Creating controller {i}: {profile.Id} ({profile.Name})");
-            controllers.Add(ctx.CreateController(profile));
+            var slot = new RunningController { Ctrl = ctx.CreateController(profile) };
+            HookOutputReceived(slot.Ctrl, i);
+            slots.Add(slot);
         }
 
-        // Phase 1.5: re-apply friendly names. Without this, the FIRST
-        // controller often shows the generic INF default ("Game Controller")
-        // because PnP driver-bind for the SECOND controller racing with our
-        // initial CM_Set_DevNode_PropertyW writes clobbers them.
+        // Phase 1.5: re-apply friendly names (PnP race fix — see HMContext.FinalizeNames doc).
         Console.Write("  Finalizing device names... ");
         ctx.FinalizeNames();
         Console.WriteLine("OK");
 
-        Console.WriteLine($"\n  All {controllers.Count} controller(s) ready.\n");
+        Console.WriteLine($"\n  All {slots.Count} controller(s) ready.\n");
 
-        // Phase 2: input threads — one test-pattern thread per controller
-        var cts = new CancellationTokenSource();
-        var threads = new List<Thread>();
-        for (int i = 0; i < controllers.Count; i++)
-        {
-            int idx = i;
-            var t = new Thread(() => SendTestPattern(controllers[idx], idx, cts.Token))
-            {
-                IsBackground = true,
-                Name = $"Pattern_{idx}"
-            };
-            t.Start();
-            threads.Add(t);
-        }
+        // Phase 2: input threads — one test-pattern thread per controller.
+        for (int i = 0; i < slots.Count; i++)
+            StartPatternThread(slots, i);
 
-        // Console reader — 'quit' to stop
-        Console.WriteLine("  Sending input. Type 'quit' to exit.");
+        // Console reader: "quit" to exit, "<idx> <profile-id>" to live-swap a controller.
+        Console.WriteLine("  Sending input. Commands:");
+        Console.WriteLine("    quit                          exit");
+        Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
         while (Console.ReadLine() is string line)
         {
-            if (line.Trim().Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
+            line = line.Trim();
+            if (line.Length == 0) continue;
+            if (line.Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
+
+            // Live profile switch: "<index> <profile-id>"
+            var parts = line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 2 && int.TryParse(parts[0], out int swapIdx))
+            {
+                if (swapIdx < 0 || swapIdx >= slots.Count)
+                {
+                    Console.WriteLine($"  ! index {swapIdx} out of range (0..{slots.Count - 1})");
+                    continue;
+                }
+                var newProfile = ctx.GetProfile(parts[1]);
+                if (newProfile == null)
+                {
+                    Console.WriteLine($"  ! profile '{parts[1]}' not found");
+                    continue;
+                }
+                Console.WriteLine($"  === Swapping slot {swapIdx} → {newProfile.Id} ===");
+                LiveSwap(ctx, slots, swapIdx, newProfile);
+                continue;
+            }
+
+            Console.WriteLine($"  ! unknown command: {line}");
         }
 
-        cts.Cancel();
-        foreach (var t in threads) t.Join(2000);
-        foreach (var c in controllers) c.Dispose();
+        foreach (var s in slots)
+        {
+            try { s.Cts.Cancel(); } catch { }
+            try { s.Thread?.Join(2000); } catch { }
+            try { s.Ctrl.Dispose(); } catch { }
+        }
         return 0;
+    }
+
+    /// <summary>Cancel the pattern thread for a slot, dispose its controller,
+    /// create a fresh controller pinned to the same index with the new profile,
+    /// re-hook the output event, and restart the pattern thread.</summary>
+    static void LiveSwap(HMContext ctx, List<RunningController> slots, int idx, HMProfile profile)
+    {
+        var old = slots[idx];
+        try { old.Cts.Cancel(); } catch { }
+        try { old.Thread?.Join(2000); } catch { }
+        try { old.Ctrl.Dispose(); } catch { }
+
+        // Pin to the same index so live switching preserves slot identity
+        // (XInput slot, joy.cpl ordering, etc.). HMContext.CreateControllerAt
+        // throws if the index is still in use; old.Ctrl.Dispose above frees it.
+        var fresh = new RunningController { Ctrl = ctx.CreateControllerAt(idx, profile) };
+        HookOutputReceived(fresh.Ctrl, idx);
+        slots[idx] = fresh;
+        StartPatternThread(slots, idx);
+    }
+
+    static void StartPatternThread(List<RunningController> slots, int idx)
+    {
+        var slot = slots[idx];
+        slot.Thread = new Thread(() => SendTestPattern(slot.Ctrl, idx, slot.Cts.Token))
+        {
+            IsBackground = true,
+            Name = $"Pattern_{idx}",
+        };
+        slot.Thread.Start();
+    }
+
+    /// <summary>Subscribe to OutputReceived for the given controller and print
+    /// each packet (decoded if recognized, hex-dumped otherwise). The handler
+    /// runs on the SDK's polling thread, not the test app's UI thread, so
+    /// keep it cheap and Console-only.</summary>
+    static void HookOutputReceived(HMController ctrl, int idx)
+    {
+        ctrl.OutputReceived += (c, pkt) =>
+        {
+            string label = c.Profile.Inner.DeviceDescription
+                           ?? c.Profile.Inner.ProductString
+                           ?? c.Profile.Id;
+            string decoded = DecodeOutputPacket(c.Profile, pkt);
+            Console.WriteLine($"  [out{idx} {label}] {pkt.Source} id=0x{pkt.ReportId:X2} {decoded}");
+        };
+    }
+
+    /// <summary>Best-effort one-line decode of common output packet types.
+    /// Falls back to a hex dump for unrecognized payloads.</summary>
+    static string DecodeOutputPacket(HMProfile profile, in HMOutputPacket pkt)
+    {
+        var data = pkt.Data.Span;
+
+        // XInput rumble: 5 bytes [0x00, 0x00, lo, hi, 0x00] (xusb22 GET_STATE response format)
+        if (pkt.Source == HMOutputSource.XInput && data.Length >= 5)
+            return $"XInput rumble lo={data[2]} hi={data[3]}";
+
+        // DualSense / DS4 output report (HID OUTPUT, report ID 0x05 / 0x02):
+        // first few bytes carry rumble + LED + adaptive trigger config.
+        if (pkt.Source == HMOutputSource.HidOutput
+            && profile.VendorId == 0x054C && data.Length >= 4)
+        {
+            // Report ID 0x05 (DualSense USB) layout: byte[2..3] are rumble lo/hi
+            return $"PS rumble lo={data[2]} hi={data[3]} ({data.Length}B)";
+        }
+
+        // Xbox 360 / One HID rumble output report (when sent via HID OUTPUT)
+        if (pkt.Source == HMOutputSource.HidOutput
+            && profile.VendorId == 0x045E && data.Length >= 8)
+            return $"XB rumble {data[3]:X2} {data[4]:X2} {data[5]:X2} {data[6]:X2} ({data.Length}B)";
+
+        // Fallback: hex dump first 16 bytes
+        int n = Math.Min(data.Length, 16);
+        var sb = new System.Text.StringBuilder($"{data.Length}B [");
+        for (int i = 0; i < n; i++) { if (i > 0) sb.Append(' '); sb.Append(data[i].ToString("X2")); }
+        if (data.Length > n) sb.Append(" …");
+        sb.Append(']');
+        return sb.ToString();
     }
 
     /// <summary>Per-controller exercise pattern, ported verbatim from the
