@@ -125,6 +125,24 @@ class _DIDATAFORMAT(ctypes.Structure):
                 ("dwNumObjs", ctypes.c_ulong),
                 ("rgodf", ctypes.POINTER(_DIOBJECTDATAFORMAT))]
 
+class _DIDEVICEOBJECTINSTANCEW(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong),
+                ("guidType", _GUID),
+                ("dwOfs", ctypes.c_ulong),
+                ("dwType", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("tszName", ctypes.c_wchar * 260),
+                ("dwFFMaxForce", ctypes.c_ulong),
+                ("dwFFForceResolution", ctypes.c_ulong),
+                ("wCollectionNumber", ctypes.c_ushort),
+                ("wDesignatorIndex", ctypes.c_ushort),
+                ("wUsagePage", ctypes.c_ushort),
+                ("wUsage", ctypes.c_ushort),
+                ("dwDimension", ctypes.c_ulong),
+                ("wExponent", ctypes.c_ushort),
+                ("wReportId", ctypes.c_ushort)]
+
+
 # WNDPROC: LRESULT is LONG_PTR. c_ssize_t (NOT c_long) on x64.
 _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
                               ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
@@ -235,14 +253,23 @@ def check_directinput(repeats: int) -> dict:
             i = p.contents
             g = _GUID(i.guidInstance.d1, i.guidInstance.d2, i.guidInstance.d3,
                       (ctypes.c_ubyte*8)(*i.guidInstance.d4))
-            found.append((g, i.tszProductName))
+            # guidProduct.Data1 packs (PID << 16) | VID for HID-class devices.
+            # Used as VID/PID fallback when DIPROP_GUIDANDPATH path doesn't
+            # contain vid_xxxx&pid_xxxx (e.g. ROOT\HIDClass\* devices).
+            found.append((g, i.tszProductName, i.guidProduct.d1))
             return True
         _vcall(di8, 4, EnumSig)(di8, 4, EnumCb(cb), None, 1)  # GAMECTRL, ATTACHEDONLY
 
-        # IDirectInputDevice8 vtbl indexes: 3=GetCaps, 5=GetProp, 7=Acq,
-        # 8=Unacq, 9=GetState, 11=SetDataFormat, 13=SetCoopLevel, 25=Poll, 2=Release
+        # IDirectInputDevice8 vtbl indexes: 3=GetCaps, 4=EnumObjects,
+        # 5=GetProp, 7=Acq, 8=Unacq, 9=GetState, 11=SetDataFormat,
+        # 13=SetCoopLevel, 25=Poll, 2=Release
         GetCapsSig  = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
                                           ctypes.POINTER(_DIDEVCAPS))
+        EnumObjsSig = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_void_p,
+                                          ctypes.c_ulong)
+        EnumObjsCb  = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, ctypes.POINTER(_DIDEVICEOBJECTINSTANCEW), ctypes.c_void_p)
         GetPropSig  = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
                                           ctypes.c_void_p, ctypes.c_void_p)
         SDFSig      = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
@@ -253,7 +280,7 @@ def check_directinput(repeats: int) -> dict:
         GetStateSig = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
                                           ctypes.c_ulong, ctypes.c_void_p)
 
-        for idx, (g, name) in enumerate(found):
+        for idx, (g, name, prod_d1) in enumerate(found):
             dev = ctypes.c_void_p()
             if _vcall(di8, 3, CreateDevSig)(
                     di8, ctypes.byref(g), ctypes.byref(dev), None) != 0:
@@ -263,7 +290,25 @@ def check_directinput(repeats: int) -> dict:
                 if _vcall(dev, 3, GetCapsSig)(dev, ctypes.byref(caps)) != 0:
                     continue
 
-                # VID/PID via DIPROP_GUIDANDPATH = MAKEDIPROP(12)
+                # caps.dwAxes counts every Generic Desktop axis usage in the
+                # HID descriptor. For our Xbox 360 wired profile, the
+                # descriptor uses Vx/Vy (usages 0x40/0x41) to carry trigger
+                # data for the browser side, but those are NOT DirectInput
+                # axes — joy.cpl ignores them. Count only standard joystick
+                # usages (0x30 X .. 0x35 Rz). This matches joy.cpl.
+                axis_count = [0]
+                def axis_cb(p, _r):
+                    o = p.contents
+                    if o.wUsagePage == 0x01 and 0x30 <= o.wUsage <= 0x35:
+                        axis_count[0] += 1
+                    return True
+                # DIDFT_AXIS = DIDFT_RELAXIS | DIDFT_ABSAXIS = 3
+                _vcall(dev, 4, EnumObjsSig)(
+                    dev, EnumObjsCb(axis_cb), None, 3)
+                di_axes = axis_count[0]
+
+                # VID/PID via DIPROP_GUIDANDPATH = MAKEDIPROP(12) — works for
+                # devices whose path contains "vid_xxxx&pid_xxxx" (HID#VID_*).
                 vid = pid = 0
                 pgp = _DIPROPGUIDANDPATH()
                 pgp.dwSize = ctypes.sizeof(_DIPROPGUIDANDPATH)
@@ -276,6 +321,13 @@ def check_directinput(repeats: int) -> dict:
                     m = re.search(r"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})",
                                   pgp.wszPath.lower())
                     if m: vid, pid = int(m.group(1),16), int(m.group(2),16)
+                # Fallback: extract from guidProduct.Data1 which DInput packs as
+                # (PID << 16) | VID for any HID gamepad. Required for devices
+                # under ROOT\HIDClass enumerator (e.g. DualSense) whose paths
+                # don't contain vid_/pid_ tokens.
+                if vid == 0 and pid == 0 and prod_d1:
+                    vid = prod_d1 & 0xFFFF
+                    pid = (prod_d1 >> 16) & 0xFFFF
 
                 hr_fmt  = _vcall(dev, 11, SDFSig)(dev, ctypes.byref(fmt))
                 hr_coop = _vcall(dev, 13, SCLSig)(dev, hwnd, 0x08 | 0x02)  # BG|NX
@@ -302,7 +354,7 @@ def check_directinput(repeats: int) -> dict:
 
                 devices.append({
                     "id": idx, "vid": vid, "pid": pid, "name": name,
-                    "axes": caps.dwAxes, "buttons": caps.dwButtons,
+                    "axes": di_axes, "buttons": caps.dwButtons,
                     "pov": caps.dwPOVs > 0, "moving": moving,
                     "errors": [f"fmt={hr_fmt&0xFFFFFFFF:08X}",
                                f"coop={hr_coop&0xFFFFFFFF:08X}",
@@ -329,24 +381,30 @@ def check_hidapi() -> dict:
     except ImportError:
         return {"available": False, "error": "hidapi not installed (pip install hidapi)"}
 
-    all_devs = list(hid.enumerate(0x045E))
+    # Enumerate ALL HID devices and filter to HIDMaestro-only via the
+    # HM-CTL-* serial prefix (same approach as check_hid_order). The old
+    # 0x045E-only enumeration missed every non-Xbox profile (DualSense, etc.),
+    # which caused false negatives when a multi-profile run included non-Xbox
+    # controllers — they would never appear in `non_ig` and `live_data` would
+    # be checked against an empty set.
+    all_devs = [d for d in hid.enumerate(0, 0)
+                if (d.get("serial_number") or "").startswith("HM-CTL-")]
     visible = [d for d in all_devs if "&IG_" not in d["path"].decode().upper()]
-    bt_devs = [d for d in visible if d["bus_type"] == 2]
 
     result = {
         "available": True,
-        "total_045e": len(all_devs),
+        "total": len(all_devs),
         "visible_to_sdl3": len(visible),
-        "bluetooth": len(bt_devs),
         "live_data": False,
         "devices": [],
     }
 
+    bus_names = {0: "UNKNOWN", 1: "USB", 2: "BT", 3: "SPI"}
     for d in all_devs:
         path = d["path"].decode()
         ig = "&IG_" in path.upper()
-        bus_names = {0: "UNKNOWN", 1: "USB", 2: "BT", 3: "SPI"}
         result["devices"].append({
+            "vid": d["vendor_id"],
             "pid": d["product_id"],
             "bus": bus_names.get(d["bus_type"], str(d["bus_type"])),
             "ig_filtered": ig,
@@ -354,13 +412,28 @@ def check_hidapi() -> dict:
             "product": d["product_string"],
         })
 
-    for d in bt_devs:
+    # Live-data check: try to read from EVERY non-IG device regardless of
+    # bus_type. Older code only checked bus_type==2 (BT), which missed USB
+    # DualSense devices that report bus_type=0 (UNKNOWN) for ROOT-enumerated
+    # virtual devices. Movement detection works on raw HID bytes regardless
+    # of how SDL3 would later classify the bus type.
+    for d in visible:
         try:
             dev = hid.device()
             dev.open_path(d["path"])
             dev.set_nonblocking(1)
-            data = dev.read(64)
-            if data and any(b != 0 for b in data[1:]):
+            # Drain a few reads — the test pattern is ~80Hz so 200ms is enough
+            # to see something for an actively-driven controller.
+            saw_data = False
+            import time as _t
+            deadline = _t.time() + 0.4
+            while _t.time() < deadline:
+                data = dev.read(64)
+                if data and any(b != 0 for b in data[1:]):
+                    saw_data = True
+                    break
+                _t.sleep(0.05)
+            if saw_data:
                 result["live_data"] = True
             dev.close()
         except Exception:
@@ -756,8 +829,12 @@ def main():
             failures.append(f"GameInput: {gi_count} controllers (want {controllers})")
 
     # -- Browser (real Chromium navigator.getGamepads via headless launcher) --
+    # Chromium hard-caps navigator.getGamepads() at 4 slots for legacy spec
+    # compatibility, regardless of how many gamepads are physically present.
+    # This is a Chromium limit, not a HIDMaestro limit. Cap our expectation.
     print("  Browser:     ", end="", flush=True)
-    target_browser = controllers
+    BROWSER_HARD_CAP = 4
+    target_browser = min(controllers, BROWSER_HARD_CAP)
     if force_no_browser:
         print("SKIP  (--no-browser)")
         br = {"available": False}
@@ -770,6 +847,9 @@ def main():
         live = br.get("live", 0)
         snap = br.get("snapshot", [])
         if pads == target_browser and live > 0:
+            cap_note = (f" [Chromium 4-slot cap; "
+                        f"{controllers - BROWSER_HARD_CAP} more present]"
+                        if controllers > BROWSER_HARD_CAP else "")
             if snap:
                 summary_lines = []
                 for s in snap[:target_browser]:
@@ -780,11 +860,11 @@ def main():
                     summary_lines.append(f"[{axes_str}] {ident_short}")
                 first = summary_lines[0]
                 rest = summary_lines[1:]
-                print(f"PASS  {pads} pad(s) live ({br['browser']}) {first}")
+                print(f"PASS  {pads} pad(s) live ({br['browser']}){cap_note} {first}")
                 for line in rest:
                     print(f"                                   {line}")
             else:
-                print(f"PASS  {pads} pad(s) live ({br['browser']})")
+                print(f"PASS  {pads} pad(s) live ({br['browser']}){cap_note}")
         elif pads == target_browser and live == 0:
             print(f"FAIL  {pads} pad(s) detected but axes static (no live data)")
             failures.append("Browser: gamepad present but data is static")
@@ -792,7 +872,10 @@ def main():
             print("FAIL  no gamepad detected")
             failures.append("Browser: no gamepad detected")
         else:
-            print(f"FAIL  {pads} pads detected (want {target_browser})")
+            note = ""
+            if controllers > BROWSER_HARD_CAP:
+                note = f" [Chromium 4-slot cap; {controllers} controllers connected]"
+            print(f"FAIL  {pads} pads detected (want {target_browser}){note}")
             failures.append(f"Browser: {pads} pads (want {target_browser})")
 
     # -- Summary --
