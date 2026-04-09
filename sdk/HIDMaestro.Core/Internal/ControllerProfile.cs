@@ -185,6 +185,45 @@ public sealed class ProfileDatabase
         return db;
     }
 
+    /// <summary>Loads every profile JSON embedded in the HIDMaestro.Core
+    /// assembly under the logical-name prefix "HIDMaestro.Profiles.". This
+    /// is the no-disk path used by HMContext.LoadDefaultProfiles() — the
+    /// SDK ships with the entire profile catalog baked in so consumers
+    /// don't need to ship a sibling profiles/ directory.</summary>
+    public static ProfileDatabase LoadEmbedded()
+    {
+        var db = new ProfileDatabase();
+        var asm = typeof(ProfileDatabase).Assembly;
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        const string prefix = "HIDMaestro.Profiles.";
+
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            if (!name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+
+            try
+            {
+                using var s = asm.GetManifestResourceStream(name);
+                if (s == null) continue;
+                using var reader = new StreamReader(s);
+                string json = reader.ReadToEnd();
+                var profile = JsonSerializer.Deserialize<ControllerProfile>(json, options);
+                if (profile != null && !string.IsNullOrEmpty(profile.Id))
+                    db._profiles.Add(profile);
+            }
+            catch
+            {
+                // Silent — embedded resources should always parse, but if a
+                // future profile has bad JSON we don't want to take down
+                // every consumer.
+            }
+        }
+
+        db._profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
+        return db;
+    }
+
     /// <summary>Find a profile by its exact ID slug.</summary>
     public ControllerProfile? GetById(string id) =>
         _profiles.FirstOrDefault(p => p.Id.Equals(id, StringComparison.OrdinalIgnoreCase));

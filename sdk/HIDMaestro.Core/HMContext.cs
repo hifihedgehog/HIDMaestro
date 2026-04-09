@@ -163,8 +163,21 @@ public sealed class HMContext : IDisposable
     public int LoadDefaultProfiles()
     {
         ThrowIfDisposed();
-        // TODO: implement once profile JSONs are embedded as resources
-        throw new NotImplementedException("LoadDefaultProfiles — pending profile embedding");
+        var db = ProfileDatabase.LoadEmbedded();
+        int added = 0;
+        lock (_lock)
+        {
+            foreach (var inner in db.All)
+            {
+                if (_profilesById.ContainsKey(inner.Id)) continue;
+                var pub = new HMProfile(inner);
+                _profiles.Add(pub);
+                _profilesById[inner.Id] = pub;
+                added++;
+            }
+            _profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
+        }
+        return added;
     }
 
     // ════════════════════════════════════════════════════════════════════

@@ -20,9 +20,16 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Driver runtime files. Copied from build/ at csproj-load time so the
-         embedded payload always matches the latest driver build. -->
-    <EmbeddedResource Include="Resources\**\*" />
+    <!-- Profile catalog. Embedded as resources with stable logical names so
+         HMContext.LoadDefaultProfiles() can read them via
+         Assembly.GetManifestResourceStream regardless of disk layout. The
+         repo's profiles/ directory is the single source of truth — these
+         are linked, not copied. -->
+    <EmbeddedResource Include="..\..\profiles\**\*.json"
+                      Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json">
+      <LogicalName>HIDMaestro.Profiles.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+      <Link>Profiles\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

@@ -126,8 +126,8 @@ class Program
             return Error("Usage: HIDMaestroTest emulate <profile-id> [profile-id ...]");
 
         using var ctx = new HMContext();
-        int loaded = ctx.LoadProfilesFromDirectory(GetProfilesDir());
-        Console.WriteLine($"  Loaded {loaded} profiles");
+        int loaded = ctx.LoadDefaultProfiles();
+        Console.WriteLine($"  Loaded {loaded} profiles (embedded)");
 
         Console.Write("  Installing driver... ");
         ctx.InstallDriver();
@@ -241,22 +241,10 @@ class Program
 
     // ── Profile browse commands ──
 
-    static string GetProfilesDir()
-    {
-        string? dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8 && dir != null; i++)
-        {
-            string candidate = Path.Combine(dir, "profiles");
-            if (Directory.Exists(candidate)) return candidate;
-            dir = Path.GetDirectoryName(dir);
-        }
-        return @"C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\profiles";
-    }
-
     static int ListProfiles()
     {
         using var ctx = new HMContext();
-        ctx.LoadProfilesFromDirectory(GetProfilesDir());
+        ctx.LoadDefaultProfiles();
         Console.WriteLine($"-- Controller Profile Database ({ctx.AllProfiles.Count}) --\n");
         foreach (var p in ctx.AllProfiles)
             Console.WriteLine($"  {p.Id,-35} {p.Name,-45} {p.VendorId:X4}:{p.ProductId:X4}");
@@ -269,7 +257,7 @@ class Program
             return Error("Usage: HIDMaestroTest search <query>");
 
         using var ctx = new HMContext();
-        ctx.LoadProfilesFromDirectory(GetProfilesDir());
+        ctx.LoadDefaultProfiles();
         var results = ctx.AllProfiles.Where(p =>
             p.Id.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             p.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
@@ -290,7 +278,7 @@ class Program
             return Error("Usage: HIDMaestroTest info <profile-id>");
 
         using var ctx = new HMContext();
-        ctx.LoadProfilesFromDirectory(GetProfilesDir());
+        ctx.LoadDefaultProfiles();
         var p = ctx.GetProfile(id);
         if (p == null)
         {
@@ -327,8 +315,8 @@ class Program
         Console.WriteLine("=== HIDMaestro SDK Demo ===\n");
 
         using var ctx = new HMContext();
-        int loaded = ctx.LoadProfilesFromDirectory(GetProfilesDir());
-        Console.WriteLine($"  Loaded {loaded} profiles");
+        int loaded = ctx.LoadDefaultProfiles();
+        Console.WriteLine($"  Loaded {loaded} profiles (embedded)");
 
         Console.Write("  Installing driver... ");
         ctx.InstallDriver();
