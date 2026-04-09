@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -75,120 +74,8 @@ class Program
         public uint pid;
     }
 
-    static void SetBusReportedDeviceDesc(string instanceId, string description)
-        => DeviceProperties.SetBusReportedDeviceDesc(instanceId, description);
-
-    static void SetDeviceDescription(string instanceId, string description)
-    {
-        // CM_Set_DevNode_PropertyW for DeviceDesc is overridden by INF string reference.
-        // Write directly to the Enum registry key instead.
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                $@"SYSTEM\CurrentControlSet\Enum\{instanceId}", writable: true);
-            if (key != null)
-            {
-                key.SetValue("DeviceDesc", description, RegistryValueKind.String);
-                key.SetValue("FriendlyName", description, RegistryValueKind.String);
-            }
-            // Also set on HID child
-            if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == 0
-                && CM_Get_Child(out uint childInst, devInst, 0) == 0)
-            {
-                uint idLen = 0;
-                CM_Get_Device_ID_Size(out idLen, childInst, 0);
-                var buf = new char[idLen + 1];
-                CM_Get_Device_IDW(childInst, buf, (uint)buf.Length, 0);
-                string childId = new string(buf, 0, (int)idLen);
-                using var childKey = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Enum\{childId}", writable: true);
-                if (childKey != null)
-                {
-                    childKey.SetValue("DeviceDesc", description, RegistryValueKind.String);
-                    childKey.SetValue("FriendlyName", description, RegistryValueKind.String);
-                }
-            }
-        }
-        catch { }
-    }
-
     [DllImport("CfgMgr32.dll")]
     static extern uint CM_Get_Device_ID_Size(out uint pulLen, uint dnDevInst, uint ulFlags);
-
-    static void SetDeviceFriendlyName(string rootInstanceId, string name)
-    {
-        if (!DeviceProperties.SetDeviceFriendlyName(rootInstanceId, name))
-            Console.Error.Write("(locate failed) ");
-    }
-
-    /// <summary>
-    /// Adds HMBtnFix UMDF2 filter on the HID child to patch xinputhid's 16-button
-    /// descriptor to 10 buttons. Configures WUDFRd service parameters.
-    /// </summary>
-    static void AddBtnFixFilter(string hidChildInstanceId)
-    {
-        string[] parts = hidChildInstanceId.Split('\\');
-        if (parts.Length < 3) return;
-        string enumPath = $@"SYSTEM\CurrentControlSet\Enum\{parts[0]}\{parts[1]}\{parts[2]}";
-
-        // Find HMBtnFix.dll in the driver store
-        string? btnFixDll = null;
-        string storePath = @"C:\Windows\System32\DriverStore\FileRepository";
-        foreach (var dir in Directory.GetDirectories(storePath, "hidmaestro_btnfix*"))
-        {
-            string candidate = Path.Combine(dir, "HMBtnFix.dll");
-            if (File.Exists(candidate)) { btnFixDll = candidate; break; }
-        }
-        if (btnFixDll == null)
-        {
-            // Try build directory
-            btnFixDll = Path.Combine(BuildDir, "HMBtnFix.dll");
-            if (!File.Exists(btnFixDll)) { Console.WriteLine("  BtnFix: DLL not found"); return; }
-        }
-
-        // 1. Create UMDF service entry
-        using (var svcKey = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\HMBtnFix"))
-        {
-            svcKey.SetValue("DisplayName", "HIDMaestro Button Fix", RegistryValueKind.String);
-            svcKey.SetValue("Type", 1, RegistryValueKind.DWord);
-            svcKey.SetValue("Start", 3, RegistryValueKind.DWord);
-            svcKey.SetValue("ErrorControl", 1, RegistryValueKind.DWord);
-        }
-        using (var wdfKey = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\HMBtnFix\Parameters\Wdf"))
-        {
-            wdfKey.SetValue("WdfMajorVersion", 2, RegistryValueKind.DWord);
-            wdfKey.SetValue("WdfMinorVersion", 15, RegistryValueKind.DWord);
-        }
-
-        // 2. Configure WUDFRd on the device's parameters
-        using (var dpKey = Registry.LocalMachine.CreateSubKey($@"{enumPath}\Device Parameters\WudfRd"))
-        {
-            // UMDF service definition
-            using (var svcDef = Registry.LocalMachine.CreateSubKey($@"{enumPath}\Device Parameters\WudfRd\UmdfService\HMBtnFix"))
-            {
-                svcDef.SetValue("UmdfLibraryVersion", "2.15.0", RegistryValueKind.String);
-                svcDef.SetValue("ServiceBinary", btnFixDll, RegistryValueKind.String);
-            }
-            dpKey.SetValue("UmdfServiceOrder", new string[] { "HMBtnFix" }, RegistryValueKind.MultiString);
-            dpKey.SetValue("UmdfKernelModeClientPolicy", 1, RegistryValueKind.DWord); // AllowKernelModeClients
-            dpKey.SetValue("UmdfFileObjectPolicy", 2, RegistryValueKind.DWord); // AllowNullAndUnknownFileObjects
-            dpKey.SetValue("UmdfMethodNeitherAction", 1, RegistryValueKind.DWord); // Copy
-            dpKey.SetValue("UmdfFsContextUsePolicy", 1, RegistryValueKind.DWord); // CanUseFsContext2
-        }
-
-        // 3. Add WUDFRd to UpperFilters
-        using (var key = Registry.LocalMachine.OpenSubKey(enumPath, writable: true))
-        {
-            if (key == null) return;
-            var existing = key.GetValue("UpperFilters") as string[];
-            if (existing != null && existing.Contains("WUDFRd")) return; // Already present
-            var newFilters = (existing ?? Array.Empty<string>()).ToList();
-            newFilters.Add("WUDFRd"); // Add after xinputhid
-            key.SetValue("UpperFilters", newFilters.ToArray(), RegistryValueKind.MultiString);
-        }
-
-        Console.Write($"  BtnFix filter configured on {hidChildInstanceId}... ");
-    }
 
     // ── P/Invoke ──
 
@@ -314,7 +201,6 @@ class Program
     const uint FILE_SHARE_RW = 3;
 
     static CancellationTokenSource _cts = new();
-    static volatile bool _ghostsCleanedThisSession = false;
     static volatile string? _switchToProfile = null;
 
     static bool IsElevated()
@@ -365,8 +251,7 @@ class Program
             // Safety net: clean up devices if the process exits unexpectedly
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
-                try { CleanupGhostDevices(); } catch { }
-                try { CleanupSharedMappings(); } catch { }
+                try { SharedMemoryIO.Cleanup(); } catch { }
             };
         }
 
@@ -397,7 +282,6 @@ class Program
             RemoveAllHIDMaestroDevices();
             DeviceManager.RemoveOrphanHidChildren();
             CleanStaleXusbInterfaces();
-            DisableGhostXusbInterfaces();
         }
 
         if (args.Length == 0)
@@ -476,208 +360,6 @@ class Program
     }
 
     static int Error(string msg) { Console.Error.WriteLine($"ERROR: {msg}"); return 1; }
-
-    // ── Descriptor preparation ──
-
-    /// <summary>
-    /// The HIDMaestro universal gamepad descriptor: 6 axes (16-bit), 10 buttons,
-    /// 1 hat switch, plus Feature Report ID 2 as the data channel.
-    /// This descriptor uses explicit Report IDs throughout, so adding the
-    /// feature report is always valid. VID/PID/ProductString from the profile
-    /// determine the identity; this descriptor determines the report format.
-    ///
-    /// Games identify controllers by VID/PID and product string — not by
-    /// parsing the HID descriptor layout. So we use our proven descriptor
-    /// for all profiles and just swap the identity.
-    /// </summary>
-    // Verified byte-for-byte from driver.h G_DefaultReportDescriptor (116 bytes)
-    static readonly byte[] UniversalDescriptor = new byte[] {
-        0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x27, 0xFF,
-        0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x09, 0x33, 0x09, 0x34, 0x81, 0x02, 0x09,
-        0x32, 0x09, 0x35, 0x81, 0x02, 0x05, 0x09, 0x19, 0x01, 0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75,
-        0x01, 0x95, 0x0A, 0x81, 0x02, 0x75, 0x06, 0x95, 0x01, 0x81, 0x01, 0x05, 0x01, 0x09, 0x39, 0x15,
-        0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
-        0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
-        0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
-        0x0E, 0xB1, 0x02, 0xC0,
-    };
-
-    /// <summary>
-    /// Adds a vendor Feature Report (ID 0xFE, 64 bytes) to a profile descriptor
-    /// so we can inject input via HidD_SetFeature. Only adds if the descriptor
-    /// has Report IDs but no existing Feature Report with ID 0xFE.
-    /// </summary>
-    /// <summary>
-    /// Parse HID descriptor to compute input report byte length for Report ID 1.
-    /// Returns total bytes including the Report ID byte.
-    /// </summary>
-    static int ComputeInputReportByteLength(byte[] desc)
-    {
-        int totalBits = 0;
-        int reportSize = 0;
-        int reportCount = 0;
-        int currentReportId = 0;
-        int firstInputReportId = 0;
-        bool hasReportIds = false;
-
-        for (int i = 0; i < desc.Length; )
-        {
-            byte prefix = desc[i];
-            int bSize = prefix & 0x03;
-            if (bSize == 3) bSize = 4;
-            int bType = (prefix >> 2) & 0x03;
-            int bTag = (prefix >> 4) & 0x0F;
-
-            int value = 0;
-            if (i + bSize < desc.Length)
-            {
-                for (int j = 0; j < bSize; j++)
-                    value |= desc[i + 1 + j] << (8 * j);
-            }
-
-            if (bType == 1) // Global
-            {
-                if (bTag == 7) reportSize = value;    // Report Size
-                if (bTag == 9) reportCount = value;   // Report Count
-                if (bTag == 8) { currentReportId = value; if (!hasReportIds) firstInputReportId = value; hasReportIds = true; } // Report ID
-            }
-            else if (bType == 0) // Main
-            {
-                if (bTag == 8) // Input
-                {
-                    // Count bits for the first report ID encountered (or all if no IDs)
-                    if (!hasReportIds || currentReportId == firstInputReportId)
-                        totalBits += reportSize * reportCount;
-                }
-            }
-
-            i += 1 + bSize;
-        }
-
-        int totalBytes = (totalBits + 7) / 8;
-        return hasReportIds ? totalBytes + 1 : totalBytes; // +1 for Report ID byte
-    }
-
-    /// <summary>
-    /// Adds a vendor Output Report (ID 0x02) to inject input data via HidD_SetOutputReport.
-    /// Output Reports are NOT enumerated as axes by Chrome's Gamepad API (unlike Feature Reports).
-    /// Sized to match the input report data exactly (15 bytes for Xbox).
-    /// </summary>
-    static byte[] AddOutputReport(byte[] desc)
-    {
-        // Check if already has our output report
-        for (int i = 0; i < desc.Length - 1; i++)
-            if (desc[i] == 0x85 && desc[i+1] == 0x02) return desc;
-
-        bool hasIds = false;
-        for (int i = 0; i < desc.Length - 1; i++)
-            if (desc[i] == 0x85) { hasIds = true; break; }
-        if (!hasIds) return desc;
-
-        // Compute input report data size to match our output report
-        int inputBytes = ComputeInputReportByteLength(desc);
-        int dataBytes = inputBytes > 1 ? inputBytes - 1 : 15; // Subtract Report ID byte
-
-        // Output Report: ID 0x02, exactly inputDataSize vendor bytes
-        byte[] output = {
-            0x85, 0x02,                             // Report ID (2)
-            0x06, 0x00, 0xFF,                       // Usage Page (Vendor)
-            0x09, 0x02,                             // Usage (0x02)
-            0x15, 0x00, 0x26, 0xFF, 0x00,           // Logical 0-255
-            0x75, 0x08,                             // Report Size (8)
-            0x95, (byte)dataBytes,                  // Report Count = input data size
-            0x91, 0x02                              // OUTPUT (Data, Var, Abs)
-        };
-
-        // Insert before the LAST 0xC0
-        int lastC0 = desc.Length - 1;
-        while (lastC0 >= 0 && desc[lastC0] != 0xC0) lastC0--;
-        if (lastC0 < 0) return desc;
-
-        var result = new byte[desc.Length + output.Length];
-        Array.Copy(desc, 0, result, 0, lastC0);
-        Array.Copy(output, 0, result, lastC0, output.Length);
-        result[lastC0 + output.Length] = 0xC0;
-        return result;
-    }
-
-    static byte[] AddFeatureReport(byte[] desc)
-    {
-        // Check if already has our feature report (ID 0x02)
-        for (int i = 0; i < desc.Length - 1; i++)
-            if (desc[i] == 0x85 && desc[i+1] == 0x02) return desc;
-
-        // Check if descriptor has Report IDs (required — can't mix ID/no-ID)
-        bool hasIds = false;
-        for (int i = 0; i < desc.Length - 1; i++)
-            if (desc[i] == 0x85) { hasIds = true; break; }
-        if (!hasIds) return desc; // Can't add Feature Report to no-ID descriptor
-
-        // Use an Output Report (not Feature Report) as the data channel.
-        // Feature Reports create phantom axes in Chrome's Gamepad API.
-        // Output Report ID 0x02 with vendor data — Chrome ignores Output items.
-        byte[] feature = {
-            0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01,
-            0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08,
-            0x95, 0x40, 0x91, 0x02  // 0x91 = Output (not 0xB1 = Feature)
-        };
-
-        // Insert before the LAST 0xC0 (outermost End Collection)
-        int lastC0 = desc.Length - 1;
-        while (lastC0 >= 0 && desc[lastC0] != 0xC0) lastC0--;
-        if (lastC0 < 0) return desc;
-
-        var result = new byte[desc.Length + feature.Length];
-        Array.Copy(desc, 0, result, 0, lastC0);
-        Array.Copy(feature, 0, result, lastC0, feature.Length);
-        result[lastC0 + feature.Length] = 0xC0; // Re-add End Collection
-        return result;
-    }
-
-    // ── Registry config ──
-
-    static void WriteConfig(byte[] descriptor, ushort vid, ushort pid, ushort ver = 0x0100, string? productString = null, string? deviceDescription = null, int inputReportByteLength = 0, bool functionMode = false, int controllerIndex = 0)
-    {
-        // Write to per-instance key AND legacy global key (for backward compat)
-        string instanceRegPath = RegPathForIndex(controllerIndex);
-        using var key = Registry.LocalMachine.CreateSubKey(instanceRegPath);
-        // Also write to legacy global key for single-instance fallback
-        using var legacyKey = Registry.LocalMachine.CreateSubKey(REG_PATH);
-        string instanceSuffix = controllerIndex > 0 ? $"\\{controllerIndex:D4}" : "\\0000";
-        key.SetValue("DeviceInstanceId", $@"ROOT\VID_{vid:X4}&PID_{pid:X4}&IG_00{instanceSuffix}", RegistryValueKind.String);
-        key.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
-        // Copy to legacy key for index 0
-        if (controllerIndex == 0)
-        {
-            legacyKey.SetValue("DeviceInstanceId", key.GetValue("DeviceInstanceId")!, RegistryValueKind.String);
-            legacyKey.SetValue("FunctionMode", functionMode ? 1 : 0, RegistryValueKind.DWord);
-        }
-        // Debug: log what we're writing
-        Console.Write($"  [descriptor: {descriptor.Length}B, bytes[15]=0x{descriptor[15]:X2}, bytes[16]=0x{descriptor[16]:X2}] ");
-        key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
-        key.SetValue("VendorId", (int)vid, RegistryValueKind.DWord);
-        key.SetValue("ProductId", (int)pid, RegistryValueKind.DWord);
-        key.SetValue("VersionNumber", (int)ver, RegistryValueKind.DWord);
-        if (productString != null)
-            key.SetValue("ProductString", productString, RegistryValueKind.String);
-        if (inputReportByteLength > 0)
-            key.SetValue("InputReportByteLength", inputReportByteLength, RegistryValueKind.DWord);
-        // DeviceDescription = what Device Manager / FriendlyName shows
-        string displayName = deviceDescription ?? productString ?? "HIDMaestro Controller";
-        key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
-
-        // Write OEMName to Joystick\OEM registry (display name in joy.cpl).
-        string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{vid:X4}&PID_{pid:X4}";
-        try
-        {
-            using var oemLm = Registry.LocalMachine.CreateSubKey(oemKeyPath);
-            oemLm?.SetValue("OEMName", displayName, RegistryValueKind.String);
-            // Remove any stale OEMData/Axes entries from previous versions
-            oemLm?.DeleteValue("OEMData", false);
-            try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", false); } catch { }
-        }
-        catch { }
-    }
 
     // ── Process runner ──
 
@@ -837,8 +519,6 @@ class Program
         }
 
         // Clean joy.cpl joystick cache (OEM entries + slot assignments)
-        // Delete ALL our OEM entries (VID_045E&PID_* and VID_054C&PID_*) from Joystick\OEM.
-        // Over many test runs, dozens of different PIDs accumulate and fill all 16 joystick slots.
         string[] oemPrefixes = { "VID_045E&PID_", "VID_054C&PID_", "VID_0000&PID_" };
         string oemRelPath = @"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
         foreach (var root in new[] { Registry.CurrentUser, Registry.LocalMachine })
@@ -854,9 +534,6 @@ class Program
             catch { }
         }
         // Remove ALL joystick slot assignments so DirectInput reassigns fresh slots.
-        // Each slot has JoystickNOEMName + JoystickNConfiguration values (N = 1..16).
-        // Deleting all of them resets the entire slot table; Windows rebuilds on next enumeration.
-        // We must clean BOTH CurrentJoystickSettings AND per-VID/PID JoystickSettings subkeys.
         try
         {
             using var jsRoot = Registry.CurrentUser.OpenSubKey(
@@ -864,7 +541,6 @@ class Program
             if (jsRoot != null)
                 foreach (var sub in jsRoot.GetSubKeyNames())
                 {
-                    // Clean CurrentJoystickSettings (the active slot table).
                     try
                     {
                         using var settings = jsRoot.OpenSubKey($@"{sub}\CurrentJoystickSettings", writable: true);
@@ -878,9 +554,6 @@ class Program
                             }
                     }
                     catch { }
-                    // Clean per-VID/PID JoystickSettings subkeys (cached slot history).
-                    // DirectInput reads these to restore previous slot assignments; stale entries
-                    // cause new devices to land at high slot numbers (e.g. Joy11 instead of Joy1).
                     try
                     {
                         using var jsSettings = jsRoot.OpenSubKey($@"{sub}\JoystickSettings", writable: true);
@@ -908,9 +581,6 @@ class Program
         catch { }
 
         // Wait for WUDFHost processes to release our DLLs.
-        // After device removal, WUDFHost may still hold DLLs in memory.
-        // New devices would reuse the cached DLL instead of loading from the store.
-        // Wait for any WUDFHost hosting our DLLs to exit before installing new packages.
         try
         {
             string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
@@ -925,9 +595,9 @@ class Program
                         { hostsOurs = true; break; }
                     }
                     if (hostsOurs)
-                        wudf.WaitForExit(10000); // Wait for process to exit after device removal
+                        wudf.WaitForExit(10000);
                 }
-                catch { } // Access denied for other users' WUDFHost — skip
+                catch { }
             }
         }
         catch { }
@@ -962,122 +632,124 @@ class Program
             showOutput: showOutput);
     }
 
-    // ── Full build + sign + install pipeline ──
-
-    // ── Device Setup (all-in-code, no external scripts) ──
-
     /// <summary>
-    /// Ensures GameInputSvc is running and set to Automatic start.
-    /// Required for WGI to discover our device (standard browser mapping).
+    /// Scans the XUSB and WinExInput DeviceClasses registry for HMCOMPANION entries
+    /// whose backing device no longer exists (ghost/phantom gone). Deletes the stale
+    /// DeviceClasses subkey so Windows stops reporting the interface as PRESENT,
+    /// freeing the XInput slot.
     /// </summary>
-    static void EnsureGameInputService()
+    static int CleanStaleXusbInterfaces()
     {
-        try
+        int cleaned = 0;
+        string[] interfaceGuids = {
+            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
+            "{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
+        };
+
+        foreach (var guid in interfaceGuids)
         {
-            var (_, status) = RunProcess("sc.exe", "query GameInputSvc");
-            if (!status.Contains("RUNNING"))
+            try
             {
-                RunProcess("sc.exe", "config GameInputSvc start= auto");
-                RunProcess("sc.exe", "start GameInputSvc");
+                string regPath = $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}";
+                using var classKey = Registry.LocalMachine.OpenSubKey(regPath, writable: true);
+                if (classKey == null) continue;
+
+                foreach (var subName in classKey.GetSubKeyNames())
+                {
+                    // Extract the device instance ID from the subkey name.
+                    string devPath = subName;
+                    int guidStart = devPath.LastIndexOf("#{");
+                    if (guidStart >= 0)
+                        devPath = devPath.Substring(0, guidStart);
+                    devPath = devPath.Replace("##?#", "");
+                    devPath = devPath.Replace('#', '\\');
+
+                    bool isHmCompanion = subName.Contains("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
+                    bool isHidXinput = subName.Contains("HID\\", StringComparison.OrdinalIgnoreCase)
+                                    || subName.Contains("HID#", StringComparison.OrdinalIgnoreCase);
+
+                    // For HMCOMPANION: remove if the device no longer exists
+                    if (isHmCompanion)
+                    {
+                        bool alive = CM_Locate_DevNodeW(out uint _, devPath, 0) == 0;
+                        if (alive) continue;
+                    }
+                    // For non-ROOT HID entries (e.g. BT controller's xinputhid children):
+                    // remove if the device has a problem (disconnected/off) or has xinputhid
+                    // as upper filter while the controller is off.
+                    else if (isHidXinput && !subName.Contains("ROOT#", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool hasXinputHid = false;
+                        try
+                        {
+                            using var devKey = Registry.LocalMachine.OpenSubKey(
+                                $@"SYSTEM\CurrentControlSet\Enum\{devPath}");
+                            if (devKey != null)
+                            {
+                                var upperFilters = devKey.GetValue("UpperFilters") as string[];
+                                hasXinputHid = upperFilters != null && upperFilters.Any(
+                                    f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase));
+                            }
+                        }
+                        catch { }
+                        if (!hasXinputHid) continue;
+
+                        bool isGhost = false;
+                        if (CM_Locate_DevNodeW(out uint devInst, devPath, 0) != 0)
+                        {
+                            isGhost = true;
+                        }
+                        else
+                        {
+                            const uint DN_HAS_PROBLEM = 0x00000400;
+                            const uint DN_STARTED = 0x00000008;
+                            if (CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0) == 0)
+                            {
+                                if ((status & DN_HAS_PROBLEM) != 0 || (status & DN_STARTED) == 0)
+                                    isGhost = true;
+                            }
+                        }
+                        if (!isGhost) continue;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    // Device is stale/ghost — nuke the interface registry entry
+                    try
+                    {
+                        classKey.DeleteSubKeyTree(subName);
+                        Console.WriteLine($"  Cleaned stale XUSB interface: {devPath}");
+                        cleaned++;
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            string fullRegPath = $@"HKLM\{regPath}\{subName}";
+                            RunProcess("reg.exe", $"delete \"{fullRegPath}\" /f", timeoutMs: 3000);
+                            Console.WriteLine($"  Cleaned stale XUSB interface (reg.exe): {devPath}");
+                            cleaned++;
+                        }
+                        catch
+                        {
+                            Console.WriteLine($"  Warning: could not clean stale interface {devPath}: {ex.Message}");
+                        }
+                    }
+                }
             }
+            catch { }
         }
-        catch { /* Service may not exist on older Windows */ }
+
+        return cleaned;
     }
 
-    /// <summary>
-    /// Writes the GameInput registry for WGI Gamepad promotion.
-    /// Key format: HKLM\...\GameInput\Devices\{VID4}{PID4}00010005\Gamepad
-    /// Axis/button indices match WGI RawGameController enumeration order.
-    /// </summary>
-    static void WriteGameInputRegistry(ushort vid, ushort pid, ControllerProfile? profile = null)
-    {
-        string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{vid:X4}{pid:X4}00010005";
-        // Delete existing key to ensure clean state
-        try { Registry.LocalMachine.DeleteSubKeyTree(deviceKey, false); } catch { }
-        using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
-
-        string gpPath = $@"{deviceKey}\Gamepad";
-        string[] subs = { "Menu","View","A","B","X","Y","LeftShoulder","RightShoulder",
-            "LeftThumbstickButton","RightThumbstickButton",
-            "DPadUp","DPadDown","DPadLeft","DPadRight",
-            "LeftTrigger","RightTrigger",
-            "LeftThumbstickX","LeftThumbstickY","RightThumbstickX","RightThumbstickY" };
-        foreach (var sub in subs)
-            Registry.LocalMachine.CreateSubKey($@"{gpPath}\{sub}");
-
-        void SetAxis(string name, int index, bool invert = false)
-        {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
-            k.SetValue("AxisIndex", index, RegistryValueKind.DWord);
-            if (invert) k.SetValue("Invert", 1, RegistryValueKind.DWord);
-        }
-        void SetButton(string name, int index)
-        {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
-            k.SetValue("ButtonIndex", index, RegistryValueKind.DWord);
-        }
-        void SetDPad(string name, string position)
-        {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
-            k.SetValue("SwitchIndex", 0, RegistryValueKind.DWord);
-            k.SetValue("SwitchPosition", position, RegistryValueKind.String);
-            k.SetValue("IncludeAdjacent", 1, RegistryValueKind.DWord);
-        }
-
-        bool combinedTriggers = profile?.HasCombinedTriggers == true;
-
-        // Axes: WGI RawGameController order matches descriptor axis order
-        SetAxis("LeftThumbstickX", 0);
-        SetAxis("LeftThumbstickY", 1, invert: true);
-        SetAxis("RightThumbstickX", 2);
-        SetAxis("RightThumbstickY", 3, invert: true);
-
-        if (combinedTriggers)
-        {
-            // Combined Z for DI (axis 4) + hidden Vx/Vy for WGI separate triggers (axes 5/6).
-            // DI ignores velocity usages (Vx=0x40, Vy=0x41) → 5 axes.
-            // GameInput sees all HID axes → Vx at index 5, Vy at index 6.
-            SetAxis("LeftTrigger", 5);
-            SetAxis("RightTrigger", 6);
-        }
-        else
-        {
-            // GIP/separate: 6 axes (LX, LY, RX, RY, LT, RT)
-            SetAxis("LeftTrigger", 4);
-            SetAxis("RightTrigger", 5);
-        }
-
-        // Buttons
-        SetButton("A", 0); SetButton("B", 1); SetButton("X", 2); SetButton("Y", 3);
-        SetButton("LeftShoulder", 4); SetButton("RightShoulder", 5);
-        SetButton("View", 6); SetButton("Menu", 7);
-        SetButton("LeftThumbstickButton", 8); SetButton("RightThumbstickButton", 9);
-
-        // DPad from hat switch
-        SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
-        SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
-    }
+    // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
+    // (Code 43 error). Use pnputil /remove-device + recreate instead.
 
     // ── Shared memory IPC ──
-    // The actual IPC implementation lives in HIDMaestro.Internal.SharedMemoryIO.
-    // These thin forwarders preserve the existing test-app call sites while
-    // the SDK extraction is in progress. Direct callers should switch to
-    // SharedMemoryIO directly.
-
-    const int SHARED_INPUT_SIZE = SharedMemoryIO.SHARED_INPUT_SIZE;
-
-    static IntPtr EnsureSharedMapping(int controllerIndex)
-        => SharedMemoryIO.EnsureInputMapping(controllerIndex);
-
-    static void WriteSharedInput(IntPtr view, ref uint seqNo, byte[] data, int dataLen, byte[] gipData)
-        => SharedMemoryIO.WriteInputFrame(view, ref seqNo, data, dataLen, gipData);
-
-    static void CleanupSharedMappings()
-        => SharedMemoryIO.Cleanup();
-
-    // P/Invokes still used by other parts of Program.cs (e.g. rumbletest
-    // checkout, hidorder probes, ad-hoc enumeration). These will move into
-    // SharedMemoryIO or a NativeMethods file as the extraction continues.
+    // P/Invokes still used by rumbletest checkout and ad-hoc enumeration.
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
         uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
@@ -1096,18 +768,8 @@ class Program
      *
      * The driver and companion publish captured rumble / haptics / FFB / LED
      * commands into Global\HIDMaestroOutput<N>. We open the section read-only
-     * (creating it if neither the driver nor companion has yet — that lets us
-     * start the reader before the first output report arrives) and poll for
-     * SeqNo changes. Each new packet is decoded by (Source, ReportId) and
-     * printed.
-     *
-     * The struct mirrors HIDMAESTRO_SHARED_OUTPUT in driver.h:
-     *   ULONG  SeqNo
-     *   UCHAR  Source        (0=HID output, 1=HID feature, 2=XInput rumble)
-     *   UCHAR  ReportId
-     *   USHORT DataSize
-     *   UCHAR  Data[256]
-     * Total: 264 bytes.
+     * and poll for SeqNo changes. Each new packet is decoded by (Source, ReportId)
+     * and printed.
      * ====================================================================== */
 
     const int SHARED_OUTPUT_SIZE = SharedMemoryIO.SHARED_OUTPUT_SIZE;
@@ -1115,18 +777,13 @@ class Program
     const byte OUT_SOURCE_HID_FEATURE = SharedMemoryIO.OUT_SOURCE_HID_FEATURE;
     const byte OUT_SOURCE_XINPUT      = SharedMemoryIO.OUT_SOURCE_XINPUT;
 
-    /// <summary>Forwards to <see cref="SharedMemoryIO.EnsureOutputMapping"/>.
-    /// Kept as a thin wrapper while orchestration extraction is in progress.</summary>
-    static IntPtr EnsureOutputMapping(int controllerIndex)
-        => SharedMemoryIO.EnsureOutputMapping(controllerIndex);
-
     /// <summary>Polls the output mapping for the given controller and prints
     /// each new packet. Runs on a background thread until the cancellation
-    /// token fires. Profile is used for human-readable decoding.</summary>
+    /// token fires.</summary>
     static void RunOutputReader(int controllerIndex, ControllerProfile profile, CancellationToken ct)
     {
         IntPtr view;
-        try { view = EnsureOutputMapping(controllerIndex); }
+        try { view = SharedMemoryIO.EnsureOutputMapping(controllerIndex); }
         catch (Exception ex)
         {
             Console.WriteLine($"  [out{controllerIndex}] reader failed to open mapping: {ex.Message}");
@@ -1169,10 +826,7 @@ class Program
         }
     }
 
-    /// <summary>Profile-aware decode for human-readable display. Falls back to
-    /// hex dump for unknown shapes. The actual byte forwarding to a real
-    /// consumer (PadForge) is the caller's job — this method is just for
-    /// verification that capture is working end-to-end.</summary>
+    /// <summary>Profile-aware decode for human-readable display.</summary>
     static void DecodeAndPrintOutput(int idx, string label, ControllerProfile profile,
                                       byte source, byte reportId, byte[] data, int size)
     {
@@ -1183,10 +837,6 @@ class Program
         {
             case OUT_SOURCE_XINPUT:
             {
-                // XInput SetState wire format from xinput1_4 → XUSB driver:
-                // Most observed packets are 5 bytes: cmd(1) + size(1) + lo(1) + hi(1) + reserved(1).
-                // Some clients send the raw 4-byte XINPUT_VIBRATION (lo=u16, hi=u16) as-is.
-                // We display both interpretations so it's obvious which the game used.
                 int lo = -1, hi = -1;
                 if (size >= 5) { lo = data[2]; hi = data[3]; }
                 else if (size >= 4) { lo = data[0] | (data[1] << 8); hi = data[2] | (data[3] << 8); }
@@ -1202,7 +852,6 @@ class Program
             case OUT_SOURCE_HID_OUTPUT:
             default:
             {
-                // Profile-specific decoding for the well-known shapes.
                 if (TryDecodeDualSenseOutput(profile, reportId, data, size, sb)) break;
                 if (TryDecodeXboxRumbleHidOutput(profile, reportId, data, size, sb)) break;
                 sb.Append($"HID Output reportId=0x{reportId:X2} size={size}  {ToHex(data, Math.Min(size, 32))}");
@@ -1213,10 +862,6 @@ class Program
         Console.WriteLine(sb.ToString());
     }
 
-    /// <summary>DualSense / DualShock 4 output report 0x02 (USB) / 0x31 (BT):
-    /// motors at byte 1-2, adaptive triggers starting around byte 10, LED later.
-    /// Layout per the Sony HID spec / nondrum's reverse-engineering. We surface
-    /// the high-value fields; full layout is the consumer's problem.</summary>
     static bool TryDecodeDualSenseOutput(ControllerProfile p, byte reportId, byte[] d, int size, StringBuilder sb)
     {
         if (p == null) return false;
@@ -1224,9 +869,6 @@ class Program
         if (!isSony) return false;
         if (reportId != 0x02 && reportId != 0x05 && reportId != 0x31) return false;
 
-        // Sony report 0x02 starts with a flag mask byte; motors live at +2/+3 from start
-        // for both DualSense and DS4 reduced reports. We don't try to be perfect — we
-        // surface enough for verification.
         if (size < 4)
         {
             sb.Append($"Sony reportId=0x{reportId:X2} short ({size} bytes)");
@@ -1237,8 +879,6 @@ class Program
         int rumbleL = d[3];
         sb.Append($"Sony rumble  L={rumbleL,3}  R={rumbleR,3}  reportId=0x{reportId:X2}  size={size}");
 
-        // DualSense adaptive triggers: bytes 10..21 = right trigger, 22..32 = left trigger.
-        // Mode is byte 0 of each block. Only show if any non-zero.
         if (size >= 33)
         {
             byte rTrigMode = d[10];
@@ -1247,7 +887,6 @@ class Program
                 sb.Append($"  triggerL=mode{lTrigMode:X2} triggerR=mode{rTrigMode:X2}");
         }
 
-        // LED color (DualSense): bytes 44..46 RGB if set
         if (size >= 47)
         {
             byte r = d[44], g = d[45], b = d[46];
@@ -1257,9 +896,6 @@ class Program
         return true;
     }
 
-    /// <summary>Xbox HID output report — Xbox Series controllers in BT mode use
-    /// HID output report 0x03 for rumble. The xinputhid driver translates
-    /// XInputSetState into this report shape.</summary>
     static bool TryDecodeXboxRumbleHidOutput(ControllerProfile p, byte reportId, byte[] d, int size, StringBuilder sb)
     {
         if (p == null) return false;
@@ -1267,9 +903,6 @@ class Program
         if (reportId != 0x03 && reportId != 0x00) return false;
         if (size < 4) return false;
 
-        // Xbox HID rumble (Bluetooth): typical layout is enable_mask(1) + L_trig(1) +
-        // R_trig(1) + L_motor(1) + R_motor(1) + duration(1) + start_delay(1) + loop_count(1)
-        // We display the four amplitude bytes.
         sb.Append($"Xbox HID rumble reportId=0x{reportId:X2} size={size}  ");
         sb.Append($"enable=0x{d[0]:X2} ltrig={d[1],3} rtrig={d[2],3} lmot={d[3],3}");
         if (size >= 5) sb.Append($" rmot={d[4],3}");
@@ -1285,601 +918,6 @@ class Program
             s.Append(data[i].ToString("X2"));
         }
         return s.ToString();
-    }
-
-    /// <summary>
-    /// Removes ghost HID_IG_00 devices that are in Error state.
-    /// Does NOT remove working devices.
-    /// </summary>
-    static void CleanupGhostDevices()
-    {
-        // Remove ALL HIDMaestro devices (any enumerator, any state, any PID).
-        // This prevents stale devices from previous profiles contaminating the current one.
-        // NEVER touches ROOT\SYSTEM (ViGEmBus, HidHide).
-        string[] prefixes = {
-            @"ROOT\VID_", @"ROOT\HID_IG_00", @"ROOT\HIDCLASS",
-            @"ROOT\XnaComposite"
-        };
-        foreach (var prefix in prefixes)
-        {
-            for (int idx = 0; idx < 10; idx++)
-            {
-                string instId = $@"{prefix}\{idx:D4}";
-                if (prefix.StartsWith(@"ROOT\VID_"))
-                {
-                    // VID_ prefix: scan for any VID pattern
-                    // Use CM_Locate to check existence
-                    break; // handled below
-                }
-                if (CM_Locate_DevNodeW(out uint _, instId, 0) == 0)
-                {
-                    DeviceManager.RemoveDevice(instId);
-                }
-            }
-        }
-        // VID_*&IG_00 and VID_*&PID_* patterns — scan registry for ROOT\VID_ enumerators
-        try
-        {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (enumKey != null)
-            {
-                foreach (var subName in enumKey.GetSubKeyNames())
-                {
-                    if (subName.StartsWith("VID_", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // Found a VID_ enumerator — remove all device instances under it
-                        using var vidKey = enumKey.OpenSubKey(subName);
-                        if (vidKey != null)
-                        {
-                            foreach (var instName in vidKey.GetSubKeyNames())
-                            {
-                                string instId = $@"ROOT\{subName}\{instName}";
-                                DeviceManager.RemoveDevice(instId);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        catch { }
-
-        // Clean ALL ghost interface registrations — XUSB and WinExInput.
-        // Both cause duplicate XInput slots if left behind.
-        string[] interfaceGuids = {
-            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
-            @"{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
-        };
-        foreach (var guid in interfaceGuids)
-        {
-            try
-            {
-                using var classKey = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
-                if (classKey == null) continue;
-                foreach (var subName in classKey.GetSubKeyNames())
-                {
-                    // Clean our devices but NEVER ViGEmBus/HidHide (ROOT#SYSTEM#0000, #0001)
-                    bool isOurDevice = subName.Contains("ROOT#VID_") || subName.Contains("ROOT#HIDCLASS") ||
-                        subName.Contains("ROOT#HID_IG");
-                    // For ROOT#SYSTEM, only clean entries beyond index 1 (0000=ViGEmBus, 0001=HidHide)
-                    if (!isOurDevice && subName.Contains("ROOT#SYSTEM#"))
-                    {
-                        // Check if it's index >= 2
-                        var match = System.Text.RegularExpressions.Regex.Match(subName, @"ROOT#SYSTEM#(\d+)");
-                        if (match.Success && int.Parse(match.Groups[1].Value) >= 2)
-                            isOurDevice = true;
-                    }
-                    if (isOurDevice)
-                    {
-                        try { classKey.DeleteSubKeyTree(subName); } catch { }
-                    }
-                }
-            }
-            catch { }
-        }
-
-    }
-
-    /// <summary>
-    /// Scans the XUSB and WinExInput DeviceClasses registry for HMCOMPANION entries
-    /// whose backing device no longer exists (ghost/phantom gone). Deletes the stale
-    /// DeviceClasses subkey so Windows stops reporting the interface as PRESENT,
-    /// freeing the XInput slot.
-    /// </summary>
-    static int CleanStaleXusbInterfaces()
-    {
-        int cleaned = 0;
-        string[] interfaceGuids = {
-            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}", // XUSB
-            "{6c53d5fd-6480-440f-b618-476750c5e1a6}", // WinExInput
-        };
-
-        foreach (var guid in interfaceGuids)
-        {
-            try
-            {
-                string regPath = $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}";
-                using var classKey = Registry.LocalMachine.OpenSubKey(regPath, writable: true);
-                if (classKey == null) continue;
-
-                foreach (var subName in classKey.GetSubKeyNames())
-                {
-                    // Extract the device instance ID from the subkey name.
-                    // Format: ##?#ROOT#HMCOMPANION#0010#{ec87f1e3-...}
-                    // or:     ##?#HID#{00001812-...}&Dev&VID_045e&...&IG_00#...#{ec87f1e3-...}
-                    string devPath = subName;
-                    int guidStart = devPath.LastIndexOf("#{");
-                    if (guidStart >= 0)
-                        devPath = devPath.Substring(0, guidStart);
-                    devPath = devPath.Replace("##?#", "");
-                    devPath = devPath.Replace('#', '\\');
-
-                    bool isHmCompanion = subName.Contains("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
-                    bool isHidXinput = subName.Contains("HID\\", StringComparison.OrdinalIgnoreCase)
-                                    || subName.Contains("HID#", StringComparison.OrdinalIgnoreCase);
-
-                    // For HMCOMPANION: remove if the device no longer exists
-                    if (isHmCompanion)
-                    {
-                        bool alive = CM_Locate_DevNodeW(out uint _, devPath, 0) == 0;
-                        if (alive) continue;
-                    }
-                    // For non-ROOT HID entries (e.g. BT controller's xinputhid children):
-                    // remove if the device has a problem (disconnected/off) or has xinputhid
-                    // as upper filter while the controller is off.
-                    else if (isHidXinput && !subName.Contains("ROOT#", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // Check if xinputhid is the upper filter (confirms Xbox HID child)
-                        bool hasXinputHid = false;
-                        try
-                        {
-                            using var devKey = Registry.LocalMachine.OpenSubKey(
-                                $@"SYSTEM\CurrentControlSet\Enum\{devPath}");
-                            if (devKey != null)
-                            {
-                                var upperFilters = devKey.GetValue("UpperFilters") as string[];
-                                hasXinputHid = upperFilters != null && upperFilters.Any(
-                                    f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase));
-                            }
-                        }
-                        catch { }
-                        if (!hasXinputHid) continue;
-
-                        // Check if the device node is actually started and working.
-                        // If not present or has a problem, it's a ghost occupying a slot.
-                        bool isGhost = false;
-                        if (CM_Locate_DevNodeW(out uint devInst, devPath, 0) != 0)
-                        {
-                            // Device not even present — definitely stale
-                            isGhost = true;
-                        }
-                        else
-                        {
-                            // Device is present — check status. If it has a problem
-                            // (DN_HAS_PROBLEM) or is not started, the controller is off.
-                            const uint DN_HAS_PROBLEM = 0x00000400;
-                            const uint DN_STARTED = 0x00000008;
-                            if (CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0) == 0)
-                            {
-                                // Ghost if device has a problem OR is not started
-                                if ((status & DN_HAS_PROBLEM) != 0 || (status & DN_STARTED) == 0)
-                                    isGhost = true;
-                            }
-                        }
-                        if (!isGhost) continue;
-                    }
-                    else
-                    {
-                        // Skip entries we don't recognize
-                        continue;
-                    }
-
-                    // Device is stale/ghost — nuke the interface registry entry
-                    try
-                    {
-                        classKey.DeleteSubKeyTree(subName);
-                        Console.WriteLine($"  Cleaned stale XUSB interface: {devPath}");
-                        cleaned++;
-                    }
-                    catch (Exception ex)
-                    {
-                        // Registry ACLs may block — try via reg.exe as fallback
-                        try
-                        {
-                            string fullRegPath = $@"HKLM\{regPath}\{subName}";
-                            RunProcess("reg.exe", $"delete \"{fullRegPath}\" /f", timeoutMs: 3000);
-                            Console.WriteLine($"  Cleaned stale XUSB interface (reg.exe): {devPath}");
-                            cleaned++;
-                        }
-                        catch
-                        {
-                            Console.WriteLine($"  Warning: could not clean stale interface {devPath}: {ex.Message}");
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        return cleaned;
-    }
-
-    /// <summary>
-    /// Disables XUSB interfaces from real BT controllers that are paired but turned off.
-    /// When a BT Xbox controller is paired, Windows keeps its HID children present with
-    /// xinputhid loaded. xinputhid registers XUSB interfaces on those children, consuming
-    /// XInput slots even though the controller is off. This pushes HIDMaestro virtual
-    /// controllers to higher slot numbers (e.g. 2,3 instead of 0,1).
-    ///
-    /// Fix: disable the HID child device nodes of non-ROOT Xbox controllers.
-    /// This unloads xinputhid and deactivates their XUSB interfaces, freeing slots 0+.
-    /// When the real BT controller connects, the BT stack re-enumerates fresh children.
-    ///
-    /// IMPORTANT: Only call at startup, NOT at process exit. Disabling at exit would
-    /// break a real controller the user turned on during the session.
-    /// </summary>
-    static void DisableGhostXusbInterfaces()
-    {
-        try
-        {
-            // Strategy: find non-ROOT HID devices with xinputhid upper filter that have
-            // XUSB interfaces registered. These are BT Xbox controller HID children that
-            // occupy XInput slots even when the controller is off.
-            // We disable the devnode AND clean the XUSB registry entries.
-            using var xusbKey = Registry.LocalMachine.OpenSubKey(
-                @"SYSTEM\CurrentControlSet\Control\DeviceClasses\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}");
-            if (xusbKey == null) return;
-
-            foreach (var subName in xusbKey.GetSubKeyNames())
-            {
-                // Only target non-ROOT HID devices (real controller's xinputhid children)
-                if (subName.Contains("ROOT#", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!subName.Contains("HID#", StringComparison.OrdinalIgnoreCase)) continue;
-
-                // Extract device instance ID from the registry key name
-                string devPath = subName;
-                int guidStart = devPath.LastIndexOf("#{");
-                if (guidStart < 0) continue;
-                devPath = devPath.Substring(0, guidStart); // remove #{guid}
-                devPath = devPath.Replace("##?#", "");     // remove prefix
-                devPath = devPath.Replace('#', '\\');
-
-                // Verify this has xinputhid as upper filter (confirms it's an Xbox HID child)
-                bool hasXinputHid = false;
-                try
-                {
-                    using var devKey = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Enum\{devPath}");
-                    if (devKey == null) continue;
-                    var upperFilters = devKey.GetValue("UpperFilters") as string[];
-                    hasXinputHid = upperFilters != null && upperFilters.Any(
-                        f => f.Equals("xinputhid", StringComparison.OrdinalIgnoreCase));
-                }
-                catch { continue; }
-                if (!hasXinputHid) continue;
-
-                // Check device status — we only want to disable ghosts (off controllers)
-                bool isGhost = false;
-                uint devInst = 0;
-                // Try locate with NORMAL flag first (present devices only)
-                if (CM_Locate_DevNodeW(out devInst, devPath, 0) != 0)
-                {
-                    // Not present at all — try phantom (paired but removed)
-                    const uint CM_LOCATE_DEVNODE_PHANTOM = 0x00000001;
-                    if (CM_Locate_DevNodeW(out devInst, devPath, CM_LOCATE_DEVNODE_PHANTOM) == 0)
-                        isGhost = true;
-                    else
-                        continue; // Can't even find it as phantom — skip
-                }
-                else
-                {
-                    // Device is present — check if it's actually started (controller on)
-                    const uint DN_HAS_PROBLEM = 0x00000400;
-                    const uint DN_STARTED = 0x00000008;
-                    if (CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0) == 0)
-                    {
-                        if ((status & DN_HAS_PROBLEM) != 0 || (status & DN_STARTED) == 0)
-                            isGhost = true;
-                        else
-                            continue; // Device is started and healthy — real active controller
-                    }
-                    else
-                    {
-                        isGhost = true; // Can't get status — treat as ghost
-                    }
-                }
-
-                if (!isGhost) continue;
-
-                Console.WriteLine($"  Found ghost XUSB interface: {devPath}");
-
-                // Approach 1: Disable the device node to unload xinputhid
-                uint result = CM_Disable_DevNode(devInst, 0);
-                if (result == 0)
-                    Console.WriteLine($"    Disabled device node OK");
-                else
-                    Console.WriteLine($"    CM_Disable_DevNode returned 0x{result:X8}");
-
-                // Approach 2: Also clean the XUSB DeviceClasses registry entry.
-                // This ensures the XInput slot is freed even if CM_Disable_DevNode
-                // didn't fully deactivate the interface.
-                try
-                {
-                    string regPath = @"SYSTEM\CurrentControlSet\Control\DeviceClasses\{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}";
-                    using var classKey = Registry.LocalMachine.OpenSubKey(regPath, writable: true);
-                    if (classKey != null)
-                    {
-                        try
-                        {
-                            classKey.DeleteSubKeyTree(subName);
-                            Console.WriteLine($"    Deleted XUSB registry entry");
-                        }
-                        catch
-                        {
-                            // Try reg.exe fallback
-                            try
-                            {
-                                string fullRegPath = $@"HKLM\{regPath}\{subName}";
-                                RunProcess("reg.exe", $"delete \"{fullRegPath}\" /f", timeoutMs: 3000);
-                                Console.WriteLine($"    Deleted XUSB registry entry (reg.exe)");
-                            }
-                            catch (Exception ex2)
-                            {
-                                Console.WriteLine($"    Warning: could not delete XUSB entry: {ex2.Message}");
-                            }
-                        }
-                    }
-                }
-                catch { }
-
-                // Also clean the WinExInput interface for this device
-                try
-                {
-                    string winExPath = @"SYSTEM\CurrentControlSet\Control\DeviceClasses\{6c53d5fd-6480-440f-b618-476750c5e1a6}";
-                    using var winExKey = Registry.LocalMachine.OpenSubKey(winExPath, writable: true);
-                    if (winExKey != null)
-                    {
-                        // Find matching entry for this device
-                        string devPathHash = devPath.Replace('\\', '#');
-                        foreach (var weSub in winExKey.GetSubKeyNames())
-                        {
-                            if (weSub.Contains(devPathHash, StringComparison.OrdinalIgnoreCase))
-                            {
-                                try
-                                {
-                                    winExKey.DeleteSubKeyTree(weSub);
-                                    Console.WriteLine($"    Deleted WinExInput registry entry");
-                                }
-                                catch
-                                {
-                                    try
-                                    {
-                                        string fullRegPath = $@"HKLM\{winExPath}\{weSub}";
-                                        RunProcess("reg.exe", $"delete \"{fullRegPath}\" /f", timeoutMs: 3000);
-                                        Console.WriteLine($"    Deleted WinExInput registry entry (reg.exe)");
-                                    }
-                                    catch { }
-                                }
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  Warning: DisableGhostXusbInterfaces error: {ex.Message}");
-        }
-    }
-
-    // NOTE: NEVER kill WUDFHost processes. Killing WUDFHost breaks real BT controllers
-    // (Code 43 error). Use pnputil /remove-device + recreate instead.
-
-    /// <summary>Forwards to <see cref="DeviceProperties.ApplyFriendlyNameForController"/>.</summary>
-    static void ApplyFriendlyNameForController(int controllerIndex, string name)
-        => DeviceProperties.ApplyFriendlyNameForController(controllerIndex, name);
-
-    /// <summary>Forwards to <see cref="DeviceProperties.FixHidChildNames"/>.</summary>
-    static void FixHidChildNames(string name, int controllerIndex = -1)
-        => DeviceProperties.FixHidChildNames(name, controllerIndex);
-
-    /// <summary>Forwards to <see cref="DeviceNodeCreator.CreateDeviceNode"/>.
-    /// The full implementation lives in HIDMaestro.Core/Internal/DeviceNodeCreator.cs.
-    /// Kept as a thin wrapper for compatibility with existing call sites.</summary>
-    static bool CreateDeviceNode(ControllerProfile profile, string infPath, int controllerIndex = 0)
-        => DeviceNodeCreator.CreateDeviceNode(profile, infPath, controllerIndex).Success;
-
-    // SetupAPI / newdev P/Invokes — still used by the gamepad/XUSB companion
-    // creators and the createprobe diagnostic. They'll move into the library
-    // when those code paths get extracted in subsequent commits. The library
-    // has its own private copies for DeviceNodeCreator's use; the two sets
-    // are independent (different DllImport sites, same target functions).
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
-
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiCreateDeviceInfoW")]
-    static extern bool SetupDiCreateDeviceInfoW_Raw(IntPtr DeviceInfoSet, string DeviceName,
-        ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
-
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiSetDeviceRegistryPropertyW")]
-    static extern bool SetupDiSetDeviceRegistryPropertyW_Raw(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
-
-    [DllImport("SetupAPI.dll", SetLastError = true, EntryPoint = "SetupDiCallClassInstaller")]
-    static extern bool SetupDiCallClassInstaller_Raw(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
-
-    [DllImport("newdev.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwndParent, string HardwareId,
-        string FullInfPath, int InstallFlags, out bool RebootRequired);
-
-    static bool IsDriverInStore()
-    {
-        var (_, output) = RunProcess("pnputil.exe", "/enum-drivers");
-        return output.Contains("hidmaestro.inf");
-    }
-
-    static bool EnsureDriverInstalled(ControllerProfile? profile = null, int controllerIndex = 0)
-    {
-        {
-            bool needsBuild = DriverBuilder.NeedsBuild();
-            bool driverInstalled = DriverBuilder.IsDriverInstalled();
-
-            if (needsBuild || !driverInstalled)
-            {
-                Console.WriteLine("  Driver deploy needed...");
-                if (!DriverBuilder.FullDeploy(rebuild: needsBuild))
-                    return false;
-            }
-        }
-
-        // companionOnly: skip main HID device — XUSB companion provides DI + XInput + browser.
-        // Real Xbox 360 uses xusb22.sys (no HID at all). DI reads from XInput (5 axes).
-        string? rootInstId = null;
-        if (profile?.CompanionOnly == true)
-        {
-            Console.WriteLine("  Companion-only mode (no main HID device)");
-        }
-        else
-        {
-            // Find existing device for THIS controller index (by ControllerIndex in registry).
-            Console.Write("  Checking device... ");
-            {
-                string[] enumerators = new[] { "HID_IG_00", "XnaComposite",
-                    $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00",
-                    "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
-                    "VID_045E&PID_028E&IG_00" };
-                foreach (string enumer in enumerators)
-                {
-                    try
-                    {
-                        using var ek = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{enumer}");
-                        if (ek == null) continue;
-                        foreach (var inst in ek.GetSubKeyNames())
-                        {
-                            string candidate = $@"ROOT\{enumer}\{inst}";
-                            if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
-                            using var dp = ek.OpenSubKey($@"{inst}\Device Parameters");
-                            var ci = dp?.GetValue("ControllerIndex");
-                            // Claim device if it has our index, OR if it has no index (unclaimed, for index 0)
-                            if ((ci is int ciVal && ciVal == controllerIndex) ||
-                                (ci == null && controllerIndex == 0))
-                            { rootInstId = candidate; break; }
-                        }
-                    }
-                    catch { }
-                    if (rootInstId != null) break;
-                }
-            }
-            string infPath = Path.Combine(BuildDir, "hidmaestro.inf");
-            if (rootInstId != null)
-            {
-                // Device already exists with correct ControllerIndex — use it as-is.
-                // Don't restart/remove — that destroys xinputhid binding and HID children.
-                Console.WriteLine("OK");
-            }
-            else
-            {
-                // Device doesn't exist — create it
-                Console.Write("creating... ");
-                if (profile != null)
-                    CreateDeviceNode(profile, infPath, controllerIndex);
-                else
-                    RunPowerShell("create_node.ps1"); // fallback
-                Thread.Sleep(3000);
-                Console.WriteLine("OK");
-            }
-        }
-
-        // Set device name on root AND HID child
-        Console.Write("  Setting device name... ");
-        string dispName = (string?)Registry.LocalMachine.OpenSubKey(RegPathForIndex(controllerIndex))?.GetValue("DeviceDescription")
-            ?? (string?)Registry.LocalMachine.OpenSubKey(REG_PATH)?.GetValue("DeviceDescription")
-            ?? "Controller";
-
-        // If rootInstId wasn't captured from the existing-device claim above
-        // (i.e. CreateDeviceNode just made a new one), find OUR new instance
-        // by ControllerIndex BEFORE renaming. Without this, the rename runs
-        // against null and the root device gets stuck with the INF default
-        // name "Game Controller".
-        uint rootInst = 0;
-        if (rootInstId == null)
-        {
-            string? enumer = profile?.UsesUpperFilter == true
-                ? $"VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00"
-                : $"VID_{profile?.VendorId:X4}&PID_{profile?.ProductId:X4}&IG_00";
-            try
-            {
-                using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{enumer}");
-                if (enumKey != null)
-                    foreach (var inst in enumKey.GetSubKeyNames())
-                    {
-                        string candidate = $@"ROOT\{enumer}\{inst}";
-                        if (CM_Locate_DevNodeW(out uint ci, candidate, 0) != 0) continue;
-                        using var dp = enumKey.OpenSubKey($@"{inst}\Device Parameters");
-                        if (dp?.GetValue("ControllerIndex") is int idx && idx == controllerIndex)
-                        { rootInst = ci; rootInstId = candidate; break; }
-                    }
-            }
-            catch { }
-        }
-        else
-        {
-            CM_Locate_DevNodeW(out rootInst, rootInstId, 0);
-        }
-
-        if (rootInstId != null)
-        {
-            SetDeviceDescription(rootInstId, dispName);
-            SetBusReportedDeviceDesc(rootInstId, dispName);
-            SetDeviceFriendlyName(rootInstId, dispName);
-        }
-
-        if (rootInst != 0)
-        {
-            if (CM_Get_Child(out uint childInst, rootInst, 0) == 0)
-            {
-                // Walk children to find the HID child
-                uint inst = childInst;
-                do
-                {
-                    // Set name on every child
-                    var friendlyKey = new DEVPROPKEY
-                    {
-                        fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-                        pid = 14
-                    };
-                    var busDescKey = new DEVPROPKEY
-                    {
-                        fmtid = new Guid(0x540b947e, 0x8b40, 0x45bc, 0xa8, 0xa2, 0x6a, 0x0b, 0x89, 0x4c, 0xbd, 0xa2),
-                        pid = 4
-                    };
-                    byte[] nameBytes = Encoding.Unicode.GetBytes(dispName + "\0");
-                    CM_Set_DevNode_PropertyW(inst, ref friendlyKey, 0x12, nameBytes, (uint)nameBytes.Length, 0);
-                    CM_Set_DevNode_PropertyW(inst, ref busDescKey, 0x12, nameBytes, (uint)nameBytes.Length, 0);
-                } while (CM_Get_Sibling(out inst, inst, 0) == 0);
-            }
-        }
-        Console.WriteLine("OK");
-
-        return true;
-    }
-
-    // ── Device restart (remove + recreate) ──
-
-    static void RestartDevice()
-    {
-        Console.Write("  Restarting device node... ");
-
-        // Remove existing nodes (but NOT HIDCLASS — gamepad companion lives there)
-        // RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0000\" /subtree");
-        // RunProcess("pnputil.exe", "/remove-device \"ROOT\\HIDCLASS\\0001\" /subtree");
-        Thread.Sleep(1000);
-
-        // Recreate via the create_node.ps1 script
-        RunPowerShell("create_node.ps1");
-
-        Console.WriteLine("OK");
     }
 
     // ── Find and open HID child device ──
@@ -1918,7 +956,6 @@ class Program
                     var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
                     if (HidD_GetAttributes(handle, ref attrs))
                     {
-                        // Match by VID/PID AND verify it's our root-enumerated device
                         if (attrs.VendorID == targetVid && attrs.ProductID == targetPid
                             && path.Contains("root", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1999,22 +1036,6 @@ class Program
         consoleThread.Start();
 
         // Phase 1: Set up all controllers SEQUENTIALLY (no races).
-        // No artificial cap on count — XInput tops out at 4 slots (Microsoft's
-        // limit, not ours), but DInput / HIDAPI / WGI / browser see all
-        // controllers regardless.
-        //
-        // The HID-child wait inside CreateDeviceNode handles PnP ordering for
-        // non-Xbox profiles. For Xbox profiles we additionally wait for an
-        // XInput slot to be claimed so the slot order matches creation order
-        // (otherwise xinputhid (slow) and our XUSB companion (fast) race for
-        // slot 0 and the slot order doesn't match).
-        //
-        // Verified with `rumbletest hidorder` that the underlying HID
-        // enumeration (the same enumerator WGI uses internally) returns the
-        // controllers in our creation order. Some consumers (e.g. Dolphin)
-        // may *display* them in a different order due to their own
-        // remove+re-insert-on-event behavior — that's the consumer's bug,
-        // not ours.
         var phase1Db = ProfileDatabase.Load(GetProfilesDir());
         for (int i = 0; i < currentIds.Length; i++)
         {
@@ -2049,11 +1070,6 @@ class Program
         }
 
         // Phase 1.5: Re-apply friendly names AFTER all setup is complete.
-        // The per-controller rename inside EmulateProfile races with PnP
-        // driver-bind for the FIRST controller — its CM_Set_DevNode_PropertyW
-        // calls happen before the new device's binding settles, so the
-        // FriendlyName/DeviceDesc writes get lost. Re-applying here, after
-        // all PnP activity is done, makes the writes stick reliably.
         Console.Write("\n  Finalizing device names... ");
         Thread.Sleep(2000);
         {
@@ -2063,13 +1079,13 @@ class Program
                 var p = nameDb.GetById(currentIds[i]);
                 if (p == null) continue;
                 string name = p.DeviceDescription ?? p.ProductString ?? "Controller";
-                ApplyFriendlyNameForController(i, name);
+                DeviceProperties.ApplyFriendlyNameForController(i, name);
             }
         }
         Console.WriteLine("OK");
 
         // Phase 2: Run input loops concurrently. inputLoopOnly=true skips ALL device
-        // setup (Steps 0-3.6) and only opens handles + runs the input loop.
+        // setup and only opens handles + runs the input loop.
         Console.WriteLine($"\n  All controllers ready. Starting input loops...\n");
         var threads = new List<Thread>();
         var outputThreads = new List<Thread>();
@@ -2085,9 +1101,6 @@ class Program
             thread.Start();
             threads.Add(thread);
 
-            // Output passthrough reader: tail Global\HIDMaestroOutput<N> for any
-            // rumble/haptics/FFB the host sends to this virtual controller, and
-            // print a profile-aware summary. The driver/companion are the writers.
             var profile = phase2Db.GetById(pid);
             if (profile != null)
             {
@@ -2214,38 +1227,25 @@ class Program
 
         if (profileDesc != null)
         {
-            // Use the profile descriptor as-is. Data injection uses shared file,
-            // so no output/feature report injection needed.
             descriptor = profileDesc;
             Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (native)\n");
         }
         else
         {
-            descriptor = UniversalDescriptor;
+            descriptor = new byte[] {
+                0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x27, 0xFF,
+                0xFF, 0x00, 0x00, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x09, 0x33, 0x09, 0x34, 0x81, 0x02, 0x09,
+                0x32, 0x09, 0x35, 0x81, 0x02, 0x05, 0x09, 0x19, 0x01, 0x29, 0x0A, 0x15, 0x00, 0x25, 0x01, 0x75,
+                0x01, 0x95, 0x0A, 0x81, 0x02, 0x75, 0x06, 0x95, 0x01, 0x81, 0x01, 0x05, 0x01, 0x09, 0x39, 0x15,
+                0x01, 0x25, 0x08, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81,
+                0x42, 0x75, 0x04, 0x95, 0x01, 0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81,
+                0x03, 0x85, 0x02, 0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
+                0x0E, 0xB1, 0x02, 0xC0,
+            };
             Console.WriteLine($"  Descriptor: {descriptor.Length} bytes (universal)\n");
         }
 
-        // Compute input report length (pure computation from profile, no device ops)
-        int inputReportLen = (profile.InputReportSize ?? 0) > 0
-            ? profile.InputReportSize!.Value
-            : ComputeInputReportByteLength(descriptor);
-
-        // Compute BLE descriptor (pure computation, no device ops)
-        byte[] bleDesc;
-        int bleReportLen;
-        if (profile.UsesUpperFilter)
-        {
-            bleDesc = descriptor;
-            bleReportLen = inputReportLen;
-        }
-        else
-        {
-            bleDesc = descriptor;
-            bleReportLen = inputReportLen;
-        }
-
         // Phase 2 (inputLoopOnly): skip ALL device setup — devices already exist from Phase 1.
-        // Only need to parse descriptors, open handles, and run the input loop.
         SafeFileHandle? h = null;
         SafeFileHandle? xh = null;
         ushort hidFeatureReportLen = 0;
@@ -2253,441 +1253,12 @@ class Program
 
         if (!inputLoopOnly)
         {
-
-        // Step 0: Pre-flight setup (all in code, no external scripts)
-        Console.Write("  Setting up environment... ");
-        EnsureGameInputService();
-        EnsureSharedMapping(controllerIndex);
-        // Pre-create the output passthrough section so the driver/companion
-        // (running as LocalService in WUDFHost without SeCreateGlobalPrivilege)
-        // can OpenFileMapping it. Test app is the only entity that can create
-        // Global\ named sections in this scenario.
-        try { EnsureOutputMapping(controllerIndex); } catch { }
-        if (controllerIndex == 0 && !_ghostsCleanedThisSession)
-        {
-            CleanupGhostDevices();
-            DisableGhostXusbInterfaces();
-            _ghostsCleanedThisSession = true;
-        }
-        // Also clean XUSB companions (only HIDMaestro, NEVER ViGEmBus/HidHide)
-        for (int idx = 0; idx < 10; idx++)
-        {
-            string sysId = $@"ROOT\SYSTEM\{idx:D4}";
-            if (CM_Locate_DevNodeW(out uint _, sysId, 0) == 0)
-            {
-                // Check device identity via registry
-                try
-                {
-                    using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{sysId}");
-                    if (key != null)
-                    {
-                        string? fn = key.GetValue("FriendlyName") as string;
-                        string? dd = key.GetValue("DeviceDesc") as string;
-                        string?[] hwIds = key.GetValue("HardwareID") as string[] ?? Array.Empty<string>();
-                        bool isOurs = (fn != null && fn.Contains("HIDMaestro")) ||
-                                      (dd != null && dd.Contains("HIDMaestro")) ||
-                                      hwIds.Any(h => h != null && h.Contains("HIDMaestro"));
-                        if (isOurs)
-                            DeviceManager.RemoveDevice(sysId);
-                    }
-                }
-                catch { }
-            }
-        }
-        // GameInput registry sets the Gamepad flag so SDL3 uses GetGamepadState (live data)
-        // instead of GetControllerAxisState (zeros). Security fix (GA for Everyone) enables
-        // non-elevated GameInput reading.
-        WriteGameInputRegistry(profile.VendorId, profile.ProductId, profile);
-        Console.WriteLine("OK");
-
-        // Step 1: Write descriptor to registry
-        Console.Write($"  Writing profile to registry (InputReport={inputReportLen}B)... ");
-        // === PID 0001 TRICK (critical for xinputhid profiles) ===
-        //
-        // HID attributes PID is set to 0x0001 (Microsoft mouse), NOT the real PID.
-        // xinputhid matches by HARDWARE ID (PID 02FF), not HID attributes — unaffected.
-        //
-        // Why: GameInput auto-claims Xbox VID/PID as Gamepad but returns ZEROS for
-        // virtual (ROOT-enumerated) devices. PID 0001 isn't in GameInput's gamepad
-        // database, so GameInput skips it entirely.
-        //
-        // SDL3 detection chain with PID 0001:
-        //   HIDAPI: skips (device path has &IG_)
-        //   GameInput: skips (PID 0001 not a gamepad)
-        //   RawInput: skips for gaming (PID 0001 generic)
-        //   XInput: CLAIMS IT → reads from xinputhid's slot → correct identity + live data
-        //
-        // Result: SDL3/PadForge shows "Xbox Series X Controller" via XInput backend.
-        // Python hidapi showing "no devices" is CORRECT — HIDAPI is not the path.
-        // Write BLE descriptor + real VID/PID (companion reads this at startup)
-        // BLE descriptor has Report ID 0x01 which HIDAPI can parse correctly
-        // Companion descriptor: use the profile's native descriptor directly.
-        // For xinputhid profiles, prepend Report ID 0x01 to make mshidumdf happy.
-        // The companion is hidden from HIDAPI (&IG_), so SDL3 sees it through
-        // RawInput/Windows backend which maps by VID/PID, not descriptor parsing.
-        // DirectInput reads this descriptor directly — must match real hardware
-        // (correct axis count, button count, trigger mode).
-        // === Vx/Vy VELOCITY TRICK (Xbox 360 descriptor) ===
-        //
-        // Xbox 360 profiles use Vx (0x40) and Vy (0x41) velocity usages in the HID
-        // descriptor to carry separate trigger values. This solves the DI-vs-browser
-        // trigger dilemma:
-        //   - DirectInput ignores velocity usages → sees 5 axes (X, Y, Z, Rx, Ry)
-        //   - GameInput/WGI reads velocity as extra axes → browser gets separate LT/RT
-        //   - Combined Z axis gives DI the classic Xbox 360 behavior
-        //
-        // The descriptor is in the profile JSON — no code manipulation needed.
-        // (bleDesc/bleReportLen already computed above)
-        // FunctionMode for Xbox HID profiles: skip filter mode so XUSB registers on
-        // the HID device itself. DI sees XUSB → uses XInput mapping (5 axes, 10 buttons).
-        bool funcMode = profile.VendorId == 0x045E && !profile.UsesUpperFilter;
-        WriteConfig(bleDesc, profile.VendorId, profile.ProductId,
-            productString: profile.ProductString,
-            deviceDescription: profile.DeviceDescription,
-            inputReportByteLength: bleReportLen,
-            functionMode: funcMode,
-            controllerIndex: controllerIndex);
-        Console.WriteLine("OK");
-
-        // Ensure driver packages are in the store BEFORE creating any devices.
-        // Devices created without a matching driver enter a bad state requiring reboot.
-        {
-            bool needsBuild = DriverBuilder.NeedsBuild();
-            bool driverInstalled = DriverBuilder.IsDriverInstalled();
-            if (needsBuild || !driverInstalled)
-            {
-                Console.Write("  Installing drivers... ");
-                if (!DriverBuilder.FullDeploy(rebuild: needsBuild))
-                    return Error("Driver build/install failed. Run elevated.");
-                Console.WriteLine("OK");
-            }
-        }
-
-        // Step 1.5: Create Gamepad companion for SDL3 HIDAPI identity.
-        // The companion provides correct VID/PID + BTHLEDEVICE bus type so SDL3's
-        // HIDAPI backend claims it and shows the correct controller name.
-        // Multi-controller: each controllerIndex gets its OWN companion instance.
-        // We claim an existing companion only if its Device Parameters\ControllerIndex
-        // matches ours; otherwise we create a fresh device and write ControllerIndex
-        // to identify it. This mirrors the CreateDeviceNode pattern for non-xinputhid.
-        if (profile.UsesUpperFilter)
-        {
-            Console.Write($"  Creating Gamepad companion {controllerIndex}... ");
-            string gpVid = $"{profile.VendorId:X4}";
-            string gpPid = $"{profile.ProductId:X4}";
-            string hwPid = profile.DriverPid != null
-                ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
-            string gpEnumerator = $"VID_{gpVid}&PID_{hwPid}&IG_00";
-
-            // 1. Look for an existing companion already claimed by THIS controllerIndex
-            string? gpInstId = null;
-            try
-            {
-                using var gpEnum = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Enum\ROOT\{gpEnumerator}");
-                if (gpEnum != null)
-                {
-                    foreach (var inst in gpEnum.GetSubKeyNames())
-                    {
-                        string candidate = $@"ROOT\{gpEnumerator}\{inst}";
-                        if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
-                        using var dp = gpEnum.OpenSubKey($@"{inst}\Device Parameters");
-                        var ci = dp?.GetValue("ControllerIndex");
-                        if (ci is int civ && civ == controllerIndex)
-                        { gpInstId = candidate; break; }
-                    }
-                }
-            }
-            catch { }
-
-            if (gpInstId == null)
-            {
-                // 2. No existing match — create a new companion device.
-                var hidGuid = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
-                IntPtr dis3 = SetupDiCreateDeviceInfoList(ref hidGuid, IntPtr.Zero);
-                if (dis3 != new IntPtr(-1))
-                {
-                    byte[] diBuf3 = new byte[32];
-                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf3, 0);
-                    var diHandle3 = System.Runtime.InteropServices.GCHandle.Alloc(diBuf3, GCHandleType.Pinned);
-                    string gpHw = $"root\\VID_{gpVid}&PID_{hwPid}&IG_00\0root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
-                    byte[] gpHwBytes = Encoding.Unicode.GetBytes(gpHw);
-                    if (SetupDiCreateDeviceInfoW_Raw(dis3, gpEnumerator, ref hidGuid,
-                        "HIDMaestro Gamepad", IntPtr.Zero, 1, diHandle3.AddrOfPinnedObject()))
-                    {
-                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 1, gpHwBytes, (uint)gpHwBytes.Length);
-                        // CompatibleIDs — only spoof BTHLEDEVICE for Bluetooth profiles
-                        string gpCompatBase = $"root\\HIDMaestroGamepad\0root\\HIDMaestro\0\0";
-                        if (profile.Connection == "bluetooth")
-                            gpCompatBase = $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}\0" + gpCompatBase;
-                        byte[] gpCompatBytes = Encoding.Unicode.GetBytes(gpCompatBase);
-                        SetupDiSetDeviceRegistryPropertyW_Raw(dis3, diHandle3.AddrOfPinnedObject(), 2, gpCompatBytes, (uint)gpCompatBytes.Length);
-                        SetupDiCallClassInstaller_Raw(0x19, dis3, diHandle3.AddrOfPinnedObject()); // DIF_REGISTERDEVICE
-                        SetupDiCallClassInstaller_Raw(0x02, dis3, diHandle3.AddrOfPinnedObject()); // DIF_INSTALLDEVICE
-                    }
-                    diHandle3.Free();
-                    SetupDiDestroyDeviceInfoList(dis3);
-                }
-
-                // 3. Find the freshly-created instance: live device with no
-                //    ControllerIndex yet. Same trick CreateDeviceNode uses.
-                try
-                {
-                    using var gpEnum = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{gpEnumerator}");
-                    if (gpEnum != null)
-                    {
-                        foreach (var inst in gpEnum.GetSubKeyNames())
-                        {
-                            string candidate = $@"ROOT\{gpEnumerator}\{inst}";
-                            if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
-                            string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{candidate}\Device Parameters";
-                            using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
-                            if (dpKey.GetValue("ControllerIndex") == null)
-                            {
-                                dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
-                                gpInstId = candidate;
-                                break;
-                            }
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            // 4. Restart THIS controller's companion so it picks up the latest
-            //    descriptor + VID/PID from the per-instance registry config.
-            if (gpInstId != null)
-            {
-                DeviceManager.RestartDevice(gpInstId);
-                Thread.Sleep(2000);
-            }
-            Console.WriteLine("OK");
-
-            // Registry keeps real VID/PID (companion reads it)
-        }
-
-        // Step 2: Build, sign, install driver + create main device node
-        if (!profile.UsesUpperFilter)
-        {
-            if (!EnsureDriverInstalled(profile, controllerIndex))
-                return Error("Driver build/install failed. Run elevated.");
-        }
-        else
-        {
-            Console.WriteLine("  Companion-only mode (no xinputhid main device)");
-        }
-
-        // Step 3: Wait for HID child + xinputhid, then fix device name.
-        // Pass controllerIndex so we ONLY rename our own controller's devices
-        // — never overwrite a sibling controller's friendly name in multi mode.
-        Thread.Sleep(3000);
-        Console.Write("  Fixing device name... ");
-        string displayName = profile.DeviceDescription ?? profile.ProductString;
-        FixHidChildNames(displayName, controllerIndex);
-        // Also set on root device — locate it via Device Parameters\ControllerIndex
-        // so multi-controller doesn't grab the wrong root.
-        {
-            bool found = false;
-            try
-            {
-                using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-                if (rootEnum != null)
-                {
-                    foreach (var sub in rootEnum.GetSubKeyNames())
-                    {
-                        if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
-                        using var subKey = rootEnum.OpenSubKey(sub);
-                        if (subKey == null) continue;
-                        foreach (var inst in subKey.GetSubKeyNames())
-                        {
-                            using var dpKey = Registry.LocalMachine.OpenSubKey(
-                                $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
-                            int actual = (dpKey?.GetValue("ControllerIndex") is int v) ? v : 0;
-                            if (actual != controllerIndex) continue;
-                            string rootId = $@"ROOT\{sub}\{inst}";
-                            SetBusReportedDeviceDesc(rootId, displayName);
-                            SetDeviceFriendlyName(rootId, displayName);
-                            found = true; break;
-                        }
-                        if (found) break;
-                    }
-                }
-            }
-            catch { }
-        }
-        // Final name fix after xinputhid grandchild has fully appeared
-        Thread.Sleep(2000);
-        FixHidChildNames(displayName, controllerIndex);
-
-        // Xbox 360 xinputhid: BtnFix filter (DISABLED — needs proper INF installation)
-        if (false && profile.UsesXinputhid && profile.ProductId == 0x028E)
-        {
-            // Find the xinputhid HID child (HID\VID_045E&PID_02FF&IG_00\...)
-            var hidChild = System.Diagnostics.Process.GetCurrentProcess(); // placeholder
-            string? hidChildId = null;
-            using (var hidEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\HID"))
-            {
-                if (hidEnum != null)
-                {
-                    foreach (var sub in hidEnum.GetSubKeyNames())
-                    {
-                        if (sub.Contains("VID_045E") && sub.Contains("PID_02FF") && sub.Contains("IG_00"))
-                        {
-                            using var devKey = hidEnum.OpenSubKey(sub);
-                            if (devKey != null)
-                            {
-                                foreach (var inst in devKey.GetSubKeyNames())
-                                {
-                                    hidChildId = $@"HID\{sub}\{inst}";
-                                    break;
-                                }
-                            }
-                            if (hidChildId != null) break;
-                        }
-                    }
-                }
-            }
-            if (hidChildId != null)
-            {
-                Console.Write("  Adding BtnFix filter... ");
-                try
-                {
-                    AddBtnFixFilter(hidChildId);
-                    // Restart HID child for filter to load
-                    DeviceManager.RestartDevice(hidChildId);
-                    Thread.Sleep(3000);
-                    Console.WriteLine("OK");
-                }
-                catch (Exception ex) { Console.WriteLine($"FAILED: {ex.Message}"); }
-            }
-        }
-
-        // Set BusTypeGuid to USB on ROOT device and HID children
-        // GameInput uses BusTypeGuid to determine how to read HID reports
-        {
-            var busTypeKey = new DEVPROPKEY
-            {
-                fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
-                pid = 21 // DEVPKEY_Device_BusTypeGuid
-            };
-            byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
-            // DEVPROP_TYPE_GUID = 0x0D
-            foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
-            {
-                for (int idx = 0; idx < 10; idx++)
-                {
-                    string devId = $@"ROOT\{enumer}\{idx:D4}";
-                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
-                    {
-                        CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
-                            usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        // Also set on HID child
-                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                        {
-                            CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
-                                usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        }
-                    }
-                }
-            }
-        }
-        Console.WriteLine("OK");
-
-        // Step 3.5: Create XUSB companion for XInput — non-xinputhid Xbox profiles ONLY.
-        // For xinputhid profiles (Xbox Series BT, etc.), xinputhid auto-loads on the
-        // HID child of the gamepad companion and provides XInput itself. Creating an
-        // XUSB companion in that case produces a duplicate XInput slot.
-        if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
-        {
-            Console.Write($"  Creating XUSB companion {controllerIndex}... ");
-            // Each controller gets its own XUSB companion for independent XInput slots.
-            // Check if THIS controller's companion already exists
-            // Find live companion for this controllerIndex
-            string? xusbInstId = null;
-            try
-            {
-                using var hmEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\HMCOMPANION");
-                if (hmEnum != null)
-                    foreach (var inst in hmEnum.GetSubKeyNames())
-                    {
-                        string candidate = $@"ROOT\HMCOMPANION\{inst}";
-                        if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
-                        using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
-                        if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
-                        { xusbInstId = candidate; break; }
-                    }
-            }
-            catch { }
-            bool xusbExists = xusbInstId != null;
-            if (!xusbExists)
-            {
-                var sysGuid = new Guid("4D36E97D-E325-11CE-BFC1-08002BE10318");
-                IntPtr dis2 = SetupDiCreateDeviceInfoList(ref sysGuid, IntPtr.Zero);
-                if (dis2 != new IntPtr(-1))
-                {
-                    byte[] diBuf = new byte[32];
-                    BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf, 0);
-                    var diHandle = System.Runtime.InteropServices.GCHandle.Alloc(diBuf, GCHandleType.Pinned);
-                    string xusbHw = "root\\HIDMaestroXUSB\0\0";
-                    byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
-                    string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-                    if (SetupDiCreateDeviceInfoW_Raw(dis2, "HMCompanion", ref sysGuid,
-                        companionDesc, IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
-                    {
-                        SetupDiSetDeviceRegistryPropertyW_Raw(dis2, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
-                        SetupDiCallClassInstaller_Raw(0x19, dis2, diHandle.AddrOfPinnedObject());
-                    }
-                    diHandle.Free();
-                    SetupDiDestroyDeviceInfoList(dis2);
-                    // Find the actual instance PnP created (live, no ControllerIndex yet)
-                    try
-                    {
-                        using var hmEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\HMCOMPANION");
-                        if (hmEnum != null)
-                            foreach (var inst in hmEnum.GetSubKeyNames())
-                            {
-                                string candidate = $@"ROOT\HMCOMPANION\{inst}";
-                                if (CM_Locate_DevNodeW(out uint _, candidate, 0) != 0) continue;
-                                string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{candidate}\Device Parameters";
-                                using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
-                                if (dpKey.GetValue("ControllerIndex") == null)
-                                {
-                                    dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
-                                    xusbInstId = candidate;
-                                    break;
-                                }
-                            }
-                    }
-                    catch { }
-                    // Trigger driver binding and wait for XUSB interface.
-                    if (xusbInstId == null) xusbInstId = $@"ROOT\HMCOMPANION\{controllerIndex:D4}";
-                    var xusbGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
-                    for (int attempt = 0; attempt < 3; attempt++)
-                    {
-                        RunProcess("pnputil.exe", $"/restart-device \"{xusbInstId}\"", timeoutMs: 5000);
-                        if (DeviceManager.WaitForDeviceInterface(xusbInstId, xusbGuid, timeoutMs: 5000))
-                            break;
-                        // Error state — restart device to retry
-                        DeviceManager.RestartDevice(xusbInstId);
-                    }
-                }
-            }
-            else
-            {
-                DeviceManager.RestartDevice(xusbInstId);
-            }
-            // Set companion name to match the controller profile
-            string companionName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-            SetBusReportedDeviceDesc(xusbInstId, companionName);
-            SetDeviceFriendlyName(xusbInstId, companionName);
-            Console.WriteLine("OK");
-        }
-
-        // (Gamepad companion already created in Step 1.5)
-
-        } // end if (!inputLoopOnly) — skip device setup for Phase 2
+            // Full setup via SDK orchestrator
+            Console.Write("  Setting up controller via SDK... ");
+            string infPath = Path.Combine(BuildDir, "hidmaestro.inf");
+            DeviceOrchestrator.SetupController(controllerIndex, profile, infPath);
+            Console.WriteLine($"OK ({setupSw.ElapsedMilliseconds}ms)");
+        } // end if (!inputLoopOnly)
 
         // Step 4: Open the HID child device (runs for both setup and inputLoopOnly)
         Console.Write("  Opening HID device... ");
@@ -2740,7 +1311,6 @@ class Program
                         if (SetupDiGetDeviceInterfaceDetailW(xDis, ref xDid, xDetail, xReq, out _, IntPtr.Zero))
                         {
                             string xPath = Marshal.PtrToStringUni(xDetail + 4)!;
-                            // Open our device's XUSB interface (ROOT#HID_IG_00 or ROOT#SYSTEM)
                             if (xPath.Contains("root#", StringComparison.OrdinalIgnoreCase))
                             {
                                 xh = CreateFileW(xPath, GENERIC_READ | GENERIC_WRITE,
@@ -2757,19 +1327,16 @@ class Program
         }
 
         // Parse the descriptor to build a generic input report packer
-        // Parse the ORIGINAL profile descriptor (before Feature Report injection)
-        // GIP builder: used for XUSB GET_STATE data AND as report builder for xinputhid profiles
         byte[] gipDescBytes = Convert.FromHexString("05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0");
         var gipBuilder = HidReportBuilder.Parse(gipDescBytes);
         Console.WriteLine("  GIP builder layout:");
         gipBuilder.PrintLayout();
         Console.WriteLine($"    RightTrigger: {(gipBuilder.RightTrigger != null ? $"bit {gipBuilder.RightTrigger.BitOffset}, {gipBuilder.RightTrigger.BitSize}b" : "NULL!")}");
-        // Quick test: build with RT=0.8 and check bytes 10-11
         byte[] testGip = gipBuilder.BuildReport(rightTrigger: 0.8);
         Console.WriteLine($"    Test RT=0.8: bytes[10-11] = 0x{testGip[10]:X2}{testGip[11]:X2} = {(testGip[10] | (testGip[11] << 8)) & 0x3FF}");
 
-        // For xinputhid profiles with companion, use BLE descriptor builder (Report ID 0x01)
-        // For other profiles, parse the profile descriptor directly
+        // BLE descriptor for report builder
+        byte[] bleDesc = descriptor;
         var reportBuilder = profile.UsesUpperFilter
             ? HidReportBuilder.Parse(bleDesc)
             : HidReportBuilder.Parse(profileDesc ?? descriptor);
@@ -2783,8 +1350,6 @@ class Program
         Console.WriteLine("  Sending input. Type a profile ID to switch, 'quit' to exit.\n");
         timeBeginPeriod(1); // Enable 1ms timer resolution for 1000 Hz loop
 
-        // Feature report: Report ID 0x02 + enough data for the input report
-        // Output Report buffer
         int reportBufSize = reportBuilder.InputReportByteSize;
         if (h != null)
         {
@@ -2798,14 +1363,13 @@ class Program
         }
         Console.WriteLine($"  Report buffer: {reportBufSize} bytes");
 
-        // Shared memory IPC: pagefile-backed named section in Global\ namespace.
-        // Driver opens by name. RAM-only — no disk I/O.
+        // Shared memory IPC
         int ctrlIndex = controllerIndex;
         IntPtr sharedView = IntPtr.Zero;
         uint sharedMemSeqNo = 0;
         try
         {
-            sharedView = EnsureSharedMapping(ctrlIndex);
+            sharedView = SharedMemoryIO.EnsureInputMapping(ctrlIndex);
             Console.WriteLine($"  Shared memory: OK (Global\\HIDMaestroInput{ctrlIndex})");
         }
         catch (Exception ex)
@@ -2820,45 +1384,33 @@ class Program
         while (!_cts.Token.IsCancellationRequested && _switchToProfile == null)
         {
             double t = sw.Elapsed.TotalSeconds;
-            // Each controller MUST have visually distinct movement across ALL APIs
-            // for testing. Speed, direction, and phase all vary by index.
-            // DO NOT MODIFY this to fix a single-API bug — the problem is elsewhere.
-            double speed = 0.5 + ctrlIndex * 0.3;                       // 0.5, 0.8, 1.1, 1.4 Hz
-            double direction = (ctrlIndex % 2 == 0) ? 1.0 : -1.0;      // even=CW, odd=CCW
-            double phase = ctrlIndex * Math.PI / 2;                     // 0°, 90°, 180°, 270°
+            double speed = 0.5 + ctrlIndex * 0.3;
+            double direction = (ctrlIndex % 2 == 0) ? 1.0 : -1.0;
+            double phase = ctrlIndex * Math.PI / 2;
             double angle = t * Math.PI * 2 * speed * direction + phase;
 
             double lxNorm = 0.5 + 0.46 * Math.Sin(angle);
             double lyNorm = 0.5 + 0.46 * Math.Cos(angle);
-            uint btnMask = ((int)t % 2 == 0) ? 0x01u : 0x00u; // Toggle button A
+            uint btnMask = ((int)t % 2 == 0) ? 0x01u : 0x00u;
 
-            // Triggers: cycle through sweep pattern (15s cycle)
-            // Phase 0-3s:  LT pulls 0→full, RT idle
-            // Phase 3-6s:  LT releases full→0, RT idle
-            // Phase 6-9s:  RT pulls 0→full, LT idle
-            // Phase 9-12s: Both pull together 0→full
-            // Phase 12-15s: Both release full→0
             double triggerPhase = (t % 15.0);
             double ltVal, rtVal;
             if (profile.HasCombinedTriggers)
             {
-                // Combined Z: 0.5=center, 0.0=LT full, 1.0=RT full
-                // Both full = cancel out = center (0.5)
                 if (triggerPhase < 3.0)
-                    ltVal = 0.5 - 0.5 * (triggerPhase / 3.0);         // center → LT full
+                    ltVal = 0.5 - 0.5 * (triggerPhase / 3.0);
                 else if (triggerPhase < 6.0)
-                    ltVal = 0.5 * ((triggerPhase - 3.0) / 3.0);       // LT full → center
+                    ltVal = 0.5 * ((triggerPhase - 3.0) / 3.0);
                 else if (triggerPhase < 9.0)
-                    ltVal = 0.5 + 0.5 * ((triggerPhase - 6.0) / 3.0); // center → RT full
+                    ltVal = 0.5 + 0.5 * ((triggerPhase - 6.0) / 3.0);
                 else if (triggerPhase < 12.0)
-                    ltVal = 1.0 - 0.5 * ((triggerPhase - 9.0) / 3.0); // RT full → center
+                    ltVal = 1.0 - 0.5 * ((triggerPhase - 9.0) / 3.0);
                 else
-                    ltVal = 0.5; // both full = cancel = center
+                    ltVal = 0.5;
                 rtVal = 0.0;
             }
             else
             {
-                // Separate: each 0.0=released, 1.0=full
                 if (triggerPhase < 3.0)
                     { ltVal = triggerPhase / 3.0; rtVal = 0.0; }
                 else if (triggerPhase < 6.0)
@@ -2866,15 +1418,11 @@ class Program
                 else if (triggerPhase < 9.0)
                     { ltVal = 0.0; rtVal = (triggerPhase - 6.0) / 3.0; }
                 else if (triggerPhase < 12.0)
-                    { ltVal = (triggerPhase - 9.0) / 3.0; rtVal = 1.0; }  // Both engage
+                    { ltVal = (triggerPhase - 9.0) / 3.0; rtVal = 1.0; }
                 else
-                    { ltVal = 1.0 - (triggerPhase - 12.0) / 3.0; rtVal = 1.0 - (triggerPhase - 12.0) / 3.0; } // Both release
+                    { ltVal = 1.0 - (triggerPhase - 12.0) / 3.0; rtVal = 1.0 - (triggerPhase - 12.0) / 3.0; }
             }
 
-            // Separate trigger values: sequential ramp pattern
-            // Phase 0-3: LT up, RT=0. Phase 3-6: LT down, RT=0.
-            // Phase 6-9: LT=0, RT up. Phase 9-12: LT up, RT holds.
-            // Phase 12-15: both ramp down together.
             double sepLt, sepRt;
             if (triggerPhase < 3.0)
                 { sepLt = triggerPhase / 3.0; sepRt = 0.0; }
@@ -2893,23 +1441,11 @@ class Program
                 leftTrigger: sepLt, rightTrigger: sepRt,
                 hatValue: 0, buttonMask: btnMask);
 
-            // Publish to shared memory section: 86 bytes via seqlock.
-            // Data = native HID report (for DirectInput via HID READ_REPORT)
-            // GipData = GIP format (for XInput via XUSB GET_STATE)
             if (sharedView != IntPtr.Zero)
             {
                 int dataStart = reportBuilder.InputReportId != 0 ? 1 : 0;
                 int dataLen = Math.Min(inputReport.Length - dataStart, 64);
 
-                // Build GipData with exact layout the companion expects:
-                // [0..1]  LX (16-bit unsigned)
-                // [2..3]  LY (16-bit unsigned)
-                // [4..5]  RX (16-bit unsigned)
-                // [6..7]  RY (16-bit unsigned)
-                // [8..9]  LT (10-bit in low bits)
-                // [10..11] RT (10-bit in low bits)
-                // [12]    btnLow (A=0x01, B=0x02, X=0x04, Y=0x08, LB=0x10, RB=0x20, LS=0x40, RS=0x80)
-                // [13]    btnHigh (Back=0x01, Start=0x02, hat in bits 2-5)
                 byte[] gipData = new byte[14];
                 BitConverter.GetBytes((ushort)(lxNorm * 65535)).CopyTo(gipData, 0);
                 BitConverter.GetBytes((ushort)(lyNorm * 65535)).CopyTo(gipData, 2);
@@ -2918,41 +1454,37 @@ class Program
                 BitConverter.GetBytes((ushort)(sepLt * 1023)).CopyTo(gipData, 8);
                 BitConverter.GetBytes((ushort)(sepRt * 1023)).CopyTo(gipData, 10);
                 byte btnLow = 0;
-                if ((btnMask & 0x001) != 0) btnLow |= 0x01; // A
-                if ((btnMask & 0x002) != 0) btnLow |= 0x02; // B
-                if ((btnMask & 0x004) != 0) btnLow |= 0x04; // X
-                if ((btnMask & 0x008) != 0) btnLow |= 0x08; // Y
-                if ((btnMask & 0x010) != 0) btnLow |= 0x10; // LB
-                if ((btnMask & 0x020) != 0) btnLow |= 0x20; // RB
-                if ((btnMask & 0x100) != 0) btnLow |= 0x40; // LS (button 9)
-                if ((btnMask & 0x200) != 0) btnLow |= 0x80; // RS (button 10)
+                if ((btnMask & 0x001) != 0) btnLow |= 0x01;
+                if ((btnMask & 0x002) != 0) btnLow |= 0x02;
+                if ((btnMask & 0x004) != 0) btnLow |= 0x04;
+                if ((btnMask & 0x008) != 0) btnLow |= 0x08;
+                if ((btnMask & 0x010) != 0) btnLow |= 0x10;
+                if ((btnMask & 0x020) != 0) btnLow |= 0x20;
+                if ((btnMask & 0x100) != 0) btnLow |= 0x40;
+                if ((btnMask & 0x200) != 0) btnLow |= 0x80;
                 gipData[12] = btnLow;
                 byte btnHigh = 0;
-                if ((btnMask & 0x040) != 0) btnHigh |= 0x01; // Back (button 7)
-                if ((btnMask & 0x080) != 0) btnHigh |= 0x02; // Start (button 8)
+                if ((btnMask & 0x040) != 0) btnHigh |= 0x01;
+                if ((btnMask & 0x080) != 0) btnHigh |= 0x02;
                 gipData[13] = btnHigh;
 
-                // Native HID payload extracted from inputReport (skip Report ID byte if present)
                 byte[] nativeData = new byte[dataLen];
                 Array.Copy(inputReport, dataStart, nativeData, 0, dataLen);
 
-                // Atomic seqlock publish — single-writer, lock-free, no disk I/O
-                WriteSharedInput(sharedView, ref sharedMemSeqNo, nativeData, dataLen, gipData);
+                SharedMemoryIO.WriteInputFrame(sharedView, ref sharedMemSeqNo, nativeData, dataLen, gipData);
             }
             bool ok = true;
 
             // Send GIP-format data to XUSB companion for XInput
-            // Uses SEPARATE trigger values (sepLt/sepRt), not combined ltVal.
             if (xh != null)
             {
                 byte[] xusbIn = new byte[17];
-                xusbIn[0] = 0x01; xusbIn[1] = 0x01; xusbIn[2] = 0x00; // GET_STATE header
-                // GIP layout: LX(2) LY(2) RX(2) RY(2) LT(2) RT(2) BtnLow(1) BtnHigh(1)
+                xusbIn[0] = 0x01; xusbIn[1] = 0x01; xusbIn[2] = 0x00;
                 ushort xLx = (ushort)(lxNorm * 65535);
                 ushort xLy = (ushort)(lyNorm * 65535);
                 ushort xRx = (ushort)(0.5 * 65535);
                 ushort xRy = (ushort)(0.5 * 65535);
-                ushort xLt = (ushort)(sepLt * 1023);  // 10-bit separate trigger
+                ushort xLt = (ushort)(sepLt * 1023);
                 ushort xRt = (ushort)(sepRt * 1023);
                 BitConverter.GetBytes(xLx).CopyTo(xusbIn, 3);
                 BitConverter.GetBytes(xLy).CopyTo(xusbIn, 5);
@@ -2961,7 +1493,7 @@ class Program
                 BitConverter.GetBytes(xLt).CopyTo(xusbIn, 11);
                 BitConverter.GetBytes(xRt).CopyTo(xusbIn, 13);
                 byte btnLow = 0;
-                if ((btnMask & 0x01) != 0) btnLow |= 0x01; // A
+                if ((btnMask & 0x01) != 0) btnLow |= 0x01;
                 xusbIn[15] = btnLow;
                 xusbIn[16] = 0;
                 byte[] xusbOut = new byte[29];
@@ -2975,7 +1507,7 @@ class Program
                 failCount++;
                 if (failCount == 1)
                     Console.Error.WriteLine($"  HID send failed: {err} (0x{err:X})");
-                if (failCount > 100) break; // Only exit after 100 consecutive failures
+                if (failCount > 100) break;
             }
             else
             {
@@ -2993,7 +1525,7 @@ class Program
                 Console.Write($"\r  #{count} gip[0-3]: {gLx2:X4} {gLy2:X4}  xi: {xLx} {xLy}  lx={lxNorm:F3} ly={lyNorm:F3}  ");
             }
 
-            Thread.Sleep(1); // ~1000 Hz with timeBeginPeriod(1)
+            Thread.Sleep(1);
         }
 
         Console.WriteLine($"\n\n  Sent {count} reports.");
@@ -3006,7 +1538,6 @@ class Program
         }
 
         Console.Write("\n  Cleaning up devices... ");
-        // Fast cleanup using CM APIs — no pnputil process spawning
         try
         {
             using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
@@ -3031,7 +1562,6 @@ class Program
 
     static string GetProfilesDir()
     {
-        // Walk up from exe to find profiles/ directory
         string? dir = AppContext.BaseDirectory;
         for (int i = 0; i < 8 && dir != null; i++)
         {
@@ -3039,7 +1569,6 @@ class Program
             if (Directory.Exists(candidate)) return candidate;
             dir = Path.GetDirectoryName(dir);
         }
-        // Fallback to known path
         return @"C:\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\profiles";
     }
 
@@ -3104,23 +1633,19 @@ class Program
     {
         Console.WriteLine($"Setting device name to: \"{name}\"\n");
 
-        // Set FriendlyName on root
         Console.Write("  Setting FriendlyName on root... ");
-        SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", name);
+        DeviceProperties.SetDeviceFriendlyName(@"ROOT\HID_IG_00\0000", name);
         Console.WriteLine();
 
-        // Set BusReportedDeviceDesc on root
         Console.Write("  Setting BusReportedDeviceDesc on root... ");
-        SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", name);
+        DeviceProperties.SetBusReportedDeviceDesc(@"ROOT\HID_IG_00\0000", name);
         Console.WriteLine();
 
-        // Verify
         uint locResult = CM_Locate_DevNodeW(out uint devInst, @"ROOT\HID_IG_00\0000", 0);
         Console.WriteLine($"  Locate root: result={locResult} inst={devInst}");
 
         if (locResult == 0)
         {
-            // Try reading back FriendlyName
             var fnKey = new DEVPROPKEY
             {
                 fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
@@ -3155,7 +1680,6 @@ class Program
             HidD_FreePreparsedData(ppd);
         }
 
-        // Try to read one input report (blocking, will wait for data)
         Console.Write("  Reading input report (waiting for data)... ");
         byte[] buf = new byte[17];
         bool ok = ReadFile(h, buf, (uint)buf.Length, out uint bytesRead, IntPtr.Zero);
@@ -3167,7 +1691,6 @@ class Program
                 Console.Write($"{buf[i]:X2} ");
             Console.WriteLine();
 
-            // Parse axes
             if (bytesRead >= 9)
             {
                 ushort lx = (ushort)(buf[1] | (buf[2] << 8));
@@ -3196,7 +1719,6 @@ class Program
     {
         Console.WriteLine("-- Windows.Gaming.Input Test --\n");
 
-        // WGI needs event-based discovery. Register for events, then pump messages.
         var found = new List<Windows.Gaming.Input.RawGameController>();
         var foundGamepads = new List<Windows.Gaming.Input.Gamepad>();
 
@@ -3215,7 +1737,6 @@ class Program
             Console.WriteLine($"  [EVENT] Gamepad added (standard mapping!)");
         };
 
-        // Check existing devices
         var existing = Windows.Gaming.Input.RawGameController.RawGameControllers;
         Console.WriteLine($"Existing RawControllers: {existing.Count}");
         foreach (var rc in existing)
@@ -3229,13 +1750,11 @@ class Program
         var existingGamepads = Windows.Gaming.Input.Gamepad.Gamepads;
         Console.WriteLine($"Existing Gamepads: {existingGamepads.Count}");
 
-        // WGI needs a Win32 message pump for device notifications
         Console.WriteLine("\nPumping messages for 5s...");
         var sw2 = Stopwatch.StartNew();
         while (sw2.ElapsedMilliseconds < 5000)
         {
-            // Win32 PeekMessage/DispatchMessage pump
-            while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, 1)) // PM_REMOVE
+            while (PeekMessageW(out MSG msg, IntPtr.Zero, 0, 0, 1))
             {
                 TranslateMessage(ref msg);
                 DispatchMessageW(ref msg);
@@ -3266,9 +1785,6 @@ class Program
     struct XINPUT_STATE
     {
         public uint dwPacketNumber;
-        // We don't care about the gamepad fields for slot enumeration —
-        // the return code (0 = ERROR_SUCCESS / connected; 1167 = NOT_CONNECTED)
-        // is all we need. The struct just needs to be large enough.
         public ushort wButtons;
         public byte bLeftTrigger;
         public byte bRightTrigger;
@@ -3278,12 +1794,6 @@ class Program
         public short sThumbRY;
     }
 
-    /// <summary>Returns the number of XInput slots currently reporting as
-    /// connected (0..4). Used to wait for a freshly-created Xbox profile to
-    /// claim its slot before the next profile is created — without this,
-    /// xinput1_4's enumeration order is determined by which transport
-    /// (xinputhid vs XUSB) finishes registering first, not by our setup
-    /// order, leading to non-intuitive slot assignments.</summary>
     static int CountConnectedXInputSlots()
     {
         int count = 0;
@@ -3294,16 +1804,9 @@ class Program
         return count;
     }
 
-    /// <summary>True if the profile is for a controller that registers as
-    /// an XInput device. Sony / generic HID profiles return false (they
-    /// don't take XInput slots, so there's nothing to wait for).</summary>
     static bool ProfileTakesXInputSlot(ControllerProfile? p) =>
         p != null && p.VendorId == 0x045E;
 
-    /// <summary>Pump Win32 messages on the calling thread for the given
-    /// number of milliseconds. Used to drain WGI's RawGameControllerAdded
-    /// events, which only fire when the thread that subscribed pumps
-    /// messages.</summary>
     static void PumpMessagesFor(int ms)
     {
         var sw = Stopwatch.StartNew();
@@ -3318,11 +1821,6 @@ class Program
         }
     }
 
-    /// <summary>Sends a rumble or HID output report to a virtual controller for
-    /// end-to-end verification of the output passthrough channel. Usage:
-    ///   rumbletest xinput &lt;slot&gt;            — XInputSetState on XInput slot
-    ///   rumbletest hid &lt;vid&gt; &lt;pid&gt; &lt;reportId&gt; &lt;hex...&gt;
-    /// </summary>
     static int RumbleTest(string[] args)
     {
         if (args.Length == 0)
@@ -3352,23 +1850,11 @@ class Program
 
         if (args[0] == "hidorder")
         {
-            // Dead-simple order check: enumerate HID gamepads via the same
-            // Windows.Devices.HumanInterfaceDevice path that every well-behaved
-            // WGI/UWP consumer uses, and dump their serials in iteration order.
-            //
-            // If serials come out in HM-CTL-0000, 0001, 0002, 0003 order then
-            // every reasonable consumer sees them in creation order. Anything
-            // that displays them in a different order (like Dolphin's
-            // remove+re-insert-on-event behavior) is the consumer's own bug,
-            // not ours.
             ushort vid = args.Length > 1 ? ushort.Parse(args[1], System.Globalization.NumberStyles.HexNumber) : (ushort)0x054C;
             ushort pid = args.Length > 2 ? ushort.Parse(args[2], System.Globalization.NumberStyles.HexNumber) : (ushort)0x0CE6;
 
             Console.WriteLine($"-- HID enumeration order (HidDevice.GetDeviceSelector / FindAllAsync) for VID=0x{vid:X4} PID=0x{pid:X4} --\n");
 
-            // Selector matches gamepad usage page (0x0001) usage (0x0005)
-            // for the given VID/PID. Same filter WGI uses for gamepad-shaped
-            // RawGameControllers.
             string selector = Windows.Devices.HumanInterfaceDevice.HidDevice.GetDeviceSelector(0x0001, 0x0005, vid, pid);
             var devices = Windows.Devices.Enumeration.DeviceInformation.FindAllAsync(selector).GetAwaiter().GetResult();
 
@@ -3376,8 +1862,6 @@ class Program
             foreach (var info in devices)
             {
                 Console.WriteLine($"  [{n++}] id: {info.Id}");
-                // Open via SetupAPI (since the WinRT HidDevice opens are blocked
-                // by HID class for already-opened devices) and read the serial.
                 var h = CreateFileW(info.Id, 0, 0x03, IntPtr.Zero, 3, 0, IntPtr.Zero);
                 if (!h.IsInvalid)
                 {
@@ -3401,25 +1885,12 @@ class Program
 
         if (args[0] == "wgi")
         {
-            // Read-only WGI enumeration: dumps every gamepad WGI sees and the
-            // order WGI returns them in. Used to diagnose enumeration-order
-            // bugs (Dolphin/browser see DualSense in reverse from what we
-            // created). Bypasses cleanup hooks via the rumbletest mode.
-            //
-            // WGI is event-driven and won't enumerate at all unless you've
-            // subscribed to its events first (the subscription primes the
-            // discovery plumbing). After subscribing, we pump messages so the
-            // RawGameControllerAdded events for already-present devices get
-            // delivered, then read the static .RawGameControllers list which
-            // is populated as a side effect.
             Console.WriteLine("-- WGI enumeration order --\n");
             var seen = new List<Windows.Gaming.Input.RawGameController>();
             Windows.Gaming.Input.RawGameController.RawGameControllerAdded += (_, rc) => seen.Add(rc);
 
-            // Touch the static collection to kick the enumerator
             _ = Windows.Gaming.Input.RawGameController.RawGameControllers;
 
-            // Pump for ~3s so the [Added] events drain
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 3000)
             {
@@ -3431,8 +1902,6 @@ class Program
                 Thread.Sleep(50);
             }
 
-            // Combine: events that fired during pumping + anything in the
-            // static list right now (de-duplicated by NonRoamableId).
             var listed = Windows.Gaming.Input.RawGameController.RawGameControllers;
             var combined = new List<Windows.Gaming.Input.RawGameController>(seen);
             foreach (var rc in listed)
@@ -3453,11 +1922,6 @@ class Program
 
         if (args[0] == "serials")
         {
-            // Walk every HID device matching the given VID/PID and dump
-            // (path, attributes, manufacturer, product, serial). Used to
-            // verify that two virtual controllers with the same VID/PID
-            // are disambiguated by HidD_GetSerialNumberString — that's the
-            // string SDL3 / HIDAPI / PadForge use as the unique key.
             if (args.Length < 3)
             {
                 Console.WriteLine("usage: rumbletest serials <vid_hex> <pid_hex>");
@@ -3470,7 +1934,7 @@ class Program
             Guid hidGuid;
             HidD_GetHidGuid(out hidGuid);
             IntPtr devs = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero,
-                0x10 | 0x02 /* DIGCF_DEVICEINTERFACE | DIGCF_PRESENT */);
+                0x10 | 0x02);
             if (devs == new IntPtr(-1)) { Console.WriteLine("SetupDiGetClassDevs failed"); return 2; }
 
             int found = 0;
@@ -3528,81 +1992,6 @@ class Program
             return 0;
         }
 
-        if (args[0] == "createprobe")
-        {
-            // Empirically check which steps of CreateDeviceNode actually need admin.
-            // Run this from a non-elevated shell to find out what gates the device
-            // creation API on standard-user contexts. We test each call in isolation
-            // and report the exact Win32 error so we know whether a service-based
-            // architecture is needed for unprivileged consumers, or whether the
-            // existing direct path works post-install.
-            Console.WriteLine($"Running as elevated: {IsElevated()}");
-            Console.WriteLine();
-
-            // Step 1: Build a device info set for HIDClass
-            Guid hidClass = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
-            IntPtr dis = SetupDiCreateDeviceInfoList(ref hidClass, IntPtr.Zero);
-            if (dis == new IntPtr(-1))
-            {
-                Console.WriteLine($"FAIL  SetupDiCreateDeviceInfoList  err={Marshal.GetLastWin32Error()}");
-                return 2;
-            }
-            Console.WriteLine("OK    SetupDiCreateDeviceInfoList");
-
-            try
-            {
-                // Step 2: Create a device info entry (in-memory only at this stage)
-                byte[] devInfoBuf = new byte[32];
-                int devInfoSize = IntPtr.Size == 8 ? 32 : 28;
-                BitConverter.GetBytes(devInfoSize).CopyTo(devInfoBuf, 0);
-                var diHandle = GCHandle.Alloc(devInfoBuf, GCHandleType.Pinned);
-                try
-                {
-                    string enumer = "VID_DEAD&PID_BEEF&IG_00";  // bogus, won't conflict
-                    string desc = "HIDMaestro probe device";
-                    if (!SetupDiCreateDeviceInfoW_Raw(dis, enumer, ref hidClass, desc, IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
-                    {
-                        Console.WriteLine($"FAIL  SetupDiCreateDeviceInfoW          err={Marshal.GetLastWin32Error()}");
-                        return 3;
-                    }
-                    Console.WriteLine("OK    SetupDiCreateDeviceInfoW");
-
-                    // Step 3: Set hardware ID property
-                    string hwMulti = $"root\\VID_DEAD&PID_BEEF&IG_00\0root\\HIDMaestroProbe\0\0";
-                    byte[] hwBytes = Encoding.Unicode.GetBytes(hwMulti);
-                    if (!SetupDiSetDeviceRegistryPropertyW_Raw(dis, diHandle.AddrOfPinnedObject(), 1, hwBytes, (uint)hwBytes.Length))
-                    {
-                        Console.WriteLine($"FAIL  SetupDiSetDeviceRegistryPropertyW  err={Marshal.GetLastWin32Error()}");
-                        return 4;
-                    }
-                    Console.WriteLine("OK    SetupDiSetDeviceRegistryPropertyW");
-
-                    // Step 4: The big one. DIF_REGISTERDEVICE actually creates the
-                    // root-enumerated PnP node. This is where SeLoadDriverPrivilege
-                    // is documented to be required.
-                    if (!SetupDiCallClassInstaller_Raw(0x19, dis, diHandle.AddrOfPinnedObject()))
-                    {
-                        int err = Marshal.GetLastWin32Error();
-                        Console.WriteLine($"FAIL  DIF_REGISTERDEVICE                err={err}  (0x{err:X8})");
-                        if (err == 5) Console.WriteLine("        ERROR_ACCESS_DENIED — needs admin / SeLoadDriverPrivilege");
-                        if (err == 1314) Console.WriteLine("        ERROR_PRIVILEGE_NOT_HELD — needs SeLoadDriverPrivilege");
-                        return 5;
-                    }
-                    Console.WriteLine("OK    DIF_REGISTERDEVICE  *** device created ***");
-
-                    // Step 5: cleanup — REMOVE the probe device immediately
-                    SetupDiCallClassInstaller_Raw(0x05, dis, diHandle.AddrOfPinnedObject()); // DIF_REMOVE
-                    Console.WriteLine("OK    DIF_REMOVE  (cleanup)");
-                }
-                finally { diHandle.Free(); }
-            }
-            finally { SetupDiDestroyDeviceInfoList(dis); }
-
-            Console.WriteLine();
-            Console.WriteLine("RESULT: device creation works in this context");
-            return 0;
-        }
-
         if (args[0] == "checkout")
         {
             int idx = args.Length > 1 ? int.Parse(args[1]) : 0;
@@ -3656,7 +2045,6 @@ class Program
             using var h = OpenHidDevice(path);
             if (h == null || h.IsInvalid) { Console.WriteLine("  ERROR: open failed"); return 3; }
 
-            // HidD_SetOutputReport sends the bytes as an output report.
             byte[] buf = payload.ToArray();
             bool ok = HidD_SetOutputReport(h, buf, (uint)buf.Length);
             Console.WriteLine($"  HidD_SetOutputReport → {ok}");
@@ -3667,18 +2055,12 @@ class Program
         return 1;
     }
 
-    /// <summary>Walks the HID device interface set looking for a device whose
-    /// declared HID attributes match VID/PID. We can't rely on the PnP path
-    /// because virtual devices using ROOT\HIDCLASS don't encode VID/PID in
-    /// the path — we have to actually open the device and query
-    /// HidD_GetAttributes. The 'skipPathContains' filter avoids matching
-    /// IG_-filtered Xbox HID children when targeting non-XInput profiles.</summary>
     static string? FindHidDevicePath(ushort vid, ushort pid)
     {
         Guid hidGuid;
         HidD_GetHidGuid(out hidGuid);
         IntPtr devs = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero,
-            0x10 /* DIGCF_DEVICEINTERFACE */ | 0x02 /* DIGCF_PRESENT */);
+            0x10 | 0x02);
         if (devs == new IntPtr(-1)) return null;
 
         try
@@ -3699,8 +2081,7 @@ class Program
                     string? path = Marshal.PtrToStringUni(detail + 4);
                     if (path == null) continue;
 
-                    // Open with no access bits (just enough to query attributes — no exclusive lock)
-                    var h = CreateFileW(path, 0, 0x03 /* SHARE_RW */, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+                    var h = CreateFileW(path, 0, 0x03, IntPtr.Zero, 3, 0, IntPtr.Zero);
                     if (h.IsInvalid) continue;
 
                     var attrs = new HIDD_ATTRIBUTES();
@@ -3759,11 +2140,9 @@ class Program
             var attrs = new HIDD_ATTRIBUTES { Size = (uint)Marshal.SizeOf<HIDD_ATTRIBUTES>() };
             if (!HidD_GetAttributes(handle, ref attrs)) { handle.Dispose(); continue; }
 
-            // Show game controllers (skip keyboards, mice, etc.)
             if (HidD_GetPreparsedData(handle, out IntPtr ppd))
             {
                 HidP_GetCaps(ppd, out HIDP_CAPS caps);
-                // Usage Page 1 (Generic Desktop), Usage 4/5 (Joystick/GamePad)
                 if (caps.UsagePage == 0x01 && (caps.Usage == 0x04 || caps.Usage == 0x05))
                 {
                     byte[] prodBuf = new byte[256];
@@ -3776,11 +2155,8 @@ class Program
                     Console.WriteLine($"  Values:  In={caps.NumberInputValueCaps} Out={caps.NumberOutputValueCaps} Feat={caps.NumberFeatureValueCaps}");
                     Console.WriteLine($"  Path: {path}");
 
-                    // Dump value caps (axes)
                     if (caps.NumberInputValueCaps > 0)
                     {
-                        // HIDP_VALUE_CAPS: UsagePage+0, ReportID+2, IsRange+12, BitSize+18, ReportCount+20,
-                        // LogicalMin+40, LogicalMax+44, NotRange.Usage+56
                         ushort numVals = caps.NumberInputValueCaps;
                         byte[] valBuf = new byte[72 * numVals];
                         HidP_GetValueCaps(0, valBuf, ref numVals, ppd);
@@ -3814,12 +2190,11 @@ class Program
                             Console.WriteLine($"    [{v}] Page=0x{usagePage:X4} Usage=0x{usage:X4} Bits={bitSize}");
                         }
                     }
-                    // Dump button caps
                     if (caps.NumberInputButtonCaps > 0)
                     {
                         ushort numBtns = caps.NumberInputButtonCaps;
                         byte[] btnBuf = new byte[72 * numBtns];
-                        HidP_GetButtonCaps(0, btnBuf, ref numBtns, ppd); // 0 = HidP_Input
+                        HidP_GetButtonCaps(0, btnBuf, ref numBtns, ppd);
                         Console.WriteLine($"  Input Buttons ({numBtns}):");
                         for (int b = 0; b < numBtns; b++)
                         {
@@ -3861,8 +2236,6 @@ class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool HidD_GetManufacturerString(SafeFileHandle HidDeviceObject, byte[] Buffer, uint BufferLength);
 
-    /// <summary>Decodes a UTF-16LE buffer (as returned by HidD_Get*String) into a
-    /// string, stopping at the first NUL char.</summary>
     static string UnicodeBufToString(byte[] buf)
     {
         int n = 0;
@@ -3890,7 +2263,6 @@ class Program
             UseShellExecute = false
         };
 
-        // Try direct path
         string scriptPath = Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", "cleanup.ps1"));
         if (!File.Exists(scriptPath))
