@@ -139,8 +139,8 @@ bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-36
 # List available profiles
 HIDMaestroTest.exe list
 
-# Validate all APIs
-python test\validate.py xbox-360-wired
+# Validate all APIs (XInput, DirectInput, HIDAPI/SDL3, browser, WGI, HID enumeration order)
+python scripts\verify.py
 ```
 
 The test app is fully self-contained. On first run it:
@@ -175,7 +175,7 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 
 ## Validation Results
 
-Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally generated self-signed certificate added to the machine's Root and TrustedPublisher stores (no `bcdedit /set testsigning` required). Each profile was deployed via the test app and validated with `validate.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
+Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally generated self-signed certificate added to the machine's Root and TrustedPublisher stores (no `bcdedit /set testsigning` required). Each profile was deployed via the test app and validated with `scripts/verify.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
 
 ### Summary
 
@@ -327,15 +327,16 @@ Each validation result above was produced with these tools:
 
 | Check | Tool | Command / Method |
 |-------|------|-----------------|
-| DirectInput axes/buttons | Python `ctypes` + `winmm.joyGetDevCapsW` | `validate.py` |
-| XInput slots/triggers | Python `ctypes` + `xinput1_4.XInputGetState` | `validate.py` |
-| SDL3/HIDAPI identity | Python `hid.enumerate()` | `validate.py` |
-| Browser Gamepad | Chrome/Edge → `navigator.getGamepads()` | Manual or `gamepad_test.html` |
-| WGI/WinExInput | `pnputil /enum-interfaces` | `validate.py` |
+| DirectInput axes/buttons | Python `ctypes` + DirectInput8 + `winmm.joyGetDevCapsW` | `scripts/verify.py` |
+| XInput slots/triggers | Python `ctypes` + `xinput1_4.XInputGetState` | `scripts/verify.py` |
+| SDL3/HIDAPI identity | Python `hid.enumerate()` | `scripts/verify.py` |
+| Browser Gamepad | Headless Edge/Chrome → `navigator.getGamepads()` | `scripts/verify.py` (via `scripts/browser_check/`) |
+| GameInput / WGI | `winrt.windows.gaming.input.RawGameController` | `scripts/verify.py` |
+| HID enumeration order | Python `hid.enumerate()` filtered by `HM-CTL-` serial | `scripts/verify.py` |
 | Device tree | `Get-PnpDevice` (PowerShell) | Manual |
 | joy.cpl | Windows Game Controllers control panel | Manual |
 
-To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python test/validate.py <profile-id>` in a separate terminal.
+To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python scripts/verify.py` in a separate terminal.
 
 ## Glossary
 
