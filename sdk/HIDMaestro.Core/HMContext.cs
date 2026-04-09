@@ -173,19 +173,13 @@ public sealed class HMContext : IDisposable
     /// controller to remove the device, or dispose the entire context to
     /// remove all controllers it owns.</para>
     ///
-    /// <para><b>Profile support (current):</b> plain HID profiles
-    /// (DualSense, third-party gamepads — anything with no upper filter and
-    /// non-Microsoft VID) are fully supported. Xbox-family profiles
-    /// (xinputhid wrapper companion or XUSB system-class companion) require
-    /// orchestration code that has not yet been ported into the SDK; calling
-    /// this with an Xbox profile throws <see cref="NotSupportedException"/>.
-    /// The test app (HIDMaestroTest.exe emulate) handles Xbox profiles today
-    /// via its own orchestrator and is the reference implementation.</para>
+    /// <para>All three profile paths are supported: plain HID (DualSense,
+    /// generic gamepads), xinputhid companion-only (Xbox Series BT, Xbox
+    /// One), and non-xinputhid Xbox with XUSB companion (Xbox 360 Wired).
+    /// </para>
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="NotSupportedException">The profile is an Xbox-family
-    /// profile whose orchestration is not yet ported into the SDK.</exception>
     /// <exception cref="InvalidOperationException">Driver install failed or
     /// device node creation failed.</exception>
     public HMController CreateController(HMProfile profile)
@@ -212,7 +206,7 @@ public sealed class HMContext : IDisposable
         string infPath = System.IO.Path.Combine(
             Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
 
-        string instanceId;
+        string? instanceId;
         try
         {
             instanceId = Internal.DeviceOrchestrator.SetupController(

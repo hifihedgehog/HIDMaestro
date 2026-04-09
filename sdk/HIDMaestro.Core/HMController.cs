@@ -24,7 +24,7 @@ public sealed class HMController : IDisposable
 {
     private readonly HMContext _context;
     internal int Index { get; }
-    internal string InstanceId { get; }
+    internal string? InstanceId { get; }
     public HMProfile Profile { get; }
 
     // Encoder built once from the profile descriptor at construction time;
@@ -50,7 +50,7 @@ public sealed class HMController : IDisposable
     /// this virtual controller. Subscribers must be thread-safe.</summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
-    internal HMController(HMContext context, int index, HMProfile profile, string instanceId)
+    internal HMController(HMContext context, int index, HMProfile profile, string? instanceId)
     {
         _context = context;
         Index = index;
