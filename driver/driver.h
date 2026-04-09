@@ -22,7 +22,12 @@
 #include <hidport.h>
 #include <devpropdef.h>
 
-#include "../include/hidmaestro.h"
+/* Hard caps on the descriptor and report buffers the driver allocates.
+ * Previously lived in include/hidmaestro.h alongside an old IOCTL-based
+ * design that's now obsolete (the driver and SDK communicate via shared
+ * memory, not IOCTLs). Inlined here so the obsolete header can go away. */
+#define HIDMAESTRO_MAX_DESCRIPTOR_SIZE  4096
+#define HIDMAESTRO_MAX_REPORT_SIZE      1024
 
 /*
  * Common definitions shared with the vhidmini2 sample.
