@@ -2,6 +2,10 @@ build/
 test/HIDMaestroTest/bin/
 test/HIDMaestroTest/obj/
 test/HIDMaestroTest/publish_out/
+sdk/HIDMaestro.Core/bin/
+sdk/HIDMaestro.Core/obj/
+# Resources/ is populated by csproj <PackResources> target before build
+sdk/HIDMaestro.Core/Resources/
 *.cer
 *.cat
 *.user

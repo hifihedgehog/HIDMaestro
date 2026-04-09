@@ -1,263 +1,259 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace HIDMaestro.Internal;
 
 /// <summary>
-/// Builds, signs, and installs HIDMaestro driver DLLs.
-/// All operations run with CreateNoWindow — no visible popups.
+/// Self-contained driver installer. The driver binaries (HIDMaestro.dll,
+/// HMXInput.dll), their INFs, and every external tool needed to sign + catalog
+/// + deploy them (signtool.exe + SXS deps, inf2cat.exe + deps) ship as embedded
+/// resources inside HIDMaestro.Core.dll. At install time we extract the whole
+/// payload to %TEMP%\HIDMaestro_{guid}\ and shell out to the extracted tools.
+///
+/// No WDK install is required on the consumer's machine. The SDK consumer ships
+/// a single DLL.
 /// </summary>
 public static class DriverBuilder
 {
-    static readonly string RepoRoot = Path.GetFullPath(Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
-    public static readonly string BuildDir = Path.Combine(RepoRoot, "build");
-    static readonly string DriverDir = Path.Combine(RepoRoot, "driver");
-    static readonly string IncludeDir = Path.Combine(RepoRoot, "include");
+    const string CertSubject = "CN=HIDMaestroTestCert";
+    const string CertFriendlyName = "HIDMaestroTestCert";
 
-    static readonly string WdkRoot = @"C:\Program Files (x86)\Windows Kits\10";
-    static readonly string WdkVer = "10.0.26100.0";
-    static readonly string UmdfVer = "2.15";
+    /// <summary>The directory the most recent extraction landed in. Other
+    /// internal helpers (e.g. DeviceOrchestrator) read the staged INF from
+    /// here when wiring a device node. Null until <see cref="FullDeploy"/>
+    /// (or <see cref="EnsureExtracted"/>) has run at least once.</summary>
+    public static string? StagingDir { get; private set; }
 
-    static string? _vcvarsPath;
-    static string? FindVcvars()
+    /// <summary>Back-compat shim. Old code referenced
+    /// <c>DriverBuilder.BuildDir</c> for the directory containing
+    /// <c>hidmaestro.inf</c>. Now points at the extraction staging dir.
+    /// Calls <see cref="EnsureExtracted"/> the first time it's accessed.</summary>
+    public static string BuildDir => EnsureExtracted();
+
+    static (int exitCode, string output) Run(string fileName, string arguments,
+        string? workingDir = null, int timeoutMs = 60_000)
     {
-        if (_vcvarsPath != null) return _vcvarsPath;
-        foreach (var vsDir in Directory.GetDirectories(@"C:\Program Files\Microsoft Visual Studio"))
+        var psi = new ProcessStartInfo
         {
-            foreach (var edition in Directory.GetDirectories(vsDir))
-            {
-                string path = Path.Combine(edition, "VC", "Auxiliary", "Build", "vcvarsall.bat");
-                if (File.Exists(path)) { _vcvarsPath = path; return path; }
-            }
-        }
-        return null;
+            FileName = fileName,
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        if (workingDir != null) psi.WorkingDirectory = workingDir;
+
+        using var proc = Process.Start(psi)!;
+        string stdout = proc.StandardOutput.ReadToEnd();
+        string stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(timeoutMs);
+        return (proc.ExitCode, stdout + stderr);
     }
 
-    static (int exitCode, string output) Run(string cmd, int timeoutMs = 60_000)
+    // ── Extraction ──────────────────────────────────────────────────────────
+
+    /// <summary>The full set of files we extract from embedded resources.
+    /// Names match the LogicalName suffix used in the csproj
+    /// (HIDMaestro.Resources.{Filename}{Extension}).</summary>
+    static readonly string[] EmbeddedFiles = new[]
     {
-        // Use a temp batch file to handle complex quoting (vcvarsall paths with spaces).
-        // The batch file inherits the caller's elevation since UseShellExecute=false.
-        string batFile = Path.Combine(Path.GetTempPath(), $"hm_{Guid.NewGuid():N}.cmd");
-        File.WriteAllText(batFile, $"@echo off\r\n{cmd}\r\n");
-        try
+        // Drivers + INFs
+        "HIDMaestro.dll",
+        "HMXInput.dll",
+        "hidmaestro.inf",
+        "hidmaestro_xusb.inf",
+
+        // signtool.exe + its SXS dep tree (x64)
+        "signtool.exe",
+        "signtool.exe.manifest",
+        "mssign32.dll",
+        "Microsoft.Windows.Build.Signing.mssign32.dll.manifest",
+        "wintrust.dll",
+        "wintrust.dll.ini",
+        "Microsoft.Windows.Build.Signing.wintrust.dll.manifest",
+        "appxsip.dll",
+        "Microsoft.Windows.Build.Appx.AppxSip.dll.manifest",
+        "appxpackaging.dll",
+        "Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest",
+        "opcservices.dll",
+        "Microsoft.Windows.Build.Appx.OpcServices.dll.manifest",
+
+        // inf2cat.exe + minimum deps (x86)
+        "Inf2Cat.exe",
+        "inf2cat.exe.manifest",
+        "WindowsProtectedFiles.xml",
+        "Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll",
+        "Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll",
+        "Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll",
+        "Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll",
+        "Microsoft.Kits.Logger.dll",
+    };
+
+    /// <summary>Lazily extracts the embedded payload to %TEMP%\HIDMaestro_*\
+    /// and returns the directory path. Idempotent — subsequent calls return
+    /// the same directory without re-extracting.</summary>
+    public static string EnsureExtracted()
+    {
+        if (StagingDir != null && Directory.Exists(StagingDir))
+            return StagingDir;
+
+        string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+
+        var asm = typeof(DriverBuilder).Assembly;
+        // Build a case-insensitive lookup of available resource names.
+        var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string name in asm.GetManifestResourceNames())
+            available[name] = name;
+
+        foreach (string file in EmbeddedFiles)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = batFile,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            using var proc = Process.Start(psi)!;
-            string stdout = proc.StandardOutput.ReadToEnd();
-            string stderr = proc.StandardError.ReadToEnd();
-            proc.WaitForExit(timeoutMs);
-            return (proc.ExitCode, stdout + stderr);
+            string logical = "HIDMaestro.Resources." + file;
+            if (!available.TryGetValue(logical, out var actual))
+                throw new InvalidOperationException(
+                    $"Embedded resource '{logical}' not found in HIDMaestro.Core.dll. " +
+                    "Did the PackResources MSBuild target run?");
+
+            using var stream = asm.GetManifestResourceStream(actual)
+                ?? throw new InvalidOperationException($"Failed to open resource '{actual}'.");
+            string outPath = Path.Combine(dir, file);
+            using var fs = File.Create(outPath);
+            stream.CopyTo(fs);
         }
-        finally
-        {
-            try { File.Delete(batFile); } catch { }
-        }
+
+        StagingDir = dir;
+        return dir;
     }
 
-    /// <summary>Builds HIDMaestro.dll (main HID driver) from driver.c.</summary>
-    public static bool BuildMainDriver()
-    {
-        string vcvars = FindVcvars() ?? throw new Exception("Visual Studio not found");
-        Directory.CreateDirectory(BuildDir);
+    // ── Test signing certificate (managed, no powershell) ──────────────────
 
-        string umInc = Path.Combine(WdkRoot, "Include", WdkVer, "um");
-        string sharedInc = Path.Combine(WdkRoot, "Include", WdkVer, "shared");
-        string kmInc = Path.Combine(WdkRoot, "Include", WdkVer, "km");
-        string wdfInc = Path.Combine(WdkRoot, "Include", "wdf", "umdf", UmdfVer);
-        string umLib = Path.Combine(WdkRoot, "Lib", WdkVer, "um", "x64");
-        string wdfLib = Path.Combine(WdkRoot, "Lib", "wdf", "umdf", "x64", UmdfVer);
-
-        string src = Path.Combine(DriverDir, "driver.c");
-        string obj = Path.Combine(BuildDir, "main_driver.obj");
-        string dll = Path.Combine(BuildDir, "HIDMaestro.dll");
-
-        string compileCmd = $"\"{vcvars}\" amd64 >nul 2>&1 && cl.exe /nologo /W4 /GS /Gz /wd4324 /wd4101 " +
-            $"/D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 " +
-            $"/D HIDMAESTRO_NOT_DEFINED_XYZZY " +
-            $"\"/I{umInc}\" \"/I{sharedInc}\" \"/I{kmInc}\" \"/I{wdfInc}\" \"/I{IncludeDir}\" " +
-            $"\"/Fo{obj}\" /c \"{src}\"";
-
-        var (rc, output) = Run(compileCmd);
-        if (rc != 0) { Console.WriteLine($"  Compile failed: {output}"); return false; }
-
-        string linkCmd = $"\"{vcvars}\" amd64 >nul 2>&1 && link.exe /nologo /DLL \"/OUT:{dll}\" " +
-            $"\"/LIBPATH:{umLib}\" \"/LIBPATH:{wdfLib}\" \"{obj}\" " +
-            "WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib";
-
-        (rc, output) = Run(linkCmd);
-        if (rc != 0) { Console.WriteLine($"  Link failed: {output}"); return false; }
-
-        return true;
-    }
-
-    /// <summary>Builds HMXInput.dll (XUSB companion) from companion.c.</summary>
-    public static bool BuildCompanion()
-    {
-        string vcvars = FindVcvars() ?? throw new Exception("Visual Studio not found");
-        Directory.CreateDirectory(BuildDir);
-
-        string umInc = Path.Combine(WdkRoot, "Include", WdkVer, "um");
-        string sharedInc = Path.Combine(WdkRoot, "Include", WdkVer, "shared");
-        string kmInc = Path.Combine(WdkRoot, "Include", WdkVer, "km");
-        string wdfInc = Path.Combine(WdkRoot, "Include", "wdf", "umdf", UmdfVer);
-        string umLib = Path.Combine(WdkRoot, "Lib", WdkVer, "um", "x64");
-        string wdfLib = Path.Combine(WdkRoot, "Lib", "wdf", "umdf", "x64", UmdfVer);
-
-        string src = Path.Combine(DriverDir, "companion.c");
-        string obj = Path.Combine(BuildDir, "companion.obj");
-        string dll = Path.Combine(BuildDir, "HMXInput.dll");
-
-        string compileCmd = $"\"{vcvars}\" amd64 >nul 2>&1 && cl.exe /nologo /W4 /GS /Gz /wd4324 /wd4101 " +
-            $"/D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 " +
-            $"\"/I{umInc}\" \"/I{sharedInc}\" \"/I{kmInc}\" \"/I{wdfInc}\" " +
-            $"\"/Fo{obj}\" /c \"{src}\"";
-
-        var (rc, output) = Run(compileCmd);
-        if (rc != 0) { Console.WriteLine($"  Compile failed: {output}"); return false; }
-
-        string linkCmd = $"\"{vcvars}\" amd64 >nul 2>&1 && link.exe /nologo /DLL \"/OUT:{dll}\" " +
-            $"\"/LIBPATH:{umLib}\" \"/LIBPATH:{wdfLib}\" \"{obj}\" " +
-            "WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib";
-
-        (rc, output) = Run(linkCmd);
-        if (rc != 0) { Console.WriteLine($"  Link failed: {output}"); return false; }
-
-        return true;
-    }
-
-    /// <summary>Ensures the test signing certificate exists and is trusted. Creates if missing.</summary>
+    /// <summary>Ensures HIDMaestroTestCert exists in LocalMachine\My and is
+    /// trusted in Root + TrustedPublisher. Uses the managed
+    /// <see cref="CertificateRequest"/> API — no external tool needed.</summary>
     public static void EnsureTestCertificate()
     {
-        using var myStore = new System.Security.Cryptography.X509Certificates.X509Store(
-            System.Security.Cryptography.X509Certificates.StoreName.My,
-            System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
-        myStore.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
-        var existing = myStore.Certificates.Find(
-            System.Security.Cryptography.X509Certificates.X509FindType.FindBySubjectName,
-            "HIDMaestroTestCert", false);
-
-        System.Security.Cryptography.X509Certificates.X509Certificate2? cert = null;
-
-        if (existing.Count > 0)
+        // Check LocalMachine\My first.
+        using (var lmMy = new X509Store(StoreName.My, StoreLocation.LocalMachine))
         {
-            cert = existing[0];
+            lmMy.Open(OpenFlags.ReadOnly);
+            var existing = lmMy.Certificates.Find(X509FindType.FindBySubjectName, CertFriendlyName, false);
+            if (existing.Count > 0)
+                return;
         }
-        else
-        {
-            Console.Write("  Creating test certificate... ");
-            // Create via PowerShell (only API for self-signed on older .NET)
-            Run("powershell -NoProfile -Command \"" +
-                "New-SelfSignedCertificate -Type Custom -Subject 'CN=HIDMaestroTestCert' " +
-                "-FriendlyName 'HIDMaestro Test Signing' -CertStoreLocation 'Cert:\\CurrentUser\\My' " +
-                "-KeyUsage DigitalSignature -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3')\"");
 
-            myStore.Close();
-            using var myStore2 = new System.Security.Cryptography.X509Certificates.X509Store(
-                System.Security.Cryptography.X509Certificates.StoreName.My,
-                System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
-            myStore2.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
-            var created = myStore2.Certificates.Find(
-                System.Security.Cryptography.X509Certificates.X509FindType.FindBySubjectName,
-                "HIDMaestroTestCert", false);
-            if (created.Count > 0) cert = created[0];
-            Console.Write("OK ");
-        }
-        myStore.Close();
+        // Generate fresh self-signed cert with code-signing EKU.
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest(CertSubject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        req.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.DigitalSignature, critical: false));
+        req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+            new OidCollection { new Oid("1.3.6.1.5.5.7.3.3") }, critical: false));
+        req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
 
-        if (cert == null) { Console.WriteLine("  CERT CREATION FAILED"); return; }
+        var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
+        var notAfter = DateTimeOffset.UtcNow.AddYears(10);
+        using var cert = req.CreateSelfSigned(notBefore, notAfter);
+        cert.FriendlyName = CertFriendlyName;
 
-        // Trust the cert by exporting and importing via certutil (runs in-process, inherits elevation)
-        string exportPath = Path.Combine(Path.GetTempPath(), "HIDMaestroTestCert.cer");
-        try
-        {
-            File.WriteAllBytes(exportPath, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
-            // Use Process.Start directly (not Run/batch) to inherit elevation properly
-            foreach (string store in new[] { "Root", "TrustedPublisher" })
-            {
-                // UseShellExecute=true so certutil inherits proper elevation
-                var certutilPsi = new ProcessStartInfo
-                {
-                    FileName = "certutil.exe",
-                    Arguments = $"-f -addstore {store} \"{exportPath}\"",
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-                using var p = Process.Start(certutilPsi)!;
-                p.WaitForExit(10_000);
-            }
-        }
-        finally
-        {
-            try { File.Delete(exportPath); } catch { }
-        }
-        Console.WriteLine("  Certificate ready.");
+        // Re-import with PersistKeySet so the private key lives in the machine
+        // key store (signtool needs it from LocalMachine\My).
+        byte[] pfx = cert.Export(X509ContentType.Pfx, "");
+        using var persistableCert = X509CertificateLoader.LoadPkcs12(pfx, "",
+            X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
+        persistableCert.FriendlyName = CertFriendlyName;
+
+        AddToStore(persistableCert, StoreName.My);
+        AddToStore(persistableCert, StoreName.Root);
+        AddToStore(persistableCert, StoreName.TrustedPublisher);
     }
 
-    /// <summary>Signs DLLs with the test certificate from CurrentUser\My store.</summary>
+    static void AddToStore(X509Certificate2 cert, StoreName name)
+    {
+        using var store = new X509Store(name, StoreLocation.LocalMachine);
+        store.Open(OpenFlags.ReadWrite);
+        store.Add(cert);
+    }
+
+    // ── Sign / Catalog / Install pipeline ──────────────────────────────────
+
+    /// <summary>Signs HIDMaestro.dll and HMXInput.dll using the extracted
+    /// signtool.exe and the test certificate from LocalMachine\My.</summary>
     public static bool SignDrivers()
     {
         EnsureTestCertificate();
+        string dir = EnsureExtracted();
+        string signtool = Path.Combine(dir, "signtool.exe");
 
-        string signtool = Path.Combine(WdkRoot, "bin", WdkVer, "x64", "signtool.exe");
-        if (!File.Exists(signtool)) { Console.WriteLine("  signtool not found"); return false; }
-
-        // Sign from CurrentUser\My store (where the private key lives)
         foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
         {
-            string path = Path.Combine(BuildDir, dll);
+            string path = Path.Combine(dir, dll);
             if (!File.Exists(path)) continue;
-            var (rc, output) = Run($"\"{signtool}\" sign /a /s My /n HIDMaestroTestCert /fd SHA256 \"{path}\"");
-            if (rc != 0) { Console.WriteLine($"  Sign failed for {dll}: {output}"); return false; }
+            var (rc, output) = Run(signtool,
+                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{path}\"",
+                workingDir: dir);
+            if (rc != 0)
+            {
+                Console.WriteLine($"  Sign failed for {dll}: {output}");
+                return false;
+            }
         }
         return true;
     }
 
-    /// <summary>Generates catalog files and signs them.</summary>
+    /// <summary>Generates the catalogs for the extracted INFs and signs each
+    /// resulting .cat file with the test certificate.</summary>
     public static bool GenerateCatalogs()
     {
-        string inf2cat = Path.Combine(WdkRoot, "bin", WdkVer, "x86", "inf2cat.exe");
-        string signtool = Path.Combine(WdkRoot, "bin", WdkVer, "x64", "signtool.exe");
+        string dir = EnsureExtracted();
+        string inf2cat = Path.Combine(dir, "Inf2Cat.exe");
+        string signtool = Path.Combine(dir, "signtool.exe");
 
-        // Copy INFs to build dir
-        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_gamepad.inf", "hidmaestro_xusb.inf" })
+        // Delete any stale catalogs from a previous run.
+        foreach (string cat in Directory.GetFiles(dir, "*.cat"))
         {
-            string src = Path.Combine(DriverDir, inf);
-            string dst = Path.Combine(BuildDir, inf);
-            if (File.Exists(src)) File.Copy(src, dst, true);
+            try { File.Delete(cat); } catch { }
         }
 
-        // Delete old catalogs
-        foreach (string cat in Directory.GetFiles(BuildDir, "*.cat"))
-            File.Delete(cat);
+        var (rc, output) = Run(inf2cat, $"/driver:\"{dir}\" /os:10_X64", workingDir: dir);
+        if (rc != 0)
+        {
+            Console.WriteLine($"  inf2cat failed: {output}");
+            return false;
+        }
 
-        // Generate catalogs
-        Run($"\"{inf2cat}\" /driver:\"{BuildDir}\" /os:10_X64");
-
-        // Sign catalogs
-        foreach (string cat in Directory.GetFiles(BuildDir, "*.cat"))
-            Run($"\"{signtool}\" sign /a /s My /n HIDMaestroTestCert /fd SHA256 \"{cat}\"");
-
+        foreach (string cat in Directory.GetFiles(dir, "*.cat"))
+        {
+            var (rc2, output2) = Run(signtool,
+                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
+                workingDir: dir);
+            if (rc2 != 0)
+            {
+                Console.WriteLine($"  Catalog sign failed for {cat}: {output2}");
+                return false;
+            }
+        }
         return true;
     }
 
-    /// <summary>Installs all driver packages via pnputil (silent, no popup).</summary>
+    /// <summary>Installs the staged INFs via pnputil (Windows builtin).</summary>
     public static bool InstallDrivers()
     {
-        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_gamepad.inf", "hidmaestro_xusb.inf" })
+        string dir = EnsureExtracted();
+        string pnputil = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
+
+        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
-            string path = Path.Combine(BuildDir, inf);
+            string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
-            var (rc, output) = Run($"pnputil /add-driver \"{path}\" /install", timeoutMs: 15_000);
+            var (rc, output) = Run(pnputil, $"/add-driver \"{path}\" /install",
+                timeoutMs: 30_000);
             if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
             {
                 Console.WriteLine($"\n    pnputil failed for {inf}: {output.Trim()}");
@@ -270,7 +266,9 @@ public static class DriverBuilder
     /// <summary>Removes all HIDMaestro driver packages from the driver store.</summary>
     public static void RemoveOldDriverPackages()
     {
-        var (_, output) = Run("pnputil /enum-drivers");
+        string pnputil = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
+        var (_, output) = Run(pnputil, "/enum-drivers");
         string? oem = null;
         foreach (string line in output.Split('\n'))
         {
@@ -281,26 +279,24 @@ public static class DriverBuilder
             }
             if (oem != null && line.Contains("hidmaestro", StringComparison.OrdinalIgnoreCase))
             {
-                Run($"pnputil /delete-driver {oem} /force");
+                Run(pnputil, $"/delete-driver {oem} /force");
                 oem = null;
             }
             if (string.IsNullOrWhiteSpace(line)) oem = null;
         }
     }
 
-    /// <summary>Full build + sign + install pipeline. Returns true on success.</summary>
+    /// <summary>Full extract + sign + catalog + install pipeline. Returns
+    /// true on success. The <paramref name="rebuild"/> parameter is retained
+    /// for ABI compatibility but ignored — there is no source build step
+    /// any more (the driver binaries ship pre-built inside the SDK DLL).</summary>
     public static bool FullDeploy(bool rebuild = true)
     {
-        if (rebuild)
-        {
-            Console.Write("  Building main driver... ");
-            if (!BuildMainDriver()) return false;
-            Console.WriteLine("OK");
+        _ = rebuild; // intentionally unused
 
-            Console.Write("  Building companion... ");
-            if (!BuildCompanion()) return false;
-            Console.WriteLine("OK");
-        }
+        Console.Write("  Extracting embedded driver payload... ");
+        EnsureExtracted();
+        Console.WriteLine("OK");
 
         Console.Write("  Removing old packages... ");
         RemoveOldDriverPackages();
@@ -311,7 +307,7 @@ public static class DriverBuilder
         Console.WriteLine("OK");
 
         Console.Write("  Generating catalogs... ");
-        GenerateCatalogs();
+        if (!GenerateCatalogs()) return false;
         Console.WriteLine("OK");
 
         Console.Write("  Installing drivers... ");
@@ -324,32 +320,14 @@ public static class DriverBuilder
     /// <summary>Checks if ALL required HIDMaestro drivers are in the store.</summary>
     public static bool IsDriverInstalled()
     {
-        var (_, output) = Run("pnputil /enum-drivers");
+        string pnputil = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
+        var (_, output) = Run(pnputil, "/enum-drivers");
         return output.Contains("hidmaestro.inf", StringComparison.OrdinalIgnoreCase)
             && output.Contains("hidmaestro_xusb.inf", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Checks if source files are newer than built DLLs.</summary>
-    public static bool NeedsBuild()
-    {
-        string mainDll = Path.Combine(BuildDir, "HIDMaestro.dll");
-        string companionDll = Path.Combine(BuildDir, "HMXInput.dll");
-        if (!File.Exists(mainDll) || !File.Exists(companionDll)) return true;
-
-        // Check driver.c/driver.h against HIDMaestro.dll
-        var mainTime = File.GetLastWriteTime(mainDll);
-        foreach (string src in new[] { "driver.c", "driver.h" })
-        {
-            string path = Path.Combine(DriverDir, src);
-            if (File.Exists(path) && File.GetLastWriteTime(path) > mainTime)
-                return true;
-        }
-        // Check companion.c against HMXInput.dll
-        var companionTime = File.GetLastWriteTime(companionDll);
-        string companionSrc = Path.Combine(DriverDir, "companion.c");
-        if (File.Exists(companionSrc) && File.GetLastWriteTime(companionSrc) > companionTime)
-            return true;
-
-        return false;
-    }
+    /// <summary>True iff the driver isn't installed yet. There is no
+    /// source-vs-binary timestamp check now — the binaries ship embedded.</summary>
+    public static bool NeedsBuild() => !IsDriverInstalled();
 }

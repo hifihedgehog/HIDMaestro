@@ -13,15 +13,74 @@
     <RootNamespace>HIDMaestro</RootNamespace>
     <Description>HIDMaestro UMDF2 virtual HID controller engine — embed in your app to create exact-fidelity virtual game controllers.</Description>
 
-    <!-- Pack everything (driver DLLs, INF, CAT, profile JSONs) inside the
-         assembly as embedded resources so single-file publishing in the
-         consuming app picks them up automatically — no sibling files. -->
+    <!-- Pack everything (driver DLLs, INFs, signing/catalog tools, profile JSONs)
+         inside the assembly as embedded resources so single-file publishing in
+         the consuming app picks them up automatically — no sibling files, no
+         WDK install required on the user's machine. -->
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+
+    <!-- Source paths used by the PackResources pre-build target. -->
+    <HMRepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</HMRepoRoot>
+    <HMBuildDir>$(HMRepoRoot)build\</HMBuildDir>
+    <HMWdkBin>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\</HMWdkBin>
   </PropertyGroup>
 
+  <!-- Pre-build: refresh embedded payload from build/ and the local WDK install.
+       This runs once per `dotnet build` so the embedded resources always reflect
+       the latest driver binaries. The Resources/ directory is .gitignored. -->
+  <Target Name="PackResources" BeforeTargets="BeforeBuild">
+    <MakeDir Directories="$(MSBuildThisFileDirectory)Resources" />
+
+    <ItemGroup>
+      <!-- Driver binaries + INFs from build/ -->
+      <_HMDriverFiles Include="$(HMBuildDir)HIDMaestro.dll" />
+      <_HMDriverFiles Include="$(HMBuildDir)HMXInput.dll" />
+      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro.inf" />
+      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusb.inf" />
+
+      <!-- signtool.exe + its SXS dep tree (from WDK x64) -->
+      <_HMSigntool Include="$(HMWdkBin)x64\signtool.exe" />
+      <_HMSigntool Include="$(HMWdkBin)x64\signtool.exe.manifest" />
+      <_HMSigntool Include="$(HMWdkBin)x64\mssign32.dll" />
+      <_HMSigntool Include="$(HMWdkBin)x64\Microsoft.Windows.Build.Signing.mssign32.dll.manifest" />
+      <_HMSigntool Include="$(HMWdkBin)x64\wintrust.dll" />
+      <_HMSigntool Include="$(HMWdkBin)x64\wintrust.dll.ini" />
+      <_HMSigntool Include="$(HMWdkBin)x64\Microsoft.Windows.Build.Signing.wintrust.dll.manifest" />
+      <_HMSigntool Include="$(HMWdkBin)x64\appxsip.dll" />
+      <_HMSigntool Include="$(HMWdkBin)x64\Microsoft.Windows.Build.Appx.AppxSip.dll.manifest" />
+      <_HMSigntool Include="$(HMWdkBin)x64\appxpackaging.dll" />
+      <_HMSigntool Include="$(HMWdkBin)x64\Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest" />
+      <_HMSigntool Include="$(HMWdkBin)x64\opcservices.dll" />
+      <_HMSigntool Include="$(HMWdkBin)x64\Microsoft.Windows.Build.Appx.OpcServices.dll.manifest" />
+
+      <!-- inf2cat.exe + its minimum dep set (from WDK x86).
+           apivalidator.exe / microsoft.kits.drivers.apivalidator.dll /
+           Microsoft.Extensions.CommandLineUtils.dll were tested and are NOT
+           required for /os:10_X64 catalog generation. -->
+      <_HMInf2cat Include="$(HMWdkBin)x86\Inf2Cat.exe" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\inf2cat.exe.manifest" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\WindowsProtectedFiles.xml" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll" />
+      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.Kits.Logger.dll" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_HMDriverFiles)" DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_HMSigntool)"   DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_HMInf2cat)"    DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+  </Target>
+
   <ItemGroup>
-    <!-- Profile catalog. Embedded as resources with stable logical names so
-         HMContext.LoadDefaultProfiles() can read them via
+    <!-- Driver/tool payload. Embedded with stable HIDMaestro.Resources.* logical
+         names so DriverBuilder can extract them by name at install time. -->
+    <EmbeddedResource Include="Resources\**\*">
+      <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+
+    <!-- Profile catalog. Embedded with stable HIDMaestro.Profiles.* logical
+         names so HMContext.LoadDefaultProfiles() can read them via
          Assembly.GetManifestResourceStream regardless of disk layout. The
          repo's profiles/ directory is the single source of truth — these
          are linked, not copied. -->
