@@ -103,7 +103,26 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  SharedMemHandle;     /* CreateFileMapping handle */
     PVOID   SharedMemPtr;        /* MapViewOfFile pointer */
     ULONG   SharedMemSeqNo;      /* Last sequence number we processed */
-    WDFTIMER PollTimer;          /* Periodic timer to check shared memory */
+
+    /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
+     * handler returns a cached input report immediately ONLY when there's
+     * new data since the last delivery (SharedMemSeqNo > LastDeliveredSeqNo).
+     * Otherwise the request is parked in ManualQueue and the worker thread
+     * completes it on the next ProcessSharedInput tick. Without this gate,
+     * HIDClass hammers READ_REPORT in a tight loop because every call
+     * returns instantly with stale data — the original CPU saturation
+     * culprit. */
+    ULONG   LastDeliveredInputSeqNo;
+
+    /* Event-driven IPC: SDK signals InputDataEvent after every seqlock write,
+     * the worker thread (WorkerThread) waits on (StopEvent, InputDataEvent)
+     * and processes frames. Replaces the old 1ms WdfTimer busy-poll which
+     * saturated CPU cores at scale. A 50 ms safety timeout on WaitForMultiple
+     * Objects keeps things moving if a signal is ever dropped. */
+    HANDLE  InputDataEvent;      /* OpenEvent on Global\HIDMaestroInputEvent<N> */
+    HANDLE  StopEvent;            /* Signaled from EvtDeviceContextCleanup */
+    HANDLE  WorkerThread;        /* CreateThread handle */
+    WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
 
     /* XInput state file — pre-built XInput state from user-mode */
     HANDLE  XInputFileHandle;

@@ -62,8 +62,15 @@ internal static class SharedMemoryIO
     private const uint FILE_MAP_READ  = 0x02;
     private const uint FILE_MAP_WRITE = 0x04;
 
+    // CreateEventW flags
+    private const uint CREATE_EVENT_MANUAL_RESET = 0x00000001;
+    private const uint CREATE_EVENT_INITIAL_SET  = 0x00000002;
+    private const uint EVENT_MODIFY_STATE        = 0x0002;
+    private const uint SYNCHRONIZE               = 0x00100000;
+
     private static readonly Dictionary<int, IntPtr> s_inputHandles  = new();
     private static readonly Dictionary<int, IntPtr> s_inputViews    = new();
+    private static readonly Dictionary<int, IntPtr> s_inputEvents   = new();
     private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
 
@@ -88,8 +95,16 @@ internal static class SharedMemoryIO
             for (int i = 0; i < SHARED_INPUT_SIZE; i++)
                 Marshal.WriteByte(view, i, 0);
 
+            // Companion signaling event. Auto-reset (manual_reset=FALSE), not
+            // initially set. The driver's per-device worker thread waits on
+            // this with a 50ms safety timeout to replace the old 1ms busy poll.
+            // SDDL matches the section so WUDFHost (LocalService) can open it.
+            string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
+            IntPtr ev = CreateNamedEvent(evName);
+
             s_inputHandles[controllerIndex] = h;
             s_inputViews[controllerIndex] = view;
+            s_inputEvents[controllerIndex] = ev;
             return view;
         }
     }
@@ -113,13 +128,34 @@ internal static class SharedMemoryIO
         }
     }
 
+    /// <summary>Returns the signaling event handle for a controller's input
+    /// section, or <see cref="IntPtr.Zero"/> if no mapping has been created
+    /// for that index yet. Used by <see cref="HMController"/> to cache the
+    /// handle alongside the view pointer so <see cref="WriteInputFrame"/>
+    /// can signal it per frame without a dictionary lookup.</summary>
+    public static IntPtr GetInputEvent(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            return s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) ? ev : IntPtr.Zero;
+        }
+    }
+
     /// <summary>Atomic seqlock write of a new input frame. Single-writer
     /// (the SDK consumer's input loop) → many-readers (driver + companion)
-    /// pattern is safe lock-free — readers retry on SeqNo mismatch.
+    /// pattern is safe lock-free — readers retry on SeqNo mismatch. After
+    /// publishing the new sequence, signals <paramref name="eventHandle"/>
+    /// so the driver's worker thread can wake immediately instead of
+    /// busy-polling the section.
     ///
     /// <para><c>seqNo</c> is updated in place; the caller maintains it
-    /// across frames so it survives mapping resets.</para></summary>
-    public static void WriteInputFrame(IntPtr view, ref uint seqNo,
+    /// across frames so it survives mapping resets.</para>
+    ///
+    /// <para><paramref name="eventHandle"/> may be <see cref="IntPtr.Zero"/>
+    /// if no signaling event exists (e.g. older driver that still polls
+    /// without opening the event). The SetEvent call is skipped in that
+    /// case — the write still completes normally.</para></summary>
+    public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        byte[] data, int dataLen, byte[] gipData,
                                        int dataOffset = 0)
     {
@@ -139,6 +175,13 @@ internal static class SharedMemoryIO
         Thread.MemoryBarrier();
         seqNo = pending + 1;
         Marshal.WriteInt32(view, 0, (int)seqNo);
+
+        // 4. Wake the driver's worker thread. Auto-reset event: one
+        // successful wait consumes the signal. If the driver is still
+        // processing a previous frame the signal stays latched until
+        // it returns to WaitForMultipleObjects.
+        if (eventHandle != IntPtr.Zero)
+            SetEvent(eventHandle);
     }
 
     /// <summary>Polled seqlock read of the latest output packet. Returns
@@ -189,6 +232,10 @@ internal static class SharedMemoryIO
             if (s_inputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
                 CloseHandle(h);
             s_inputHandles.Remove(controllerIndex);
+
+            if (s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
+                CloseHandle(ev);
+            s_inputEvents.Remove(controllerIndex);
         }
         lock (s_outputViews)
         {
@@ -215,6 +262,9 @@ internal static class SharedMemoryIO
             foreach (var h in s_inputHandles.Values)
                 if (h != IntPtr.Zero) CloseHandle(h);
             s_inputHandles.Clear();
+            foreach (var ev in s_inputEvents.Values)
+                if (ev != IntPtr.Zero) CloseHandle(ev);
+            s_inputEvents.Clear();
         }
         lock (s_outputViews)
         {
@@ -270,6 +320,42 @@ internal static class SharedMemoryIO
         return (hMap, view);
     }
 
+    /// <summary>Creates a named auto-reset event under the same SDDL used
+    /// for the sections so WUDFHost (LocalService) can OpenEvent it. Auto
+    /// reset so a single Wait consumes the signal; manual_reset=FALSE means
+    /// the dwFlags argument to CreateEventExW is 0 (not MANUAL_RESET).</summary>
+    private static IntPtr CreateNamedEvent(string name)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                Sddl, 1, out IntPtr sd, IntPtr.Zero))
+            throw new Win32Exception();
+
+        SECURITY_ATTRIBUTES sa = new()
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = sd,
+            bInheritHandle = 0,
+        };
+        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        Marshal.StructureToPtr(sa, saPtr, false);
+
+        IntPtr ev;
+        try
+        {
+            // dwFlags = 0 → auto-reset, not initially set.
+            ev = CreateEventExW(saPtr, name, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(saPtr);
+            LocalFree(sd);
+        }
+
+        if (ev == IntPtr.Zero)
+            throw new Win32Exception();
+        return ev;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct SECURITY_ATTRIBUTES
     {
@@ -299,4 +385,11 @@ internal static class SharedMemoryIO
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr LocalFree(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName,
+        uint dwFlags, uint dwDesiredAccess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetEvent(IntPtr hEvent);
 }

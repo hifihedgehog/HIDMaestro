@@ -31,6 +31,10 @@ public sealed class HMController : IDisposable
     // SubmitState reuses it for every frame.
     private readonly HidReportBuilder _reportBuilder;
     private readonly IntPtr _inputView;
+    // Named auto-reset event signaled by WriteInputFrame so the driver's
+    // worker thread can wake immediately instead of busy-polling. Cached at
+    // construction time alongside the view pointer.
+    private readonly IntPtr _inputEvent;
     private uint _inputSeqNo;
 
     // Output passthrough reader (rumble/haptics/FFB) — background thread
@@ -73,6 +77,7 @@ public sealed class HMController : IDisposable
 
         _reportBuilder = HidReportBuilder.Parse(profile.Inner.GetDescriptorBytes()!);
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
+        _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
         // Output passthrough is best-effort. If the section can't be created
         // (rare — only LocalService permission issues) we just don't raise
@@ -177,7 +182,7 @@ public sealed class HMController : IDisposable
         int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
         int dataLen = Math.Min(report.Length - dataStart, 64);
         SharedMemoryIO.WriteInputFrame(
-            _inputView, ref _inputSeqNo, report, dataLen, _gipBuf, dataStart);
+            _inputView, _inputEvent, ref _inputSeqNo, report, dataLen, _gipBuf, dataStart);
     }
 
     /// <summary>Push a raw HID input report. Use this for exotic features
@@ -195,7 +200,7 @@ public sealed class HMController : IDisposable
         // left it in (or zero if SubmitState was never called) — raw consumers
         // are expected to also call SubmitState if they need GIP/XInput.
         SharedMemoryIO.WriteInputFrame(
-            _inputView, ref _inputSeqNo, copy, copy.Length, _gipBuf);
+            _inputView, _inputEvent, ref _inputSeqNo, copy, copy.Length, _gipBuf);
     }
 
     /// <summary>Background polling loop that reads from the per-controller

@@ -132,6 +132,11 @@ class Program
         public HMController Ctrl = default!;
         public CancellationTokenSource Cts = new();
         public Thread? Thread;
+        // True = pattern thread is suspended (idle test). The thread spins
+        // on a long Sleep instead of submitting frames so we can measure
+        // the driver's true idle CPU cost (should be ~0% with event-driven
+        // IPC; was a busy-polled core per controller before the fix).
+        public volatile bool Paused;
     }
 
     static int Emulate(string[] profileIds)
@@ -173,12 +178,26 @@ class Program
         // Console reader: "quit" to exit, "<idx> <profile-id>" to live-swap a controller.
         Console.WriteLine("  Sending input. Commands:");
         Console.WriteLine("    quit                          exit");
+        Console.WriteLine("    pause                         stop submitting input frames (idle CPU test)");
+        Console.WriteLine("    resume                        resume submitting input frames");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
         while (Console.ReadLine() is string line)
         {
             line = line.Trim();
             if (line.Length == 0) continue;
             if (line.Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
+            if (line.Equals("pause", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var s in slots) s.Paused = true;
+                Console.WriteLine($"  paused {slots.Count} pattern thread(s) — driver should now be idle");
+                continue;
+            }
+            if (line.Equals("resume", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var s in slots) s.Paused = false;
+                Console.WriteLine($"  resumed {slots.Count} pattern thread(s)");
+                continue;
+            }
 
             // Live profile switch: "<index> <profile-id>"
             var parts = line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
@@ -203,12 +222,17 @@ class Program
             Console.WriteLine($"  ! unknown command: {line}");
         }
 
-        foreach (var s in slots)
+        var cleanupSw = Stopwatch.StartNew();
+        for (int i = 0; i < slots.Count; i++)
         {
+            var perCtrl = Stopwatch.StartNew();
+            var s = slots[i];
             try { s.Cts.Cancel(); } catch { }
             try { s.Thread?.Join(2000); } catch { }
             try { s.Ctrl.Dispose(); } catch { }
+            Console.WriteLine($"  disposed slot {i} in {perCtrl.ElapsedMilliseconds} ms");
         }
+        Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
         return 0;
     }
 
@@ -234,7 +258,7 @@ class Program
     static void StartPatternThread(List<RunningController> slots, int idx)
     {
         var slot = slots[idx];
-        slot.Thread = new Thread(() => SendTestPattern(slot.Ctrl, idx, slot.Cts.Token))
+        slot.Thread = new Thread(() => SendTestPattern(slot, idx, slot.Cts.Token))
         {
             IsBackground = true,
             Name = $"Pattern_{idx}",
@@ -300,11 +324,22 @@ class Program
     /// every second. Triggers do a clean 15-second sweep through 5 phases
     /// rather than continuous oscillation.
     /// </summary>
-    static void SendTestPattern(HMController ctrl, int ctrlIndex, CancellationToken ct)
+    static void SendTestPattern(RunningController slot, int ctrlIndex, CancellationToken ct)
     {
+        HMController ctrl = slot.Ctrl;
         var sw = Stopwatch.StartNew();
         while (!ct.IsCancellationRequested)
         {
+            // Pause gate: when paused, sleep in 100ms chunks (so we still
+            // notice cancellation promptly) and submit no frames. This
+            // exercises the driver's idle path so we can measure that the
+            // event-driven worker thread truly costs ~0% CPU when nothing
+            // is being submitted.
+            if (slot.Paused)
+            {
+                try { Thread.Sleep(100); } catch { break; }
+                continue;
+            }
             double t = sw.Elapsed.TotalSeconds;
 
             // Per-controller circle: differentiated speed, direction, and phase.

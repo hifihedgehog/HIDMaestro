@@ -95,6 +95,12 @@ InitInstancePaths(
         RtlCopyMemory(ctx->OutputMappingName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->OutputMappingName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroInputEvent";
+        SIZE_T cap = sizeof(ctx->InputEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->InputEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->InputEventName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -401,12 +407,15 @@ ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
     return TRUE;
 }
 
+/* Core per-frame work extracted from the old EvtSharedMemTimer.
+ * Called from the event-driven worker thread whenever the SDK signals
+ * InputDataEvent (or the 50 ms safety tick fires). Doing all the HID
+ * report-build + manual-queue drain here — no WDF timer, no IRQL games:
+ * WdfRequestComplete / WdfWaitLock* are documented safe from a raw worker
+ * thread in UMDF2. */
 static void
-EvtSharedMemTimer(
-    _In_ WDFTIMER Timer)
+ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 {
-    PDEVICE_CONTEXT ctx = GetDeviceContext(WdfTimerGetParentObject(Timer));
-
     HIDMAESTRO_SHARED_INPUT shared;
     if (!ReadSharedInput(ctx, &shared)) return;
 
@@ -494,13 +503,63 @@ EvtSharedMemTimer(
                 WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
             }
         }
-        /* Also store for polled GET_INPUT_REPORT */
+        /* Also store for polled GET_INPUT_REPORT, and bump the seqno gate
+         * so the next IOCTL_HID_READ_REPORT for this seqno completes
+         * directly (the queued ones have already been drained above). */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
+        ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
         WdfWaitLockRelease(ctx->InputLock);
     }
+}
+
+/* Event-driven worker thread. Replaces the 1ms WdfTimer that used to
+ * saturate a core per controller. Waits on (StopEvent, InputDataEvent) —
+ * InputDataEvent is an auto-reset event signaled by the SDK every time
+ * WriteInputFrame publishes a new seqlock frame.
+ *
+ * Two-phase wait:
+ *   Phase 1 (bootstrap): the driver may attach before the SDK has created
+ *     Global\HIDMaestroInputEvent<N>. Wait on StopEvent only with a short
+ *     200 ms timeout; on each timeout, retry OpenEventW. Once it succeeds,
+ *     drop into Phase 2.
+ *   Phase 2 (steady state): wait on (StopEvent, InputDataEvent) with
+ *     INFINITE timeout. Auto-reset events + SetEvent are reliable on
+ *     Windows — the wait blocks at zero CPU cost until the SDK signals
+ *     a frame or the device is torn down. ZERO wakeups when idle.
+ *
+ * The stop event is signaled from EvtDeviceContextCleanup; we then join
+ * the thread handle so all cleanup is race-free. */
+static DWORD WINAPI
+SharedInputWorkerProc(_In_ LPVOID Parameter)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
+
+    /* Phase 1: bootstrap-loop until the SDK side creates the event. */
+    while (ctx->InputDataEvent == NULL) {
+        HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
+                               ctx->InputEventName);
+        if (ev != NULL) {
+            ctx->InputDataEvent = ev;
+            break;
+        }
+        /* Wait on StopEvent only — if it fires, exit immediately. */
+        if (WaitForSingleObject(ctx->StopEvent, 200) == WAIT_OBJECT_0)
+            return 0;
+    }
+
+    /* Phase 2: steady state — block until either StopEvent or a frame. */
+    HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
+    for (;;) {
+        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (rc == WAIT_OBJECT_0) break; /* stop */
+        if (rc == WAIT_OBJECT_0 + 1) ProcessSharedInput(ctx);
+        /* Any other return (WAIT_FAILED etc.) — bail rather than spin. */
+        else break;
+    }
+    return 0;
 }
 
 /* ================================================================== */
@@ -509,6 +568,19 @@ static EVT_WDF_OBJECT_CONTEXT_CLEANUP EvtDeviceContextCleanup;
 static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext((WDFDEVICE)Object);
+
+    /* Stop the worker thread first so nothing is touching SharedMemPtr
+     * while we unmap. SetEvent → 2-second join (should be instant — the
+     * worker wakes on the stop event and returns). */
+    if (ctx->StopEvent) SetEvent(ctx->StopEvent);
+    if (ctx->WorkerThread) {
+        WaitForSingleObject(ctx->WorkerThread, 2000);
+        CloseHandle(ctx->WorkerThread);
+        ctx->WorkerThread = NULL;
+    }
+    if (ctx->InputDataEvent) { CloseHandle(ctx->InputDataEvent); ctx->InputDataEvent = NULL; }
+    if (ctx->StopEvent)      { CloseHandle(ctx->StopEvent);      ctx->StopEvent = NULL; }
+
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
@@ -744,17 +816,16 @@ EvtDeviceAdd(
     ctx->SharedMemPtr = NULL;
     ctx->SharedMemSeqNo = 0;
 
-    /* Poll timer: reads shared section every 1ms for data injection */
-    {
-        WDF_TIMER_CONFIG timerConfig;
-        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerConfig, EvtSharedMemTimer, 1);
-        WDF_OBJECT_ATTRIBUTES timerAttrs;
-        WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
-        timerAttrs.ParentObject = device;
-        status = WdfTimerCreate(&timerConfig, &timerAttrs, &ctx->PollTimer);
-        if (NT_SUCCESS(status)) {
-            WdfTimerStart(ctx->PollTimer, WDF_REL_TIMEOUT_IN_MS(100));
-        }
+    /* Event-driven shared-input worker. The SDK creates
+     * Global\HIDMaestroInputEvent<N> alongside the section and SetEvents
+     * it per frame; we OpenEvent lazily in the worker (it may not exist
+     * yet at EvtDeviceAdd time). StopEvent is our sentinel for shutdown.
+     * Replaces the old 1 ms WdfTimer busy poll — see commit/diff for the
+     * CPU-saturation root cause. */
+    ctx->InputDataEvent = NULL;
+    ctx->StopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
+    if (ctx->StopEvent != NULL) {
+        ctx->WorkerThread = CreateThread(NULL, 0, SharedInputWorkerProc, ctx, 0, NULL);
     }
 
     return STATUS_SUCCESS;
@@ -848,15 +919,23 @@ EvtIoDeviceControl(
     case IOCTL_HID_READ_REPORT: {
         /*
          * HID class wants an input report.
-         * Check if user-mode has submitted one, else park the request.
+         *
+         * Critical: only complete IMMEDIATELY when the cached report is
+         * NEWER than the last one we delivered. Otherwise pend in ManualQueue
+         * and let ProcessSharedInput drain it when the SDK next signals.
+         *
+         * Without this seqno gate, every READ_REPORT completes instantly
+         * with stale cached data, HIDClass immediately re-issues, and we
+         * burn a core per device hammering the kernel↔user mode bridge.
+         * GET_INPUT_REPORT (a different IOCTL, polled diagnostic path) is
+         * unaffected — it still reads the cache directly.
          */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
 
-        if (ctx->InputReportReady) {
+        if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
-            /* Do NOT clear InputReportReady — GET_INPUT_REPORT needs it too.
-             * Timer updates the data every 4ms regardless. */
+            ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
             WdfWaitLockRelease(ctx->InputLock);
         } else {
             WdfWaitLockRelease(ctx->InputLock);
