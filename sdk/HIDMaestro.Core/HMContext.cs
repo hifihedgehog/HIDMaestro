@@ -81,19 +81,16 @@ public sealed class HMContext : IDisposable
     public void InstallDriver()
     {
         ThrowIfDisposed();
-        // The DriverBuilder currently sources the driver binaries from the
-        // repo's build/ directory rather than embedded resources. Resource
-        // embedding (so the SDK is single-file deployable) is a planned
-        // follow-up — this still works correctly when the SDK is consumed
-        // from a checkout of the HIDMaestro repo, which is the intended
-        // initial use case (PadForge integration).
-        if (DriverBuilder.NeedsBuild() || !DriverBuilder.IsDriverInstalled())
-        {
-            if (!DriverBuilder.FullDeploy(rebuild: DriverBuilder.NeedsBuild()))
-                throw new InvalidOperationException(
-                    "Driver build/install failed. Run elevated and check the build log " +
-                    "in the repo's build/ directory.");
-        }
+        // Always run the full deploy. The previous version gated on
+        // IsDriverInstalled — but a stale half-removed package would make
+        // that gate return true and skip the install entirely, leaving
+        // WUDFHost serving devices from an OLD binary. That failure mode
+        // hid the CPU-saturation fix for hours during testing. The pnputil
+        // install is fast (a few seconds) and safely overwrites whatever
+        // is in the store, so unconditional install is strictly better.
+        if (!DriverBuilder.FullDeploy())
+            throw new InvalidOperationException(
+                "Driver install failed. Run elevated and check pnputil output.");
     }
 
     /// <summary>Removes ALL HIDMaestro virtual devices on the system, including

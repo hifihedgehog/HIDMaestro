@@ -263,27 +263,15 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Removes all HIDMaestro driver packages from the driver store.</summary>
+    /// <summary>Removes all HIDMaestro driver packages from the driver store.
+    /// Strict: matches by <c>Provider Name == "HIDMaestro"</c> + the explicit
+    /// INF allow-list, retries on "in use" failures, and verifies removal.
+    /// Throws if anything is left in the store afterward — that prevents
+    /// the next install from silently using a stale binary, which was the
+    /// failure mode that hid the CPU-saturation bug for hours.</summary>
     public static void RemoveOldDriverPackages()
     {
-        string pnputil = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
-        var (_, output) = Run(pnputil, "/enum-drivers");
-        string? oem = null;
-        foreach (string line in output.Split('\n'))
-        {
-            if (line.Contains("Published Name:") && line.Contains("oem"))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(line, @"(oem\d+\.inf)");
-                if (match.Success) oem = match.Groups[1].Value;
-            }
-            if (oem != null && line.Contains("hidmaestro", StringComparison.OrdinalIgnoreCase))
-            {
-                Run(pnputil, $"/delete-driver {oem} /force");
-                oem = null;
-            }
-            if (string.IsNullOrWhiteSpace(line)) oem = null;
-        }
+        PnputilHelper.RemoveAllHidMaestroPackages();
     }
 
     /// <summary>Full extract + sign + catalog + install pipeline. Returns
@@ -317,17 +305,13 @@ public static class DriverBuilder
         return true;
     }
 
-    /// <summary>Checks if ALL required HIDMaestro drivers are in the store.</summary>
+    /// <summary>Checks if ALL required HIDMaestro drivers are in the store.
+    /// Strict: requires a record per INF where <c>Provider Name == "HIDMaestro"</c>.
+    /// Substring grepping was previously vulnerable to half-removed entries
+    /// matching by accident — see PnputilHelper for the failure-mode notes.</summary>
     public static bool IsDriverInstalled()
     {
-        string pnputil = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
-        var (_, output) = Run(pnputil, "/enum-drivers");
-        return output.Contains("hidmaestro.inf", StringComparison.OrdinalIgnoreCase)
-            && output.Contains("hidmaestro_xusb.inf", StringComparison.OrdinalIgnoreCase);
+        return PnputilHelper.IsHidMaestroDriverInstalled();
     }
 
-    /// <summary>True iff the driver isn't installed yet. There is no
-    /// source-vs-binary timestamp check now — the binaries ship embedded.</summary>
-    public static bool NeedsBuild() => !IsDriverInstalled();
 }

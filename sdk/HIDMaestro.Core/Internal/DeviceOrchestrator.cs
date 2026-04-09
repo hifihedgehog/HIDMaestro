@@ -742,11 +742,16 @@ internal static class DeviceOrchestrator
         WriteInstanceConfig(controllerIndex, profile);
 
         // ── Step 2: ensure driver is in the store ────────────────────────
-        if (DriverBuilder.NeedsBuild() || !DriverBuilder.IsDriverInstalled())
+        // Use IsDriverInstalled here (not unconditional FullDeploy) because
+        // SetupController may be called per-controller in tight loops; the
+        // strict pnputil parser is reliable so this gate is now safe. The
+        // unconditional FullDeploy lives in HMContext.InstallDriver, which
+        // is the canonical entry point and is called once at app startup.
+        if (!DriverBuilder.IsDriverInstalled())
         {
-            if (!DriverBuilder.FullDeploy(rebuild: DriverBuilder.NeedsBuild()))
+            if (!DriverBuilder.FullDeploy())
                 throw new InvalidOperationException(
-                    "Driver build/install failed. Run elevated and check logs.");
+                    "Driver install failed. Run elevated and check pnputil output.");
         }
 
         // ── Step 3: create device(s) ────────────────────────────────────
@@ -1160,24 +1165,13 @@ internal static class DeviceOrchestrator
         }
         catch { }
 
-        // Remove driver packages from store
-        try
-        {
-            var (_, drivers) = RunProcess("pnputil.exe", "/enum-drivers", timeoutMs: 10_000);
-            string? currentOem = null;
-            foreach (var line in drivers.Split('\n'))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(line, @"(oem\d+\.inf)");
-                if (match.Success) currentOem = match.Groups[1].Value;
-                if (currentOem != null && line.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase))
-                {
-                    RunProcess("pnputil.exe", $"/delete-driver {currentOem} /force", timeoutMs: 5000);
-                    currentOem = null;
-                }
-                if (string.IsNullOrWhiteSpace(line)) currentOem = null;
-            }
-        }
-        catch { }
+        // Remove driver packages from store. Strict, retry-aware, verifies
+        // afterward — see PnputilHelper. Catch the verification throw here
+        // because cleanup is best-effort: leaving a stale package is bad
+        // (it'll bite the next install) but it shouldn't kill the cleanup
+        // path entirely. The next FullDeploy will try again, and FullDeploy
+        // does NOT swallow this exception.
+        try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
 
         // Clear registry config
         try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
