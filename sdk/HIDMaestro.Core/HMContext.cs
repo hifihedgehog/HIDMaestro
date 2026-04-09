@@ -96,6 +96,15 @@ public sealed class HMContext : IDisposable
         }
     }
 
+    /// <summary>Removes ALL HIDMaestro virtual devices on the system, including
+    /// orphans from previous runs that weren't cleanly disposed. Use this from
+    /// a "cleanup" command-line command. Static (no HMContext instance needed).
+    /// Requires admin.</summary>
+    public static void RemoveAllVirtualControllers()
+    {
+        Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
+    }
+
     // ════════════════════════════════════════════════════════════════════
     //  Profile catalog
     // ════════════════════════════════════════════════════════════════════
@@ -228,6 +237,29 @@ public sealed class HMContext : IDisposable
     public IReadOnlyCollection<HMController> ActiveControllers
     {
         get { ThrowIfDisposed(); lock (_lock) return _controllers.Values.ToArray(); }
+    }
+
+    /// <summary>Re-apply friendly names to every live controller. Call once
+    /// after creating ALL controllers — there is a Windows PnP race where the
+    /// first controller's friendly name gets overwritten by the SECOND
+    /// controller's driver-bind activity. Re-applying after all PnP has
+    /// settled makes the writes stick. The proven pre-SDK test app called
+    /// this as "Phase 1.5 — Finalizing device names". A 2-second sleep is
+    /// included to let PnP settle before the re-apply pass.</summary>
+    public void FinalizeNames()
+    {
+        ThrowIfDisposed();
+        System.Threading.Thread.Sleep(2000);
+        HMController[] all;
+        lock (_lock) all = _controllers.Values.ToArray();
+        foreach (var c in all)
+        {
+            string name = c.Profile.Inner.DeviceDescription
+                          ?? c.Profile.Inner.ProductString
+                          ?? "Controller";
+            try { Internal.DeviceProperties.ApplyFriendlyNameForController(c.Index, name); }
+            catch { /* per-controller failure shouldn't break the whole pass */ }
+        }
     }
 
     // Called by HMController.Dispose; the context tears down its half of the state.

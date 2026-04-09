@@ -58,6 +58,9 @@ internal static class DeviceOrchestrator
     [DllImport("CfgMgr32.dll", SetLastError = true)]
     private static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
+    [DllImport("CfgMgr32.dll", SetLastError = true)]
+    private static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
     [DllImport("CfgMgr32.dll")]
     private static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
 
@@ -688,6 +691,11 @@ internal static class DeviceOrchestrator
             throw new ArgumentException(
                 $"Profile '{profile.Id}' has no HID descriptor.", nameof(profile));
 
+        // Snapshot XInput slot count BEFORE any setup so the post-setup wait
+        // can detect the new claim. Sony / generic profiles get -1 (skip).
+        int slotsBefore = (profile.VendorId == 0x045E) ? CountConnectedXInputSlots() : -1;
+        bool xinputFull = slotsBefore >= 4;
+
         // ── Step 0: pre-flight environment ───────────────────────────────
         SharedMemoryIO.EnsureInputMapping(controllerIndex);
         try { SharedMemoryIO.EnsureOutputMapping(controllerIndex); } catch { }
@@ -814,8 +822,56 @@ internal static class DeviceOrchestrator
         // ── Step 6: final friendly name ──────────────────────────────────
         DeviceProperties.ApplyFriendlyNameForController(controllerIndex, displayName);
 
+        // ── Step 7: wait for XInput slot claim ───────────────────────────
+        // Without this, xinputhid (slow) and our XUSB companion (fast) race
+        // for slot 0 and the slot order does NOT match the creation order.
+        // Only Xbox-VID profiles touch XInput, so non-Xbox profiles skip the
+        // wait entirely. When XInput is already full (4/4), we skip
+        // gracefully — the controller is still visible via DI/HIDAPI/Browser.
+        // Timeout is non-fatal: log only, never throw, to match the proven
+        // pre-SDK test app behavior.
+        if (slotsBefore >= 0 && !xinputFull)
+        {
+            var sw = Stopwatch.StartNew();
+            int slotsAfter = slotsBefore;
+            while (sw.ElapsedMilliseconds < 15000)
+            {
+                slotsAfter = CountConnectedXInputSlots();
+                if (slotsAfter > slotsBefore) break;
+                Thread.Sleep(100);
+            }
+            // Either the slot was claimed, or 15s elapsed and we move on.
+        }
+
         // Return main instance ID, or companion ID for companion-only profiles
         return mainInstanceId ?? companionId;
+    }
+
+    /// <summary>Count XInput slots currently reporting connected. Used by
+    /// SetupController to wait for the slot claim after each Xbox controller
+    /// is created so multi-Xbox setups get deterministic slot ordering.</summary>
+    private static int CountConnectedXInputSlots()
+    {
+        int count = 0;
+        for (uint slot = 0; slot < 4; slot++)
+            if (XInputGetState(slot, out _) == 0) count++;
+        return count;
+    }
+
+    [System.Runtime.InteropServices.DllImport("xinput1_4.dll")]
+    private static extern uint XInputGetState(uint dwUserIndex, out _XINPUT_STATE pState);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct _XINPUT_GAMEPAD
+    {
+        public ushort wButtons; public byte bLeftTrigger; public byte bRightTrigger;
+        public short sThumbLX; public short sThumbLY; public short sThumbRX; public short sThumbRY;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct _XINPUT_STATE
+    {
+        public uint dwPacketNumber; public _XINPUT_GAMEPAD Gamepad;
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -887,14 +943,270 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
+    //  RemoveAllVirtualControllers — purge every HIDMaestro virtual device
+    //  from the system, including orphans from prior runs. Used by the
+    //  "cleanup" CLI command and by consumers who want a clean slate.
+    // ════════════════════════════════════════════════════════════════════
+
+    public static void RemoveAllVirtualControllers()
+    {
+        // Walk ROOT enumerators and remove HIDMaestro-owned devices.
+        // Enumerators we always own: VID_*, XnaComposite, HMCompanion, HID_IG_00
+        // Shared enumerators (HIDCLASS, SYSTEM): verify hardware ID contains "HIDMaestro"
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (enumKey != null)
+            {
+                foreach (var sub in enumKey.GetSubKeyNames())
+                {
+                    bool alwaysOurs = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HMCompanion", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase);
+
+                    bool shared = sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+
+                    if (!alwaysOurs && !shared) continue;
+
+                    using var subKey = enumKey.OpenSubKey(sub);
+                    if (subKey == null) continue;
+
+                    foreach (var inst in subKey.GetSubKeyNames())
+                    {
+                        string instId = $@"ROOT\{sub}\{inst}";
+
+                        if (alwaysOurs)
+                        {
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000);
+                            continue;
+                        }
+
+                        // Shared: only remove if hardware ID contains "HIDMaestro"
+                        try
+                        {
+                            using var devKey = subKey.OpenSubKey(inst);
+                            var hwIds = devKey?.GetValue("HardwareID") as string[];
+                            if (hwIds?.Any(h => h.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)) == true)
+                                DeviceManager.RemoveDevice(instId, timeoutMs: 3000);
+                        }
+                        catch { }
+                    }
+                }
+            }
+        }
+        catch { }
+
+        // Remove orphaned HID children (survive parent removal as "Unknown").
+        try
+        {
+            using var hidEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\HID");
+            if (hidEnum != null)
+            {
+                foreach (var sub in hidEnum.GetSubKeyNames())
+                {
+                    bool couldBeOurs = sub.StartsWith("VID_045E", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                        || sub.StartsWith("HID_IG", StringComparison.OrdinalIgnoreCase);
+                    if (!couldBeOurs) continue;
+
+                    using var childEnum = hidEnum.OpenSubKey(sub);
+                    if (childEnum == null) continue;
+                    foreach (var inst in childEnum.GetSubKeyNames())
+                    {
+                        string childId = $@"HID\{sub}\{inst}";
+                        if (CM_Locate_DevNodeW(out uint childInst, childId, 0) == 0)
+                        {
+                            bool parentGone = CM_Get_Parent(out uint _, childInst, 0) != 0;
+                            if (parentGone)
+                                DeviceManager.RemoveDevice(childId, timeoutMs: 3000);
+                        }
+                        else if (CM_Locate_DevNodeW(out childInst, childId, CM_LOCATE_DEVNODE_PHANTOM) == 0)
+                        {
+                            DeviceManager.RemoveDevice(childId, timeoutMs: 3000);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+
+        // Clean Device Parameters under our enumerators via reg.exe (PnP ACLs
+        // prevent direct writes). Leaves the PnP instance keys themselves intact.
+        {
+            string[] ourEnumerators = { "VID_", "XnaComposite", "HMCompanion", "HID_IG_00" };
+            try
+            {
+                using var enumRoot = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+                if (enumRoot != null)
+                {
+                    foreach (var sub in enumRoot.GetSubKeyNames())
+                    {
+                        bool ours = ourEnumerators.Any(e =>
+                            sub.StartsWith(e, StringComparison.OrdinalIgnoreCase)
+                            || sub.Equals(e, StringComparison.OrdinalIgnoreCase));
+                        if (!ours) continue;
+                        using var subKey = enumRoot.OpenSubKey(sub);
+                        if (subKey == null) continue;
+                        foreach (var inst in subKey.GetSubKeyNames())
+                        {
+                            string dpPath = $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters";
+                            RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Clean interface registries (XUSB + WinExInput)
+        foreach (var guid in new[] {
+            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
+            "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
+        {
+            try
+            {
+                using var classKey = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
+                if (classKey != null)
+                    foreach (var sub in classKey.GetSubKeyNames())
+                        if (sub.Contains("ROOT#"))
+                            try { classKey.DeleteSubKeyTree(sub); } catch { }
+            }
+            catch { }
+        }
+
+        // Clean joy.cpl joystick OEM cache + slot assignments
+        string[] oemPrefixes = { "VID_045E&PID_", "VID_054C&PID_", "VID_0000&PID_" };
+        string oemRelPath = @"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
+        foreach (var root in new[] { Registry.CurrentUser, Registry.LocalMachine })
+        {
+            try
+            {
+                using var oemKey = root.OpenSubKey(oemRelPath, writable: true);
+                if (oemKey != null)
+                    foreach (var sub in oemKey.GetSubKeyNames())
+                        if (oemPrefixes.Any(p => sub.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                            try { oemKey.DeleteSubKeyTree(sub, false); } catch { }
+            }
+            catch { }
+        }
+        try
+        {
+            using var jsRoot = Registry.CurrentUser.OpenSubKey(
+                @"System\CurrentControlSet\Control\MediaResources\Joystick", writable: true);
+            if (jsRoot != null)
+                foreach (var sub in jsRoot.GetSubKeyNames())
+                {
+                    try
+                    {
+                        using var settings = jsRoot.OpenSubKey($@"{sub}\CurrentJoystickSettings", writable: true);
+                        if (settings != null)
+                            foreach (var name in settings.GetValueNames())
+                            {
+                                if (name.StartsWith("Joystick", StringComparison.OrdinalIgnoreCase) &&
+                                    (name.Contains("OEMName", StringComparison.OrdinalIgnoreCase) ||
+                                     name.Contains("Configuration", StringComparison.OrdinalIgnoreCase)))
+                                    settings.DeleteValue(name, false);
+                            }
+                    }
+                    catch { }
+                    try
+                    {
+                        using var jsSettings = jsRoot.OpenSubKey($@"{sub}\JoystickSettings", writable: true);
+                        if (jsSettings != null)
+                            foreach (var vidPid in jsSettings.GetSubKeyNames())
+                            {
+                                try
+                                {
+                                    using var vidPidKey = jsSettings.OpenSubKey(vidPid, writable: true);
+                                    if (vidPidKey == null) continue;
+                                    foreach (var name in vidPidKey.GetValueNames())
+                                    {
+                                        if (name.StartsWith("Joystick", StringComparison.OrdinalIgnoreCase) &&
+                                            (name.Contains("OEMName", StringComparison.OrdinalIgnoreCase) ||
+                                             name.Contains("Configuration", StringComparison.OrdinalIgnoreCase)))
+                                            vidPidKey.DeleteValue(name, false);
+                                    }
+                                }
+                                catch { }
+                            }
+                    }
+                    catch { }
+                }
+        }
+        catch { }
+
+        // Wait for WUDFHost processes to release our DLLs.
+        try
+        {
+            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
+            foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
+            {
+                try
+                {
+                    bool hostsOurs = false;
+                    foreach (ProcessModule mod in wudf.Modules)
+                    {
+                        if (ourDlls.Any(d => mod.ModuleName.Equals(d, StringComparison.OrdinalIgnoreCase)))
+                        { hostsOurs = true; break; }
+                    }
+                    if (hostsOurs)
+                        wudf.WaitForExit(10000);
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        // Remove driver packages from store
+        try
+        {
+            var (_, drivers) = RunProcess("pnputil.exe", "/enum-drivers", timeoutMs: 10_000);
+            string? currentOem = null;
+            foreach (var line in drivers.Split('\n'))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(line, @"(oem\d+\.inf)");
+                if (match.Success) currentOem = match.Groups[1].Value;
+                if (currentOem != null && line.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase))
+                {
+                    RunProcess("pnputil.exe", $"/delete-driver {currentOem} /force", timeoutMs: 5000);
+                    currentOem = null;
+                }
+                if (string.IsNullOrWhiteSpace(line)) currentOem = null;
+            }
+        }
+        catch { }
+
+        // Clear registry config
+        try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+
+        // Release shared-memory mappings
+        try { SharedMemoryIO.Cleanup(); } catch { }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     //  ComputeInputReportByteLength
     // ════════════════════════════════════════════════════════════════════
 
+    /// <summary>Compute the input report byte length from a HID descriptor.
+    /// Ported verbatim from the proven pre-SDK test app's implementation.
+    /// Critically: handles multi-Report-ID descriptors (e.g. dualsense which
+    /// declares Report IDs 1, 2, 3, ...) by counting bits ONLY for the first
+    /// encountered Report ID — that's the input report we use. Adds +1 to
+    /// the byte total for descriptors that have any Report ID, accounting
+    /// for the prefix byte the kernel HID stack adds when delivering reports.
+    /// </summary>
     private static int ComputeInputReportByteLength(byte[] desc)
     {
-        int reportSize = 0, reportCount = 0;
-        long inputBits = 0;
-        int colDepth = 0;
+        int totalBits = 0;
+        int reportSize = 0;
+        int reportCount = 0;
+        int currentReportId = 0;
+        int firstInputReportId = 0;
+        bool hasReportIds = false;
+
         for (int i = 0; i < desc.Length;)
         {
             byte prefix = desc[i];
@@ -903,23 +1215,39 @@ internal static class DeviceOrchestrator
             int bType = (prefix >> 2) & 0x03;
             int bTag = (prefix >> 4) & 0x0F;
 
-            int dataValue = 0;
-            for (int b = 0; b < bSize && i + 1 + b < desc.Length; b++)
-                dataValue |= desc[i + 1 + b] << (b * 8);
-
-            if (bType == 1 && bTag == 7) reportSize = dataValue;
-            else if (bType == 1 && bTag == 9) reportCount = dataValue;
-            else if (bType == 0 && bTag == 8)
-                inputBits += (long)reportSize * reportCount;
-            else if (bType == 0 && bTag == 10) colDepth++;
-            else if (bType == 0 && bTag == 12)
+            int value = 0;
+            if (i + bSize < desc.Length)
             {
-                colDepth--;
-                if (colDepth == 0) break;
+                for (int j = 0; j < bSize; j++)
+                    value |= desc[i + 1 + j] << (8 * j);
+            }
+
+            if (bType == 1) // Global
+            {
+                if (bTag == 7) reportSize = value;     // Report Size
+                if (bTag == 9) reportCount = value;    // Report Count
+                if (bTag == 8)                          // Report ID
+                {
+                    currentReportId = value;
+                    if (!hasReportIds) firstInputReportId = value;
+                    hasReportIds = true;
+                }
+            }
+            else if (bType == 0) // Main
+            {
+                if (bTag == 8) // Input
+                {
+                    // Count bits for the first report ID encountered (or all
+                    // bits if the descriptor doesn't use Report IDs at all).
+                    if (!hasReportIds || currentReportId == firstInputReportId)
+                        totalBits += reportSize * reportCount;
+                }
             }
 
             i += 1 + bSize;
         }
-        return (int)((inputBits + 7) / 8);
+
+        int totalBytes = (totalBits + 7) / 8;
+        return hasReportIds ? totalBytes + 1 : totalBytes; // +1 for Report ID byte
     }
 }

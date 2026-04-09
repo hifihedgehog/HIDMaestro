@@ -39,11 +39,25 @@ public sealed class HMController : IDisposable
     private readonly Thread? _outputThread;
     private readonly CancellationTokenSource _outputCts = new();
 
-    // Empty 14-byte GIP packet — required by SharedMemoryIO.WriteInputFrame
-    // (used by the XUSB companion to populate XInput state). Plain HID
-    // profiles don't have an XUSB companion, so an all-zero GIP slice is
-    // a valid no-op for them.
-    private static readonly byte[] s_emptyGip = new byte[14];
+    // 14-byte GIP-format buffer reused per frame to avoid per-call alloc.
+    // The XUSB companion (HMXInput.dll, used for non-xinputhid Xbox
+    // profiles like Xbox 360 wired) reads ONLY this slice from shared
+    // memory when servicing IOCTL_XUSB_GET_STATE — it does not read the
+    // HID native bytes. For Xbox-VID profiles SubmitState packs LX/LY/RX
+    // /RY/LT/RT/buttons into this buffer in the layout the companion
+    // expects. For non-Xbox profiles the buffer stays zeroed (companion
+    // is not bound, so the bytes are unused).
+    //
+    // Layout (matches the proven pre-SDK test app):
+    //   [0..1]  LX  16-bit unsigned (0..65535)
+    //   [2..3]  LY  16-bit unsigned
+    //   [4..5]  RX  16-bit unsigned
+    //   [6..7]  RY  16-bit unsigned
+    //   [8..9]  LT  10-bit unsigned in the low bits
+    //   [10..11] RT 10-bit unsigned in the low bits
+    //   [12]    btnLow  (A=0x01 B=0x02 X=0x04 Y=0x08 LB=0x10 RB=0x20 LS=0x40 RS=0x80)
+    //   [13]    btnHigh (Back=0x01 Start=0x02 …)
+    private readonly byte[] _gipBuf = new byte[14];
 
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
@@ -93,24 +107,77 @@ public sealed class HMController : IDisposable
     {
         ThrowIfDisposed();
 
-        // HMGamepadState uses [-1..+1] for sticks (Y-up convention) and
-        // [0..1] for triggers. HidReportBuilder.BuildReport expects [0..1]
-        // normalized values for axes (centered at 0.5) and 0..1 for triggers.
-        // Convert: x -> (x + 1) / 2 with Y inverted because HID Y is down-positive.
+        // HMGamepadState uses [-1..+1] for sticks and [0..1] for triggers.
+        // HidReportBuilder.BuildReport expects [0..1] normalized values for
+        // axes (centered at 0.5). Map directly with no sign flip — the
+        // proven test app encoder passed values straight through to
+        // BuildReport without inversion, and it produced correct circles
+        // in joy.cpl / Gamepad Tester for every profile type. HID Y axis
+        // direction is descriptor-defined, not a universal convention, so
+        // the SDK keeps the contract simple: caller's LeftStickY = +1
+        // becomes HID logical max for that field.
         double Map(float v) => Math.Clamp((v + 1.0) / 2.0, 0.0, 1.0);
 
+        double mlx = Map(state.LeftStickX);
+        double mly = Map(state.LeftStickY);
+        double mrx = Map(state.RightStickX);
+        double mry = Map(state.RightStickY);
+        double mlt = Math.Clamp(state.LeftTrigger, 0f, 1f);
+        double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
+
         byte[] report = _reportBuilder.BuildReport(
-            leftX: Map(state.LeftStickX),
-            leftY: Map(-state.LeftStickY),  // invert: HID Y is down-positive
-            rightX: Map(state.RightStickX),
-            rightY: Map(-state.RightStickY),
-            leftTrigger: Math.Clamp(state.LeftTrigger, 0f, 1f),
-            rightTrigger: Math.Clamp(state.RightTrigger, 0f, 1f),
+            leftX: mlx, leftY: mly,
+            rightX: mrx, rightY: mry,
+            leftTrigger: mlt, rightTrigger: mrt,
             hatValue: (int)state.Hat,
             buttonMask: (uint)state.Buttons);
 
+        // Pack the GIP-format buffer that the XUSB companion (HMXInput.dll)
+        // reads for IOCTL_XUSB_GET_STATE. Only meaningful for non-xinputhid
+        // Xbox profiles (Xbox 360 wired etc.) — for other profiles no XUSB
+        // companion is bound and the bytes are unused. We pack unconditionally
+        // because checking the profile per-frame is more expensive than
+        // writing 14 bytes.
+        ushort gipLx = (ushort)(mlx * 65535);
+        ushort gipLy = (ushort)(mly * 65535);
+        ushort gipRx = (ushort)(mrx * 65535);
+        ushort gipRy = (ushort)(mry * 65535);
+        ushort gipLt = (ushort)(mlt * 1023);
+        ushort gipRt = (ushort)(mrt * 1023);
+        _gipBuf[0]  = (byte)(gipLx & 0xFF); _gipBuf[1]  = (byte)(gipLx >> 8);
+        _gipBuf[2]  = (byte)(gipLy & 0xFF); _gipBuf[3]  = (byte)(gipLy >> 8);
+        _gipBuf[4]  = (byte)(gipRx & 0xFF); _gipBuf[5]  = (byte)(gipRx >> 8);
+        _gipBuf[6]  = (byte)(gipRy & 0xFF); _gipBuf[7]  = (byte)(gipRy >> 8);
+        _gipBuf[8]  = (byte)(gipLt & 0xFF); _gipBuf[9]  = (byte)(gipLt >> 8);
+        _gipBuf[10] = (byte)(gipRt & 0xFF); _gipBuf[11] = (byte)(gipRt >> 8);
+        // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
+        uint b = (uint)state.Buttons;
+        byte btnLow = 0;
+        if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
+        if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
+        if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
+        if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
+        if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
+        if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
+        if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
+        if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
+        _gipBuf[12] = btnLow;
+        // Button high byte: Back, Start, hat in upper bits (companion-specific)
+        byte btnHigh = 0;
+        if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
+        if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
+        _gipBuf[13] = btnHigh;
+
+        // Strip the Report ID byte (if any) before writing the HID native
+        // bytes. BuildReport puts the Report ID at position 0 when the
+        // descriptor declares one. The driver expects the shared memory
+        // section to contain only data bytes — the kernel HID stack adds
+        // the Report ID prefix when delivering. dataLen capped at 64 to
+        // match the shared memory section's data area size.
+        int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
+        int dataLen = Math.Min(report.Length - dataStart, 64);
         SharedMemoryIO.WriteInputFrame(
-            _inputView, ref _inputSeqNo, report, report.Length, s_emptyGip);
+            _inputView, ref _inputSeqNo, report, dataLen, _gipBuf, dataStart);
     }
 
     /// <summary>Push a raw HID input report. Use this for exotic features
@@ -124,8 +191,11 @@ public sealed class HMController : IDisposable
         if (report.Length > 64) throw new ArgumentException("Report exceeds the 64-byte shared section payload.", nameof(report));
 
         byte[] copy = report.ToArray();
+        // Raw mode reuses the GIP buffer at whatever state SubmitState last
+        // left it in (or zero if SubmitState was never called) — raw consumers
+        // are expected to also call SubmitState if they need GIP/XInput.
         SharedMemoryIO.WriteInputFrame(
-            _inputView, ref _inputSeqNo, copy, copy.Length, s_emptyGip);
+            _inputView, ref _inputSeqNo, copy, copy.Length, _gipBuf);
     }
 
     /// <summary>Background polling loop that reads from the per-controller

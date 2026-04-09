@@ -120,7 +120,8 @@ internal static class SharedMemoryIO
     /// <para><c>seqNo</c> is updated in place; the caller maintains it
     /// across frames so it survives mapping resets.</para></summary>
     public static void WriteInputFrame(IntPtr view, ref uint seqNo,
-                                       byte[] data, int dataLen, byte[] gipData)
+                                       byte[] data, int dataLen, byte[] gipData,
+                                       int dataOffset = 0)
     {
         // 1. Mark write in progress (odd seqNo)
         uint pending = seqNo + 1;
@@ -130,7 +131,7 @@ internal static class SharedMemoryIO
         // 2. Write payload (DataSize + Data + GipData)
         Marshal.WriteInt32(view, 4, dataLen);
         for (int i = 0; i < 64; i++)
-            Marshal.WriteByte(view, 8 + i, i < dataLen ? data[i] : (byte)0);
+            Marshal.WriteByte(view, 8 + i, i < dataLen ? data[dataOffset + i] : (byte)0);
         for (int i = 0; i < 14; i++)
             Marshal.WriteByte(view, 72 + i, gipData[i]);
 
