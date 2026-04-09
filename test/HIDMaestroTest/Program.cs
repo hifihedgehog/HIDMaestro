@@ -145,12 +145,28 @@ class Program
         // (buttons[0]=A, [1]=B, [2]=X, [3]=Y, [4]=LB, [5]=RB) so we get an
         // unambiguous fingerprint with no float-comparison ambiguity.
         public volatile int MarkButton = -1;
+        // 'park' mode: hold the LEFT stick at literal (ParkX, ParkY) values
+        // in the [-1..+1] range and submit a static frame. Used by the
+        // Cemu-style SDL2 readback diagnostic — we can park at known
+        // positions and verify SDL_GameControllerGetAxis returns the
+        // expected value at each. Sentinel float.NaN = not in park mode.
+        public float ParkX = float.NaN;
+        public float ParkY = float.NaN;
     }
 
     static int Emulate(string[] profileIds)
     {
+        // Optional --paused-at-zero flag: every pattern thread starts in
+        // park mode at (0, 0). Useful when a downstream consumer (Cemu's
+        // input config dialog, Citron, anything that auto-calibrates the
+        // resting stick position on first poll) needs to see the controller
+        // sitting still at center before the time-varying circle pattern
+        // kicks in. After observing zero, send 'park off' over stdin to
+        // start the circle.
+        bool startPaused = profileIds.Contains("--paused-at-zero");
+        profileIds = profileIds.Where(p => p != "--paused-at-zero").ToArray();
         if (profileIds.Length == 0)
-            return Error("Usage: HIDMaestroTest emulate <profile-id> [profile-id ...]");
+            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] <profile-id> [profile-id ...]");
 
         using var ctx = new HMContext();
         int loaded = ctx.LoadDefaultProfiles();
@@ -168,6 +184,9 @@ class Program
             if (profile == null) return Error($"Profile not found: {profileIds[i]}");
             Console.WriteLine($"  Creating controller {i}: {profile.Id} ({profile.Name})");
             var slot = new RunningController { Ctrl = ctx.CreateController(profile) };
+            // Pre-park BEFORE the pattern thread starts so the very first
+            // submitted frame is (0, 0), not whatever the circle was at.
+            if (startPaused) { slot.ParkX = 0f; slot.ParkY = 0f; }
             HookOutputReceived(slot.Ctrl, i);
             slots.Add(slot);
         }
@@ -190,6 +209,8 @@ class Program
         Console.WriteLine("    resume                        resume submitting input frames");
         Console.WriteLine("    mark                          static frame: each ctrl holds button = its index (browser-order test)");
         Console.WriteLine("    unmark                        leave mark mode and resume the time-varying pattern");
+        Console.WriteLine("    park <idx|all> <x> <y>        pin slot N's left stick to literal x,y in [-1..+1]");
+        Console.WriteLine("    park off                      leave park mode and resume the time-varying pattern");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
         while (Console.ReadLine() is string line)
         {
@@ -218,6 +239,43 @@ class Program
             {
                 foreach (var s in slots) s.MarkButton = -1;
                 Console.WriteLine($"  unmarked {slots.Count} controller(s) — back to time-varying pattern");
+                continue;
+            }
+            // park <idx> <x> <y>     pin slot N's left stick to literal x,y in [-1..+1]
+            // park all <x> <y>       pin every slot to the same x,y
+            // park off               leave park mode (resume time-varying pattern)
+            if (line.StartsWith("park", StringComparison.OrdinalIgnoreCase)
+                && (line.Length == 4 || line[4] == ' '))
+            {
+                var sub = line.Substring(4).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (sub.Length == 1 && sub[0].Equals("off", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var s in slots) { s.ParkX = float.NaN; s.ParkY = float.NaN; }
+                    Console.WriteLine($"  park off — {slots.Count} controller(s) back to time-varying pattern");
+                    continue;
+                }
+                if (sub.Length == 3
+                    && float.TryParse(sub[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float px)
+                    && float.TryParse(sub[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float py))
+                {
+                    if (sub[0].Equals("all", StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var s in slots) { s.ParkX = px; s.ParkY = py; }
+                        Console.WriteLine($"  parked all {slots.Count} controller(s) at ({px:F3}, {py:F3})");
+                    }
+                    else if (int.TryParse(sub[0], out int parkIdx) && parkIdx >= 0 && parkIdx < slots.Count)
+                    {
+                        slots[parkIdx].ParkX = px;
+                        slots[parkIdx].ParkY = py;
+                        Console.WriteLine($"  parked slot {parkIdx} at ({px:F3}, {py:F3})");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  ! park: bad index '{sub[0]}'");
+                    }
+                    continue;
+                }
+                Console.WriteLine($"  ! park usage: park <idx|all> <x> <y>  |  park off");
                 continue;
             }
 
@@ -373,6 +431,23 @@ class Program
                     Buttons = (HMButton)(1u << markBtn),
                 };
                 try { ctrl.SubmitState(in markState); } catch { break; }
+                try { Thread.Sleep(8); } catch { break; }
+                continue;
+            }
+            // Park gate: hold left stick at a literal (ParkX, ParkY) for SDL2
+            // readback testing. Right stick centered, triggers released, no
+            // buttons. Read these as locals to get a consistent snapshot
+            // (volatile float read isn't atomic in C# but it's stable enough
+            // for parked-position testing where the values change rarely).
+            float px = slot.ParkX, py = slot.ParkY;
+            if (!float.IsNaN(px) && !float.IsNaN(py))
+            {
+                var parkState = new HMGamepadState
+                {
+                    LeftStickX = Math.Clamp(px, -1f, 1f),
+                    LeftStickY = Math.Clamp(py, -1f, 1f),
+                };
+                try { ctrl.SubmitState(in parkState); } catch { break; }
                 try { Thread.Sleep(8); } catch { break; }
                 continue;
             }
