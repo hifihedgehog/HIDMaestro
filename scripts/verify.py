@@ -17,6 +17,7 @@ Exit code 0 = all pass, 1 = failures detected.
 
 import ctypes
 import ctypes.wintypes
+from ctypes import wintypes
 import subprocess
 import sys
 import time
@@ -40,102 +41,282 @@ class XINPUT_STATE(ctypes.Structure):
 
 
 def check_xinput(repeats: int) -> dict:
+    """Walks all 4 XInput slots and returns a list of connected slots, each with
+    a moving / static determination based on `repeats` polls. Multi-controller
+    aware: a 4-Xbox config is expected to have 4 slots populated."""
     try:
         xinput = ctypes.windll.xinput1_4
     except OSError:
         xinput = ctypes.windll.xinput9_1_0
 
-    result = {"connected": False, "moving": False, "slot": -1, "details": ""}
+    slots = []
     for slot in range(4):
         state = XINPUT_STATE()
         if xinput.XInputGetState(slot, ctypes.byref(state)) != 0:
             continue
-        result["connected"] = True
-        result["slot"] = slot
+        first_pkt = state.dwPacketNumber
+        moving = False
         for _ in range(repeats):
             xinput.XInputGetState(slot, ctypes.byref(state))
             if state.sThumbLX != 0 or state.sThumbLY != 0:
-                result["moving"] = True
+                moving = True
             time.sleep(0.25)
-        result["details"] = (
-            f"slot={slot} pkt={state.dwPacketNumber} "
-            f"LX={state.sThumbLX:+d} LY={state.sThumbLY:+d} "
-            f"LT={state.bLeftTrigger} RT={state.bRightTrigger}"
-        )
-        break
-    return result
+        slots.append({
+            "slot": slot,
+            "pkt_first": first_pkt,
+            "pkt_last": state.dwPacketNumber,
+            "moving": moving,
+            "lx": state.sThumbLX, "ly": state.sThumbLY,
+            "lt": state.bLeftTrigger, "rt": state.bRightTrigger,
+        })
+    return {"slots": slots, "count": len(slots)}
 
 
 # ---------------------------------------------------------------------------
-#  DirectInput (via WinMM)
+#  DirectInput8 (with Acquire — joy.cpl/Dolphin do the same)
 # ---------------------------------------------------------------------------
+#
+# xinputhid eats HID reads, so passive paths (WinMM joyGetPosEx) see only
+# 32767 forever. The only working path is DI8 with a real top-level window
+# and Acquire — exactly what joy.cpl does.
 
-class JOYCAPSW(ctypes.Structure):
-    _fields_ = [
-        ("wMid", ctypes.c_ushort), ("wPid", ctypes.c_ushort),
-        ("szPname", ctypes.c_wchar * 32),
-        ("wXmin", ctypes.c_uint), ("wXmax", ctypes.c_uint),
-        ("wYmin", ctypes.c_uint), ("wYmax", ctypes.c_uint),
-        ("wZmin", ctypes.c_uint), ("wZmax", ctypes.c_uint),
-        ("wNumButtons", ctypes.c_uint),
-        ("wPeriodMin", ctypes.c_uint), ("wPeriodMax", ctypes.c_uint),
-        ("wRmin", ctypes.c_uint), ("wRmax", ctypes.c_uint),
-        ("wUmin", ctypes.c_uint), ("wUmax", ctypes.c_uint),
-        ("wVmin", ctypes.c_uint), ("wVmax", ctypes.c_uint),
-        ("wCaps", ctypes.c_uint),
-        ("wMaxAxes", ctypes.c_uint), ("wNumAxes", ctypes.c_uint),
-        ("wMaxButtons", ctypes.c_uint),
-        ("szRegKey", ctypes.c_wchar * 32),
-        ("szOEMVxD", ctypes.c_wchar * 260),
-    ]
+class _GUID(ctypes.Structure):
+    _fields_ = [("d1", ctypes.c_ulong), ("d2", ctypes.c_ushort),
+                ("d3", ctypes.c_ushort), ("d4", ctypes.c_ubyte * 8)]
+
+class _DIDEVICEINSTANCEW(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong), ("guidInstance", _GUID),
+                ("guidProduct", _GUID), ("dwDevType", ctypes.c_ulong),
+                ("tszInstanceName", ctypes.c_wchar * 260),
+                ("tszProductName", ctypes.c_wchar * 260),
+                ("guidFFDriver", _GUID),
+                ("wUsagePage", ctypes.c_ushort), ("wUsage", ctypes.c_ushort)]
+
+class _DIDEVCAPS(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                ("dwDevType", ctypes.c_ulong), ("dwAxes", ctypes.c_ulong),
+                ("dwButtons", ctypes.c_ulong), ("dwPOVs", ctypes.c_ulong),
+                ("dwFFSamplePeriod", ctypes.c_ulong),
+                ("dwFFMinTimeResolution", ctypes.c_ulong),
+                ("dwFirmwareRevision", ctypes.c_ulong),
+                ("dwHardwareRevision", ctypes.c_ulong),
+                ("dwFFDriverVersion", ctypes.c_ulong)]
+
+class _DIPROPGUIDANDPATH(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong), ("dwHeaderSize", ctypes.c_ulong),
+                ("dwObj", ctypes.c_ulong), ("dwHow", ctypes.c_ulong),
+                ("guidClass", _GUID), ("wszPath", ctypes.c_wchar * 260)]
+
+class _DIJOYSTATE(ctypes.Structure):
+    _fields_ = [("lX", ctypes.c_long), ("lY", ctypes.c_long),
+                ("lZ", ctypes.c_long), ("lRx", ctypes.c_long),
+                ("lRy", ctypes.c_long), ("lRz", ctypes.c_long),
+                ("rglSlider", ctypes.c_long * 2),
+                ("rgdwPOV", ctypes.c_ulong * 4),
+                ("rgbButtons", ctypes.c_ubyte * 32)]
+
+class _DIOBJECTDATAFORMAT(ctypes.Structure):
+    _fields_ = [("pguid", ctypes.c_void_p), ("dwOfs", ctypes.c_ulong),
+                ("dwType", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong)]
+
+class _DIDATAFORMAT(ctypes.Structure):
+    _fields_ = [("dwSize", ctypes.c_ulong), ("dwObjSize", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong), ("dwDataSize", ctypes.c_ulong),
+                ("dwNumObjs", ctypes.c_ulong),
+                ("rgodf", ctypes.POINTER(_DIOBJECTDATAFORMAT))]
+
+# WNDPROC: LRESULT is LONG_PTR. c_ssize_t (NOT c_long) on x64.
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                              ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [("style", ctypes.c_uint), ("lpfnWndProc", _WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
+                ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR)]
 
 
-class JOYINFOEX(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-        ("dwXpos", ctypes.c_ulong), ("dwYpos", ctypes.c_ulong),
-        ("dwZpos", ctypes.c_ulong), ("dwRpos", ctypes.c_ulong),
-        ("dwUpos", ctypes.c_ulong), ("dwVpos", ctypes.c_ulong),
-        ("dwButtons", ctypes.c_ulong), ("dwButtonNumber", ctypes.c_ulong),
-        ("dwPOV", ctypes.c_ulong),
-        ("dwReserved1", ctypes.c_ulong), ("dwReserved2", ctypes.c_ulong),
-    ]
+def _vcall(iface, slot_index, sig):
+    """Resolve a COM vtable slot to a callable. iface is a ctypes pointer
+    whose first field is the vtable pointer; slot_index is the method index;
+    sig is the WINFUNCTYPE signature. Returns a bound callable."""
+    vtbl_ptr = ctypes.cast(iface, ctypes.POINTER(ctypes.c_void_p))[0]
+    fn_ptr = ctypes.cast(vtbl_ptr, ctypes.POINTER(ctypes.c_void_p))[slot_index]
+    return sig(fn_ptr)
 
 
 def check_directinput(repeats: int) -> dict:
-    winmm = ctypes.windll.winmm
+    try:
+        dinput8 = ctypes.windll.dinput8
+    except OSError as e:
+        return {"available": False, "error": f"dinput8.dll: {e}"}
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # x64 handles are 64-bit; default restype c_int truncates them. Pin types.
+    kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = [
+        ctypes.c_ulong, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_ulong,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.RegisterClassW.restype = ctypes.c_ushort
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+    user32.PeekMessageW.argtypes = [
+        ctypes.c_void_p, wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+    user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+
+    # --- Build c_dfDIJoystick equivalent: 6 axes + 2 sliders + 4 POVs + 32 btns
+    AXIS = 3 | 0x00FFFF00 | 0x80000000   # DIDFT_AXIS|ANYINSTANCE|OPTIONAL
+    BTN  = 0x0C | 0x00FFFF00 | 0x80000000
+    POV  = 0x10 | 0x00FFFF00 | 0x80000000
+    objs = []
+    for ofs in (0,4,8,12,16,20,24,28): objs.append((ofs, AXIS))
+    for ofs in (32,36,40,44):           objs.append((ofs, POV))
+    for i in range(32):                 objs.append((48+i, BTN))
+    arr = (_DIOBJECTDATAFORMAT * len(objs))(
+        *(_DIOBJECTDATAFORMAT(None, o, t, 0) for (o, t) in objs))
+    fmt = _DIDATAFORMAT(ctypes.sizeof(_DIDATAFORMAT),
+                       ctypes.sizeof(_DIOBJECTDATAFORMAT), 1,
+                       ctypes.sizeof(_DIJOYSTATE), len(objs), arr)
+
+    # --- Top-level window (NULL/desktop hwnds fail SetCooperativeLevel)
+    user32.DefWindowProcW.restype = ctypes.c_ssize_t
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint,
+                                       wintypes.WPARAM, wintypes.LPARAM]
+    wndproc = _WNDPROC(lambda h,m,w,l: user32.DefWindowProcW(h,m,w,l))
+    wc = _WNDCLASSW()
+    wc.lpfnWndProc = wndproc
+    wc.hInstance = kernel32.GetModuleHandleW(None)
+    wc.lpszClassName = "HMVerifyDIWindow"
+    user32.RegisterClassW(ctypes.byref(wc))  # ignore "already exists"
+    hwnd = user32.CreateWindowExW(
+        0, "HMVerifyDIWindow", "HMVerifyDI",
+        0x80000000 | 0x10000000,  # WS_POPUP | WS_VISIBLE
+        -32000, -32000, 1, 1, None, None, wc.hInstance, None)
+    if not hwnd:
+        return {"available": False, "error": "CreateWindowExW failed"}
+    user32.SetForegroundWindow(hwnd)
+
     devices = []
+    di8 = ctypes.c_void_p()
+    try:
+        IID_IDI8W = _GUID(0xBF798031, 0x483A, 0x4DA2,
+                          (ctypes.c_ubyte*8)(0xAA,0x99,0x5D,0x64,0xED,0x36,0x97,0x00))
+        dinput8.DirectInput8Create.restype = ctypes.c_long
+        dinput8.DirectInput8Create.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_GUID),
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        hr = dinput8.DirectInput8Create(
+                wc.hInstance, 0x0800, ctypes.byref(IID_IDI8W),
+                ctypes.byref(di8), None)
+        if hr != 0:
+            return {"available": False,
+                    "error": f"DirectInput8Create hr=0x{hr&0xFFFFFFFF:08X}"}
 
-    for jid in range(16):
-        caps = JOYCAPSW()
-        info = JOYINFOEX()
-        info.dwSize = ctypes.sizeof(info)
-        info.dwFlags = 0xFF  # JOY_RETURNALL
+        # IDirectInput8 vtbl: 3=CreateDevice, 4=EnumDevices, 2=Release
+        EnumSig = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong)
+        EnumCb = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, ctypes.POINTER(_DIDEVICEINSTANCEW), ctypes.c_void_p)
+        CreateDevSig = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_GUID),
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)
 
-        if winmm.joyGetDevCapsW(jid, ctypes.byref(caps), ctypes.sizeof(caps)) != 0:
-            continue
-        if winmm.joyGetPosEx(jid, ctypes.byref(info)) != 0:
-            continue
+        found = []
+        def cb(p, _r):
+            i = p.contents
+            g = _GUID(i.guidInstance.d1, i.guidInstance.d2, i.guidInstance.d3,
+                      (ctypes.c_ubyte*8)(*i.guidInstance.d4))
+            found.append((g, i.tszProductName))
+            return True
+        _vcall(di8, 4, EnumSig)(di8, 4, EnumCb(cb), None, 1)  # GAMECTRL, ATTACHEDONLY
 
-        moving = False
-        for _ in range(repeats):
-            winmm.joyGetPosEx(jid, ctypes.byref(info))
-            if info.dwXpos != 32767 or info.dwYpos != 32767:
-                moving = True
-            time.sleep(0.15)
+        # IDirectInputDevice8 vtbl indexes: 3=GetCaps, 5=GetProp, 7=Acq,
+        # 8=Unacq, 9=GetState, 11=SetDataFormat, 13=SetCoopLevel, 25=Poll, 2=Release
+        GetCapsSig  = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          ctypes.POINTER(_DIDEVCAPS))
+        GetPropSig  = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_void_p)
+        SDFSig      = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          ctypes.POINTER(_DIDATAFORMAT))
+        SCLSig      = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          wintypes.HWND, ctypes.c_ulong)
+        VoidSig     = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+        GetStateSig = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                          ctypes.c_ulong, ctypes.c_void_p)
 
-        devices.append({
-            "id": jid,
-            "vid": caps.wMid,
-            "pid": caps.wPid,
-            "name": caps.szPname.strip(),
-            "axes": caps.wNumAxes,
-            "buttons": caps.wNumButtons,
-            "pov": bool(caps.wCaps & 0x10),
-            "moving": moving,
-        })
+        for idx, (g, name) in enumerate(found):
+            dev = ctypes.c_void_p()
+            if _vcall(di8, 3, CreateDevSig)(
+                    di8, ctypes.byref(g), ctypes.byref(dev), None) != 0:
+                continue
+            try:
+                caps = _DIDEVCAPS(); caps.dwSize = ctypes.sizeof(caps)
+                if _vcall(dev, 3, GetCapsSig)(dev, ctypes.byref(caps)) != 0:
+                    continue
 
-    return {"count": len(devices), "devices": devices}
+                # VID/PID via DIPROP_GUIDANDPATH = MAKEDIPROP(12)
+                vid = pid = 0
+                pgp = _DIPROPGUIDANDPATH()
+                pgp.dwSize = ctypes.sizeof(_DIPROPGUIDANDPATH)
+                pgp.dwHeaderSize = 16  # sizeof DIPROPHEADER
+                pgp.dwHow = 0  # DIPH_DEVICE
+                if _vcall(dev, 5, GetPropSig)(
+                        dev, ctypes.cast(12, ctypes.c_void_p),
+                        ctypes.byref(pgp)) == 0:
+                    import re
+                    m = re.search(r"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})",
+                                  pgp.wszPath.lower())
+                    if m: vid, pid = int(m.group(1),16), int(m.group(2),16)
+
+                hr_fmt  = _vcall(dev, 11, SDFSig)(dev, ctypes.byref(fmt))
+                hr_coop = _vcall(dev, 13, SCLSig)(dev, hwnd, 0x08 | 0x02)  # BG|NX
+                hr_acq  = _vcall(dev, 7, VoidSig)(dev)
+
+                moving = False
+                if hr_fmt == 0 and hr_coop == 0 and hr_acq == 0:
+                    state = _DIJOYSTATE()
+                    prev = None
+                    for _ in range(repeats):
+                        # Pump messages so DI8 can deliver state
+                        msg = (ctypes.c_byte * 48)()
+                        while user32.PeekMessageW(msg, hwnd, 0, 0, 1):
+                            user32.DispatchMessageW(msg)
+                        _vcall(dev, 25, VoidSig)(dev)  # Poll
+                        if _vcall(dev, 9, GetStateSig)(
+                                dev, ctypes.sizeof(state), ctypes.byref(state)) == 0:
+                            cur = (state.lX, state.lY, state.lZ,
+                                   state.lRx, state.lRy, state.lRz)
+                            if prev is not None and cur != prev: moving = True
+                            prev = cur
+                        time.sleep(0.15)
+                    _vcall(dev, 8, VoidSig)(dev)  # Unacquire
+
+                devices.append({
+                    "id": idx, "vid": vid, "pid": pid, "name": name,
+                    "axes": caps.dwAxes, "buttons": caps.dwButtons,
+                    "pov": caps.dwPOVs > 0, "moving": moving,
+                    "errors": [f"fmt={hr_fmt&0xFFFFFFFF:08X}",
+                               f"coop={hr_coop&0xFFFFFFFF:08X}",
+                               f"acq={hr_acq&0xFFFFFFFF:08X}"]
+                              if (hr_fmt or hr_coop or hr_acq) else [],
+                })
+            finally:
+                _vcall(dev, 2, VoidSig)(dev)
+    finally:
+        if di8: _vcall(di8, 2, VoidSig)(di8)
+        user32.DestroyWindow(hwnd)
+        del wndproc
+
+    return {"available": True, "count": len(devices), "devices": devices}
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +433,151 @@ def check_hid_order(expected_count: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+#  WinExInput interface count (lightweight WGI pre-check)
+# ---------------------------------------------------------------------------
+#
+# Enumerates devices that have the WinExInput interface registered. WGI fires
+# Windows.Gaming.Input.Gamepad.GamepadAdded for any device with this interface,
+# so the WGI path (UWP games, Xbox app, Game Bar, Game Pass titles, browser WGI
+# backend) requires at least one. WinExInput is required for ANY profile —
+# Chrome's XInput fallback for Xbox is a partial workaround, not a substitute
+# for proper WGI registration.
+#
+# IMPORTANT: pnputil /enum-interfaces /class doesn't see this interface class
+# at all (pnputil only enumerates well-known classes). The correct API is
+# SetupDiGetClassDevs + SetupDiEnumDeviceInterfaces with the WinExInput GUID.
+
+def check_winexinput() -> dict:
+    import ctypes
+    from ctypes import wintypes, byref, sizeof, Structure, POINTER
+
+    try:
+        setupapi = ctypes.windll.setupapi
+    except OSError as e:
+        return {"available": False, "error": f"setupapi.dll: {e}"}
+
+    class GUID(Structure):
+        _fields_ = [("Data1", ctypes.c_ulong),
+                    ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort),
+                    ("Data4", ctypes.c_ubyte * 8)]
+
+    class SP_DEVICE_INTERFACE_DATA(Structure):
+        _fields_ = [("cbSize", ctypes.c_ulong),
+                    ("InterfaceClassGuid", GUID),
+                    ("Flags", ctypes.c_ulong),
+                    ("Reserved", ctypes.c_size_t)]
+
+    setupapi.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+    setupapi.SetupDiGetClassDevsW.argtypes = [
+        POINTER(GUID), wintypes.LPCWSTR, wintypes.HWND, ctypes.c_ulong]
+    setupapi.SetupDiEnumDeviceInterfaces.restype = wintypes.BOOL
+    setupapi.SetupDiEnumDeviceInterfaces.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, POINTER(GUID),
+        ctypes.c_ulong, POINTER(SP_DEVICE_INTERFACE_DATA)]
+    setupapi.SetupDiDestroyDeviceInfoList.restype = wintypes.BOOL
+    setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+
+    # WinExInput interface class GUID — registered by WdfDeviceCreateDeviceInterface
+    # in driver.c / companion.c. WGI uses this to find gamepad devices.
+    WINEXINPUT_GUID = GUID(
+        0x6c53d5fd, 0x6480, 0x440f,
+        (ctypes.c_ubyte * 8)(0xb6, 0x18, 0x47, 0x67, 0x50, 0xc5, 0xe1, 0xa6))
+
+    DIGCF_PRESENT = 0x02
+    DIGCF_DEVICEINTERFACE = 0x10
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    h = setupapi.SetupDiGetClassDevsW(
+        byref(WINEXINPUT_GUID), None, None,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+    if h == INVALID_HANDLE_VALUE or h is None:
+        return {"available": False, "error": f"SetupDiGetClassDevs failed: {ctypes.get_last_error()}"}
+
+    try:
+        count = 0
+        for i in range(64):
+            did = SP_DEVICE_INTERFACE_DATA()
+            did.cbSize = sizeof(did)
+            if not setupapi.SetupDiEnumDeviceInterfaces(
+                    h, None, byref(WINEXINPUT_GUID), i, byref(did)):
+                break
+            count += 1
+        return {"available": True, "enabled": count}
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(h)
+
+
+# ---------------------------------------------------------------------------
+#  GameInput / Windows.Gaming.Input — RawGameController enumeration
+# ---------------------------------------------------------------------------
+#
+# Walks Windows.Gaming.Input.RawGameController.RawGameControllers — the same
+# WGI source Dolphin's WGInput backend uses ("WGInput/N/<DisplayName>"). This
+# sees ANY HID-class gamepad-like device (gamepad OR joystick usage), unlike
+# Gamepad.Gamepads which only sees devices WGI has promoted to the Gamepad
+# class via XInput / internal mapping rules.
+#
+# RawGameController is what UWP / Game Bar / Xbox app / Dolphin / browser-WGI
+# all consume, so this is the canonical "is the WGI path working" check.
+#
+# Returns: {available, count, controllers, live_data}
+
+def check_gameinput(repeats: int) -> dict:
+    try:
+        from winrt.windows.gaming.input import RawGameController  # type: ignore
+    except ImportError:
+        return {"available": False,
+                "error": "winrt-Windows-Gaming-Input not installed "
+                         "(pip install winrt-Windows-Gaming-Input winrt-Windows-Foundation)"}
+    except Exception as e:
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+    try:
+        ctrls = list(RawGameController.raw_game_controllers)
+    except Exception as e:
+        return {"available": False, "error": f"RawGameController enumeration failed: {e}"}
+
+    result = {"available": True, "count": len(ctrls), "controllers": [], "live_data": False}
+    for c in ctrls:
+        try:
+            num_axes = c.axis_count
+            num_buttons = c.button_count
+            num_switches = c.switch_count
+            display = c.display_name
+            # Sample axes for movement detection
+            axes_buf = (ctypes.c_double * num_axes)()
+            buttons_buf = (ctypes.c_bool * num_buttons)()
+            from winrt.windows.gaming.input import GameControllerSwitchPosition  # type: ignore
+            switches_buf = (ctypes.c_int * num_switches)() if num_switches else None
+            prev_axes = None
+            moving = False
+            for _ in range(repeats):
+                # RawGameController.GetCurrentReading takes pre-allocated buffers
+                try:
+                    timestamp = c.get_current_reading(buttons_buf, switches_buf, axes_buf)
+                    cur = tuple(round(axes_buf[a], 4) for a in range(num_axes))
+                    if prev_axes is not None and cur != prev_axes:
+                        moving = True
+                    prev_axes = cur
+                except Exception:
+                    pass
+                time.sleep(0.15)
+            if moving:
+                result["live_data"] = True
+            result["controllers"].append({
+                "name": display,
+                "axes": num_axes,
+                "buttons": num_buttons,
+                "switches": num_switches,
+                "moving": moving,
+            })
+        except Exception as e:
+            result["controllers"].append({"error": str(e)})
+    return result
+
+
+# ---------------------------------------------------------------------------
 #  Browser (real Chromium navigator.getGamepads via headless launcher)
 # ---------------------------------------------------------------------------
 
@@ -277,14 +603,29 @@ def check_browser() -> dict:
 #  Main
 # ---------------------------------------------------------------------------
 
-TARGET_AXES = 5  # Xbox controllers expose 5 axes (X,Y,Z,Rx,Ry); DualSense=6
+# Per-VID expectations. Used to auto-skip XInput for non-Xbox profiles and
+# auto-pick the right axis count when multi-controller mixes Xbox + Sony.
+VID_AXES = {
+    0x045E: 5,   # Microsoft Xbox: 5 axes (X, Y, Z=combined trigger, Rx, Ry)
+    0x054C: 6,   # Sony PlayStation: 6 axes (X, Y, Z, Rx, Ry, Rz)
+}
+DEFAULT_AXES = 5
+
+# VIDs that route through XInput. Anything else is excluded from the XInput
+# check entirely (Sony controllers correctly do NOT occupy XInput slots).
+XINPUT_VIDS = {0x045E}
+
+SERIAL_PREFIX = "HM-CTL-"
+TARGET_AXES = 5  # legacy default for --axes when not auto-detecting
 
 
 def main():
     wait = 0
     repeats = 4
-    controllers = 1   # number of HIDMaestro controllers expected to be running
-    target_axes = TARGET_AXES
+    controllers = 1
+    explicit_axes = None
+    force_no_xinput = False
+    force_no_browser = False
 
     args = sys.argv[1:]
     i = 0
@@ -296,12 +637,13 @@ def main():
         elif args[i] in ("--controllers", "-n") and i + 1 < len(args):
             controllers = int(args[i + 1]); i += 2
         elif args[i] == "--axes" and i + 1 < len(args):
-            target_axes = int(args[i + 1]); i += 2
+            explicit_axes = int(args[i + 1]); i += 2
+        elif args[i] == "--no-xinput":
+            force_no_xinput = True; i += 1
+        elif args[i] == "--no-browser":
+            force_no_browser = True; i += 1
         else:
             i += 1
-
-    target_di_count = controllers
-    target_browser = controllers
 
     if wait > 0:
         print(f"Waiting {wait}s...")
@@ -314,84 +656,214 @@ def main():
 
     failures = []
 
-    # -- XInput --
-    xi = check_xinput(repeats)
-    if xi["connected"] and xi["moving"]:
-        print(f"  XInput:      PASS  ({xi['details']})")
-    elif xi["connected"]:
-        print(f"  XInput:      WARN  connected but static ({xi['details']})")
-    else:
-        print("  XInput:      FAIL  not connected")
-        failures.append("XInput not connected")
+    # First, enumerate HIDMaestro devices via HM-CTL-* serial. The result drives
+    # auto-skip decisions for XInput (no Xbox device → skip) and per-device
+    # axis expectations for DirectInput.
+    ho = check_hid_order(controllers) if 'check_hid_order' in globals() else {"available": False}
+    hm_devices = ho.get("devices", []) if ho.get("available") else []
+    xbox_count = sum(1 for d in hm_devices if d["vid"] in XINPUT_VIDS)
+    expect_xinput = xbox_count > 0 and not force_no_xinput
 
-    # -- DirectInput --
+    # -- XInput --
+    #
+    # SKIP only when the XInput library itself can't load. Otherwise: Xbox
+    # devices must show live data (PASS), non-Xbox-only configs must show no
+    # XInput slot occupied (PASS by virtue of being not-applicable), and any
+    # mismatch is a FAIL.
+    print("  XInput:      ", end="")
+    if force_no_xinput:
+        print("SKIP  (--no-xinput)")
+    elif not hm_devices:
+        # No HIDMaestro devices visible at all — there's nothing to test against.
+        # Caller almost certainly forgot to start the test app.
+        print("FAIL  no HIDMaestro devices found (test app not running?)")
+        failures.append("No HIDMaestro devices visible")
+    else:
+        xi = check_xinput(repeats)
+        if expect_xinput:
+            # Xbox profile present — at least one slot must be live
+            if xi["count"] >= 1 and any(s["moving"] for s in xi["slots"]):
+                slot_summary = ", ".join(
+                    f"slot{s['slot']} pkt={s['pkt_last']} LX={s['lx']:+d} LY={s['ly']:+d}"
+                    for s in xi["slots"]
+                )
+                print(f"PASS  {xi['count']} slot(s) live ({slot_summary})")
+            elif xi["count"] >= 1:
+                print(f"FAIL  {xi['count']} slot(s) connected but static")
+                failures.append(f"XInput: {xi['count']} slot(s) connected but no movement")
+            else:
+                print(f"FAIL  no slot connected (expected {xbox_count} Xbox slot(s))")
+                failures.append("XInput: no slot connected")
+        else:
+            # No Xbox profile — XInput should NOT be occupied by HIDMaestro.
+            # If a slot is occupied, that's the user's real Xbox controller; we
+            # have no way to attribute. Treat as PASS (not applicable).
+            if xi["count"] == 0:
+                print(f"PASS  not applicable ({len(hm_devices)} non-Xbox HIDMaestro device(s))")
+            else:
+                print(f"PASS  not applicable (other Xbox device on slot {xi['slots'][0]['slot']})")
+
+    # -- DirectInput (via pygame → SDL2 → DirectInput8) --
     di = check_directinput(repeats)
     print(f"  DirectInput: ", end="")
-    if di["count"] == target_di_count:
-        # All devices must have correct axes count and at least one must show movement
-        wrong_axes = [d for d in di["devices"] if d["axes"] != target_axes]
-        any_moving = any(d["moving"] for d in di["devices"])
-        if not wrong_axes and any_moving:
-            ids = ", ".join(f"VID=0x{d['vid']:04X} PID=0x{d['pid']:04X}" for d in di["devices"])
-            print(f"PASS  {di['count']} device(s) Axes={target_axes} ({ids})")
-        elif not wrong_axes:
-            print(f"WARN  {di['count']} device(s) {target_axes} axes but no movement")
-        else:
-            print(f"FAIL  axes mismatch: {[d['axes'] for d in di['devices']]} (want {target_axes})")
-            failures.append(f"DirectInput axes mismatch (want {target_axes})")
-    elif di["count"] == 0:
-        print("FAIL  no devices")
-        failures.append("DirectInput: no devices")
+    if not di.get("available"):
+        print(f"SKIP  ({di.get('error', 'unavailable')})")
     else:
-        print(f"FAIL  {di['count']} devices (want {target_di_count})")
-        for d in di["devices"]:
-            print(f"    Joy{d['id']}: VID=0x{d['vid']:04X} PID=0x{d['pid']:04X} "
-                  f"Axes={d['axes']}")
-        failures.append(f"DirectInput: {di['count']} devices (want {target_di_count})")
+        # Filter to HIDMaestro devices: match by (VID, PID) against the HM-CTL-* set
+        hm_vidpids = {(d["vid"], d["pid"]) for d in hm_devices}
+        if hm_vidpids:
+            hm_di = [d for d in di["devices"] if (d["vid"], d["pid"]) in hm_vidpids]
+        else:
+            # No HM-CTL-* devices found (legacy driver, or before serial fix). Fall
+            # back to total count of all DI joysticks.
+            hm_di = di["devices"]
 
-    # -- HIDAPI / SDL3 --
+        target_di_count = controllers
+        if len(hm_di) == target_di_count:
+            # Per-device axes: explicit override wins, otherwise look up by VID
+            wrong_axes = []
+            for d in hm_di:
+                expected = explicit_axes if explicit_axes is not None else VID_AXES.get(d["vid"], DEFAULT_AXES)
+                if d["axes"] != expected:
+                    wrong_axes.append((d["id"], d["vid"], d["axes"], expected))
+            any_moving = any(d["moving"] for d in hm_di)
+            if not wrong_axes and any_moving:
+                ids = ", ".join(
+                    f"VID=0x{d['vid']:04X} PID=0x{d['pid']:04X} Axes={d['axes']}"
+                    for d in hm_di
+                )
+                print(f"PASS  {len(hm_di)} device(s) ({ids})")
+            elif not wrong_axes:
+                ax_summary = ",".join(str(d["axes"]) for d in hm_di)
+                err_summary = "; ".join(
+                    f"joy{d['id']}: {','.join(d.get('errors', []))}"
+                    for d in hm_di if d.get("errors"))
+                hr_tail = f" [{err_summary}]" if err_summary else ""
+                print(f"FAIL  {len(hm_di)} device(s) [{ax_summary}ax] but no movement{hr_tail}")
+                failures.append(f"DirectInput: {len(hm_di)} device(s) static (no movement)")
+            else:
+                mism = ", ".join(
+                    f"joy{j} VID=0x{v:04X}: {a} (want {e})" for j, v, a, e in wrong_axes
+                )
+                print(f"FAIL  axes mismatch: {mism}")
+                failures.append(f"DirectInput axes mismatch ({mism})")
+        elif len(hm_di) == 0:
+            print(f"FAIL  no HIDMaestro DI devices (di.count={di['count']})")
+            failures.append("DirectInput: no HIDMaestro devices")
+        else:
+            print(f"FAIL  {len(hm_di)} HIDMaestro DI devices (want {target_di_count})")
+            for d in hm_di:
+                print(f"    Joy{d['id']}: VID=0x{d['vid']:04X} PID=0x{d['pid']:04X} Axes={d['axes']}")
+            failures.append(f"DirectInput: {len(hm_di)} devices (want {target_di_count})")
+
+    # -- HIDAPI / SDL3 (heterogeneous-aware) --
+    #
+    # Xbox controllers are IG-filtered → SDL3 routes them through XInput backend.
+    # Non-Xbox controllers are visible to SDL3 directly → expect live data.
     hi = check_hidapi()
     print(f"  HIDAPI/SDL3: ", end="")
     if not hi.get("available"):
         print(f"SKIP  ({hi.get('error', 'unavailable')})")
     else:
-        # For xinputhid profiles: HIDAPI sees the device with IG=True (skipped by SDL3).
-        # SDL3 uses XInput backend instead. This is correct behavior.
         ig_devs = [d for d in hi["devices"] if d["ig_filtered"]]
         non_ig = [d for d in hi["devices"] if not d["ig_filtered"]]
-        if len(non_ig) == 0 and len(ig_devs) > 0:
-            ids = ", ".join(f"PID=0x{d['pid']:04X}" for d in ig_devs)
-            print(f"OK    {len(ig_devs)} dev IG=True ({ids}) — SDL3 uses XInput backend")
-        elif len(non_ig) == controllers and hi["live_data"]:
-            ids = ", ".join(f"PID=0x{d['pid']:04X} Bus={d['bus']}" for d in non_ig)
-            print(f"PASS  {len(non_ig)} dev live ({ids})")
-        elif len(non_ig) > controllers:
-            print(f"FAIL  {len(non_ig)} visible devices (want {controllers} or all IG-filtered)")
-            failures.append(f"HIDAPI: {len(non_ig)} non-IG devices")
+        # Expected counts based on what's actually running
+        non_xbox_expected = sum(1 for d in hm_devices if d["vid"] not in XINPUT_VIDS)
+        xbox_expected = sum(1 for d in hm_devices if d["vid"] in XINPUT_VIDS)
+        if not hm_devices:
+            # Legacy fallback (pre-serial-fix): use the old check
+            if len(non_ig) == 0 and len(ig_devs) > 0:
+                ids = ", ".join(f"PID=0x{d['pid']:04X}" for d in ig_devs)
+                print(f"OK    {len(ig_devs)} dev IG-filtered ({ids}) — SDL3 falls through to XInput backend")
+            elif len(non_ig) == controllers and hi.get("live_data"):
+                ids = ", ".join(f"PID=0x{d['pid']:04X} Bus={d['bus']}" for d in non_ig)
+                print(f"PASS  {len(non_ig)} dev live ({ids})")
+            else:
+                print(f"WARN  {hi.get('total_045e', 0)} 045E device(s), no live data")
         else:
-            print(f"WARN  {hi['total_045e']} device(s), no live data")
+            total_ok = (len(ig_devs) == xbox_expected and len(non_ig) == non_xbox_expected)
+            live_ok = (non_xbox_expected == 0) or hi.get("live_data")
+            if total_ok and live_ok:
+                parts = []
+                if ig_devs:
+                    parts.append(f"{len(ig_devs)} IG-filtered (XInput backend)")
+                if non_ig:
+                    ids = ", ".join(f"PID=0x{d['pid']:04X} Bus={d['bus']}" for d in non_ig)
+                    parts.append(f"{len(non_ig)} live ({ids})")
+                print(f"PASS  {', '.join(parts)}")
+            elif non_xbox_expected > 0 and not hi.get("live_data"):
+                print(f"FAIL  {non_xbox_expected} non-Xbox device(s) but no live data")
+                failures.append("HIDAPI: non-Xbox device has no live data")
+            else:
+                print(f"FAIL  {len(ig_devs)} IG, {len(non_ig)} non-IG (want {xbox_expected} IG, {non_xbox_expected} non-IG)")
+                failures.append(f"HIDAPI: {len(ig_devs)} IG, {len(non_ig)} non-IG (want {xbox_expected}/{non_xbox_expected})")
 
     # -- HID enumeration order (creation-order check, dead simple) --
     print("  HID order:   ", end="")
-    ho = check_hid_order(controllers)
     if not ho.get("available"):
         print(f"SKIP  ({ho.get('error', 'unavailable')})")
     elif ho["count"] == 0:
-        print("SKIP  (no HM-CTL-* serials found — driver pre-serial-fix?)")
+        print("FAIL  no HM-CTL-* serials found — driver pre-serial-fix or no devices")
+        failures.append("HID order: no HIDMaestro devices visible")
     elif ho["count"] != controllers:
-        print(f"WARN  found {ho['count']} HIDMaestro device(s), expected {controllers}")
+        print(f"FAIL  found {ho['count']} HIDMaestro device(s), expected {controllers}")
+        failures.append(f"HID order: {ho['count']} devices (want {controllers})")
     elif ho["in_order"]:
         print(f"PASS  {ho['count']} device(s) in creation order: {ho['indices']}")
     else:
         print(f"FAIL  enumeration out of order: {ho['indices']}")
         failures.append(f"HID order mismatch: {ho['indices']} (want {list(range(controllers))})")
 
+    # -- WinExInput interface count (required for WGI / browser / Xbox app / Game Bar) --
+    print("  WinExInput:  ", end="")
+    wxi = check_winexinput()
+    if not wxi.get("available"):
+        print(f"SKIP  ({wxi.get('error', 'SetupDi failed')})")
+    else:
+        n = wxi["enabled"]
+        target_wxi = controllers
+        if n == target_wxi:
+            print(f"PASS  {n} interface(s) enabled")
+        elif n > target_wxi:
+            print(f"FAIL  {n} interfaces enabled (want exactly {target_wxi})")
+            failures.append(f"WinExInput: {n} interfaces (want {target_wxi})")
+        else:
+            print(f"FAIL  {n} interfaces enabled (want {target_wxi})")
+            failures.append(f"WinExInput: {n} interfaces (want {target_wxi})")
+
+    # -- GameInput / Windows.Gaming.Input.RawGameController (Dolphin's source) --
+    print("  GameInput:   ", end="")
+    gi = check_gameinput(repeats)
+    if not gi.get("available"):
+        print(f"SKIP  ({gi.get('error', 'unavailable')})")
+    else:
+        gi_count = gi["count"]
+        # RawGameController sees ANY HID-class gamepad-like device — heterogeneous
+        # configs (Xbox + Sony) are both expected to appear.
+        if gi_count == controllers and gi["live_data"]:
+            names = ", ".join(c.get("name","?") for c in gi["controllers"])
+            print(f"PASS  {gi_count} controller(s) live via WGI ({names})")
+        elif gi_count == controllers:
+            print(f"FAIL  {gi_count} controller(s) detected but static (no movement)")
+            failures.append("GameInput: detected but static")
+        elif gi_count == 0:
+            print(f"FAIL  no RawGameControllers in WGI (want {controllers})")
+            failures.append("GameInput: no controllers")
+        else:
+            print(f"FAIL  {gi_count} controller(s) (want {controllers})")
+            failures.append(f"GameInput: {gi_count} controllers (want {controllers})")
+
     # -- Browser (real Chromium navigator.getGamepads via headless launcher) --
     print("  Browser:     ", end="", flush=True)
-    br = check_browser()
-    if not br.get("available"):
-        print(f"SKIP  ({br.get('error', 'unavailable')})")
+    target_browser = controllers
+    if force_no_browser:
+        print("SKIP  (--no-browser)")
+        br = {"available": False}
     else:
+        br = check_browser()
+    if not br.get("available") and not force_no_browser:
+        print(f"SKIP  ({br.get('error', 'unavailable')})")
+    elif br.get("available"):
         pads = br.get("pads", 0)
         live = br.get("live", 0)
         snap = br.get("snapshot", [])
