@@ -1,7 +1,9 @@
 build/
-test/HIDMaestroTest/bin/
-test/HIDMaestroTest/obj/
-test/HIDMaestroTest/publish_out/
+test/bin/
+test/obj/
+test/publish_out/
+example/SdkDemo/bin/
+example/SdkDemo/obj/
 sdk/HIDMaestro.Core/bin/
 sdk/HIDMaestro.Core/obj/
 # Resources/ is populated by csproj <PackResources> target before build
@@ -15,7 +17,6 @@ sdk/HIDMaestro.Core/Resources/
 *.log.*
 .vs/
 publish_out/
-xinput/
 
 # Python
 __pycache__/

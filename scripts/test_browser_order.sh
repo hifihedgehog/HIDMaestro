@@ -19,7 +19,7 @@
 set +u   # coproc PID variable can briefly become unset across test app exit
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-EXE="$REPO/test/HIDMaestroTest/bin/Debug/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
+EXE="$REPO/test/bin/Debug/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
 PY="$REPO/scripts/check_browser_order.py"
 
 if [[ ! -x "$EXE" ]]; then

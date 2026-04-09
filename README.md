@@ -128,8 +128,11 @@ User-Mode Test App
 Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10
 
 ```bash
-# Build and run (self-contained — handles cert, build, sign, install automatically)
-cd test\HIDMaestroTest
+# Smallest possible SDK consumer (drop-in quickstart, runs for 5 seconds)
+dotnet run --project example\SdkDemo
+
+# Full test app — self-contained: cert + build + sign + install all automatic
+cd test
 dotnet build -c Debug
 bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
 

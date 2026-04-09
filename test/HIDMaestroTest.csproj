@@ -8,6 +8,6 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <ProjectReference Include="..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
 </Project>
