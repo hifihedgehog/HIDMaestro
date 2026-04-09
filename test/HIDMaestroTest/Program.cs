@@ -137,6 +137,14 @@ class Program
         // the driver's true idle CPU cost (should be ~0% with event-driven
         // IPC; was a busy-polled core per controller before the fix).
         public volatile bool Paused;
+        // -1 = not in mark mode. >=0 = pattern thread submits a STATIC frame
+        // holding only HMButton bit (1 << MarkButton), so the browser-order
+        // diagnostic can read pad.buttons[MarkButton].pressed to find which
+        // creation-order controller maps to which Chromium gamepad index.
+        // Buttons are integer-indexed in the Chromium Standard Gamepad mapping
+        // (buttons[0]=A, [1]=B, [2]=X, [3]=Y, [4]=LB, [5]=RB) so we get an
+        // unambiguous fingerprint with no float-comparison ambiguity.
+        public volatile int MarkButton = -1;
     }
 
     static int Emulate(string[] profileIds)
@@ -180,6 +188,8 @@ class Program
         Console.WriteLine("    quit                          exit");
         Console.WriteLine("    pause                         stop submitting input frames (idle CPU test)");
         Console.WriteLine("    resume                        resume submitting input frames");
+        Console.WriteLine("    mark                          static frame: each ctrl holds button = its index (browser-order test)");
+        Console.WriteLine("    unmark                        leave mark mode and resume the time-varying pattern");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
         while (Console.ReadLine() is string line)
         {
@@ -196,6 +206,18 @@ class Program
             {
                 foreach (var s in slots) s.Paused = false;
                 Console.WriteLine($"  resumed {slots.Count} pattern thread(s)");
+                continue;
+            }
+            if (line.Equals("mark", StringComparison.OrdinalIgnoreCase))
+            {
+                for (int i = 0; i < slots.Count; i++) slots[i].MarkButton = i;
+                Console.WriteLine($"  marked {slots.Count} controller(s) — each holds button=its index");
+                continue;
+            }
+            if (line.Equals("unmark", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var s in slots) s.MarkButton = -1;
+                Console.WriteLine($"  unmarked {slots.Count} controller(s) — back to time-varying pattern");
                 continue;
             }
 
@@ -338,6 +360,20 @@ class Program
             if (slot.Paused)
             {
                 try { Thread.Sleep(100); } catch { break; }
+                continue;
+            }
+            // Mark gate: submit a static frame holding only the marker button.
+            // The pattern thread keeps re-submitting at the normal rate so the
+            // browser snapshot reliably catches it. Sticks centered, no triggers.
+            int markBtn = slot.MarkButton;
+            if (markBtn >= 0)
+            {
+                var markState = new HMGamepadState
+                {
+                    Buttons = (HMButton)(1u << markBtn),
+                };
+                try { ctrl.SubmitState(in markState); } catch { break; }
+                try { Thread.Sleep(8); } catch { break; }
                 continue;
             }
             double t = sw.Elapsed.TotalSeconds;
