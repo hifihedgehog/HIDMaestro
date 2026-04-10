@@ -38,7 +38,7 @@ Most solutions get one or two APIs right. HIDMaestro targets all of them simulta
 Spin up multiple virtual controllers simultaneously — verified working up to 6 mixed controllers (e.g. 2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without limit.
 
 ### Hot-Plug
-Create and remove controllers without reboots. Switch between profiles — Xbox 360 to Xbox Series X to DualSense — live within the same process. The previous controller vanishes cleanly and the new one appears immediately.
+Create and remove controllers without reboots. Each controller is independently disposable — remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total.
 
 ### Profile-Based
 Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
@@ -133,7 +133,7 @@ User-Mode Test App
 Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10
 
 ```bash
-# Smallest possible SDK consumer (drop-in quickstart, runs for 5 seconds)
+# Smallest possible SDK consumer (drop-in quickstart)
 dotnet run --project example\SdkDemo
 
 # Full test app — self-contained: cert + build + sign + install all automatic
@@ -143,6 +143,13 @@ bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-36
 
 # Multiple controllers at once (up to 6 verified, any mix of profiles)
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired dualsense
+
+# Interactive commands during emulation:
+#   remove 2              dispose controller 2 (others stay live)
+#   2 dualsense           live-swap controller 2 to a DualSense
+#   mark / unmark         toggle static-button diagnostic mode
+#   pause / resume        idle CPU test (driver should use ~0%)
+#   quit                  graceful shutdown
 
 # List available profiles (225 across 32 vendors)
 HIDMaestroTest.exe list
@@ -312,12 +319,14 @@ WinExInput Interface:
 
 | Operation | Measured Time |
 |-----------|--------------|
-| Cold start (first run — cert + sign + install + create) | ~18s |
-| Warm start (drivers cached, create only) | ~10s |
-| PnP device node creation (SetupDI call) | ~13ms |
-| PnP device node removal (SetupDI call) | ~11ms |
+| Cold start (first run — cert + sign + install + create 1) | ~18s |
+| Warm start, single controller (drivers cached) | **~200ms** |
+| Warm start, 6 mixed controllers (sequential) | **~3.5s** |
+| Single controller dispose (graceful) | **~1s** |
+| 6-controller full cleanup (graceful quit) | **~7s** |
+| 6-controller full cleanup (after force-kill) | ~28s (Windows PnP limitation) |
 
-Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start (drivers already installed) skips the install phase. The ~10s warm-start time is dominated by PnP async driver binding, HID child enumeration, and settle waits. Optimization toward sub-5-second creation is an active area of development — the fixed `Thread.Sleep` calls in the orchestration flow are the primary optimization targets.
+Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready — zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
 
 ## Why UMDF2 Is Enough
 
