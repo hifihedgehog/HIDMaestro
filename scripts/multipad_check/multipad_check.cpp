@@ -143,9 +143,13 @@ static void PrintBackendResults(IInputBackend* b, int expected) {
 int wmain(int argc, wchar_t** argv) {
     int expected = 2;
     int windowMs = 2000;
+    bool trigger = false;
+    int triggerMs = 5000;
     for (int i = 1; i < argc; ++i) {
         if (!wcscmp(argv[i], L"--expected") && i + 1 < argc) expected = (int)_wtoi(argv[++i]);
         else if (!wcscmp(argv[i], L"--window-ms") && i + 1 < argc) windowMs = (int)_wtoi(argv[++i]);
+        else if (!wcscmp(argv[i], L"--trigger")) trigger = true;
+        else if (!wcscmp(argv[i], L"--trigger-ms") && i + 1 < argc) { trigger = true; triggerMs = (int)_wtoi(argv[++i]); }
     }
 
     printf("==================================================================\n");
@@ -154,7 +158,10 @@ int wmain(int argc, wchar_t** argv) {
     printf("Expected controllers in mark mode: %d\n", expected);
     printf("Sampling window:                   %d ms\n", windowMs);
     printf("Each creation index N is identified by HMButton bit (1 << N) held.\n");
-    printf("Run the test app with --mark or type 'mark' at its prompt.\n");
+    if (trigger)
+        printf("Trigger mode:  backends will open first, then wait %d ms for mark.\n", triggerMs);
+    else
+        printf("Run the test app with --mark or type 'mark' at its prompt.\n");
 
     // Hidden message-only window for backends that need a HWND (DInput's
     // SetCooperativeLevel and RawInput's WM_INPUT target).
@@ -183,6 +190,34 @@ int wmain(int argc, wchar_t** argv) {
 
     for (auto& b : backends) {
         b->Init(hwnd);
+    }
+
+    // --trigger mode: all backends are now open and subscribed. Give the
+    // user/script time to trigger mark mode on the test app. The transition
+    // from time-varying → mark is a state delta that every HID class backend
+    // will catch because they're already subscribed.
+    //
+    // Without --trigger (legacy mode): assumes mark was already active before
+    // this tool opened. Only XInput (always-on, polled by the OS) will see
+    // buttons held before open. DInput/HIDAPI/WGI/RawInput will NOT see
+    // buttons held before open — this is standard HID class behavior, not a
+    // bug. Use --trigger for correct cross-API mark validation.
+    if (trigger) {
+        printf("\n>>> Backends open and subscribed.\n");
+        printf(">>> TRIGGER MARK NOW:  send 'mark' to HIDMaestroTest stdin.\n");
+        printf(">>> Waiting %d ms for you to trigger, then sampling begins...\n\n", triggerMs);
+        fflush(stdout);
+        auto trigDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(triggerMs);
+        while (std::chrono::steady_clock::now() < trigDeadline) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            for (auto& b : backends) b->Poll();
+            Sleep(5);
+        }
+        printf(">>> Trigger window closed. Sampling...\n\n");
     }
 
     // Drive the same loop MultiPadTester runs every frame: pump messages,
