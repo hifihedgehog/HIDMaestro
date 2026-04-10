@@ -517,11 +517,16 @@ internal static class DeviceOrchestrator
             catch { }
         }
 
-        // 4. Restart so it picks up latest descriptor + VID/PID
+        // 4. Restart so it picks up latest descriptor + VID/PID, then poll
+        //    for the HID child to appear (replaces a fixed 2000ms sleep).
         if (gpInstId != null)
         {
             DeviceManager.RestartDevice(gpInstId);
-            Thread.Sleep(2000);
+
+            // Poll for HID child PDO to be created by HIDClass below our parent.
+            // On fast machines this takes <100ms; the old Thread.Sleep(2000) was
+            // wasting 1900+ms on every creation.
+            WaitForHidChild(gpInstId, timeoutMs: 5000);
         }
 
         return gpInstId;
@@ -784,7 +789,14 @@ internal static class DeviceOrchestrator
         }
 
         // ── Step 4: wait for HID child + name finalization ───────────────
-        Thread.Sleep(3000);
+        //    Old: Thread.Sleep(3000) — fixed worst-case wait for PnP async install.
+        //    New: poll for the HID child PDO to appear, then finalize names.
+        //    On a warm-start machine this exits in <500ms instead of 3000ms.
+        {
+            string? parentId = mainInstanceId ?? companionId;
+            if (parentId != null)
+                WaitForHidChild(parentId, timeoutMs: 10000);
+        }
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
         DeviceProperties.FixHidChildNames(displayName, controllerIndex);
 
@@ -817,8 +829,18 @@ internal static class DeviceOrchestrator
         }
         catch { }
 
-        // Final name fix after xinputhid grandchild has fully appeared
-        Thread.Sleep(2000);
+        // Final name fix — poll for the device to be fully started (DN_STARTED)
+        // rather than a fixed 2000ms sleep. For xinputhid profiles this waits
+        // for xinputhid to fully bind; for others it's typically instant.
+        {
+            string? parentId = mainInstanceId ?? companionId;
+            if (parentId != null)
+            {
+                string? hidChildId = DeviceManager.GetHidChildId(parentId);
+                if (hidChildId != null)
+                    WaitForDeviceStarted(hidChildId, timeoutMs: 5000);
+            }
+        }
         DeviceProperties.FixHidChildNames(displayName, controllerIndex);
 
         // ── Step 5: bus type + companions ─────────────────────────────────
@@ -859,6 +881,45 @@ internal static class DeviceOrchestrator
 
         // Return main instance ID, or companion ID for companion-only profiles
         return mainInstanceId ?? companionId;
+    }
+
+    /// <summary>
+    /// Polls for a HID child PDO to appear under the given parent devnode.
+    /// Replaces fixed Thread.Sleep calls with an event-driven poll that exits
+    /// as soon as the condition is met. On fast machines this returns in
+    /// &lt;100ms; on slow machines it adapts up to the timeout.
+    /// </summary>
+    private static bool WaitForHidChild(string parentInstanceId, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (DeviceManager.GetHidChildId(parentInstanceId) != null)
+                return true;
+            Thread.Sleep(100);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Polls for a device to reach DN_STARTED status (driver fully bound and
+    /// device functional). Replaces fixed Thread.Sleep calls that waited for
+    /// xinputhid or other upper filters to finish binding.
+    /// </summary>
+    private static bool WaitForDeviceStarted(string instanceId, int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == 0)
+            {
+                if (CM_Get_DevNode_Status(out uint status, out _, devInst, 0) == 0
+                    && (status & DN_STARTED) != 0)
+                    return true;
+            }
+            Thread.Sleep(100);
+        }
+        return false;
     }
 
     /// <summary>Count XInput slots currently reporting connected. Used by
