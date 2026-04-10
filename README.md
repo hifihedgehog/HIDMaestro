@@ -88,7 +88,7 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 | Kernel driver required | **No** | Yes | No (UMDF2) | Yes |
 | EV certificate for new builds | **No** | Yes | No | Yes |
 | Physical hardware required | **No** | No | Yes (DS3) | No |
-| Profile-defined controller identity | **Yes** | No (2 types) | No (DS3 only) | No (fixed) |
+| Profile-defined controller identity | **Yes** | No (2 types) | Yes (5 modes) | No (fixed) |
 | Bluetooth bus type spoof | **Yes** | No | No | No |
 | Single browser gamepad entry | **Yes** | Yes | N/A | No |
 | XInput with separate triggers | **Yes** | Yes | Yes | No |
