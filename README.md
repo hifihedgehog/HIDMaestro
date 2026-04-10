@@ -126,8 +126,8 @@ User-Mode Test App
 ```
 
 **Data flows:**
-- **DirectInput** ← HID READ_REPORT ← shared file (combined Z + Vx/Vy in descriptor)
-- **XInput** ← XUSB GET_STATE ← companion reads GipData from shared file
+- **DirectInput** ← HID READ_REPORT ← shared memory (combined Z + Vx/Vy in descriptor)
+- **XInput** ← XUSB GET_STATE ← companion reads GipData from shared memory
 - **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
 - **Browser** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
 - **Bluetooth ID** — HIDAPI checks CompatibleIDs, reports bus_type=BT
@@ -196,7 +196,7 @@ Controller profiles are JSON files in `profiles/`:
 }
 ```
 
-The descriptor field contains the raw HID report descriptor as hex. The test app parses it, builds input reports, and feeds data through the shared file. Adding a new controller is a matter of capturing its descriptor and writing a JSON file.
+The descriptor field contains the raw HID report descriptor as hex. The test app parses it, builds input reports, and feeds data through shared memory. Adding a new controller is a matter of capturing its descriptor and writing a JSON file.
 
 ## Validation Results
 
@@ -402,8 +402,6 @@ The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as chil
 - **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output — vendor extensions require per-controller work.
 - **XUSB companion creates a second device node** for non-xinputhid Xbox profiles (e.g. Xbox 360 Wired). Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager. Xbox Series BT profiles use xinputhid natively and do not need a companion.
 - **HID class APIs are event-driven, not state-driven.** DirectInput, HIDAPI, WGI, and RawInput only see state changes that occur after a consumer opens the device. Buttons held *before* a consumer opens are invisible until released and re-pressed. This is standard Windows HID class behavior — real Microsoft Xbox controllers exhibit the same semantics. XInput is the exception (always-on, polled by the OS). See `project-mark-mode-symptom.md` for the full investigation that confirmed this.
-- **Creation/destruction latency.** Creating a virtual controller currently takes ~10 seconds end-to-end due to PnP async install, driver binding, and settle waits. Optimization toward sub-5-second creation is an active area of development.
-
 ## How to Reproduce the Validation
 
 Each validation result above was produced with these tools:
