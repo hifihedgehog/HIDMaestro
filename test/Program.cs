@@ -97,7 +97,8 @@ class Program
         {
             Console.WriteLine("Usage:");
             Console.WriteLine("  HIDMaestroTest emulate <id> [id ...]   Create virtual controller(s) + test pattern");
-            Console.WriteLine("  HIDMaestroTest list                    List all controller profiles");
+            Console.WriteLine("  HIDMaestroTest custom                  Demo custom controllers (16-btn DualSense + flight stick)");
+        Console.WriteLine("  HIDMaestroTest list                    List all controller profiles");
             Console.WriteLine("  HIDMaestroTest search <query>          Search profiles by name/vendor");
             Console.WriteLine("  HIDMaestroTest info <id>               Show profile details");
             Console.WriteLine("  HIDMaestroTest cleanup                 Remove all HIDMaestro virtual devices");
@@ -109,6 +110,7 @@ class Program
         return args[0].ToLower() switch
         {
             "emulate"  => Emulate(args.Skip(1).ToArray()),
+            "custom"   => EmulateCustom(),
             "list"     => ListProfiles(),
             "search"   => SearchProfiles(args.Length > 1 ? args[1] : ""),
             "info"     => ShowProfile(args.Length > 1 ? args[1] : ""),
@@ -353,6 +355,130 @@ class Program
             Console.WriteLine($"  disposed slot {i} in {perCtrl.ElapsedMilliseconds} ms");
         }
         Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
+        return 0;
+    }
+
+    // ── custom ──
+    //
+    // Demonstrates custom controller creation: a 16-button DualSense variant
+    // and a fully custom flight stick built from scratch. Both use the public
+    // HMProfileBuilder + HidDescriptorBuilder APIs.
+
+    static int EmulateCustom()
+    {
+        using var ctx = new HMContext();
+        int loaded = ctx.LoadDefaultProfiles();
+        Console.WriteLine($"  Loaded {loaded} profiles");
+
+        Console.Write("  Installing driver... ");
+        ctx.InstallDriver();
+        Console.WriteLine("OK");
+
+        // ── Custom DualSense with 16 buttons ────────────────────────────
+        var dsProfile = ctx.GetProfile("dualsense")!;
+        Console.WriteLine($"\n  Base DualSense: {dsProfile.ButtonCount} buttons, {dsProfile.AxisCount} axes");
+
+        byte[] customDsDesc = new HidDescriptorBuilder()
+            .Gamepad()
+            .AddStick("Left", bits: 8)
+            .AddStick("Right", bits: 8)
+            .AddTrigger("Left", bits: 8)
+            .AddTrigger("Right", bits: 8)
+            .AddButtons(16)
+            .AddHat()
+            .Build();
+
+        var customDs = new HMProfileBuilder()
+            .FromProfile(dsProfile)
+            .Id("dualsense-16btn")
+            .Name("DualSense (16 buttons)")
+            .Descriptor(customDsDesc)
+            .InputReportSize(new HidDescriptorBuilder()
+                .Gamepad().AddStick("Left",8).AddStick("Right",8)
+                .AddTrigger("Left",8).AddTrigger("Right",8)
+                .AddButtons(16).AddHat().InputReportByteSize)
+            .Notes("Custom: 16 buttons instead of 15")
+            .Build();
+
+        Console.Write($"  Creating {customDs.Name} ({customDs.ButtonCount} buttons)... ");
+        using var ctrl0 = ctx.CreateController(customDs);
+        Console.WriteLine("OK");
+
+        // ── Fully custom flight stick ────────────────────────────────────
+        byte[] stickDesc = new HidDescriptorBuilder()
+            .Joystick()
+            .AddStick("Left", bits: 16)
+            .AddTrigger("Left", bits: 8)
+            .AddTrigger("Right", bits: 8)
+            .AddButtons(6)
+            .AddHat()
+            .Build();
+
+        var flightStick = new HMProfileBuilder()
+            .Id("custom-flight-stick")
+            .Name("Custom Flight Stick")
+            .Vendor("Custom")
+            .Vid(0x0483).Pid(0x0001)
+            .ProductString("My Flight Stick")
+            .ManufacturerString("Homebrew")
+            .Type("flightstick")
+            .Connection("usb")
+            .Descriptor(stickDesc)
+            .InputReportSize(new HidDescriptorBuilder()
+                .Joystick().AddStick("Left",16).AddTrigger("Left",8)
+                .AddTrigger("Right",8).AddButtons(6).AddHat().InputReportByteSize)
+            .Build();
+
+        Console.Write($"  Creating {flightStick.Name} (VID={flightStick.VendorId:X4} " +
+                      $"PID={flightStick.ProductId:X4})... ");
+        using var ctrl1 = ctx.CreateController(flightStick);
+        Console.WriteLine("OK");
+
+        ctx.FinalizeNames();
+        Console.WriteLine($"\n  Both custom controllers ready. Open joy.cpl to inspect.");
+        Console.WriteLine("  Sending input... (quit to exit)\n");
+
+        var sw = Stopwatch.StartNew();
+        var cts = new CancellationTokenSource();
+        var inputThread = new Thread(() =>
+        {
+            while (!cts.Token.IsCancellationRequested)
+            {
+                double t = sw.Elapsed.TotalSeconds;
+                double angle = t * 2 * Math.PI;
+
+                ctrl0.SubmitState(new HMGamepadState
+                {
+                    LeftStickX   = (float)Math.Cos(angle),
+                    LeftStickY   = (float)Math.Sin(angle),
+                    RightStickX  = (float)Math.Sin(angle * 0.5),
+                    RightStickY  = (float)Math.Cos(angle * 0.5),
+                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t * 3)),
+                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 3)),
+                    Buttons      = (HMButton)(1u << ((int)t % 16)),
+                    Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),
+                });
+
+                ctrl1.SubmitState(new HMGamepadState
+                {
+                    LeftStickX   = (float)Math.Sin(t * 1.5),
+                    LeftStickY   = (float)Math.Cos(t * 1.5),
+                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t)),
+                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 2)),
+                    Buttons      = ((int)t % 3 == 0) ? HMButton.A : HMButton.None,
+                    Hat          = (HMHat)(1 + ((int)(t * 3) % 8)),
+                });
+
+                Thread.Sleep(4);
+            }
+        }) { IsBackground = true };
+        inputThread.Start();
+
+        while (Console.ReadLine() is string line)
+        {
+            if (line.Trim().Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
+        }
+        cts.Cancel();
         return 0;
     }
 
