@@ -326,8 +326,10 @@ WinExInput Interface:
 | Cold start (first run — cert + sign + install + create 1) | ~18s |
 | Warm start, single controller (drivers cached) | **~200ms** |
 | Warm start, 6 mixed controllers (sequential) | **~3.5s** |
-| 6-controller full cleanup (graceful quit) | **~7s** |
-| 6-controller full cleanup (after force-kill) | ~28s (Windows PnP limitation) |
+| Single dispose: plain HID (DualSense, wheels, etc.) | **~200ms** |
+| Single dispose: Xbox 360 Wired (XUSB companion) | ~5.6s |
+| Single dispose: Xbox Series BT (xinputhid filter) | ~11s |
+| 6-controller mixed cleanup (sequential) | ~33s (dominated by Xbox teardown) |
 
 Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready — zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
 
