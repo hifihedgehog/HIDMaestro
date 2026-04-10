@@ -588,6 +588,66 @@ class Program
         Console.WriteLine($"  VID:            0x{p.VendorId:X4}");
         Console.WriteLine($"  PID:            0x{p.ProductId:X4}");
         Console.WriteLine($"  Product String: {p.ProductString}");
+        Console.WriteLine($"  Connection:     {p.Inner.Connection ?? "usb"}");
+        Console.WriteLine($"  Driver Mode:    {p.Inner.DriverMode ?? "(default)"}");
+        Console.WriteLine($"  Report Size:    {p.Inner.InputReportSize} bytes");
+        Console.WriteLine();
+
+        // Parse and display the HID descriptor layout
+        var descBytes = p.Inner.GetDescriptorBytes();
+        if (descBytes != null)
+        {
+            var builder = HIDMaestro.Internal.HidReportBuilder.Parse(descBytes);
+            builder.PrintLayout();
+
+            // List all parsed input fields for full visibility
+            Console.WriteLine($"\n  All input fields ({builder.InputFields.Count}):");
+            foreach (var f in builder.InputFields)
+            {
+                string kind = f.IsConstant ? "Const" : "Data ";
+                string page = f.UsagePage switch
+                {
+                    0x01 => "GenericDesktop",
+                    0x02 => "Simulation",
+                    0x09 => "Button",
+                    0x0C => "Consumer",
+                    0x0F => "PID",
+                    _ => $"0x{f.UsagePage:X2}"
+                };
+                string usage = (f.UsagePage, f.Usage) switch
+                {
+                    (0x01, 0x30) => "X",
+                    (0x01, 0x31) => "Y",
+                    (0x01, 0x32) => "Z",
+                    (0x01, 0x33) => "Rx",
+                    (0x01, 0x34) => "Ry",
+                    (0x01, 0x35) => "Rz",
+                    (0x01, 0x39) => "Hat",
+                    (0x01, 0x40) => "Vx",
+                    (0x01, 0x41) => "Vy",
+                    (0x01, 0x80) => "SysControl",
+                    (0x01, 0x85) => "SysMainMenu",
+                    (0x02, 0xC4) => "Accelerator",
+                    (0x02, 0xC5) => "Brake",
+                    (0x09, _) => $"Btn{f.Usage}",
+                    _ => $"0x{f.Usage:X2}"
+                };
+                Console.WriteLine($"    [{kind}] {page}/{usage,-12} bit {f.BitOffset,4}, {f.BitSize,2}b, range [{f.LogicalMin}..{f.LogicalMax}]");
+            }
+
+            Console.WriteLine($"\n  Descriptor hex ({descBytes.Length} bytes):");
+            Console.Write("    ");
+            for (int i = 0; i < descBytes.Length; i++)
+            {
+                Console.Write($"{descBytes[i]:X2}");
+                if ((i + 1) % 32 == 0) Console.Write("\n    ");
+            }
+            Console.WriteLine();
+        }
+        else
+        {
+            Console.WriteLine("  (no descriptor)");
+        }
         return 0;
     }
 
