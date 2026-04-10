@@ -491,6 +491,12 @@ HIDMaestro replicates the public-facing identity and input/output behavior of ga
 - **[HIDAPI](https://github.com/libusb/hidapi)** — Bus type detection behavior that informed the BTHLEDEVICE spoofing technique.
 - **[SDL3](https://github.com/libsdl-org/SDL)** — Multi-backend fallback behavior that informed the &IG_ enumerator trick. SDL3 is not a dependency — HIDMaestro is validated against it.
 
+## Donations
+
+Knowing HIDMaestro is useful is reward enough. If you truly insist on donating, please donate to your charity of choice and bless humanity. If you can't think of one, consider [Humanitarian Services of The Church of Jesus Christ of Latter-day Saints](https://philanthropies.churchofjesuschrist.org/humanitarian-services). Also consider donating directly to the upstream projects listed above — they made all of this possible.
+
+**My promise:** HIDMaestro will never become paid, freemium, or Patreon early-access paywalled. Free means free.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
