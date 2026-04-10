@@ -322,11 +322,62 @@ WinExInput Interface:
 | Cold start (first run — cert + sign + install + create 1) | ~18s |
 | Warm start, single controller (drivers cached) | **~200ms** |
 | Warm start, 6 mixed controllers (sequential) | **~3.5s** |
-| Single controller dispose (graceful) | **~1s** |
 | 6-controller full cleanup (graceful quit) | **~7s** |
 | 6-controller full cleanup (after force-kill) | ~28s (Windows PnP limitation) |
 
 Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready — zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
+
+### Profile Architecture Groups and Teardown Timing
+
+Disposal speed depends on which kernel-side drivers are in the device stack. Each additional driver in the stack adds its own PnP query-remove handshake, handle release, and notification cascade. HIDMaestro profiles fall into three architecture groups with dramatically different teardown characteristics:
+
+#### 1. Plain HID — generic gamepads, wheels, HOTAS, flight sticks (~200ms)
+
+Profiles where `driverMode` is not `"xinputhid"` and the VID is not Microsoft (`0x045E`). Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 225-profile catalog.
+
+```
+ROOT\VID_054C&PID_0CE6\NNNN          ← our UMDF2 driver (mshidumdf host)
+  └─ HID\VID_054C&PID_0CE6\...       ← raw HID PDO, no upper filter
+```
+
+**Lightest stack.** One `DIF_REMOVE` on the ROOT parent tears down the entire tree. No XUSB companion device, no Microsoft upper filter. Creation ~200ms, disposal ~200ms.
+
+#### 2. Non-xinputhid Xbox — Xbox 360 Wired (~5.7s)
+
+Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is delivered via a separate HMCOMPANION device running `HMXInput.dll` (XUSB companion).
+
+```
+ROOT\VID_045E&PID_028E&IG_00\NNNN    ← our UMDF2 driver (main HID device)
+  └─ HID\VID_045E&PID_028E&IG_00\... ← HID child (raw PDO, input.inf)
+ROOT\HMCOMPANION\NNNN                ← XUSB companion (HMXInput.dll)
+  ├─ XUSB interface → XInput slot
+  └─ WinExInput interface → WGI
+```
+
+**Medium stack.** Three devices to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~5.7s.
+
+#### 3. xinputhid Xbox — Xbox Series X|S Bluetooth (~11s)
+
+Profiles with `driverMode: "xinputhid"`. These match `xinputhid.inf [GIP_Hid]` by hardware ID (`HID\VID_045E&PID_0B13&IG_00`), which binds Microsoft's `xinputhid.sys` as an upper filter on the HID child. xinputhid provides XInput delivery + 16-button descriptor synthesis natively — no XUSB companion needed, single Device Manager entry.
+
+```
+ROOT\VID_045E&PID_0B13&IG_00\NNNN    ← our UMDF2 driver (mshidumdf host)
+  └─ HID\VID_045E&PID_0B13&IG_00\... ← HID child (xinputhid.inf, xinputhid upper filter)
+        ├─ xinputhid.sys              ← Microsoft inbox kernel filter
+        ├─ XInput delivery (internal)
+        └─ 16-button HID synthesis
+```
+
+**Heaviest stack.** xinputhid is a Microsoft inbox kernel filter driver. Its teardown goes through the full PnP query-remove → class installer → filter unload chain. This is entirely controlled by Microsoft's driver — HIDMaestro cannot speed it up. Creation ~200ms, disposal ~11s.
+
+#### Why this matters for consumers
+
+If your application needs fast profile switching (e.g. remapping a physical controller to a different virtual identity on the fly), the profile architecture group determines the user-perceived latency:
+
+- **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~400ms round trip (200ms dispose + 200ms create). Essentially instant.
+- **Switching to/from Xbox 360 Wired**: ~6-7s (XUSB companion teardown dominates).
+- **Switching to/from Xbox Series BT**: ~11-12s (xinputhid teardown dominates).
+- **Switching between profiles in the same group with the same VID/PID** (e.g. Xbox Series BT config A → config B): could potentially be optimized to in-place reconfiguration without teardown (not yet implemented).
 
 ## Why UMDF2 Is Enough
 
