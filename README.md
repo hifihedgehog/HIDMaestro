@@ -14,7 +14,7 @@ Every existing virtual controller solution requires you to give something up:
 
 - **vJoy** needs a kernel driver and is no longer actively maintained. The existing signed drivers work, but producing new builds requires driver signing infrastructure. And it always shows up as "vJoy Device" — never as a real controller.
 - **ViGEmBus** needs a kernel driver. The existing signed drivers work well, but producing new builds requires an EV code signing certificate ($300+/year). The project is now retired.
-- **DsHidMini** creates virtual controllers but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
+- **DsHidMini** supports 5 HID modes (including DS4 and Xbox emulation) but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
 - **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
 **HIDMaestro needs none of that.** It runs entirely in user mode. It works with locally generated self-signed certificates trusted by the target machine — no purchased certificate and no Windows test-signing boot mode required. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
