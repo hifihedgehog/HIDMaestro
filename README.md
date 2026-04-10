@@ -1,5 +1,7 @@
 # HIDMaestro
 
+*"And we talk of Christ, we rejoice in Christ, we preach of Christ, we prophesy of Christ, and we write according to our prophecies, that our children may know to what source they may look for a remission of their sins."* — 2 Nephi 25:26
+
 *Glory, honor, and praise to the Lord Jesus Christ, the source of all truth, forever and ever.*
 
 **A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.**
