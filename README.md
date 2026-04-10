@@ -21,7 +21,7 @@ Every existing virtual controller solution requires you to give something up:
 HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. HIDMaestro is designed to work with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
 
 ### Exact Hardware Identity
-Pick from a broad set of controller identities — Xbox 360, Xbox Series X, DualSense, flight sticks, racing wheels — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Choose from **225 embedded profiles** across 32 vendors — Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -34,11 +34,14 @@ Most solutions get one or two APIs right. HIDMaestro targets all of them simulta
 | **Browser Gamepad** | STANDARD GAMEPAD with separate triggers |
 | **WGI (GameInput)** | Proper Gamepad promotion via GameInput registry |
 
-### Instant Hot-Plug
-Create a controller in milliseconds. Remove it in milliseconds. Switch between profiles — Xbox 360 to Xbox Series X to DualSense — with zero downtime and zero reboots. The previous controller vanishes cleanly and the new one appears immediately.
+### Multi-Controller
+Spin up multiple virtual controllers simultaneously — verified working up to 6 mixed controllers (e.g. 2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without limit.
+
+### Hot-Plug
+Create and remove controllers without reboots. Switch between profiles — Xbox 360 to Xbox Series X to DualSense — live within the same process. The previous controller vanishes cleanly and the new one appears immediately.
 
 ### Profile-Based
-Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory already includes Xbox 360, Xbox One, Xbox Series X|S, Elite controllers, and more.
+Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
 ## Novel Techniques
 
@@ -95,24 +98,26 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 
 ```
 User-Mode Test App
-  │ Writes input data to per-controller shared file
+  │ Writes input data to per-controller shared memory section
   │ Manages device lifecycle (create, configure, remove)
   │
-  ├──► Shared File (input_0.bin)
+  ├──► Shared Memory (per-controller)
   │     SeqNo(4) + HID Report(64) + GIP Data(14) = 86 bytes
+  │     Event-driven: SDK signals InputDataEvent on each write
   │
   ├──► Main HID Device (HIDMaestro.dll via mshidumdf)
   │     ROOT\VID_045E&PID_028E&IG_00\0000
   │     ├─ HID descriptor with Vx/Vy velocity triggers
-  │     ├─ Timer reads shared file → HID READ_REPORT
+  │     ├─ Event-driven worker reads shared memory → HID READ_REPORT
+  │     │   (seqno-gated: idle CPU cost ~0.04% per controller)
   │     ├─ USB + WinExInput interfaces
   │     └─ BTHLEDEVICE CompatibleIDs (Bluetooth profiles)
   │
   └──► XUSB Companion (HMXInput.dll, XnaComposite class)
-        ROOT\HMCompanion\0000
+        ROOT\HMCompanion\0000  (non-xinputhid Xbox profiles only)
         ├─ XUSB interface → XInput discovery
         ├─ WinExInput interface → WGI GamepadAdded
-        ├─ Timer reads GipData from shared file
+        ├─ Event-driven: reads GipData from shared memory
         └─ Handles GET_STATE/GET_CAPABILITIES/SET_STATE IOCTLs
 ```
 
@@ -136,22 +141,31 @@ cd test
 dotnet build -c Debug
 bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
 
-# List available profiles
+# Multiple controllers at once (up to 6 verified, any mix of profiles)
+HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired dualsense
+
+# List available profiles (225 across 32 vendors)
 HIDMaestroTest.exe list
 
-# Validate all APIs (XInput, DirectInput, HIDAPI/SDL3, browser, WGI, HID enumeration order)
-python scripts\verify.py
+# Search profiles
+HIDMaestroTest.exe search thrustmaster
+
+# Validate all APIs (XInput, DirectInput, HIDAPI/SDL3, browser, WGI, HID order)
+python scripts\verify.py --controllers 4
+
+# Cross-API ordering diagnostic with correct open-then-trigger semantics
+build\multipad_check.exe --trigger --expected 4
 ```
 
 The test app is fully self-contained. On first run it:
 1. Creates a locally trusted self-signed certificate (if needed)
-2. Builds the driver DLLs from source
+2. Extracts pre-built driver DLLs from the SDK assembly
 3. Signs everything
 4. Installs driver packages
-5. Creates the virtual controller
-6. Starts feeding test input data
+5. Creates the virtual controller(s)
+6. Starts feeding test input data (time-varying pattern by default)
 
-No external scripts, no manual setup, no popups. Just the one console window.
+No external scripts, no manual setup, no popups. Just the one console window. Requires elevation (administrator privileges).
 
 ## Profile System
 
@@ -177,6 +191,8 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 
 Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally generated self-signed certificate added to the machine's Root and TrustedPublisher stores (no `bcdedit /set testsigning` required). Each profile was deployed via the test app and validated with `scripts/verify.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
 
+Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) — all 6 APIs report correct per-controller identity and ordering. Real Microsoft Xbox Series X|S BT controller tested side-by-side: virtual and real exhibit byte-identical behavior across all HID class APIs.
+
 ### Summary
 
 | Profile | DirectInput | XInput | SDL3 | Browser | WGI |
@@ -184,6 +200,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally gener
 | Xbox 360 Wired | 5 axes, 10 btns | 1 slot, separate triggers | &IG_ path, USB | STANDARD GAMEPAD, separate | 1 interface |
 | Xbox Series BT | 5 axes, 16 btns | 1 slot, separate triggers | &IG_ path, Bluetooth | STANDARD GAMEPAD, separate | 1+ interfaces |
 | DualSense (PS5) | 6 axes, 15 btns | N/A | USB | Detected | N/A |
+| **6-controller mixed** | **All 6 visible** | **4 slots (XInput cap)** | **4 IG + 2 live** | **4 pads (Chromium cap)** | **All 6 visible** |
 
 ### Xbox 360 Controller (Wired)
 
@@ -295,12 +312,12 @@ WinExInput Interface:
 
 | Operation | Measured Time |
 |-----------|--------------|
-| Cold start (first run — cert + build + sign + install + create) | ~18s |
-| Live profile switch (in-process, drivers cached) | ~18s |
-| PnP device node creation | ~13ms |
-| PnP device node removal | ~11ms |
+| Cold start (first run — cert + sign + install + create) | ~18s |
+| Warm start (drivers cached, create only) | ~10s |
+| PnP device node creation (SetupDI call) | ~13ms |
+| PnP device node removal (SetupDI call) | ~11ms |
 
-Cold start includes certificate creation, driver compilation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after source changes. Live profile switching (type a profile ID during emulation) tears down the current device, reconfigures, and creates the new one without restarting the process. Switch time is dominated by PnP device removal and creation; optimization to sub-second switching is an active area of development.
+Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start (drivers already installed) skips the install phase. The ~10s warm-start time is dominated by PnP async driver binding, HID child enumeration, and settle waits. Optimization toward sub-5-second creation is an active area of development — the fixed `Thread.Sleep` calls in the orchestration flow are the primary optimization targets.
 
 ## Why UMDF2 Is Enough
 
@@ -315,11 +332,12 @@ The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as chil
 
 ## Known Limitations
 
-- **No force feedback / haptics output passthrough yet.** The driver accepts SET_STATE (rumble) IOCTLs but doesn't forward them to physical hardware. This is a data-routing feature, not an architectural limitation.
-- **Single instance per profile currently.** Multi-controller support (e.g., four Xbox 360 controllers simultaneously) has foundational support in the code but is not yet validated end-to-end.
+- **Output passthrough is delivered but not routed to hardware.** The driver accepts rumble/haptics/FFB SET_STATE IOCTLs and the SDK raises `HMController.OutputReceived` events to the consumer application. Routing those events to a physical controller is the consumer's responsibility (e.g. PadForge handles this).
 - **Auth-chip controllers.** Some platforms (PS4/PS5 online, Nintendo Switch Online) require cryptographic authentication from the controller hardware. HIDMaestro cannot replicate authentication chips.
 - **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output — vendor extensions require per-controller work.
-- **XUSB companion creates a second device node.** Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager.
+- **XUSB companion creates a second device node** for non-xinputhid Xbox profiles (e.g. Xbox 360 Wired). Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager. Xbox Series BT profiles use xinputhid natively and do not need a companion.
+- **HID class APIs are event-driven, not state-driven.** DirectInput, HIDAPI, WGI, and RawInput only see state changes that occur after a consumer opens the device. Buttons held *before* a consumer opens are invisible until released and re-pressed. This is standard Windows HID class behavior — real Microsoft Xbox controllers exhibit the same semantics. XInput is the exception (always-on, polled by the OS). See `project-mark-mode-symptom.md` for the full investigation that confirmed this.
+- **Creation/destruction latency.** Creating a virtual controller currently takes ~10 seconds end-to-end due to PnP async install, driver binding, and settle waits. Optimization toward sub-5-second creation is an active area of development.
 
 ## How to Reproduce the Validation
 
@@ -333,10 +351,12 @@ Each validation result above was produced with these tools:
 | Browser Gamepad | Headless Edge/Chrome → `navigator.getGamepads()` | `scripts/verify.py` (via `scripts/browser_check/`) |
 | GameInput / WGI | `winrt.windows.gaming.input.RawGameController` | `scripts/verify.py` |
 | HID enumeration order | Python `hid.enumerate()` filtered by `HM-CTL-` serial | `scripts/verify.py` |
+| Cross-API mark-mode ordering | C++ multi-backend harness (MPT 1:1) | `build/multipad_check.exe --trigger` |
+| Real vs virtual HID stream diff | C++ HID capture tool | `build/hid_capture.exe <vid> <pid>` |
 | Device tree | `Get-PnpDevice` (PowerShell) | Manual |
 | joy.cpl | Windows Game Controllers control panel | Manual |
 
-To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python scripts/verify.py` in a separate terminal.
+To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python scripts/verify.py` in a separate terminal. For multi-controller validation: `HIDMaestroTest.exe emulate <id1> <id2> ...` then `python scripts/verify.py --controllers N`.
 
 ## Glossary
 
