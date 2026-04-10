@@ -119,7 +119,7 @@ internal static class DeviceOrchestrator
             {
                 string instId = $@"{prefix}\{idx:D4}";
                 if (CM_Locate_DevNodeW(out _, instId, 0) == 0)
-                    DeviceManager.RemoveDevice(instId);
+                    DeviceManager.RemoveDevice(instId, fast: true);
             }
         }
 
@@ -137,7 +137,7 @@ internal static class DeviceOrchestrator
                     foreach (var instName in vidKey.GetSubKeyNames())
                     {
                         string instId = $@"ROOT\{subName}\{instName}";
-                        DeviceManager.RemoveDevice(instId);
+                        DeviceManager.RemoveDevice(instId, fast: true);
                     }
                 }
             }
@@ -739,7 +739,7 @@ internal static class DeviceOrchestrator
                                           (dd != null && dd.Contains("HIDMaestro")) ||
                                           hwIds.Any(h => h != null && h.Contains("HIDMaestro"));
                             if (isOurs)
-                                DeviceManager.RemoveDevice(sysId);
+                                DeviceManager.RemoveDevice(sysId, fast: true);
                         }
                     }
                     catch { }
@@ -1023,8 +1023,44 @@ internal static class DeviceOrchestrator
     //  "cleanup" CLI command and by consumers who want a clean slate.
     // ════════════════════════════════════════════════════════════════════
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetEvent(IntPtr hEvent);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    private const uint EVENT_MODIFY_STATE = 0x0002;
+
     public static void RemoveAllVirtualControllers()
     {
+        // Signal all named StopEvents so the driver's worker threads exit.
+        // After a force-kill, WUDFHost still hosts our driver whose worker
+        // is blocked on WaitForMultipleObjects(StopEvent, InputDataEvent).
+        // Without this signal, PnP removal blocks ~1s per device waiting
+        // for the kernel query-remove to time out. With the signal, the
+        // worker exits immediately, WUDFHost releases, and PnP completes
+        // the removal in milliseconds.
+        for (int i = 0; i < 16; i++)
+        {
+            IntPtr ev = OpenEventW(EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroStopEvent{i}");
+            if (ev != IntPtr.Zero)
+            {
+                SetEvent(ev);
+                CloseHandle(ev);
+            }
+        }
+        // Give worker threads time to exit. The signal breaks the circular
+        // deadlock (PnP waits for WUDFHost, WUDFHost waits for worker),
+        // which speeds up subsequent DIF_REMOVE calls. WUDFHost still
+        // needs kernel-side PnP processing per device, so cleanup after
+        // a force-kill remains bounded by Windows' IRP_MN_QUERY_REMOVE
+        // timeout (~1s/device). For graceful shutdown (quit command),
+        // the signal makes cleanup near-instant.
+        Thread.Sleep(500);
+
         // Walk ROOT enumerators and remove HIDMaestro-owned devices.
         // Enumerators we always own: VID_*, XnaComposite, HMCompanion, HID_IG_00
         // Shared enumerators (HIDCLASS, SYSTEM): verify hardware ID contains "HIDMaestro"
@@ -1054,7 +1090,7 @@ internal static class DeviceOrchestrator
 
                         if (alwaysOurs)
                         {
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true);
                             continue;
                         }
 
@@ -1064,7 +1100,7 @@ internal static class DeviceOrchestrator
                             using var devKey = subKey.OpenSubKey(inst);
                             var hwIds = devKey?.GetValue("HardwareID") as string[];
                             if (hwIds?.Any(h => h.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)) == true)
-                                DeviceManager.RemoveDevice(instId, timeoutMs: 3000);
+                                DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true);
                         }
                         catch { }
                     }
@@ -1095,11 +1131,11 @@ internal static class DeviceOrchestrator
                         {
                             bool parentGone = CM_Get_Parent(out uint _, childInst, 0) != 0;
                             if (parentGone)
-                                DeviceManager.RemoveDevice(childId, timeoutMs: 3000);
+                                DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true);
                         }
                         else if (CM_Locate_DevNodeW(out childInst, childId, CM_LOCATE_DEVNODE_PHANTOM) == 0)
                         {
-                            DeviceManager.RemoveDevice(childId, timeoutMs: 3000);
+                            DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true);
                         }
                     }
                 }

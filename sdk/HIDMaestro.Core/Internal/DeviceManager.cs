@@ -393,50 +393,95 @@ public static class DeviceManager
     /// Enumerates HID children first and removes them individually via DIF_REMOVE,
     /// then removes the parent. This prevents ghost HID children from surviving.
     /// </summary>
-    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000)
+    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS &&
             CM_Locate_DevNodeW(out devInst, instanceId, 1) != CR_SUCCESS)
             return true;
 
+        // In fast mode (used by cleanup paths), fire-and-forget: issue
+        // DIF_REMOVE for all children and the parent without waiting for
+        // each removal to complete. PnP processes them asynchronously.
+        // This avoids 500ms+ of WaitForDeviceRemoval per device (~24
+        // calls during a 6-controller teardown = 12+ seconds of waiting
+        // for events that won't fire until WUDFHost releases handles).
+        // Any devices that survive as phantoms get caught by the ghost
+        // cleanup at the start of the next SetupController run.
+
         // Step 1: Find and remove all children first
         var childIds = GetAllChildDeviceIds(devInst);
         foreach (string childId in childIds)
         {
-            DifRemoveDevice(childId);
-            WaitForDeviceRemoval(childId, 2000);
-        }
-
-        // Step 2: Try DIF_REMOVE first (proper PnP removal)
-        DifRemoveDevice(instanceId);
-        WaitForDeviceRemoval(instanceId, timeoutMs);
-
-        // Step 3: pnputil as second pass — always try for ROOT devices
-        // DIF_REMOVE often reports success but leaves phantom devices in the Enum registry.
-        // pnputil /remove-device is more thorough for ghost cleanup.
-        if (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
-            instanceId.StartsWith("HID\\", StringComparison.OrdinalIgnoreCase))
-        {
-            try
+            if (fast)
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
+                // Fast mode: CM_Disable + CM_Uninstall directly. Avoids the
+                // SetupDiRemoveDevice → IRP_MN_QUERY_REMOVE → kernel-veto
+                // timeout (~1s per device) that dominates cleanup time when
+                // the UMDF host still holds handles after a force-kill.
+                if (CM_Locate_DevNodeW(out uint ci, childId, 0) == CR_SUCCESS
+                 || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
                 {
-                    FileName = "pnputil.exe",
-                    Arguments = $"/remove-device \"{instanceId}\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-                using var proc = System.Diagnostics.Process.Start(psi);
-                if (proc != null)
-                {
-                    proc.StandardOutput.ReadToEnd();
-                    proc.StandardError.ReadToEnd();
-                    proc.WaitForExit(5000);
+                    CM_Disable_DevNode(ci, 0);
+                    CM_Uninstall_DevNode(ci, 0);
                 }
             }
-            catch { }
+            else
+            {
+                DifRemoveDevice(childId);
+                WaitForDeviceRemoval(childId, 2000);
+            }
+        }
+
+        // Step 2: Remove the parent
+        bool goneAfterDif;
+        if (fast)
+        {
+            CM_Disable_DevNode(devInst, 0);
+            CM_Uninstall_DevNode(devInst, 0);
+            goneAfterDif = false; // don't wait, don't confirm
+        }
+        else
+        {
+            DifRemoveDevice(instanceId);
+            goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
+        }
+
+        // Step 3: pnputil as fallback — ONLY if DIF_REMOVE didn't fully
+        // remove the device AND we're not in fast mode. In fast mode (cleanup
+        // paths), we skip pnputil entirely — DIF_REMOVE + CM_Uninstall is
+        // sufficient for most devices, and the ones that survive as phantoms
+        // will be caught by pnputil on the NEXT non-fast removal (e.g. the
+        // ghost cleanup at the start of the next SetupController run). This
+        // avoids spawning ~14 sequential pnputil processes during teardown
+        // of a 6-controller setup, which was the primary 28-second bottleneck.
+        if (!fast && !goneAfterDif &&
+            (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
+             instanceId.StartsWith("HID\\", StringComparison.OrdinalIgnoreCase)))
+        {
+            bool stillPhantom = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
+            if (stillPhantom)
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "pnputil.exe",
+                        Arguments = $"/remove-device \"{instanceId}\"",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+                    using var proc = System.Diagnostics.Process.Start(psi);
+                    if (proc != null)
+                    {
+                        proc.StandardOutput.ReadToEnd();
+                        proc.StandardError.ReadToEnd();
+                        proc.WaitForExit(5000);
+                    }
+                }
+                catch { }
+            }
         }
 
         // Step 4: Final check

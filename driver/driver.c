@@ -101,6 +101,12 @@ InitInstancePaths(
         RtlCopyMemory(ctx->InputEventName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->InputEventName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroStopEvent";
+        SIZE_T cap = sizeof(ctx->StopEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->StopEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->StopEventName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -823,7 +829,26 @@ EvtDeviceAdd(
      * Replaces the old 1 ms WdfTimer busy poll — see commit/diff for the
      * CPU-saturation root cause. */
     ctx->InputDataEvent = NULL;
-    ctx->StopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
+    /* Create a NAMED StopEvent so external cleanup code (SDK's
+     * RemoveAllVirtualControllers) can signal it after a force-kill,
+     * breaking the deadlock where PnP waits for WUDFHost to release
+     * and WUDFHost waits for our worker thread to exit. Without this,
+     * cleanup of force-killed controllers takes ~28s (kernel query-
+     * remove timeout per device). With it, cleanup signals the named
+     * event, the worker exits, WUDFHost releases, and PnP removes
+     * the device instantly.
+     *
+     * Uses a permissive NULL DACL so any elevated process can open it. */
+    {
+        SECURITY_ATTRIBUTES sa;
+        SECURITY_DESCRIPTOR sd;
+        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+        ctx->StopEvent = CreateEventW(&sa, TRUE /* manual reset */, FALSE, ctx->StopEventName);
+    }
     if (ctx->StopEvent != NULL) {
         ctx->WorkerThread = CreateThread(NULL, 0, SharedInputWorkerProc, ctx, 0, NULL);
     }
