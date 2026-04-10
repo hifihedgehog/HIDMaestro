@@ -47,6 +47,46 @@ Create and remove controllers without reboots. Each controller is independently 
 ### Profile-Based
 Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
+### Custom Controllers — Build or Modify Any Device
+HIDMaestro goes beyond fixed profiles. Using the public `HidDescriptorBuilder` and `HMProfileBuilder` APIs, consumers can:
+
+- **Clone and modify** an existing profile — e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
+- **Build entirely new controllers from scratch** — define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
+- **Spoof any controller ever made** — if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
+
+This is what vJoy always wanted to be but couldn't: an SDK for fully custom virtual controllers that masquerade as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
+
+```csharp
+// Clone a DualSense and add a button
+var custom = new HMProfileBuilder()
+    .FromProfile(ctx.GetProfile("dualsense")!)
+    .Id("dualsense-16btn")
+    .Descriptor(new HidDescriptorBuilder()
+        .Gamepad()
+        .AddStick("Left", 8).AddStick("Right", 8)
+        .AddTrigger("Left", 8).AddTrigger("Right", 8)
+        .AddButtons(16).AddHat()
+        .Build())
+    .InputReportSize(8)
+    .Build();
+using var ctrl = ctx.CreateController(custom);
+
+// Or build a flight stick from nothing
+var stick = new HMProfileBuilder()
+    .Id("my-stick").Name("My Flight Stick")
+    .Vid(0x0483).Pid(0x0001)
+    .ProductString("Custom HOTAS")
+    .Descriptor(new HidDescriptorBuilder()
+        .Joystick()
+        .AddStick("Left", 16)
+        .AddTrigger("Left", 8).AddTrigger("Right", 8)
+        .AddButtons(12).AddHat()
+        .Build())
+    .InputReportSize(8)
+    .Build();
+using var ctrl2 = ctx.CreateController(stick);
+```
+
 ## Novel Techniques
 
 HIDMaestro uses several techniques we haven't seen documented elsewhere in the virtual controller space.
@@ -96,6 +136,9 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 | SDL3 with correct identity | **Yes** | Yes | Yes (real HW) | No |
 | Hot-plug without reboot | **Yes** | Yes | N/A | No |
 | Data-driven profiles | **Yes** | No | No | No |
+| Custom descriptor builder | **Yes** | No | No | Yes (fixed layout) |
+| Clone + modify existing profiles | **Yes** | No | No | No |
+| Spoof arbitrary VID/PID | **Yes** | No | No | No |
 | Status | **Active** | Retired | Active | Stale |
 
 ## Architecture
