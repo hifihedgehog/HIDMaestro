@@ -93,7 +93,7 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 | Single browser gamepad entry | **Yes** | Yes | N/A | No |
 | XInput with separate triggers | **Yes** | Yes | Yes | No |
 | DirectInput with correct axes | **Yes** | Yes | Yes | Partial |
-| SDL3 with correct identity | **Yes** | Partial | Yes (real HW) | No |
+| SDL3 with correct identity | **Yes** | Yes | Yes (real HW) | No |
 | Hot-plug without reboot | **Yes** | Yes | N/A | No |
 | Data-driven profiles | **Yes** | No | No | No |
 | Status | **Active** | Retired | Active | Stale |
