@@ -1,8 +1,10 @@
 # HIDMaestro
 
+*Glory, honor, and praise to the Lord Jesus Christ, the source of all truth, forever and ever.*
+
 **A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.**
 
-HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines.
+HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines. Builds heavily on the UMDF2 + xinputhid foundation pioneered by [Nefarius](https://nefarius.at/) with [DsHidMini](https://github.com/nefarius/DsHidMini).
 
 ## Why This Matters
 
@@ -441,7 +443,7 @@ HIDMaestro replicates the public-facing identity and input/output behavior of ga
 
 ## Credits
 
-- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by Nefarius Software Solutions — Pioneered the UMDF2 + xinputhid architecture for virtual game controllers on Windows. HIDMaestro builds on this foundational approach.
+- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by [Nefarius Software Solutions](https://nefarius.at/) — HIDMaestro builds heavily on the UMDF2 + xinputhid foundation that Nefarius pioneered with DsHidMini. They proved that a user-mode driver framework could replace kernel-mode drivers for game controller emulation on Windows, and their architecture — `mshidumdf` as the kernel-side HID proxy, `WUDFRd` as the reflector, xinputhid as the XInput bridge — is the bedrock that HIDMaestro's entire virtual controller stack is built on. Without DsHidMini's trailblazing work, this project would not exist.
 - **[HIDAPI](https://github.com/libusb/hidapi)** — Bus type detection behavior that informed the BTHLEDEVICE spoofing technique.
 - **[SDL3](https://github.com/libsdl-org/SDL)** — Multi-backend fallback behavior that informed the &IG_ enumerator trick. SDL3 is not a dependency — HIDMaestro is validated against it.
 
