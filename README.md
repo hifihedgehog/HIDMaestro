@@ -12,8 +12,8 @@ HIDMaestro creates profile-driven virtual controllers without a custom kernel dr
 
 Every existing virtual controller solution requires you to give something up:
 
-- **vJoy** needs a kernel driver and the original developer abandoned it years ago. Community forks have to maintain driver signing. And it always shows up as "vJoy Device" — never as a real controller.
-- **ViGEmBus** needs a kernel driver AND an EV code signing certificate ($300+/year). The project is now retired.
+- **vJoy** needs a kernel driver and is no longer actively maintained. The existing signed drivers work, but producing new builds requires driver signing infrastructure. And it always shows up as "vJoy Device" — never as a real controller.
+- **ViGEmBus** needs a kernel driver. The existing signed drivers work well, but producing new builds requires an EV code signing certificate ($300+/year). The project is now retired.
 - **DsHidMini** creates virtual controllers but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
 - **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
 
@@ -86,7 +86,7 @@ Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro
 | Feature | HIDMaestro | ViGEmBus | DsHidMini | vJoy |
 |---------|-----------|----------|-----------|------|
 | Kernel driver required | **No** | Yes | No (UMDF2) | Yes |
-| EV certificate required | **No** | Yes | No | Yes |
+| EV certificate for new builds | **No** | Yes | No | Yes |
 | Physical hardware required | **No** | No | Yes (DS3) | No |
 | Profile-defined controller identity | **Yes** | No (2 types) | No (DS3 only) | No (fixed) |
 | Bluetooth bus type spoof | **Yes** | No | No | No |
