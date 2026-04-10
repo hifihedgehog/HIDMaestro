@@ -143,7 +143,27 @@ rawReport[0] = 0x00;             // Report ID 0 (or whatever the descriptor uses
 //                                     // current state with raw bytes
 Console.WriteLine("  (SubmitRawReport available for exotic HID features — see source)");
 
-Console.WriteLine("\n=== Demo complete — disposing ===");
-// using-statements above handle cleanup of ctrl0, ctrl1, and ctx in
-// reverse order. The virtual controllers vanish from Device Manager,
-// joy.cpl, and all APIs immediately on dispose.
+// ── 7. Dispose a single controller while others stay live ────────────
+// Each HMController is independently disposable. Disposing one removes
+// just that virtual device from the system — the others keep running.
+// This is the pattern PadForge uses when a user disconnects one physical
+// controller while others remain active.
+Console.WriteLine("\n  Disposing controller 1 (Xbox 360) — controller 0 stays live...");
+ctrl1.Dispose();
+Console.WriteLine("  Controller 1 removed. Controller 0 still active for 2 more seconds...");
+sw.Restart();
+while (sw.ElapsedMilliseconds < 2_000)
+{
+    double t = sw.Elapsed.TotalSeconds;
+    var state = new HMGamepadState
+    {
+        LeftStickX = (float)Math.Cos(t * 2 * Math.PI),
+        LeftStickY = (float)Math.Sin(t * 2 * Math.PI),
+        Buttons    = HMButton.A,
+    };
+    ctrl0.SubmitState(in state);
+    Thread.Sleep(4);
+}
+
+Console.WriteLine("\n=== Demo complete — disposing remaining controller ===");
+// ctrl0's using-statement handles the final cleanup. ctx disposes after.

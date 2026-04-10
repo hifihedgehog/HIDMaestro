@@ -222,6 +222,7 @@ class Program
         Console.WriteLine("    unmark                        leave mark mode and resume the time-varying pattern");
         Console.WriteLine("    park <idx|all> <x> <y>        pin slot N's left stick to literal x,y in [-1..+1]");
         Console.WriteLine("    park off                      leave park mode and resume the time-varying pattern");
+        Console.WriteLine("    remove <index>                dispose a single controller (others stay live)");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
         while (Console.ReadLine() is string line)
         {
@@ -287,6 +288,34 @@ class Program
                     continue;
                 }
                 Console.WriteLine($"  ! park usage: park <idx|all> <x> <y>  |  park off");
+                continue;
+            }
+
+            // remove <index> — dispose a single controller without replacement
+            if (line.StartsWith("remove ", StringComparison.OrdinalIgnoreCase))
+            {
+                var rmArg = line.Substring(7).Trim();
+                if (int.TryParse(rmArg, out int rmIdx) && rmIdx >= 0 && rmIdx < slots.Count)
+                {
+                    var s = slots[rmIdx];
+                    if (s.Ctrl == null!)
+                    {
+                        Console.WriteLine($"  slot {rmIdx} already removed");
+                    }
+                    else
+                    {
+                        var rmSw = Stopwatch.StartNew();
+                        try { s.Cts.Cancel(); } catch { }
+                        try { s.Thread?.Join(2000); } catch { }
+                        try { s.Ctrl.Dispose(); } catch { }
+                        s.Ctrl = null!;
+                        Console.WriteLine($"  removed slot {rmIdx} in {rmSw.ElapsedMilliseconds} ms — {slots.Count(x => x.Ctrl != null!)} controller(s) remain");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"  ! remove: bad index '{rmArg}' (0..{slots.Count - 1})");
+                }
                 continue;
             }
 
