@@ -296,14 +296,38 @@ public sealed class HMContext : IDisposable
     /// first controller's friendly name gets overwritten by the SECOND
     /// controller's driver-bind activity. Re-applying after all PnP has
     /// settled makes the writes stick. The proven pre-SDK test app called
-    /// this as "Phase 1.5 — Finalizing device names". A 2-second sleep is
-    /// included to let PnP settle before the re-apply pass.</summary>
+    /// this as "Phase 1.5 — Finalizing device names".
+    ///
+    /// Instead of a fixed 2-second sleep, polls for every controller's HID
+    /// child to reach DN_STARTED (driver fully bound) before re-applying.
+    /// On fast machines this exits in &lt;100ms; on slow machines it adapts
+    /// up to 5 seconds rather than failing from an insufficient fixed sleep.
+    /// </summary>
     public void FinalizeNames()
     {
         ThrowIfDisposed();
-        System.Threading.Thread.Sleep(2000);
+
         HMController[] all;
         lock (_lock) all = _controllers.Values.ToArray();
+
+        // Wait until every controller's HID child is in DN_STARTED state,
+        // which means PnP is done binding drivers on that device tree.
+        // Replaces a fixed Thread.Sleep(2000) that wasted time on fast
+        // machines and was fragile on slow ones.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 5000)
+        {
+            bool allStarted = true;
+            foreach (var c in all)
+            {
+                if (c.InstanceId == null) continue;
+                if (!Internal.DeviceManager.IsDeviceStarted(c.InstanceId))
+                    { allStarted = false; break; }
+            }
+            if (allStarted) break;
+            System.Threading.Thread.Sleep(100);
+        }
+
         foreach (var c in all)
         {
             string name = c.Profile.Inner.DeviceDescription

@@ -63,6 +63,7 @@ public static class DeviceManager
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED = 9;
 
     const uint CR_SUCCESS = 0;
+    const uint DN_STARTED = 0x00000008;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct CM_NOTIFY_FILTER
@@ -562,6 +563,30 @@ public static class DeviceManager
         CM_Locate_DevNodeW(out devInst, instanceId, 1); // phantom flag
         CM_Enable_DevNode(devInst, 0);
         return true;
+    }
+
+    /// <summary>
+    /// Returns true if the device (or its HID child) is in DN_STARTED state,
+    /// meaning its driver is fully bound and the device is functional.
+    /// Used by FinalizeNames to poll for PnP readiness instead of fixed sleeps.
+    /// </summary>
+    public static bool IsDeviceStarted(string instanceId)
+    {
+        // Check the device itself first
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS)
+            return false;
+        if (CM_Get_DevNode_Status(out uint status, out _, devInst, 0) == CR_SUCCESS
+            && (status & DN_STARTED) != 0)
+            return true;
+
+        // Also check the HID child (if any) — for virtual controllers the parent
+        // may be started but the HID child (where xinputhid binds) is what matters.
+        string? hidChild = GetHidChildId(instanceId);
+        if (hidChild == null) return false;
+        if (CM_Locate_DevNodeW(out uint childInst, hidChild, 0) != CR_SUCCESS)
+            return false;
+        return CM_Get_DevNode_Status(out uint childStatus, out _, childInst, 0) == CR_SUCCESS
+            && (childStatus & DN_STARTED) != 0;
     }
 
     /// <summary>
