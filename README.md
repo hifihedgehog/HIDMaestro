@@ -383,7 +383,6 @@ If your application needs fast profile switching (e.g. remapping a physical cont
 - **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~400ms round trip (200ms dispose + 200ms create). Essentially instant.
 - **Switching to/from Xbox 360 Wired**: ~6-7s (XUSB companion teardown dominates).
 - **Switching to/from Xbox Series BT**: ~11-12s (xinputhid teardown dominates).
-- **Switching between profiles in the same group with the same VID/PID** (e.g. Xbox Series BT config A → config B): could potentially be optimized to in-place reconfiguration without teardown (not yet implemented).
 
 ## Why UMDF2 Is Enough
 
