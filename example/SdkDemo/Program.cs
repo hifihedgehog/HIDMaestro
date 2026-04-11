@@ -346,5 +346,182 @@ Console.WriteLine("OK");
     Thread.Sleep(2000);
 }
 
+// ── 12. PadForge migration reference — all four target profiles ──────
+// Complete SubmitRawReport examples for the four controller types
+// PadForge supports or plans to support. Each shows the exact byte
+// layout for the profile's native wire format.
+
+// ── 12a. Xbox 360 Wired (ViGEmBus Xbox360 replacement) ──────────────
+// Profile: xbox-360-wired | VID 045E PID 028E | No Report ID | 18 bytes
+// Note: Xbox 360 uses SubmitState (not raw) because HMGamepadState
+// maps 1:1 to the descriptor's standard fields. No vendor-specific
+// touchpad/gyro region. XInput delivery is via HMCOMPANION.
+Console.WriteLine("\n  12a. Xbox 360 Wired — via SubmitState");
+{
+    var x360Ref = ctx.GetProfile("xbox-360-wired")!;
+    Console.Write($"  Creating {x360Ref.Name}... ");
+    using var x360 = ctx.CreateController(x360Ref);
+    Console.WriteLine("OK");
+
+    // Xbox 360 has combined triggers (Z axis), 10 buttons, hat, two 16-bit sticks.
+    // SubmitState handles everything — no raw report needed.
+    var x360State = new HMGamepadState
+    {
+        LeftStickX   =  0.5f,
+        LeftStickY   = -0.3f,
+        RightStickX  = -0.2f,
+        RightStickY  =  0.7f,
+        LeftTrigger  =  0.8f,   // Combined Z axis in DI
+        RightTrigger =  0.4f,   // Combined Z axis in DI, separate via Vx/Vy for WGI
+        Buttons      =  HMButton.A | HMButton.LeftBumper,
+        Hat          =  HMHat.North,
+    };
+    x360.SubmitState(in x360State);
+    Console.WriteLine("  Submitted Xbox 360 state (A + LB, hat North)");
+    Thread.Sleep(1500);
+}
+
+// ── 12b. Xbox Series X|S Bluetooth ──────────────────────────────────
+// Profile: xbox-series-xs-bt | VID 045E PID 0B13 | No Report ID | 17 bytes
+// Uses xinputhid for XInput + 16-button synthesis. SubmitState is the
+// primary path. No vendor touchpad/gyro region.
+Console.WriteLine("\n  12b. Xbox Series X|S Bluetooth — via SubmitState");
+{
+    var xsBtProfile = ctx.GetProfile("xbox-series-xs-bt")!;
+    Console.Write($"  Creating {xsBtProfile.Name}... ");
+    using var xsBt = ctx.CreateController(xsBtProfile);
+    Console.WriteLine("OK");
+
+    // 17-byte GIP descriptor: two 16-bit sticks, two 10-bit triggers,
+    // 10 buttons (xinputhid synthesizes 16 for DInput), hat, guide button.
+    var xsBtState = new HMGamepadState
+    {
+        LeftStickX   =  0.7f,
+        LeftStickY   =  0.3f,
+        RightStickX  = -0.5f,
+        RightStickY  = -0.1f,
+        LeftTrigger  =  1.0f,
+        RightTrigger =  0.0f,
+        Buttons      =  HMButton.X | HMButton.Y | HMButton.RightBumper,
+        Hat          =  HMHat.SouthEast,
+    };
+    xsBt.SubmitState(in xsBtState);
+    Console.WriteLine("  Submitted Xbox Series BT state (X + Y + RB, hat SE)");
+    Thread.Sleep(1500);
+}
+
+// ── 12c. DualSense (PS5) — with touchpad via SubmitRawReport ────────
+// Profile: dualsense | VID 054C PID 0CE6 | Report ID 0x01 | 64 bytes
+// Standard fields work via SubmitState. For touchpad/gyro/battery,
+// use SubmitRawReport with the 63-byte data buffer (no Report ID
+// prefix — the driver adds 0x01 automatically).
+Console.WriteLine("\n  12c. DualSense — SubmitState + SubmitRawReport for touchpad");
+{
+    var dsProfile2 = ctx.GetProfile("dualsense")!;
+    Console.Write($"  Creating {dsProfile2.Name}... ");
+    using var ds = ctx.CreateController(dsProfile2);
+    Console.WriteLine("OK");
+
+    // Option A: SubmitState for standard fields only (no touchpad)
+    ds.SubmitState(new HMGamepadState
+    {
+        LeftStickX  = -0.3f,
+        LeftStickY  =  0.6f,
+        LeftTrigger =  0.5f,
+        Buttons     =  HMButton.A | HMButton.B,  // Cross + Circle
+        Hat         =  HMHat.West,
+    });
+    Console.WriteLine("  Submitted DualSense state via SubmitState (Cross + Circle)");
+
+    // Option B: SubmitRawReport for full control including touchpad.
+    // 63 bytes data (Sony USB wire format). Byte offsets:
+    //   0-3:   LX, LY, RX, RY (0-255, center=128)
+    //   4-5:   hat(4b) + buttons(14b) packed LE
+    //   6:     special (PS=0x01, touchpad click=0x02)
+    //   7-8:   L2, R2 (0-255)
+    //   9-10:  timestamp (LE, 10µs ticks)
+    //   11:    battery level
+    //   12-31: IMU (gyro 3x16b LE + accel 3x16b LE) + padding
+    //   32:    touch packet count
+    //   33-41: touch finger data (packet counter + 2 fingers)
+    //   42-62: reserved
+    byte[] dsRaw = new byte[63];
+    dsRaw[0] = 100; dsRaw[1] = 150; dsRaw[2] = 128; dsRaw[3] = 128; // sticks
+    dsRaw[4] = 0x08 | (1 << 5) | (1 << 6);  // hat=None + Cross + Circle
+    dsRaw[7] = 128; // L2 half-pressed
+    dsRaw[11] = 0xFF; // battery full
+    dsRaw[32] = 1; // one touch packet
+    dsRaw[34] = 0x00; // finger 0 down
+    int dsTx = 960, dsTy = 471;
+    dsRaw[35] = (byte)(dsTx & 0xFF);
+    dsRaw[36] = (byte)(((dsTx >> 8) & 0x0F) | ((dsTy << 4) & 0xF0));
+    dsRaw[37] = (byte)(dsTy >> 4);
+    dsRaw[38] = 0x80; // finger 1 lifted
+    ds.SubmitRawReport(dsRaw);
+    Console.WriteLine("  Submitted DualSense raw report with touchpad at (960, 471)");
+    Thread.Sleep(1500);
+}
+
+// ── 12d. Nintendo Switch Pro Controller — with gyro via SubmitRawReport
+// Profile: switch-pro | VID 057E PID 2009 | Report ID 0x30 | 64 bytes
+// The Switch Pro uses Nintendo's vendor-specific report format (0x30
+// full input mode). Sticks are 12-bit packed (3 bytes per stick).
+// IMU data (gyro + accel) is at bytes 13-24 (3x16b gyro + 3x16b accel).
+Console.WriteLine("\n  12d. Switch Pro Controller — SubmitRawReport with gyro");
+{
+    var swProfile = ctx.GetProfile("switch-pro")!;
+    Console.Write($"  Creating {swProfile.Name}... ");
+    using var sw2 = ctx.CreateController(swProfile);
+    Console.WriteLine("OK");
+
+    // 63 bytes data (no Report ID prefix — driver adds 0x30).
+    // Nintendo Switch Pro 0x30 report format:
+    //   0:     timer counter (increments per report)
+    //   1:     battery + connection info
+    //   2-4:   button state (3 bytes: Y/X/B/A, triggers, hat, sticks click, etc.)
+    //   5-7:   left stick (12-bit X in bits 0-11, 12-bit Y in bits 12-23, packed LE)
+    //   8-10:  right stick (same packing)
+    //   11:    vibration report ACK
+    //   12:    sub-command reply ID
+    //   13-24: IMU data (3 frames × 2 samples: gyro XYZ + accel XYZ, 16-bit LE each)
+    //   25-62: sub-command reply data / NFC/IR data
+    byte[] swRaw = new byte[63];
+    swRaw[0] = 0x42; // timer counter
+    swRaw[1] = 0x8E; // battery full, USB connected
+
+    // Buttons: A pressed (byte 2, bit 3 in Nintendo layout)
+    swRaw[2] = 0x08; // A button
+
+    // Left stick centered: 12-bit X=2048, Y=2048
+    // Packed as: byte5 = X[7:0], byte6 = X[11:8] | Y[3:0], byte7 = Y[11:4]
+    int lsx = 2048, lsy = 2048;
+    swRaw[5] = (byte)(lsx & 0xFF);
+    swRaw[6] = (byte)(((lsx >> 8) & 0x0F) | ((lsy & 0x0F) << 4));
+    swRaw[7] = (byte)(lsy >> 4);
+
+    // Right stick centered
+    int rsx = 2048, rsy = 2048;
+    swRaw[8] = (byte)(rsx & 0xFF);
+    swRaw[9] = (byte)(((rsx >> 8) & 0x0F) | ((rsy & 0x0F) << 4));
+    swRaw[10] = (byte)(rsy >> 4);
+
+    // IMU: gyro X/Y/Z at bytes 13-18 (16-bit LE, signed)
+    // Small rotation around Y axis (simulating a gentle tilt)
+    short gyroX = 0, gyroY = 500, gyroZ = 0;
+    swRaw[13] = (byte)(gyroX & 0xFF); swRaw[14] = (byte)(gyroX >> 8);
+    swRaw[15] = (byte)(gyroY & 0xFF); swRaw[16] = (byte)(gyroY >> 8);
+    swRaw[17] = (byte)(gyroZ & 0xFF); swRaw[18] = (byte)(gyroZ >> 8);
+
+    // Accel X/Y/Z at bytes 19-24 (gravity on Y = -4096 typical)
+    short accelX = 0, accelY = -4096, accelZ = 0;
+    swRaw[19] = (byte)(accelX & 0xFF); swRaw[20] = (byte)((ushort)accelX >> 8);
+    swRaw[21] = (byte)(accelY & 0xFF); swRaw[22] = (byte)((ushort)accelY >> 8);
+    swRaw[23] = (byte)(accelZ & 0xFF); swRaw[24] = (byte)((ushort)accelZ >> 8);
+
+    sw2.SubmitRawReport(swRaw);
+    Console.WriteLine("  Submitted Switch Pro raw report with gyro tilt + A button");
+    Thread.Sleep(1500);
+}
+
 Console.WriteLine("\n=== Demo complete — disposing all controllers ===");
-// using-statements handle cleanup of ctrl0, ctrl2, ctrl3, ctrl4, and ctx.
+// using-statements handle cleanup of all controllers and ctx.
