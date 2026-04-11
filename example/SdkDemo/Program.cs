@@ -273,5 +273,78 @@ while (sw.ElapsedMilliseconds < 3_000)
     Thread.Sleep(4);
 }
 
+// ── 11. SubmitRawReport — ViGEmBus DS4 migration pattern ─────────────
+// This shows how PadForge (or any app migrating from ViGEmBus) can
+// submit full DS4/DualSense reports including touchpad, gyro, and
+// battery data using SubmitRawReport. The caller packs the raw byte
+// buffer in the device's native wire format — same as ViGEmBus's
+// DS4_REPORT_EX — and HIDMaestro passes it through unchanged.
+//
+// Key difference from ViGEmBus: pass DATA BYTES ONLY (no Report ID
+// prefix). The driver prepends the Report ID automatically. For the
+// DualShock 4 / DualSense (Report ID 0x01, 64-byte report), pass
+// 63 bytes of data.
+//
+// PadForge migration:
+//   Before: _controller.SubmitRawReport(buf63);     // ViGEmBus
+//   After:  ctrl.SubmitRawReport(buf63);             // HIDMaestro
+//   (Same 63-byte buffer, same byte offsets, same touchpad packing)
+Console.WriteLine("\n  SubmitRawReport: DS4/DualSense with touchpad data...");
+var ds4Profile = ctx.GetProfile("dualshock-4-v1-full")
+    ?? ctx.GetProfile("dualsense")!;
+Console.Write($"  Creating {ds4Profile.Name} for raw report demo... ");
+using var ctrl4 = ctx.CreateController(ds4Profile);
+Console.WriteLine("OK");
+
+{
+    // Build a raw DS4 report with touchpad finger data.
+    // This is the same byte layout PadForge's DS4VirtualController uses.
+    // Byte offsets match Sony's DS4 USB wire format (not the HID descriptor's
+    // logical field order — SubmitRawReport bypasses descriptor parsing).
+    byte[] raw = new byte[63]; // 63 data bytes (no Report ID prefix)
+
+    // Sticks (bytes 0-3): center = 128
+    raw[0] = 128; // LX
+    raw[1] = 128; // LY
+    raw[2] = 128; // RX
+    raw[3] = 128; // RY
+
+    // Buttons (bytes 4-5): Cross pressed (bit 5 of byte 4)
+    raw[4] = 0x08 | (1 << 5); // Hat=None(8) | Cross
+    raw[5] = 0x00;
+
+    // Special (byte 6): PS button = 0x01, Touchpad click = 0x02
+    raw[6] = 0x00;
+
+    // Triggers (bytes 7-8)
+    raw[7] = 0;   // L2
+    raw[8] = 0;   // R2
+
+    // Timestamp (bytes 9-10)
+    raw[9] = 0x00;
+    raw[10] = 0x00;
+
+    // Battery (byte 11)
+    raw[11] = 0xFF;
+
+    // Touchpad (bytes 32-41): one finger touching at center
+    raw[32] = 1;   // touch packet count
+
+    // Finger 0: active, ID=0, X=960, Y=471
+    raw[33] = 0;   // packet counter
+    raw[34] = 0x00; // tracking number (bit 7 clear = finger down)
+    int tx = 960, ty = 471;
+    raw[35] = (byte)(tx & 0xFF);
+    raw[36] = (byte)(((tx >> 8) & 0x0F) | ((ty << 4) & 0xF0));
+    raw[37] = (byte)(ty >> 4);
+
+    // Finger 1: not touching
+    raw[38] = 0x80; // tracking number (bit 7 set = finger lifted)
+
+    ctrl4.SubmitRawReport(raw);
+    Console.WriteLine("  Submitted raw DS4 report with touchpad finger at (960, 471)");
+    Thread.Sleep(2000);
+}
+
 Console.WriteLine("\n=== Demo complete — disposing all controllers ===");
-// using-statements handle cleanup of ctrl0, ctrl2, ctrl3, and ctx.
+// using-statements handle cleanup of ctrl0, ctrl2, ctrl3, ctrl4, and ctx.

@@ -185,10 +185,23 @@ public sealed class HMController : IDisposable
             _inputView, _inputEvent, ref _inputSeqNo, report, dataLen, _gipBuf, dataStart);
     }
 
-    /// <summary>Push a raw HID input report. Use this for exotic features
-    /// that <see cref="HMGamepadState"/> doesn't model — touchpad coordinates,
-    /// gyroscope, sensor packets, vendor extensions. The first byte must be
-    /// the HID Report ID (or 0 if the descriptor declares no report IDs).</summary>
+    /// <summary>Push a raw HID input report for features that
+    /// <see cref="HMGamepadState"/> doesn't model — touchpad coordinates,
+    /// gyroscope, sensor packets, vendor extensions.
+    ///
+    /// <para>Pass <b>data bytes only</b> — do NOT include a Report ID prefix.
+    /// The driver prepends the Report ID automatically (same as
+    /// <see cref="SubmitState"/>). For a DualSense with Report ID 0x01 and
+    /// 64-byte InputReportByteLength, pass 63 bytes of data.</para>
+    ///
+    /// <para>For profiles with no Report ID (e.g. Xbox Series BT), pass the
+    /// full report as-is.</para>
+    ///
+    /// <para>Tip: use <see cref="HMProfile.InputReportSize"/> and
+    /// <see cref="HMProfile.GetDescriptorBytes"/> to determine the expected
+    /// data layout. The test app's <c>info</c> command shows every field's
+    /// bit offset.</para>
+    /// </summary>
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
