@@ -126,6 +126,11 @@ public sealed class HMProfile
     /// <summary>Notes from the profile JSON (descriptor provenance, quirks, etc.).</summary>
     public string? Notes => Inner.Notes;
 
+    /// <summary>Button remapping table. Maps HMButton bit positions (index) to
+    /// descriptor button indices (value). Null means identity mapping (Xbox layout).
+    /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.</summary>
+    public int[]? ButtonMap => Inner.ButtonMap;
+
     public override string ToString() => $"{Id} ({Name})";
 
     // Lazily parsed layout cache

@@ -73,6 +73,16 @@ public sealed class ControllerProfile
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>Optional button remapping table. Maps HMButton bit positions
+    /// (index) to descriptor button indices (value). When present, BuildReport
+    /// uses this to place semantic buttons (A, B, X, Y, LB, RB, etc.) at the
+    /// correct descriptor positions for the profile's controller family.
+    /// When null, identity mapping is assumed (bit N → descriptor button N).
+    /// Example: Sony DS4 maps HMButton.A (bit 0) to descriptor button 2 (Cross).
+    /// </summary>
+    [JsonPropertyName("buttonMap")]
+    public int[]? ButtonMap { get; set; }
+
     /// <summary>If true, skip main HID device — use XUSB companion only.
     /// DI reads from XInput (5 axes), browser reads from XInput (separate triggers).
     /// Used for Xbox 360 where real hardware uses xusb22.sys (no HID).</summary>

@@ -76,6 +76,7 @@ public sealed class HMController : IDisposable
         Profile = profile;
 
         _reportBuilder = HidReportBuilder.Parse(profile.Inner.GetDescriptorBytes()!);
+        _reportBuilder.ButtonMap = profile.Inner.ButtonMap;
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 

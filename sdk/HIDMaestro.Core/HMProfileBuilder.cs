@@ -50,6 +50,7 @@ public sealed class HMProfileBuilder
     private int? _inputReportSize;
     private string? _deviceDescription;
     private string? _notes;
+    private int[]? _buttonMap;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
     public HMProfileBuilder Id(string id) { _id = id; return this; }
@@ -108,6 +109,11 @@ public sealed class HMProfileBuilder
     /// <summary>Set notes/comments (for documentation only, not functional).</summary>
     public HMProfileBuilder Notes(string? notes) { _notes = notes; return this; }
 
+    /// <summary>Set button remapping table. Maps HMButton bit positions (index)
+    /// to descriptor button indices (value). Pass null for identity mapping (Xbox).
+    /// Sony DS4/DualSense use: [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13].</summary>
+    public HMProfileBuilder ButtonMap(int[]? map) { _buttonMap = map; return this; }
+
     /// <summary>Initialize all fields from an existing profile. Call individual
     /// setters afterward to override specific properties.</summary>
     public HMProfileBuilder FromProfile(HMProfile source)
@@ -127,6 +133,7 @@ public sealed class HMProfileBuilder
         _inputReportSize = source.InputReportSize > 0 ? source.InputReportSize : null;
         _deviceDescription = source.Inner.DeviceDescription;
         _notes = source.Notes;
+        _buttonMap = source.ButtonMap;
         return this;
     }
 
@@ -154,6 +161,7 @@ public sealed class HMProfileBuilder
             InputReportSize = _inputReportSize,
             DeviceDescription = _deviceDescription,
             Notes = _notes,
+            ButtonMap = _buttonMap,
         };
 
         return new HMProfile(inner);

@@ -20,6 +20,13 @@ public class HidReportBuilder
     public int InputReportByteSize => (InputReportBitSize + 7) / 8 + (InputReportId != 0 ? 1 : 0);
     public List<InputField> InputFields { get; } = new();
 
+    /// <summary>Optional button remapping table. Maps HMButton bit positions
+    /// (index) to descriptor button indices (value). When set, BuildReport
+    /// uses this to place semantic buttons at the correct descriptor positions
+    /// for the profile's controller family. When null, identity mapping is
+    /// assumed (bit N → descriptor button N).</summary>
+    public int[]? ButtonMap { get; set; }
+
     // Semantic axis mapping (resolved after parsing)
     public InputField? LeftStickX { get; private set; }
     public InputField? LeftStickY { get; private set; }
@@ -310,10 +317,18 @@ public class HidReportBuilder
             WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRaw);
         }
 
-        for (int b = 0; b < Buttons.Count && b < 32; b++)
+        // Button packing with optional remapping. When ButtonMap is set,
+        // HMButton bit positions are translated to descriptor button indices
+        // so that semantic names (A, B, LB, Start, etc.) land at the correct
+        // positions for the profile's controller family.
+        for (int b = 0; b < 32; b++)
         {
-            int val = ((buttonMask >> b) & 1) != 0 ? 1 : 0;
-            WriteBits(report, Buttons[b].BitOffset + idOffset, Buttons[b].BitSize, val);
+            if (((buttonMask >> b) & 1) == 0) continue;
+            int descBtn = (ButtonMap != null && b < ButtonMap.Length)
+                ? ButtonMap[b] : b;
+            if (descBtn >= 0 && descBtn < Buttons.Count)
+                WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
+                          Buttons[descBtn].BitSize, 1);
         }
 
         return report;
