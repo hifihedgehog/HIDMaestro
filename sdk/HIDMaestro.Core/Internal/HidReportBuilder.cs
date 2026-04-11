@@ -20,6 +20,12 @@ public class HidReportBuilder
     public int InputReportByteSize => (InputReportBitSize + 7) / 8 + (InputReportId != 0 ? 1 : 0);
     public List<InputField> InputFields { get; } = new();
 
+    /// <summary>Optional axis semantic override. When set, applied after
+    /// ResolveSemantics to correct axis assignments for profiles where the
+    /// default heuristic is wrong (e.g. Sony uses Z/Rz for right stick,
+    /// Rx/Ry for triggers — opposite of the Xbox convention).</summary>
+    public Dictionary<string, string>? AxisMap { get; set; }
+
     /// <summary>Optional button remapping table. Maps HMButton bit positions
     /// (index) to descriptor button indices (value). When set, BuildReport
     /// uses this to place semantic buttons at the correct descriptor positions
@@ -38,12 +44,64 @@ public class HidReportBuilder
     public InputField? HatSwitch { get; private set; }
     public List<InputField> Buttons { get; } = new();
 
-    public static HidReportBuilder Parse(byte[] descriptor)
+    public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null)
     {
         var builder = new HidReportBuilder();
         builder.ParseDescriptor(descriptor);
         builder.ResolveSemantics();
+        if (axisMap != null)
+        {
+            builder.AxisMap = axisMap;
+            builder.ApplyAxisMap(axisMap);
+        }
         return builder;
+    }
+
+    /// <summary>Override semantic axis assignments from an explicit map.
+    /// Keys are hex usage codes (e.g. "0x32"), values are semantic names
+    /// (leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger,
+    /// rightTrigger). Clears the affected slots before reassigning so
+    /// there are no duplicates.</summary>
+    void ApplyAxisMap(Dictionary<string, string> map)
+    {
+        // Build a lookup from usage code → InputField
+        var fieldByUsage = new Dictionary<ushort, InputField>();
+        foreach (var f in InputFields)
+        {
+            if (f.IsConstant || f.UsagePage != 0x01) continue;
+            if (!fieldByUsage.ContainsKey(f.Usage))
+                fieldByUsage[f.Usage] = f;
+        }
+
+        // Clear all slots that will be reassigned
+        foreach (var kvp in map)
+        {
+            switch (kvp.Value.ToLowerInvariant())
+            {
+                case "leftstickx":  LeftStickX = null; break;
+                case "leftsticky":  LeftStickY = null; break;
+                case "rightstickx": RightStickX = null; break;
+                case "rightsticky": RightStickY = null; break;
+                case "lefttrigger": LeftTrigger = null; break;
+                case "righttrigger": RightTrigger = null; break;
+            }
+        }
+
+        // Apply the overrides
+        foreach (var kvp in map)
+        {
+            ushort usage = Convert.ToUInt16(kvp.Key, 16);
+            if (!fieldByUsage.TryGetValue(usage, out var field)) continue;
+            switch (kvp.Value.ToLowerInvariant())
+            {
+                case "leftstickx":  LeftStickX = field; break;
+                case "leftsticky":  LeftStickY = field; break;
+                case "rightstickx": RightStickX = field; break;
+                case "rightsticky": RightStickY = field; break;
+                case "lefttrigger": LeftTrigger = field; break;
+                case "righttrigger": RightTrigger = field; break;
+            }
+        }
     }
 
     void ParseDescriptor(byte[] desc)

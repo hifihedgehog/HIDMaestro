@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HIDMaestro.Internal;
 
 namespace HIDMaestro;
@@ -130,6 +131,12 @@ public sealed class HMProfile
     /// descriptor button indices (value). Null means identity mapping (Xbox layout).
     /// Sony profiles remap so HMButton.A → Cross, HMButton.X → Square, etc.</summary>
     public int[]? ButtonMap => Inner.ButtonMap;
+
+    /// <summary>Axis semantic override map. Keys are hex HID usage codes (e.g.
+    /// "0x32" for Z), values are semantic names (leftStickX, rightStickY,
+    /// leftTrigger, etc.). Sony profiles override Z/Rz→rightStick and
+    /// Rx/Ry→triggers. Null means default heuristic mapping.</summary>
+    public Dictionary<string, string>? AxisMap => Inner.AxisMap;
 
     public override string ToString() => $"{Id} ({Name})";
 

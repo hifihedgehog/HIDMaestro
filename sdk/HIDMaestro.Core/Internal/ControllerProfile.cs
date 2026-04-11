@@ -83,6 +83,18 @@ public sealed class ControllerProfile
     [JsonPropertyName("buttonMap")]
     public int[]? ButtonMap { get; set; }
 
+    /// <summary>Optional axis semantic override. Maps HID usage codes to
+    /// semantic roles when the default heuristic gets it wrong. Keys are
+    /// HID usage codes (e.g. "0x32" for Z), values are semantic names:
+    /// "leftStickX", "leftStickY", "rightStickX", "rightStickY",
+    /// "leftTrigger", "rightTrigger". When present, overrides
+    /// ResolveSemantics for the specified usages. When null, the default
+    /// heuristic applies (which assumes Z=trigger, Rz=trigger).
+    /// Sony profiles need this because Z/Rz = right stick, Rx/Ry = triggers.
+    /// </summary>
+    [JsonPropertyName("axisMap")]
+    public Dictionary<string, string>? AxisMap { get; set; }
+
     /// <summary>If true, skip main HID device — use XUSB companion only.
     /// DI reads from XInput (5 axes), browser reads from XInput (separate triggers).
     /// Used for Xbox 360 where real hardware uses xusb22.sys (no HID).</summary>
