@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="HIDMaestro" width="140">
+</p>
+
 # HIDMaestro
 
 *"And we talk of Christ, we rejoice in Christ, we preach of Christ, we prophesy of Christ, and we write according to our prophecies, that our children may know to what source they may look for a remission of their sins."* — 2 Nephi 25:26
