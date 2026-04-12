@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/logo.png" alt="HIDMaestro" width="140">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-light.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/logo.png">
+    <img src="docs/logo.png" alt="HIDMaestro" width="140">
+  </picture>
 </p>
 
 # HIDMaestro
