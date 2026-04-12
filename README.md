@@ -47,7 +47,7 @@ Most solutions get one or two APIs right. HIDMaestro targets all of them simulta
 | **WGI (GameInput)** | Proper Gamepad promotion via GameInput registry |
 
 ### Multi-Controller
-Spin up multiple virtual controllers simultaneously — verified working up to 6 mixed controllers (e.g. 2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without limit.
+Spin up multiple virtual controllers simultaneously — supports up to 16 controllers (the DirectInput limit on consumer Windows), tested with 6 mixed (2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without limit.
 
 ### Hot-Plug
 Create and remove controllers without reboots. Each controller is independently disposable — remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total.
