@@ -1123,7 +1123,7 @@ EvtIoDeviceControl(
         *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
         caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
         caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF3FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY */
+        *(USHORT*)&caps[4] = 0xF7FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
         caps[6] = 0xFF;                /* bLeftTrigger */
         caps[7] = 0xFF;                /* bRightTrigger */
         *(SHORT*)&caps[8]  = 32767;    /* ThumbLX */
@@ -1186,6 +1186,7 @@ EvtIoDeviceControl(
             if (btnLow & 0x80) buttons |= 0x0010;
             if (btnHigh & 0x01) buttons |= 0x0040;
             if (btnHigh & 0x02) buttons |= 0x0080;
+            if (btnHigh & 0x40) buttons |= 0x0400; /* Guide (XInputGetStateEx) */
             switch (hat) {
                 case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
                 case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;

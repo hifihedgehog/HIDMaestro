@@ -654,7 +654,15 @@ class Program
                 RightStickY = 0f,
                 LeftTrigger  = lt,
                 RightTrigger = rt,
-                Buttons      = ((int)t % 2 == 0) ? HMButton.A : HMButton.None,
+                // A at 1Hz, Guide at 0.5Hz, Share at 0.33Hz — three distinct
+                // cadences so each is individually observable in any consumer
+                // (joy.cpl, browser Gamepad Tester, XInputGetStateEx). Guide
+                // routes to System Main Menu on Xbox Series descriptors and
+                // to regular button N on Sony/Xbox 360; Share routes via
+                // profile buttonMap (absent on pre-Series profiles — drops).
+                Buttons      = (((int)t % 2 == 0) ? HMButton.A : HMButton.None)
+                             | ((((int)(t / 2)) % 2 == 0) ? HMButton.Guide : HMButton.None)
+                             | ((((int)(t / 3)) % 2 == 0) ? HMButton.Share : HMButton.None),
             };
             try { ctrl.SubmitState(in state); } catch { break; }
             try { Thread.Sleep(4); } catch { break; }

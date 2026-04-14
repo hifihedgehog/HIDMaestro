@@ -168,10 +168,15 @@ public sealed class HMController : IDisposable
         if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
         if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
         _gipBuf[12] = btnLow;
-        // Button high byte: Back, Start, hat in upper bits (companion-specific)
+        // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
+        // 4-bit hat (companion.c does (btnHigh >> 2) & 0x0F), so Guide has
+        // to live above the hat — bit 6 (0x40). HMXInput.dll's
+        // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
+        // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
         byte btnHigh = 0;
         if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
         if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
+        if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
         _gipBuf[13] = btnHigh;
 
         // Strip the Report ID byte (if any) before writing the HID native

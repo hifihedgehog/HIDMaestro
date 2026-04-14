@@ -338,7 +338,7 @@ void CompanionIoControl(
         *(USHORT*)&caps[0] = 0x0101;
         caps[2] = 0x01; /* XINPUT_DEVTYPE_GAMEPAD */
         caps[3] = 0x01; /* XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF3FF; /* wButtons mask */
+        *(USHORT*)&caps[4] = 0xF7FF; /* wButtons mask — includes Guide (0x0400) */
         caps[6] = 0xFF; caps[7] = 0xFF;
         *(SHORT*)&caps[8]  = 32767; *(SHORT*)&caps[10] = 32767;
         *(SHORT*)&caps[12] = 32767; *(SHORT*)&caps[14] = 32767;
@@ -374,6 +374,7 @@ void CompanionIoControl(
             if (btnLow & 0x80) buttons |= 0x0010; /* RS */
             if (btnHigh & 0x01) buttons |= 0x0040; /* Back */
             if (btnHigh & 0x02) buttons |= 0x0080; /* Start */
+            if (btnHigh & 0x40) buttons |= 0x0400; /* Guide (XInputGetStateEx) */
             switch (hat) {
                 case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
                 case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;

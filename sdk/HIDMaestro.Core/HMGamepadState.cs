@@ -58,6 +58,7 @@ public enum HMButton : uint
     RightStick   = 1u << 9,   // R3
     Guide        = 1u << 10,  // Xbox / PS / Home
     Touchpad     = 1u << 11,  // PS touchpad click (DualShock 4 / DualSense)
+    Share        = 1u << 12,  // Xbox Series Share button (not present on earlier Xbox or Sony)
 
     // Aliases for clarity when programming against PlayStation profiles
     Cross    = A,

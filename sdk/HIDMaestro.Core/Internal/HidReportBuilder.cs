@@ -44,6 +44,16 @@ public class HidReportBuilder
     public InputField? HatSwitch { get; private set; }
     public List<InputField> Buttons { get; } = new();
 
+    /// <summary>System Control / System Main Menu bit. On Xbox Series / Xbox
+    /// One controllers the Guide (Xbox) button lives here, not in the regular
+    /// gamepad button array. xinputhid parses this bit and exposes it via
+    /// XInputGetStateEx (ordinal 100) as XINPUT_GAMEPAD_GUIDE. When this field
+    /// is present, <see cref="BuildReport"/> routes <c>HMButton.Guide</c> to
+    /// it; otherwise Guide falls back to the normal button-array path so
+    /// profiles where Guide is a regular button (Xbox 360, Sony, etc.) still
+    /// work via <see cref="ButtonMap"/>.</summary>
+    public InputField? SystemMainMenu { get; private set; }
+
     public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null)
     {
         var builder = new HidReportBuilder();
@@ -277,6 +287,7 @@ public class HidReportBuilder
                             RightTrigger ??= f;
                         break;
                     case 0x39: HatSwitch ??= f; break;     // Hat Switch
+                    case 0x85: SystemMainMenu ??= f; break; // System Main Menu (Xbox Guide)
                     case 0x40:                               // Vx — hidden separate LT for WGI
                         CombinedTrigger ??= LeftTrigger;     // Save Z as combined before override
                         LeftTrigger = f; break;
@@ -375,6 +386,22 @@ public class HidReportBuilder
             WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRaw);
         }
 
+        // Guide (bit 10) routing: on descriptors where the Xbox Guide button
+        // lives in the System Control collection (Xbox Series / Xbox One BT
+        // family), write the dedicated System Main Menu 1-bit field. The
+        // regular button-array path below will skip bit 10 in that case so
+        // we don't double-write. On descriptors where Guide is a regular
+        // button (Xbox 360, PS4/PS5 PS Home button via buttonMap), the
+        // regular path handles it.
+        const int GUIDE_BIT = 10;
+        bool guideRoutedToSysMenu = false;
+        if (SystemMainMenu != null && ((buttonMask >> GUIDE_BIT) & 1) != 0)
+        {
+            WriteBits(report, SystemMainMenu.BitOffset + idOffset,
+                      SystemMainMenu.BitSize, 1);
+            guideRoutedToSysMenu = true;
+        }
+
         // Button packing with optional remapping. When ButtonMap is set,
         // HMButton bit positions are translated to descriptor button indices
         // so that semantic names (A, B, LB, Start, etc.) land at the correct
@@ -382,6 +409,7 @@ public class HidReportBuilder
         for (int b = 0; b < 32; b++)
         {
             if (((buttonMask >> b) & 1) == 0) continue;
+            if (b == GUIDE_BIT && guideRoutedToSysMenu) continue;
             int descBtn = (ButtonMap != null && b < ButtonMap.Length)
                 ? ButtonMap[b] : b;
             if (descBtn >= 0 && descBtn < Buttons.Count)
@@ -419,6 +447,7 @@ public class HidReportBuilder
         if (LeftTrigger != null) Console.WriteLine($"    LTrigger: bit {LeftTrigger.BitOffset}, {LeftTrigger.BitSize}b, range [{LeftTrigger.LogicalMin}..{LeftTrigger.LogicalMax}]");
         if (RightTrigger != null) Console.WriteLine($"    RTrigger: bit {RightTrigger.BitOffset}, {RightTrigger.BitSize}b, range [{RightTrigger.LogicalMin}..{RightTrigger.LogicalMax}]");
         if (HatSwitch != null) Console.WriteLine($"    Hat:      bit {HatSwitch.BitOffset}, {HatSwitch.BitSize}b");
+        if (SystemMainMenu != null) Console.WriteLine($"    SysMenu:  bit {SystemMainMenu.BitOffset}, {SystemMainMenu.BitSize}b (Xbox Guide)");
         Console.WriteLine($"    Buttons:  {Buttons.Count}");
     }
 }
