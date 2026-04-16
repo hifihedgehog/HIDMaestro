@@ -46,6 +46,8 @@ typedef struct _COMPANION_CTX {
     HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
     PVOID OutputMemPtr;        /* MapViewOfFile RW pointer for output */
     ULONG OutputSeqNoLocal;    /* Last value we wrote (always increment) */
+    ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
+    ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -118,6 +120,8 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
         if (v == NULL) { CloseHandle(h); return FALSE; }
         ctx->SharedMemHandle = h;
         ctx->SharedMemPtr = v;
+        ctx->LastGipSeqNo = 0;
+        ctx->GipStaleCount = 0;
     }
 
     /* Seqlock read: retry if writer was mid-update */
@@ -133,6 +137,23 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
         seq2 = src->SeqNo;
     } while (seq1 != seq2 && --retries > 0);
     for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
+
+    /* Stale-handle recovery (issue #1): if the SDK tore down and recreated
+     * the shared memory section (RemoveAllVirtualControllers → Cleanup →
+     * EnsureInputMapping), our cached handle points at the old destroyed
+     * section. SeqNo will never advance. After 500 consecutive stale reads
+     * (~2s at typical XInput polling rate), close and re-open. */
+    if (seq1 == ctx->LastGipSeqNo) {
+        if (++ctx->GipStaleCount > 500) {
+            UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL;
+            CloseHandle(ctx->SharedMemHandle);  ctx->SharedMemHandle = NULL;
+            ctx->GipStaleCount = 0;
+            return FALSE; /* next call will lazy-open the fresh section */
+        }
+    } else {
+        ctx->LastGipSeqNo = seq1;
+        ctx->GipStaleCount = 0;
+    }
     return TRUE;
 }
 

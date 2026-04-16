@@ -543,29 +543,76 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 {
     PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
 
-    /* Phase 1: bootstrap-loop until the SDK side creates the event. */
-    while (ctx->InputDataEvent == NULL) {
-        HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
-                               ctx->InputEventName);
-        if (ev != NULL) {
-            ctx->InputDataEvent = ev;
-            break;
-        }
-        /* Wait on StopEvent only — if it fires, exit immediately. */
-        if (WaitForSingleObject(ctx->StopEvent, 200) == WAIT_OBJECT_0)
-            return 0;
-    }
-
-    /* Phase 2: steady state — block until either StopEvent or a frame. */
-    HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
+    /* Outer recovery loop: Phase 1 discovers the event, Phase 2 processes
+     * frames. If Phase 2 detects stale handles (SDK tore down and recreated
+     * shared memory between sessions), it closes them and loops back to
+     * Phase 1 to re-discover the fresh kernel objects. */
     for (;;) {
-        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-        if (rc == WAIT_OBJECT_0) break; /* stop */
-        if (rc == WAIT_OBJECT_0 + 1) ProcessSharedInput(ctx);
-        /* Any other return (WAIT_FAILED etc.) — bail rather than spin. */
-        else break;
+        /* Phase 1: bootstrap — wait for the SDK to create the named event. */
+        while (ctx->InputDataEvent == NULL) {
+            HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
+                                   ctx->InputEventName);
+            if (ev != NULL) {
+                ctx->InputDataEvent = ev;
+                break;
+            }
+            if (WaitForSingleObject(ctx->StopEvent, 200) == WAIT_OBJECT_0)
+                return 0;
+        }
+
+        /* Phase 2: steady state — process frames until stop or stale.
+         *
+         * Stale-handle recovery (issue #1): when the SDK calls
+         * RemoveAllVirtualControllers → SharedMemoryIO.Cleanup and then
+         * recreates sections+events with the same names, our cached handles
+         * point at destroyed kernel objects. The SDK signals the NEW event
+         * but we wait on the OLD one — permanent deadlock.
+         *
+         * Two detection paths:
+         *   (a) Timeout: no event signal for 5s → handles are dead.
+         *   (b) Event fires but SeqNo never advances for 250+ wakeups
+         *       (~1s) → event is live but shared memory is stale.
+         * Both close all cached handles and loop back to Phase 1. */
+        {
+            ULONG staleWakeups = 0;
+            BOOLEAN recycle = FALSE;
+            HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
+
+            for (;;) {
+                DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 5000);
+
+                if (rc == WAIT_OBJECT_0)
+                    return 0; /* StopEvent → clean exit */
+
+                if (rc == WAIT_TIMEOUT) {
+                    recycle = TRUE;
+                    break;
+                }
+
+                if (rc == WAIT_OBJECT_0 + 1) {
+                    ULONG prevSeq = ctx->SharedMemSeqNo;
+                    ProcessSharedInput(ctx);
+                    if (ctx->SharedMemSeqNo == prevSeq) {
+                        if (++staleWakeups > 250) { recycle = TRUE; break; }
+                    } else {
+                        staleWakeups = 0;
+                    }
+                    continue;
+                }
+
+                return 0; /* WAIT_FAILED → bail */
+            }
+
+            if (recycle) {
+                /* Close stale handles — Phase 1 will re-open fresh ones. */
+                CloseHandle(ctx->InputDataEvent);
+                ctx->InputDataEvent = NULL;
+                if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
+                if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+                /* Loop back to Phase 1 */
+            }
+        }
     }
-    return 0;
 }
 
 /* ================================================================== */
