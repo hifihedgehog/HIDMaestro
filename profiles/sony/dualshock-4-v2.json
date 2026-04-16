@@ -12,5 +12,6 @@
   "inputReportSize": 64,
   "notes": "507-byte descriptor. Source: DJm00n/ControllersInfo (CUH-ZCT2E). Second-gen PS4 controller. Manufacturer string updated to 'Sony Interactive Entertainment'. USB wireless adapter PID: 0x0BA0. Differs from v1: adds hat physical descriptors, 6 extra feature reports, removes reports 0xA5/0xA6.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
   "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
 }

@@ -12,5 +12,6 @@
   "inputReportSize": 64,
   "notes": "483-byte full pairing descriptor with all feature reports for PS4 authentication. Source: GIMX EMUPS4PAIRING. Includes reports 0xB1 and 0xB2 not present in standard 458-byte DS4 v1 descriptor.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
   "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
 }

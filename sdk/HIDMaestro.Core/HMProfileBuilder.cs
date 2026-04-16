@@ -52,6 +52,7 @@ public sealed class HMProfileBuilder
     private string? _deviceDescription;
     private string? _notes;
     private int[]? _buttonMap;
+    private int[]? _triggerButtons;
     private Dictionary<string, string>? _axisMap;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
@@ -116,6 +117,11 @@ public sealed class HMProfileBuilder
     /// Sony DS4/DualSense use: [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13].</summary>
     public HMProfileBuilder ButtonMap(int[]? map) { _buttonMap = map; return this; }
 
+    /// <summary>Set trigger-to-button derivation. Array of two descriptor button
+    /// indices: [LT_button, RT_button]. When triggers are nonzero, the corresponding
+    /// buttons engage automatically (DS4/DualSense L2/R2 digital buttons).</summary>
+    public HMProfileBuilder TriggerButtons(int[]? map) { _triggerButtons = map; return this; }
+
     /// <summary>Set axis semantic override map. Keys are hex HID usage codes
     /// (e.g. "0x32"), values are semantic names (leftStickX, rightStickY, etc.).
     /// Sony: { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }</summary>
@@ -141,6 +147,7 @@ public sealed class HMProfileBuilder
         _deviceDescription = source.Inner.DeviceDescription;
         _notes = source.Notes;
         _buttonMap = source.ButtonMap;
+        _triggerButtons = source.Inner.TriggerButtons;
         _axisMap = source.AxisMap;
         return this;
     }
@@ -170,6 +177,7 @@ public sealed class HMProfileBuilder
             DeviceDescription = _deviceDescription,
             Notes = _notes,
             ButtonMap = _buttonMap,
+            TriggerButtons = _triggerButtons,
             AxisMap = _axisMap,
         };
 

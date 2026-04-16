@@ -10,5 +10,8 @@
   "connection": "usb",
   "descriptor": "05010905a1018501093009310932093509330934150026ff007508950681020600ff09209501810205010939150025073500463b016514750495018142650005091901290f150025017501950f81020600ff0921950d81020600ff0922150026ff0075089534810285020923953f9102850509339528b10285080934952fb102850909249513b102850a0925951ab10285200926953fb102852109279504b10285220940953fb10285800928953fb10285810929953fb1028582092a9509b1028583092b953fb1028584092c953fb1028585092d9502b10285a0092e9501b10285e0092f953fb10285f00930953fb10285f10931953fb10285f209329534b10285f40935953fb10285f509369503b10285600941953fb10285610942b10285620943b10285630944b10285640945b10285650946b10285680947b10285700948b10285710949b1028572094ab1028573094bb1028574094cb1028575094db1028576094eb1028577094fb10285780950b10285790951b102857a0952b102857b0953b102c0",
   "inputReportSize": 64,
-  "notes": "389-byte descriptor. Source: ShadowBlip/InputPlumber DS_EDGE_USB_DESCRIPTOR, contributed by LtChipotle. Extends standard DualSense (273 bytes) with Edge-specific feature reports 0x60-0x7B for profile/remapping control. Output report 0x02 uses 63 bytes (vs 47 in standard). Feature report 0xF2 uses 52 bytes (vs 15 in standard). The only modern PlayStation controller that does NOT use 'Wireless Controller' as its product string."
+  "notes": "389-byte descriptor. Source: ShadowBlip/InputPlumber DS_EDGE_USB_DESCRIPTOR, contributed by LtChipotle. Extends standard DualSense (273 bytes) with Edge-specific feature reports 0x60-0x7B for profile/remapping control. Output report 0x02 uses 63 bytes (vs 47 in standard). Feature report 0xF2 uses 52 bytes (vs 15 in standard). The only modern PlayStation controller that does NOT use 'Wireless Controller' as its product string.",
+  "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
+  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
 }

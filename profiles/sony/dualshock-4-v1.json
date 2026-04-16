@@ -12,5 +12,6 @@
   "inputReportSize": 64,
   "notes": "458-byte descriptor. Source: Eleccelerator Wiki / GIMX. First-gen PS4 controller. 4 USB interfaces (Audio Control, Audio Streaming x2, HID). HID is interface 3. Note manufacturer string uses old 'Sony Computer Entertainment' branding.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
   "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
 }

@@ -83,6 +83,15 @@ public sealed class ControllerProfile
     [JsonPropertyName("buttonMap")]
     public int[]? ButtonMap { get; set; }
 
+    /// <summary>Optional trigger-to-button derivation. When a DS4 or DualSense
+    /// trigger is nonzero, the corresponding digital button should also engage
+    /// (real hardware reports both the analog axis and a digital button for L2/R2).
+    /// Array of two descriptor button indices: [LT_button, RT_button].
+    /// When present, BuildReport sets these buttons whenever the corresponding
+    /// trigger axis is nonzero. When null, no derivation occurs.</summary>
+    [JsonPropertyName("triggerButtons")]
+    public int[]? TriggerButtons { get; set; }
+
     /// <summary>Optional axis semantic override. Maps HID usage codes to
     /// semantic roles when the default heuristic gets it wrong. Keys are
     /// HID usage codes (e.g. "0x32" for Z), values are semantic names:

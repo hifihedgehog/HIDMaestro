@@ -11,7 +11,7 @@ Class       = XnaComposite
 ClassGuid   = {D61CA365-5AF4-4486-998B-9DB4734C6CA3}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 03/30/2026,1.0.0.0
+DriverVer   = 04/15/2026,1.1.2.0
 PnpLockdown = 1
 
 [DestinationDirs]

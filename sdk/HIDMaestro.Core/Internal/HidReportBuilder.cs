@@ -33,6 +33,13 @@ public class HidReportBuilder
     /// assumed (bit N → descriptor button N).</summary>
     public int[]? ButtonMap { get; set; }
 
+    /// <summary>Optional trigger-to-button derivation. When set, BuildReport
+    /// automatically sets the specified descriptor buttons when the corresponding
+    /// trigger axis is nonzero. Array of two: [LT_button_index, RT_button_index].
+    /// DS4/DualSense hardware reports L2/R2 as both analog axis AND digital button;
+    /// this field replicates that behavior so consumers see both.</summary>
+    public int[]? TriggerButtons { get; set; }
+
     // Semantic axis mapping (resolved after parsing)
     public InputField? LeftStickX { get; private set; }
     public InputField? LeftStickY { get; private set; }
@@ -384,6 +391,20 @@ public class HidReportBuilder
                 hatRaw = hatValue + HatSwitch.LogicalMin - 1;
             }
             WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRaw);
+        }
+
+        // Trigger-to-button derivation: DS4/DualSense hardware reports L2/R2
+        // as both analog axes AND digital buttons (buttons 7/8 in the DS4
+        // descriptor). When TriggerButtons is set, any nonzero trigger value
+        // automatically engages the corresponding descriptor button.
+        if (TriggerButtons != null && TriggerButtons.Length >= 2)
+        {
+            if (leftTrigger > 0.0 && TriggerButtons[0] >= 0 && TriggerButtons[0] < Buttons.Count)
+                WriteBits(report, Buttons[TriggerButtons[0]].BitOffset + idOffset,
+                          Buttons[TriggerButtons[0]].BitSize, 1);
+            if (rightTrigger > 0.0 && TriggerButtons[1] >= 0 && TriggerButtons[1] < Buttons.Count)
+                WriteBits(report, Buttons[TriggerButtons[1]].BitOffset + idOffset,
+                          Buttons[TriggerButtons[1]].BitSize, 1);
         }
 
         // Guide (bit 10) routing: on descriptors where the Xbox Guide button

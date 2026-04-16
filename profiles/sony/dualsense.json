@@ -12,5 +12,6 @@
   "inputReportSize": 64,
   "notes": "273-byte descriptor. Source: DJm00n/ControllersInfo, confirmed by nondebug/dualsense. 4 USB interfaces. Both original and lighter 'V2' hardware revision share this PID.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
   "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
 }
