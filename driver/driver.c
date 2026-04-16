@@ -1182,10 +1182,10 @@ EvtIoDeviceControl(
             if (btnLow & 0x08) buttons |= 0x8000;
             if (btnLow & 0x10) buttons |= 0x0100;
             if (btnLow & 0x20) buttons |= 0x0200;
-            if (btnLow & 0x40) buttons |= 0x0020;
-            if (btnLow & 0x80) buttons |= 0x0010;
-            if (btnHigh & 0x01) buttons |= 0x0040;
-            if (btnHigh & 0x02) buttons |= 0x0080;
+            if (btnLow & 0x40) buttons |= 0x0040; /* LS → LEFT_THUMB */
+            if (btnLow & 0x80) buttons |= 0x0080; /* RS → RIGHT_THUMB */
+            if (btnHigh & 0x01) buttons |= 0x0020; /* Back → BACK */
+            if (btnHigh & 0x02) buttons |= 0x0010; /* Start → START */
             if (btnHigh & 0x40) buttons |= 0x0400; /* Guide (XInputGetStateEx) */
             switch (hat) {
                 case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
