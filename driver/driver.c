@@ -327,10 +327,17 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
  * IMPORTANT: WUDFHost runs as LocalService which lacks SeCreateGlobalPrivilege,
  * so the driver CANNOT CreateFileMapping in the Global\ namespace — only
  * the test app (running elevated) can. */
+/* Stale-handle recovery (issue #2, output side of #1): periodic re-open
+ * every 500 writes (~2s) so we pick up fresh sections after SDK teardown. */
 static BOOLEAN
 EnsureOutputMapping(_In_ PDEVICE_CONTEXT ctx)
 {
-    if (ctx->OutputMemPtr != NULL) return TRUE;
+    if (ctx->OutputMemPtr != NULL) {
+        if (++ctx->OutputWriteCount < 500) return TRUE;
+        UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL;
+        CloseHandle(ctx->OutputMemHandle);  ctx->OutputMemHandle = NULL;
+        ctx->OutputWriteCount = 0;
+    }
 
     HANDLE h = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE,
                                 ctx->OutputMappingName);
@@ -342,6 +349,7 @@ EnsureOutputMapping(_In_ PDEVICE_CONTEXT ctx)
 
     ctx->OutputMemHandle = h;
     ctx->OutputMemPtr = view;
+    ctx->OutputWriteCount = 0;
     return TRUE;
 }
 

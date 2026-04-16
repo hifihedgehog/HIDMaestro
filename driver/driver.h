@@ -147,6 +147,7 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  OutputMemHandle;
     PVOID   OutputMemPtr;
     ULONG   OutputSeqNoLocal;       /* Last value we wrote (so we always increment) */
+    ULONG   OutputWriteCount;       /* Stale-detection: writes since last re-open (#2) */
 
     /* Diagnostics */
     LONG    InputReportsSubmitted;

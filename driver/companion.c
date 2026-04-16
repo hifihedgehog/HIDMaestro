@@ -46,6 +46,7 @@ typedef struct _COMPANION_CTX {
     HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
     PVOID OutputMemPtr;        /* MapViewOfFile RW pointer for output */
     ULONG OutputSeqNoLocal;    /* Last value we wrote (always increment) */
+    ULONG OutputWriteCount;    /* Stale-detection: total writes since last re-open */
     ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
     ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
 } COMPANION_CTX, *PCOMPANION_CTX;
@@ -168,10 +169,23 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
 
 /* Open the per-controller output section. The test app pre-creates it with
  * a permissive SDDL; we just attach. WUDFHost runs as LocalService and
- * cannot create Global\ sections itself (no SeCreateGlobalPrivilege). */
+ * cannot create Global\ sections itself (no SeCreateGlobalPrivilege).
+ *
+ * Stale-handle recovery (issue #2, output side of #1): if the SDK tears
+ * down and recreates the output section between sessions, our cached
+ * handle points at the old (destroyed) kernel object. Writes go nowhere.
+ * Every 500 writes (~2s at typical XInput polling rate), close and
+ * re-open to pick up the fresh section. */
 static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
 {
-    if (ctx->OutputMemPtr != NULL) return TRUE;
+    /* Periodic re-open: close stale mapping every 500 writes */
+    if (ctx->OutputMemPtr != NULL) {
+        if (++ctx->OutputWriteCount < 500) return TRUE;
+        /* Time to re-validate — close and re-open */
+        UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL;
+        CloseHandle(ctx->OutputMemHandle);  ctx->OutputMemHandle = NULL;
+        ctx->OutputWriteCount = 0;
+    }
 
     HANDLE h = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE,
                                 ctx->OutputMappingName);
@@ -182,6 +196,7 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
 
     ctx->OutputMemHandle = h;
     ctx->OutputMemPtr = v;
+    ctx->OutputWriteCount = 0;
     return TRUE;
 }
 
