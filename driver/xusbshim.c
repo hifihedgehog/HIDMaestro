@@ -130,6 +130,40 @@ XusbShimDeviceAdd(
         device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
 }
 
+/* XUSB IOCTL codes documented via public reverse engineering of xusb22.sys
+ * and xinput1_4.dll. The ones below are the subset WGI / xinput1_4 are
+ * most likely to call. Actual format is still to be confirmed empirically
+ * — hence we log the first input bytes for SET_STATE when we see it. */
+#define IOCTL_XUSB_GET_INFORMATION       0x80006000u  /* GetCapabilities */
+#define IOCTL_XUSB_GET_CAPABILITIES      0x8000E000u
+#define IOCTL_XUSB_GET_LED_STATE         0x8000E004u
+#define IOCTL_XUSB_GET_STATE             0x8000E008u
+#define IOCTL_XUSB_SET_STATE             0x8000A010u  /* vibration + LED */
+#define IOCTL_XUSB_WAIT_GUIDE_BUTTON     0x8000E00Cu
+#define IOCTL_XUSB_GET_BATTERY_INFO      0x8000E018u
+
+static VOID
+LogBytes(_In_z_ const char *tag, _In_bytecount_(len) const UCHAR *buf, _In_ SIZE_T len)
+{
+    if (len == 0) { LogEvent(tag, 0); return; }
+    /* Hex-dump up to 32 bytes after the tag. */
+    char msg[96];
+    char *p = msg;
+    while (*tag) *p++ = *tag++;
+    *p++ = ' ';
+    SIZE_T n = (len > 32) ? 32 : len;
+    for (SIZE_T i = 0; i < n; i++) {
+        int hi = (buf[i] >> 4) & 0xF;
+        int lo = buf[i] & 0xF;
+        *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
+        *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
+        *p++ = ' ';
+    }
+    *p++ = '\r';
+    *p++ = '\n';
+    LogLine(msg, (SIZE_T)(p - msg));
+}
+
 VOID
 XusbShimIoDefault(
     _In_ WDFQUEUE   Queue,
@@ -145,9 +179,29 @@ XusbShimIoDefault(
      * xinput1_4 are sending through the XUSB interface. */
     if (params.Type == WdfRequestTypeDeviceControl ||
         params.Type == WdfRequestTypeDeviceControlInternal) {
+        ULONG code = params.Parameters.DeviceIoControl.IoControlCode;
         LogEvent(
             params.Type == WdfRequestTypeDeviceControl ? "IOCTL" : "INT-IOCTL",
-            params.Parameters.DeviceIoControl.IoControlCode);
+            code);
+
+        /* For the known XUSB IOCTLs, also dump the input buffer bytes so the
+         * exact format (motor offsets, slot byte, etc.) is known empirically
+         * before we write the WRITE_REPORT translator. */
+        if (code == IOCTL_XUSB_SET_STATE ||
+            code == IOCTL_XUSB_GET_STATE ||
+            code == IOCTL_XUSB_GET_INFORMATION ||
+            code == IOCTL_XUSB_GET_CAPABILITIES) {
+            PVOID  buf;
+            size_t sz;
+            if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &buf, &sz))) {
+                const char *tag =
+                    (code == IOCTL_XUSB_SET_STATE)        ? "SET_STATE-in"    :
+                    (code == IOCTL_XUSB_GET_STATE)        ? "GET_STATE-in"    :
+                    (code == IOCTL_XUSB_GET_INFORMATION)  ? "GET_INFO-in"     :
+                                                            "GET_CAPS-in";
+                LogBytes(tag, (const UCHAR*)buf, sz);
+            }
+        }
     } else {
         LogEvent("MJ", (ULONG)params.Type);
     }
