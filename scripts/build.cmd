@@ -79,6 +79,35 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: ----------------------------------------------------------------------
+:: XUSB Interface Shim (UMDF2 HID upper filter) — experimental.
+:: Builds xusbshim.c → HMXusbShim.dll. The shim registers the XUSB
+:: interface class on our virtual HID Xbox gamepad children to test
+:: whether WGI's Gamepad.Vibration dispatch gates on interface presence.
+:: ----------------------------------------------------------------------
+if exist "%DRIVER_DIR%\xusbshim.c" (
+    echo.
+    echo Compiling HMXusbShim.dll ...
+    cl.exe /nologo /W4 /GS /Gz /wd4324 ^
+        /D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE ^
+        /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
+        "/I%UM_INC%" "/I%SHARED_INC%" "/I%KM_INC%" "/I%WDF_INC%" ^
+        "/Fo%OUT_DIR%\\" /c "%DRIVER_DIR%\xusbshim.c"
+    if errorlevel 1 (
+        echo XUSBSHIM COMPILE FAILED
+        exit /b 1
+    )
+    link.exe /nologo /DLL ^
+        "/OUT:%OUT_DIR%\HMXusbShim.dll" ^
+        "/LIBPATH:%UM_LIB%" "/LIBPATH:%WDF_LIB%" ^
+        "%OUT_DIR%\xusbshim.obj" ^
+        WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib
+    if errorlevel 1 (
+        echo XUSBSHIM LINK FAILED
+        exit /b 1
+    )
+)
+
 :: Stamp each INF's DriverVer with today's date + HHmm build number.
 :: The committed source INF keeps a stable 1.x.y.0 for review; the build/
 :: INF gets a fresh stamp so every package is uniquely versioned — pnputil
@@ -89,6 +118,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
     -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf"
 if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
     -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf"
+if exist "%DRIVER_DIR%\hidmaestro_xusbshim.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro_xusbshim.inf" -Dest "%OUT_DIR%\hidmaestro_xusbshim.inf"
 
 echo.
 echo BUILD SUCCEEDED: %OUT_DIR%\%DRIVER_NAME%.dll

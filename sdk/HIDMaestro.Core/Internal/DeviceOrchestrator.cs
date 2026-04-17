@@ -1276,7 +1276,7 @@ internal static class DeviceOrchestrator
         // Wait for WUDFHost processes to release our DLLs.
         try
         {
-            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
+            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll" };
             foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
             {
                 try
@@ -1359,7 +1359,7 @@ internal static class DeviceOrchestrator
 
         // Our own UMDF drivers — fine to terminate a host that runs only these.
         var ourDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll",
+            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll",
         };
 
         foreach (var proc in System.Diagnostics.Process.GetProcessesByName("WUDFHost"))
