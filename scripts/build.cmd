@@ -79,8 +79,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-copy /y "%DRIVER_DIR%\hidmaestro.inf" "%OUT_DIR%\" >nul
-if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" copy /y "%DRIVER_DIR%\hidmaestro_xusb.inf" "%OUT_DIR%\" >nul
+:: Stamp each INF's DriverVer with today's date + HHmm build number.
+:: The committed source INF keeps a stable 1.x.y.0 for review; the build/
+:: INF gets a fresh stamp so every package is uniquely versioned — pnputil
+:: will never see "same version, skip install" against a prior DriverStore
+:: directory (which was the failure mode that hid every driver bugfix in
+:: this session behind a stale already-installed binary).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf"
+if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf"
 
 echo.
 echo BUILD SUCCEEDED: %OUT_DIR%\%DRIVER_NAME%.dll

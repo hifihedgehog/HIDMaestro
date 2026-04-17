@@ -393,7 +393,7 @@ public static class DeviceManager
     /// Enumerates HID children first and removes them individually via DIF_REMOVE,
     /// then removes the parent. This prevents ghost HID children from surviving.
     /// </summary>
-    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false)
+    public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS &&
             CM_Locate_DevNodeW(out devInst, instanceId, 1) != CR_SUCCESS)
@@ -446,15 +446,19 @@ public static class DeviceManager
             goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
         }
 
-        // Step 3: pnputil as fallback — ONLY if DIF_REMOVE didn't fully
-        // remove the device AND we're not in fast mode. In fast mode (cleanup
-        // paths), we skip pnputil entirely — DIF_REMOVE + CM_Uninstall is
-        // sufficient for most devices, and the ones that survive as phantoms
-        // will be caught by pnputil on the NEXT non-fast removal (e.g. the
-        // ghost cleanup at the start of the next SetupController run). This
-        // avoids spawning ~14 sequential pnputil processes during teardown
-        // of a 6-controller setup, which was the primary 28-second bottleneck.
-        if (!fast && !goneAfterDif &&
+        // Step 3: pnputil + devcon fallbacks. Normally gated on !fast (skipped
+        // during bulk teardown to avoid 14× pnputil process spawn). But when
+        // caller passes forceFallbacks=true — e.g. the pre-install sweep in
+        // HMContext.InstallDriver — we MUST unstick any device still bound
+        // to our old INF, because pnputil /delete-driver refuses to remove a
+        // package while any device holds it (error "One or more devices are
+        // presently installed using the specified INF"). The failure mode
+        // that cost hours: without this, the old DriverStore package + its
+        // stale DLL survive every reinstall, pnputil /add-driver reports
+        // "Driver package added successfully. (Needed repairing)" and
+        // restores the OLD bytes from internal cache, so the fresh v1.1.5
+        // self-heal binary literally never loads and input keeps hanging.
+        if ((!fast || forceFallbacks) && !goneAfterDif &&
             (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
              instanceId.StartsWith("HID\\", StringComparison.OrdinalIgnoreCase)))
         {
@@ -482,12 +486,77 @@ public static class DeviceManager
                 }
                 catch { }
             }
+
+            // Step 3.5: devcon fallback — per feedback-devcon-for-cleanup, the
+            // CM/SetupDi APIs sometimes leave a phantom that pnputil also can't
+            // shift (observed during this session on ROOT\HMCOMPANION\0000 and
+            // ROOT\VID_045E...). `devcon remove @<id>` bypasses both paths and
+            // tears the node out cleanly in most of those cases. Only run if
+            // devcon is locatable — it ships with the WDK, not the OS, so
+            // users without the WDK silently skip this step.
+            bool stillPhantom2 = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
+            if (stillPhantom2)
+            {
+                string? devcon = TryLocateDevcon();
+                if (devcon != null)
+                {
+                    try
+                    {
+                        var psi = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = devcon,
+                            Arguments = $"remove \"@{instanceId}\"",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true
+                        };
+                        using var proc = System.Diagnostics.Process.Start(psi);
+                        if (proc != null)
+                        {
+                            proc.StandardOutput.ReadToEnd();
+                            proc.StandardError.ReadToEnd();
+                            proc.WaitForExit(5000);
+                        }
+                    }
+                    catch { }
+                }
+            }
         }
 
         // Step 4: Final check
         bool removed = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS
                     && CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS;
         return removed;
+    }
+
+    /// <summary>Locate devcon.exe under the installed WDK. Returns the first
+    /// match under C:\Program Files (x86)\Windows Kits\10\Tools\*\x64\, or
+    /// null if no WDK Tools directory is found. Result is cached for the
+    /// lifetime of the process — a missing devcon won't re-probe on every
+    /// fallback invocation.</summary>
+    private static string? s_devconPath;
+    private static bool s_devconProbed;
+    private static string? TryLocateDevcon()
+    {
+        if (s_devconProbed) return s_devconPath;
+        s_devconProbed = true;
+        try
+        {
+            string root = @"C:\Program Files (x86)\Windows Kits\10\Tools";
+            if (!System.IO.Directory.Exists(root)) return null;
+            foreach (var dir in System.IO.Directory.EnumerateDirectories(root))
+            {
+                string candidate = System.IO.Path.Combine(dir, "x64", "devcon.exe");
+                if (System.IO.File.Exists(candidate))
+                {
+                    s_devconPath = candidate;
+                    return candidate;
+                }
+            }
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>

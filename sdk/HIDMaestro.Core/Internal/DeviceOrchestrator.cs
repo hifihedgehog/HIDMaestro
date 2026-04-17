@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -959,7 +960,17 @@ internal static class DeviceOrchestrator
 
         if (!string.IsNullOrEmpty(instanceId))
         {
-            try { DeviceManager.RemoveDevice(instanceId!); } catch { }
+            // forceFallbacks: this is the live-swap teardown path. We must
+            // leave nothing behind — if the old device persists as a phantom,
+            // its driver's WUDFHost kept alive by it, CM IOCTLs keep being
+            // served, and the new controller at the same ControllerIndex
+            // shares Global\HIDMaestroOutput{N} with the zombie, surfacing
+            // the zombie's rumble publishes on the new controller's SDK
+            // (observed: XInput rumble bleeding onto a DS4 after live-swap
+            // from xbox-360-wired, because the prior Xbox 360 HMCOMPANION
+            // failed to tear down in default-mode and the Xbox UI's Guide
+            // haptic kept poking its XUSB interface).
+            try { DeviceManager.RemoveDevice(instanceId!, forceFallbacks: true); } catch { }
         }
 
         // Scan and remove companions by ControllerIndex
@@ -977,7 +988,7 @@ internal static class DeviceOrchestrator
                     using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
                     if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                     {
-                        try { DeviceManager.RemoveDevice(candidate); } catch { }
+                        try { DeviceManager.RemoveDevice(candidate, forceFallbacks: true); } catch { }
                     }
                 }
             }
@@ -1001,7 +1012,7 @@ internal static class DeviceOrchestrator
                         using var dp = vidKey.OpenSubKey($@"{instName}\Device Parameters");
                         if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                         {
-                            try { DeviceManager.RemoveDevice(candidate); } catch { }
+                            try { DeviceManager.RemoveDevice(candidate, forceFallbacks: true); } catch { }
                         }
                     }
                 }
@@ -1090,7 +1101,7 @@ internal static class DeviceOrchestrator
 
                         if (alwaysOurs)
                         {
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true);
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
                             continue;
                         }
 
@@ -1100,7 +1111,7 @@ internal static class DeviceOrchestrator
                             using var devKey = subKey.OpenSubKey(inst);
                             var hwIds = devKey?.GetValue("HardwareID") as string[];
                             if (hwIds?.Any(h => h.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)) == true)
-                                DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true);
+                                DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
                         }
                         catch { }
                     }
@@ -1131,11 +1142,24 @@ internal static class DeviceOrchestrator
                         {
                             bool parentGone = CM_Get_Parent(out uint _, childInst, 0) != 0;
                             if (parentGone)
-                                DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true);
+                                DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true, forceFallbacks: true);
                         }
                         else if (CM_Locate_DevNodeW(out childInst, childId, CM_LOCATE_DEVNODE_PHANTOM) == 0)
                         {
-                            DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true);
+                            // CRITICAL: forceFallbacks=true is what lets devcon
+                            // actually tear down the phantom. Without it the
+                            // phantom HID child keeps WUDFHost alive for the
+                            // prior-session driver process, and that WUDFHost
+                            // has OUR DLL memory-mapped from a DriverStore
+                            // directory that's since been deleted. A freshly
+                            // created device from the NEW session can get
+                            // assigned to that stale WUDFHost, executing the
+                            // OLD driver bytes while the disk has the NEW
+                            // ones — yielding "driver upgraded but behavior
+                            // unchanged" mysteries. Draining the phantoms
+                            // lets the stale WUDFHost exit and a fresh one
+                            // start with the fresh DLL.
+                            DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true, forceFallbacks: true);
                         }
                     }
                 }
@@ -1284,6 +1308,101 @@ internal static class DeviceOrchestrator
 
         // Release shared-memory mappings
         try { SharedMemoryIO.Cleanup(); } catch { }
+
+        // Drain orphaned WUDFHost processes that STILL have our stale
+        // HIDMaestro.dll memory-mapped from a since-deleted DriverStore
+        // directory. This is what bit us for hours: pnputil /delete-driver
+        // removes the file on disk, but any WUDFHost process that had the
+        // DLL mapped keeps the OLD code resident in virtual memory. When a
+        // fresh device is created AFTER a driver upgrade, PnP can assign
+        // the new device to an existing WUDFHost (they're reused across
+        // devices of the same UMDF class) — and then the new device runs
+        // the OLD driver bytes while the disk has NEW ones. That's the
+        // "driver upgraded but behavior unchanged" mystery.
+        //
+        // Termination is SAFE because we inspect the target process's
+        // loaded modules first: we only kill WUDFHost instances that host
+        // NOTHING but our HIDMaestro.dll / HMXInput.dll (plus framework
+        // DLLs like WUDFx02000.dll, WUDFPlatform.dll). Any WUDFHost that
+        // hosts ANOTHER third-party UMDF driver (e.g.
+        // microsoft.bluetooth.profiles.hidovergatt.dll for a real BT Xbox
+        // controller) is skipped entirely — that's what the NEVER-kill-
+        // WUDFHost rule in feedback-never-kill-wudfhost.md is about.
+        DrainOrphanedWudfHosts();
+    }
+
+    /// <summary>Terminate WUDFHost instances that are hosting ONLY our
+    /// HIDMaestro driver (plus UMDF framework DLLs). Skips any WUDFHost
+    /// that has another third-party driver loaded — killing those would
+    /// break real devices (most notably real Bluetooth Xbox controllers
+    /// hosted by microsoft.bluetooth.profiles.hidovergatt.dll).
+    ///
+    /// Why this is needed: pnputil /delete-driver removes the DLL from
+    /// disk but doesn't unload it from running WUDFHost processes. Those
+    /// keep the OLD code mapped until the process itself exits. Fresh
+    /// device creation after an INF upgrade can bind a new device into
+    /// an existing WUDFHost that has the stale mapping — so the new
+    /// device runs old code. Killing the safe-to-terminate instances
+    /// lets PnP spawn a fresh WUDFHost that loads the fresh DLL from
+    /// the current DriverStore directory.</summary>
+    private static void DrainOrphanedWudfHosts()
+    {
+        // Framework / OS modules that every WUDFHost loads by default.
+        // Presence of anything OUTSIDE this set (other than our own
+        // HIDMaestro.dll / HMXInput.dll) marks the WUDFHost as hosting
+        // a third-party driver we must not disrupt.
+        var frameworkModules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in new[] {
+            "WUDFHost.exe", "WUDFPlatform.dll", "WUDFx02000.dll",
+            "WUDFCoinstaller.dll", "WudfSMCClassExt.dll", "Mshidumdf.dll",
+        }) frameworkModules.Add(name);
+
+        // Our own UMDF drivers — fine to terminate a host that runs only these.
+        var ourDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll",
+        };
+
+        foreach (var proc in System.Diagnostics.Process.GetProcessesByName("WUDFHost"))
+        {
+            try
+            {
+                bool hostsThirdParty = false;
+                bool hostsOurs = false;
+
+                foreach (System.Diagnostics.ProcessModule m in proc.Modules)
+                {
+                    string name = m.ModuleName ?? "";
+                    string path = m.FileName ?? "";
+
+                    // Framework — ignore
+                    if (frameworkModules.Contains(name) ||
+                        path.StartsWith(@"C:\Windows\System32\", StringComparison.OrdinalIgnoreCase) &&
+                        !path.Contains(@"\DriverStore\", StringComparison.OrdinalIgnoreCase) &&
+                        !path.Contains(@"\drivers\umdf\", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // Ours — note it but keep scanning (a WUDFHost with BOTH
+                    // ours AND third-party is still must-not-kill).
+                    if (ourDrivers.Contains(name)) { hostsOurs = true; continue; }
+
+                    // Anything else loaded from DriverStore or the UMDF drivers
+                    // dir — this is another third-party UMDF driver. Abort.
+                    if (path.Contains(@"\DriverStore\FileRepository\", StringComparison.OrdinalIgnoreCase) ||
+                        path.Contains(@"\System32\drivers\umdf\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hostsThirdParty = true;
+                        break;
+                    }
+                }
+
+                if (hostsOurs && !hostsThirdParty)
+                {
+                    try { proc.Kill(); proc.WaitForExit(2000); } catch { }
+                }
+            }
+            catch { /* access denied, process exited, etc. — skip this host */ }
+            finally { proc.Dispose(); }
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════

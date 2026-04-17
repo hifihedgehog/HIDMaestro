@@ -81,6 +81,29 @@ public sealed class HMContext : IDisposable
     public void InstallDriver()
     {
         ThrowIfDisposed();
+
+        // Proactive ghost sweep FIRST, before FullDeploy. Without this, when a
+        // prior process crashed or was force-killed (Dispose never ran), its
+        // virtual controllers + HMCOMPANION stay PnP-live and REMAIN BOUND to
+        // the old INF. On the next launch, DriverBuilder.FullDeploy calls
+        // pnputil /delete-driver /uninstall /force — which fails with "One or
+        // more devices are presently installed using the specified INF" and
+        // leaves the old INF + stale DLL bytes in DriverStore. The subsequent
+        // /add-driver then sees package-already-present + "Needed repairing"
+        // and RESTORES the stale bytes from pnputil's internal cache rather
+        // than installing the fresh extracted binary. Net effect: every
+        // launch since the first one serves the stale driver forever, the
+        // v1.1.5 self-heal code never actually loads, input keeps hanging,
+        // and the only escape is manual devcon + TrustedInstaller takeown of
+        // the FileRepository subdirectory (which users do not have).
+        //
+        // Running the sweep here FIRST removes the bound devices via devcon
+        // (returning "Removed on reboot" is sufficient — the INF becomes
+        // eligible for package deletion immediately), so FullDeploy's
+        // /delete-driver call actually succeeds and the fresh extracted
+        // binary replaces the DriverStore contents.
+        Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
+
         // Always run the full deploy. The previous version gated on
         // IsDriverInstalled — but a stale half-removed package would make
         // that gate return true and skip the install entirely, leaving

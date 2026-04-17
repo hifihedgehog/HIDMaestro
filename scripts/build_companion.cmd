@@ -28,4 +28,12 @@ link.exe /nologo /DLL "/OUT:%OUT_DIR%\HIDMaestroCompanion.dll" ^
 if errorlevel 1 (echo LINK FAILED & exit /b 1)
 
 copy /y "%OUT_DIR%\HIDMaestroCompanion.dll" "%OUT_DIR%\HMXInput.dll" >nul
+
+:: Also stamp + stage the companion INF so a standalone `build_companion`
+:: invocation leaves build/ in a consistent state (otherwise SDK rebuilds
+:: after this script would pick up whatever hidmaestro_xusb.inf was in
+:: build/ from the last full build — potentially stale).
+if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf"
+
 echo BUILD SUCCEEDED

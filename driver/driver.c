@@ -529,34 +529,54 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
     }
 }
 
-/* Event-driven worker thread. Replaces the 1ms WdfTimer that used to
- * saturate a core per controller. Waits on (StopEvent, InputDataEvent) —
- * InputDataEvent is an auto-reset event signaled by the SDK every time
- * WriteInputFrame publishes a new seqlock frame.
+/* Event-driven worker thread. Bulletproof design: the ONLY way this
+ * function returns is StopEvent being signaled. Every other condition —
+ * WAIT_FAILED, WAIT_TIMEOUT, stale-handle detection, invalid-handle,
+ * OpenEvent/OpenFileMapping failure — recycles the handles and loops
+ * back to Phase 1 to re-discover fresh kernel objects.
+ *
+ * This is a deliberate departure from the prior "5s timeout OR 250 stale
+ * wakeups" logic, which could leave the worker stuck in scenarios where
+ * the SDK kept signaling the old event (keeping staleWakeups small) but
+ * the shared-memory view was pointing at destroyed/stale pages. In that
+ * state the 5s timeout never fired (events kept arriving) and the stale
+ * counter reset on each signal, so recycle never triggered — permanent
+ * deadlock until WUDFHost was killed.
  *
  * Two-phase wait:
  *   Phase 1 (bootstrap): the driver may attach before the SDK has created
  *     Global\HIDMaestroInputEvent<N>. Wait on StopEvent only with a short
  *     200 ms timeout; on each timeout, retry OpenEventW. Once it succeeds,
  *     drop into Phase 2.
- *   Phase 2 (steady state): wait on (StopEvent, InputDataEvent) with
- *     INFINITE timeout. Auto-reset events + SetEvent are reliable on
- *     Windows — the wait blocks at zero CPU cost until the SDK signals
- *     a frame or the device is torn down. ZERO wakeups when idle.
+ *   Phase 2 (steady state): wait on (StopEvent, InputDataEvent) with a
+ *     500 ms timeout so even if the SDK never signals, we recycle and
+ *     re-verify handles every half second. When the SDK is active this
+ *     is still effectively zero CPU (events arrive well under 500 ms) —
+ *     the timeout is a safety net, not a polling interval.
  *
- * The stop event is signaled from EvtDeviceContextCleanup; we then join
- * the thread handle so all cleanup is race-free. */
+ * StopEvent is signaled from:
+ *   (a) EvtDeviceContextCleanup — normal PnP teardown
+ *   (b) External SDK RemoveAllVirtualControllers cleanup — opens the
+ *       named stop event and signals it to unblock worker threads of
+ *       force-killed prior processes
+ * Both cases result in a clean return 0. The 2-second thread-join in
+ * EvtDeviceContextCleanup is the backstop if the worker is somehow stuck
+ * outside the wait (e.g., inside ProcessSharedInput's WdfRequestComplete
+ * during a concurrent teardown). */
 static DWORD WINAPI
 SharedInputWorkerProc(_In_ LPVOID Parameter)
 {
     PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
 
-    /* Outer recovery loop: Phase 1 discovers the event, Phase 2 processes
-     * frames. If Phase 2 detects stale handles (SDK tore down and recreated
-     * shared memory between sessions), it closes them and loops back to
-     * Phase 1 to re-discover the fresh kernel objects. */
+    /* Outer recovery loop. Phase 1 discovers/re-discovers the named event;
+     * Phase 2 processes frames until StopEvent OR until we detect stale
+     * handles, at which point we fall back through to Phase 1 with NULL
+     * handles to re-open fresh. There is NO return path out of this loop
+     * except StopEvent. */
     for (;;) {
-        /* Phase 1: bootstrap — wait for the SDK to create the named event. */
+        /* Phase 1: bootstrap — wait for the SDK to create the named event.
+         * StopEvent is checked on every 200 ms tick so teardown stays
+         * responsive even when the SDK hasn't started up yet. */
         while (ctx->InputDataEvent == NULL) {
             HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
                                    ctx->InputEventName);
@@ -568,57 +588,57 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 return 0;
         }
 
-        /* Phase 2: steady state — process frames until stop or stale.
-         *
-         * Stale-handle recovery (issue #1): when the SDK calls
-         * RemoveAllVirtualControllers → SharedMemoryIO.Cleanup and then
-         * recreates sections+events with the same names, our cached handles
-         * point at destroyed kernel objects. The SDK signals the NEW event
-         * but we wait on the OLD one — permanent deadlock.
-         *
-         * Two detection paths:
-         *   (a) Timeout: no event signal for 5s → handles are dead.
-         *   (b) Event fires but SeqNo never advances for 250+ wakeups
-         *       (~1s) → event is live but shared memory is stale.
-         * Both close all cached handles and loop back to Phase 1. */
-        {
-            ULONG staleWakeups = 0;
-            BOOLEAN recycle = FALSE;
-            HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
+        /* Phase 2: steady state. The 500 ms timeout + unconditional recycle
+         * on ANY non-signal rc (TIMEOUT, FAILED, ABANDONED, unexpected)
+         * guarantees recovery from every class of stale-handle failure
+         * within half a second of the SDK stopping signaling. The stale-
+         * seqno counter recycles after 250 wakeups (~5s at ~50 Hz input)
+         * to catch the "event fires but shared-memory view is stale" case,
+         * where the SDK keeps signaling an event object we share by name
+         * but writes to a view the driver isn't reading from anymore. */
+        ULONG staleWakeups = 0;
+        BOOLEAN recycle = FALSE;
+        HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
 
-            for (;;) {
-                DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 5000);
+        for (;;) {
+            DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 500);
 
-                if (rc == WAIT_OBJECT_0)
-                    return 0; /* StopEvent → clean exit */
+            if (rc == WAIT_OBJECT_0)
+                return 0; /* StopEvent → the only legitimate exit */
 
-                if (rc == WAIT_TIMEOUT) {
-                    recycle = TRUE;
-                    break;
+            if (rc == WAIT_OBJECT_0 + 1) {
+                ULONG prevSeq = ctx->SharedMemSeqNo;
+                ProcessSharedInput(ctx);
+                if (ctx->SharedMemSeqNo == prevSeq) {
+                    if (++staleWakeups > 250) { recycle = TRUE; break; }
+                } else {
+                    staleWakeups = 0;
                 }
-
-                if (rc == WAIT_OBJECT_0 + 1) {
-                    ULONG prevSeq = ctx->SharedMemSeqNo;
-                    ProcessSharedInput(ctx);
-                    if (ctx->SharedMemSeqNo == prevSeq) {
-                        if (++staleWakeups > 250) { recycle = TRUE; break; }
-                    } else {
-                        staleWakeups = 0;
-                    }
-                    continue;
-                }
-
-                return 0; /* WAIT_FAILED → bail */
+                continue;
             }
 
-            if (recycle) {
-                /* Close stale handles — Phase 1 will re-open fresh ones. */
-                CloseHandle(ctx->InputDataEvent);
-                ctx->InputDataEvent = NULL;
-                if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
-                if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
-                /* Loop back to Phase 1 */
-            }
+            /* WAIT_TIMEOUT (258), WAIT_FAILED (0xFFFFFFFF), or any other
+             * unexpected value. Previously WAIT_FAILED returned 0 and
+             * killed the worker permanently; now we recycle like every
+             * other non-signal path and let Phase 1 re-open fresh handles.
+             * The 2-second thread-join timeout in EvtDeviceContextCleanup
+             * still bounds any teardown race. */
+            recycle = TRUE;
+            break;
+        }
+
+        if (recycle) {
+            /* Close stale handles — Phase 1 will re-open fresh ones.
+             * Unmapping the view first, then closing handles, keeps the
+             * sequence symmetric with TryOpenSharedMapping. */
+            CloseHandle(ctx->InputDataEvent);
+            ctx->InputDataEvent = NULL;
+            if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
+            if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+            /* Also reset cached seqno so the fresh mapping's first read
+             * (even if it happens to land on a SeqNo matching our previous
+             * cached value by chance) is treated as new data. */
+            ctx->SharedMemSeqNo = 0;
         }
     }
 }
@@ -905,6 +925,22 @@ EvtDeviceAdd(
         ctx->StopEvent = CreateEventW(&sa, TRUE /* manual reset */, FALSE, ctx->StopEventName);
     }
     if (ctx->StopEvent != NULL) {
+        /* CRITICAL: reset the StopEvent explicitly before starting the worker.
+         * Windows' CreateEventW, when called on an existing named event, IGNORES
+         * the initialState argument and returns a handle to the existing object
+         * in whatever signal state it's in. On live-swap (teardown old context
+         * + create new context on the same ControllerIndex), the OLD context's
+         * EvtDeviceContextCleanup signaled this event (manual-reset → stays
+         * signaled) to wake its worker. If any process still holds a handle to
+         * the event when the new context runs — the SDK's
+         * RemoveAllVirtualControllers utility keeps a handle briefly, and the
+         * kernel object survives as long as any ref exists — then our
+         * CreateEventW above hands us that still-signaled event. The worker
+         * immediately sees WAIT_OBJECT_0 on StopEvent and returns 0: HID input
+         * path dead for the rest of this session. (HMCOMPANION still runs its
+         * own path, so XUSB / Guide still works — which is the exact partial-
+         * hang symptom: only Guide flashes after a live-swap on Xbox 360.) */
+        ResetEvent(ctx->StopEvent);
         ctx->WorkerThread = CreateThread(NULL, 0, SharedInputWorkerProc, ctx, 0, NULL);
     }
 
@@ -1280,12 +1316,29 @@ EvtIoDeviceControl(
          * here (the actual XINPUT_VIBRATION struct is 4 bytes wLeft+wRight,
          * but the wire format the driver receives is the 5-byte cmd packet).
          * Forward to the output shared section tagged as XInput so the
-         * consumer can distinguish from HID output reports. */
+         * consumer can distinguish from HID output reports.
+         *
+         * Gate on VendorID == 0x045E (Microsoft / Xbox family). Non-Xbox
+         * profiles (DualSense, DualShock, Switch, etc.) register WinExInput
+         * on their main device for WGI GamepadAdded detection, and
+         * GameInputSvc + the Xbox UI's Guide-haptic layer indiscriminately
+         * open that interface and dispatch IOCTL_XUSB_SET_STATE through it.
+         * For an Xbox-family profile that's legitimate (it's the XInput
+         * rumble path). For a PS/Switch/etc. profile the caller's intent
+         * is "rumble this gamepad" and we already emit the correct native
+         * HID output report — publishing the duplicate XInput-source
+         * packet to the SDK surfaces as a confusing "XInput rumble on a
+         * DualShock 4" ghost, especially just after a live-swap from an
+         * Xbox profile where the Xbox UI kept its slot-0 rumble state
+         * latched. Silently succeed (so the caller's API returns OK and
+         * nothing retries) but do not publish. */
         PVOID setBuf; size_t setBufSize;
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &setBuf, &setBufSize))
             && setBufSize >= 1) {
-            PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_XINPUT,
-                          0, (const UCHAR *)setBuf, (ULONG)setBufSize);
+            if (ctx->HidDeviceAttributes.VendorID == 0x045E) {
+                PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_XINPUT,
+                              0, (const UCHAR *)setBuf, (ULONG)setBufSize);
+            }
         }
         status = STATUS_SUCCESS;
         break;

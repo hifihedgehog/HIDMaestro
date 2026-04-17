@@ -122,6 +122,16 @@ internal static class SharedMemoryIO
             string name = $@"Global\HIDMaestroOutput{controllerIndex}";
             (IntPtr h, IntPtr view) = CreateSection(name, SHARED_OUTPUT_SIZE);
 
+            // Zero-init: pagefile sections start zero, BUT a residual kernel
+            // object from a prior SDK process (kept alive by a still-loaded
+            // driver view) may retain a non-zero SeqNo and stale Data. Without
+            // this, a fresh OutputPollLoop sees `SeqNo != lastSeq(0)` on its
+            // first sample and replays prior-session FFB as a brand-new
+            // OutputReceived packet — on repeat if a consumer process's
+            // XInput/HID handle still talks to the ghost slot.
+            for (int i = 0; i < SHARED_OUTPUT_SIZE; i++)
+                Marshal.WriteByte(view, i, 0);
+
             s_outputHandles[controllerIndex] = h;
             s_outputViews[controllerIndex] = view;
             return view;

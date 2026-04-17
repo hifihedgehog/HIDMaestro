@@ -231,7 +231,12 @@ public sealed class HMController : IDisposable
     private void OutputPollLoop()
     {
         if (_outputView == IntPtr.Zero) return;
-        uint lastSeq = 0;
+        // Belt-and-suspenders: even with EnsureOutputMapping zeroing the
+        // section on create, initialize lastSeq to whatever SeqNo is
+        // currently published so a first-poll read of any pre-existing
+        // payload (stale or legitimate) never fires a spurious
+        // OutputReceived for the prior session's rumble state.
+        uint lastSeq = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(_outputView, 0);
         byte[] buf = new byte[256];
         var ct = _outputCts.Token;
         while (!ct.IsCancellationRequested)

@@ -433,12 +433,43 @@ void CompanionIoControl(
         /* XInput rumble. Forward the wire-format vibration packet to the
          * output shared section as source=XInput. The consumer interprets
          * the bytes (typical packet is 5 bytes: cmd + size + lo motor +
-         * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION). */
+         * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION).
+         *
+         * CRITICAL: a stale-HMCOMPANION-after-live-swap gate. When the user
+         * live-swaps from Xbox 360 → DS4, TeardownController removes the
+         * Xbox 360 HMCOMPANION, but devcon can return "Removed on reboot"
+         * and the companion persists as a phantom still serving IOCTLs.
+         * xinput1_4 / GameInputSvc keep sending IOCTL_XUSB_SET_STATE here;
+         * without this gate we publish Source=XInput to the SAME shared
+         * output section that the new DS4 is reading from — so the user's
+         * DS4 SDK surfaces phantom XInput rumble packets. Fix: re-read the
+         * CURRENT registry VendorId for this ControllerIndex every IOCTL.
+         * If the index has been re-profiled to a non-Xbox controller, the
+         * current VendorId will not be 0x045E and we silently drop. Cheap
+         * — one small registry read, already done at init so the HKEY is
+         * warm. Safer than sampling at init because live-swap DOES update
+         * the registry before creating the new controller. */
+        BOOLEAN isXboxNow = FALSE;
+        {
+            HKEY hKey;
+            DWORD val = 0, sz = sizeof(val);
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
+                              0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL,
+                                     (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
+                    if ((USHORT)val == 0x045E) isXboxNow = TRUE;
+                }
+                RegCloseKey(hKey);
+            }
+        }
+
         PVOID rumbleBuf; size_t rumbleSize;
         if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &rumbleBuf, &rumbleSize))
             && rumbleSize >= 1) {
-            PublishOutput(ctx, OUT_SOURCE_XINPUT, 0,
-                          (const UCHAR*)rumbleBuf, (ULONG)rumbleSize);
+            if (isXboxNow) {
+                PublishOutput(ctx, OUT_SOURCE_XINPUT, 0,
+                              (const UCHAR*)rumbleBuf, (ULONG)rumbleSize);
+            }
         }
         WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
         break;

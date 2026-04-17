@@ -17,6 +17,7 @@ sdk/HIDMaestro.Core/Resources/
 *.log.*
 .vs/
 publish_out/
+.claude/
 
 # Python
 __pycache__/
