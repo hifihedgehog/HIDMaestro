@@ -66,8 +66,10 @@ public static class DriverBuilder
         // Drivers + INFs
         "HIDMaestro.dll",
         "HMXInput.dll",
+        "HMXusbShim.dll",
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
+        "hidmaestro_xusbshim.inf",
 
         // signtool.exe + its SXS dep tree (x64)
         "signtool.exe",
@@ -190,7 +192,7 @@ public static class DriverBuilder
         string dir = EnsureExtracted();
         string signtool = Path.Combine(dir, "signtool.exe");
 
-        foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
+        foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll", "HMXusbShim.dll" })
         {
             string path = Path.Combine(dir, dll);
             if (!File.Exists(path)) continue;
@@ -248,7 +250,7 @@ public static class DriverBuilder
         string pnputil = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
-        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
+        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf", "hidmaestro_xusbshim.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
