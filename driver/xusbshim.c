@@ -8,12 +8,19 @@
  *
  * Critically, this filter does NOT modify the HID report descriptor. Our
  * original profile-specified descriptor (10 buttons on Xbox 360, etc.)
- * is preserved end-to-end. All IOCTLs pass through unmodified.
+ * is preserved end-to-end.
  *
- * Experimental — part of v1-dev-experiment-xusb-child-pdo. The hypothesis
- * being tested: does WGI Gamepad.Vibration dispatch trigger when the HID
- * child exposes the XUSB interface class, independent of xinputhid being
- * the function/upper-filter?
+ * Diagnostic logging: every IOCTL seen is appended to
+ *   C:\ProgramData\HIDMaestro\xusbshim_log.txt
+ * so the next test iteration can read the empirical set of IOCTLs WGI /
+ * xinput1_4 sends via the XUSB interface (if any). The log is cheap — a
+ * bounded count (first ~200 IOCTLs) protects against runaway file growth.
+ *
+ * Experimental — part of v1-dev-experiment-xusb-child-pdo. If interface
+ * registration alone does NOT flip WGI Gamepad.Vibration routing, the
+ * next iteration extends this filter to translate IOCTL_XUSB_SET_STATE
+ * (0x8000A010) into HID WRITE_REPORT (Report ID 0x0F) so our ROOT
+ * driver.c's PublishOutput path receives vibration events.
  */
 #define WIN32_NO_STATUS
 #include <windows.h>
@@ -33,6 +40,45 @@ static const GUID GUID_DEVINTERFACE_XUSB = {
     { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB }
 };
 
+/* ---- Diagnostic log helpers ---------------------------------------- */
+
+static VOID
+LogLine(_In_z_ const char *msg, _In_ SIZE_T len)
+{
+    HANDLE h = CreateFileW(
+        L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
+        FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+        OPEN_ALWAYS, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD written;
+    WriteFile(h, msg, (DWORD)len, &written, NULL);
+    CloseHandle(h);
+}
+
+static VOID
+LogEvent(_In_z_ const char *tag, _In_ ULONG value)
+{
+    /* Bounded: only the first ~200 events across all device instances.
+     * Protects against runaway log growth if WGI polls IOCTL_GET_STATE. */
+    static volatile LONG counter = 0;
+    if (InterlockedIncrement(&counter) > 200) return;
+
+    char buf[64];
+    char *p = buf;
+    while (*tag) *p++ = *tag++;
+    *p++ = ' ';
+    /* Hex-format value, 8 digits, no leading 0x (compact). */
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        int nibble = (value >> shift) & 0xF;
+        *p++ = (char)(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
+    }
+    *p++ = '\r';
+    *p++ = '\n';
+    LogLine(buf, (SIZE_T)(p - buf));
+}
+
+/* ---- Driver entry / device-add ------------------------------------- */
+
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT  DriverObject,
@@ -50,8 +96,8 @@ XusbShimDeviceAdd(
     _In_    WDFDRIVER       Driver,
     _Inout_ PWDFDEVICE_INIT DeviceInit)
 {
-    NTSTATUS           status;
-    WDFDEVICE          device;
+    NTSTATUS            status;
+    WDFDEVICE           device;
     WDF_IO_QUEUE_CONFIG queueConfig;
     UNREFERENCED_PARAMETER(Driver);
 
@@ -60,24 +106,28 @@ XusbShimDeviceAdd(
     status = WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device);
     if (!NT_SUCCESS(status)) return status;
 
-    /* Register the XUSB interface class. WGI's Gamepad.Vibration dispatch
-     * is hypothesized to gate on this interface being present on the HID
-     * child. */
-    (void)WdfDeviceCreateDeviceInterface(
-        device, (LPGUID)&GUID_DEVINTERFACE_XUSB, NULL);
+    /* Ensure log directory exists. Harmless if it already does. */
+    CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
+    LogEvent("DeviceAdd", 0);
 
-    /* Pass-through queue: default IOCTL handler forwards everything to
-     * the parent (HidClass / mshidumdf / our ROOT driver.c).
+    /* Register the XUSB interface class — the central experiment. */
+    NTSTATUS ifs = WdfDeviceCreateDeviceInterface(
+        device, (LPGUID)&GUID_DEVINTERFACE_XUSB, NULL);
+    LogEvent("XUSB-ifreg", (ULONG)ifs);
+
+    /* Default queue forwards all IOCTLs to the parent while logging them.
      *
-     * NOTE: if WGI opens the XUSB interface and sends IOCTL_XUSB_SET_STATE
-     * (0x8000A010), the lower HidClass stack will reject it. A follow-up
-     * iteration needs to translate XUSB IOCTLs into HID WRITE_REPORT. For
-     * this first cut we observe whether the interface registration alone
-     * is sufficient to unlock Gamepad class promotion. */
-    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+     * NOTE: the lower HID stack will reject genuine XUSB IOCTLs (SET_STATE
+     * etc.) with STATUS_INVALID_DEVICE_REQUEST. A follow-up iteration will
+     * handle the XUSB IOCTL codes locally (synthesizing HID WRITE_REPORT
+     * for vibration commands). For this first cut we only observe which
+     * IOCTLs WGI sends — the log tells us what to implement. */
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
+        &queueConfig, WdfIoQueueDispatchParallel);
     queueConfig.EvtIoDefault = XusbShimIoDefault;
 
-    return WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
+    return WdfIoQueueCreate(
+        device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
 }
 
 VOID
@@ -86,9 +136,25 @@ XusbShimIoDefault(
     _In_ WDFREQUEST Request)
 {
     WDFDEVICE                device = WdfIoQueueGetDevice(Queue);
-    WDF_REQUEST_SEND_OPTIONS options;
-    WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET);
-    if (!WdfRequestSend(Request, WdfDeviceGetIoTarget(device), &options)) {
+    WDF_REQUEST_PARAMETERS   params;
+    WDF_REQUEST_PARAMETERS_INIT(&params);
+    WdfRequestGetParameters(Request, &params);
+
+    /* Log the IOCTL code if this is a device-control request; log the
+     * WDF major function otherwise. This reveals exactly what WGI and
+     * xinput1_4 are sending through the XUSB interface. */
+    if (params.Type == WdfRequestTypeDeviceControl ||
+        params.Type == WdfRequestTypeDeviceControlInternal) {
+        LogEvent(
+            params.Type == WdfRequestTypeDeviceControl ? "IOCTL" : "INT-IOCTL",
+            params.Parameters.DeviceIoControl.IoControlCode);
+    } else {
+        LogEvent("MJ", (ULONG)params.Type);
+    }
+
+    WDF_REQUEST_SEND_OPTIONS opts;
+    WDF_REQUEST_SEND_OPTIONS_INIT(&opts, WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET);
+    if (!WdfRequestSend(Request, WdfDeviceGetIoTarget(device), &opts)) {
         WdfRequestComplete(Request, WdfRequestGetStatus(Request));
     }
 }
