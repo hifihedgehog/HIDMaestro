@@ -47,6 +47,47 @@ AppendUlongDecimal(_Inout_ WCHAR *dest, _In_ ULONG value, _In_ SIZE_T maxChars)
     dest[len] = 0;
 }
 
+/* Append a labeled HID output-report dump to the shared xusbshim_log.txt trace.
+ * Used during WGI HID-FFB investigation: if Chromium's playEffect dispatches
+ * via HID output reports (the `hidforcefeedback.cpp` path in WGI) rather than
+ * via XUSB IOCTLs, those writes arrive here at IOCTL_HID_WRITE_REPORT /
+ * IOCTL_UMDF_HID_SET_OUTPUT_REPORT / IOCTL_UMDF_HID_SET_FEATURE and would
+ * otherwise be invisible in the log file that aggregates xusb22 traffic. */
+static VOID
+LogHidOutputReport(_In_ PCSTR tag, _In_ UCHAR reportId,
+                   _In_reads_bytes_(len) const UCHAR *payload, _In_ ULONG len)
+{
+    static volatile LONG counter = 0;
+    ULONG c = (ULONG)InterlockedIncrement(&counter);
+    if (c > 800) return;  /* Hard cap so a runaway caller can't fill the disk. */
+    HANDLE h = CreateFileW(
+        L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
+        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char buf[256];
+    char *p = buf;
+    *p++ = '['; for (int i = 0; tag[i] && i < 12; i++) *p++ = tag[i]; *p++ = ']'; *p++ = ' ';
+    *p++ = 'i'; *p++ = 'd'; *p++ = '=';
+    {
+        int hi = (reportId >> 4) & 0xF; int lo = reportId & 0xF;
+        *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
+        *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
+    }
+    *p++ = ' '; *p++ = '[';
+    ULONG n = len > 16 ? 16 : len;  /* dump first 16 bytes */
+    for (ULONG i = 0; i < n; i++) {
+        int hi = (payload[i] >> 4) & 0xF; int lo = payload[i] & 0xF;
+        *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
+        *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
+        if (i + 1 < n) *p++ = ' ';
+    }
+    *p++ = ']';
+    if (len > n) { *p++ = '.'; *p++ = '.'; *p++ = '.'; }
+    *p++ = '\r'; *p++ = '\n';
+    DWORD w; WriteFile(h, buf, (DWORD)(p - buf), &w, NULL);
+    CloseHandle(h);
+}
+
 /* Initialize per-instance paths from ControllerIndex.
  * Reads ControllerIndex from device HW key (written by test app at device creation).
  * Falls back to index 0 / legacy global paths if not found. */
@@ -1081,6 +1122,7 @@ EvtIoDeviceControl(
             UCHAR  reportId = (wrSize > 0) ? p[0] : 0;
             const UCHAR *payload = (wrSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((wrSize > 0) ? wrSize - 1 : 0);
+            LogHidOutputReport("HID-WRITE", reportId, payload, payloadLen);
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
                           reportId, payload, payloadLen);
         }
@@ -1106,6 +1148,7 @@ EvtIoDeviceControl(
             UCHAR  reportId = (featureSize > 0) ? p[0] : 0;
             const UCHAR *payload = (featureSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
+            LogHidOutputReport("HID-SETFEAT", reportId, payload, payloadLen);
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE,
                           reportId, payload, payloadLen);
         }
@@ -1138,6 +1181,7 @@ EvtIoDeviceControl(
             UCHAR  reportId = (outBufSize > 0) ? p[0] : 0;
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
+            LogHidOutputReport("HID-SETOUT", reportId, payload, payloadLen);
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
                           reportId, payload, payloadLen);
         }
@@ -1214,18 +1258,19 @@ EvtIoDeviceControl(
          */
         UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
-        *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
-        caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
-        caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[6] = 0xF7FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
-        caps[8] = 0xFF;                /* bLeftTrigger */
-        caps[9] = 0xFF;                /* bRightTrigger */
-        *(SHORT*)&caps[10] = 32767;    /* ThumbLX */
-        *(SHORT*)&caps[12] = 32767;    /* ThumbLY */
-        *(SHORT*)&caps[14] = 32767;    /* ThumbRX */
-        *(SHORT*)&caps[16] = 32767;    /* ThumbRY */
-        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed */
-        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed */
+        *(USHORT*)&caps[0]  = 0x0101;  /* XUSBVersion */
+        caps[2] = 0x01;                 /* Type: XINPUT_DEVTYPE_GAMEPAD */
+        caps[3] = 0x01;                 /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
+        *(USHORT*)&caps[4]  = 0x0001;  /* Flags = XINPUT_CAPS_FFB_SUPPORTED (branch-experimental) */
+        *(USHORT*)&caps[6]  = 0xF7FF;  /* wButtons mask */
+        caps[8] = 0xFF;                 /* bLeftTrigger max */
+        caps[9] = 0xFF;                 /* bRightTrigger max */
+        *(SHORT*)&caps[10] = 32767;    /* sThumbLX max */
+        *(SHORT*)&caps[12] = 32767;    /* sThumbLY max */
+        *(SHORT*)&caps[14] = 32767;    /* sThumbRX max */
+        *(SHORT*)&caps[16] = 32767;    /* sThumbRY max */
+        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed max */
+        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed max */
         status = RequestCopyFromBuffer(Request, caps, sizeof(caps));
         break;
     }
