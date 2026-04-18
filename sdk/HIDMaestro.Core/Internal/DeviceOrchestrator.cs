@@ -318,6 +318,13 @@ internal static class DeviceOrchestrator
     {
         string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
         try { Registry.LocalMachine.DeleteSubKeyTree(deviceKey, false); } catch { }
+
+        // Also clean up any stale entry from the earlier (now-disabled)
+        // SOFTWARE path experiment so we don't leave a DS4-shaped mapping
+        // for 045E VIDs that could override WGI's native handling.
+        string staleSoftwareKey = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
+        try { Registry.LocalMachine.DeleteSubKeyTree(staleSoftwareKey, false); } catch { }
+
         using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
 
         string gpPath = $@"{deviceKey}\Gamepad";
