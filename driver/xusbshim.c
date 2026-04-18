@@ -43,10 +43,32 @@ EVT_WDF_IO_QUEUE_IO_DEFAULT XusbShimIoDefault;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP XusbShimDeviceCleanup;
 
 /* XUSB interface class — same GUID xinputhid registers on real Xbox HID
- * children. */
+ * children. Confirmed present in Windows.Gaming.Input.dll's enumeration
+ * table at offset 0xAA9E0. */
 static const GUID GUID_DEVINTERFACE_XUSB = {
     0xEC87F1E3, 0xC13B, 0x4100,
     { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB }
+};
+
+/* WinExInput — interface that Chromium's gamepad backend uses to detect
+ * GamepadAdded arrivals. HMCOMPANION also registers this on its own
+ * devnode; registering it on the HID child exposes the child directly
+ * to Chromium's enumeration without the companion indirection. */
+static const GUID GUID_DEVINTERFACE_WINEXINPUT = {
+    0x6C53D5FD, 0x6480, 0x440F,
+    { 0xB6, 0x18, 0x47, 0x67, 0x50, 0xC5, 0xE1, 0xA6 }
+};
+
+/* Unknown-1 and Unknown-2 from WGI's enumeration table. Even though we
+ * don't know what they semantically are, registering them is benign — if
+ * WGI enumerates by these GUIDs, our HID child will be found. */
+static const GUID GUID_DEVINTERFACE_WGI_UNK1 = {
+    0x08A7EE33, 0xA682, 0x49EE,
+    { 0xB8, 0xBF, 0x3E, 0x41, 0xC9, 0x9D, 0xB3, 0xC0 }
+};
+static const GUID GUID_DEVINTERFACE_WGI_UNK2 = {
+    0xD421B08E, 0x6D16, 0x41CA,
+    { 0x9C, 0x4D, 0x91, 0x47, 0xE5, 0xAC, 0x98, 0xE0 }
 };
 
 /* XUSB IOCTL codes (public RE of xusb22.sys / xinputhid.sys). */
@@ -303,6 +325,25 @@ XusbShimDeviceAdd(
     NTSTATUS ifs = WdfDeviceCreateDeviceInterface(
         device, (LPGUID)&GUID_DEVINTERFACE_XUSB, NULL);
     LogEvent("XUSB-ifreg", (ULONG)ifs);
+
+    /* Shotgun extra interfaces from WGI's internal enumeration table.
+     * If any one of these is the actual gate WGI checks beyond (or
+     * instead of) XUSB, registering them too covers the case. */
+    {
+        UNICODE_STRING ref0;
+        RtlInitUnicodeString(&ref0, L"XI_00");
+        NTSTATUS wex = WdfDeviceCreateDeviceInterface(
+            device, (LPGUID)&GUID_DEVINTERFACE_WINEXINPUT, &ref0);
+        LogEvent("WinEx-ifreg", (ULONG)wex);
+
+        NTSTATUS u1 = WdfDeviceCreateDeviceInterface(
+            device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK1, NULL);
+        LogEvent("WGI-Unk1-ifreg", (ULONG)u1);
+
+        NTSTATUS u2 = WdfDeviceCreateDeviceInterface(
+            device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK2, NULL);
+        LogEvent("WGI-Unk2-ifreg", (ULONG)u2);
+    }
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
         &queueConfig, WdfIoQueueDispatchParallel);
