@@ -2,6 +2,12 @@ build/
 test/bin/
 test/obj/
 test/publish_out/
+test/probes/*/bin/
+test/probes/*/obj/
+test/probes/*/*.exe
+test/probes/*/*.ilk
+test/probes/*/*.pdb
+test/probes/*/vc140.pdb
 example/SdkDemo/bin/
 example/SdkDemo/obj/
 sdk/HIDMaestro.Core/bin/

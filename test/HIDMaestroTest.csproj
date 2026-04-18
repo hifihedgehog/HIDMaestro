@@ -11,4 +11,13 @@
   <ItemGroup>
     <ProjectReference Include="..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
+  <!-- Diagnostic probes live in test/probes/ as independent standalone projects
+       (each has its own .csproj). The SDK's default **/*.cs glob would
+       otherwise pull their Program.cs files into this test app's compile
+       and collide on class P / Main(). Keep them excluded here; build each
+       probe via its own csproj or build_*.cmd. See test/probes/README.md. -->
+  <ItemGroup>
+    <Compile Remove="probes\**\*.cs" />
+    <None Remove="probes\**\*" />
+  </ItemGroup>
 </Project>
