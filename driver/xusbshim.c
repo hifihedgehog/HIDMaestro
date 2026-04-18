@@ -72,12 +72,16 @@ static const GUID GUID_DEVINTERFACE_WGI_UNK2 = {
 };
 
 /* XUSB IOCTL codes (public RE of xusb22.sys / xinputhid.sys). */
+/* Canonical XUSB IOCTL codes (mirror companion.c). I had these off-by-one
+ * in earlier xusbshim commits which caused every GET_CAPABILITIES probe
+ * from xinput1_4 to return STATUS_INVALID_DEVICE_REQUEST and xinput1_4 to
+ * classify our device as "not XInput-capable". */
 #define IOCTL_XUSB_GET_INFORMATION       0x80006000u
-#define IOCTL_XUSB_GET_CAPABILITIES      0x8000E000u
-#define IOCTL_XUSB_GET_LED_STATE         0x8000E004u
-#define IOCTL_XUSB_GET_STATE             0x8000E008u
+#define IOCTL_XUSB_GET_CAPABILITIES      0x8000E004u
+#define IOCTL_XUSB_GET_LED_STATE         0x8000E008u
+#define IOCTL_XUSB_GET_STATE             0x8000E00Cu
 #define IOCTL_XUSB_SET_STATE             0x8000A010u
-#define IOCTL_XUSB_WAIT_GUIDE_BUTTON     0x8000E00Cu
+#define IOCTL_XUSB_WAIT_GUIDE_BUTTON     0x8000E014u
 #define IOCTL_XUSB_GET_BATTERY_INFO      0x8000E018u
 #define IOCTL_XUSB_WAIT_FOR_INPUT        0x8000E3ACu
 #define IOCTL_XUSB_GET_INFORMATION_EX    0x8000E3FCu
