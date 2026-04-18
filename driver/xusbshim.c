@@ -610,10 +610,18 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_WAIT_GUIDE_BUTTON ||
-                 code == IOCTL_XUSB_WAIT_FOR_INPUT ||
-                 code == IOCTL_XUSB_POWER_INFO) {
-            /* Never-completes semantics are wrong for a filter; just succeed
-             * with no data — the caller will retry. Avoids hanging queues. */
+                 code == IOCTL_XUSB_WAIT_FOR_INPUT) {
+            /* Return INVALID_DEVICE_REQUEST so xinput1_4 falls back to
+             * GET_STATE polling (matches companion.c's empirically-validated
+             * behavior — comment there: STATUS_DEVICE_NOT_READY stops polling
+             * entirely; SUCCESS may confuse state-change detection; only
+             * INVALID_DEVICE_REQUEST correctly signals "not supported, keep
+             * using GET_STATE"). */
+            WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+            handledLocally = TRUE;
+        }
+        else if (code == IOCTL_XUSB_POWER_INFO) {
+            /* SUCCESS with zero bytes — device is powered, no special info. */
             WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
             handledLocally = TRUE;
         }
