@@ -287,6 +287,18 @@ public static class DriverBuilder
                 return false;
             }
         }
+
+        // Force PnP to rescan existing devices so newly-added INFs apply to
+        // already-present matching devnodes. Without this, an Extension/filter
+        // INF added AFTER the HID child enumerates won't auto-apply until the
+        // device is removed and re-added. /scan-devices hits the whole system
+        // but is cheap (fractions of a second on a clean machine).
+        try
+        {
+            Run(pnputil, "/scan-devices", timeoutMs: 10_000);
+        }
+        catch { /* non-fatal */ }
+
         return true;
     }
 
