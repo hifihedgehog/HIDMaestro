@@ -422,8 +422,11 @@ void CompanionIoControl(
         /* OutDeviceInfos_t — 12 bytes (matches driver.c format exactly) */
         UCHAR info[12];
         RtlZeroMemory(info, sizeof(info));
-        *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 */
+        *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 — Xbox 360 era */
         info[2] = 0x01; /* device count — always 1 (each companion hosts one controller) */
+        info[3] = 0x01; /* slot/capability marker — empirical xinputhid value;
+                         * xusb22 may also set this. WGI may read it as a
+                         * "device is usable" flag. Was 0x00 originally. */
         info[4] = 0x00;                /* unk2 — bit 7 clear = don't skip */
         *(USHORT*)&info[8] = ctx->VendorId;
         *(USHORT*)&info[10] = ctx->ProductId;
