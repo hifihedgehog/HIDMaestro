@@ -657,7 +657,7 @@ XusbShimIoDefault(
              * + vibration advertised. Mirrors HMCOMPANION's response. */
             UCHAR caps[24];
             for (int i = 0; i < 24; i++) caps[i] = 0;
-            caps[0] = 0x01; caps[1] = 0x01;        /* Version 1.1 */
+            caps[0] = 0x03; caps[1] = 0x01;        /* Version 1.3 (match xinputhid empirical) */
             caps[2] = 0x01;                         /* XINPUT_DEVTYPE_GAMEPAD */
             caps[3] = 0x01;                         /* XINPUT_DEVSUBTYPE_GAMEPAD */
             caps[4] = 0xFF; caps[5] = 0xF7;         /* wButtons mask (LE) */
