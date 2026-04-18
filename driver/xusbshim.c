@@ -395,7 +395,23 @@ XusbShimIoDefault(
             size_t sz;
             if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &buf, &sz))) {
                 LogBytes("SET_STATE-in", (const UCHAR*)buf, sz);
-                PublishXusbRumble(ctx, (const UCHAR*)buf, (ULONG)sz);
+                /* Normalize to a canonical 5-byte frame with the SAME
+                 * layout HMCOMPANION publishes for IOCTL_XUSB_SET_STATE:
+                 * [slot, flags, led, lo_motor, hi_motor]. Empirically
+                 * that's what xinputhid accepts (see memory:
+                 * project-xusb-ioctl-empirical.md). Consumers (PadForge)
+                 * decode motor values from positions 3 and 4 regardless
+                 * of the incoming buffer size. */
+                UCHAR canon[5] = { 0, 0, 0, 0, 0 };
+                const UCHAR *in = (const UCHAR *)buf;
+                if (sz >= 5) {
+                    canon[0] = in[0]; canon[1] = in[1]; canon[2] = in[2];
+                    canon[3] = in[3]; canon[4] = in[4];
+                } else if (sz >= 2) {
+                    /* Best-effort: assume the last two bytes are motors. */
+                    canon[3] = in[sz - 2]; canon[4] = in[sz - 1];
+                }
+                PublishXusbRumble(ctx, canon, 5);
             }
             WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
             handledLocally = TRUE;
