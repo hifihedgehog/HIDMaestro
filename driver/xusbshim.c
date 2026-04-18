@@ -486,6 +486,30 @@ XusbShimIoDefault(
             }
             handledLocally = TRUE;
         }
+        else if (code == IOCTL_XUSB_GET_STATE) {
+            /* 29-byte neutral gamepad state (no buttons, centered sticks,
+             * zero triggers). Matches HMCOMPANION's layout so xinput1_4
+             * / WGI polling succeeds even if we're not reading live input
+             * through this filter. Real input still flows through the HID
+             * interface to consumers via driver.c — this IOCTL response
+             * exists to keep xinput1_4 alive and probing. */
+            UCHAR state[29];
+            for (int i = 0; i < 29; i++) state[i] = 0;
+            state[0] = 0x03; state[1] = 0x01;  /* Version 1.3 */
+            state[2] = 0x01;                    /* CONNECTED */
+            /* packet counter at offset 5 would normally increment; 0 is OK
+             * because xinput1_4 uses it to detect state changes, not absolute */
+            PVOID  outBuf;
+            size_t outLen;
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outLen))) {
+                SIZE_T copy = outLen < 29 ? outLen : 29;
+                for (SIZE_T i = 0; i < copy; i++) ((UCHAR*)outBuf)[i] = state[i];
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
+            } else {
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            }
+            handledLocally = TRUE;
+        }
         else if (code == IOCTL_XUSB_GET_LED_STATE) {
             /* 3-byte LED state: led num 0, blink 0, initial state 0x06
              * (matches HMCOMPANION's response). */
