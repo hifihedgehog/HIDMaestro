@@ -1,0 +1,39 @@
+# XUSB wire format confirmation — deterministic XInputSetState probe
+#
+# Tool: test/probes/xinput_byte_probe/Program.cs (XiByteProbe)
+# Calls: xinput1_4.XInputSetState(slot=0, &vibration) with exact
+#        (wLeftMotorSpeed, wRightMotorSpeed) pairs.
+# Driver: HIDMaestro virtual xbox-360-wired @ post-parser-fix build
+#         (driver/xusbshim.c:550-558, xusb22-style decode: motors at in[2]/in[3]).
+#
+# Log source: c:\ProgramData\HIDMaestro\xusbshim_log.txt
+# Each [timestamp] SET_STATE-in line is the RAW IOCTL input buffer captured by
+# our xusbshim UMDF2 upper filter BEFORE any canonicalization.
+
+Program output:
+  [18:40:58.922] slot=0 wLeft=0x0000 wRight=0x0000  rc=0x00000000  label=CLEAR
+  [18:40:59.953] slot=0 wLeft=0xFFFF wRight=0x0000  rc=0x00000000  label=LEFT-only max (wLeft=0xFFFF, wRight=0)
+  [18:41:00.956] slot=0 wLeft=0x0000 wRight=0xFFFF  rc=0x00000000  label=RIGHT-only max (wLeft=0, wRight=0xFFFF)
+  [18:41:01.958] slot=0 wLeft=0x8080 wRight=0x4040  rc=0x00000000  label=LEFT=0x80 RIGHT=0x40 (asymmetric)
+  [18:41:02.972] slot=0 wLeft=0x0100 wRight=0xFF00  rc=0x00000000  label=LEFT=0x01 RIGHT=0xFF (minimal vs max)
+  [18:41:03.973] slot=0 wLeft=0x0000 wRight=0x0000  rc=0x00000000  label=CLEAR
+
+Driver log captured during the probe:
+  [18:40:58.915] SET_STATE-in 00 0D 00 00 01        (xinput1_4 capability probe, byte[4]=0x01)
+  [18:40:58.915] SET_STATE-in 00 00 00 00 02        (initial CLEAR, byte[4]=0x02 packet trailer)
+  [18:40:59.952] SET_STATE-in 00 00 FF 00 02        (LEFT=0xFFFF → byte[2]=0xFF, byte[3]=0)
+  [18:41:00.956] SET_STATE-in 00 00 00 FF 02        (RIGHT=0xFFFF → byte[2]=0, byte[3]=0xFF)
+  [18:41:01.957] SET_STATE-in 00 00 80 40 02        (L=0x8080 R=0x4040 → byte[2]=0x80, byte[3]=0x40)
+  [18:41:02.972] SET_STATE-in 00 00 01 FF 02        (L=0x0100 R=0xFF00 → byte[2]=0x01, byte[3]=0xFF)
+  [18:41:03.972] SET_STATE-in 00 00 00 00 02        (final CLEAR)
+
+Confirmed wire format on the xusbshim receive path:
+  byte[0] = 0x00 reserved
+  byte[1] = 0x00 reserved
+  byte[2] = LEFT motor  = wLeftMotorSpeed >> 8
+  byte[3] = RIGHT motor = wRightMotorSpeed >> 8
+  byte[4] = 0x02        packet trailer (during rumble)
+            0x01        packet trailer (during capability probe)
+
+This confirms the post-fix canonicalization in driver/xusbshim.c:550-558
+(lo = in[2]; hi = in[3];) is correct for every wLeft/wRight pair tested.

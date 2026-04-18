@@ -1,0 +1,80 @@
+       MIN,        MAX, ffffe58db1f36710, \Device\HarddiskVolume3\Users\sonic\AppData\Local\Temp\claude\c--Users-sonic-OneDrive-Documents-GitHub-HIDMaestro\c2d9d5fd-aa08-49d1-8a4a-9766f1d5ede8\tasks\b37aaszqc.output
+       MIN,        MAX, ffffe58db1f09b90, \Device\HarddiskVolume3\Users\sonic\OneDrive\.claude\Projects\c--Users-sonic-OneDrive-Documents-GitHub-HIDMaestro\memory\MEMORY.md
+       MIN,        MAX, ffffe58db15788d0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\docs\screenshot-dualsense.png
+       MIN,        MAX, ffffe58db15781c0, \Device\HarddiskVolume3\Users\sonic\Downloads\HIDMaestro.png
+       MIN,        MAX, ffffe58db1571890, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\docs\screenshot-xbox-360-wired.png
+       MIN,        MAX, ffffe58db15671c0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\docs\screenshot-xbox-series-bt.png
+       MIN,        MAX, ffffe58db1493180, \Device\HarddiskVolume3\tmp\GameInputTest\native_wgi.ilk
+       MIN,        MAX, ffffe58db1492710, \Device\HarddiskVolume3\tmp\GameInputTest\native_wgi.exe
+       MIN,        MAX, ffffe58db1329180, \Device\HarddiskVolume3\tmp\GameInputTest\native_wgi.pdb
+       MIN,        MAX, ffffe58db11d4d30, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\docs\screenshot-xbox-series-bt.png::$REPARSE_POINT
+       MIN,        MAX, ffffe58db1192710, \Device\HarddiskVolume3\tmp\GameInputTest\native_wgi.cpp
+       MIN,        MAX, ffffe58db1192180, \Device\HarddiskVolume3\tmp\GameInputTest\build_native_wgi.cmd
+       MIN,        MAX, ffffe58db1176890, \Device\HarddiskVolume3\tmp\GameInputTest\native_wgi.obj
+       MIN,        MAX, ffffe58db116fb90, \Device\HarddiskVolume3\Windows\System32\DriverStore\en-US\xusb22.inf_loc
+       MIN,        MAX, ffffe58dafff4710, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\example\SdkDemo\obj\Release\net10.0-windows10.0.26100.0\win-x64\SdkDemo.GeneratedMSBuildEditorConfig.editorconfig
+       MIN,        MAX, ffffe58dafff4180, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\example\SdkDemo\obj\Release\net10.0-windows10.0.26100.0\win-x64\SdkDemo.csproj.AssemblyReference.cache
+       MIN,        MAX, ffffe58daffa7b90, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\SDK\HIDMaestro.Core\internal\AssemblyInfo.cs::$REPARSE_POINT
+       MIN,        MAX, ffffe58daff65180, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\build\hid_capture.obj
+       MIN,        MAX, ffffe58dafeeba90, \Device\HarddiskVolume3\tmp\GameInputTest\enumall.exe
+       MIN,        MAX, ffffe58dafd351c0, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\it
+       MIN,        MAX, ffffe58dafd33810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\JP
+       MIN,        MAX, ffffe58dafd33180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\ko
+       MIN,        MAX, ffffe58dafd32810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\ru
+       MIN,        MAX, ffffe58dafd32180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\zh-Hans
+       MIN,        MAX, ffffe58dafd31810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\zh-Hant
+       MIN,        MAX, ffffe58dafd2e180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\de
+       MIN,        MAX, ffffe58dafd2d810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\en
+       MIN,        MAX, ffffe58dafd2d180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\es
+       MIN,        MAX, ffffe58dafd2c810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Networking.XboxLive.XboxLiveSecureSocketsContract\1.0.0.0\fr
+       MIN,        MAX, ffffe58dafc431c0, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\zh-Hans
+       MIN,        MAX, ffffe58dafbf4810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\zh-Hant
+       MIN,        MAX, ffffe58dafbf1180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\en
+       MIN,        MAX, ffffe58dafbf0810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\es
+       MIN,        MAX, ffffe58dafbf0180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\fr
+       MIN,        MAX, ffffe58dafbef180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\it
+       MIN,        MAX, ffffe58dafbee810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\JP
+       MIN,        MAX, ffffe58dafbee180, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\ko
+       MIN,        MAX, ffffe58dafbed810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\ru
+       MIN,        MAX, ffffe58dafbe9810, \Device\HarddiskVolume3\Program Files (x86)\Windows Kits\10\references\10.0.26100.0\Windows.Gaming.XboxLive.StorageApiContract\1.0.0.0\de
+       MIN,        MAX, ffffe58daf8bf180, \Device\HarddiskVolume3\tmp\GameInputTest
+       MIN,        MAX, ffffe58daf81f180, \Device\HarddiskVolume3\tmp\edge_trial_profile\Default\Code Cache\js\36c32cbbaa80b13b_0
+       MIN,        MAX, ffffe58daf80c9c0, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_c2569374a45ce1c869fefaefc205fa0f4b99a71_78663088_514018aa-7b04-4def-bc80-7f70bd92fcf4\Report.wer
+       MIN,        MAX, ffffe58daf80c180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_fd583443-4a6c-477d-962c-d6a564ca3e83\Report.wer
+       MIN,        MAX, ffffe58daf80b710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_fc6ab81d-d031-44dd-97ee-e921d382ca41\Report.wer
+       MIN,        MAX, ffffe58daf80b180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_d219b271-5f5f-460a-a0b3-fcbe48eec4c3\Report.wer
+       MIN,        MAX, ffffe58daf80a430, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_7125ab53-d2f8-4e14-afc2-fddb42fd5741\Report.wer
+       MIN,        MAX, ffffe58daf8099c0, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_6a22759c-3595-4d26-924c-e77b1c5775d2\Report.wer
+       MIN,        MAX, ffffe58daf809180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_6413b081-2e1e-4d1b-acbf-a3cf23776f7b\Report.wer
+       MIN,        MAX, ffffe58daf7f9710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_a454b956295996da81d94c1a746458c32b8cd260_78663088_67ae11ae-c921-4a1b-a3f1-d7fea8c40f68\Report.wer
+       MIN,        MAX, ffffe58daf7f9180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_a454b956295996da81d94c1a746458c32b8cd260_78663088_62818a49-f5b0-42e7-888b-1ae9677c3e94\Report.wer
+       MIN,        MAX, ffffe58daf7f8710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_GameInputSvc.exe_8e6797511a435d4a96589cb5eb3dfe99b3b219_2fc4d6aa_eacc8cde-cb0f-46c4-a6bb-b54e596a4258\Report.wer
+       MIN,        MAX, ffffe58daf7f8180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_GameInputSvc.exe_662ac915f23738b8017ec7a9bc24ad21762de37_2fc4d6aa_ec157284-cf79-4148-b285-dbd731df2298\Report.wer
+       MIN,        MAX, ffffe58daf7ee710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_60db91f9-316b-4239-b720-1df5dc731ec8\Report.wer
+       MIN,        MAX, ffffe58daf7ee180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_4ee39991-74d4-4350-abe0-52fee6601a27\Report.wer
+       MIN,        MAX, ffffe58daf7ed710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_4c7c2f0e-4cd2-4aee-8ca2-9caa97687c0f\Report.wer
+       MIN,        MAX, ffffe58daf7ed180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_3e544b19-eb56-48bb-9fd8-4deda102fee6\Report.wer
+       MIN,        MAX, ffffe58daf7ec710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_318b6871-0311-439b-8301-ad4a1eb202e9\Report.wer
+       MIN,        MAX, ffffe58daf7ec180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_24c4e5cd-d67e-433f-ade6-50797673e1a7\Report.wer
+       MIN,        MAX, ffffe58daf7eb710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_be40fad1902a8258d24abe74f15fbb587b212c3_78663088_1e4dd703-1d6f-4540-8572-a26107407925\Report.wer
+       MIN,        MAX, ffffe58daf7eb180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_a454b956295996da81d94c1a746458c32b8cd260_78663088_6c35aba9-f737-4356-9847-853aa5f6d562\Report.wer
+       MIN,        MAX, ffffe58daf7d6180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_f21b4c91563a7a4e961648db92ec1a947fe6e39e_78663088_d6fd802b-6f14-4e51-bb18-745a218ef620\Report.wer
+       MIN,        MAX, ffffe58daf7d5710, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_e63ad96b48e114fe48c6a54edeedcbc42a6b3e8_78663088_13d4c213-3270-472f-9e9a-db2d328b9075\Report.wer
+       MIN,        MAX, ffffe58daf7d5180, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_d82460140925a35b5b04152ebc8a440af7bb6d1_78663088_5a7dbe39-5f0c-4d67-a1ae-63680bc947e7\Report.wer
+       MIN,        MAX, ffffe58daf7d4430, \Device\HarddiskVolume3\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_HIDMaestroTest.e_c2569374a45ce1c869fefaefc205fa0f4b99a71_78663088_6ba0e6df-b998-46d3-9447-222abd1d7347\Report.wer
+       MIN,        MAX, ffffe58daf68a1c0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\DsHidMini\DMF
+       MIN,        MAX, ffffe58daeea0ac0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\example\SdkDemo\Program.cs
+       MIN,        MAX, ffffe58daed43180, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\scripts\check_no_guide_in_pulse.ps1
+       MIN,        MAX, ffffe58daea351c0, \Device\HarddiskVolume3\Windows\prefetch\HIDMAESTROTEST.EXE-36A0622E.pf
+       MIN,        MAX, ffffe58dae7cb710, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\example\SdkDemo\obj\Release\net10.0-windows10.0.26100.0\win-x64\SdkDemo.dll
+       MIN,        MAX, ffffe58dae7c2810, \Device\HarddiskVolume3\Users\sonic\AppData\Local\Temp\HIDMaestro_3a1886a88ad2442a8b3fb02a31257770\Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll
+       MIN,        MAX, ffffe58dae7b0810, \Device\HarddiskVolume3\Users\sonic\AppData\Local\Microsoft\Edge\User Data\Default\Extensions\hlepfoohegkhhmjieoechaddaejaokhf\26.4.4_0\Assets\features\quick-comment-hiding.js
+       MIN,        MAX, ffffe58dae6a9180, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\.git\config
+       MIN,        MAX, ffffe58dae68bb00, \Device\HarddiskVolume3\Users\sonic\OneDrive\.claude\Projects\c--Users-sonic-OneDrive-Documents-GitHub-HIDMaestro\memory\project-xinputhid-button-count-tradeoff.md
+       MIN,        MAX, ffffe58dae6138d0, \Device\HarddiskVolume3\tmp\hidmaestro-org\.git\hooks
+       MIN,        MAX, ffffe58dae5c8ac0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\.git\objects\42\98a2f055ce02a3a202119a60fb8f5d323d70c7
+       MIN,        MAX, ffffe58dae519ac0, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\SDL\src\hidapi\Windows\test\Data
+       MIN,        MAX, ffffe58dae460710, \Device\HarddiskVolume3\Users\sonic\OneDrive\Documents\GitHub\HIDMaestro\build\install_log.txt
+       MIN,        MAX, ffffe58dae2d9180, \Device\HarddiskVolume3\tmp\hidmaestro-org\.git
+       MIN,        MAX, ffffe58dae15e890, \Device\HarddiskVolume3\tmp\hidmaestro-org
+       MIN,        MAX, ffffe58dadfe5890, \Device\HarddiskVolume3\Windows\System32\DriverStore\FileRepository\hidi3c.inf_amd64_5aafa5ba2d88c8e7\HIDI3C.dll
