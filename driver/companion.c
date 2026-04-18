@@ -21,6 +21,13 @@ static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 static const GUID WINEXINPUT_GUID =
     { 0x6C53D5FD, 0x6480, 0x440F, { 0xB6, 0x18, 0x47, 0x67, 0x50, 0xC5, 0xE1, 0xA6 } };
+/* From WGI's enumeration table (Windows.Gaming.Input.dll @ 0xAA9D0).
+ * Semantically unknown but appears on Xbox Series BT HID children; Max's
+ * external review hypothesized it may be the GIP device interface class
+ * WGI uses for gamepad-class promotion of non-xinputhid Xbox paths.
+ * Registering it on HMCOMPANION is additive and benign. */
+static const GUID WGI_UNK1_GUID =
+    { 0x08A7EE33, 0xA682, 0x49EE, { 0xB8, 0xBF, 0x3E, 0x41, 0xC9, 0x9D, 0xB3, 0xC0 } };
 
 #define IOCTL_XUSB_GET_INFORMATION   0x80006000
 #define IOCTL_XUSB_GET_CAPABILITIES  0x8000E004
@@ -326,6 +333,12 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         RtlInitUnicodeString(&refStr, L"XI_00");
         WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
     }
+
+    /* Shotgun additional WGI table GUID on HMCOMPANION too (see declaration
+     * above). Matches xusbshim's interface set on the HID child — if WGI's
+     * provider-selection check looks at BOTH container endpoints and wants
+     * a specific interface on BOTH, we supply it on both. */
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&WGI_UNK1_GUID, NULL);
 
     return STATUS_SUCCESS;
 }
