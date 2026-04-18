@@ -422,8 +422,15 @@ XusbShimDeviceAdd(
      * If any one of these is the actual gate WGI checks beyond (or
      * instead of) XUSB, registering them too covers the case. */
     {
+        /* Muse external review (2026-04-17) suggests "IG_00" for WinExInput
+         * reference (not "XI_00") so WGI correlates HID and XUSB interfaces
+         * via the shared &IG_00 portion of HardwareID. Try it here on the
+         * HID-child filter while HMCOMPANION keeps its proven "XI_00"
+         * convention — WGI sees BOTH reference strings and picks whichever
+         * correlates. If Muse is right, this is the missing gate for the
+         * HID-child vibration route. */
         UNICODE_STRING ref0;
-        RtlInitUnicodeString(&ref0, L"XI_00");
+        RtlInitUnicodeString(&ref0, L"IG_00");
         NTSTATUS wex = WdfDeviceCreateDeviceInterface(
             device, (LPGUID)&GUID_DEVINTERFACE_WINEXINPUT, &ref0);
         LogEvent("WinEx-ifreg", (ULONG)wex);
