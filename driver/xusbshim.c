@@ -150,8 +150,14 @@ static VOID LogLine(_In_z_ const char *msg, _In_ SIZE_T len)
 
 static VOID LogEvent(_In_z_ const char *tag, _In_ ULONG value)
 {
-    static volatile LONG counter = 0;
-    if (InterlockedIncrement(&counter) > 400) return;
+    /* Bound non-SET_STATE events; SET_STATE always logs because it's
+     * the vibration signal we're hunting. Tag-prefix check so "SET_STATE-in"
+     * / similar continues logging past the 400-event cap while GET_STATE
+     * polling doesn't drown us. */
+    if (!(tag[0] == 'S' && tag[1] == 'E' && tag[2] == 'T')) {
+        static volatile LONG counter = 0;
+        if (InterlockedIncrement(&counter) > 400) return;
+    }
     char buf[80]; char *p = buf;
     while (*tag) *p++ = *tag++;
     *p++ = ' ';
@@ -165,6 +171,11 @@ static VOID LogEvent(_In_z_ const char *tag, _In_ ULONG value)
 
 static VOID LogBytes(_In_z_ const char *tag, _In_bytecount_(len) const UCHAR *buf, _In_ SIZE_T len)
 {
+    /* Same bounding rule as LogEvent so SET_STATE hex dumps always survive. */
+    if (!(tag[0] == 'S' && tag[1] == 'E' && tag[2] == 'T')) {
+        static volatile LONG counter = 0;
+        if (InterlockedIncrement(&counter) > 400) return;
+    }
     char msg[112]; char *p = msg;
     while (*tag) *p++ = *tag++;
     *p++ = ' ';
