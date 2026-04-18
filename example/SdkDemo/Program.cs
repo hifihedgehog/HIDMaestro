@@ -97,7 +97,6 @@ while (sw.ElapsedMilliseconds < 5_000)
     // Note: the DualSense profile has triggerButtons=[6,7], so whenever
     // LeftTrigger or RightTrigger is nonzero, buttons 7/8 (L2/R2 digital)
     // automatically engage — matching real DS4/DualSense hardware behavior.
-    // Guide (PS Home) pulses at 0.5 Hz via buttonMap → descriptor button 13.
     var state0 = new HMGamepadState
     {
         LeftStickX   = (float)Math.Cos(angle),
@@ -106,23 +105,19 @@ while (sw.ElapsedMilliseconds < 5_000)
         RightStickY  = (float)Math.Cos(angle * 0.5),
         LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t * 3)),
         RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 3)),
-        Buttons      = (((int)t % 2 == 0) ? HMButton.A : HMButton.B)
-                     | ((((int)(t / 2)) % 2 == 0) ? HMButton.Guide : HMButton.None),
+        Buttons      = ((int)t % 2 == 0) ? HMButton.A : HMButton.B,
         Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),  // cycle N through NW
     };
     ctrl0.SubmitState(in state0);
 
     // Controller 1 (Xbox 360): opposite direction, different buttons.
-    // Guide routes through the XUSB companion path (btnHigh 0x40 → wButtons
-    // 0x0400) and is visible via XInputGetStateEx (ordinal 100).
     var state1 = new HMGamepadState
     {
         LeftStickX   = (float)Math.Cos(-angle),
         LeftStickY   = (float)Math.Sin(-angle),
         LeftTrigger  = (float)(0.5 + 0.5 * Math.Cos(t * 2)),
         RightTrigger = (float)(0.5 + 0.5 * Math.Sin(t * 2)),
-        Buttons      = (((int)t % 2 == 0) ? HMButton.X : HMButton.Y)
-                     | ((((int)(t / 2)) % 2 == 0) ? HMButton.Guide : HMButton.None),
+        Buttons      = ((int)t % 2 == 0) ? HMButton.X : HMButton.Y,
     };
     ctrl1.SubmitState(in state1);
 
@@ -383,7 +378,7 @@ Console.WriteLine("\n  12a. Xbox 360 Wired — via SubmitState");
         RightStickY  =  0.7f,
         LeftTrigger  =  0.8f,   // Combined Z axis in DI
         RightTrigger =  0.4f,   // Combined Z axis in DI, separate via Vx/Vy for WGI
-        Buttons      =  HMButton.A | HMButton.LeftBumper | HMButton.Guide,
+        Buttons      =  HMButton.A | HMButton.LeftBumper | HMButton.Guide,  // ALLOW-GUIDE: one-shot tour snapshot demonstrating Guide→wButtons 0x0400 routing, not a loop
         Hat          =  HMHat.North,
     };
     x360.SubmitState(in x360State);
@@ -416,7 +411,7 @@ Console.WriteLine("\n  12b. Xbox Series X|S Bluetooth — via SubmitState");
         LeftTrigger  =  1.0f,
         RightTrigger =  0.0f,
         Buttons      =  HMButton.X | HMButton.Y | HMButton.RightBumper
-                      | HMButton.Guide | HMButton.Share,
+                      | HMButton.Guide | HMButton.Share,  // ALLOW-GUIDE: one-shot tour snapshot showing Series-BT Guide via HID System Main Menu, not a loop
         Hat          =  HMHat.SouthEast,
     };
     xsBt.SubmitState(in xsBtState);

@@ -524,7 +524,17 @@ class Program
                            ?? c.Profile.Inner.ProductString
                            ?? c.Profile.Id;
             string decoded = DecodeOutputPacket(c.Profile, pkt);
-            Console.WriteLine($"  [out{idx} {label}] {pkt.Source} id=0x{pkt.ReportId:X2} {decoded}");
+            // Raw-byte dump in addition to decoded line, so the on-wire layout
+            // is inspectable directly instead of trusting the decode. Per Opus
+            // 2026-04-18: "the driver-side log is load-bearing for every
+            // hypothesis; if it's not trusted and double-checked with raw-byte
+            // dumps early, every hypothesis built on top of it inherits the
+            // uncertainty."
+            var dbg = pkt.Data.Span;
+            int n = System.Math.Min(dbg.Length, 16);
+            var raw = new System.Text.StringBuilder();
+            for (int i = 0; i < n; i++) { if (i > 0) raw.Append(' '); raw.Append(dbg[i].ToString("X2")); }
+            Console.WriteLine($"  [out{idx} {label}] {pkt.Source} id=0x{pkt.ReportId:X2} raw[{dbg.Length}B]={raw} | {decoded}");
         };
     }
 
@@ -654,14 +664,14 @@ class Program
                 RightStickY = 0f,
                 LeftTrigger  = lt,
                 RightTrigger = rt,
-                // A at 1Hz, Guide at 0.5Hz, Share at 0.33Hz — three distinct
-                // cadences so each is individually observable in any consumer
-                // (joy.cpl, browser Gamepad Tester, XInputGetStateEx). Guide
-                // routes to System Main Menu on Xbox Series descriptors and
-                // to regular button N on Sony/Xbox 360; Share routes via
-                // profile buttonMap (absent on pre-Series profiles — drops).
+                // A at 1Hz, Share at 0.33Hz — distinct cadences so each is
+                // individually observable in any consumer (joy.cpl, browser
+                // Gamepad Tester). Guide is deliberately OMITTED because the
+                // Windows shell fires a Guide-long-press haptic ack to slot 0
+                // whenever Guide is seen pressed on our virtual, which
+                // pollutes the xusbshim/HMCOMP log with `[00 00 00 7F 02]`
+                // and masks real Chromium playEffect dispatch.
                 Buttons      = (((int)t % 2 == 0) ? HMButton.A : HMButton.None)
-                             | ((((int)(t / 2)) % 2 == 0) ? HMButton.Guide : HMButton.None)
                              | ((((int)(t / 3)) % 2 == 0) ? HMButton.Share : HMButton.None),
             };
             try { ctrl.SubmitState(in state); } catch { break; }
