@@ -949,7 +949,24 @@ internal static class DeviceOrchestrator
             {
                 string? hidChildId = DeviceManager.GetHidChildId(parentId);
                 if (hidChildId != null)
+                {
                     WaitForDeviceStarted(hidChildId, timeoutMs: 5000);
+
+                    // Write ControllerIndex directly to the HID child's HW key
+                    // so xusbshim (and any future HID-child filter) can read
+                    // it without having to walk up to the parent devnode via
+                    // DEVPKEY_Device_Parent. Robustness belt-and-suspenders:
+                    // the parent walk works but this shortcut eliminates a
+                    // failure mode if WdfDeviceQueryPropertyEx returns stale
+                    // or missing parent data mid-enumeration.
+                    try
+                    {
+                        string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{hidChildId}\Device Parameters";
+                        using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
+                        dpKey?.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+                    }
+                    catch { /* non-fatal */ }
+                }
             }
         }
         DeviceProperties.FixHidChildNames(displayName, controllerIndex);

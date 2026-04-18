@@ -233,6 +233,27 @@ ReadParentIdentity(_In_ WDFDEVICE device, _Out_ PDEVICE_CTX ctx)
     ctx->VendorId        = 0x045E;
     ctx->ProductId       = 0x028E;
 
+    /* Try the simpler path first: SDK may have written ControllerIndex
+     * directly to our HID child's HW key (DeviceOrchestrator.SetupController
+     * step 4.5). If present, use it without walking up to parent. */
+    {
+        WDFKEY hkDevice;
+        if (NT_SUCCESS(WdfDeviceOpenRegistryKey(device,
+                PLUGPLAY_REGKEY_DEVICE, KEY_READ,
+                WDF_NO_OBJECT_ATTRIBUTES, &hkDevice))) {
+            UNICODE_STRING valueName;
+            RtlInitUnicodeString(&valueName, L"ControllerIndex");
+            ULONG idx = 0;
+            if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx))) {
+                ctx->ControllerIndex = idx;
+                WdfRegistryClose(hkDevice);
+                /* Still need VID/PID from SOFTWARE\HIDMaestro\Controller<N> — fall through. */
+                goto read_vidpid;
+            }
+            WdfRegistryClose(hkDevice);
+        }
+    }
+
     WDF_DEVICE_PROPERTY_DATA prop;
     WDF_DEVICE_PROPERTY_DATA_INIT(&prop, &DEVPKEY_Device_ParentLocal);
     prop.Lcid = LOCALE_NEUTRAL;
@@ -261,9 +282,11 @@ ReadParentIdentity(_In_ WDFDEVICE device, _Out_ PDEVICE_CTX ctx)
         RegCloseKey(hKey);
     }
 
+read_vidpid:
     /* Per-controller VID/PID from SOFTWARE\HIDMaestro\Controller<N>. Falls
      * back to 045E/028E if the key hasn't been written (or we're on a
      * different profile than expected for this filter's PIDs). */
+    ; // empty statement for label
     WCHAR cfgPath[128];
     WstrCopy(cfgPath, L"SOFTWARE\\HIDMaestro\\Controller", 128);
     WstrAppendUlong(cfgPath, ctx->ControllerIndex, 128);
