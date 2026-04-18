@@ -380,13 +380,33 @@ void CompanionIoControl(
                 FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
                 OPEN_ALWAYS, 0, NULL);
             if (h != INVALID_HANDLE_VALUE) {
-                char buf[80];
+                char buf[160];
                 char *p = buf;
                 const char tag[] = "[HMCOMP] IOCTL ";
                 for (int i = 0; tag[i]; i++) *p++ = tag[i];
                 for (int shift = 28; shift >= 0; shift -= 4) {
                     int n = (IoControlCode >> shift) & 0xF;
                     *p++ = (char)(n < 10 ? '0' + n : 'A' + n - 10);
+                }
+                /* For SET_STATE, also dump first 8 input bytes so we see
+                 * the motor values WGI actually sent. */
+                if (isSetState && InputBufferLength > 0) {
+                    PVOID inBuf;
+                    size_t inLen;
+                    if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(
+                            Request, 1, &inBuf, &inLen))) {
+                        *p++ = ' '; *p++ = '[';
+                        size_t n = inLen > 8 ? 8 : inLen;
+                        const UCHAR *ib = (const UCHAR *)inBuf;
+                        for (size_t i = 0; i < n; i++) {
+                            int hi = (ib[i] >> 4) & 0xF;
+                            int lo = ib[i] & 0xF;
+                            *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
+                            *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
+                            if (i + 1 < n) *p++ = ' ';
+                        }
+                        *p++ = ']';
+                    }
                 }
                 *p++ = '\r'; *p++ = '\n';
                 DWORD w;
