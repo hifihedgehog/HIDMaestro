@@ -12,16 +12,24 @@
  * existing output worker delivers it to OutputReceived — no new SDK code
  * needed.
  *
- * ControllerIndex comes from the parent devnode's HW key (set by the SDK
- * when it creates the virtual controller). The filter queries the parent's
- * instance ID via DEVPKEY_Device_Parent, then reads ControllerIndex from
- * the parent's Device Parameters key.
+ * ControllerIndex lookup: tries the HID child's own Device Parameters key
+ * first (SDK now writes it there for us — see DeviceOrchestrator step 4.5).
+ * Falls back to parent-walk via DEVPKEY_Device_Parent if the value isn't
+ * present (older SDK). Either way, the ControllerIndex determines which
+ * shared-memory section we publish to.
  *
  * Diagnostic log at C:\ProgramData\HIDMaestro\xusbshim_log.txt captures
  * every IOCTL code (+ hex dump for XUSB IOCTLs) so we know what WGI
- * actually sends through this interface.
+ * actually sends through this interface. HMCOMPANION also logs to the
+ * same file with a [HMCOMP] prefix so one log file shows BOTH paths.
  *
- * Experimental — v1-dev-experiment-xusb-child-pdo.
+ * Experimental — v1-dev-experiment-xusb-child-pdo. Branch status as of
+ * 46 commits: INF and filter structurally sound (Inf2Cat validates, zero
+ * warnings). XUSB IOCTL layer mirrors empirical xinputhid format (Version
+ * 0x0101 for Xbox 360 — NOT 0x0103 which is Xbox One territory).
+ * Definitive test requires user to start xbox-360-wired virtual and run
+ * Chromium vibrationActuator.playEffect() — see memory:project-xusbshim-
+ * test-procedure.md for the interpretation matrix.
  */
 #define WIN32_NO_STATUS
 #include <windows.h>
