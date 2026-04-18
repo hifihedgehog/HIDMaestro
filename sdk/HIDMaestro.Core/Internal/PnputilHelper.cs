@@ -33,11 +33,25 @@ internal static class PnputilHelper
 {
     /// <summary>The INF original names that belong to HIDMaestro. Used as
     /// the strict allow-list when filtering enumerated driver records.</summary>
+    /// <summary>INFs we EXPECT to be installed. IsHidMaestroDriverInstalled
+    /// requires all of these to be present.</summary>
     public static readonly string[] HidMaestroInfNames = new[]
     {
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
         "hidmaestro_xusbshim_class.inf",
+    };
+
+    /// <summary>INFs that RemoveAllHidMaestroPackages should clean up — includes
+    /// legacy/experimental names so stale packages from prior iterations
+    /// don't linger in the driver store and block reinstall.</summary>
+    public static readonly string[] HidMaestroInfNamesForCleanup = new[]
+    {
+        "hidmaestro.inf",
+        "hidmaestro_xusb.inf",
+        "hidmaestro_xusbshim_class.inf",
+        "hidmaestro_xusbshim.inf",  // legacy Extension variant
+        "hidmaestro_btnfix.inf",    // legacy btnfix experiment
     };
 
     /// <summary>One enumerated driver package record (a single block of
@@ -162,8 +176,15 @@ internal static class PnputilHelper
     /// prevents the "stale entry blocks reinstall" failure mode.</summary>
     public static void RemoveAllHidMaestroPackages()
     {
+        // Use the broader cleanup allow-list so legacy/experimental INF names
+        // (hidmaestro_xusbshim.inf, hidmaestro_btnfix.inf) also get removed.
+        var cleanup = EnumerateDrivers()
+            .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
+                     && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,
+                                                                             StringComparison.OrdinalIgnoreCase)))
+            .ToList();
         var failures = new List<(string Published, string Error)>();
-        foreach (var pkg in FindHidMaestroPackages())
+        foreach (var pkg in cleanup)
         {
             if (!DeletePackage(pkg.PublishedName, out string err))
                 failures.Add((pkg.PublishedName, err));
