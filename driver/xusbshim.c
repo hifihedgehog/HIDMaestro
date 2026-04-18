@@ -438,22 +438,40 @@ XusbShimIoDefault(
             size_t sz;
             if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &buf, &sz))) {
                 LogBytes("SET_STATE-in", (const UCHAR*)buf, sz);
-                /* Normalize to a canonical 5-byte frame with the SAME
-                 * layout HMCOMPANION publishes for IOCTL_XUSB_SET_STATE:
-                 * [slot, flags, led, lo_motor, hi_motor]. Empirically
-                 * that's what xinputhid accepts (see memory:
-                 * project-xusb-ioctl-empirical.md). Consumers (PadForge)
-                 * decode motor values from positions 3 and 4 regardless
-                 * of the incoming buffer size. */
+                /* Normalize to the same 5-byte XUSB GET_STATE-response layout
+                 * HMCOMPANION publishes and the test harness decodes:
+                 *   [0x00, 0x00, lo_motor, hi_motor, 0x00]
+                 *
+                 * Motor position in the INPUT buffer varies by the client's
+                 * view of the device type:
+                 *   - xusb22 client format: motors at in[2], in[3]
+                 *   - xinputhid client format: motors at in[3], in[4]
+                 *   (both confirmed via c:\tmp\XusbOpen probe on a live
+                 *   xinputhid-bound Xbox Series BT — fmt[0] and fmt[1] both
+                 *   accepted, see memory:project-xusb-ioctl-empirical.md)
+                 *
+                 * Strategy: pick the position where both bytes are
+                 * NON-zero OR take max of (in[2],in[3]) vs (in[3],in[4]).
+                 * When both positions have values, prefer in[3],in[4]
+                 * (xinputhid style) because xusbshim mimics xinputhid.
+                 * When only in[2],in[3] have values, use them. Output
+                 * always maps to canon[2], canon[3] = HMCOMPANION format.
+                 */
                 UCHAR canon[5] = { 0, 0, 0, 0, 0 };
                 const UCHAR *in = (const UCHAR *)buf;
+                UCHAR lo = 0, hi = 0;
                 if (sz >= 5) {
-                    canon[0] = in[0]; canon[1] = in[1]; canon[2] = in[2];
-                    canon[3] = in[3]; canon[4] = in[4];
+                    UCHAR a_lo = in[2], a_hi = in[3];  /* xusb22-style */
+                    UCHAR b_lo = in[3], b_hi = in[4];  /* xinputhid-style */
+                    if (b_lo != 0 || b_hi != 0) { lo = b_lo; hi = b_hi; }
+                    else                        { lo = a_lo; hi = a_hi; }
+                } else if (sz >= 4) {
+                    lo = in[2]; hi = in[3];
                 } else if (sz >= 2) {
-                    /* Best-effort: assume the last two bytes are motors. */
-                    canon[3] = in[sz - 2]; canon[4] = in[sz - 1];
+                    lo = in[sz - 2]; hi = in[sz - 1];
                 }
+                canon[2] = lo;
+                canon[3] = hi;
                 PublishXusbRumble(ctx, canon, 5);
             }
             WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
