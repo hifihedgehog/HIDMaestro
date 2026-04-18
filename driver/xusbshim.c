@@ -513,22 +513,25 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_INFORMATION_EX) {
-            /* Extended info — size ~20 bytes per HMCOMPANION. Return zeroes
-             * padded out; xinput1_4 uses this to detect XInput 1.4+ devices
-             * but the structure content isn't strictly required for vibration. */
-            UCHAR exInfo[20];
-            for (int i = 0; i < 20; i++) exInfo[i] = 0;
-            exInfo[0] = 0x01; exInfo[1] = 0x01;       /* Version 1.1 */
+            /* 64-byte extended info. HMCOMPANION uses the same buffer size.
+             * xinput1_4 uses this for XInput 1.4+ feature detection; returning
+             * the correct header (version + device count + VID/PID) with
+             * remaining bytes zeroed is sufficient for the gate check. */
+            UCHAR exInfo[64];
+            for (int i = 0; i < 64; i++) exInfo[i] = 0;
+            exInfo[0] = 0x03; exInfo[1] = 0x01;       /* Version 1.3 */
+            exInfo[2] = 0x01;                          /* Device count */
+            exInfo[3] = 0x01;                          /* Slot/cap marker */
             exInfo[8]  = (UCHAR)(ctx->VendorId & 0xFF);
             exInfo[9]  = (UCHAR)((ctx->VendorId >> 8) & 0xFF);
             exInfo[10] = (UCHAR)(ctx->ProductId & 0xFF);
             exInfo[11] = (UCHAR)((ctx->ProductId >> 8) & 0xFF);
             PVOID  outBuf;
             size_t outLen;
-            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 20, &outBuf, &outLen))) {
-                if (outLen > 20) outLen = 20;
-                for (size_t i = 0; i < outLen; i++) ((UCHAR*)outBuf)[i] = exInfo[i];
-                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outLen);
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outLen))) {
+                SIZE_T copy = outLen < 64 ? outLen : 64;
+                for (SIZE_T i = 0; i < copy; i++) ((UCHAR*)outBuf)[i] = exInfo[i];
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
             } else {
                 WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
             }
