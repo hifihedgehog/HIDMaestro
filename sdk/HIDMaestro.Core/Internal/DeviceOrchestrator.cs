@@ -374,7 +374,13 @@ internal static class DeviceOrchestrator
         SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
         SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
 
-        WriteWgiSoftwareRegistry(profile);
+        // DISABLED per external review: writing a DS4-cloned mapping to
+        // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
+        // for a 045E VID may confuse WGI's normal Xbox-family handling.
+        // If mainline HMCOMPANION is sufficient (Grok's analysis), this
+        // write is unneeded and potentially harmful. The method is kept
+        // below for manual invocation if future experiments need it.
+        // WriteWgiSoftwareRegistry(profile);
     }
 
     // ════════════════════════════════════════════════════════════════════
