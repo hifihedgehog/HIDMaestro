@@ -329,6 +329,38 @@ XusbShimDeviceAdd(
     CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
     LogEvent("DeviceAdd idx", ctx->ControllerIndex);
 
+    /* Log the HID child's own DEVPKEY_Device_InstanceId so we can
+     * verify at test time that the filter attached to the expected
+     * node (HID\VID_045E&PID_028E&IG_00\...) vs something unexpected. */
+    {
+        static const DEVPROPKEY DEVPKEY_Device_InstanceId_Local = {
+            { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } },
+            256
+        };
+        WDF_DEVICE_PROPERTY_DATA prop;
+        WDF_DEVICE_PROPERTY_DATA_INIT(&prop, &DEVPKEY_Device_InstanceId_Local);
+        prop.Lcid = LOCALE_NEUTRAL;
+        WCHAR id[200] = {0};
+        ULONG req = 0;
+        DEVPROPTYPE pt = 0;
+        if (NT_SUCCESS(WdfDeviceQueryPropertyEx(device, &prop, sizeof(id), id, &req, &pt))) {
+            /* Log first 64 wchars as ASCII-ish (not true UTF16->ASCII but
+             * the HID\VID_...&PID_... portion is ASCII clean). */
+            char msg[128];
+            char *p = msg;
+            const char tag[] = "InstanceId ";
+            for (int i = 0; tag[i]; i++) *p++ = tag[i];
+            int j = 0;
+            while (id[j] && j < 80) {
+                UCHAR c = (UCHAR)id[j];
+                *p++ = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+                j++;
+            }
+            *p++ = '\r'; *p++ = '\n';
+            LogLine(msg, (SIZE_T)(p - msg));
+        }
+    }
+
     NTSTATUS ifs = WdfDeviceCreateDeviceInterface(
         device, (LPGUID)&GUID_DEVINTERFACE_XUSB, NULL);
     LogEvent("XUSB-ifreg", (ULONG)ifs);
