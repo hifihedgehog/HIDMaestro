@@ -40,6 +40,7 @@ static const DEVPROPKEY DEVPKEY_Device_ParentLocal = {
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD XusbShimDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEFAULT XusbShimIoDefault;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP XusbShimDeviceCleanup;
 
 /* XUSB interface class — same GUID xinputhid registers on real Xbox HID
  * children. */
@@ -262,6 +263,7 @@ XusbShimDeviceAdd(
     WdfFdoInitSetFilter(DeviceInit);
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CTX);
+    attributes.EvtCleanupCallback = XusbShimDeviceCleanup;
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;
 
@@ -287,6 +289,15 @@ XusbShimDeviceAdd(
 
     return WdfIoQueueCreate(
         device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
+}
+
+VOID
+XusbShimDeviceCleanup(_In_ WDFOBJECT Object)
+{
+    PDEVICE_CTX ctx = GetDevCtx((WDFDEVICE)Object);
+    if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
+    if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
+    LogEvent("DeviceCleanup", ctx->ControllerIndex);
 }
 
 VOID
