@@ -79,6 +79,9 @@ static const GUID GUID_DEVINTERFACE_WGI_UNK2 = {
 #define IOCTL_XUSB_SET_STATE             0x8000A010u
 #define IOCTL_XUSB_WAIT_GUIDE_BUTTON     0x8000E00Cu
 #define IOCTL_XUSB_GET_BATTERY_INFO      0x8000E018u
+#define IOCTL_XUSB_WAIT_FOR_INPUT        0x8000E3ACu
+#define IOCTL_XUSB_GET_INFORMATION_EX    0x8000E3FCu
+#define IOCTL_XUSB_POWER_INFO            0x80006380u
 
 /* Mirror of SHARED_OUTPUT from driver.h / companion.c. Keep in sync. */
 #pragma pack(push, 1)
@@ -445,10 +448,34 @@ XusbShimIoDefault(
             }
             handledLocally = TRUE;
         }
-        else if (code == IOCTL_XUSB_WAIT_GUIDE_BUTTON) {
+        else if (code == IOCTL_XUSB_WAIT_GUIDE_BUTTON ||
+                 code == IOCTL_XUSB_WAIT_FOR_INPUT ||
+                 code == IOCTL_XUSB_POWER_INFO) {
             /* Never-completes semantics are wrong for a filter; just succeed
              * with no data — the caller will retry. Avoids hanging queues. */
             WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            handledLocally = TRUE;
+        }
+        else if (code == IOCTL_XUSB_GET_INFORMATION_EX) {
+            /* Extended info — size ~20 bytes per HMCOMPANION. Return zeroes
+             * padded out; xinput1_4 uses this to detect XInput 1.4+ devices
+             * but the structure content isn't strictly required for vibration. */
+            UCHAR exInfo[20];
+            for (int i = 0; i < 20; i++) exInfo[i] = 0;
+            exInfo[0] = 0x01; exInfo[1] = 0x01;       /* Version 1.1 */
+            exInfo[8]  = (UCHAR)(ctx->VendorId & 0xFF);
+            exInfo[9]  = (UCHAR)((ctx->VendorId >> 8) & 0xFF);
+            exInfo[10] = (UCHAR)(ctx->ProductId & 0xFF);
+            exInfo[11] = (UCHAR)((ctx->ProductId >> 8) & 0xFF);
+            PVOID  outBuf;
+            size_t outLen;
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 20, &outBuf, &outLen))) {
+                if (outLen > 20) outLen = 20;
+                for (size_t i = 0; i < outLen; i++) ((UCHAR*)outBuf)[i] = exInfo[i];
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outLen);
+            } else {
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            }
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_CAPABILITIES) {
