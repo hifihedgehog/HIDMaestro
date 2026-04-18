@@ -445,18 +445,21 @@ XusbShimDeviceAdd(
      * If any one of these is the actual gate WGI checks beyond (or
      * instead of) XUSB, registering them too covers the case. */
     {
-        /* Muse external review (2026-04-17) suggests "IG_00" for WinExInput
-         * reference (not "XI_00") so WGI correlates HID and XUSB interfaces
-         * via the shared &IG_00 portion of HardwareID. Try it here on the
-         * HID-child filter while HMCOMPANION keeps its proven "XI_00"
-         * convention — WGI sees BOTH reference strings and picks whichever
-         * correlates. If Muse is right, this is the missing gate for the
-         * HID-child vibration route. */
-        UNICODE_STRING ref0;
-        RtlInitUnicodeString(&ref0, L"IG_00");
-        NTSTATUS wex = WdfDeviceCreateDeviceInterface(
-            device, (LPGUID)&GUID_DEVINTERFACE_WINEXINPUT, &ref0);
-        LogEvent("WinEx-ifreg", (ULONG)wex);
+        /* NOT registering WinExInput on the HID child — HMCOMPANION already
+         * registers it with reference "XI_00", and a second registration
+         * here would create a duplicate symlink that could show Chromium
+         * two separate Gamepad entries for the same controller. Chromium's
+         * GamepadAdded dedupe happens downstream of the DeviceWatcher
+         * enumeration, so the safer choice is to emit WinExInput from a
+         * single devnode (HMCOMPANION) and let xusbshim focus on XUSB.
+         *
+         * Previous commit (7223667) experimented with WinExInput + "IG_00"
+         * reference here; reverted because dedupe risk outweighs uncertain
+         * correlation benefit. Muse's hypothesis untested but lower-priority
+         * than avoiding a duplicate gamepad entry.
+         */
+        NTSTATUS wex = STATUS_SUCCESS;
+        LogEvent("WinEx-ifreg-skipped", (ULONG)wex);
 
         NTSTATUS u1 = WdfDeviceCreateDeviceInterface(
             device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK1, NULL);
