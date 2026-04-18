@@ -596,8 +596,10 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_BATTERY_INFO) {
-            /* 4-byte battery info: type=1 (wired, "no battery"), level 0xFF. */
-            UCHAR bat[4] = { 0x00, 0x01, 0xFF, 0x00 };
+            /* 4-byte battery info matching companion.c exactly:
+             * [0, 1, 3, 0] — type=1 (wired), level=3 (full).
+             * Was 0xFF before; HMCOMPANION uses 3 which works. */
+            UCHAR bat[4] = { 0x00, 0x01, 0x03, 0x00 };
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 4, &outBuf, &outLen))) {
