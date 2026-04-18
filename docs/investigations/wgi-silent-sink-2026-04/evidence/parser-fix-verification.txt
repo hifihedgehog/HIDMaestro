@@ -1,0 +1,63 @@
+# Parser-fix verification — XInputTester 2D sweep, before vs after
+#
+# Bug: driver/xusbshim.c canonicalization heuristic preferred
+#      "xinputhid-style motors at in[3]/in[4]" when those bytes were non-zero.
+#      For every rumble frame on the real path, in[4] is the packet trailer
+#      (0x02), which was misidentified as the high motor value.
+#
+# Symptom: HIDMaestroTest OutputReceived hook showed "hi stuck at 0x02"
+#          regardless of right-motor slider position.
+#
+# Fix: driver/xusbshim.c:550-558 replaced heuristic with deterministic
+#      lo = in[2]; hi = in[3]; (xusb22-style, verified by XiByteProbe).
+#
+# Tool: XInputTester (third-party, uses xinput1_4.XInputSetState).
+# Log source: HIDMaestroTest emulate xbox-360-wired output (via
+#             SDK OutputReceived hook; raw[5B] dump added to the hook
+#             line for this investigation).
+
+
+## BEFORE FIX — right slider 0 → max → 0, left pinned at 0
+
+  raw[5B]=00 00 00 02 00 | XInput rumble lo=0 hi=2
+  raw[5B]=00 00 10 02 00 | XInput rumble lo=16 hi=2
+  raw[5B]=00 00 46 02 00 | XInput rumble lo=70 hi=2
+  raw[5B]=00 00 7D 02 00 | XInput rumble lo=125 hi=2
+  raw[5B]=00 00 BF 02 00 | XInput rumble lo=191 hi=2
+  raw[5B]=00 00 DF 02 00 | XInput rumble lo=223 hi=2
+  raw[5B]=00 00 FD 02 00 | XInput rumble lo=253 hi=2     ← hi STUCK at 2
+  ...
+
+  Problem: xusbshim canonicalization picked byte[3]=0xFD as "lo" and
+  byte[4]=0x02 (the trailer) as "hi". Right-motor slider was incorrectly
+  labeled as the low motor, and the packet trailer was incorrectly
+  reported as the high motor.
+
+
+## AFTER FIX — full 2D sweep, right slider then left slider
+
+  (right slider sweep 0 → max, with left still at 0)
+  raw[5B]=00 00 00 00 00 | XInput rumble lo=0 hi=0
+  raw[5B]=00 00 00 18 00 | XInput rumble lo=0 hi=24
+  raw[5B]=00 00 00 67 00 | XInput rumble lo=0 hi=103
+  raw[5B]=00 00 00 FD 00 | XInput rumble lo=0 hi=253     ← right slider → byte[3] → hi correct
+
+  (now sweeping left slider up, right at max)
+  raw[5B]=00 00 03 FD 00 | XInput rumble lo=3 hi=253
+  raw[5B]=00 00 85 FD 00 | XInput rumble lo=133 hi=253
+  raw[5B]=00 00 FD FD 00 | XInput rumble lo=253 hi=253   ← both maxed
+
+  (right slider back down, left still at max)
+  raw[5B]=00 00 FD 8D 00 | XInput rumble lo=253 hi=141
+  raw[5B]=00 00 FD 00 00 | XInput rumble lo=253 hi=0
+
+  (left slider back down)
+  raw[5B]=00 00 83 00 00 | XInput rumble lo=131 hi=0
+  raw[5B]=00 00 00 00 00 | XInput rumble lo=0 hi=0
+
+
+## Mapping confirmed post-fix
+
+  XInputTester left slider  → wLeftMotorSpeed  → byte[2] → reported "lo"
+  XInputTester right slider → wRightMotorSpeed → byte[3] → reported "hi"
+  byte[4] = packet trailer (0x00 on this path variant)

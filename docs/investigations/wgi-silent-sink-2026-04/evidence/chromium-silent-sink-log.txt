@@ -1,0 +1,26 @@
+# Chromium silent-sink log excerpt
+#
+# Captured during the 2026-04-18 18:46:04 → 18:48:00 Chromium click window.
+# User clicked "Vibration, 1 sec" on the physical Xbox 360 Wired first, then
+# clicked the same on our ROOT-enumerated UMDF2 virtual (VID 045E / PID 028E).
+# Physical rumbled (user-tactile). Virtual received only probe and idle-state
+# IOCTLs across all three instrumented driver layers — zero motor-bearing
+# SET_STATE bytes at any layer.
+#
+# Instrumentation layers:
+#   [HMCOMP] IOCTL 8000A010 <bytes>  = HMCOMPANION xusb22-replica path
+#   [timestamp] SET_STATE-in <bytes> = xusbshim xinputhid-filter path
+#   [HID-WRITE] / [HID-SETOUT] / [HID-SETFEAT] = UMDF HID output report paths
+#   (none of the HID-* appear because xbox-360-wired HID descriptor declares
+#    no output report collection — see finding.md caveats)
+#
+# Non-polling entries only (IOCTL 8000E00C GET_STATE + other probes filtered).
+
+[HMCOMP] IOCTL 8000A010 [00 0D 00 00 01]      # WGI capability probe (Chromium enumeration)
+[18:47:48.480] SET_STATE-in 00 0D 00 00 01    # same probe on xinputhid path
+[HMCOMP] IOCTL 8000A010 [00 00 00 00 02]      # idle-state clear
+[18:47:51.995] SET_STATE-in 00 00 00 00 02
+[HMCOMP] IOCTL 8000A010 [00 00 00 00 02]
+[18:47:51.995] SET_STATE-in 00 00 00 00 02
+[HMCOMP] IOCTL 8000A010 [00 0D 00 00 01]      # subsequent probe
+[18:47:59.991] SET_STATE-in 00 0D 00 00 01
