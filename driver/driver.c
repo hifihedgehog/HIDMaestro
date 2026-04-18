@@ -1207,22 +1207,25 @@ EvtIoDeviceControl(
     case IOCTL_XUSB_GET_CAPABILITIES: {
         /*
          * GamepadCapabilities0101 — 24 bytes.
-         * Input: InBaseRequest_t (3 bytes: version + deviceIndex)
+         * Wire: [0-1]Version then XINPUT_CAPABILITIES at [2]:
+         *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
+         *   [10-17]4xi16 thumb maxes [18-19]wLeftMotorSpeed
+         *   [20-21]wRightMotorSpeed [22-23]reserved.
          */
         UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
         *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
         caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
         caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF7FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
-        caps[6] = 0xFF;                /* bLeftTrigger */
-        caps[7] = 0xFF;                /* bRightTrigger */
-        *(SHORT*)&caps[8]  = 32767;    /* ThumbLX */
-        *(SHORT*)&caps[10] = 32767;    /* ThumbLY */
-        *(SHORT*)&caps[12] = 32767;    /* ThumbRX */
-        *(SHORT*)&caps[14] = 32767;    /* ThumbRY */
-        caps[22] = 0xFF;               /* bLeftMotorSpeed */
-        caps[23] = 0xFF;               /* bRightMotorSpeed */
+        *(USHORT*)&caps[6] = 0xF7FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
+        caps[8] = 0xFF;                /* bLeftTrigger */
+        caps[9] = 0xFF;                /* bRightTrigger */
+        *(SHORT*)&caps[10] = 32767;    /* ThumbLX */
+        *(SHORT*)&caps[12] = 32767;    /* ThumbLY */
+        *(SHORT*)&caps[14] = 32767;    /* ThumbRX */
+        *(SHORT*)&caps[16] = 32767;    /* ThumbRY */
+        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed */
+        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed */
         status = RequestCopyFromBuffer(Request, caps, sizeof(caps));
         break;
     }
