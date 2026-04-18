@@ -676,6 +676,17 @@ internal static class DeviceOrchestrator
                     companionDesc, IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
                 {
                     SetupDiSetDeviceRegistryPropertyW(dis, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
+
+                    // CompatibleIDs — advertises Xbox 360 XInput-compat signature
+                    // so any WGI grep of DEVPKEY_Device_CompatibleIds for "XUSB"
+                    // or "MS_COMP_XUSB10" finds a match (xusb22.inf uses these
+                    // identifiers for generic XInput-compat device matching).
+                    // Multi-SZ: each NUL-terminated, ends with extra NUL.
+                    string compat = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0USB\\Class_FF\0\0";
+                    byte[] compatBytes = Encoding.Unicode.GetBytes(compat);
+                    SetupDiSetDeviceRegistryPropertyW(dis, diHandle.AddrOfPinnedObject(),
+                        2 /*SPDRP_COMPATIBLEIDS*/, compatBytes, (uint)compatBytes.Length);
+
                     SetupDiCallClassInstaller(0x19, dis, diHandle.AddrOfPinnedObject()); // DIF_REGISTERDEVICE
                 }
                 diHandle.Free();
