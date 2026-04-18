@@ -571,6 +571,7 @@ void CompanionIoControl(
         RtlZeroMemory(infoEx, sizeof(infoEx));
         *(USHORT*)&infoEx[0] = 0x0101;
         infoEx[2] = 0x01;
+        infoEx[3] = 0x01;  /* slot/capability marker — mirror GET_INFORMATION */
         *(USHORT*)&infoEx[8] = ctx->VendorId;
         *(USHORT*)&infoEx[10] = ctx->ProductId;
         ULONG outLen = OutputBufferLength < 64 ? (ULONG)OutputBufferLength : 64;
