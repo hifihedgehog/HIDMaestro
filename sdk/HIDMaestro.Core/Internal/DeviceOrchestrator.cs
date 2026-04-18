@@ -660,7 +660,16 @@ internal static class DeviceOrchestrator
                 byte[] diBuf = new byte[32];
                 BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf, 0);
                 var diHandle = GCHandle.Alloc(diBuf, GCHandleType.Pinned);
-                string xusbHw = "root\\HIDMaestroXUSB\0\0";
+                // Multi-SZ HardwareIDs — the VID_045E&PID_028E&XI_00 alias first
+                // so DEVPKEY_Device_HardwareIds contains 'VID_045E' for any
+                // WGI check that greps for Xbox-family VID strings (Opus's
+                // 'Gate 2' hypothesis for the 045E hardcoded branch).
+                // root\HIDMaestroXUSB kept as second alias so existing
+                // enumeration paths keying on it still work. Each HwID
+                // is separately NUL-terminated; the array ends with an
+                // extra NUL (REG_MULTI_SZ).
+                string vidHw = $"root\\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&XI_00";
+                string xusbHw = vidHw + "\0" + "root\\HIDMaestroXUSB" + "\0\0";
                 byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
                 string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
                 if (SetupDiCreateDeviceInfoW(dis, "HMCompanion", ref sysGuid,
