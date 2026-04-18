@@ -12,28 +12,26 @@
 
 *Glory, honor, and praise to the Lord Jesus Christ, the source of all truth, forever and ever.*
 
-**A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.**
+A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.
 
-HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines. Builds heavily on the UMDF2 + xinputhid foundation pioneered by [Nefarius](https://nefarius.at/) with [DsHidMini](https://github.com/nefarius/DsHidMini).
+HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines. The stack builds on the UMDF2 + xinputhid approach that [Nefarius](https://nefarius.at/) used in [DsHidMini](https://github.com/nefarius/DsHidMini).
 
-## Why This Matters
+## What it replaces
 
-Every existing virtual controller solution requires you to give something up:
+- **vJoy**: needs a kernel driver and is no longer actively maintained. The existing signed drivers work, but producing new builds requires driver signing infrastructure. Devices show up as "vJoy Device", not as a real controller.
+- **ViGEmBus**: needs a kernel driver. Existing signed drivers work, but producing new builds requires an EV code signing certificate ($300+/year). The project is retired.
+- **DsHidMini**: supports 5 HID modes (including DS4 and Xbox emulation) but requires a physical DualShock 3 connected. It translates real hardware, not arbitrary input sources.
+- **VHF**: a Microsoft kernel framework. Kernel mode only.
 
-- **vJoy** needs a kernel driver and is no longer actively maintained. The existing signed drivers work, but producing new builds requires driver signing infrastructure. And it always shows up as "vJoy Device" — never as a real controller.
-- **ViGEmBus** needs a kernel driver. The existing signed drivers work well, but producing new builds requires an EV code signing certificate ($300+/year). The project is now retired.
-- **DsHidMini** supports 5 HID modes (including DS4 and Xbox emulation) but requires a physical DualShock 3 connected — it translates real hardware, not arbitrary input sources.
-- **VHF** is a Microsoft kernel framework. Kernel mode, full stop.
+HIDMaestro runs entirely in user mode. It works with locally generated self-signed certificates trusted by the target machine: no purchased certificate and no Windows test-signing boot mode required. It creates and removes controllers without rebooting. DirectInput, XInput, SDL3, and the Chrome Gamepad API see the identity and behavior the profile defines.
 
-**HIDMaestro needs none of that.** It runs entirely in user mode. It works with locally generated self-signed certificates trusted by the target machine — no purchased certificate and no Windows test-signing boot mode required. It creates and removes controllers without rebooting. And the APIs most game software actually uses — DirectInput, XInput, SDL3, Chrome Gamepad API — see the identity and behavior the profile defines.
-
-## What Makes It Different
+## Features
 
 ### No Kernel Driver
-HIDMaestro uses UMDF2 (User-Mode Driver Framework). Your driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro can't blue-screen your machine. You don't need an EV certificate. You don't need WHQL. HIDMaestro is designed to work with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
+HIDMaestro uses UMDF2 (User-Mode Driver Framework). The driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro cannot blue-screen the machine. No EV certificate, no WHQL. HIDMaestro works with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
 
 ### Exact Hardware Identity
-Choose from **225 embedded profiles** across 32 vendors — Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more — or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Choose from 225 embedded profiles across 32 vendors (Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more), or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -47,22 +45,22 @@ Most solutions get one or two APIs right. HIDMaestro targets all of them simulta
 | **WGI (GameInput)** | Proper Gamepad promotion via GameInput registry |
 
 ### Multi-Controller
-Spin up multiple virtual controllers simultaneously with no hard limit — tested with 6 mixed (2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without limit.
+Multiple virtual controllers run simultaneously with no hard limit. Tested with 6 mixed (2x Xbox Series BT, 2x Xbox 360 Wired, 2x DualSense) with correct per-controller ordering across all APIs. XInput caps at 4 slots for Xbox-family profiles; non-Xbox profiles are visible through DInput/HIDAPI/WGI/RawInput/Browser without that limit.
 
 ### Hot-Plug
-Create and remove controllers without reboots. Each controller is independently disposable — remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total.
+Create and remove controllers without reboots. Each controller is independently disposable: remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total.
 
 ### Profile-Based
-Every controller is a JSON file. VID, PID, descriptor, trigger mode, connection type — all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
+Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
-### Custom Controllers — Build or Modify Any Device
-HIDMaestro goes beyond fixed profiles. Using the public `HidDescriptorBuilder` and `HMProfileBuilder` APIs, consumers can:
+### Custom Controllers: build or modify any device
+Using the public `HidDescriptorBuilder` and `HMProfileBuilder` APIs, consumers can:
 
-- **Clone and modify** an existing profile — e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
-- **Build entirely new controllers from scratch** — define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
-- **Spoof any controller ever made** — if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
+- **Clone and modify** an existing profile: e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
+- **Build new controllers from scratch**: define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
+- **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
 
-This is what vJoy always wanted to be but couldn't: an SDK for fully custom virtual controllers that masquerade as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
+The result is an SDK for fully custom virtual controllers that present as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
 
 ```csharp
 // Clone a DualSense and add a button
@@ -95,23 +93,21 @@ var stick = new HMProfileBuilder()
 using var ctrl2 = ctx.CreateController(stick);
 ```
 
-## Novel Techniques
+## Techniques
 
-HIDMaestro uses several techniques we haven't seen documented elsewhere in the virtual controller space.
+A few HIDMaestro techniques that are not well documented elsewhere in the virtual controller space.
 
 ### Velocity Usage Descriptor Trick
 
-**The technique that makes Xbox 360 trigger fidelity possible across all APIs.**
+Real Xbox 360 controllers have a combined trigger axis (Z) in DirectInput: both triggers share one axis. Browsers and WGI need separate trigger values. Previous solutions had to choose: correct DI (5 axes, combined) or correct browser (separate triggers, 6 axes).
 
-Real Xbox 360 controllers have a combined trigger axis (Z) in DirectInput — both triggers share one axis. But browsers and WGI need separate trigger values. Every previous solution had to choose: correct DI (5 axes, combined) or correct browser (separate triggers, 6 axes).
+HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput does not map velocity usages to any axis slot, so it sees 5 axes. GameInput/WGI enumerates them as additional axes and reads separate trigger data via the GameInput registry mapping.
 
-HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput doesn't map velocity usages to any axis slot — it sees 5 axes. GameInput/WGI enumerates them as additional axes and reads real separate trigger data via the GameInput registry mapping.
-
-**Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.**
+Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.
 
 ### BTHLEDEVICE Bus Type Spoofing
 
-HIDAPI detects Bluetooth controllers by checking for `BTHLEDEVICE` in the device's CompatibleIDs. HIDMaestro sets this property from user mode during device creation — no Bluetooth hardware, no kernel bus driver.
+HIDAPI detects Bluetooth controllers by checking for `BTHLEDEVICE` in the device's CompatibleIDs. HIDMaestro sets this property from user mode during device creation, without Bluetooth hardware and without a kernel bus driver.
 
 SDL3 then uses its Bluetooth-specific controller parsing path, which handles the descriptor correctly. Without this spoof, SDL3's default parser produces zeros for certain virtual device configurations.
 
@@ -181,7 +177,7 @@ User-Mode Test App
 - **XInput** ← XUSB GET_STATE ← companion reads GipData from shared memory
 - **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
 - **Browser** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
-- **Bluetooth ID** — HIDAPI checks CompatibleIDs, reports bus_type=BT
+- **Bluetooth ID**: HIDAPI checks CompatibleIDs, reports bus_type=BT
 
 ## Getting Started
 
@@ -191,7 +187,7 @@ Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10
 # Smallest possible SDK consumer (drop-in quickstart)
 dotnet run --project example\SdkDemo
 
-# Full test app — self-contained: cert + build + sign + install all automatic
+# Full test app (self-contained: cert + build + sign + install all automatic)
 cd test
 dotnet build -c Debug
 bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
@@ -253,7 +249,7 @@ The descriptor field contains the raw HID report descriptor as hex. The test app
 
 Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a locally generated self-signed certificate added to the machine's Root and TrustedPublisher stores (no `bcdedit /set testsigning` required). Each profile was deployed via the test app and validated with `scripts/verify.py` plus manual verification in joy.cpl, PadForge/SDL3, Chrome Gamepad API, and XInput state readers.
 
-Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense) — all 6 APIs report correct per-controller identity and ordering. Real Microsoft Xbox Series X|S BT controller tested side-by-side: virtual and real exhibit byte-identical behavior across all HID class APIs.
+Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series BT + 2x Xbox 360 Wired + 2x DualSense): all 6 APIs report correct per-controller identity and ordering. Real Microsoft Xbox Series X|S BT controller tested side-by-side: virtual and real exhibit byte-identical behavior across all HID class APIs.
 
 ### Summary
 
@@ -296,19 +292,19 @@ Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series 
 
 ### Screenshots
 
-**Xbox Series X|S Bluetooth** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+**Xbox Series X|S Bluetooth** in Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3:
 ![Xbox Series BT across all tools](docs/screenshot-xbox-series-bt.png)
 
-**Xbox 360 Wired** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+**Xbox 360 Wired** in Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3:
 ![Xbox 360 Wired across all tools](docs/screenshot-xbox-360-wired.png)
 
-**DualSense (PS5)** — Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3
+**DualSense (PS5)** in Device Manager, joy.cpl, Chrome Gamepad Tester, PadForge/SDL3:
 ![DualSense across all tools](docs/screenshot-dualsense.png)
 
 ### Tool Output Logs
 
 <details>
-<summary>HIDAPI enumeration — Xbox 360 Wired (click to expand)</summary>
+<summary>HIDAPI enumeration: Xbox 360 Wired (click to expand)</summary>
 
 ```
 VID=0x045E PID=0x028E
@@ -321,7 +317,7 @@ VID=0x045E PID=0x028E
 </details>
 
 <details>
-<summary>HIDAPI enumeration — Xbox Series BT (click to expand)</summary>
+<summary>HIDAPI enumeration: Xbox Series BT (click to expand)</summary>
 
 ```
 VID=0x045E PID=0x0B13
@@ -332,7 +328,7 @@ VID=0x045E PID=0x0B13
 </details>
 
 <details>
-<summary>XInput state — Xbox 360 Wired (click to expand)</summary>
+<summary>XInput state: Xbox 360 Wired (click to expand)</summary>
 
 ```
 Slot 0: Connected  LT=87 RT=87 LX=3080 LY=29988 Buttons=0x1000
@@ -343,7 +339,7 @@ Slot 3: Not connected
 </details>
 
 <details>
-<summary>PnP device tree — Xbox 360 Wired (click to expand)</summary>
+<summary>PnP device tree: Xbox 360 Wired (click to expand)</summary>
 
 ```
 Status Class        FriendlyName                  InstanceId
@@ -374,7 +370,7 @@ WinExInput Interface:
 
 | Operation | Measured Time |
 |-----------|--------------|
-| Cold start (first run — cert + sign + install + create 1) | ~18s |
+| Cold start (first run: cert + sign + install + create 1) | ~18s |
 | Warm start, single controller (drivers cached) | **~200ms** |
 | Warm start, 6 mixed controllers (sequential) | **~3.5s** |
 | Single dispose: plain HID (DualSense, wheels, etc.) | **~200ms** |
@@ -382,13 +378,13 @@ WinExInput Interface:
 | Single dispose: Xbox Series BT (xinputhid filter) | ~11s |
 | 6-controller mixed cleanup (sequential) | ~33s (dominated by Xbox teardown) |
 
-Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready — zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
+Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready. Zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
 
 ### Profile Architecture Groups and Teardown Timing
 
 Disposal speed depends on which kernel-side drivers are in the device stack. Each additional driver in the stack adds its own PnP query-remove handshake, handle release, and notification cascade. HIDMaestro profiles fall into three architecture groups with dramatically different teardown characteristics:
 
-#### 1. Plain HID — generic gamepads, wheels, HOTAS, flight sticks (~200ms)
+#### 1. Plain HID: generic gamepads, wheels, HOTAS, flight sticks (~200ms)
 
 Profiles where `driverMode` is not `"xinputhid"` and the VID is not Microsoft (`0x045E`). Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 225-profile catalog.
 
@@ -399,7 +395,7 @@ ROOT\VID_054C&PID_0CE6\NNNN          ← our UMDF2 driver (mshidumdf host)
 
 **Lightest stack.** One `DIF_REMOVE` on the ROOT parent tears down the entire tree. No XUSB companion device, no Microsoft upper filter. Creation ~200ms, disposal ~200ms.
 
-#### 2. Non-xinputhid Xbox — Xbox 360 Wired (~5.7s)
+#### 2. Non-xinputhid Xbox: Xbox 360 Wired (~5.7s)
 
 Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is delivered via a separate HMCOMPANION device running `HMXInput.dll` (XUSB companion).
 
@@ -413,9 +409,9 @@ ROOT\HMCOMPANION\NNNN                ← XUSB companion (HMXInput.dll)
 
 **Medium stack.** Three devices to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~5.7s.
 
-#### 3. xinputhid Xbox — Xbox Series X|S Bluetooth (~11s)
+#### 3. xinputhid Xbox: Xbox Series X|S Bluetooth (~11s)
 
-Profiles with `driverMode: "xinputhid"`. These match `xinputhid.inf [GIP_Hid]` by hardware ID (`HID\VID_045E&PID_0B13&IG_00`), which binds Microsoft's `xinputhid.sys` as an upper filter on the HID child. xinputhid provides XInput delivery + 16-button descriptor synthesis natively — no XUSB companion needed, single Device Manager entry.
+Profiles with `driverMode: "xinputhid"`. These match `xinputhid.inf [GIP_Hid]` by hardware ID (`HID\VID_045E&PID_0B13&IG_00`), which binds Microsoft's `xinputhid.sys` as an upper filter on the HID child. xinputhid provides XInput delivery + 16-button descriptor synthesis natively: no XUSB companion needed, single Device Manager entry.
 
 ```
 ROOT\VID_045E&PID_0B13&IG_00\NNNN    ← our UMDF2 driver (mshidumdf host)
@@ -425,7 +421,7 @@ ROOT\VID_045E&PID_0B13&IG_00\NNNN    ← our UMDF2 driver (mshidumdf host)
         └─ 16-button HID synthesis
 ```
 
-**Heaviest stack.** xinputhid is a Microsoft inbox kernel filter driver. Its teardown goes through the full PnP query-remove → class installer → filter unload chain. This is entirely controlled by Microsoft's driver — HIDMaestro cannot speed it up. Creation ~200ms, disposal ~11s.
+**Heaviest stack.** xinputhid is a Microsoft inbox kernel filter driver. Its teardown goes through the full PnP query-remove → class installer → filter unload chain. This is entirely controlled by Microsoft's driver; HIDMaestro cannot speed it up. Creation ~200ms, disposal ~11s.
 
 #### Why this matters for consumers
 
@@ -441,7 +437,7 @@ A common assumption is that virtual game controllers require kernel-mode drivers
 
 - **HID class driver is already in the kernel.** Windows ships `mshidumdf.sys` which acts as a kernel-mode HID minidriver proxy. Our UMDF2 DLL runs in user mode but the HID class stack sees a real HID device.
 - **XInput discovery uses device interfaces, not bus type.** `xinput1_4.dll` finds controllers through the XUSB device interface GUID. A UMDF2 driver can register this interface from user mode.
-- **GameInput reads HID reports, not driver internals.** WGI/GameInput reads from the HID preparsed data and report descriptors — it doesn't care whether the underlying driver is kernel or user mode.
+- **GameInput reads HID reports, not driver internals.** WGI/GameInput reads from the HID preparsed data and report descriptors; it does not care whether the underlying driver is kernel or user mode.
 - **SDL3 and HIDAPI check device paths and attributes.** Bus type, VID/PID, and device path strings are all settable from user mode via SetupDI and CM APIs.
 
 The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as children of a bus, or intercept internal kernel IOCTLs. HIDMaestro works around this by using a companion device for XUSB and root-enumerated device nodes for the HID stack.
@@ -450,9 +446,9 @@ The only things UMDF2 *cannot* do: create PDOs (Physical Device Objects) as chil
 
 - **Output passthrough is delivered but not routed to hardware.** The driver accepts rumble/haptics/FFB SET_STATE IOCTLs and the SDK raises `HMController.OutputReceived` events to the consumer application. Routing those events to a physical controller is the consumer's responsibility (e.g. PadForge handles this).
 - **Auth-chip controllers.** Some platforms (PS4/PS5 online, Nintendo Switch Online) require cryptographic authentication from the controller hardware. HIDMaestro cannot replicate authentication chips.
-- **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output — vendor extensions require per-controller work.
+- **Vendor-specific feature reports.** Some controllers use proprietary feature reports for calibration, LED control, or firmware updates. HIDMaestro profiles currently cover standard input/output; vendor extensions require per-controller work.
 - **XUSB companion creates a second device node** for non-xinputhid Xbox profiles (e.g. Xbox 360 Wired). Real Xbox controllers have XUSB and HID on the same PDO. HIDMaestro uses a separate companion device because mshidumdf suppresses XUSB IOCTLs. This is invisible to applications but visible in Device Manager. Xbox Series BT profiles use xinputhid natively and do not need a companion.
-- **HID class APIs are event-driven, not state-driven.** DirectInput, HIDAPI, WGI, and RawInput only see state changes that occur after a consumer opens the device. Buttons held *before* a consumer opens are invisible until released and re-pressed. This is standard Windows HID class behavior, not a HIDMaestro limitation — tested and confirmed: a real Microsoft Xbox Series X|S BT controller exhibits byte-identical behavior (holding A before opening joy.cpl shows A as not pressed). XInput is the exception (always-on, polled by the OS).
+- **HID class APIs are event-driven, not state-driven.** DirectInput, HIDAPI, WGI, and RawInput only see state changes that occur after a consumer opens the device. Buttons held *before* a consumer opens are invisible until released and re-pressed. This is standard Windows HID class behavior, not a HIDMaestro limitation. Tested and confirmed: a real Microsoft Xbox Series X|S BT controller exhibits byte-identical behavior (holding A before opening joy.cpl shows A as not pressed). XInput is the exception (always-on, polled by the OS).
 ## How to Reproduce the Validation
 
 Each validation result above was produced with these tools:
@@ -481,7 +477,7 @@ To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python sc
 | **XUSB Companion** | A separate UMDF2 device (`HMXInput.dll`) that handles XUSB IOCTLs for XInput. Needed because `mshidumdf` suppresses XUSB on HID devices. |
 | **GameInput mapping** | Registry entries at `HKLM\...\GameInput\Devices\{VID}{PID}...` that tell WGI how to map HID axes/buttons to the Gamepad interface. |
 | **&IG_** | "Interface Group" marker in Xbox device paths. Chrome and HIDAPI skip devices with this in the path; SDL3 falls through to its RawInput backend. |
-| **Vx/Vy** | HID velocity usages (0x40/0x41). Invisible to DirectInput's axis mapper but enumerated by GameInput — used to carry separate trigger values. |
+| **Vx/Vy** | HID velocity usages (0x40/0x41). Invisible to DirectInput's axis mapper but enumerated by GameInput; used to carry separate trigger values. |
 | **mshidumdf** | Microsoft's kernel-mode HID minidriver proxy that hosts UMDF2 HID drivers. |
 
 ## Security and Scope
@@ -495,13 +491,13 @@ HIDMaestro replicates the public-facing identity and input/output behavior of ga
 
 ## Credits
 
-- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by [Nefarius Software Solutions](https://nefarius.at/) — HIDMaestro builds heavily on the UMDF2 + xinputhid foundation that Nefarius pioneered with DsHidMini. They proved that a user-mode driver framework could replace kernel-mode drivers for game controller emulation on Windows, and their architecture — `mshidumdf` as the kernel-side HID proxy, `WUDFRd` as the reflector, xinputhid as the XInput bridge — is the bedrock that HIDMaestro's entire virtual controller stack is built on. Without DsHidMini's trailblazing work, this project would not exist.
-- **[HIDAPI](https://github.com/libusb/hidapi)** — Bus type detection behavior that informed the BTHLEDEVICE spoofing technique.
-- **[SDL3](https://github.com/libsdl-org/SDL)** — Multi-backend fallback behavior that informed the &IG_ enumerator trick. SDL3 is not a dependency — HIDMaestro is validated against it.
+- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by [Nefarius Software Solutions](https://nefarius.at/). HIDMaestro builds on the UMDF2 + xinputhid approach that Nefarius used in DsHidMini. DsHidMini demonstrated that a user-mode driver framework can replace kernel-mode drivers for game controller emulation on Windows. The same architecture (`mshidumdf` as the kernel-side HID proxy, `WUDFRd` as the reflector, xinputhid as the XInput bridge) is the foundation HIDMaestro's virtual controller stack is built on.
+- **[HIDAPI](https://github.com/libusb/hidapi)**: bus type detection behavior informed the BTHLEDEVICE spoofing technique.
+- **[SDL3](https://github.com/libsdl-org/SDL)**: multi-backend fallback behavior informed the &IG_ enumerator trick. SDL3 is not a dependency; HIDMaestro is validated against it.
 
 ## Donations
 
-Knowing HIDMaestro is useful is reward enough. If you truly insist on donating, please donate to your charity of choice and bless humanity. If you can't think of one, consider [Humanitarian Services of The Church of Jesus Christ of Latter-day Saints](https://philanthropies.churchofjesuschrist.org/humanitarian-services). Also consider donating directly to the upstream projects listed above — they made all of this possible.
+Knowing HIDMaestro is useful is reward enough. If you truly insist on donating, please donate to your charity of choice and bless humanity. If you can't think of one, consider [Humanitarian Services of The Church of Jesus Christ of Latter-day Saints](https://philanthropies.churchofjesuschrist.org/humanitarian-services). Also consider donating directly to the upstream projects listed above; they made all of this possible.
 
 **My promise:** HIDMaestro will never become paid, freemium, or Patreon early-access paywalled. Free means free.
 
