@@ -397,13 +397,17 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_INFORMATION) {
-            /* 12-byte GetInformation reply: XUSB 1.1, 1 device, VID/PID
-             * from our per-controller registry config so WGI's Xbox-family
-             * gating (if it keys on VID==0x045E) sees the right identity. */
+            /* 12-byte GetInformation reply matching xinputhid's format
+             * empirically observed 2026-04-17 on a live Xbox Series BT:
+             *   bytes: 03 01 01 01 00 00 00 00 VID_lo VID_hi PID_lo PID_hi
+             * Version 0x0103 (1.3), device count 1, byte[3]=0x01 (maybe slot).
+             * Original HMCOMPANION uses v1.1 — xinputhid uses v1.3; xinput1_4
+             * may accept both but we mirror xinputhid since that's what works. */
             UCHAR info[12];
             for (int i = 0; i < 12; i++) info[i] = 0;
-            info[0] = 0x01; info[1] = 0x01;       /* Version 1.1 */
+            info[0] = 0x03; info[1] = 0x01;       /* Version 1.3 */
             info[2] = 0x01;                        /* Device count */
+            info[3] = 0x01;                        /* Slot/capability marker */
             info[8]  = (UCHAR)(ctx->VendorId & 0xFF);
             info[9]  = (UCHAR)((ctx->VendorId >> 8) & 0xFF);
             info[10] = (UCHAR)(ctx->ProductId & 0xFF);
