@@ -674,6 +674,24 @@ internal static class DeviceOrchestrator
                             if (dpKey.GetValue("ControllerIndex") == null)
                             {
                                 dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+
+                                // Align HMCOMPANION's ContainerID with the main ROOT device's
+                                // deterministic GUID so WGI sees main HID + HMCOMPANION as ONE
+                                // physical device rather than two separate containers. Codex
+                                // flagged split-container topology as a plausible remaining
+                                // friction for WGI's put_Vibration dispatch selecting the right
+                                // provider. Without this, HMCOMPANION's XUSB interface lives in
+                                // a different container than the HID gamepad WGI promotes, and
+                                // some WGI paths route vibration by container ownership.
+                                //
+                                // Format matches DeviceNodeCreator's main-device ContainerID
+                                // write: {48494430-4D41-4553-5452-4F00000000<idx:X2>} =
+                                // "HIDMAESTRO" ASCII + index byte.
+                                string containerGuid = $"{{48494430-4D41-4553-5452-4F00000000{controllerIndex:X2}}}";
+                                string enumRegPath = $@"SYSTEM\CurrentControlSet\Enum\{candidate}";
+                                using (var devKey = Registry.LocalMachine.OpenSubKey(enumRegPath, writable: true))
+                                    devKey?.SetValue("ContainerID", containerGuid, RegistryValueKind.String);
+
                                 xusbInstId = candidate;
                                 break;
                             }
