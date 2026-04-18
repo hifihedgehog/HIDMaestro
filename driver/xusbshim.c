@@ -375,6 +375,41 @@ XusbShimIoDefault(
             }
             handledLocally = TRUE;
         }
+        else if (code == IOCTL_XUSB_GET_LED_STATE) {
+            /* 3-byte LED state: led num 0, blink 0, initial state 0x06
+             * (matches HMCOMPANION's response). */
+            UCHAR led[3] = { 0x00, 0x00, 0x06 };
+            PVOID  outBuf;
+            size_t outLen;
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 3, &outBuf, &outLen))) {
+                if (outLen > 3) outLen = 3;
+                for (size_t i = 0; i < outLen; i++) ((UCHAR*)outBuf)[i] = led[i];
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outLen);
+            } else {
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            }
+            handledLocally = TRUE;
+        }
+        else if (code == IOCTL_XUSB_GET_BATTERY_INFO) {
+            /* 4-byte battery info: type=1 (wired, "no battery"), level 0xFF. */
+            UCHAR bat[4] = { 0x00, 0x01, 0xFF, 0x00 };
+            PVOID  outBuf;
+            size_t outLen;
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 4, &outBuf, &outLen))) {
+                if (outLen > 4) outLen = 4;
+                for (size_t i = 0; i < outLen; i++) ((UCHAR*)outBuf)[i] = bat[i];
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outLen);
+            } else {
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            }
+            handledLocally = TRUE;
+        }
+        else if (code == IOCTL_XUSB_WAIT_GUIDE_BUTTON) {
+            /* Never-completes semantics are wrong for a filter; just succeed
+             * with no data — the caller will retry. Avoids hanging queues. */
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+            handledLocally = TRUE;
+        }
         else if (code == IOCTL_XUSB_GET_CAPABILITIES) {
             /* 24-byte capabilities: Gamepad type/subtype with full button mask
              * + vibration advertised. Mirrors HMCOMPANION's response. */
