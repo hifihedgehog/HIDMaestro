@@ -774,7 +774,13 @@ internal static class DeviceOrchestrator
         byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
 
         foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
+            // HMCOMPANION enumerator added per gap analysis item #6:
+            // WGI may check DEVPKEY_Device_BusTypeGuid on the XUSB-interface-
+            // providing devnode, expecting GUID_BUS_TYPE_USB for Xbox 360
+            // hardware. HMCOMPANION is the primary XUSB source for non-xinputhid
+            // Xbox profiles; mark it as USB bus type so that check passes.
+            "HMCOMPANION" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
