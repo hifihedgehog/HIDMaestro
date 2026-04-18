@@ -58,7 +58,11 @@ AddReg = XusbShim_AddReg
 HKR,,"UpperFilters",0x00010008,"WUDFRd"
 
 [XusbShim_Install.NT.Services]
-AddService = WUDFRd,0x000001fa,WUDFRD_Service
+; Default flag (no SPSVCINST_ASSOCSERVICE) — we're an upper filter, NOT the
+; function driver. HidClass remains function driver. Match xinputhid.inf's
+; filter-service pattern: `AddService=xinputhid,,XInput_HidService` with no
+; middle-field flag. Empty middle field = default behavior, purely filter.
+AddService = WUDFRd,,WUDFRD_Service
 
 [WUDFRD_Service]
 DisplayName    = %WudfRdDesc%
