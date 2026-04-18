@@ -108,6 +108,7 @@ typedef struct _DEVICE_CTX {
     PVOID  OutputMemPtr;
     ULONG  OutputSeqNoLocal;
     ULONG  OutputWriteCount;
+    ULONG  PacketCount;            /* increments per GET_STATE so xinput1_4 detects state-change */
 } DEVICE_CTX, *PDEVICE_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CTX, GetDevCtx)
@@ -547,8 +548,14 @@ XusbShimIoDefault(
             for (int i = 0; i < 29; i++) state[i] = 0;
             state[0] = 0x03; state[1] = 0x01;  /* Version 1.3 */
             state[2] = 0x01;                    /* CONNECTED */
-            /* packet counter at offset 5 would normally increment; 0 is OK
-             * because xinput1_4 uses it to detect state changes, not absolute */
+            /* Packet counter at offset 5 — xinput1_4 uses this to detect
+             * state changes. Increment per poll so xinput1_4 believes input
+             * is changing (even if it's not) and keeps the device active. */
+            ctx->PacketCount++;
+            state[5] = (UCHAR)(ctx->PacketCount & 0xFF);
+            state[6] = (UCHAR)((ctx->PacketCount >> 8) & 0xFF);
+            state[7] = (UCHAR)((ctx->PacketCount >> 16) & 0xFF);
+            state[8] = (UCHAR)((ctx->PacketCount >> 24) & 0xFF);
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outLen))) {
