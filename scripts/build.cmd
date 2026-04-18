@@ -118,8 +118,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
     -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf"
 if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
     -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf"
-if exist "%DRIVER_DIR%\hidmaestro_xusbshim.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
-    -Source "%DRIVER_DIR%\hidmaestro_xusbshim.inf" -Dest "%OUT_DIR%\hidmaestro_xusbshim.inf"
+if exist "%DRIVER_DIR%\hidmaestro_xusbshim_class.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro_xusbshim_class.inf" -Dest "%OUT_DIR%\hidmaestro_xusbshim_class.inf"
 
 echo.
 echo BUILD SUCCEEDED: %OUT_DIR%\%DRIVER_NAME%.dll

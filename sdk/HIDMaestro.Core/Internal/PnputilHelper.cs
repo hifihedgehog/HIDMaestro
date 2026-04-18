@@ -37,7 +37,7 @@ internal static class PnputilHelper
     {
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-        "hidmaestro_xusbshim.inf",
+        "hidmaestro_xusbshim_class.inf",
     };
 
     /// <summary>One enumerated driver package record (a single block of

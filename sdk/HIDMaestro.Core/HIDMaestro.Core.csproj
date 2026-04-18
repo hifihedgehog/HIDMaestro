@@ -39,7 +39,7 @@
       <_HMDriverFiles Include="$(HMBuildDir)HMXusbShim.dll" Condition="Exists('$(HMBuildDir)HMXusbShim.dll')" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro.inf" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusb.inf" />
-      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusbshim.inf" Condition="Exists('$(HMBuildDir)hidmaestro_xusbshim.inf')" />
+      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusbshim_class.inf" Condition="Exists('$(HMBuildDir)hidmaestro_xusbshim_class.inf')" />
 
       <!-- signtool.exe + its SXS dep tree (from WDK x64) -->
       <_HMSigntool Include="$(HMWdkBin)x64\signtool.exe" />
