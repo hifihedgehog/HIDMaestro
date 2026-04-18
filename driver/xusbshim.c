@@ -71,6 +71,15 @@ static const GUID GUID_DEVINTERFACE_WGI_UNK2 = {
     { 0x9C, 0x4D, 0x91, 0x47, 0xE5, 0xAC, 0x98, 0xE0 }
 };
 
+/* {0C320FF7-BD9B-42B6-BDAF-49FEB9C91649} — empirically registered by
+ * xinputhid on Xbox Series BT HID children. Semantically unknown (appears
+ * on non-gamepad devices too) but match-replicating what a known-working
+ * xinputhid-bound device exposes can't hurt. */
+static const GUID GUID_DEVINTERFACE_XINPUTHID_EXTRA = {
+    0x0C320FF7, 0xBD9B, 0x42B6,
+    { 0xBD, 0xAF, 0x49, 0xFE, 0xB9, 0xC9, 0x16, 0x49 }
+};
+
 /* XUSB IOCTL codes (public RE of xusb22.sys / xinputhid.sys). */
 /* Canonical XUSB IOCTL codes (mirror companion.c). I had these off-by-one
  * in earlier xusbshim commits which caused every GET_CAPABILITIES probe
@@ -426,6 +435,10 @@ XusbShimDeviceAdd(
         NTSTATUS u2 = WdfDeviceCreateDeviceInterface(
             device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK2, NULL);
         LogEvent("WGI-Unk2-ifreg", (ULONG)u2);
+
+        NTSTATUS ux = WdfDeviceCreateDeviceInterface(
+            device, (LPGUID)&GUID_DEVINTERFACE_XINPUTHID_EXTRA, NULL);
+        LogEvent("xhidExtra-ifreg", (ULONG)ux);
     }
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
