@@ -69,7 +69,7 @@ public static class DriverBuilder
         "HMXusbShim.dll",
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-        "hidmaestro_xusbshim.inf",
+        "hidmaestro_xusbshim_class.inf",
 
         // signtool.exe + its SXS dep tree (x64)
         "signtool.exe",
@@ -250,7 +250,7 @@ public static class DriverBuilder
         string pnputil = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
-        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf", "hidmaestro_xusbshim.inf" })
+        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf", "hidmaestro_xusbshim_class.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
@@ -261,7 +261,7 @@ public static class DriverBuilder
             // of whether pnputil marks the install as successful, so we can
             // tell at a glance if the Extension INF applied to matching
             // HID children or silently fell through.
-            if (inf == "hidmaestro_xusbshim.inf")
+            if (inf == "hidmaestro_xusbshim_class.inf")
             {
                 Console.WriteLine($"    [xusbshim] pnputil rc={rc}");
                 foreach (var line in output.Split('\n'))
@@ -277,7 +277,7 @@ public static class DriverBuilder
                 // xusbshim failure is non-fatal — if the Extension INF doesn't
                 // apply, the rest of the install flow still works and we just
                 // lose the experimental filter. Log and continue.
-                if (inf == "hidmaestro_xusbshim.inf")
+                if (inf == "hidmaestro_xusbshim_class.inf")
                 {
                     Console.WriteLine($"    [xusbshim] install reported failure but continuing " +
                                       $"(main driver + companion unaffected)");
