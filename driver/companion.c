@@ -435,17 +435,30 @@ void CompanionIoControl(
     }
 
     case IOCTL_XUSB_GET_CAPABILITIES: {
-        /* GamepadCapabilities0101 — 24 bytes */
+        /* GamepadCapabilities0101 — 24-byte wire: [0-1]Version, then the
+         * XINPUT_CAPABILITIES struct starting at [2]:
+         *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
+         *   [10-17]sThumbLX/LY/RX/RY (4xi16) [18-19]wLeftMotorSpeed
+         *   [20-21]wRightMotorSpeed [22-23]reserved.
+         *
+         * Prior bug: motors were at [22-23] and wButtons at [4-5]. WGI
+         * read motor maxes from [18-21] -> zeros -> ForceFeedbackMotors=0
+         * -> silently dropped put_Vibration. */
         UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
-        *(USHORT*)&caps[0] = 0x0101;
-        caps[2] = 0x01; /* XINPUT_DEVTYPE_GAMEPAD */
-        caps[3] = 0x01; /* XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF7FF; /* wButtons mask — includes Guide (0x0400) */
-        caps[6] = 0xFF; caps[7] = 0xFF;
-        *(SHORT*)&caps[8]  = 32767; *(SHORT*)&caps[10] = 32767;
-        *(SHORT*)&caps[12] = 32767; *(SHORT*)&caps[14] = 32767;
-        caps[22] = 0xFF; caps[23] = 0xFF;
+        *(USHORT*)&caps[0]  = 0x0101;       /* Version 1.1 */
+        caps[2] = 0x01;                      /* XINPUT_DEVTYPE_GAMEPAD */
+        caps[3] = 0x01;                      /* XINPUT_DEVSUBTYPE_GAMEPAD */
+        *(USHORT*)&caps[4]  = 0x0001;       /* Flags = XINPUT_CAPS_FFB_SUPPORTED */
+        *(USHORT*)&caps[6]  = 0xF7FF;       /* wButtons mask */
+        caps[8]  = 0xFF;                     /* bLeftTrigger max */
+        caps[9]  = 0xFF;                     /* bRightTrigger max */
+        *(SHORT*)&caps[10] = 32767;         /* sThumbLX max */
+        *(SHORT*)&caps[12] = 32767;         /* sThumbLY max */
+        *(SHORT*)&caps[14] = 32767;         /* sThumbRX max */
+        *(SHORT*)&caps[16] = 32767;         /* sThumbRY max */
+        *(USHORT*)&caps[18] = 0xFFFF;       /* wLeftMotorSpeed max */
+        *(USHORT*)&caps[20] = 0xFFFF;       /* wRightMotorSpeed max */
         CopyToRequest(Request, caps, 24);
         break;
     }

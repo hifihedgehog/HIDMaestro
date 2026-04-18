@@ -537,22 +537,20 @@ XusbShimIoDefault(
                  *   xinputhid-bound Xbox Series BT — fmt[0] and fmt[1] both
                  *   accepted, see memory:project-xusb-ioctl-empirical.md)
                  *
-                 * Strategy: pick the position where both bytes are
-                 * NON-zero OR take max of (in[2],in[3]) vs (in[3],in[4]).
-                 * When both positions have values, prefer in[3],in[4]
-                 * (xinputhid style) because xusbshim mimics xinputhid.
-                 * When only in[2],in[3] have values, use them. Output
-                 * always maps to canon[2], canon[3] = HMCOMPANION format.
+                 * Verified empirically 2026-04-18 via deterministic
+                 * XInputSetState probe (wLeft=0xFFFF,wRight=0 → `00 00 FF 00 02`;
+                 * wLeft=0,wRight=0xFFFF → `00 00 00 FF 02`; wLeft=0x8080,
+                 * wRight=0x4040 → `00 00 80 40 02`): wire layout on this path
+                 * is motors at in[2] (LEFT) and in[3] (RIGHT) with in[4]=0x02
+                 * as packet trailer. The earlier "prefer in[3],in[4] if
+                 * non-zero" heuristic was wrong and caused right-motor values
+                 * to be mislabeled as left and the 0x02 trailer to be
+                 * reported as the right motor (the "hi=2 stuck" regression).
                  */
                 UCHAR canon[5] = { 0, 0, 0, 0, 0 };
                 const UCHAR *in = (const UCHAR *)buf;
                 UCHAR lo = 0, hi = 0;
-                if (sz >= 5) {
-                    UCHAR a_lo = in[2], a_hi = in[3];  /* xusb22-style */
-                    UCHAR b_lo = in[3], b_hi = in[4];  /* xinputhid-style */
-                    if (b_lo != 0 || b_hi != 0) { lo = b_lo; hi = b_hi; }
-                    else                        { lo = a_lo; hi = a_hi; }
-                } else if (sz >= 4) {
+                if (sz >= 4) {
                     lo = in[2]; hi = in[3];
                 } else if (sz >= 2) {
                     lo = in[sz - 2]; hi = in[sz - 1];
@@ -697,20 +695,30 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_CAPABILITIES) {
-            /* 24-byte capabilities: Gamepad type/subtype with full button mask
-             * + vibration advertised. Mirrors HMCOMPANION's response. */
+            /* 24-byte capabilities. Wire format: [0-1]Version, then
+             * XINPUT_CAPABILITIES struct starting at [2]:
+             *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
+             *   [10-17]sThumbLX/LY/RX/RY (4xi16) [18-19]wLeftMotorSpeed
+             *   [20-21]wRightMotorSpeed [22-23]reserved.
+             *
+             * Prior bug: motor maxes sat at [22-23] while WGI reads them
+             * from [18-21]. WGI saw zeros -> ForceFeedbackMotors=0 ->
+             * put_Vibration silently dropped. */
             UCHAR caps[24];
             for (int i = 0; i < 24; i++) caps[i] = 0;
-            caps[0] = 0x01; caps[1] = 0x01;        /* Version 1.1 — Xbox 360 era. */
-            caps[2] = 0x01;                         /* XINPUT_DEVTYPE_GAMEPAD */
-            caps[3] = 0x01;                         /* XINPUT_DEVSUBTYPE_GAMEPAD */
-            caps[4] = 0xFF; caps[5] = 0xF7;         /* wButtons mask (LE) */
-            caps[6] = 0xFF; caps[7] = 0xFF;         /* triggers */
-            caps[8] = 0xFF; caps[9] = 0x7F;         /* LX max */
-            caps[10]= 0xFF; caps[11]= 0x7F;         /* LY max */
-            caps[12]= 0xFF; caps[13]= 0x7F;         /* RX max */
-            caps[14]= 0xFF; caps[15]= 0x7F;         /* RY max */
-            caps[22]= 0xFF; caps[23]= 0xFF;         /* vibration max */
+            caps[0] = 0x01; caps[1] = 0x01;         /* Version 1.1 */
+            caps[2] = 0x01;                          /* XINPUT_DEVTYPE_GAMEPAD */
+            caps[3] = 0x01;                          /* XINPUT_DEVSUBTYPE_GAMEPAD */
+            caps[4] = 0x01; caps[5] = 0x00;         /* Flags = XINPUT_CAPS_FFB_SUPPORTED */
+            caps[6] = 0xFF; caps[7] = 0xF7;         /* wButtons mask (LE) */
+            caps[8] = 0xFF;                          /* bLeftTrigger max */
+            caps[9] = 0xFF;                          /* bRightTrigger max */
+            caps[10]= 0xFF; caps[11]= 0x7F;         /* sThumbLX max (0x7FFF) */
+            caps[12]= 0xFF; caps[13]= 0x7F;         /* sThumbLY max */
+            caps[14]= 0xFF; caps[15]= 0x7F;         /* sThumbRX max */
+            caps[16]= 0xFF; caps[17]= 0x7F;         /* sThumbRY max */
+            caps[18]= 0xFF; caps[19]= 0xFF;         /* wLeftMotorSpeed max */
+            caps[20]= 0xFF; caps[21]= 0xFF;         /* wRightMotorSpeed max */
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
