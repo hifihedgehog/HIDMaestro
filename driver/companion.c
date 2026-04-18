@@ -352,6 +352,37 @@ void CompanionIoControl(
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
 
+    /* Bounded diagnostic log. Writes to the SAME file xusbshim uses so a
+     * single `Get-Content xusbshim_log.txt` captures BOTH paths' activity
+     * during a Chromium playEffect() call — critical for deciding whether
+     * WGI routes vibration via HMCOMPANION or via the HID-child xusbshim
+     * interface (per external-AI review 2026-04-17). Cap matches xusbshim. */
+    {
+        static volatile LONG counter = 0;
+        ULONG c = (ULONG)InterlockedIncrement(&counter);
+        BOOLEAN isSetState = (IoControlCode == IOCTL_XUSB_SET_STATE);
+        if (isSetState || c <= 400) {
+            HANDLE h = CreateFileW(
+                L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
+                FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                OPEN_ALWAYS, 0, NULL);
+            if (h != INVALID_HANDLE_VALUE) {
+                char buf[80];
+                char *p = buf;
+                const char tag[] = "[HMCOMP] IOCTL ";
+                for (int i = 0; tag[i]; i++) *p++ = tag[i];
+                for (int shift = 28; shift >= 0; shift -= 4) {
+                    int n = (IoControlCode >> shift) & 0xF;
+                    *p++ = (char)(n < 10 ? '0' + n : 'A' + n - 10);
+                }
+                *p++ = '\r'; *p++ = '\n';
+                DWORD w;
+                WriteFile(h, buf, (DWORD)(p - buf), &w, NULL);
+                CloseHandle(h);
+            }
+        }
+    }
+
     switch (IoControlCode)
     {
     case IOCTL_XUSB_GET_INFORMATION: {
