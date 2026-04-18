@@ -144,6 +144,29 @@ static VOID LogLine(_In_z_ const char *msg, _In_ SIZE_T len)
         OPEN_ALWAYS, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD written;
+
+    /* Timestamp prefix: [HH:MM:SS.mmm] so relative event ordering is
+     * readable when tailing. No timezone — just local wall clock. */
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char ts[16];
+    int ti = 0;
+    ts[ti++] = '[';
+    ts[ti++] = (char)('0' + t.wHour / 10);
+    ts[ti++] = (char)('0' + t.wHour % 10);
+    ts[ti++] = ':';
+    ts[ti++] = (char)('0' + t.wMinute / 10);
+    ts[ti++] = (char)('0' + t.wMinute % 10);
+    ts[ti++] = ':';
+    ts[ti++] = (char)('0' + t.wSecond / 10);
+    ts[ti++] = (char)('0' + t.wSecond % 10);
+    ts[ti++] = '.';
+    ts[ti++] = (char)('0' + t.wMilliseconds / 100);
+    ts[ti++] = (char)('0' + (t.wMilliseconds / 10) % 10);
+    ts[ti++] = (char)('0' + t.wMilliseconds % 10);
+    ts[ti++] = ']';
+    ts[ti++] = ' ';
+    WriteFile(h, ts, (DWORD)ti, &written, NULL);
     WriteFile(h, msg, (DWORD)len, &written, NULL);
     CloseHandle(h);
 }
