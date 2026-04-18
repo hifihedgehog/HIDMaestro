@@ -338,6 +338,15 @@ XusbShimDeviceAdd(
                     sizeof(ctx->OutputMappingName) / sizeof(WCHAR));
 
     CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
+
+    /* Build-timestamp banner so we can tell which version of the filter
+     * is live. __DATE__ / __TIME__ are compile-time constants — the log
+     * banner distinguishes a rebuild vs. a stale DLL. */
+    {
+        static const char banner[] =
+            "==== HMXusbShim build " __DATE__ " " __TIME__ " ====\r\n";
+        LogLine(banner, sizeof(banner) - 1);
+    }
     LogEvent("DeviceAdd idx", ctx->ControllerIndex);
 
     /* Log the HID child's own DEVPKEY_Device_InstanceId so we can
