@@ -532,7 +532,7 @@ XusbShimIoDefault(
              * may accept both but we mirror xinputhid since that's what works. */
             UCHAR info[12];
             for (int i = 0; i < 12; i++) info[i] = 0;
-            info[0] = 0x03; info[1] = 0x01;       /* Version 1.3 */
+            info[0] = 0x01; info[1] = 0x01;       /* Version 1.1 — Xbox 360/xusb22 era. Was 0x0103 (Xbox One/xinputhid). Muse flags: 0x0103 triggers 15-button Xbox One descriptor validation in WGI, which fails on our 10-button Xbox 360 descriptor → WGI demotes to RawGameController (no put_Vibration). Matches HMCOMPANION's working version. */
             info[2] = 0x01;                        /* Device count */
             info[3] = 0x01;                        /* Slot/capability marker */
             info[8]  = (UCHAR)(ctx->VendorId & 0xFF);
@@ -559,7 +559,7 @@ XusbShimIoDefault(
              * exists to keep xinput1_4 alive and probing. */
             UCHAR state[29];
             for (int i = 0; i < 29; i++) state[i] = 0;
-            state[0] = 0x03; state[1] = 0x01;  /* Version 1.3 */
+            state[0] = 0x01; state[1] = 0x01;  /* Version 1.1 — Xbox 360 era. */
             state[2] = 0x01;                    /* CONNECTED */
             /* Packet counter at offset 5 — xinput1_4 uses this to detect
              * state changes. Increment per poll so xinput1_4 believes input
@@ -634,7 +634,7 @@ XusbShimIoDefault(
              * remaining bytes zeroed is sufficient for the gate check. */
             UCHAR exInfo[64];
             for (int i = 0; i < 64; i++) exInfo[i] = 0;
-            exInfo[0] = 0x03; exInfo[1] = 0x01;       /* Version 1.3 */
+            exInfo[0] = 0x01; exInfo[1] = 0x01;       /* Version 1.1 — Xbox 360 era. */
             exInfo[2] = 0x01;                          /* Device count */
             exInfo[3] = 0x01;                          /* Slot/cap marker */
             exInfo[8]  = (UCHAR)(ctx->VendorId & 0xFF);
@@ -657,7 +657,7 @@ XusbShimIoDefault(
              * + vibration advertised. Mirrors HMCOMPANION's response. */
             UCHAR caps[24];
             for (int i = 0; i < 24; i++) caps[i] = 0;
-            caps[0] = 0x03; caps[1] = 0x01;        /* Version 1.3 (match xinputhid empirical) */
+            caps[0] = 0x01; caps[1] = 0x01;        /* Version 1.1 — Xbox 360 era. */
             caps[2] = 0x01;                         /* XINPUT_DEVTYPE_GAMEPAD */
             caps[3] = 0x01;                         /* XINPUT_DEVSUBTYPE_GAMEPAD */
             caps[4] = 0xFF; caps[5] = 0xF7;         /* wButtons mask (LE) */
