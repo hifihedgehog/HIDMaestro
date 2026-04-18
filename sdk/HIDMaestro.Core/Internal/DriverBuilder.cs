@@ -256,8 +256,33 @@ public static class DriverBuilder
             if (!File.Exists(path)) continue;
             var (rc, output) = Run(pnputil, $"/add-driver \"{path}\" /install",
                 timeoutMs: 30_000);
+
+            // xusbshim is experimental — log its outcome verbosely regardless
+            // of whether pnputil marks the install as successful, so we can
+            // tell at a glance if the Extension INF applied to matching
+            // HID children or silently fell through.
+            if (inf == "hidmaestro_xusbshim.inf")
+            {
+                Console.WriteLine($"    [xusbshim] pnputil rc={rc}");
+                foreach (var line in output.Split('\n'))
+                {
+                    var trimmed = line.TrimEnd();
+                    if (trimmed.Length > 0)
+                        Console.WriteLine($"    [xusbshim] {trimmed}");
+                }
+            }
+
             if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
             {
+                // xusbshim failure is non-fatal — if the Extension INF doesn't
+                // apply, the rest of the install flow still works and we just
+                // lose the experimental filter. Log and continue.
+                if (inf == "hidmaestro_xusbshim.inf")
+                {
+                    Console.WriteLine($"    [xusbshim] install reported failure but continuing " +
+                                      $"(main driver + companion unaffected)");
+                    continue;
+                }
                 Console.WriteLine($"\n    pnputil failed for {inf}: {output.Trim()}");
                 return false;
             }
