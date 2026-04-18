@@ -72,6 +72,8 @@ typedef struct {
 
 typedef struct _DEVICE_CTX {
     ULONG  ControllerIndex;
+    USHORT VendorId;
+    USHORT ProductId;
     WCHAR  OutputMappingName[64];  /* e.g. "Global\HIDMaestroOutput0" */
     HANDLE OutputMemHandle;
     PVOID  OutputMemPtr;
@@ -151,9 +153,13 @@ static VOID LogBytes(_In_z_ const char *tag, _In_bytecount_(len) const UCHAR *bu
 
 /* ---- ControllerIndex from parent devnode --------------------------- */
 
-static ULONG
-ReadParentControllerIndex(_In_ WDFDEVICE device)
+static VOID
+ReadParentIdentity(_In_ WDFDEVICE device, _Out_ PDEVICE_CTX ctx)
 {
+    ctx->ControllerIndex = 0;
+    ctx->VendorId        = 0x045E;
+    ctx->ProductId       = 0x028E;
+
     WDF_DEVICE_PROPERTY_DATA prop;
     WDF_DEVICE_PROPERTY_DATA_INIT(&prop, &DEVPKEY_Device_ParentLocal);
     prop.Lcid = LOCALE_NEUTRAL;
@@ -163,25 +169,40 @@ ReadParentControllerIndex(_In_ WDFDEVICE device)
     DEVPROPTYPE propType = 0;
     NTSTATUS   s = WdfDeviceQueryPropertyEx(
         device, &prop, sizeof(parentId), parentId, &reqSize, &propType);
-    if (!NT_SUCCESS(s) || reqSize == 0) return 0;
+    if (!NT_SUCCESS(s) || reqSize == 0) return;
 
-    /* Build \SYSTEM\CurrentControlSet\Enum\<parentId>\Device Parameters */
+    /* Parent's Device Parameters holds ControllerIndex (written by SDK at
+     * virtual-device create time). */
     WCHAR regPath[400];
     WstrCopy(regPath, L"SYSTEM\\CurrentControlSet\\Enum\\", 400);
     WstrCat (regPath, parentId, 400);
     WstrCat (regPath, L"\\Device Parameters", 400);
 
     HKEY hKey;
-    ULONG idx = 0;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD val = 0, sz = sizeof(val);
         if (RegQueryValueExW(hKey, L"ControllerIndex", NULL, NULL,
                              (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
-            idx = val;
+            ctx->ControllerIndex = val;
         }
         RegCloseKey(hKey);
     }
-    return idx;
+
+    /* Per-controller VID/PID from SOFTWARE\HIDMaestro\Controller<N>. Falls
+     * back to 045E/028E if the key hasn't been written (or we're on a
+     * different profile than expected for this filter's PIDs). */
+    WCHAR cfgPath[128];
+    WstrCopy(cfgPath, L"SOFTWARE\\HIDMaestro\\Controller", 128);
+    WstrAppendUlong(cfgPath, ctx->ControllerIndex, 128);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, cfgPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD val = 0, sz = sizeof(val);
+        if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+            ctx->VendorId = (USHORT)val;
+        sz = sizeof(val);
+        if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+            ctx->ProductId = (USHORT)val;
+        RegCloseKey(hKey);
+    }
 }
 
 /* ---- Shared-memory publish ----------------------------------------- */
@@ -268,7 +289,7 @@ XusbShimDeviceAdd(
     if (!NT_SUCCESS(status)) return status;
 
     PDEVICE_CTX ctx = GetDevCtx(device);
-    ctx->ControllerIndex = ReadParentControllerIndex(device);
+    ReadParentIdentity(device, ctx);
 
     /* "Global\HIDMaestroOutput<N>" — the section HMCOMPANION writes to. */
     WstrCopy(ctx->OutputMappingName, L"Global\\HIDMaestroOutput",
@@ -332,14 +353,17 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_INFORMATION) {
-            /* Minimal 12-byte GetInformation reply: XUSB 1.1, 1 device. */
+            /* 12-byte GetInformation reply: XUSB 1.1, 1 device, VID/PID
+             * from our per-controller registry config so WGI's Xbox-family
+             * gating (if it keys on VID==0x045E) sees the right identity. */
             UCHAR info[12];
             for (int i = 0; i < 12; i++) info[i] = 0;
             info[0] = 0x01; info[1] = 0x01;       /* Version 1.1 */
             info[2] = 0x01;                        /* Device count */
-            /* info[8..11] left zero — VID/PID unknown to the filter.
-             * If WGI keys on these, HMCOMPANION's parallel XUSB interface
-             * provides the proper VID/PID response. */
+            info[8]  = (UCHAR)(ctx->VendorId & 0xFF);
+            info[9]  = (UCHAR)((ctx->VendorId >> 8) & 0xFF);
+            info[10] = (UCHAR)(ctx->ProductId & 0xFF);
+            info[11] = (UCHAR)((ctx->ProductId >> 8) & 0xFF);
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 12, &outBuf, &outLen))) {
