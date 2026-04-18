@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="HIDMaestro" Team="HIDMaestro" Comments="Gamepad haptic trace" Company="HIDMaestro" Copyright="HIDMaestro">
+  <Profiles>
+    <SystemCollector Id="SystemCollector_GamepadTrace" Name="NT Kernel Logger">
+      <BufferSize Value="1024"/>
+      <Buffers Value="64"/>
+    </SystemCollector>
+    <EventCollector Id="EventCollector_Gamepad" Name="Gamepad Haptic Events">
+      <BufferSize Value="1024"/>
+      <Buffers Value="64"/>
+    </EventCollector>
+    <SystemProvider Id="SystemProvider_Gamepad">
+      <Keywords>
+        <Keyword Value="CpuConfig"/>
+        <Keyword Value="Loader"/>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="CSwitch"/>
+        <Keyword Value="SampledProfile"/>
+        <Keyword Value="DiskIO"/>
+      </Keywords>
+      <Stacks>
+        <Stack Value="SampledProfile"/>
+      </Stacks>
+    </SystemProvider>
+    <EventProvider Id="EventProvider_HID" Name="Microsoft-Windows-HID-Class"/>
+    <EventProvider Id="EventProvider_HIDClass2" Name="46bc3f20-3ba4-4467-b3c3-8c5fd5d5b4c1"/>
+    <EventProvider Id="EventProvider_COM" Name="Microsoft-Windows-COMRuntime"/>
+    <EventProvider Id="EventProvider_WinRT" Name="Microsoft-Windows-WinRT-Error"/>
+    <Profile Id="GamepadTrace.Verbose.File" Name="GamepadTrace" Description="Gamepad haptic trace" DetailLevel="Verbose" LoggingMode="File">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector_GamepadTrace">
+          <SystemProviderId Value="SystemProvider_Gamepad"/>
+        </SystemCollectorId>
+        <EventCollectorId Value="EventCollector_Gamepad">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_HID"/>
+            <EventProviderId Value="EventProvider_HIDClass2"/>
+            <EventProviderId Value="EventProvider_COM"/>
+            <EventProviderId Value="EventProvider_WinRT"/>
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
