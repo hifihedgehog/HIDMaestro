@@ -1,0 +1,5 @@
+# Issue #3 — Dual xinputhid virtuals: CPU saturation + state-freeze (2026-04)
+
+PadForge reported that two `driverMode: xinputhid` virtuals active on the same `HMContext` cause `WUDFHost.exe` CPU saturation and external XInput consumers see frozen state while `SubmitState` keeps succeeding locally. This investigation ran the full T1–T5 test battery from the issue plus on-the-fly live-swap / destroy / quit scenarios against `HIDMaestroTest` at both nominal 1 kHz and TRUE 1 kHz (via `timeBeginPeriod(1)`), then independently verified multi-virtual slot allocation via `scripts/verify.py`. The symptom does not reproduce.
+
+Formal finding: [finding.md](finding.md). Maximum observed WUDFHost CPU across any test was **2.94% of one core** — nowhere near saturation. XInput `dwPacketNumber` advanced monotonically in every test; no state freeze observed. Multi-virtual xinputhid slot allocation works as expected (verified via `verify.py --controllers 2`: slots 0 + 2 both live with independent packet numbers). Conclusion per issue's own decision rule: probable PadForge-side cause.
