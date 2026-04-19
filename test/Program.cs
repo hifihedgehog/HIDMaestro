@@ -167,9 +167,24 @@ class Program
         // start the circle.
         bool startPaused = profileIds.Contains("--paused-at-zero");
         bool startMarked = profileIds.Contains("--mark");
+        // --rate-hz N : override the per-virtual SubmitState rate (default 250 Hz,
+        // which comes from the pattern thread's Thread.Sleep(4)). PadForge polls
+        // at 1 kHz; issue #3 uses 1 kHz and 125 Hz for saturation-rate tests.
+        int rateHz = 250;
+        for (int i = 0; i < profileIds.Length; i++)
+        {
+            if (profileIds[i] == "--rate-hz" && i + 1 < profileIds.Length
+                && int.TryParse(profileIds[i + 1], out int r) && r > 0 && r <= 4000)
+            {
+                rateHz = r;
+                profileIds = profileIds.Where((_, idx) => idx != i && idx != i + 1).ToArray();
+                break;
+            }
+        }
         profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
         if (profileIds.Length == 0)
-            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] <profile-id> [profile-id ...]");
+            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] <profile-id> [profile-id ...]");
+        Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");
 
         using var ctx = new HMContext();
         int loaded = ctx.LoadDefaultProfiles();
@@ -212,6 +227,10 @@ class Program
         Console.WriteLine($"\n  All {slots.Count} controller(s) ready.\n");
 
         // Phase 2: input threads — one test-pattern thread per controller.
+        s_patternSleepMs = System.Math.Max(1000 / rateHz, 1);
+        // Raise timer resolution to 1 ms so Thread.Sleep(1) doesn't coarsen to
+        // 15.6 ms. Honored process-wide; released at emulate exit.
+        if (rateHz >= 500) timeBeginPeriod(1);
         for (int i = 0; i < slots.Count; i++)
             StartPatternThread(slots, i);
 
@@ -355,6 +374,7 @@ class Program
             Console.WriteLine($"  disposed slot {i} in {perCtrl.ElapsedMilliseconds} ms");
         }
         Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
+        if (rateHz >= 500) timeEndPeriod(1);
         return 0;
     }
 
@@ -580,12 +600,28 @@ class Program
     /// every second. Triggers do a clean 15-second sweep through 5 phases
     /// rather than continuous oscillation.
     /// </summary>
+    // Per-virtual submission period in milliseconds. Default 4 ms = 250 Hz;
+    // overridden via emulate --rate-hz flag. Set from Emulate() before pattern
+    // threads start; all threads read the same value.
+    static volatile int s_patternSleepMs = 4;
+
+    // timeBeginPeriod support so Sleep(1) actually yields ~1 ms (default Windows
+    // timer resolution coarsens Sleep(1) to 15.6 ms on non-multimedia threads).
+    // Needed to reproduce PadForge's 1 kHz SubmitState rate in the issue #3 test
+    // battery — without this, --rate-hz 1000 silently runs at ~200 Hz.
+    [System.Runtime.InteropServices.DllImport("winmm.dll")]
+    static extern uint timeBeginPeriod(uint uPeriod);
+    [System.Runtime.InteropServices.DllImport("winmm.dll")]
+    static extern uint timeEndPeriod(uint uPeriod);
+
     static void SendTestPattern(RunningController slot, int ctrlIndex, CancellationToken ct)
     {
         HMController ctrl = slot.Ctrl;
         var sw = Stopwatch.StartNew();
         while (!ct.IsCancellationRequested)
         {
+            int sleepMs = s_patternSleepMs;
+            int gateSleepMs = System.Math.Max(sleepMs * 2, 1);  // mark/park gates: 2x the normal rate
             // Pause gate: when paused, sleep in 100ms chunks (so we still
             // notice cancellation promptly) and submit no frames. This
             // exercises the driver's idle path so we can measure that the
@@ -607,7 +643,7 @@ class Program
                     Buttons = (HMButton)(1u << markBtn),
                 };
                 try { ctrl.SubmitState(in markState); } catch { break; }
-                try { Thread.Sleep(8); } catch { break; }
+                try { Thread.Sleep(gateSleepMs); } catch { break; }
                 continue;
             }
             // Park gate: hold left stick at a literal (ParkX, ParkY) for SDL2
@@ -624,7 +660,7 @@ class Program
                     LeftStickY = Math.Clamp(py, -1f, 1f),
                 };
                 try { ctrl.SubmitState(in parkState); } catch { break; }
-                try { Thread.Sleep(8); } catch { break; }
+                try { Thread.Sleep(gateSleepMs); } catch { break; }
                 continue;
             }
             double t = sw.Elapsed.TotalSeconds;
@@ -675,7 +711,7 @@ class Program
                              | ((((int)(t / 3)) % 2 == 0) ? HMButton.Share : HMButton.None),
             };
             try { ctrl.SubmitState(in state); } catch { break; }
-            try { Thread.Sleep(4); } catch { break; }
+            try { Thread.Sleep(sleepMs); } catch { break; }
         }
     }
 
