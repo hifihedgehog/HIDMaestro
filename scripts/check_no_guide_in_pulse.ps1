@@ -18,6 +18,9 @@
 #
 # The allowlist comment must be on the SAME line as the HMButton.Guide
 # reference. Lines without it fail the check.
+#
+# Full discussion (why + examples + what not to do):
+#   docs/testing/guide-in-test-loops.md
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
