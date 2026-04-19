@@ -77,6 +77,10 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
+; See hidmaestro.inf for rationale. Each XUSB companion runs in its own
+; WUDFHost to prevent co-tenancy contention with other HIDMaestro virtuals
+; or real xinputhid devices.
+UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HMXInput_UmdfService]
 UmdfLibraryVersion = 2.15.0

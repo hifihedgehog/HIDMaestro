@@ -88,6 +88,13 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
+; Each virtual gets its own WUDFHost process. Without this, UMDF2 pools
+; multiple HIDMaestro virtuals (and adjacent xinputhid-bound devices) into
+; one shared WUDFHost and contention between writer threads + concurrent
+; XInputGetState reader threads causes non-linear CPU saturation when
+; 2+ virtuals co-exist with a real xinputhid device in the same host. See
+; issue #3 and docs/investigations/issue3-dual-xinputhid-saturation-2026-04/.
+UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HIDMaestro_UmdfService]
 UmdfLibraryVersion = 2.15.0
