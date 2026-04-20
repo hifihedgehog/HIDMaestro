@@ -129,6 +129,7 @@ class Program
             "sdk-demo" => SdkDemo(args.Skip(1).ToArray()),
             "oem"      => OemCommand(args.Skip(1).ToArray()),
             "build-descriptor" => BuildDescriptorCommand(),
+            "issue6-repro" => Issue6ReproCommand(),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -915,6 +916,77 @@ class Program
     {
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
         return ushort.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out v);
+    }
+
+    // ── issue6-repro ──
+    //
+    // Creates the exact custom profile from issue #6 (2 sticks 16b + 2 triggers
+    // 8b + hat + 11 buttons, VID beef PID f000) and keeps it live for 30s so
+    // an external probe can inspect Chrome's Gamepad API, joy.cpl, or the
+    // PnP tree while it's active. Emits a ready marker and periodic
+    // heartbeats. Requires admin.
+    static int Issue6ReproCommand()
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        Console.Write("  Installing driver... ");
+        ctx.InstallDriver();
+        Console.WriteLine("OK");
+
+        byte[] desc = new HidDescriptorBuilder()
+            .Gamepad()
+            .AddStick("Left", 16)
+            .AddStick("Right", 16)
+            .AddTrigger("Left", 8)
+            .AddTrigger("Right", 8)
+            .AddHat()
+            .AddButtons(11)
+            .Build();
+
+        var profile = new HMProfileBuilder()
+            .Id("padforge-custom-issue6")
+            .Name("Custom")
+            .Vendor("Custom")
+            .Vid(0xBEEF)
+            .Pid(0xF000)
+            .ProductString("PadForge Game Controller")
+            .ManufacturerString("PadForge")
+            .Type("gamepad")
+            .Connection("usb")
+            .Descriptor(desc)
+            .Build();
+
+        Console.Write($"  Creating {profile.Name} (VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4})... ");
+        using var ctrl = ctx.CreateController(profile);
+        Console.WriteLine("OK");
+        Console.WriteLine($"  Descriptor: {desc.Length} bytes");
+        Console.WriteLine($"  Hex:        {Convert.ToHexString(desc).ToLowerInvariant()}");
+        Console.WriteLine();
+        Console.WriteLine("  ==== READY ==== open chrome://gamepad or joy.cpl to inspect");
+        Console.WriteLine("  (holding virtual live for 3 min; feeding a left-stick circle so entries show activity)");
+        Console.WriteLine("  (press Ctrl+C or close the window to tear down early)");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 180_000)
+        {
+            double t = sw.Elapsed.TotalSeconds;
+            var state = new HMGamepadState
+            {
+                LeftStickX  = (float)Math.Cos(t * 2 * Math.PI),
+                LeftStickY  = (float)Math.Sin(t * 2 * Math.PI),
+                RightStickX = (float)Math.Cos(t * 2 * Math.PI * 2),
+                RightStickY = (float)Math.Sin(t * 2 * Math.PI * 2),
+                LeftTrigger  = 0.25f,
+                RightTrigger = 0.75f,
+                Buttons = HMButton.A,
+            };
+            ctrl.SubmitState(in state);
+            Thread.Sleep(8);
+            if ((int)sw.Elapsed.TotalSeconds % 5 == 0 && sw.ElapsedMilliseconds % 5000 < 10)
+                Console.WriteLine($"  [heartbeat t={sw.Elapsed.TotalSeconds:F0}s]");
+        }
+        Console.WriteLine("  Done. Disposing virtual.");
+        return 0;
     }
 
     // ── build-descriptor ──

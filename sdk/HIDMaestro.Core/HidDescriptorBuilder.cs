@@ -91,9 +91,18 @@ public sealed class HidDescriptorBuilder
 
     /// <summary>Add a single trigger axis.</summary>
     /// <param name="name">"Left" maps to Z (0x32), "Right" maps to Rz (0x35).</param>
-    /// <param name="bits">Axis resolution: 8 for [0..255], 10 for [0..1023].</param>
+    /// <param name="bits">Axis resolution: 8 for [0..255], 16 for [0..65535].
+    /// Must be a multiple of 8 to keep the report byte-aligned. 10-bit or
+    /// other non-aligned sizes would force a Const pad item that Chromium's
+    /// RawInput parser surfaces as a phantom axis (see issue #6).</param>
     public HidDescriptorBuilder AddTrigger(string name, int bits = 8)
     {
+        if (bits % 8 != 0)
+            throw new ArgumentException(
+                $"AddTrigger bits must be a multiple of 8 (got {bits}). " +
+                "Non-aligned sizes introduce phantom axes in Chromium's Gamepad API.",
+                nameof(bits));
+
         byte usage = name.Equals("Left", StringComparison.OrdinalIgnoreCase)
                    || name.Equals("L", StringComparison.OrdinalIgnoreCase)
             ? (byte)0x32 : (byte)0x35;
@@ -103,84 +112,80 @@ public sealed class HidDescriptorBuilder
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, usage });        // Usage (Z or Rz)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
-        _bytes.AddRange(new byte[] { 0x26, (byte)(logMax & 0xFF), (byte)(logMax >> 8) });
+        if (bits <= 8)
+            _bytes.AddRange(new byte[] { 0x26, (byte)(logMax & 0xFF), (byte)(logMax >> 8) });
+        else
+            _bytes.AddRange(new byte[] { 0x27, (byte)(logMax & 0xFF), (byte)((logMax >> 8) & 0xFF),
+                                                (byte)((logMax >> 16) & 0xFF), (byte)(logMax >> 24) });
         _bytes.AddRange(new byte[] { 0x95, 0x01 });        // Report Count (1)
         _bytes.AddRange(new byte[] { 0x75, (byte)bits });   // Report Size (bits)
         _bytes.AddRange(new byte[] { 0x81, 0x02 });        // Input (Data,Var,Abs)
 
         _totalInputBits += bits;
 
-        // Pad to byte boundary if not aligned — on a vendor-defined page so
-        // browsers/OS parsers don't surface the pad as a phantom axis. See
-        // issue #6 for the symptom (Const Generic-Desktop pad items appeared
-        // as extra axes in Chrome's Gamepad API).
-        EmitPadding();
-
         return this;
     }
 
-    /// <summary>Add N buttons (Button Page, Usage 1..N, 1 bit each, auto-padded to byte boundary).</summary>
+    /// <summary>Add N buttons (Button Page, Usage 1..N, 1 bit each). The
+    /// declared Report Count is rounded UP to the next multiple of 8 (with
+    /// extra Usage Max bump so the round-up bits are "dummy" buttons the
+    /// caller never sets). No Const pad item follows — Chromium's RawInput
+    /// parser surfaces any trailing Const Input item as a phantom axis,
+    /// even on the Vendor-Defined Usage Page. Absorbing the pad as
+    /// additional buttons keeps the report byte-aligned without introducing
+    /// a Const item. See issue #6 — the round-up approach eliminates the
+    /// "AXIS 9 = 1227133568" phantom seen in Chrome's Gamepad API.</summary>
     public HidDescriptorBuilder AddButtons(int count)
     {
+        // Round the total bits after this block up to the next byte boundary
+        // by declaring extra "dummy" buttons. User still wires `count` real
+        // buttons; the extras stay zero.
+        int bitsBefore = _totalInputBits;
+        int declaredCount = count;
+        int total = bitsBefore + count;
+        int pad = (8 - (total % 8)) % 8;
+        declaredCount += pad;
+
         _bytes.AddRange(new byte[] { 0x05, 0x09 });        // Usage Page (Button)
         _bytes.AddRange(new byte[] { 0x19, 0x01 });        // Usage Minimum (1)
-        _bytes.AddRange(new byte[] { 0x29, (byte)count });  // Usage Maximum (count)
-        _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0) — explicit
-        _bytes.AddRange(new byte[] { 0x25, 0x01 });        // Logical Maximum (1) — explicit
-        _bytes.AddRange(new byte[] { 0x95, (byte)count });  // Report Count (count)
+        _bytes.AddRange(new byte[] { 0x29, (byte)declaredCount }); // Usage Maximum (declaredCount)
+        _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
+        _bytes.AddRange(new byte[] { 0x25, 0x01 });        // Logical Maximum (1)
+        _bytes.AddRange(new byte[] { 0x95, (byte)declaredCount }); // Report Count
         _bytes.AddRange(new byte[] { 0x75, 0x01 });        // Report Size (1)
         _bytes.AddRange(new byte[] { 0x81, 0x02 });        // Input (Data,Var,Abs)
 
-        _totalInputBits += count;
-
-        EmitPadding();
+        _totalInputBits += declaredCount;
 
         return this;
     }
 
-    /// <summary>Add a 4-bit hat switch (D-pad), auto-padded to byte boundary.</summary>
+    /// <summary>Add an 8-bit hat switch (D-pad). Uses Report Size 8 instead
+    /// of 4 so the hat absorbs its own byte rather than requiring a Const
+    /// pad item after it. Hat values 1-8 encode the 8 directions; 0 and
+    /// 9-255 are null (via the Null-state flag), identical to a 4-bit hat
+    /// with Logical Max 8 semantically but byte-aligned on the wire. No
+    /// following Const pad item — see AddButtons docs for rationale.</summary>
     public HidDescriptorBuilder AddHat()
     {
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x39 });        // Usage (Hat switch)
-        _bytes.AddRange(new byte[] { 0x15, 0x01 });        // Logical Minimum (1)
+        _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
         _bytes.AddRange(new byte[] { 0x25, 0x08 });        // Logical Maximum (8)
         _bytes.AddRange(new byte[] { 0x35, 0x00 });        // Physical Minimum (0)
         _bytes.AddRange(new byte[] { 0x46, 0x3B, 0x01 });  // Physical Maximum (315)
         _bytes.AddRange(new byte[] { 0x66, 0x14, 0x00 });  // Unit (Degrees)
-        _bytes.AddRange(new byte[] { 0x75, 0x04 });        // Report Size (4)
+        _bytes.AddRange(new byte[] { 0x75, 0x08 });        // Report Size (8) — byte-aligned
         _bytes.AddRange(new byte[] { 0x95, 0x01 });        // Report Count (1)
         _bytes.AddRange(new byte[] { 0x81, 0x42 });        // Input (Data,Var,Abs,Null)
 
-        _totalInputBits += 4;
+        _totalInputBits += 8;
 
         // Reset physical max and unit so they don't bleed into subsequent items.
         _bytes.AddRange(new byte[] { 0x45, 0x00 });        // Physical Maximum (0)
         _bytes.AddRange(new byte[] { 0x65, 0x00 });        // Unit (None)
 
-        EmitPadding();
-
         return this;
-    }
-
-    /// <summary>Emit a Const Input item that fills up to the next byte boundary,
-    /// on Usage Page 0xFF00 (vendor-defined) with no local usage. Vendor-defined
-    /// pages are universally understood by HID parsers as non-gameplay data, so
-    /// the pad does not surface as a phantom axis or button in browsers or
-    /// games. Resets Logical Min/Max afterward so the next AddX call starts
-    /// from a known global state. No-op if the descriptor is already byte
-    /// aligned.</summary>
-    private void EmitPadding()
-    {
-        int pad = (8 - (_totalInputBits % 8)) % 8;
-        if (pad == 0) return;
-        _bytes.AddRange(new byte[] { 0x06, 0x00, 0xFF }); // Usage Page (Vendor-Defined 0xFF00)
-        _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
-        _bytes.AddRange(new byte[] { 0x25, 0x00 });        // Logical Maximum (0)
-        _bytes.AddRange(new byte[] { 0x75, (byte)pad });   // Report Size (pad bits)
-        _bytes.AddRange(new byte[] { 0x95, 0x01 });        // Report Count (1)
-        _bytes.AddRange(new byte[] { 0x81, 0x03 });        // Input (Const,Var,Abs)
-        _totalInputBits += pad;
     }
 
     /// <summary>Add raw descriptor bytes. For advanced use — appends arbitrary
