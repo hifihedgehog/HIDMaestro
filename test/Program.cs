@@ -80,7 +80,7 @@ class Program
         // Read-only introspection commands run fine without admin. Everything
         // else needs SeLoadDriverPrivilege for device create / driver install /
         // registry cleanup.
-        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info" or "build-descriptor";
+        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info" or "build-descriptor" or "extract-profile";
         if (!readOnlyCmd && !IsElevated())
         {
             Console.WriteLine("  Requesting elevation (admin required)...\n");
@@ -114,6 +114,9 @@ class Program
             Console.WriteLine("  HIDMaestroTest oem recover             Restore overrides left by a crashed consumer");
             Console.WriteLine("  HIDMaestroTest oem list                Show currently-tracked overrides");
             Console.WriteLine("  HIDMaestroTest build-descriptor        Inspect HidDescriptorBuilder output (read-only)");
+            Console.WriteLine("  HIDMaestroTest extract-profile         List connected HID devices (read-only)");
+            Console.WriteLine("  HIDMaestroTest extract-profile <vid> <pid>");
+            Console.WriteLine("                                        Emit HIDMaestro profile JSON for the device");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -130,6 +133,7 @@ class Program
             "oem"      => OemCommand(args.Skip(1).ToArray()),
             "build-descriptor" => BuildDescriptorCommand(),
             "issue6-repro" => Issue6ReproCommand(),
+            "extract-profile" => ExtractProfileCommand(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -1026,6 +1030,55 @@ class Program
             Console.WriteLine($"    [{kind}] {page,-16}/0x{f.Usage:X2}   bit {f.BitOffset,3}, {f.BitSize,2}b, range [{f.LogicalMin}..{f.LogicalMax}]");
         }
         return 0;
+    }
+
+    // ── extract-profile ──
+    //
+    // Enumerates connected HID devices and extracts their HIDMaestro
+    // profile JSON from the real preparsed-data via HMDeviceExtractor.
+    // Read-only; no admin. Useful for profile contribution (the 99
+    // undeployable profiles from issue #4) and cross-verification of
+    // shipped profiles against real hardware.
+
+    static int ExtractProfileCommand(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            // Listing mode.
+            var devices = HMDeviceExtractor.ListDevices();
+            Console.WriteLine($"  Found {devices.Count} HID interface(s):");
+            Console.WriteLine($"  {"VID:PID",-12} {"Usage",-16} {"Product",-40} {"Manufacturer"}");
+            Console.WriteLine($"  {new string('-', 12)} {new string('-', 16)} {new string('-', 40)} {new string('-', 20)}");
+            foreach (var d in devices.OrderBy(x => x.VendorId).ThenBy(x => x.ProductId))
+            {
+                string vidpid = $"{d.VendorId:X4}:{d.ProductId:X4}";
+                string usage = $"0x{d.TopLevelUsagePage:X2}:0x{d.TopLevelUsage:X2}";
+                string product = d.ProductString ?? "(unknown)";
+                if (product.Length > 40) product = product.Substring(0, 37) + "...";
+                string mfg = d.ManufacturerString ?? "";
+                Console.WriteLine($"  {vidpid,-12} {usage,-16} {product,-40} {mfg}");
+            }
+            Console.WriteLine();
+            Console.WriteLine("  Usage: HIDMaestroTest extract-profile <vid> <pid>");
+            return 0;
+        }
+
+        if (args.Length < 2)
+            return Error("Usage: extract-profile <vid> <pid>");
+        if (!TryParseHex(args[0], out ushort vid)) return Error($"Bad vid: {args[0]}");
+        if (!TryParseHex(args[1], out ushort pid)) return Error($"Bad pid: {args[1]}");
+
+        try
+        {
+            var profile = HMDeviceExtractor.ExtractByVidPid(vid, pid);
+            string json = HMDeviceExtractor.ToJson(profile);
+            Console.Write(json);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            return Error(ex.Message);
+        }
     }
 
     // ── sdk-demo ──
