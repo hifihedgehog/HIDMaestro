@@ -22,6 +22,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using HIDMaestro;
 
@@ -194,6 +195,28 @@ while (sw.ElapsedMilliseconds < 2_000)
     ctrl0.SubmitState(in state);
     Thread.Sleep(4);
 }
+
+// ── 7b. Enumerate and extract connected HID devices ──────────────────
+// HMDeviceExtractor reads the descriptor Windows already has cached for
+// every connected HID device and returns a ready-to-deploy HMProfile.
+// Consumers that want a "scan my hardware and pick one" flow use this.
+// Read-only; no admin required for this call; no input is captured.
+Console.WriteLine("\n  Scanning connected HID devices...");
+var connected = HMDeviceExtractor.ListDevices();
+Console.WriteLine($"  Found {connected.Count} HID interface(s).");
+// Show the first five to keep the demo output tight.
+foreach (var d in connected.Take(5))
+{
+    Console.WriteLine($"    VID_{d.VendorId:X4}:PID_{d.ProductId:X4}  " +
+                      $"Usage=0x{d.TopLevelUsagePage:X2}:0x{d.TopLevelUsage:X2}  " +
+                      $"{d.ProductString ?? "(unknown)"}");
+}
+// To deploy any of these as a virtual identical to the physical device:
+//   var extracted = HMDeviceExtractor.Extract(connected[0]);
+//   using var clone = ctx.CreateController(extracted);
+// To save the extracted profile as JSON (matches profiles/<vendor>/*.json):
+//   string json = HMDeviceExtractor.ToJson(extracted);
+//   File.WriteAllText("captured.json", json);
 
 // ── 8. Inspect profile characteristics ───────────────────────────────
 // Every profile's descriptor layout is publicly accessible — buttons,
