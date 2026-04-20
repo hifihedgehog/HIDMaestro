@@ -8,7 +8,7 @@
   "manufacturerString": "Nintendo Co., Ltd.",
   "type": "gamepad",
   "connection": "bluetooth",
-  "descriptor": null,
+  "descriptor": "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0",
   "inputReportSize": null,
-  "notes": "NSO retro controller. Bluetooth connectivity."
+  "notes": "170-byte Joy-Con Bluetooth HID descriptor (firmware-family analog, not a direct 0x2017 capture). NSO retro controllers share Nintendo's Joy-Con/Pro Controller firmware framing. The generic gamepad report declares 16 buttons + 1 hat + 4 axes; the physical SNES NSO only has 8 face buttons (A, B, X, Y, L, R, Select, Start) plus Home/Capture and a D-pad (→ hat), with no analog sticks, so 6 ghost buttons and all 4 axes are always zero. Replace with a direct 0x2017 capture when available."
 }
