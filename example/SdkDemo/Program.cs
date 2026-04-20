@@ -27,6 +27,19 @@ using HIDMaestro;
 
 Console.WriteLine("=== HIDMaestro SDK Quickstart ===\n");
 
+// ── 0. Recover any OEM-name overrides left by a prior crash ─────────
+// HMOemNameOverride lets consumers overwrite the DirectInput OEM-name
+// label that joy.cpl shows for a given VID:PID. Every claim is recorded
+// in HKLM\SOFTWARE\HIDMaestroOemOverrides before the DirectInput key is
+// mutated, so a crash or force-kill cannot leave joy.cpl showing the
+// override forever. Calling RecoverOrphans once at startup replays
+// any such records from a prior process and restores the DirectInput
+// keys to their pre-override state. Safe to call on every startup; no-op
+// if there are no orphan records.
+int recovered = HMOemNameOverride.RecoverOrphans();
+if (recovered > 0)
+    Console.WriteLine($"  Recovered {recovered} OEM-name override(s) from a prior session");
+
 // ── 1. Context + profiles ────────────────────────────────────────────
 // The SDK ships its full profile catalog embedded inside
 // HIDMaestro.Core.dll, so consumers don't need to drop JSONs
@@ -59,6 +72,19 @@ Console.WriteLine("OK");
 Console.Write($"  Creating controller 1 ({x360Profile.Name})... ");
 using var ctrl1 = ctx.CreateController(x360Profile);
 Console.WriteLine("OK");
+
+// ── 3a. Override the joy.cpl label for ctrl1 ─────────────────────────
+// joy.cpl and DirectInput UIs read an OEM-name table that Windows
+// pre-populates for many common VID:PIDs. HMOemNameOverride replaces
+// the entry for a given VID:PID with a label of your choice. The write
+// is crash-safe: the prior value is captured to a HIDMaestro-owned
+// registry record before DirectInput is touched, so RecoverOrphans at
+// startup can always restore the original.
+ushort x360Vid = x360Profile.VendorId;
+ushort x360Pid = x360Profile.ProductId;
+HMOemNameOverride.Set(x360Vid, x360Pid, "SdkDemo Custom Label");
+Console.WriteLine($"  Overrode joy.cpl label for VID_{x360Vid:X4}&PID_{x360Pid:X4} " +
+                  $"-> \"SdkDemo Custom Label\" (open joy.cpl in another window to verify)");
 
 // ── 4. Subscribe to output events (rumble / haptics / FFB) ───────────
 // When a game sends rumble or LED commands to the virtual controller,
@@ -152,6 +178,7 @@ Console.WriteLine("  (SubmitRawReport available for exotic HID features — see 
 // This is the pattern PadForge uses when a user disconnects one physical
 // controller while others remain active.
 Console.WriteLine("\n  Disposing controller 1 (Xbox 360) — controller 0 stays live...");
+HMOemNameOverride.Clear(x360Vid, x360Pid);  // Restore the pre-override joy.cpl label
 ctrl1.Dispose();
 Console.WriteLine("  Controller 1 removed. Controller 0 still active for 2 more seconds...");
 sw.Restart();
