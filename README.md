@@ -54,11 +54,12 @@ Create and remove controllers without reboots. Each controller is independently 
 Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
 ### Custom Controllers: build or modify any device
-Using the public `HidDescriptorBuilder` and `HMProfileBuilder` APIs, consumers can:
+Using the public `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs, consumers can:
 
 - **Clone and modify** an existing profile: e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
 - **Build new controllers from scratch**: define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
 - **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
+- **Capture a connected device**: `HMDeviceExtractor.Extract` reads the cached HID descriptor Windows parsed from any real HID device you have plugged in and returns a ready-to-deploy `HMProfile`. No JSON authoring, no descriptor reverse engineering — point it at the controller and you get a matching virtual.
 
 The result is an SDK for fully custom virtual controllers that present as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
 
@@ -91,7 +92,28 @@ var stick = new HMProfileBuilder()
     .InputReportSize(8)
     .Build();
 using var ctrl2 = ctx.CreateController(stick);
+
+// Or capture a physical controller and deploy as a virtual
+var device = HMDeviceExtractor.ListDevices()
+    .First(d => d.VendorId == 0x046D && d.ProductId == 0xC216);
+var extracted = HMDeviceExtractor.Extract(device);
+using var ctrl3 = ctx.CreateController(extracted);
+// Virtual now presents with the real device's descriptor, VID/PID,
+// product string — identical to what the physical device reports.
 ```
+
+### Profile Extractor (GUI tool)
+
+Every HIDMaestro release ships a standalone WPF app (`HIDMaestroProfileExtractor.exe`) under `HIDMaestroProfileExtractor/` in the release ZIP. It calls the same `HMDeviceExtractor` API from a dropdown-and-save UI:
+
+1. Plug any HID device into Windows.
+2. Run `HIDMaestroProfileExtractor.exe` (no admin required).
+3. Pick the device from the dropdown, click **Extract**.
+4. Save the Profile JSON to disk or copy it to the clipboard.
+
+The output is the exact JSON format shipped in `profiles/<vendor>/<slug>.json`. Drop it in a PR (or an [issue via the profile contribution template](https://github.com/hifihedgehog/HIDMaestro/issues/new?template=profile-contribution.yml)) to add the profile to the catalog so every HIDMaestro user can emulate that controller without owning it themselves.
+
+The extractor reads only the cached HID descriptor Windows has already parsed — no live input capture, no gameplay involvement. Reconstruction uses a C# port of the libusb/hidapi algorithm (Chromium WebHID team's reverse engineering of Microsoft's preparsed-data layout). Output is logically equivalent to the device's real HID report descriptor: same report IDs, field layouts, logical ranges, usage pages, and sizes.
 
 ## Techniques
 
