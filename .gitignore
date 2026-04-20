@@ -12,6 +12,8 @@ example/SdkDemo/bin/
 example/SdkDemo/obj/
 sdk/HIDMaestro.Core/bin/
 sdk/HIDMaestro.Core/obj/
+tools/*/bin/
+tools/*/obj/
 # Resources/ is populated by csproj <PackResources> target before build
 sdk/HIDMaestro.Core/Resources/
 *.cer
