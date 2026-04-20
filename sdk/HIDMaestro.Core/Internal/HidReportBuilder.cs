@@ -261,6 +261,25 @@ public class HidReportBuilder
 
     void ResolveSemantics()
     {
+        // Pre-scan: does this descriptor have dedicated Rx (0x33) or Ry (0x34)
+        // usages? If so, Z (0x32) and Rz (0x35) are triggers — the Xbox-style
+        // 6-axis layout. If NOT, and Z+Rz both appear at 8-bit, they're the
+        // right stick — the 4-axis DirectInput layout (the usage pattern
+        // WebKit/Chromium call the "standard gamepad"). Without this
+        // distinction the 8-bit Z/Rz case gets classified as triggers and
+        // RightStickX/RightStickY writes become silent no-ops. See issue #5.
+        bool hasRxOrRy = false;
+        bool hasZ8 = false;
+        bool hasRz8 = false;
+        foreach (var f in InputFields)
+        {
+            if (f.IsConstant || f.UsagePage != 0x01) continue;
+            if (f.Usage == 0x33 || f.Usage == 0x34) hasRxOrRy = true;
+            else if (f.Usage == 0x32 && f.BitSize <= 8) hasZ8 = true;
+            else if (f.Usage == 0x35 && f.BitSize <= 8) hasRz8 = true;
+        }
+        bool fourAxisDInput = !hasRxOrRy && hasZ8 && hasRz8;
+
         // Map HID usages to semantic gamepad axes/buttons
         // This works for any standard gamepad descriptor
         foreach (var f in InputFields)
@@ -274,8 +293,13 @@ public class HidReportBuilder
                     case 0x30: LeftStickX ??= f; break;    // X
                     case 0x31: LeftStickY ??= f; break;    // Y
                     case 0x32:                               // Z
-                        // Z could be right stick or trigger — distinguish by bit size
-                        if (f.BitSize > 8) // 10+ bit = trigger, 16-bit = stick
+                        // Z could be right stick or trigger — distinguish by
+                        // bit size AND by whether Rx/Ry exist elsewhere in
+                        // the descriptor. 4-axis DInput (no Rx/Ry, 8-bit
+                        // Z+Rz) maps Z to right stick X.
+                        if (fourAxisDInput)
+                            RightStickX ??= f;
+                        else if (f.BitSize > 8)
                         {
                             if (f.BitSize >= 16 && RightStickX == null)
                                 RightStickX = f;
@@ -288,7 +312,9 @@ public class HidReportBuilder
                     case 0x33: RightStickX ??= f; break;   // Rx
                     case 0x34: RightStickY ??= f; break;   // Ry
                     case 0x35:                               // Rz
-                        if (f.BitSize >= 16 && RightStickY == null)
+                        if (fourAxisDInput)
+                            RightStickY ??= f;
+                        else if (f.BitSize >= 16 && RightStickY == null)
                             RightStickY = f;
                         else
                             RightTrigger ??= f;

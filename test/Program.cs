@@ -77,21 +77,27 @@ class Program
             }
         }
 
-        // Elevate — every command here needs admin (device create / driver install / cleanup)
-        if (!IsElevated())
+        // Read-only introspection commands run fine without admin. Everything
+        // else needs SeLoadDriverPrivilege for device create / driver install /
+        // registry cleanup.
+        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info";
+        if (!readOnlyCmd && !IsElevated())
         {
             Console.WriteLine("  Requesting elevation (admin required)...\n");
             return RelaunchElevated(args);
         }
 
-        // Safety net: always purge devices on exit so testing leaves no trace
-        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        // Safety net: always purge devices on exit so testing leaves no trace.
+        // Skip for read-only commands since that path needs admin for the
+        // registry cleanup it performs.
+        if (!readOnlyCmd)
         {
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            };
             try { HMContext.RemoveAllVirtualControllers(); } catch { }
-        };
-
-        // Clean up any leftover devices from previous sessions
-        try { HMContext.RemoveAllVirtualControllers(); } catch { }
+        }
 
         if (args.Length == 0)
         {
