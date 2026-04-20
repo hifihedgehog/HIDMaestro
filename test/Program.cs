@@ -80,7 +80,7 @@ class Program
         // Read-only introspection commands run fine without admin. Everything
         // else needs SeLoadDriverPrivilege for device create / driver install /
         // registry cleanup.
-        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info";
+        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info" or "build-descriptor";
         if (!readOnlyCmd && !IsElevated())
         {
             Console.WriteLine("  Requesting elevation (admin required)...\n");
@@ -113,6 +113,7 @@ class Program
             Console.WriteLine("  HIDMaestroTest oem clear <vid> <pid>");
             Console.WriteLine("  HIDMaestroTest oem recover             Restore overrides left by a crashed consumer");
             Console.WriteLine("  HIDMaestroTest oem list                Show currently-tracked overrides");
+            Console.WriteLine("  HIDMaestroTest build-descriptor        Inspect HidDescriptorBuilder output (read-only)");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -127,6 +128,7 @@ class Program
             "cleanup"  => RunCleanup(),
             "sdk-demo" => SdkDemo(args.Skip(1).ToArray()),
             "oem"      => OemCommand(args.Skip(1).ToArray()),
+            "build-descriptor" => BuildDescriptorCommand(),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -913,6 +915,45 @@ class Program
     {
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
         return ushort.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out v);
+    }
+
+    // ── build-descriptor ──
+    //
+    // Reconstructs the HidDescriptorBuilder output for the padforge-custom
+    // repro shape (2 sticks + 2 triggers + hat + 11 buttons) and prints the
+    // raw descriptor bytes plus the parsed layout via HidReportBuilder. Used
+    // to verify that the builder doesn't emit phantom Const axes (issue #6).
+
+    static int BuildDescriptorCommand()
+    {
+        byte[] desc = new HidDescriptorBuilder()
+            .Gamepad()
+            .AddStick("Left", 16)
+            .AddStick("Right", 16)
+            .AddTrigger("Left", 8)
+            .AddTrigger("Right", 8)
+            .AddHat()
+            .AddButtons(11)
+            .Build();
+        Console.WriteLine($"Descriptor: {desc.Length} bytes");
+        Console.WriteLine($"Hex:        {Convert.ToHexString(desc).ToLowerInvariant()}");
+        Console.WriteLine();
+        var parsed = HIDMaestro.Internal.HidReportBuilder.Parse(desc);
+        parsed.PrintLayout();
+        Console.WriteLine($"\n  All input fields ({parsed.InputFields.Count}):");
+        foreach (var f in parsed.InputFields)
+        {
+            string kind = f.IsConstant ? "Const" : "Data ";
+            string page = f.UsagePage switch
+            {
+                0x01 => "GenericDesktop",
+                0x09 => "Button",
+                0xFF00 => "VendorDefined",
+                _ => $"0x{f.UsagePage:X4}",
+            };
+            Console.WriteLine($"    [{kind}] {page,-16}/0x{f.Usage:X2}   bit {f.BitOffset,3}, {f.BitSize,2}b, range [{f.LogicalMin}..{f.LogicalMax}]");
+        }
+        return 0;
     }
 
     // ── sdk-demo ──
