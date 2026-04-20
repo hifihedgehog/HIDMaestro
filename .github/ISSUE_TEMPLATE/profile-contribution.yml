@@ -1,0 +1,99 @@
+name: Profile contribution
+description: Submit a HIDMaestro profile extracted from a real HID device you own
+title: "[Profile] <vendor> <device name>"
+labels: ["profile-contribution"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing a controller profile. This form is for submitting the JSON output from
+        **HIDMaestroProfileExtractor** (shipped in every HIDMaestro release since v1.1.14).
+
+        If you haven't extracted it yet:
+
+        1. Download the latest release ZIP from https://github.com/hifihedgehog/HIDMaestro/releases/latest
+        2. Open `HIDMaestroProfileExtractor/HIDMaestroProfileExtractor.exe`
+        3. Plug the device in, pick it from the dropdown, hit **Extract**
+        4. Copy the **Profile JSON** tab or use **Save as…** and attach below
+
+  - type: input
+    id: device_name
+    attributes:
+      label: Device
+      description: Plain-language name (e.g. "Fanatec CSL DD Pro", "8BitDo SN30 Pro USB")
+      placeholder: Logitech G920
+    validations:
+      required: true
+
+  - type: input
+    id: vid_pid
+    attributes:
+      label: VID:PID
+      description: As shown in the extractor dropdown (format `VID_XXXX:PID_YYYY`)
+      placeholder: "VID_046D:PID_C262"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Connection / mode
+      description: What mode is the device in when you captured this?
+      options:
+        - USB
+        - Bluetooth
+        - BLE
+        - Wireless adapter
+        - Other (describe in notes)
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows build
+      description: Output of `winver` or the build number from Settings → System → About
+      placeholder: 10.0.26200.8246
+    validations:
+      required: true
+
+  - type: textarea
+    id: profile_json
+    attributes:
+      label: Profile JSON
+      description: |
+        Paste the full JSON from the **Profile JSON** tab. Alternatively, upload the
+        saved `.json` file in the attachments area at the bottom of the issue form.
+      render: json
+      placeholder: |
+        {
+          "id": "...",
+          "name": "...",
+          "vendor": "...",
+          ...
+        }
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes (optional)
+      description: |
+        Anything unusual about the device you'd like to call out: multiple HID interfaces,
+        mode switches, firmware quirks, haptic/rumble behavior, etc.
+      placeholder: |
+        Device has two HID collections (Joystick + Gamepad). Captured the Gamepad one
+        because that's what Chrome surfaces. DInput mode, firmware 1.04.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I physically own this device and ran the extractor against my own hardware.
+          required: true
+        - label: The JSON above was produced by `HIDMaestroProfileExtractor` without manual edits.
+          required: true
+        - label: I'm okay with this profile being redistributed under the HIDMaestro license.
+          required: true
