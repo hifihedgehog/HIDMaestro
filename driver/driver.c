@@ -860,17 +860,22 @@ EvtDeviceAdd(
      * registered XUSB here too, mshidumdf would corrupt the IOCTL path and
      * xinput1_4 would talk to the wrong device. */
 
-    /* WinExInput — needed for browser GamepadAdded detection.
-     * Skip for:
-     *   - gamepad companion (would create duplicate browser entry)
-     *   - function mode (XUSB companion provides WinExInput instead) */
-    if (!isGamepadCompanion && !functionMode)
-    {
-        UNICODE_STRING refStr;
-        RtlInitUnicodeString(&refStr, L"XI_00");
-        WdfDeviceCreateDeviceInterface(device,
-            (LPGUID)&WINEXINPUT_INTERFACE_GUID, &refStr);
-    }
+    /* WinExInput is NEVER registered on the main HID device.
+     *
+     * Registering it here caused duplicate entries in the browser Gamepad
+     * API: plain HID virtuals (DualSense, Stadia, custom profiles) showed up
+     * once as a WGI "standard gamepad" (via this WinExInput registration)
+     * AND once as a raw HID device (via RawInput). See issue #6.
+     *
+     * Xbox profiles with WGI detection needs: the XUSB companion
+     * (HMXInput.dll) registers WinExInput with the same XI_00 reference
+     * string. WGI fires GamepadAdded for the companion; the main HID is
+     * seen only via RawInput by apps that want it. No duplicate.
+     *
+     * Plain HID virtuals (non-Xbox): browsers detect them via RawInput
+     * directly. No WGI path is required or desired. Chrome applies its
+     * standard-gamepad mapping heuristic based on VID:PID and descriptor
+     * shape, not on WinExInput presence. */
 
     /* Create locks */
     status = WdfWaitLockCreate(WDF_NO_OBJECT_ATTRIBUTES, &ctx->InputLock);
