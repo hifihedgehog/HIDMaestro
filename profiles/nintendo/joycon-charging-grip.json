@@ -8,7 +8,7 @@
   "manufacturerString": "Nintendo Co., Ltd.",
   "type": "gamepad",
   "connection": "usb",
-  "descriptor": null,
+  "descriptor": "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0",
   "inputReportSize": null,
-  "notes": "USB device that presents as a single device. Driver splits into L+R internally."
+  "notes": "170-byte Joy-Con HID descriptor (firmware-family analog, not a direct 0x200E capture). The real Grip hosts two Joy-Con HID interfaces (one per slot) over USB, each speaking Joy-Con protocol; this profile collapses that into a single single-interface virtual with the standard Joy-Con descriptor. Linux hid-nintendo.c groups the Grip under jc_type_is_joycon, confirming it shares Joy-Con framing rather than Pro Controller framing. Replace with a direct 0x200E per-interface capture when available."
 }
