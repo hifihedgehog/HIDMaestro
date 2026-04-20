@@ -409,13 +409,17 @@ internal static class DeviceOrchestrator
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
 
-        // Joystick OEM display name (joy.cpl). Write BOTH HKLM and HKCU —
-        // HKCU takes precedence over HKLM for this path, and Windows ships
-        // HKCU preloaded for many common clone VID:PIDs (e.g. VID_0079&PID_0006
-        // -> "PC TWIN SHOCK Gamepad"). Without the HKCU write the preload
-        // wins and joy.cpl shows the stale clone label instead of the profile's
-        // ProductString. Consumers that want a different label can override
-        // both paths via HMOemNameOverride.Set.
+        // Joystick OEM display name (HKLM only). HKCU Joystick\OEM\<VID&PID>
+        // takes precedence over HKLM for joy.cpl, and Windows ships HKCU
+        // preloaded for many common clone VID:PIDs. Writing HKCU from
+        // DeviceOrchestrator would destructively overwrite that preload
+        // without a capture-and-restore mechanism, leaving joy.cpl showing
+        // the profile's ProductString forever even after the virtual is
+        // disposed. Route HKCU writes exclusively through HMOemNameOverride,
+        // which captures the prior value to a pending record before mutating
+        // and restores on Clear / RecoverOrphans. The HKLM write here stays
+        // because it's non-destructive (HKCU wins for joy.cpl anyway) and
+        // some legacy MME consumers do read HKLM.
         string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}";
         try
         {
@@ -423,14 +427,6 @@ internal static class DeviceOrchestrator
             oem?.SetValue("OEMName", displayName, RegistryValueKind.String);
             oem?.DeleteValue("OEMData", false);
             try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", throwOnMissingSubKey: false); } catch { }
-        }
-        catch { }
-        try
-        {
-            using var oem = Registry.CurrentUser.CreateSubKey(oemKeyPath);
-            oem?.SetValue("OEMName", displayName, RegistryValueKind.String);
-            oem?.DeleteValue("OEMData", false);
-            try { Registry.CurrentUser.DeleteSubKeyTree($@"{oemKeyPath}\Axes", throwOnMissingSubKey: false); } catch { }
         }
         catch { }
     }

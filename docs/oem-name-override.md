@@ -86,7 +86,11 @@ If the process is force-killed before `Clear` runs, the next startup's `RecoverO
 
 ## Interaction with default HIDMaestro profile behavior
 
-When a virtual is created, `DeviceOrchestrator` also writes both HKLM and HKCU Joystick\OEM paths using the profile's `DeviceDescription ?? ProductString` as the label. That sets a sensible default so joy.cpl shows the profile's intended name for fresh virtuals, without any explicit `HMOemNameOverride.Set` call. `HMOemNameOverride.Set` is still needed to force a label different from the profile's own string, or to override what Windows has preloaded before the virtual first came up.
+When a virtual is created, `DeviceOrchestrator` writes **only** the HKLM Joystick\OEM path using the profile's `DeviceDescription ?? ProductString` as the label. It does NOT write HKCU, because that would destructively overwrite the Windows-shipped preload without the capture-and-restore machinery that this class provides — and there is no obvious lifecycle trigger for when to restore it (a virtual can be disposed without the consumer intending the joy.cpl label to revert).
+
+The consequence: for any VID:PID where Windows has an HKCU preload (e.g. "PC TWIN SHOCK Gamepad" for VID_0079&PID_0006), the preload keeps winning for joy.cpl purposes unless the consumer calls `HMOemNameOverride.Set` explicitly. If the label your profile wants is different from the HKCU preload, `Set` is the mechanism.
+
+Historical note: v1.1.10 briefly had DeviceOrchestrator write HKCU by default. That was reverted in v1.1.11 because it silently overwrote Windows preloads with no way to restore them on virtual disposal.
 
 ## Caveats
 
