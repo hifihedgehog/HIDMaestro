@@ -6,58 +6,85 @@ using Microsoft.Win32;
 namespace HIDMaestro.Internal;
 
 /// <summary>
-/// Crash-safe registry state machine for DirectInput OEM-name overrides.
+/// Crash-safe registry state machine for joy.cpl / DirectInput OEM-name
+/// overrides.
 ///
-/// Windows ships a pre-populated table at
-/// <c>HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput\VID_####&amp;PID_####\OEM\OEM Name</c>
-/// which joy.cpl (a DirectInput UI) reads in preference to the device's
-/// HID-reported iProduct string. For some VID:PIDs that label is
-/// unhelpful (e.g. VID 0x0079 PID 0x0006 is pre-labeled "PC TWIN SHOCK
-/// Gamepad" even though the device's iProduct may say something else).
-///
-/// Consumers that want joy.cpl to show a specific label override that
-/// registry value. To keep the override safe under crash, power loss,
-/// force-kill, or missed uninstaller cleanup, this store:
+/// <para>Empirical result on Windows 11: the label shown in
+/// <c>joy.cpl</c> and the one returned by DirectInput's
+/// <c>DIPROP_PRODUCTNAME</c> are sourced from three distinct registry
+/// paths, and Windows pre-populates at least one of them
+/// (<c>HKCU\...\Joystick\OEM\...</c>) for common clone VID:PIDs. To
+/// reliably override the label, all three paths must be written:</para>
 ///
 /// <list type="number">
-///   <item>Records the prior value in a HIDMaestro-owned registry hive
-///         (<c>HKLM\SOFTWARE\HIDMaestroOemOverrides\VID_xxxx&amp;PID_xxxx</c>)
-///         BEFORE mutating the DirectInput key. If we crash before the
-///         mutation, the record's target value is already in place and
-///         restore is a no-op. If we crash after, the record drives the
-///         restore.</item>
-///   <item>Acquires a global mutex around every claim, release, and
-///         recovery sweep so concurrent SDK consumers serialize access.</item>
-///   <item>Provides <see cref="RecoverOrphans"/> that replays every
-///         pending record from a prior process and restores the DirectInput
-///         key. Consumers call this once at startup.</item>
+///   <item>
+///     <c>HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput\VID_####&amp;PID_####\OEM\"OEM Name"</c>
+///     <br/>(value name has a space; read by DirectInput consumers)
+///   </item>
+///   <item>
+///     <c>HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_####&amp;PID_####\"OEMName"</c>
+///     <br/>(value name has NO space; read by the MME joy.cpl applet)
+///   </item>
+///   <item>
+///     <c>HKCU\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_####&amp;PID_####\"OEMName"</c>
+///     <br/>(per-user copy; takes precedence over the HKLM Joystick path
+///     and is what Windows preloads with clone labels like
+///     "PC TWIN SHOCK Gamepad" for VID_0079&amp;PID_0006)
+///   </item>
 /// </list>
 ///
-/// All methods require admin (HKLM write). Callers that lack admin should
-/// catch <see cref="UnauthorizedAccessException"/> and decide how to
-/// surface the failure.
+/// <para>Every claim captures the pre-override value for each of the
+/// three targets into a single HIDMaestro-owned record at
+/// <c>HKLM\SOFTWARE\HIDMaestroOemOverrides\VID_xxxx&amp;PID_xxxx</c>
+/// BEFORE any of the target keys is mutated. That record drives
+/// three-way restore on <see cref="Release"/> and
+/// <see cref="RecoverOrphans"/>.</para>
+///
+/// <para>Backward compatibility: pending records written by an earlier
+/// build of this store (which captured only the DirectInput target)
+/// are still replayed correctly — missing Joystick fields are treated
+/// as "no restore needed" for that target, which is the safe default
+/// since no new Joystick write happened under that old record.</para>
+///
+/// <para>All methods require admin (HKLM write). The HKCU write
+/// targets the CALLING user's hive. Multi-user systems: the override
+/// is user-scoped for joy.cpl purposes but system-wide for DirectInput.
+/// Single-user workstations (the common case) see consistent behavior
+/// across both UIs.</para>
 /// </summary>
 internal static class OemNameOverrideStore
 {
+    // ── Target paths ────────────────────────────────────────────────
     private const string DirectInputRoot =
         @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\DirectInput";
-    // NOTE: deliberately NOT under HKLM\SOFTWARE\HIDMaestro. That subtree is
-    // wiped wholesale by DeviceOrchestrator.RemoveAllVirtualControllers as
-    // part of normal cleanup, which would stomp our pending records on every
-    // SDK restart. This hive is a sibling path, orthogonal to the driver's
-    // lifecycle.
+    private const string JoystickRoot =
+        @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
+
+    private const string DirectInputOemSubkey = "OEM";
+    private const string DirectInputOemNameValue = "OEM Name";   // space
+    private const string JoystickOemNameValue = "OEMName";       // no space
+
+    // ── Pending-record hive (sibling of HKLM\SOFTWARE\HIDMaestro;
+    //    deliberately NOT under it — see DeviceOrchestrator cleanup)
     private const string PendingRoot = @"SOFTWARE\HIDMaestroOemOverrides";
     private const string MutexName = @"Global\HIDMaestro-OEM-Recovery";
-    private const string OemSubkey = "OEM";
-    private const string OemNameValue = "OEM Name";
-    private const string StoreOriginalName = "OriginalOemName";
-    private const string StoreOriginalExisted = "OriginalKeyExisted";
-    private const string StoreClaimedAt = "ClaimedAtFileTime";
 
-    /// <summary>Claim an OEM-name override for (vid, pid). If a prior override
-    /// already exists from this process or another one, it is replaced; the
-    /// original-value record is preserved (not overwritten to point at our
-    /// replacement value).</summary>
+    // ── Pending-record value names ─────────────────────────────────
+    // DirectInput (v1 fields — preserved for backward compat)
+    private const string DI_OriginalName    = "OriginalOemName";
+    private const string DI_OriginalExisted = "OriginalKeyExisted";
+    // Joystick HKLM (v2 fields)
+    private const string JM_OriginalName    = "OriginalJoystickOemName_HKLM";
+    private const string JM_OriginalExisted = "OriginalJoystickKeyExisted_HKLM";
+    // Joystick HKCU (v2 fields)
+    private const string JU_OriginalName    = "OriginalJoystickOemName_HKCU";
+    private const string JU_OriginalExisted = "OriginalJoystickKeyExisted_HKCU";
+    private const string V_ClaimedAt        = "ClaimedAtFileTime";
+
+    // ────────────────────────────────────────────────────────────────
+    //  Public entry points
+    // ────────────────────────────────────────────────────────────────
+
     public static void Claim(ushort vid, ushort pid, string label)
     {
         if (label is null) throw new ArgumentNullException(nameof(label));
@@ -66,19 +93,19 @@ internal static class OemNameOverrideStore
         using var mutex = AcquireMutex();
         try
         {
-            // Only capture the "original" value the FIRST time we touch this
-            // VID:PID. If our own pending record already exists, we're replacing
-            // our own prior claim; the captured-original from that first claim
-            // is still the correct thing to restore to on release.
+            // Capture prior values ONLY on the first Set for this VID:PID.
+            // Subsequent Sets replace the label but leave the original-state
+            // record alone, so Clear always restores to the true pre-HIDMaestro
+            // state, not the prior Set's label.
+            bool recordExists;
             using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
             {
-                if (pending is null)
-                {
-                    CaptureOriginalToPendingStore(vidPid);
-                }
+                recordExists = pending is not null;
             }
+            if (!recordExists)
+                CaptureAllOriginalsToPendingStore(vidPid);
 
-            WriteDirectInputOemName(vidPid, label);
+            WriteAllTargets(vidPid, label);
         }
         finally
         {
@@ -86,29 +113,14 @@ internal static class OemNameOverrideStore
         }
     }
 
-    /// <summary>Release an OEM-name override for (vid, pid). Restores whatever
-    /// was in the DirectInput key when the first <see cref="Claim"/> for this
-    /// VID:PID happened — either writes the original string back, or deletes
-    /// the OEM subkey if it didn't exist before. If no pending record exists,
-    /// this is a no-op.</summary>
     public static void Release(ushort vid, ushort pid)
     {
         string vidPid = FormatVidPid(vid, pid);
         using var mutex = AcquireMutex();
-        try
-        {
-            RestoreFromPendingStore(vidPid);
-        }
-        finally
-        {
-            mutex.ReleaseMutex();
-        }
+        try { RestoreFromPendingStore(vidPid); }
+        finally { mutex.ReleaseMutex(); }
     }
 
-    /// <summary>Replay every pending record from a prior process and restore
-    /// the corresponding DirectInput OEM key. Call once at consumer startup,
-    /// before creating any HIDMaestro virtuals, to clean up after a crash
-    /// or missed cleanup. Returns the number of overrides restored.</summary>
     public static int RecoverOrphans()
     {
         using var mutex = AcquireMutex();
@@ -125,15 +137,9 @@ internal static class OemNameOverrideStore
             }
             return restored;
         }
-        finally
-        {
-            mutex.ReleaseMutex();
-        }
+        finally { mutex.ReleaseMutex(); }
     }
 
-    /// <summary>Enumerate all currently-active overrides owned by this store.
-    /// Returns a snapshot; entries may disappear between enumeration and read
-    /// in the concurrent case.</summary>
     public static IReadOnlyList<(string VidPid, string? OriginalOemName, bool OriginalExisted)> ListActive()
     {
         var result = new List<(string, string?, bool)>();
@@ -144,114 +150,175 @@ internal static class OemNameOverrideStore
         {
             using var entry = pendingRoot.OpenSubKey(vidPid, writable: false);
             if (entry is null) continue;
-            string? original = entry.GetValue(StoreOriginalName) as string;
-            bool existed = (entry.GetValue(StoreOriginalExisted) as int?) == 1;
+            // ListActive surfaces the DirectInput original for backward compat
+            // with the v1 record shape. The joystick fields are also captured
+            // but are implementation detail of restore.
+            string? original = entry.GetValue(DI_OriginalName) as string;
+            bool existed = (entry.GetValue(DI_OriginalExisted) as int?) == 1;
             result.Add((vidPid, original, existed));
         }
         return result;
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Internals
-    // ────────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────
+    //  Write pass — mutate all three targets
+    // ────────────────────────────────────────────────────────────────
 
-    private static Mutex AcquireMutex()
+    private static void WriteAllTargets(string vidPid, string label)
     {
-        var mutex = new Mutex(initiallyOwned: false, MutexName);
-        try
+        // 1. DirectInput (HKLM)
+        using (var key = Registry.LocalMachine.CreateSubKey($@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}", writable: true)!)
         {
-            mutex.WaitOne();
+            key.SetValue(DirectInputOemNameValue, label, RegistryValueKind.String);
         }
-        catch (AbandonedMutexException)
+
+        // 2. Joystick (HKLM)
+        using (var key = Registry.LocalMachine.CreateSubKey($@"{JoystickRoot}\{vidPid}", writable: true)!)
         {
-            // A prior owner crashed while holding the mutex. We now own it —
-            // safe to proceed; state integrity is guarded by the two-phase
-            // write ordering, not the mutex lifetime.
+            key.SetValue(JoystickOemNameValue, label, RegistryValueKind.String);
         }
-        return mutex;
+
+        // 3. Joystick (HKCU) — wins over HKLM, what joy.cpl actually shows
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{JoystickRoot}\{vidPid}", writable: true)!)
+        {
+            key.SetValue(JoystickOemNameValue, label, RegistryValueKind.String);
+        }
     }
 
-    private static void CaptureOriginalToPendingStore(string vidPid)
+    // ────────────────────────────────────────────────────────────────
+    //  Capture pass — save originals for all three targets
+    // ────────────────────────────────────────────────────────────────
+
+    private static void CaptureAllOriginalsToPendingStore(string vidPid)
     {
-        string? original;
-        bool existed;
-        using (var oem = Registry.LocalMachine.OpenSubKey(DirectInputOemPath(vidPid), writable: false))
-        {
-            if (oem is null)
-            {
-                original = null;
-                existed = false;
-            }
-            else
-            {
-                original = oem.GetValue(OemNameValue) as string;
-                existed = true;
-            }
-        }
+        var (diOrig, diExisted) = ReadOriginal(
+            Registry.LocalMachine,
+            $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}",
+            DirectInputOemNameValue);
+
+        var (jmOrig, jmExisted) = ReadOriginal(
+            Registry.LocalMachine,
+            $@"{JoystickRoot}\{vidPid}",
+            JoystickOemNameValue);
+
+        var (juOrig, juExisted) = ReadOriginal(
+            Registry.CurrentUser,
+            $@"{JoystickRoot}\{vidPid}",
+            JoystickOemNameValue);
 
         using var pending = Registry.LocalMachine.CreateSubKey(PendingEntryPath(vidPid), writable: true)!;
-        if (original is not null)
-            pending.SetValue(StoreOriginalName, original, RegistryValueKind.String);
-        else
-            pending.DeleteValue(StoreOriginalName, throwOnMissingValue: false);
-
-        pending.SetValue(StoreOriginalExisted, existed ? 1 : 0, RegistryValueKind.DWord);
-        pending.SetValue(StoreClaimedAt, DateTime.UtcNow.ToFileTimeUtc(), RegistryValueKind.QWord);
+        WriteOriginalPair(pending, DI_OriginalName, DI_OriginalExisted, diOrig, diExisted);
+        WriteOriginalPair(pending, JM_OriginalName, JM_OriginalExisted, jmOrig, jmExisted);
+        WriteOriginalPair(pending, JU_OriginalName, JU_OriginalExisted, juOrig, juExisted);
+        pending.SetValue(V_ClaimedAt, DateTime.UtcNow.ToFileTimeUtc(), RegistryValueKind.QWord);
     }
+
+    private static (string? val, bool existed) ReadOriginal(RegistryKey baseKey, string path, string valueName)
+    {
+        using var k = baseKey.OpenSubKey(path, writable: false);
+        if (k is null) return (null, false);
+        return (k.GetValue(valueName) as string, true);
+    }
+
+    private static void WriteOriginalPair(RegistryKey pending, string nameKey, string existedKey, string? original, bool existed)
+    {
+        if (original is not null)
+            pending.SetValue(nameKey, original, RegistryValueKind.String);
+        else
+            pending.DeleteValue(nameKey, throwOnMissingValue: false);
+        pending.SetValue(existedKey, existed ? 1 : 0, RegistryValueKind.DWord);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  Restore pass — replay record, delete pending entry
+    // ────────────────────────────────────────────────────────────────
 
     private static void RestoreFromPendingStore(string vidPid)
     {
-        // Read pending record
-        string? original;
-        bool existed;
+        string? diOrig; bool? diExisted;
+        string? jmOrig; bool? jmExisted;
+        string? juOrig; bool? juExisted;
+
         using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
         {
-            if (pending is null)
-            {
-                // No pending record — nothing to restore. Idempotent.
-                return;
-            }
-            original = pending.GetValue(StoreOriginalName) as string;
-            existed = (pending.GetValue(StoreOriginalExisted) as int?) == 1;
+            if (pending is null) return; // nothing to restore; idempotent
+
+            diOrig    = pending.GetValue(DI_OriginalName) as string;
+            diExisted = ReadExistedFlag(pending, DI_OriginalExisted);
+            jmOrig    = pending.GetValue(JM_OriginalName) as string;
+            jmExisted = ReadExistedFlag(pending, JM_OriginalExisted);
+            juOrig    = pending.GetValue(JU_OriginalName) as string;
+            juExisted = ReadExistedFlag(pending, JU_OriginalExisted);
         }
 
-        if (existed)
-        {
-            // Original OEM subkey existed. Restore the value (or null-out by
-            // removing the OEM Name value if the original had no such value).
-            using var oem = Registry.LocalMachine.CreateSubKey(DirectInputOemPath(vidPid), writable: true)!;
-            if (original is not null)
-                oem.SetValue(OemNameValue, original, RegistryValueKind.String);
-            else
-                oem.DeleteValue(OemNameValue, throwOnMissingValue: false);
-        }
-        else
-        {
-            // Original OEM subkey did not exist — we created it. Remove it.
-            using var parent = Registry.LocalMachine.OpenSubKey(
-                DirectInputVidPidPath(vidPid), writable: true);
-            parent?.DeleteSubKeyTree(OemSubkey, throwOnMissingSubKey: false);
-        }
+        // DirectInput target
+        if (diExisted == true)
+            RestoreValue(Registry.LocalMachine, $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}",
+                         DirectInputOemNameValue, diOrig);
+        else if (diExisted == false)
+            DeleteSubkey(Registry.LocalMachine, $@"{DirectInputRoot}\{vidPid}", DirectInputOemSubkey);
+        // diExisted == null → record lacks DirectInput fields; skip
 
-        // Drop our pending record
+        // Joystick HKLM target
+        if (jmExisted == true)
+            RestoreValue(Registry.LocalMachine, $@"{JoystickRoot}\{vidPid}",
+                         JoystickOemNameValue, jmOrig);
+        else if (jmExisted == false)
+            DeleteSubkeyFromParent(Registry.LocalMachine, JoystickRoot, vidPid);
+        // jmExisted == null → v1 record; no joystick write happened, nothing to restore
+
+        // Joystick HKCU target
+        if (juExisted == true)
+            RestoreValue(Registry.CurrentUser, $@"{JoystickRoot}\{vidPid}",
+                         JoystickOemNameValue, juOrig);
+        else if (juExisted == false)
+            DeleteSubkeyFromParent(Registry.CurrentUser, JoystickRoot, vidPid);
+        // juExisted == null → v1 record; nothing to restore
+
+        // Drop the pending entry
         using var pendingRoot = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: true);
         pendingRoot?.DeleteSubKeyTree(vidPid, throwOnMissingSubKey: false);
     }
 
-    private static void WriteDirectInputOemName(string vidPid, string label)
+    private static bool? ReadExistedFlag(RegistryKey key, string valueName)
     {
-        using var oem = Registry.LocalMachine.CreateSubKey(DirectInputOemPath(vidPid), writable: true)!;
-        oem.SetValue(OemNameValue, label, RegistryValueKind.String);
+        var v = key.GetValue(valueName);
+        if (v is null) return null;
+        return ((int)v) == 1;
+    }
+
+    private static void RestoreValue(RegistryKey baseKey, string path, string valueName, string? original)
+    {
+        using var k = baseKey.CreateSubKey(path, writable: true)!;
+        if (original is not null)
+            k.SetValue(valueName, original, RegistryValueKind.String);
+        else
+            k.DeleteValue(valueName, throwOnMissingValue: false);
+    }
+
+    private static void DeleteSubkey(RegistryKey baseKey, string parentPath, string subkey)
+    {
+        using var parent = baseKey.OpenSubKey(parentPath, writable: true);
+        parent?.DeleteSubKeyTree(subkey, throwOnMissingSubKey: false);
+    }
+
+    private static void DeleteSubkeyFromParent(RegistryKey baseKey, string parentPath, string subkey) =>
+        DeleteSubkey(baseKey, parentPath, subkey);
+
+    // ────────────────────────────────────────────────────────────────
+    //  Plumbing
+    // ────────────────────────────────────────────────────────────────
+
+    private static Mutex AcquireMutex()
+    {
+        var mutex = new Mutex(initiallyOwned: false, MutexName);
+        try { mutex.WaitOne(); }
+        catch (AbandonedMutexException) { /* safe: two-phase ordering guards state */ }
+        return mutex;
     }
 
     private static string FormatVidPid(ushort vid, ushort pid) =>
         $"VID_{vid:X4}&PID_{pid:X4}";
-
-    private static string DirectInputVidPidPath(string vidPid) =>
-        $@"{DirectInputRoot}\{vidPid}";
-
-    private static string DirectInputOemPath(string vidPid) =>
-        $@"{DirectInputRoot}\{vidPid}\{OemSubkey}";
 
     private static string PendingEntryPath(string vidPid) =>
         $@"{PendingRoot}\{vidPid}";

@@ -5,22 +5,32 @@ using HIDMaestro.Internal;
 namespace HIDMaestro;
 
 /// <summary>
-/// Override the DirectInput OEM-name label shown by <c>joy.cpl</c> and any
-/// other DirectInput UI for a given USB VID:PID.
+/// Override the OEM-name label shown by <c>joy.cpl</c> and DirectInput
+/// consumers for a given USB VID:PID.
 ///
-/// <para>Windows maintains a pre-populated OEM-name table for a number of
-/// well-known VID:PIDs. DirectInput reads that table in preference to the
-/// device's HID iProduct string when reporting <c>DIPROP_PRODUCTNAME</c>.
-/// For example, any device claiming VID 0x0079 / PID 0x0006 is labeled
-/// "PC TWIN SHOCK Gamepad" regardless of what iProduct says, because that
-/// is the canonical DragonRise clone entry in the table.</para>
+/// <para>The label surfaces from three registry locations, and Windows
+/// pre-populates at least one of them for common clone PIDs. To reliably
+/// override, all three must be written:</para>
 ///
-/// <para>Consumers that want joy.cpl to show a specific label for a
-/// HIDMaestro virtual must overwrite that table entry. This class wraps the
-/// write in a crash-safe state machine that records the prior value in a
-/// HIDMaestro-owned registry hive before mutating DirectInput's key, so a
-/// crashed or force-killed consumer can restore the original label on next
-/// startup via <see cref="RecoverOrphans"/>.</para>
+/// <list type="bullet">
+///   <item><c>HKLM\...\DirectInput\VID_####&amp;PID_####\OEM\"OEM Name"</c>
+///         (value name has a space; read by DirectInput consumers).</item>
+///   <item><c>HKLM\...\Joystick\OEM\VID_####&amp;PID_####\"OEMName"</c>
+///         (value name has NO space; MME joy.cpl reads here).</item>
+///   <item><c>HKCU\...\Joystick\OEM\VID_####&amp;PID_####\"OEMName"</c>
+///         (per-user; takes precedence over HKLM Joystick and is what
+///         Windows preloads with clone labels such as
+///         "PC TWIN SHOCK Gamepad" for VID_0079&amp;PID_0006).</item>
+/// </list>
+///
+/// <para>
+/// <see cref="Set"/> writes all three paths in a single transaction under a
+/// global mutex and captures the prior value of each target to a
+/// HIDMaestro-owned pending record at
+/// <c>HKLM\SOFTWARE\HIDMaestroOemOverrides\VID_xxxx&amp;PID_xxxx</c>
+/// BEFORE any target is mutated. <see cref="Clear"/> and
+/// <see cref="RecoverOrphans"/> replay the record to restore all three
+/// targets independently.</para>
 ///
 /// <para><b>Usage pattern:</b></para>
 /// <code>
@@ -40,14 +50,20 @@ namespace HIDMaestro;
 ///   <item>All methods require admin (HKLM write access). Throws
 ///         <see cref="UnauthorizedAccessException"/> if the caller is not
 ///         elevated.</item>
-///   <item>The override is global per VID:PID. If a real device with that
-///         same VID:PID is connected while your override is active, it also
-///         displays the override label. That is usually fine because the
-///         VID:PID is the reason both devices share a label.</item>
-///   <item>DirectInput caches OEM names per-process on first enumeration.
-///         Games that were already running when the override changes may
-///         keep showing the old label until they re-enumerate. Set the
-///         override before games launch.</item>
+///   <item>The HKLM DirectInput and HKLM Joystick targets are system-wide
+///         per VID:PID. If a real device with that VID:PID is connected
+///         while your override is active, DirectInput consumers see the
+///         override label for it too.</item>
+///   <item>The HKCU Joystick target is per-calling-user. On a single-user
+///         workstation that matches the DirectInput scope visually; on a
+///         multi-user machine, only the user who called <see cref="Set"/>
+///         sees the joy.cpl label change — the HKLM paths still carry the
+///         override for DirectInput consumers regardless of user.</item>
+///   <item>DirectInput and joy.cpl both cache OEM names per-process on first
+///         enumeration. A joy.cpl window that was already open when the
+///         override changes keeps showing the stale label until it is
+///         closed and re-opened. Games that were already running behave
+///         the same way. Set before opening joy.cpl or launching games.</item>
 ///   <item>Consumers that lock to single-instance execution can simply call
 ///         <see cref="RecoverOrphans"/> at startup and trust that nothing
 ///         else is racing them.</item>
