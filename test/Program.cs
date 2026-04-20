@@ -117,6 +117,7 @@ class Program
             Console.WriteLine("  HIDMaestroTest extract-profile         List connected HID devices (read-only)");
             Console.WriteLine("  HIDMaestroTest extract-profile <vid> <pid>");
             Console.WriteLine("                                        Emit HIDMaestro profile JSON for the device");
+            Console.WriteLine("  HIDMaestroTest emulate-file <path>    Create a virtual from a profile JSON on disk");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -131,9 +132,10 @@ class Program
             "cleanup"  => RunCleanup(),
             "sdk-demo" => SdkDemo(args.Skip(1).ToArray()),
             "oem"      => OemCommand(args.Skip(1).ToArray()),
-            "build-descriptor" => BuildDescriptorCommand(),
+            "build-descriptor" => BuildDescriptorCommand(args.Skip(1).ToArray()),
             "issue6-repro" => Issue6ReproCommand(),
             "extract-profile" => ExtractProfileCommand(args.Skip(1).ToArray()),
+            "emulate-file" => EmulateFileCommand(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -1000,17 +1002,32 @@ class Program
     // raw descriptor bytes plus the parsed layout via HidReportBuilder. Used
     // to verify that the builder doesn't emit phantom Const axes (issue #6).
 
-    static int BuildDescriptorCommand()
+    static int BuildDescriptorCommand(string[]? args = null)
     {
-        byte[] desc = new HidDescriptorBuilder()
-            .Gamepad()
-            .AddStick("Left", 16)
-            .AddStick("Right", 16)
-            .AddTrigger("Left", 8)
-            .AddTrigger("Right", 8)
-            .AddHat()
-            .AddButtons(11)
-            .Build();
+        byte[] desc;
+        if (args is { Length: >= 1 })
+        {
+            // Parse from hex argument — used to inspect arbitrary descriptors
+            // (e.g. output from HMDeviceExtractor) via the same pipeline.
+            try
+            {
+                string hex = args[0].Replace(" ", "").Replace("\n", "").Replace("\r", "");
+                desc = Convert.FromHexString(hex);
+            }
+            catch (Exception ex) { return Error("Bad hex: " + ex.Message); }
+        }
+        else
+        {
+            desc = new HidDescriptorBuilder()
+                .Gamepad()
+                .AddStick("Left", 16)
+                .AddStick("Right", 16)
+                .AddTrigger("Left", 8)
+                .AddTrigger("Right", 8)
+                .AddHat()
+                .AddButtons(11)
+                .Build();
+        }
         Console.WriteLine($"Descriptor: {desc.Length} bytes");
         Console.WriteLine($"Hex:        {Convert.ToHexString(desc).ToLowerInvariant()}");
         Console.WriteLine();
@@ -1078,6 +1095,80 @@ class Program
         catch (Exception ex)
         {
             return Error(ex.Message);
+        }
+    }
+
+    // ── emulate-file ──
+    //
+    // Load a single profile JSON from disk and create a virtual from it.
+    // Requires admin. Useful for round-trip verification: extract a profile
+    // via HIDMaestroProfileExtractor (or the CLI's extract-profile), save
+    // it to a file, then deploy it here to see if the virtual behaves
+    // the same as the real device.
+
+    static int EmulateFileCommand(string[] args)
+    {
+        if (args.Length < 1)
+            return Error("Usage: emulate-file <path-to-profile.json>");
+
+        string path = args[0];
+        if (!System.IO.File.Exists(path))
+            return Error($"File not found: {path}");
+
+        using var ctx = new HMContext();
+        string dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!;
+        // HMContext loads all *.json from a directory. Copy the single file
+        // to a temp dir so we load exactly what the user specified, not
+        // siblings of the same file.
+        string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "HIDMaestroEmulate-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(tmp);
+        try
+        {
+            string dest = System.IO.Path.Combine(tmp, System.IO.Path.GetFileName(path));
+            System.IO.File.Copy(path, dest);
+            int loaded = ctx.LoadProfilesFromDirectory(tmp);
+            if (loaded == 0)
+                return Error("No profiles parsed from the file.");
+            Console.WriteLine($"  Loaded {loaded} profile(s) from {path}");
+
+            Console.Write("  Installing driver... ");
+            ctx.InstallDriver();
+            Console.WriteLine("OK");
+
+            var profile = ctx.AllProfiles.First();
+            if (!profile.IsDeployable)
+                return Error($"Profile '{profile.Id}' has no descriptor; cannot deploy.");
+
+            Console.Write($"  Creating {profile.Name} (VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4})... ");
+            using var ctrl = ctx.CreateController(profile);
+            Console.WriteLine("OK");
+            Console.WriteLine();
+            Console.WriteLine("  ==== READY ==== virtual live; open joy.cpl / chrome://gamepad to inspect");
+            Console.WriteLine("  Holding for 3 minutes (press Ctrl+C to exit early)");
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 180_000)
+            {
+                double t = sw.Elapsed.TotalSeconds;
+                var state = new HMGamepadState
+                {
+                    LeftStickX   = (float)Math.Cos(t * 2 * Math.PI),
+                    LeftStickY   = (float)Math.Sin(t * 2 * Math.PI),
+                    RightStickX  = (float)Math.Cos(t * Math.PI),
+                    RightStickY  = (float)Math.Sin(t * Math.PI),
+                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t)),
+                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t)),
+                };
+                ctrl.SubmitState(in state);
+                Thread.Sleep(8);
+            }
+            Console.WriteLine("  Done.");
+            return 0;
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(tmp, recursive: true); } catch { }
         }
     }
 

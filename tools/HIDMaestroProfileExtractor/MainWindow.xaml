@@ -1,0 +1,68 @@
+<Window x:Class="HIDMaestro.ProfileExtractor.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="HIDMaestro Profile Extractor"
+        Height="640" Width="900"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="Segoe UI" FontSize="12">
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>   <!-- Header -->
+      <RowDefinition Height="Auto"/>   <!-- Device row -->
+      <RowDefinition Height="Auto"/>   <!-- Action row -->
+      <RowDefinition Height="*"/>      <!-- Preview -->
+      <RowDefinition Height="Auto"/>   <!-- Status -->
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0" Margin="0,0,0,10" FontSize="16" FontWeight="SemiBold"
+               Text="HIDMaestro Profile Extractor"/>
+
+    <Grid Grid.Row="1" Margin="0,0,0,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Grid.Column="0" Margin="0,0,8,0" VerticalAlignment="Center"
+                 Text="Connected HID device:"/>
+      <ComboBox Grid.Column="1" Name="DeviceCombo" Height="24"
+                DisplayMemberPath="DisplayLabel"
+                SelectionChanged="DeviceCombo_SelectionChanged"/>
+      <Button Grid.Column="2" Name="RefreshButton" Margin="8,0,0,0" Padding="10,3"
+              Content="Refresh" Click="RefreshButton_Click"/>
+    </Grid>
+
+    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+      <Button Name="ExtractButton" Padding="12,4" Content="Extract profile"
+              Click="ExtractButton_Click" IsEnabled="False"/>
+      <Button Name="SaveButton" Margin="8,0,0,0" Padding="12,4"
+              Content="Save as…" Click="SaveButton_Click" IsEnabled="False"/>
+      <Button Name="CopyButton" Margin="8,0,0,0" Padding="12,4"
+              Content="Copy JSON" Click="CopyButton_Click" IsEnabled="False"/>
+    </StackPanel>
+
+    <TabControl Grid.Row="3">
+      <TabItem Header="Profile JSON">
+        <TextBox Name="JsonPreview" FontFamily="Cascadia Mono, Consolas"
+                 FontSize="11" VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto" AcceptsReturn="True"
+                 IsReadOnly="True" TextWrapping="NoWrap" Padding="6"/>
+      </TabItem>
+      <TabItem Header="Descriptor layout">
+        <TextBox Name="LayoutPreview" FontFamily="Cascadia Mono, Consolas"
+                 FontSize="11" VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto" AcceptsReturn="True"
+                 IsReadOnly="True" TextWrapping="NoWrap" Padding="6"/>
+      </TabItem>
+      <TabItem Header="Raw descriptor (hex)">
+        <TextBox Name="HexPreview" FontFamily="Cascadia Mono, Consolas"
+                 FontSize="11" VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto" AcceptsReturn="True"
+                 IsReadOnly="True" TextWrapping="Wrap" Padding="6"/>
+      </TabItem>
+    </TabControl>
+
+    <TextBlock Grid.Row="4" Margin="0,8,0,0" Name="StatusText"
+               Foreground="#666" Text="Ready."/>
+  </Grid>
+</Window>

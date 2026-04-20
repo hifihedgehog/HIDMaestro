@@ -119,6 +119,12 @@ public static class HMDeviceExtractor
             "logically equivalent to the physical device's HID report descriptor but " +
             "not guaranteed byte-identical.";
 
+        // Deliberately skip InputReportSize — HidP_GetCaps's ReportByteLength
+        // includes a Report ID byte for some no-Report-ID devices on certain
+        // Windows builds, producing an off-by-one vs. what the descriptor
+        // actually writes. Leaving it null makes the SDK derive the correct
+        // value from the reconstructed descriptor at CreateController time,
+        // which matches what the device would encode over USB.
         return new HMProfileBuilder()
             .Id(id)
             .Name(name)
@@ -130,7 +136,6 @@ public static class HMDeviceExtractor
             .Type(type)
             .Connection(connection)
             .Descriptor(raw.ReconstructedDescriptor)
-            .InputReportSize(raw.InputReportByteLength == 0 ? 0 : raw.InputReportByteLength)
             .Notes(notes)
             .Build();
     }
