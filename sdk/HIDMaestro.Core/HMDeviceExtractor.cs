@@ -125,14 +125,27 @@ public static class HMDeviceExtractor
         // actually writes. Leaving it null makes the SDK derive the correct
         // value from the reconstructed descriptor at CreateController time,
         // which matches what the device would encode over USB.
+        //
+        // deviceDescription defaults to the resolved productString. Catalog
+        // profiles commonly carry a curated deviceDescription distinct from
+        // productString (e.g. F310's "Logitech Gamepad F310" alongside the
+        // "Logitech Dual Action" iProduct). On extract there is no curator,
+        // so productString is the best available floor — it's what the
+        // physical device reports as its own name. Emitting null would
+        // leave the Device Manager / joy.cpl identity blank for imported
+        // profiles and silently diverge from catalog-authored ones. See
+        // issue #7.
+        string resolvedProductString = raw.ProductString ?? name;
+
         return new HMProfileBuilder()
             .Id(id)
             .Name(name)
             .Vendor(vendor)
             .Vid(raw.VendorId)
             .Pid(raw.ProductId)
-            .ProductString(raw.ProductString ?? name)
+            .ProductString(resolvedProductString)
             .ManufacturerString(raw.ManufacturerString ?? "")
+            .DeviceDescription(resolvedProductString)
             .Type(type)
             .Connection(connection)
             .Descriptor(raw.ReconstructedDescriptor)
@@ -170,6 +183,7 @@ public static class HMDeviceExtractor
         AppendField(sb, "pid", $"0x{profile.ProductId:X4}");
         AppendField(sb, "productString", profile.ProductString);
         AppendField(sb, "manufacturerString", profile.Inner.ManufacturerString ?? "");
+        AppendField(sb, "deviceDescription", profile.Inner.DeviceDescription);
         AppendField(sb, "type", profile.Type);
         AppendField(sb, "connection", profile.Connection);
         AppendField(sb, "descriptor", profile.Inner.Descriptor);
