@@ -4,11 +4,12 @@
   "vendor": "Logitech",
   "vid": "0x046D",
   "pid": "0xC216",
-  "productString": "Logitech Gamepad F310",
+  "productString": "Logitech Dual Action",
   "manufacturerString": "Logitech",
+  "deviceDescription": "Logitech Gamepad F310",
   "type": "gamepad",
   "connection": "usb",
   "descriptor": "05010905a101a102850175089504150026ff00350046ff0009300931093209358102750495012507463b01661400093981426600007501950c2501450105091901290c8102950175080600ff26ff0046ff0009008102c0a10285029507750826ff0046ff000600ff09038102c0a102850309049102c0c0",
   "inputReportSize": null,
-  "notes": "119-byte DInput descriptor. Source: WebKit LogitechF310.mm test data. Same internal hardware as F710 (wired version). PID 0xC216 is DInput mode; 0xC21D is XInput mode."
+  "notes": "119-byte DInput descriptor. Source: WebKit LogitechF310.mm test data. Same internal hardware as F710 (wired version). PID 0xC216 is DInput mode; 0xC21D is XInput mode. iProduct 'Logitech Dual Action' matches the real device's legacy DirectInput-mode string (Logitech's historical name for the F-series in DInput mode); deviceDescription keeps the Device Manager display as 'Logitech Gamepad F310'."
 }
