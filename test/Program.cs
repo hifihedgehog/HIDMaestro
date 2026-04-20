@@ -103,6 +103,10 @@ class Program
             Console.WriteLine("  HIDMaestroTest info <id>               Show profile details");
             Console.WriteLine("  HIDMaestroTest cleanup                 Remove all HIDMaestro virtual devices");
             Console.WriteLine("  HIDMaestroTest sdk-demo [id]           Minimal SDK consumer demo (5s)");
+            Console.WriteLine("  HIDMaestroTest oem set <vid> <pid> <label>");
+            Console.WriteLine("  HIDMaestroTest oem clear <vid> <pid>");
+            Console.WriteLine("  HIDMaestroTest oem recover             Restore overrides left by a crashed consumer");
+            Console.WriteLine("  HIDMaestroTest oem list                Show currently-tracked overrides");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -116,6 +120,7 @@ class Program
             "info"     => ShowProfile(args.Length > 1 ? args[1] : ""),
             "cleanup"  => RunCleanup(),
             "sdk-demo" => SdkDemo(args.Skip(1).ToArray()),
+            "oem"      => OemCommand(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -839,6 +844,69 @@ class Program
         HMContext.RemoveAllVirtualControllers();
         Console.WriteLine("  OK");
         return 0;
+    }
+
+    // ── oem ──
+    //
+    // Wraps HMOemNameOverride so you can set / clear / inspect the DirectInput
+    // OEM-name table entry for any VID:PID from the CLI. Useful for verifying
+    // joy.cpl behavior without building a full consumer.
+
+    static int OemCommand(string[] args)
+    {
+        if (args.Length == 0)
+            return Error("Usage: oem {set|clear|recover|list} [args...]");
+
+        switch (args[0].ToLowerInvariant())
+        {
+            case "set":
+                if (args.Length < 4) return Error("Usage: oem set <vid> <pid> <label>");
+                if (!TryParseHex(args[1], out ushort setVid)) return Error($"Bad vid: {args[1]}");
+                if (!TryParseHex(args[2], out ushort setPid)) return Error($"Bad pid: {args[2]}");
+                string label = string.Join(' ', args.Skip(3));
+                HMOemNameOverride.Set(setVid, setPid, label);
+                Console.WriteLine($"  Set OEM Name for VID_{setVid:X4}&PID_{setPid:X4} = \"{label}\"");
+                Console.WriteLine($"  (joy.cpl and DirectInput will now show this label for this VID:PID)");
+                return 0;
+
+            case "clear":
+                if (args.Length < 3) return Error("Usage: oem clear <vid> <pid>");
+                if (!TryParseHex(args[1], out ushort clrVid)) return Error($"Bad vid: {args[1]}");
+                if (!TryParseHex(args[2], out ushort clrPid)) return Error($"Bad pid: {args[2]}");
+                HMOemNameOverride.Clear(clrVid, clrPid);
+                Console.WriteLine($"  Cleared override for VID_{clrVid:X4}&PID_{clrPid:X4}");
+                return 0;
+
+            case "recover":
+                int restored = HMOemNameOverride.RecoverOrphans();
+                Console.WriteLine($"  Recovered {restored} orphan override(s).");
+                return 0;
+
+            case "list":
+                var entries = HMOemNameOverride.ListActive();
+                if (entries.Count == 0)
+                {
+                    Console.WriteLine("  (no active overrides)");
+                    return 0;
+                }
+                Console.WriteLine($"  {"VID:PID",-20} {"Original Existed",-18} Original OEM Name");
+                foreach (var e in entries)
+                {
+                    string existed = e.OriginalKeyExisted ? "yes" : "no";
+                    string orig = e.OriginalOemName ?? "(no value)";
+                    Console.WriteLine($"  {e.VidPid,-20} {existed,-18} {orig}");
+                }
+                return 0;
+
+            default:
+                return Error($"Unknown oem subcommand: {args[0]}");
+        }
+    }
+
+    static bool TryParseHex(string s, out ushort v)
+    {
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s.Substring(2);
+        return ushort.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out v);
     }
 
     // ── sdk-demo ──
