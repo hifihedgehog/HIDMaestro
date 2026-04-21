@@ -206,7 +206,13 @@ User-Mode Test App
 Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10
 
 ```bash
-# Smallest possible SDK consumer (drop-in quickstart)
+# On a fresh clone, build the native driver + companion + SDK together.
+# This runs scripts\build.cmd, scripts\build_companion.cmd, and a two-
+# phase dotnet build so the driver binaries get embedded in the SDK DLL.
+# One command, idempotent — re-run any time you touch driver/ or sdk/.
+scripts\build_all.cmd
+
+# Smallest possible SDK consumer (after build_all.cmd)
 dotnet run --project example\SdkDemo
 
 # Full test app (self-contained: cert + build + sign + install all automatic)
