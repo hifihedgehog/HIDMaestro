@@ -8,9 +8,9 @@ namespace HIDMaestro.Internal;
 /// <summary>
 /// Per-controller virtual device node creation. This is the heart of HIDMaestro
 /// — it builds a root-enumerated PnP device of the right HID class with the
-/// right hardware ID, writes the per-instance ContainerID and ControllerIndex,
-/// installs the driver against it, and waits for the HID class to layer on
-/// top before returning.
+/// right hardware ID, writes the per-instance ControllerIndex, installs the
+/// driver against it, and waits for the HID class to layer on top before
+/// returning.
 ///
 /// <para>Three enumerator paths exist, picked from the profile:</para>
 /// <list type="bullet">
@@ -27,11 +27,6 @@ namespace HIDMaestro.Internal;
 ///
 /// <para>Critical race fixes baked in:</para>
 /// <list type="bullet">
-/// <item><b>ContainerID per-instance:</b> we write a deterministic GUID per
-/// controller index BEFORE the driver starts, so PnP keeps each virtual
-/// controller in its own container instead of merging all <c>ROOT\</c>
-/// devices into one. Without this, Settings and Device Manager show one
-/// blob for "all virtual controllers" rather than individual entries.</item>
 /// <item><b>ControllerIndex registry write:</b> the driver reads this from
 /// <c>Device Parameters\ControllerIndex</c> at startup to know which
 /// per-instance shared section to attach to.</item>
@@ -40,6 +35,17 @@ namespace HIDMaestro.Internal;
 /// controller creation races and PnP arrival order doesn't match creation
 /// order.</item>
 /// </list>
+///
+/// <para><b>ContainerID note:</b> root-enumerated virtual devices get the
+/// <c>{00000000-0000-0000-FFFF-FFFFFFFFFFFF}</c> null-sentinel container
+/// on Win11 26200. Attempts to set a real ContainerID from user mode
+/// (CM API, registry writes to <c>Enum\&lt;instId&gt;\ContainerID</c>, INF
+/// directives) are all refused or silently ignored by PnP. The documented
+/// workaround (DeviceOverrides with Removable=1) also doesn't trigger
+/// container generation for root devices without a location path on this
+/// build. UMDF2 cannot act as a bus driver, so there's no user-mode path
+/// to provide a real ContainerID. Consumers that dedupe on ContainerID
+/// will treat our virtuals as individually-containerless devices.</para>
 /// </summary>
 internal static class DeviceNodeCreator
 {
@@ -62,7 +68,6 @@ internal static class DeviceNodeCreator
     /// <list type="bullet">
     /// <item>The device exists at <c>ROOT\&lt;enumerator&gt;\&lt;instId&gt;</c></item>
     /// <item>Its <c>Device Parameters\ControllerIndex</c> = <paramref name="controllerIndex"/></item>
-    /// <item>Its <c>ContainerID</c> is a deterministic GUID derived from the index</item>
     /// <item>The driver is installed and bound</item>
     /// <item>The HID child interface has arrived (so the next per-controller
     ///       setup can start without racing PnP)</item>
@@ -194,35 +199,14 @@ internal static class DeviceNodeCreator
             }
             catch { }
 
-            // Write a deterministic ContainerID for this controllerIndex BEFORE the
-            // driver starts. PnP honors a pre-existing ContainerID on first
-            // enumeration, giving each virtual device its own container in Device
-            // Manager / Settings (instead of all of them collapsing into one).
-            try
-            {
-                using var enumKey2 = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Enum\ROOT\{enumerator}");
-                if (enumKey2 != null)
-                {
-                    foreach (var inst in enumKey2.GetSubKeyNames())
-                    {
-                        string instId2 = $@"ROOT\{enumerator}\{inst}";
-                        if (CM_Locate_DevNodeW(out uint _, instId2, 0) != 0) continue;
-                        string dpPath2 = $@"SYSTEM\CurrentControlSet\Enum\{instId2}\Device Parameters";
-                        using var dpKey2 = Registry.LocalMachine.OpenSubKey(dpPath2);
-                        var ci = dpKey2?.GetValue("ControllerIndex");
-                        if (ci is int ciVal && ciVal == controllerIndex)
-                        {
-                            string containerGuid = $"{{48494430-4D41-4553-5452-4F00000000{controllerIndex:X2}}}";
-                            string enumRegPath = $@"SYSTEM\CurrentControlSet\Enum\{instId2}";
-                            using var devKey = Registry.LocalMachine.OpenSubKey(enumRegPath, writable: true);
-                            devKey?.SetValue("ContainerID", containerGuid, RegistryValueKind.String);
-                            break;
-                        }
-                    }
-                }
-            }
-            catch { }
+            // (Removed 2026-04-21: post-registration registry write to
+            // Enum\<instId>\ContainerID. PnP caches ContainerID at first
+            // enumeration and ignores subsequent registry writes to this
+            // path — stable MS behavior across Windows 10/11. The write
+            // ran every deploy but never took effect; verified empirically
+            // during issue #8 investigation. The DeviceOverrides write
+            // above is retained because its effect on older Windows
+            // versions has not been verified.)
 
             // Install our driver against the new device's hardware ID.
             UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwId, infPath, 0, out _);

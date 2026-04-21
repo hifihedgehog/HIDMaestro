@@ -98,7 +98,6 @@ typedef struct _DEVICE_CONTEXT {
     /* Queues */
     WDFQUEUE    DefaultQueue;        /* Parallel — HID IOCTLs + our custom IOCTLs */
     WDFQUEUE    ManualQueue;         /* Manual — pending IOCTL_HID_READ_REPORT */
-    WDFQUEUE    OutputReportQueue;   /* Manual — pending user-mode output reads */
 
     /* Synchronization */
     WDFWAITLOCK InputLock;
@@ -129,11 +128,6 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  WorkerThread;        /* CreateThread handle */
     WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
     WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
-
-    /* XInput state file — pre-built XInput state from user-mode */
-    HANDLE  XInputFileHandle;
-    PVOID   XInputFilePtr;
-    ULONG   XInputSeqNo;
 
     /* Multi-instance: controller index (0, 1, 2, 3) */
     ULONG   ControllerIndex;
