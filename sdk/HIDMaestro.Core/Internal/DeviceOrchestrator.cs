@@ -1036,6 +1036,24 @@ internal static class DeviceOrchestrator
             Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false);
         }
         catch { }
+
+        // Sweep any HID children orphaned by the parent removals above.
+        // DeviceManager.RemoveDevice on a ROOT\ parent should cascade to its
+        // HID child PDOs, but in practice on Win11 26200 the child sometimes
+        // survives — detached from its removed parent, enumerable by SDL /
+        // RawInput / WGI, and no longer visible through a HIDMaestro PnP
+        // ancestor walk. Consumers that filter on "is this ours?" by walking
+        // the parent chain see an un-owned HID gamepad at VID:PID 045E:028E
+        // (or the profile's VID:PID) and treat it as a real physical device.
+        //
+        // Specific to the XUSB companion path (xbox-360-wired) per issue #9
+        // but the orphan-sweep pass is safe and general: it removes HID
+        // children whose registered parent instance-id is a ROOT\ device
+        // that can no longer be located (neither live nor phantom). That
+        // match is intrinsically "our just-removed parents" and only our
+        // just-removed parents — live controllers still anchor their HID
+        // children to a locatable parent and are untouched.
+        try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
     }
 
     // ════════════════════════════════════════════════════════════════════
