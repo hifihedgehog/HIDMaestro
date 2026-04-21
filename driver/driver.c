@@ -502,22 +502,39 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         }
     }
 
-    /* Complete ALL pending READ_REPORT requests, alternating between Col1 and Col2 */
+    /* Complete exactly ONE pending READ_REPORT per shared-memory state
+     * change — not ALL queued requests. HidClass pre-queues READ_REPORTs
+     * for performance; draining the entire queue with the same cached
+     * report means one logical press from user mode becomes N HID
+     * reports (where N = queue depth), each of which RawInput delivers
+     * as a separate WM_INPUT. Consumers that handle RawInput per-message
+     * (Start Menu / Xbox accessories UI) then register N navigation
+     * events per single press — the triple/double-movement bug in
+     * issue #8, empirically verified via InputSourceCounter probe
+     * (5 WM_INPUTs from one hDevice per single press, state change
+     * visible only once at XInput/RGC/UINav).
+     *
+     * One report per state change matches what real hardware does:
+     * a physical Xbox controller produces exactly one HID report per
+     * actual input change, not N reports to satisfy N queued reads.
+     * Subsequent queued READ_REPORTs stay parked until the SDK
+     * SubmitStates the next frame. */
     {
         WDFREQUEST pendingRead;
-        while (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+        if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
             /* Send Col1 (GIP, no Report ID) */
             NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
 
-            /* Send Col2 (Report ID 0x20) if available */
+            /* Send Col2 (Report ID 0x20) if available — one Col2 read
+             * paired with one Col1 read, still one logical "frame." */
             if (col2Size > 0 &&
                 NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
                 cs = RequestCopyFromBuffer(pendingRead, col2Report, col2Size);
                 WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
             }
         }
-        /* Also store for polled GET_INPUT_REPORT, and bump the seqno gate
+        /* Store for polled GET_INPUT_REPORT, and bump the seqno gate
          * so the next IOCTL_HID_READ_REPORT for this seqno completes
          * directly (the queued ones have already been drained above). */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
