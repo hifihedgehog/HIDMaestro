@@ -970,6 +970,28 @@ internal static class DeviceOrchestrator
 
         if (!string.IsNullOrEmpty(instanceId))
         {
+            // Capture the HID children of this root device BEFORE removing it.
+            // Windows is supposed to cascade-remove HID children when their
+            // parent goes, but in practice on Win11 26200 the child PDO can
+            // land in a half-dead state where:
+            //   - its parent's devnode is gone (or still phantom from async
+            //     removal), so the orphan-sweep's "parent truly gone" check
+            //     skips it;
+            //   - the PDO itself is still enumerable by SDL / RawInput
+            //     (instance ID visible) but not usable (device path empty);
+            //   - the HID class driver's per-collection bookkeeping hasn't
+            //     released it even though its parent is being removed.
+            //
+            // Explicit pre-capture avoids racing the kernel's cascade: we
+            // know the full child list while the parent is still live, then
+            // we can DIF_REMOVE each child alongside the parent teardown.
+            // Covers issue #11 (xbox-360-wired orphan that v1.1.17's
+            // post-teardown orphan-sweep was missing because its ROOT
+            // parent was still lingering as phantom when the sweep ran).
+            List<string> preCapturedHidChildren;
+            try { preCapturedHidChildren = DeviceManager.GetAllHidChildIds(instanceId!); }
+            catch { preCapturedHidChildren = new List<string>(); }
+
             // forceFallbacks: this is the live-swap teardown path. We must
             // leave nothing behind — if the old device persists as a phantom,
             // its driver's WUDFHost kept alive by it, CM IOCTLs keep being
@@ -981,6 +1003,17 @@ internal static class DeviceOrchestrator
             // failed to tear down in default-mode and the Xbox UI's Guide
             // haptic kept poking its XUSB interface).
             try { DeviceManager.RemoveDevice(instanceId!, forceFallbacks: true); } catch { }
+
+            // Now explicitly remove each captured HID child. If Windows
+            // already cascade-removed them, these calls are harmless no-ops
+            // (DifRemoveDevice on a non-existent instance returns gracefully).
+            // If cascade failed or is still in flight, this ensures the
+            // child is cleanly torn down rather than lingering as an
+            // enumerable-but-unusable PDO.
+            foreach (var childId in preCapturedHidChildren)
+            {
+                try { DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true, forceFallbacks: true); } catch { }
+            }
         }
 
         // Scan and remove companions by ControllerIndex
