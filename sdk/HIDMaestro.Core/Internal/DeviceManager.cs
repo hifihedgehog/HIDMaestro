@@ -726,6 +726,24 @@ public static class DeviceManager
     }
 
     /// <summary>
+    /// Returns all HID child device instance IDs of the given parent (one per
+    /// top-level HID collection the parent advertises). The enumeration must
+    /// run BEFORE the parent is torn down — once the parent goes to phantom
+    /// state, CM_Get_Child / CM_Get_Sibling on it stop working. Callers that
+    /// need to explicitly remove HID children alongside their parent (to
+    /// avoid the "half-dead PDO" state where the child survives an async
+    /// parent-removal cascade) should call this first, save the list, then
+    /// remove parent + each captured child.
+    /// Returns an empty list if the parent cannot be located or has no children.
+    /// </summary>
+    public static List<string> GetAllHidChildIds(string parentInstanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint parentInst, parentInstanceId, 0) != CR_SUCCESS)
+            return new List<string>();
+        return GetAllChildDeviceIds(parentInst);
+    }
+
+    /// <summary>
     /// Scans HKLM\SYSTEM\CurrentControlSet\Enum\HID for orphaned HID children
     /// matching VID_045E*IG_00* or HIDCLASS entries whose ROOT parent no longer exists.
     /// Removes each orphan via DIF_REMOVE.
