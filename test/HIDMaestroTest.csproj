@@ -11,4 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="probes\**\*.cs" />
+  </ItemGroup>
 </Project>

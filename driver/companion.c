@@ -16,6 +16,7 @@ DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
+EVT_WDF_TIMER CompanionPumpTimer;
 
 static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
@@ -56,6 +57,15 @@ typedef struct _COMPANION_CTX {
     ULONG OutputWriteCount;    /* Stale-detection: total writes since last re-open */
     ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
     ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
+    /* Async XUSB input pump — holds pended IOCTL_XUSB_WAIT_FOR_INPUT
+     * requests. WGI's XusbDevice::QueueInputBuffer (Windows.Gaming.Input.dll
+     * @ 0x18006af0c) issues this IOCTL async via InputOutputIoctlAsync and
+     * waits for the 29-byte XUSB state to arrive. Completing it synchronously
+     * — or with an error — kills the pump, and Gamepad::SendControllerVibration
+     * silently bails at the flag_0x184 gate because OnInputResumed never fires
+     * on the WGI Gamepad's IGameControllerInputSink. See Ghidra decomp. */
+    WDFQUEUE WaitForInputQueue;
+    WDFTIMER PumpTimer;
 } COMPANION_CTX, *PCOMPANION_CTX;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
@@ -168,6 +178,7 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
 {
     PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
+    if (ctx->PumpTimer) { WdfTimerStop(ctx->PumpTimer, TRUE); ctx->PumpTimer = NULL; }
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
@@ -323,22 +334,34 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
     if (!NT_SUCCESS(status)) return status;
 
-    /* XUSB companion always registers XUSB (its sole purpose) and WinExInput
-     * (so the browser Gamepad API gets a GamepadAdded event for this controller).
-     * The test app only creates this companion for non-xinputhid profiles —
-     * xinputhid profiles have xinputhid auto-load on the HID child instead. */
-    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
+    /* Manual-dispatch queue for pended IOCTL_XUSB_WAIT_FOR_INPUT. */
     {
-        UNICODE_STRING refStr;
-        RtlInitUnicodeString(&refStr, L"XI_00");
-        WdfDeviceCreateDeviceInterface(device, (LPGUID)&WINEXINPUT_GUID, &refStr);
+        WDF_IO_QUEUE_CONFIG manualCfg;
+        WDF_IO_QUEUE_CONFIG_INIT(&manualCfg, WdfIoQueueDispatchManual);
+        PCOMPANION_CTX ctx = GetCompanionCtx(device);
+        status = WdfIoQueueCreate(device, &manualCfg, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->WaitForInputQueue);
+        if (!NT_SUCCESS(status)) return status;
+
+        WDF_TIMER_CONFIG timerCfg;
+        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerCfg, CompanionPumpTimer, 8);
+        WDF_OBJECT_ATTRIBUTES timerAttrs;
+        WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
+        timerAttrs.ParentObject = device;
+        status = WdfTimerCreate(&timerCfg, &timerAttrs, &ctx->PumpTimer);
+        if (!NT_SUCCESS(status)) return status;
+        WdfTimerStart(ctx->PumpTimer, WDF_REL_TIMEOUT_IN_MS(8));
     }
 
-    /* Shotgun additional WGI table GUID on HMCOMPANION too (see declaration
-     * above). Matches xusbshim's interface set on the HID child — if WGI's
-     * provider-selection check looks at BOTH container endpoints and wants
-     * a specific interface on BOTH, we supply it on both. */
-    WdfDeviceCreateDeviceInterface(device, (LPGUID)&WGI_UNK1_GUID, NULL);
+    /* HMCOMPANION publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
+     * UpperFilters="xinputhid" tripwire, ProviderManagerWorker::OnPnpDeviceAdded
+     * sees cVar3=true AND interface==XUSB {ec87f1e3}, and dispatches via the
+     * XUSB path (LAB_18005f241). Publishing additional interfaces (WinExInput,
+     * speculative WGI_UNK1) produces extra PnpDevice arrivals that confuse WGI
+     * into classifying our one logical controller as multiple WGI entities —
+     * the known hang mode documented in
+     * memory:feedback-one-wgi-device-per-controller.md. */
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
 
     return STATUS_SUCCESS;
 }
@@ -352,6 +375,154 @@ static void CopyToRequest(WDFREQUEST Request, const void* data, size_t len)
     } else {
         WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
     }
+}
+
+/* Derive the XInput button/trigger/stick values from the current
+ * shared-memory GIP frame. Output is a packed XINPUT_GAMEPAD-like tuple the
+ * two 29-byte formatters below position at different offsets. */
+static VOID DecodeGipToXInput(
+    PCOMPANION_CTX ctx,
+    USHORT *outButtons, UCHAR *outLT, UCHAR *outRT,
+    SHORT *outLX, SHORT *outLY, SHORT *outRX, SHORT *outRY,
+    BOOLEAN *outValid)
+{
+    *outButtons = 0; *outLT = 0; *outRT = 0;
+    *outLX = 0; *outLY = 0; *outRX = 0; *outRY = 0;
+    *outValid = FALSE;
+
+    UCHAR gip[14];
+    if (!ReadGipData(ctx, gip)) return;
+
+    PUCHAR d = gip;
+    UCHAR btnLow = d[12], btnHigh = d[13];
+    UCHAR hat = (btnHigh >> 2) & 0x0F;
+    USHORT buttons = 0;
+    if (btnLow & 0x01) buttons |= 0x1000;
+    if (btnLow & 0x02) buttons |= 0x2000;
+    if (btnLow & 0x04) buttons |= 0x4000;
+    if (btnLow & 0x08) buttons |= 0x8000;
+    if (btnLow & 0x10) buttons |= 0x0100;
+    if (btnLow & 0x20) buttons |= 0x0200;
+    if (btnLow & 0x40) buttons |= 0x0040;
+    if (btnLow & 0x80) buttons |= 0x0080;
+    if (btnHigh & 0x01) buttons |= 0x0020;
+    if (btnHigh & 0x02) buttons |= 0x0010;
+    if (btnHigh & 0x40) buttons |= 0x0400;
+    switch (hat) {
+        case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
+        case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
+        case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
+        case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
+    }
+    *outButtons = buttons;
+    *outLT = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
+    *outRT = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
+    *outLX = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
+    *outLY = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));
+    *outRX = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
+    *outRY = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));
+    *outValid = TRUE;
+}
+
+/* 29-byte IOCTL_XUSB_GET_STATE response layout — this is what xinput1_4
+ * parses. Empirically verified: buttons at state[0x0B], triggers at
+ * state[0x0D]/[0x0E], sticks at state[0x0F..0x16]. DO NOT rearrange without
+ * re-verifying XInput/DirectInput/HIDAPI. */
+static VOID BuildXusbStateForGetState(PCOMPANION_CTX ctx, UCHAR state[29])
+{
+    RtlZeroMemory(state, 29);
+    *(USHORT*)&state[0] = 0x0103;
+    state[2] = 0x01;
+    ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
+
+    USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    if (!valid) return;
+
+    *(USHORT*)&state[0x0B] = buttons;
+    state[0x0D] = lt;
+    state[0x0E] = rt;
+    *(SHORT*)&state[0x0F] = lx;
+    *(SHORT*)&state[0x11] = ly;
+    *(SHORT*)&state[0x13] = rx;
+    *(SHORT*)&state[0x15] = ry;
+}
+
+/* 29-byte IOCTL_XUSB_WAIT_FOR_INPUT response layout — WGI's expected format.
+ * Derived from Ghidra decomp of XusbDevice::ProcessInput (all-xusb.c:~9551):
+ *   - state[2]  (this+0x28a): state indicator. 3 = RESUMED (triggers
+ *     LAB_18006aac2 which toggles this+0x2c8 to 1, enabling subsequent
+ *     UpdateInputSinks calls to dispatch OnInputResumed on newly-registered
+ *     sinks — clearing Gamepad::flag_0x184).
+ *   - state[9]  (this+0x291): reportId passed to sink.OnInputReceived.
+ *   - state[10] (this+0x292): gate — if zero, dispatch is SKIPPED at
+ *     all-xusb.c:9647. Real xusb22 puts the payload-size marker (0x14) here
+ *     as the first byte of the 0x13-byte payload that is handed to
+ *     sink.OnInputReceived(eventId, reportId=state[9], size=0x13,
+ *     data=&state[10]).
+ *   - state[11..] : XINPUT_GAMEPAD starts here in the SAME layout as
+ *     IOCTL_XUSB_GET_STATE (wButtons[11-12], LT[13], RT[14], sticks[15-22]).
+ *     Gamepad::OnInputReceived at 0x180029d30 reads data[2] = state[12]
+ *     = wButtons.high to extract the GUIDE bit. */
+static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
+{
+    RtlZeroMemory(state, 29);
+    *(USHORT*)&state[0] = 0x0103;
+    state[2] = 0x03;                    /* RESUMED */
+    ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
+    /* state[9]  = reportId passed to sink.OnInputReceived (caps non-zero per
+     *   dispatch arg at all-xusb.c:9657).
+     * state[10] = first byte of the 0x13-byte payload passed to the sink,
+     *   AND the gate byte checked at all-xusb.c:9647. In XUSB internal
+     *   convention this byte is the XINPUT_STATE packet-type marker (0x14
+     *   = XINPUT packet). The XusbInputParser expects the remaining payload
+     *   (wButtons, triggers, sticks) at data[1..] = state[11..22]. */
+    state[9]  = 0x14;
+    state[10] = 0x14;
+
+    USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    if (!valid) return;
+
+    /* XINPUT_GAMEPAD layout at state[11..22] as the parser expects when
+     * offset=10 (from GetInputReportProperties) and data[0]=packet-type. */
+    *(USHORT*)&state[11] = buttons;
+    state[13] = lt;
+    state[14] = rt;
+    *(SHORT*)&state[15] = lx;
+    *(SHORT*)&state[17] = ly;
+    *(SHORT*)&state[19] = rx;
+    *(SHORT*)&state[21] = ry;
+}
+
+/* Periodic pump for pended IOCTL_XUSB_WAIT_FOR_INPUT requests. WGI
+ * (Windows.Gaming.Input.dll XusbDevice::QueueInputBuffer @ 0x18006af0c)
+ * issues this IOCTL async and waits on the OVERLAPPED. If we never complete
+ * it, ProcessInput -> UpdateInputSinks -> OnInputResumed never fires, and
+ * Gamepad::SendControllerVibrationCommand silently bails at the flag_0x184
+ * gate (non-GIP dispatch requires flag_0x184 == 0, which only OnInputResumed
+ * sets). Completing one pended request per tick with the current 29-byte
+ * state mirrors a real xusb22 device's behavior.
+ *
+ * 8ms period roughly matches a wired Xbox 360's 125Hz USB polling cadence.
+ * Only one pending request is completed per tick; if WGI's pump is deep
+ * enough it'll re-queue immediately and the next tick picks it up. */
+EVT_WDF_TIMER CompanionPumpTimer;
+VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
+{
+    WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
+    PCOMPANION_CTX ctx = GetCompanionCtx(device);
+    if (ctx->WaitForInputQueue == NULL) return;
+
+    WDFREQUEST req;
+    NTSTATUS s = WdfIoQueueRetrieveNextRequest(ctx->WaitForInputQueue, &req);
+    if (!NT_SUCCESS(s)) return;  /* nothing pended */
+
+    UCHAR state[29];
+    BuildXusbStateForWaitInput(ctx, state);
+    CopyToRequest(req, state, 29);
 }
 
 void CompanionIoControl(
@@ -374,7 +545,8 @@ void CompanionIoControl(
         static volatile LONG counter = 0;
         ULONG c = (ULONG)InterlockedIncrement(&counter);
         BOOLEAN isSetState = (IoControlCode == IOCTL_XUSB_SET_STATE);
-        if (isSetState || c <= 400) {
+        BOOLEAN isWait = (IoControlCode == IOCTL_XUSB_WAIT_FOR_INPUT);
+        if (isSetState || isWait || c <= 400) {
             HANDLE h = CreateFileW(
                 L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
                 FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
@@ -422,7 +594,7 @@ void CompanionIoControl(
         /* OutDeviceInfos_t — 12 bytes (matches driver.c format exactly) */
         UCHAR info[12];
         RtlZeroMemory(info, sizeof(info));
-        *(USHORT*)&info[0] = 0x0101;  /* XUSBVersion 1.1 — Xbox 360 era */
+        *(USHORT*)&info[0] = 0x0103;  /* XUSBVersion 0x0103. 2026-04-23 empirical: 0x0101 lets WGI poll state but not dispatch put_Vibration; 0x0103 matches physical Xbox 360 USB and HIDMaestro BT (both work) — flip to unblock SET_STATE dispatch. */
         info[2] = 0x01; /* device count — always 1 (each companion hosts one controller) */
         info[3] = 0x01; /* slot/capability marker — empirical xinputhid value;
                          * xusb22 may also set this. WGI may read it as a
@@ -444,67 +616,63 @@ void CompanionIoControl(
          * Prior bug: motors were at [22-23] and wButtons at [4-5]. WGI
          * read motor maxes from [18-21] -> zeros -> ForceFeedbackMotors=0
          * -> silently dropped put_Vibration. */
-        UCHAR caps[24];
-        RtlZeroMemory(caps, sizeof(caps));
-        *(USHORT*)&caps[0]  = 0x0101;       /* Version 1.1 */
-        caps[2] = 0x01;                      /* XINPUT_DEVTYPE_GAMEPAD */
-        caps[3] = 0x01;                      /* XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4]  = 0x0001;       /* Flags = XINPUT_CAPS_FFB_SUPPORTED */
-        *(USHORT*)&caps[6]  = 0xF7FF;       /* wButtons mask */
-        caps[8]  = 0xFF;                     /* bLeftTrigger max */
-        caps[9]  = 0xFF;                     /* bRightTrigger max */
-        *(SHORT*)&caps[10] = 32767;         /* sThumbLX max */
-        *(SHORT*)&caps[12] = 32767;         /* sThumbLY max */
-        *(SHORT*)&caps[14] = 32767;         /* sThumbRX max */
-        *(SHORT*)&caps[16] = 32767;         /* sThumbRY max */
-        *(USHORT*)&caps[18] = 0xFFFF;       /* wLeftMotorSpeed max */
-        *(USHORT*)&caps[20] = 0xFFFF;       /* wRightMotorSpeed max */
-        CopyToRequest(Request, caps, 24);
+        /* Two distinct wire formats, verified 2026-04-23 against a live
+         * physical Xbox 360 wired controller's xusb22.sys 36-byte response.
+         * See driver/xusbshim.c:IOCTL_XUSB_GET_CAPABILITIES for the full
+         * layout comment. When WGI calls GET_CAPABILITIES with output size
+         * 36, it expects V2 extended format (header + V1 struct at byte 16).
+         * Returning V1-shaped data in a 36-byte buffer makes WGI read
+         * garbage at the V2 field offsets and the device looks malformed. */
+        /* Motor max speed fields set to 0xFFFF to advertise rumble capability.
+         * Previous zero values made WGI's QueryDeviceCapabilities report
+         * supportedRumble=0x3 but mappedRumble=0x0 (motors detected but not
+         * wired to an actuator). */
+        UCHAR caps_v1[24] = {
+            0x03, 0x01,
+            0x00, 0x01,
+            0xFF, 0xF7,
+            0xFF, 0xFF,
+            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
+            0x00, 0x00,                /* pad */
+            0xFF, 0xFF                 /* trailer */
+        };
+        UCHAR caps_v2[36] = {
+            0x03, 0x01,
+            0x01, 0x01,
+            0x0C, 0x00,
+            (UCHAR)(ctx->VendorId & 0xFF), (UCHAR)((ctx->VendorId >> 8) & 0xFF),
+            (UCHAR)(ctx->ProductId & 0xFF), (UCHAR)((ctx->ProductId >> 8) & 0xFF),
+            0x10, 0x01,
+            (UCHAR)(ctx->ControllerIndex & 0xFF), 0xFA, 0x34, 0x22,
+            0xFF, 0xF7,
+            0xFF,
+            0xFF,
+            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
+            0x00, 0x00,                /* pad */
+            0xFF, 0xFF                 /* motor-present trailer */
+        };
+        PVOID outBuf; size_t outLen;
+        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
+            SIZE_T copy;
+            if (outLen >= 36) {
+                copy = 36;
+                RtlCopyMemory(outBuf, caps_v2, copy);
+            } else {
+                copy = outLen > 24 ? 24 : outLen;
+                RtlCopyMemory(outBuf, caps_v1, copy);
+            }
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
+        } else {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+        }
         break;
     }
 
     case IOCTL_XUSB_GET_STATE: {
-        /* GamepadState0101 — 29 bytes (matches driver.c format exactly) */
         UCHAR state[29];
-        RtlZeroMemory(state, sizeof(state));
-        *(USHORT*)&state[0] = 0x0101;
-        state[2] = 0x01; /* CONNECTED */
-
-        ctx->PacketCount++;
-        *(DWORD*)&state[5] = ctx->PacketCount;
-
-        UCHAR gip[14];
-        if (ReadGipData(ctx, gip)) {
-            PUCHAR d = gip;
-            /* Button remapping: GIP button byte → XInput button bits */
-            UCHAR btnLow = d[12], btnHigh = d[13];
-            UCHAR hat = (btnHigh >> 2) & 0x0F;
-            USHORT buttons = 0;
-            if (btnLow & 0x01) buttons |= 0x1000; /* A */
-            if (btnLow & 0x02) buttons |= 0x2000; /* B */
-            if (btnLow & 0x04) buttons |= 0x4000; /* X */
-            if (btnLow & 0x08) buttons |= 0x8000; /* Y */
-            if (btnLow & 0x10) buttons |= 0x0100; /* LB */
-            if (btnLow & 0x20) buttons |= 0x0200; /* RB */
-            if (btnLow & 0x40) buttons |= 0x0040; /* LS → LEFT_THUMB */
-            if (btnLow & 0x80) buttons |= 0x0080; /* RS → RIGHT_THUMB */
-            if (btnHigh & 0x01) buttons |= 0x0020; /* Back → BACK */
-            if (btnHigh & 0x02) buttons |= 0x0010; /* Start → START */
-            if (btnHigh & 0x40) buttons |= 0x0400; /* Guide (XInputGetStateEx) */
-            switch (hat) {
-                case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
-                case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
-                case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
-                case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
-            }
-            *(USHORT*)&state[0x0B] = buttons;
-            state[0x0D] = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
-            state[0x0E] = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
-            *(SHORT*)&state[0x0F] = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
-            *(SHORT*)&state[0x11] = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));
-            *(SHORT*)&state[0x13] = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
-            *(SHORT*)&state[0x15] = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));
-        }
+        BuildXusbStateForGetState(ctx, state);
         CopyToRequest(Request, state, 29);
         break;
     }
@@ -571,18 +739,28 @@ void CompanionIoControl(
         break;
     }
 
+    case IOCTL_XUSB_WAIT_FOR_INPUT: {
+        /* Pend the request; CompanionPumpTimer completes one per tick with
+         * the current 29-byte XUSB state. WGI's XusbDevice::ProcessInput
+         * expects exactly 0x1D bytes from the async read and re-queues after
+         * each completion. */
+        NTSTATUS s = WdfRequestForwardToIoQueue(Request, ctx->WaitForInputQueue);
+        if (!NT_SUCCESS(s)) {
+            WdfRequestComplete(Request, s);
+        }
+        break;
+    }
+
     case IOCTL_XUSB_WAIT_GUIDE:
-    case IOCTL_XUSB_WAIT_FOR_INPUT:
-        /* Return INVALID_DEVICE_REQUEST so xinput1_4 falls back to GET_STATE polling.
-         * Returning STATUS_DEVICE_NOT_READY makes xinput1_4 think the device is
-         * broken and it stops polling entirely (data freezes). */
+        /* No Guide-button async notification surface yet. xinput1_4 falls
+         * back to GET_STATE polling when this returns INVALID_DEVICE_REQUEST. */
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
         break;
 
     case IOCTL_XUSB_GET_INFORMATION_EX: {
         UCHAR infoEx[64];
         RtlZeroMemory(infoEx, sizeof(infoEx));
-        *(USHORT*)&infoEx[0] = 0x0101;
+        *(USHORT*)&infoEx[0] = 0x0103;      /* Version 0x0103 — match GET_INFORMATION. */
         infoEx[2] = 0x01;
         infoEx[3] = 0x01;  /* slot/capability marker — mirror GET_INFORMATION */
         *(USHORT*)&infoEx[8] = ctx->VendorId;

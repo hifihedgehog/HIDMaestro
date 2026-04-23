@@ -250,7 +250,13 @@ public static class DriverBuilder
         string pnputil = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
-        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf", "hidmaestro_xusbshim_class.inf" })
+        // xusbshim removed — its filter INF bound indiscriminately to
+        // HID\VID_045E&PID_028E&IG_00 including physical Xbox 360 controllers.
+        // hidmaestro_xusb.inf (HMCOMPANION) REINSTATED 2026-04-23 with setup
+        // class changed from XnaComposite to System so Windows.Gaming.Input.dll
+        // does not classify it as a second WGI Gamepad. xinput1_4 discovery
+        // (which scans the {EC87F1E3} interface class directly) still finds it.
+        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
