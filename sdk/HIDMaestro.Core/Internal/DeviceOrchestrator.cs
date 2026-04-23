@@ -1000,11 +1000,15 @@ internal static class DeviceOrchestrator
         // ── Step 5: bus type + companions ─────────────────────────────────
         SetBusTypeGuidUsb();
 
-        // Non-xinputhid Xbox: create XUSB companion for XInput
+        // Non-xinputhid Xbox: create XUSB companion for XInput.
+        // HMCOMPANION setup class changed from XnaComposite to System in
+        // hidmaestro_xusb.inf so Windows.Gaming.Input.dll doesn't classify it
+        // as a WGI Gamepad (would duplicate the main virtual's HID-path
+        // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
+        // {EC87F1E3} XUSB device interface class.
         if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
             string? xusbId = CreateXusbCompanion(controllerIndex, profile);
-            // For CompanionOnly profiles, the XUSB companion IS the device
             if (profile.CompanionOnly && companionId == null)
                 companionId = xusbId;
         }

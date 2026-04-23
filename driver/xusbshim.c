@@ -445,42 +445,29 @@ XusbShimDeviceAdd(
         }
     }
 
-    NTSTATUS ifs = WdfDeviceCreateDeviceInterface(
-        device, (LPGUID)&GUID_DEVINTERFACE_XUSB, NULL);
-    LogEvent("XUSB-ifreg", (ULONG)ifs);
-
-    /* Shotgun extra interfaces from WGI's internal enumeration table.
-     * If any one of these is the actual gate WGI checks beyond (or
-     * instead of) XUSB, registering them too covers the case. */
-    {
-        /* NOT registering WinExInput on the HID child — HMCOMPANION already
-         * registers it with reference "XI_00", and a second registration
-         * here would create a duplicate symlink that could show Chromium
-         * two separate Gamepad entries for the same controller. Chromium's
-         * GamepadAdded dedupe happens downstream of the DeviceWatcher
-         * enumeration, so the safer choice is to emit WinExInput from a
-         * single devnode (HMCOMPANION) and let xusbshim focus on XUSB.
-         *
-         * Previous commit (7223667) experimented with WinExInput + "IG_00"
-         * reference here; reverted because dedupe risk outweighs uncertain
-         * correlation benefit. Muse's hypothesis untested but lower-priority
-         * than avoiding a duplicate gamepad entry.
-         */
-        NTSTATUS wex = STATUS_SUCCESS;
-        LogEvent("WinEx-ifreg-skipped", (ULONG)wex);
-
-        NTSTATUS u1 = WdfDeviceCreateDeviceInterface(
-            device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK1, NULL);
-        LogEvent("WGI-Unk1-ifreg", (ULONG)u1);
-
-        NTSTATUS u2 = WdfDeviceCreateDeviceInterface(
-            device, (LPGUID)&GUID_DEVINTERFACE_WGI_UNK2, NULL);
-        LogEvent("WGI-Unk2-ifreg", (ULONG)u2);
-
-        NTSTATUS ux = WdfDeviceCreateDeviceInterface(
-            device, (LPGUID)&GUID_DEVINTERFACE_XINPUTHID_EXTRA, NULL);
-        LogEvent("xhidExtra-ifreg", (ULONG)ux);
-    }
+    /* Do NOT publish GUID_DEVINTERFACE_XUSB ({EC87F1E3}) on this HID child.
+     *
+     * HMCOMPANION (ROOT\HMCOMPANION, XnaComposite class) already publishes
+     * the XUSB interface. Publishing it from TWO device nodes for one logical
+     * controller makes Windows.Gaming.Input.dll's provider-manager hang trying
+     * to reconcile two distinct XUSB providers for the same logical Xbox 360
+     * virtual — WGI's classifier can't resolve the paradox and stops
+     * dispatching to EVERY gamepad system-wide (including physical Xbox
+     * controllers), until GameInputSvc is restarted.
+     *
+     * Verified 2026-04-23 empirically: with both HMCOMPANION XUSB interface
+     * and xusbshim HID-child XUSB interface active, Chrome WGI vibration
+     * stops dispatching on every device. Removing this publication and keeping
+     * HMCOMPANION as the sole XUSB publisher restores WGI function.
+     *
+     * See memory:feedback-one-wgi-device-per-controller.md.
+     *
+     * xusbshim remains useful as a passive HID upper filter for logging /
+     * observability of the HID child's IOCTL traffic, but it MUST NOT create
+     * its own XUSB interface. The other interface registrations below are
+     * also disabled on the same rationale — any additional WGI-enumerated
+     * interface creates the same duplicate-provider hang. */
+    LogEvent("XUSB-ifreg-skipped-by-design", 0);
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
         &queueConfig, WdfIoQueueDispatchParallel);
@@ -574,7 +561,7 @@ XusbShimIoDefault(
              * version-discriminator story. HMCOMPANION uses 0x0101 too. */
             UCHAR info[12];
             for (int i = 0; i < 12; i++) info[i] = 0;
-            info[0] = 0x01; info[1] = 0x01;       /* Version 1.1 — Xbox 360/xusb22 era. Was 0x0103 (Xbox One/xinputhid). Muse flags: 0x0103 triggers 15-button Xbox One descriptor validation in WGI, which fails on our 10-button Xbox 360 descriptor → WGI demotes to RawGameController (no put_Vibration). Matches HMCOMPANION's working version. */
+            info[0] = 0x03; info[1] = 0x01;       /* Version 0x0103. 2026-04-23 empirical: physical Xbox 360 USB and HIDMaestro Xbox Series BT both return 0x0103 and both receive put_Vibration SET_STATE IOCTLs from Chromium WGI; 0x0101 gets polled but never vibrated. The earlier "0x0103 triggers 15-button validation → RawGameController demotion" concern wasn't borne out by positive control (physical 360 reports 0x0103 and is correctly handled as a 10-button Xbox 360). */
             info[2] = 0x01;                        /* Device count */
             info[3] = 0x01;                        /* Slot/capability marker */
             info[8]  = (UCHAR)(ctx->VendorId & 0xFF);
@@ -601,7 +588,7 @@ XusbShimIoDefault(
              * exists to keep xinput1_4 alive and probing. */
             UCHAR state[29];
             for (int i = 0; i < 29; i++) state[i] = 0;
-            state[0] = 0x01; state[1] = 0x01;  /* Version 1.1 — Xbox 360 era. */
+            state[0] = 0x03; state[1] = 0x01;  /* Version 0x0103 — match the GET_INFORMATION version so WGI doesn't see inconsistency across IOCTLs. */
             state[2] = 0x01;                    /* CONNECTED */
             /* Packet counter at offset 5 — xinput1_4 uses this to detect
              * state changes. Increment per poll so xinput1_4 believes input
@@ -676,7 +663,7 @@ XusbShimIoDefault(
              * remaining bytes zeroed is sufficient for the gate check. */
             UCHAR exInfo[64];
             for (int i = 0; i < 64; i++) exInfo[i] = 0;
-            exInfo[0] = 0x01; exInfo[1] = 0x01;       /* Version 1.1 — Xbox 360 era. */
+            exInfo[0] = 0x03; exInfo[1] = 0x01;       /* Version 0x0103 — match GET_INFORMATION. */
             exInfo[2] = 0x01;                          /* Device count */
             exInfo[3] = 0x01;                          /* Slot/cap marker */
             exInfo[8]  = (UCHAR)(ctx->VendorId & 0xFF);
@@ -695,44 +682,94 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_CAPABILITIES) {
-            /* 24-byte capabilities. Wire format: [0-1]Version, then
-             * XINPUT_CAPABILITIES struct starting at [2]:
-             *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
-             *   [10-17]sThumbLX/LY/RX/RY (4xi16) [18-19]wLeftMotorSpeed
-             *   [20-21]wRightMotorSpeed [22-23]reserved.
+            /* Two distinct wire formats, verified 2026-04-23 against a live
+             * physical Xbox 360 wired controller's xusb22.sys response:
              *
-             * Prior bug: motor maxes sat at [22-23] while WGI reads them
-             * from [18-21]. WGI saw zeros -> ForceFeedbackMotors=0 ->
-             * put_Vibration silently dropped. */
-            UCHAR caps[24];
-            for (int i = 0; i < 24; i++) caps[i] = 0;
-            caps[0] = 0x01; caps[1] = 0x01;         /* Version 1.1 */
-            caps[2] = 0x01;                          /* XINPUT_DEVTYPE_GAMEPAD */
-            caps[3] = 0x01;                          /* XINPUT_DEVSUBTYPE_GAMEPAD */
-            caps[4] = 0x01; caps[5] = 0x00;         /* Flags = XINPUT_CAPS_FFB_SUPPORTED */
-            caps[6] = 0xFF; caps[7] = 0xF7;         /* wButtons mask (LE) */
-            caps[8] = 0xFF;                          /* bLeftTrigger max */
-            caps[9] = 0xFF;                          /* bRightTrigger max */
-            caps[10]= 0xFF; caps[11]= 0x7F;         /* sThumbLX max (0x7FFF) */
-            caps[12]= 0xFF; caps[13]= 0x7F;         /* sThumbLY max */
-            caps[14]= 0xFF; caps[15]= 0x7F;         /* sThumbRX max */
-            caps[16]= 0xFF; caps[17]= 0x7F;         /* sThumbRY max */
-            caps[18]= 0xFF; caps[19]= 0xFF;         /* wLeftMotorSpeed max */
-            caps[20]= 0xFF; caps[21]= 0xFF;         /* wRightMotorSpeed max */
+             * 24-byte V1 layout (legacy xinput1_3 / xinput9_1_0 callers):
+             *   [0..1] Version 0x0103
+             *   [2]    Type    (0x00 for V1-only responses)
+             *   [3]    SubType 0x01 GAMEPAD
+             *   [4..5] wButtons mask 0xF7FF
+             *   [6..7] 0xFFFF padding
+             *   [8..15] sThumb max values (4x 0xFFC0 LE)
+             *   [16..21] zero fields (motor placeholders in V1)
+             *   [22..23] trailer 0xFFFF
+             *
+             * 36-byte V2 layout (Windows.Gaming.Input / xinput1_4 / xusb22):
+             *   [0..1]   Version 0x0103
+             *   [2]      Type     0x01 (V2 marker)
+             *   [3]      SubType  0x01 GAMEPAD
+             *   [4..5]   Flags    0x000C
+             *   [6..7]   vendorId
+             *   [8..9]   productId
+             *   [10..11] revisionId 0x0110
+             *   [12..15] compositeDeviceId (unique 32-bit value)
+             *   [16..17] wButtons mask 0xF7FF
+             *   [18]     bLeftTrigger max 0xFF
+             *   [19]     bRightTrigger max 0xFF
+             *   [20..27] sThumb max values (4x 0xFFC0)
+             *   [28..31] motor placeholders 0
+             *   [32..33] pad 0
+             *   [34..35] trailer 0xFFFF  (WGI reads [0x22/0x23] here as
+             *            XusbGameControllerDeviceCapabilities[0x10/0x11]
+             *            "motor present" booleans)
+             *
+             * Our prior implementation returned the V1-shaped buffer for both
+             * 24 and 36 requests, which put wButtons at byte 4 and made WGI
+             * read 0x00 at offset 0x10 (wButtons in the V2 layout) — devices
+             * looked buttonless / malformed to QueryDeviceCapabilities. Now
+             * we return the correct layout for each size. */
+            UCHAR caps_v1[24] = {
+                0x03, 0x01,
+                0x00, 0x01,
+                0xFF, 0xF7,
+                0xFF, 0xFF,
+                0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xFF, 0xFF
+            };
+            UCHAR caps_v2[36] = {
+                0x03, 0x01,
+                0x01, 0x01,
+                0x0C, 0x00,
+                (UCHAR)(ctx->VendorId & 0xFF), (UCHAR)((ctx->VendorId >> 8) & 0xFF),
+                (UCHAR)(ctx->ProductId & 0xFF), (UCHAR)((ctx->ProductId >> 8) & 0xFF),
+                0x10, 0x01,
+                /* compositeDeviceId — 32-bit unique per-device. Use VID^PID
+                 * rotated + controller index as a stable synthetic. */
+                (UCHAR)(ctx->ControllerIndex & 0xFF), 0xFA, 0x34, 0x22,
+                0xFF, 0xF7,
+                0xFF,
+                0xFF,
+                0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00,
+                0xFF, 0xFF
+            };
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
-                if (outLen > 24) outLen = 24;
-                for (size_t i = 0; i < outLen; i++) ((UCHAR*)outBuf)[i] = caps[i];
-                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outLen);
+                LogEvent("CAPS-requested-size", (ULONG)outLen);
+                SIZE_T copy;
+                if (outLen >= 36) {
+                    copy = 36;
+                    for (SIZE_T i = 0; i < copy; i++) ((UCHAR*)outBuf)[i] = caps_v2[i];
+                } else {
+                    copy = outLen > 24 ? 24 : outLen;
+                    for (SIZE_T i = 0; i < copy; i++) ((UCHAR*)outBuf)[i] = caps_v1[i];
+                }
+                WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
             } else {
                 WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
             }
             handledLocally = TRUE;
         }
-    } else {
-        LogEvent("MJ", (ULONG)params.Type);
     }
+    /* Intentionally not logging non-IOCTL requests (IRP_MJ_READ etc.). Logging
+     * every read synchronously opens/writes/closes the log file, which adds
+     * per-IRP latency on the HID input path and causes visibly choppy gamepad
+     * tester rotation on downstream consumers. SET_STATE is our target and is
+     * captured in the IOCTL path above. */
 
     if (!handledLocally) {
         WDF_REQUEST_SEND_OPTIONS opts;
