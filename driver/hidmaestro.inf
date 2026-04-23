@@ -16,7 +16,7 @@ Class       = HIDClass
 ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro.cat
-DriverVer   = 04/23/2026,1.1.6.311
+DriverVer   = 04/23/2026,1.1.6.322
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -55,6 +55,10 @@ AddReg = HIDMaestro_HW_AddReg
 [HIDMaestro_HW_AddReg]
 ; Lower filters: WUDFRd (UMDF reflector) loads our UMDF2 driver
 HKR,,"LowerFilters",0x00010008,"WUDFRd"
+; xinputhid UpperFilter tripwire — skip HID Gamepad creation so WGI only has
+; the XUSB Gamepad from HMCOMPANION. See hidmaestro_xusb.inf for the parallel
+; tripwire that admits HMCOMPANION to WGI's XUSB dispatch.
+HKR,,"UpperFilters",0x00010008,"xinputhid"
 ; Security: allow all users access (needed for WGI/GameInput non-elevated discovery)
 HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 

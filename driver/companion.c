@@ -479,15 +479,21 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
      *   convention this byte is the XINPUT_STATE packet-type marker (0x14
      *   = XINPUT packet). The XusbInputParser expects the remaining payload
      *   (wButtons, triggers, sticks) at data[1..] = state[11..22]. */
-    state[9]  = 0x14;
-    state[10] = 0x14;
+    /* state[9] = reportId. XusbInputParser template expects 0 — confirmed
+     * empirically 2026-04-23 via diagnostic fingerprint: setting 0 makes
+     * GetCurrentReading return actual parsed values; setting 0x14 produced
+     * all-zero readings. */
+    state[9]  = 0x00;
+    state[10] = 0x14;                 /* payload size gate (XInput packet len) */
 
     USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
     DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
     if (!valid) return;
 
-    /* XINPUT_GAMEPAD layout at state[11..22] as the parser expects when
-     * offset=10 (from GetInputReportProperties) and data[0]=packet-type. */
+    /* XINPUT_GAMEPAD layout confirmed reading offsets in the XusbInputParser
+     * template (2026-04-23 fingerprint test): LT at state[13], RT at state[14],
+     * LX at state[15-16], LY at state[17-18], RX at state[19-20], RY at
+     * state[21-22]. Buttons at state[11-12] (wButtons little-endian). */
     *(USHORT*)&state[11] = buttons;
     state[13] = lt;
     state[14] = rt;
