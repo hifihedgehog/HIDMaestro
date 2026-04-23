@@ -368,17 +368,28 @@ void CompanionIoControl(
     }
 
     case IOCTL_XUSB_GET_CAPABILITIES: {
-        /* GamepadCapabilities0101 — 24 bytes */
+        /*
+         * GamepadCapabilities0101 — 24 bytes.
+         * Wire: [0-1]Version then XINPUT_CAPABILITIES at [2]:
+         *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
+         *   [10-17]4xi16 thumb maxes [18-19]wLeftMotorSpeed
+         *   [20-21]wRightMotorSpeed [22-23]reserved.
+         * Mirrors driver.c (commit 79531e0).
+         */
         UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
-        *(USHORT*)&caps[0] = 0x0101;
-        caps[2] = 0x01; /* XINPUT_DEVTYPE_GAMEPAD */
-        caps[3] = 0x01; /* XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[4] = 0xF7FF; /* wButtons mask — includes Guide (0x0400) */
-        caps[6] = 0xFF; caps[7] = 0xFF;
-        *(SHORT*)&caps[8]  = 32767; *(SHORT*)&caps[10] = 32767;
-        *(SHORT*)&caps[12] = 32767; *(SHORT*)&caps[14] = 32767;
-        caps[22] = 0xFF; caps[23] = 0xFF;
+        *(USHORT*)&caps[0] = 0x0101;   /* XUSBVersion */
+        caps[2] = 0x01;                 /* Type: XINPUT_DEVTYPE_GAMEPAD */
+        caps[3] = 0x01;                 /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
+        *(USHORT*)&caps[6] = 0xF7FF;   /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
+        caps[8] = 0xFF;                 /* bLeftTrigger */
+        caps[9] = 0xFF;                 /* bRightTrigger */
+        *(SHORT*)&caps[10] = 32767;     /* ThumbLX */
+        *(SHORT*)&caps[12] = 32767;     /* ThumbLY */
+        *(SHORT*)&caps[14] = 32767;     /* ThumbRX */
+        *(SHORT*)&caps[16] = 32767;     /* ThumbRY */
+        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed */
+        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed */
         CopyToRequest(Request, caps, 24);
         break;
     }
@@ -475,18 +486,36 @@ void CompanionIoControl(
         break;
     }
 
-    case IOCTL_XUSB_POWER_INFO:
-        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+    case IOCTL_XUSB_POWER_INFO: {
+        /* xinputhid sends this repeatedly — return success with a zeroed
+         * buffer of the caller's requested size. Mirrors driver.c. Previously
+         * returned STATUS_SUCCESS with 0 bytes written, which callers
+         * expecting a populated buffer may interpret as a dispatch failure. */
+        PVOID outBuf; size_t outSize;
+        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outSize))) {
+            RtlZeroMemory(outBuf, outSize);
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, outSize);
+        } else {
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+        }
         break;
+    }
 
     case IOCTL_XUSB_GET_LED_STATE: {
-        UCHAR led[3] = { 0, 0, 0x06 };
+        /* 3 bytes: version(2) + LED state(1). Mirrors driver.c. */
+        UCHAR led[3];
+        *(USHORT*)&led[0] = 0x0101;
+        led[2] = 0x02; /* Player 1 */
         CopyToRequest(Request, led, 3);
         break;
     }
 
     case IOCTL_XUSB_GET_BATTERY_INFO: {
-        UCHAR batt[4] = { 0, 0x01, 0x03, 0 };
+        /* 4 bytes: version(2) + batteryType(1) + batteryLevel(1). Mirrors driver.c. */
+        UCHAR batt[4];
+        *(USHORT*)&batt[0] = 0x0101;
+        batt[2] = 0x01; /* BATTERY_TYPE_WIRED */
+        batt[3] = 0x03; /* BATTERY_LEVEL_FULL */
         CopyToRequest(Request, batt, 4);
         break;
     }
