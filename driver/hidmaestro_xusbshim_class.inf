@@ -24,7 +24,7 @@ Class       = HIDClass
 ClassGuid   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusbshim_class.cat
-DriverVer   = 04/17/2026,1.1.6.1913
+DriverVer   = 04/23/2026,1.1.19.0
 PnpLockdown = 1
 
 [DestinationDirs]
