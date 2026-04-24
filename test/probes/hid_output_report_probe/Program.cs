@@ -4,10 +4,11 @@ using Microsoft.Win32.SafeHandles;
 using System.IO;
 
 // Open our virtual's HID device file and call HidD_SetOutputReport with
-// a test byte sequence. If our driver's IOCTL_UMDF_HID_SET_OUTPUT_REPORT
-// handler fires, [HID-SETOUT] appears in xusbshim_log.txt. If driver's
-// IOCTL_HID_WRITE_REPORT (via WriteFile) fires, [HID-WRITE] appears.
-// Tests both HID output paths to confirm instrumentation is live.
+// a test byte sequence, then also issue a WriteFile to cover the
+// IOCTL_HID_WRITE_REPORT path. Exercises both HID output routes so a
+// consumer-side OutputReceived handler sees the packets the probe sent.
+// (Driver-side diagnostic logging was removed — this probe now verifies
+// only client-reachable behavior.)
 
 internal static class P
 {
@@ -127,7 +128,7 @@ internal static class P
                 handle.Close();
                 break;
             }
-            Console.WriteLine("Done. Check xusbshim_log.txt for [HID-SETOUT] and [HID-WRITE] entries.");
+            Console.WriteLine("Done. Observe OutputReceived on the HMController side for the sent bytes.");
         }
         finally
         {

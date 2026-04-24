@@ -67,7 +67,11 @@ echo "  READY"
 
 echo "[4/7] sending mark..."
 echo mark >&${TESTAPP_STDIN_FD}
-sleep 4
+# Mark-button propagates: pattern thread picks it up next 8ms iter, driver
+# publishes a new HID report, HidClass delivers it, Chromium's poll catches
+# the button state. Whole chain is well under 200ms; 2s is plenty and stays
+# inside the global no-long-sleep rule.
+sleep 2
 
 echo "[5/7] running headless browser check + order analysis (non-elevated)..."
 python "$PY"
