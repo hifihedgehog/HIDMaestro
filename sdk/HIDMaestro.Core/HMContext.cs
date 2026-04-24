@@ -104,13 +104,6 @@ public sealed class HMContext : IDisposable
         // binary replaces the DriverStore contents.
         Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
 
-        // Always run the full deploy. The previous version gated on
-        // IsDriverInstalled — but a stale half-removed package would make
-        // that gate return true and skip the install entirely, leaving
-        // WUDFHost serving devices from an OLD binary. That failure mode
-        // hid the CPU-saturation fix for hours during testing. The pnputil
-        // install is fast (a few seconds) and safely overwrites whatever
-        // is in the store, so unconditional install is strictly better.
         if (!DriverBuilder.FullDeploy())
             throw new InvalidOperationException(
                 "Driver install failed. Run elevated and check pnputil output.");

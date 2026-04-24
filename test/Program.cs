@@ -200,6 +200,12 @@ class Program
         // start the circle.
         bool startPaused = profileIds.Contains("--paused-at-zero");
         bool startMarked = profileIds.Contains("--mark");
+        // --keep-alive: ignore stdin-EOF (elevated test spawned without console
+        // has no stdin and ReadLine returns null immediately, tearing the
+        // device down before verify.py can inspect it). With this flag, the
+        // main thread blocks on a ManualResetEventSlim that's only signaled
+        // by Ctrl+C / SIGBREAK, letting the device live indefinitely.
+        bool keepAlive = profileIds.Contains("--keep-alive");
         // --rate-hz N : override the per-virtual SubmitState rate (default 250 Hz,
         // which comes from the pattern thread's Thread.Sleep(4)). PadForge polls
         // at 1 kHz; issue #3 uses 1 kHz and 125 Hz for saturation-rate tests.
@@ -214,7 +220,7 @@ class Program
                 break;
             }
         }
-        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
+        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark" && p != "--keep-alive").ToArray();
         if (profileIds.Length == 0)
             return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] <profile-id> [profile-id ...]");
         Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");
@@ -229,23 +235,28 @@ class Program
 
         // Phase 1: create all controllers sequentially
         var slots = new List<RunningController>();
+        var phase1Sw = Stopwatch.StartNew();
         for (int i = 0; i < profileIds.Length; i++)
         {
             var profile = ctx.GetProfile(profileIds[i]);
             if (profile == null) return Error($"Profile not found: {profileIds[i]}");
+            var perSlotSw = Stopwatch.StartNew();
             Console.WriteLine($"  Creating controller {i}: {profile.Id} ({profile.Name})");
             var slot = new RunningController { Ctrl = ctx.CreateController(profile) };
+            Console.WriteLine($"    -> created in {perSlotSw.ElapsedMilliseconds} ms");
             // Pre-park BEFORE the pattern thread starts so the very first
             // submitted frame is (0, 0), not whatever the circle was at.
             if (startPaused) { slot.ParkX = 0f; slot.ParkY = 0f; }
             HookOutputReceived(slot.Ctrl, i);
             slots.Add(slot);
         }
+        Console.WriteLine($"  Phase 1 (creation) total: {phase1Sw.ElapsedMilliseconds} ms for {slots.Count} slot(s)");
 
         // Phase 1.5: re-apply friendly names (PnP race fix — see HMContext.FinalizeNames doc).
+        var finalizeSw = Stopwatch.StartNew();
         Console.Write("  Finalizing device names... ");
         ctx.FinalizeNames();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({finalizeSw.ElapsedMilliseconds} ms)");
 
         // --mark: auto-activate mark mode before the pattern threads start, so
         // each controller's pattern thread comes up with MarkButton=i set and

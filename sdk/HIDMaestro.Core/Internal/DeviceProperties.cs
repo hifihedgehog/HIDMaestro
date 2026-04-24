@@ -122,7 +122,17 @@ internal static class DeviceProperties
 
             foreach (var sub in enumKey.GetSubKeyNames())
             {
-                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                // Accept the pre-SWD `VID_xxx&PID_yyy&IG_00` enumerator (ROOT
+                // path) and the current SWD form `HIDMAESTROGP_<vid>_<pid>&IG_00`.
+                // Also accept a historical `HIDMAESTRO_VID_xxx&PID_yyy&IG_00`
+                // form that matched the `VID_*&PID_*&IG_*` PnP-edge-case
+                // substring — short-lived, retained only so orphaned nodes from
+                // an in-place upgrade still get named before teardown.
+                bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
+                bool isSwdForm = sub.StartsWith("HIDMAESTROGP_", StringComparison.OrdinalIgnoreCase)
+                              || sub.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase)
+                              || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                if (!isVidForm && !isSwdForm) continue;
 
                 using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}");
                 if (subKey == null) continue;
@@ -194,7 +204,8 @@ internal static class DeviceProperties
             {
                 bool isOurClass = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
                                || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase);
+                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                               || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                 if (!isOurClass) continue;
 
                 using var subKey = rootEnum.OpenSubKey(sub);
