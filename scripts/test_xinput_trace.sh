@@ -7,7 +7,7 @@
 set +u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-EXE="$REPO/test/bin/Debug/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
+EXE="$REPO/test/bin/Release/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
 PY="$REPO/scripts/xinput_trace.py"
 
 echo "[1/5] cleanup..."

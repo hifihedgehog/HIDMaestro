@@ -189,8 +189,8 @@ dotnet run --project example\SdkDemo
 
 # Full test app (self-contained: cert + build + sign + install all automatic)
 cd test
-dotnet build -c Debug
-bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
+dotnet build
+bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
 
 # Multiple controllers at once (up to 6 verified, any mix of profiles)
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired dualsense
