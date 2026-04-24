@@ -157,12 +157,20 @@ typedef struct _DEVICE_CONTEXT {
 
 /* Shared memory layout: written by user-mode, read by driver
  * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
- * Total size: 4 + 4 + 64 + 14 = 86 bytes */
+ * Total size: 4 + 4 + 256 + 14 = 278 bytes.
+ *
+ * Data[] is 256 bytes to cover every HID input report size in the profile
+ * database without truncation. DualSense BT report 0x31 is 78 bytes;
+ * Switch Pro standard input reports can run to ~64; gyro/accelerometer
+ * passthrough on these pads writes motion values LATE in the report, so
+ * the prior 64-byte pipe clipped exactly the motion fields consumers
+ * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
+ * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
 #pragma pack(push, 1)
 typedef struct _HIDMAESTRO_SHARED_INPUT {
     volatile ULONG  SeqNo;           /* Incremented each write */
     ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
-    UCHAR           Data[64];        /* HID input report data (native descriptor format) */
+    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
     UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
 } HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
 #pragma pack(pop)
