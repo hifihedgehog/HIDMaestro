@@ -100,10 +100,20 @@ internal static class DeviceOrchestrator
             RedirectStandardError = true, CreateNoWindow = true
         };
         using var proc = Process.Start(psi)!;
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(timeoutMs);
-        return (proc.ExitCode, stdout + stderr);
+        // See PnputilHelper.Run: sync ReadToEnd blocks past timeoutMs when the
+        // child hangs. Async read + Kill-on-timeout makes the timeout real.
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            proc.WaitForExit(5_000);
+        }
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        int exitCode;
+        try { exitCode = proc.ExitCode; } catch { exitCode = -1; }
+        return (exitCode, stdout + stderr);
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -318,6 +328,13 @@ internal static class DeviceOrchestrator
     {
         string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
         try { Registry.LocalMachine.DeleteSubKeyTree(deviceKey, false); } catch { }
+
+        // Also clean up any stale entry from the earlier (now-disabled)
+        // SOFTWARE path experiment so we don't leave a DS4-shaped mapping
+        // for 045E VIDs that could override WGI's native handling.
+        string staleSoftwareKey = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
+        try { Registry.LocalMachine.DeleteSubKeyTree(staleSoftwareKey, false); } catch { }
+
         using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
 
         string gpPath = $@"{deviceKey}\Gamepad";
@@ -373,6 +390,91 @@ internal static class DeviceOrchestrator
 
         SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
         SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
+
+        // DISABLED per external review: writing a DS4-cloned mapping to
+        // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
+        // for a 045E VID may confuse WGI's normal Xbox-family handling.
+        // If mainline HMCOMPANION is sufficient (Grok's analysis), this
+        // write is unneeded and potentially harmful. The method is kept
+        // below for manual invocation if future experiments need it.
+        // WriteWgiSoftwareRegistry(profile);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  WriteWgiSoftwareRegistry
+    // ════════════════════════════════════════════════════════════════════
+    // Experimental: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
+    // is WGI's device-recognition database for non-Microsoft VIDs (DS4, Switch
+    // Pro, Thrustmaster, Hori are all there). No 045E entries natively — Xbox
+    // VIDs normally go through xinputhid/xusb22. But if WGI's gamepad enumeration
+    // consults this registry for 045E too when the usual kernel path isn't
+    // available (our case for PID 028E), writing a compatible entry may unlock
+    // Gamepad class recognition even without xinputhid binding.
+    //
+    // We clone the Sony DualShock 4 layout bytes verbatim since they're the
+    // only well-established "non-Xbox Gamepad" mapping that's known to work.
+    // Button mappings will be wrong initially (DS4 layout applied to Xbox 360
+    // HID bytes), but the primary question is whether WGI wraps the device
+    // as Gamepad at all — once that's established, a correct opcode mapping
+    // can replace this placeholder.
+    //
+    // HapticFeedback=DS4Alt advertises vibration to WGI. Chromium's put_Vibration
+    // may then dispatch via WGI's DS4 haptic protocol handler, producing output
+    // reports that our driver.c can catch on IOCTL_HID_WRITE_REPORT (source=HID).
+
+    private static void WriteWgiSoftwareRegistry(ControllerProfile profile)
+    {
+        // Only apply for Xbox-family VIDs; other profiles have their own natural
+        // paths through the non-MS registry entries that already ship with Win11.
+        if (profile.VendorId != 0x045E) return;
+
+        string key = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
+        try
+        {
+            using var k = Registry.LocalMachine.CreateSubKey(key);
+            if (k == null) return;
+
+            string description = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Xbox Controller";
+            k.SetValue("Description", description, RegistryValueKind.String);
+
+            // DS4-cloned Gamepad opcode mapping. Format is WGI's internal
+            // mapping DSL starting with opcode 0x02. Not correct for Xbox
+            // 360 button layout but exists purely to satisfy "has a Gamepad
+            // mapping" gate check.
+            byte[] gamepadBytes = new byte[]
+            {
+                0x02, 0x05, 0x03, 0x05, 0x04, 0x05, 0x00, 0x85, 0x01, 0x05, 0x02, 0x85, 0x05,
+                0x0A, 0x09, 0x0A, 0x08, 0x0A, 0x01, 0x0A, 0x02, 0x0A, 0x00, 0x0A, 0x03,
+                0x0B, 0x00, 0x4B, 0x00, 0x6B, 0x00, 0x2B, 0x00,
+                0x0A, 0x04, 0x0A, 0x05, 0x0A, 0x0A, 0x0A, 0x0B, 0x08, 0x08, 0x08, 0x08
+            };
+            k.SetValue("Gamepad", gamepadBytes, RegistryValueKind.Binary);
+            k.SetValue("HapticFeedback", "DS4Alt", RegistryValueKind.String);
+
+            using var labels = Registry.LocalMachine.CreateSubKey($@"{key}\Labels\Buttons");
+            if (labels != null)
+            {
+                labels.SetValue("Button0", "A", RegistryValueKind.String);
+                labels.SetValue("Button1", "B", RegistryValueKind.String);
+                labels.SetValue("Button2", "X", RegistryValueKind.String);
+                labels.SetValue("Button3", "Y", RegistryValueKind.String);
+                labels.SetValue("Button4", "LeftShoulder", RegistryValueKind.String);
+                labels.SetValue("Button5", "RightShoulder", RegistryValueKind.String);
+                labels.SetValue("Button6", "View", RegistryValueKind.String);
+                labels.SetValue("Button7", "Menu", RegistryValueKind.String);
+                labels.SetValue("Button8", "LeftThumbstickButton", RegistryValueKind.String);
+                labels.SetValue("Button9", "RightThumbstickButton", RegistryValueKind.String);
+            }
+            using var switches = Registry.LocalMachine.CreateSubKey($@"{key}\Labels\Switches");
+            if (switches != null)
+            {
+                switches.SetValue("Switch0Up", "Up", RegistryValueKind.String);
+                switches.SetValue("Switch0Down", "Down", RegistryValueKind.String);
+                switches.SetValue("Switch0Left", "Left", RegistryValueKind.String);
+                switches.SetValue("Switch0Right", "Right", RegistryValueKind.String);
+            }
+        }
+        catch { /* registry write may fail on non-admin; non-fatal */ }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -578,13 +680,33 @@ internal static class DeviceOrchestrator
                 byte[] diBuf = new byte[32];
                 BitConverter.GetBytes(IntPtr.Size == 8 ? 32 : 28).CopyTo(diBuf, 0);
                 var diHandle = GCHandle.Alloc(diBuf, GCHandleType.Pinned);
-                string xusbHw = "root\\HIDMaestroXUSB\0\0";
+                // Multi-SZ HardwareIDs — the VID_045E&PID_028E&XI_00 alias first
+                // so DEVPKEY_Device_HardwareIds contains 'VID_045E' for any
+                // WGI check that greps for Xbox-family VID strings (Opus's
+                // 'Gate 2' hypothesis for the 045E hardcoded branch).
+                // root\HIDMaestroXUSB kept as second alias so existing
+                // enumeration paths keying on it still work. Each HwID
+                // is separately NUL-terminated; the array ends with an
+                // extra NUL (REG_MULTI_SZ).
+                string vidHw = $"root\\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&XI_00";
+                string xusbHw = vidHw + "\0" + "root\\HIDMaestroXUSB" + "\0\0";
                 byte[] xusbHwBytes = Encoding.Unicode.GetBytes(xusbHw);
                 string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
                 if (SetupDiCreateDeviceInfoW(dis, "HMCompanion", ref sysGuid,
                     companionDesc, IntPtr.Zero, 1, diHandle.AddrOfPinnedObject()))
                 {
                     SetupDiSetDeviceRegistryPropertyW(dis, diHandle.AddrOfPinnedObject(), 1, xusbHwBytes, (uint)xusbHwBytes.Length);
+
+                    // CompatibleIDs — advertises Xbox 360 XInput-compat signature
+                    // so any WGI grep of DEVPKEY_Device_CompatibleIds for "XUSB"
+                    // or "MS_COMP_XUSB10" finds a match (xusb22.inf uses these
+                    // identifiers for generic XInput-compat device matching).
+                    // Multi-SZ: each NUL-terminated, ends with extra NUL.
+                    string compat = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0USB\\Class_FF\0\0";
+                    byte[] compatBytes = Encoding.Unicode.GetBytes(compat);
+                    SetupDiSetDeviceRegistryPropertyW(dis, diHandle.AddrOfPinnedObject(),
+                        2 /*SPDRP_COMPATIBLEIDS*/, compatBytes, (uint)compatBytes.Length);
+
                     SetupDiCallClassInstaller(0x19, dis, diHandle.AddrOfPinnedObject()); // DIF_REGISTERDEVICE
                 }
                 diHandle.Free();
@@ -605,6 +727,24 @@ internal static class DeviceOrchestrator
                             if (dpKey.GetValue("ControllerIndex") == null)
                             {
                                 dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+
+                                // Align HMCOMPANION's ContainerID with the main ROOT device's
+                                // deterministic GUID so WGI sees main HID + HMCOMPANION as ONE
+                                // physical device rather than two separate containers. Codex
+                                // flagged split-container topology as a plausible remaining
+                                // friction for WGI's put_Vibration dispatch selecting the right
+                                // provider. Without this, HMCOMPANION's XUSB interface lives in
+                                // a different container than the HID gamepad WGI promotes, and
+                                // some WGI paths route vibration by container ownership.
+                                //
+                                // Format matches DeviceNodeCreator's main-device ContainerID
+                                // write: {48494430-4D41-4553-5452-4F00000000<idx:X2>} =
+                                // "HIDMAESTRO" ASCII + index byte.
+                                string containerGuid = $"{{48494430-4D41-4553-5452-4F00000000{controllerIndex:X2}}}";
+                                string enumRegPath = $@"SYSTEM\CurrentControlSet\Enum\{candidate}";
+                                using (var devKey = Registry.LocalMachine.OpenSubKey(enumRegPath, writable: true))
+                                    devKey?.SetValue("ContainerID", containerGuid, RegistryValueKind.String);
+
                                 xusbInstId = candidate;
                                 break;
                             }
@@ -641,6 +781,65 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
+    //  SetHidParentUpperFilterXinputhid
+    //  Profile-specific WGI HID-classifier skip. Called only for profiles
+    //  that already publish an HMCOMPANION XUSB provider — so WGI still has
+    //  an XUSB Gamepad source after the HID Gamepad is skipped.
+    // ════════════════════════════════════════════════════════════════════
+
+    private static void SetHidParentUpperFilterXinputhid(int controllerIndex)
+    {
+        // Idempotent: sweep every ROOT HID parent whose HMCOMPANION counterpart
+        // exists (same ControllerIndex registered under ROOT\HMCOMPANION\*).
+        // Writing to just the current controller's instance has a timing race
+        // — Windows PnP occasionally clears properties when a sibling root
+        // device is added shortly after. Sweeping every call converges the
+        // state regardless of which iteration set which value.
+        try
+        {
+            // Build a set of controllerIndexes that have an HMCOMPANION
+            // (profiles with XUSB companions — xbox-360 wired family).
+            var companionIndexes = new HashSet<int>();
+            using (var hmEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\HMCOMPANION"))
+            {
+                if (hmEnum != null)
+                {
+                    foreach (var inst in hmEnum.GetSubKeyNames())
+                    {
+                        using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
+                        if (dp?.GetValue("ControllerIndex") is int ci) companionIndexes.Add(ci);
+                    }
+                }
+            }
+            companionIndexes.Add(controllerIndex);  // include current even if HMCOMPANION isn't enum-visible yet
+
+            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (rootEnum == null) return;
+            foreach (var sub in rootEnum.GetSubKeyNames())
+            {
+                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                using var subKey = rootEnum.OpenSubKey(sub);
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
+                {
+                    using var dpKey = Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                    int ci = (dpKey?.GetValue("ControllerIndex") is int v) ? v : -1;
+                    if (!companionIndexes.Contains(ci)) continue;
+                    string instKeyPath = $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}";
+                    using var instKey = Registry.LocalMachine.OpenSubKey(instKeyPath, writable: true);
+                    if (instKey == null) continue;
+                    var existing = instKey.GetValue("UpperFilters") as string[];
+                    if (existing != null && Array.Exists(existing, s => string.Equals(s, "xinputhid", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    instKey.SetValue("UpperFilters", new[] { "xinputhid" }, RegistryValueKind.MultiString);
+                }
+            }
+        }
+        catch { /* best-effort — absent tripwire means 2 Gamepads, not a hard failure */ }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     //  SetBusTypeGuidUsb
     // ════════════════════════════════════════════════════════════════════
 
@@ -654,7 +853,13 @@ internal static class DeviceOrchestrator
         byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
 
         foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00" })
+            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
+            // HMCOMPANION enumerator added per gap analysis item #6:
+            // WGI may check DEVPKEY_Device_BusTypeGuid on the XUSB-interface-
+            // providing devnode, expecting GUID_BUS_TYPE_USB for Xbox 360
+            // hardware. HMCOMPANION is the primary XUSB source for non-xinputhid
+            // Xbox profiles; mark it as USB bus type so that check passes.
+            "HMCOMPANION" })
         {
             for (int idx = 0; idx < 10; idx++)
             {
@@ -849,7 +1054,24 @@ internal static class DeviceOrchestrator
             {
                 string? hidChildId = DeviceManager.GetHidChildId(parentId);
                 if (hidChildId != null)
+                {
                     WaitForDeviceStarted(hidChildId, timeoutMs: 5000);
+
+                    // Write ControllerIndex directly to the HID child's HW key
+                    // so xusbshim (and any future HID-child filter) can read
+                    // it without having to walk up to the parent devnode via
+                    // DEVPKEY_Device_Parent. Robustness belt-and-suspenders:
+                    // the parent walk works but this shortcut eliminates a
+                    // failure mode if WdfDeviceQueryPropertyEx returns stale
+                    // or missing parent data mid-enumeration.
+                    try
+                    {
+                        string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{hidChildId}\Device Parameters";
+                        using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
+                        dpKey?.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+                    }
+                    catch { /* non-fatal */ }
+                }
             }
         }
         DeviceProperties.FixHidChildNames(displayName, controllerIndex);
@@ -857,13 +1079,33 @@ internal static class DeviceOrchestrator
         // ── Step 5: bus type + companions ─────────────────────────────────
         SetBusTypeGuidUsb();
 
-        // Non-xinputhid Xbox: create XUSB companion for XInput
+        // Non-xinputhid Xbox: create XUSB companion for XInput.
+        // HMCOMPANION setup class changed from XnaComposite to System in
+        // hidmaestro_xusb.inf so Windows.Gaming.Input.dll doesn't classify it
+        // as a WGI Gamepad (would duplicate the main virtual's HID-path
+        // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
+        // {EC87F1E3} XUSB device interface class.
         if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
             string? xusbId = CreateXusbCompanion(controllerIndex, profile);
-            // For CompanionOnly profiles, the XUSB companion IS the device
             if (profile.CompanionOnly && companionId == null)
                 companionId = xusbId;
+
+            // Profiles with an HMCOMPANION XUSB companion need the HID parent
+            // gated out of WGI's HidClient classifier via xinputhid tripwire
+            // (see memory:project-xinputhid-upperfilter-tripwire.md). Without
+            // this, WGI creates TWO Gamepads for the same virtual — one HID-
+            // backed with input but no vibration channel, one XUSB-backed with
+            // vibration but no input. Setting UpperFilters="xinputhid" on the
+            // HID parent makes ProviderManagerWorker::OnPnpDeviceAdded skip
+            // HidClient::CreateProvider, leaving the XUSB-backed Gamepad as
+            // the single WGI entity.
+            //
+            // Must be profile-specific (per-device, not in the INF) — other
+            // profiles (DualSense, Xbox Series BT, Switch Pro, etc.) have no
+            // HMCOMPANION; blocking their HID Gamepad would produce zero WGI
+            // entities for them.
+            SetHidParentUpperFilterXinputhid(controllerIndex);
         }
 
         // ── Step 6: final friendly name ──────────────────────────────────
@@ -1337,7 +1579,7 @@ internal static class DeviceOrchestrator
         // Wait for WUDFHost processes to release our DLLs.
         try
         {
-            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
+            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll" };
             foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
             {
                 try
@@ -1420,7 +1662,7 @@ internal static class DeviceOrchestrator
 
         // Our own UMDF drivers — fine to terminate a host that runs only these.
         var ourDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll",
+            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll",
         };
 
         foreach (var proc in System.Diagnostics.Process.GetProcessesByName("WUDFHost"))

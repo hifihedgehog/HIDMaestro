@@ -1,18 +1,22 @@
-# Read a source INF, replace its DriverVer line with an auto-stamped
-# (current date + time-of-day-derived build number), and write the result
-# to the destination path.
+# Read a source INF, update its DriverVer line with today's date while
+# preserving the full 4-part version from source, and write the result to
+# the destination path.
 #
-# The 4th component of DriverVer is a 16-bit unsigned integer (max 65535).
-# We use HHmm (0000..2359) which is monotonic within a day and well below
-# the 16-bit cap. The MM/dd/yyyy date component is what carries monotonicity
-# across day boundaries — pnputil compares that first, so 04/18/2026,1.1.6.0015
-# is still considered newer than 04/17/2026,1.1.6.2359.
+# Previous behavior auto-stamped the 4th component with HHmm so every build
+# produced a unique DriverVer. That guarded against `pnputil /add-driver`
+# seeing the same DriverVer twice and silently keeping stale DriverStore
+# bytes. The stale-install risk is now covered elsewhere: `PnputilHelper`
+# calls `/delete-driver /uninstall /force` during cleanup, which purges the
+# old package before reinstall regardless of DriverVer equality. Auto-
+# stamping was causing the deployed INFs' 4-part version to drift from the
+# managed assembly FileVersion (always `<Version>.0`), so every release
+# had native and managed sides reporting different version strings.
 #
-# The committed source INF keeps a stable major.minor.patch.0 for code review;
-# the build/*.inf that actually gets signed + installed gets the fresh stamp.
-# This makes every produced package uniquely versioned, eliminating the
-# "pnputil /add-driver sees same DriverVer and silently keeps stale bytes
-# in the existing DriverStore directory" failure mode.
+# Now all artifacts in a given release share the exact 4-part version
+# string from source (e.g. `1.1.19.0`). pnputil still accepts reinstall
+# because the cleanup flow uninstalls the prior package first. Date is
+# still refreshed on each build so INFs rebuilt on different days carry
+# a current date.
 
 param(
     [Parameter(Mandatory=$true)][string]$Source,
@@ -25,14 +29,13 @@ if (!(Test-Path -LiteralPath $Source)) {
 }
 
 $content = Get-Content -Raw -LiteralPath $Source
-$date  = (Get-Date).ToString('MM/dd/yyyy')
-$build = (Get-Date).ToString('HHmm')
+$date    = (Get-Date).ToString('MM/dd/yyyy')
 
 # Match: DriverVer [ws] = [ws] MM/dd/yyyy,N.N.N.N  (any 4-part version)
-# Keep the major.minor.patch from source, replace date + 4th component.
-$pattern = '(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*(\d+\.\d+\.\d+)\.\d+\s*$'
+# Refresh the date; preserve the full 4-part version byte-for-byte from source.
+$pattern = '(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*(\d+\.\d+\.\d+\.\d+)\s*$'
 $replaced = [regex]::Replace($content, $pattern, { param($m)
-    $m.Groups[1].Value + $date + ',' + $m.Groups[2].Value + '.' + $build
+    $m.Groups[1].Value + $date + ',' + $m.Groups[2].Value
 })
 
 if ($replaced -eq $content) {

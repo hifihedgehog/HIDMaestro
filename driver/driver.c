@@ -446,12 +446,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
 
-    ULONG expectedSize;
-    if (hasReportId) {
-        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
-    } else {
-        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
-    }
+    ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
 
     ULONG maxData;
     if (hasReportId) {
@@ -685,16 +680,6 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
 }
 
-/* ================================================================== */
-/* SelfManagedIo: retry XUSB interface enable after device fully starts */
-static NTSTATUS EvtSelfManagedIoInit(_In_ WDFDEVICE Device)
-{
-    UNREFERENCED_PARAMETER(Device);
-    /* XUSB interface is NOT registered on the main device — companion handles it.
-     * Do NOT re-enable stale XUSB interfaces here. */
-    return STATUS_SUCCESS;
-}
-
 /*  DriverEntry                                                        */
 /* ================================================================== */
 
@@ -751,14 +736,6 @@ EvtDeviceAdd(
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
     attributes.EvtCleanupCallback = EvtDeviceContextCleanup;
-
-    /* SelfManagedIo callback: retry XUSB interface enable after device starts */
-    {
-        WDF_PNPPOWER_EVENT_CALLBACKS pnpCallbacks;
-        WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
-        pnpCallbacks.EvtDeviceSelfManagedIoInit = EvtSelfManagedIoInit;
-        WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
-    }
 
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;
@@ -1236,18 +1213,19 @@ EvtIoDeviceControl(
          */
         UCHAR caps[24];
         RtlZeroMemory(caps, sizeof(caps));
-        *(USHORT*)&caps[0] = 0x0101;  /* XUSBVersion */
-        caps[2] = 0x01;                /* Type: XINPUT_DEVTYPE_GAMEPAD */
-        caps[3] = 0x01;                /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
-        *(USHORT*)&caps[6] = 0xF7FF;  /* wButtons: DPAD+Start/Back/LS/RS+LB/RB+ABXY+Guide */
-        caps[8] = 0xFF;                /* bLeftTrigger */
-        caps[9] = 0xFF;                /* bRightTrigger */
-        *(SHORT*)&caps[10] = 32767;    /* ThumbLX */
-        *(SHORT*)&caps[12] = 32767;    /* ThumbLY */
-        *(SHORT*)&caps[14] = 32767;    /* ThumbRX */
-        *(SHORT*)&caps[16] = 32767;    /* ThumbRY */
-        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed */
-        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed */
+        *(USHORT*)&caps[0]  = 0x0101;  /* XUSBVersion */
+        caps[2] = 0x01;                 /* Type: XINPUT_DEVTYPE_GAMEPAD */
+        caps[3] = 0x01;                 /* SubType: XINPUT_DEVSUBTYPE_GAMEPAD */
+        *(USHORT*)&caps[4]  = 0x0001;  /* Flags = XINPUT_CAPS_FFB_SUPPORTED (branch-experimental) */
+        *(USHORT*)&caps[6]  = 0xF7FF;  /* wButtons mask */
+        caps[8] = 0xFF;                 /* bLeftTrigger max */
+        caps[9] = 0xFF;                 /* bRightTrigger max */
+        *(SHORT*)&caps[10] = 32767;    /* sThumbLX max */
+        *(SHORT*)&caps[12] = 32767;    /* sThumbLY max */
+        *(SHORT*)&caps[14] = 32767;    /* sThumbRX max */
+        *(SHORT*)&caps[16] = 32767;    /* sThumbRY max */
+        *(USHORT*)&caps[18] = 0xFFFF;  /* wLeftMotorSpeed max */
+        *(USHORT*)&caps[20] = 0xFFFF;  /* wRightMotorSpeed max */
         status = RequestCopyFromBuffer(Request, caps, sizeof(caps));
         break;
     }

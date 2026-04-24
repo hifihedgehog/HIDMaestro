@@ -2,14 +2,13 @@
 #
 # Background: the Windows shell fires a Guide-long-press haptic (hi=0x7F short
 # burst) to the controller's XInput slot whenever Guide is seen pressed on our
-# virtual. A test loop that cycles Guide pollutes the xusbshim_log.txt /
-# [HMCOMP] SET_STATE log with phantom haptic writes that mask real Chromium
-# playEffect dispatch analysis. The previous (looser) version of this check
-# only caught the pulse idiom `HMButton.Guide ... HMButton.None`; this version
-# is strict: *any* reference to `HMButton.Guide` under example/ or test/
-# requires an explicit allowlist comment on the same line. That catches
-# continuous-hold regressions, renamed shims, and other contamination shapes
-# that the pulse-only regex missed.
+# virtual. A test loop that cycles Guide contaminates any SET_STATE trace with
+# phantom haptic writes that mask real Chromium playEffect dispatch analysis.
+# The previous (looser) version of this check only caught the pulse idiom
+# `HMButton.Guide ... HMButton.None`; this version is strict: *any* reference
+# to `HMButton.Guide` under example/ or test/ requires an explicit allowlist
+# comment on the same line. That catches continuous-hold regressions, renamed
+# shims, and other contamination shapes that the pulse-only regex missed.
 #
 # To allow a deliberate Guide reference, add a trailing comment containing the
 # token `ALLOW-GUIDE:` followed by a short justification on the same line:
@@ -42,7 +41,7 @@ foreach ($t in $targets) {
 }
 if ($violations.Count -gt 0) {
     Write-Host "ERROR: HMButton.Guide reference(s) in test code without ALLOW-GUIDE: justification." -ForegroundColor Red
-    Write-Host "Windows shell fires a Guide-haptic ack that pollutes xusbshim_log.txt." -ForegroundColor Red
+    Write-Host "Windows shell fires a Guide-haptic ack that contaminates SET_STATE traces." -ForegroundColor Red
     Write-Host "Either remove the reference, or add a trailing '// ALLOW-GUIDE: <reason>' comment on the same line." -ForegroundColor Red
     Write-Host ""
     $violations | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }

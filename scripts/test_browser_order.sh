@@ -19,7 +19,7 @@
 set +u   # coproc PID variable can briefly become unset across test app exit
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-EXE="$REPO/test/bin/Debug/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
+EXE="$REPO/test/bin/Release/net10.0-windows10.0.26100.0/win-x64/HIDMaestroTest.exe"
 PY="$REPO/scripts/check_browser_order.py"
 
 if [[ ! -x "$EXE" ]]; then
@@ -67,7 +67,11 @@ echo "  READY"
 
 echo "[4/7] sending mark..."
 echo mark >&${TESTAPP_STDIN_FD}
-sleep 4
+# Mark-button propagates: pattern thread picks it up next 8ms iter, driver
+# publishes a new HID report, HidClass delivers it, Chromium's poll catches
+# the button state. Whole chain is well under 200ms; 2s is plenty and stays
+# inside the global no-long-sleep rule.
+sleep 2
 
 echo "[5/7] running headless browser check + order analysis (non-elevated)..."
 python "$PY"
