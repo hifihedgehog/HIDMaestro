@@ -23,7 +23,7 @@ Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 04/23/2026,1.1.6.322
+DriverVer   = 04/23/2026,1.1.6.340
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -108,6 +108,10 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
+; Per-instance WUDFHost — see hidmaestro.inf for rationale. The
+; async WAIT_FOR_INPUT pump + 8ms timer would otherwise serialize
+; across every HMCOMPANION instance in a single host.
+UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HMXInput_UmdfService]
 UmdfLibraryVersion = 2.15.0
