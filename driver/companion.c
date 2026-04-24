@@ -546,58 +546,6 @@ void CompanionIoControl(
     UNREFERENCED_PARAMETER(InputBufferLength);
     UNREFERENCED_PARAMETER(OutputBufferLength);
 
-    /* Bounded diagnostic log. Writes to the SAME file xusbshim uses so a
-     * single `Get-Content xusbshim_log.txt` captures BOTH paths' activity
-     * during a Chromium playEffect() call — critical for deciding whether
-     * WGI routes vibration via HMCOMPANION or via the HID-child xusbshim
-     * interface (per external-AI review 2026-04-17). Cap matches xusbshim. */
-    {
-        static volatile LONG counter = 0;
-        ULONG c = (ULONG)InterlockedIncrement(&counter);
-        BOOLEAN isSetState = (IoControlCode == IOCTL_XUSB_SET_STATE);
-        BOOLEAN isWait = (IoControlCode == IOCTL_XUSB_WAIT_FOR_INPUT);
-        if (isSetState || isWait || c <= 400) {
-            HANDLE h = CreateFileW(
-                L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
-                FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
-                OPEN_ALWAYS, 0, NULL);
-            if (h != INVALID_HANDLE_VALUE) {
-                char buf[160];
-                char *p = buf;
-                const char tag[] = "[HMCOMP] IOCTL ";
-                for (int i = 0; tag[i]; i++) *p++ = tag[i];
-                for (int shift = 28; shift >= 0; shift -= 4) {
-                    int n = (IoControlCode >> shift) & 0xF;
-                    *p++ = (char)(n < 10 ? '0' + n : 'A' + n - 10);
-                }
-                /* For SET_STATE, also dump first 8 input bytes so we see
-                 * the motor values WGI actually sent. */
-                if (isSetState && InputBufferLength > 0) {
-                    PVOID inBuf;
-                    size_t inLen;
-                    if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(
-                            Request, 1, &inBuf, &inLen))) {
-                        *p++ = ' '; *p++ = '[';
-                        size_t n = inLen > 8 ? 8 : inLen;
-                        const UCHAR *ib = (const UCHAR *)inBuf;
-                        for (size_t i = 0; i < n; i++) {
-                            int hi = (ib[i] >> 4) & 0xF;
-                            int lo = ib[i] & 0xF;
-                            *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
-                            *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
-                            if (i + 1 < n) *p++ = ' ';
-                        }
-                        *p++ = ']';
-                    }
-                }
-                *p++ = '\r'; *p++ = '\n';
-                DWORD w;
-                WriteFile(h, buf, (DWORD)(p - buf), &w, NULL);
-                CloseHandle(h);
-            }
-        }
-    }
-
     switch (IoControlCode)
     {
     case IOCTL_XUSB_GET_INFORMATION: {
@@ -606,9 +554,15 @@ void CompanionIoControl(
         RtlZeroMemory(info, sizeof(info));
         *(USHORT*)&info[0] = 0x0103;  /* XUSBVersion 0x0103. 2026-04-23 empirical: 0x0101 lets WGI poll state but not dispatch put_Vibration; 0x0103 matches physical Xbox 360 USB and HIDMaestro BT (both work) — flip to unblock SET_STATE dispatch. */
         info[2] = 0x01; /* device count — always 1 (each companion hosts one controller) */
-        info[3] = 0x01; /* slot/capability marker — empirical xinputhid value;
-                         * xusb22 may also set this. WGI may read it as a
-                         * "device is usable" flag. Was 0x00 originally. */
+        /* Revert to 0 — pre-regression value (before commit a19861b). Setting
+         * this to 0x01 during the WGI vibration work was my speculative change
+         * ("may read it as 'device is usable' flag"), and empirical testing
+         * 2026-04-23 showed it didn't actually affect vibration dispatch while
+         * it DID coincide with the 4-player XInput slot-1 regression.
+         * Per-instance uniqueness tested (ControllerIndex+1) — no effect.
+         * Out-of-range value tested (0x09) — no effect. Testing the straight
+         * revert to 0x00 to confirm this single byte is the regression. */
+        info[3] = 0x00;
         info[4] = 0x00;                /* unk2 — bit 7 clear = don't skip */
         *(USHORT*)&info[8] = ctx->VendorId;
         *(USHORT*)&info[10] = ctx->ProductId;
