@@ -200,12 +200,6 @@ class Program
         // start the circle.
         bool startPaused = profileIds.Contains("--paused-at-zero");
         bool startMarked = profileIds.Contains("--mark");
-        // --keep-alive: ignore stdin-EOF (elevated test spawned without console
-        // has no stdin and ReadLine returns null immediately, tearing the
-        // device down before verify.py can inspect it). With this flag, the
-        // main thread blocks on a ManualResetEventSlim that's only signaled
-        // by Ctrl+C / SIGBREAK, letting the device live indefinitely.
-        bool keepAlive = profileIds.Contains("--keep-alive");
         // --rate-hz N : override the per-virtual SubmitState rate (default 250 Hz,
         // which comes from the pattern thread's Thread.Sleep(4)). PadForge polls
         // at 1 kHz; issue #3 uses 1 kHz and 125 Hz for saturation-rate tests.
@@ -220,7 +214,7 @@ class Program
                 break;
             }
         }
-        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark" && p != "--keep-alive").ToArray();
+        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
         if (profileIds.Length == 0)
             return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] <profile-id> [profile-id ...]");
         Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");

@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -50,33 +49,6 @@ internal static class SwdDeviceFactory
     /// inherits that name in its instance ID — matching the pattern that
     /// xinputhid's INF selects against.</summary>
     public const string DefaultEnumeratorName = "HIDMAESTRO";
-
-    /// <summary>
-    /// Per-instance args snapshot captured at Create time. Teardown reads this
-    /// to invoke Remove with matching args — needed because SwDeviceCreate's
-    /// reopen pattern requires identical enumerator+suffix+containerId+hwIds
-    /// as the original call. Key: <c>"{enumerator}\\{suffix}"</c>.
-    /// </summary>
-    private static readonly ConcurrentDictionary<string, CreateArgsSnapshot> s_createArgs = new();
-
-    private sealed record CreateArgsSnapshot(
-        string Enumerator,
-        string Suffix,
-        string[] HardwareIds,
-        string[] CompatibleIds,
-        Guid ContainerId,
-        string Description);
-
-    /// <summary>Look up the original create args for a live SWD device by its
-    /// enumerator + suffix. Returns null if the device wasn't created by this
-    /// process (e.g. surviving carcass from a prior run). In that case
-    /// teardown must fall back to the <see cref="RemoveFromRegistry"/>
-    /// reconstruction path.</summary>
-    private static CreateArgsSnapshot? LookupArgs(string enumerator, string suffix)
-    {
-        s_createArgs.TryGetValue($"{enumerator}\\{suffix}", out var snap);
-        return snap;
-    }
 
     public readonly struct Result
     {
@@ -257,67 +229,6 @@ internal static class SwdDeviceFactory
     public static void CloseHandle(IntPtr hSwDevice)
     {
         // no-op — see class doc.
-    }
-
-    /// <summary>
-    /// Remove a previously-created SWD device via <c>hmswd.exe remove</c>,
-    /// which reopens the device handle through <c>SwDeviceCreate</c> with the
-    /// original args, downgrades the lifetime from <c>ParentPresent</c> to
-    /// <c>Handle</c>, then calls <c>SwDeviceClose</c> so PnP tears the
-    /// devnode down. The args must match what was passed to
-    /// <see cref="Create"/> — enumerator, suffix, containerId, hardware /
-    /// compat ID lists, description. A stale registry carcass may persist
-    /// after PnP removes the devnode; that's Windows housekeeping and does
-    /// not affect subsequent creates (FindExistingCompanion filters out
-    /// non-live devnodes via <c>CM_Locate_DevNodeW</c>).
-    /// </summary>
-    public static bool Remove(
-        string instanceIdSuffix,
-        string[] hardwareIds,
-        string[] compatibleIds,
-        Guid containerId,
-        string deviceDescription,
-        string? enumeratorName = null,
-        int timeoutMs = 30000)
-    {
-        string helperPath = EnsureHelperExtracted();
-        if (helperPath == null || !File.Exists(helperPath))
-            return false;
-
-        string hwList     = string.Join('|', hardwareIds ?? Array.Empty<string>());
-        string compatList = string.Join('|', compatibleIds ?? Array.Empty<string>());
-        string guidStr    = containerId.ToString("B");
-        string enumName   = enumeratorName ?? DefaultEnumeratorName;
-
-        var psi = new ProcessStartInfo
-        {
-            FileName  = helperPath,
-            UseShellExecute        = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            CreateNoWindow         = true,
-            WorkingDirectory       = Path.GetTempPath(),
-        };
-        psi.ArgumentList.Add("remove");
-        psi.ArgumentList.Add(enumName);
-        psi.ArgumentList.Add(instanceIdSuffix);
-        psi.ArgumentList.Add(guidStr);
-        psi.ArgumentList.Add(hwList);
-        psi.ArgumentList.Add(compatList);
-        psi.ArgumentList.Add(deviceDescription ?? "HIDMaestro Device");
-
-        try
-        {
-            using var proc = Process.Start(psi);
-            if (proc == null) return false;
-            if (!proc.WaitForExit(timeoutMs))
-            {
-                try { proc.Kill(entireProcessTree: true); } catch { }
-                return false;
-            }
-            return proc.ExitCode == 0;
-        }
-        catch { return false; }
     }
 
     // ── helper extraction ────────────────────────────────────────────────
