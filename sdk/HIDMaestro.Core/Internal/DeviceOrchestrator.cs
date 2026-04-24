@@ -666,13 +666,16 @@ internal static class DeviceOrchestrator
         string hwPid = profile.DriverPid != null
             ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
         string gpEnumeratorLegacy = $"VID_{gpVid}&PID_{hwPid}&IG_00";                 // ROOT\… path
-        // SWD enumerator uses `HIDMAESTROGP_<vid>_<pid>&IG_00`. Must NOT contain the
-        // `VID_*&PID_*&IG_*` substring pattern — that form triggers a Windows PnP
-        // USB-composite-like edge case in which SWD devices register but never
-        // fully enumerate (Status=Stopped, HID child Disconnected). Underscores
-        // between VID and PID sidestep the pattern while keeping `&IG_` intact
-        // for HIDAPI/SDL3 blocklisting.
-        string gpEnumeratorSwd    = $"HIDMAESTROGP_{gpVid}_{hwPid}&IG_00";            // SWD\… path
+        // SWD enumerator: `HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00`. The only
+        // load-bearing detail vs the pre-experiment `HIDMAESTRO_VID_xxx&PID_yyy&IG_00`
+        // form is the single `&` → `_` swap between VID and PID. That form
+        // (still matching `VID_*&PID_*&IG_*`) triggered a Windows PnP edge
+        // case where SWD devices registered but never fully enumerated —
+        // Status=Stopped, HID child Disconnected. Using an underscore between
+        // VID and PID breaks the substring match without losing HIDMAESTRO
+        // branding or the `&IG_` suffix (load-bearing for HIDAPI/SDL3
+        // blocklist + xinputhid INF match).
+        string gpEnumeratorSwd    = $"HIDMAESTRO_VID_{gpVid}_PID_{hwPid}&IG_00";      // SWD\… path
 
         // 1. Look for an existing companion claimed by THIS controllerIndex —
         //    check new SWD path first, then legacy ROOT path.
@@ -711,8 +714,7 @@ internal static class DeviceOrchestrator
                 compatList.Insert(0, $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}");
             }
 
-            // Enumerator encodes HIDMAESTRO branding AND the `&IG_00` interface
-            // marker, e.g. `HIDMAESTROGP_045E_02FF&IG_00`. Two requirements
+            // Enumerator: `HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00`. Two pieces
             // meet at the HID child's instance path:
             //   1. xinputhid's INF matches on HID child HardwareIds, which
             //      carry `HID\VID_xxxx&PID_yyyy&IG_00` via our parent's
@@ -721,14 +723,14 @@ internal static class DeviceOrchestrator
             //   2. HIDAPI / SDL3 blocklist substring-matches `&IG_` in the
             //      HID child's instance path (`HID\<enumerator>\<instance>`)
             //      to decide "XInput-bound, skip for HIDAPI." The `&IG_00`
-            //      suffix here satisfies this match.
-            // The underscore between VID and PID is load-bearing. Prior forms
-            // `VID_xxx&PID_yyy&IG_00` and `HIDMAESTRO_VID_xxx&PID_yyy&IG_00`
-            // (i.e. anything matching the `VID_*&PID_*&IG_*` substring) hit a
-            // Windows PnP edge case where the SWD device registers but never
-            // fully enumerates: pnputil reports not-found, the companion stays
-            // Stopped, and the HID child is Disconnected. `HIDMAESTROGP_<vid>_<pid>`
-            // avoids the trigger substring entirely.
+            //      suffix here satisfies that match.
+            // The underscore between VID and PID is load-bearing. The form
+            // `HIDMAESTRO_VID_xxx&PID_yyy&IG_00` (matching `VID_*&PID_*&IG_*`)
+            // triggered a Windows PnP edge case where the SWD device registered
+            // but never fully enumerated: pnputil reported not-found, the
+            // companion stayed Stopped, HID child Disconnected. Swapping the
+            // `&` between VID and PID for `_` breaks the substring match
+            // without touching anything else.
             string gpSwdEnumerator = gpEnumeratorSwd;
             // Instance suffix = "<pid-hex>_<idx>". Varying the suffix per
             // process instance bypasses Windows' sticky per-container
