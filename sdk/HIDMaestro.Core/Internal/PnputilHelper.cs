@@ -146,13 +146,21 @@ internal static class PnputilHelper
 
     /// <summary>Removes one driver package by published name with retry on
     /// "in use" failures. Returns true on success. <paramref name="error"/>
-    /// is set to pnputil's combined stdout+stderr on failure.</summary>
+    /// is set to pnputil's combined stdout+stderr on failure.
+    ///
+    /// Uses <c>/uninstall /force</c>: <c>/uninstall</c> tells pnputil to
+    /// uninstall the driver from any devices still bound (including stale
+    /// PnP bindings that don't show up in <c>/enum-devices</c> — the "device
+    /// is presently installed using the specified INF" failure mode), and
+    /// <c>/force</c> covers the remaining cases where a device is actively
+    /// started. Plain <c>/force</c> alone was not sufficient on stale
+    /// bindings left behind by half-completed teardowns.</summary>
     public static bool DeletePackage(string publishedName, out string error, int retries = 3)
     {
         error = "";
         for (int attempt = 0; attempt < retries; attempt++)
         {
-            var (rc, output) = Run($"/delete-driver {publishedName} /force", timeoutMs: 10_000);
+            var (rc, output) = Run($"/delete-driver {publishedName} /uninstall /force", timeoutMs: 30_000);
             if (rc == 0 && !output.Contains("Failed", StringComparison.OrdinalIgnoreCase))
                 return true;
 
@@ -161,7 +169,8 @@ internal static class PnputilHelper
             // moment to release before retrying. Doesn't matter if the wait is
             // wasted; this only runs during cleanup.
             if (output.Contains("in use", StringComparison.OrdinalIgnoreCase) ||
-                output.Contains("currently being used", StringComparison.OrdinalIgnoreCase))
+                output.Contains("currently being used", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("presently installed", StringComparison.OrdinalIgnoreCase))
             {
                 Thread.Sleep(500);
                 continue;

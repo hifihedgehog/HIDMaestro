@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $PSScriptRoot
-$exe  = Join-Path $repo 'test\HIDMaestroTest\bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe'
+$exe  = Join-Path $repo 'test\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe'
 
 Write-Host '[1/7] cleanup...'
 & $exe cleanup 2>&1 | ForEach-Object { Write-Host "  > $_" }

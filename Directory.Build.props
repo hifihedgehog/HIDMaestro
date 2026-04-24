@@ -1,0 +1,23 @@
+<Project>
+  <!-- Repo-wide build settings. Applies to every .csproj under this root
+       (sdk/, test/, example/, test/probes/). -->
+
+  <PropertyGroup>
+    <!-- Release-only. We never ship or test Debug bits.
+         Having two configurations caused a real incident where the embedded
+         HMXInput.dll and INFs came from a stale Resources/ snapshot (the
+         Debug build ran BeforeBuild against an older build/ payload while
+         a parallel Release rebuild of the native driver had moved on).
+         `dotnet build` (no -c) now defaults to Release, and `-c Debug` is
+         rejected by the FailOnDebug target below. -->
+    <Configurations>Release</Configurations>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+  </PropertyGroup>
+
+  <!-- Hard-fail any Debug build at MSBuild evaluation time. MSBuild accepts
+       `-c Debug` even when only Release is listed in <Configurations> above,
+       so an explicit error task is required to actually block it. -->
+  <Target Name="FailOnDebug" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Debug'">
+    <Error Text="Debug builds are disabled repo-wide. Use `dotnet build` (no -c flag) or `-c Release`. See Directory.Build.props." />
+  </Target>
+</Project>
