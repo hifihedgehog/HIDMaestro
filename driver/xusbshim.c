@@ -18,11 +18,6 @@
  * present (older SDK). Either way, the ControllerIndex determines which
  * shared-memory section we publish to.
  *
- * Diagnostic log at C:\ProgramData\HIDMaestro\xusbshim_log.txt captures
- * every IOCTL code (+ hex dump for XUSB IOCTLs) so we know what WGI
- * actually sends through this interface. HMCOMPANION also logs to the
- * same file with a [HMCOMP] prefix so one log file shows BOTH paths.
- *
  * Experimental — v1-dev-experiment-xusb-child-pdo. Branch status as of
  * 46 commits: INF and filter structurally sound (Inf2Cat validates, zero
  * warnings). XUSB IOCTL layer mirrors empirical xinputhid format (Version
@@ -150,86 +145,6 @@ static VOID   WstrAppendUlong(WCHAR *d, ULONG v, SIZE_T cap)
     SIZE_T i = WstrLen(d);
     while (n > 0 && i + 1 < cap) d[i++] = tmp[--n];
     d[i] = 0;
-}
-
-/* ---- Diagnostic log ------------------------------------------------- */
-
-static VOID LogLine(_In_z_ const char *msg, _In_ SIZE_T len)
-{
-    HANDLE h = CreateFileW(
-        L"C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt",
-        FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
-        OPEN_ALWAYS, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    DWORD written;
-
-    /* Timestamp prefix: [HH:MM:SS.mmm] so relative event ordering is
-     * readable when tailing. No timezone — just local wall clock. */
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    char ts[16];
-    int ti = 0;
-    ts[ti++] = '[';
-    ts[ti++] = (char)('0' + t.wHour / 10);
-    ts[ti++] = (char)('0' + t.wHour % 10);
-    ts[ti++] = ':';
-    ts[ti++] = (char)('0' + t.wMinute / 10);
-    ts[ti++] = (char)('0' + t.wMinute % 10);
-    ts[ti++] = ':';
-    ts[ti++] = (char)('0' + t.wSecond / 10);
-    ts[ti++] = (char)('0' + t.wSecond % 10);
-    ts[ti++] = '.';
-    ts[ti++] = (char)('0' + t.wMilliseconds / 100);
-    ts[ti++] = (char)('0' + (t.wMilliseconds / 10) % 10);
-    ts[ti++] = (char)('0' + t.wMilliseconds % 10);
-    ts[ti++] = ']';
-    ts[ti++] = ' ';
-    WriteFile(h, ts, (DWORD)ti, &written, NULL);
-    WriteFile(h, msg, (DWORD)len, &written, NULL);
-    CloseHandle(h);
-}
-
-static VOID LogEvent(_In_z_ const char *tag, _In_ ULONG value)
-{
-    /* Bound non-SET_STATE events; SET_STATE always logs because it's
-     * the vibration signal we're hunting. Tag-prefix check so "SET_STATE-in"
-     * / similar continues logging past the 400-event cap while GET_STATE
-     * polling doesn't drown us. */
-    if (!(tag[0] == 'S' && tag[1] == 'E' && tag[2] == 'T')) {
-        static volatile LONG counter = 0;
-        if (InterlockedIncrement(&counter) > 400) return;
-    }
-    char buf[80]; char *p = buf;
-    while (*tag) *p++ = *tag++;
-    *p++ = ' ';
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        int nibble = (value >> shift) & 0xF;
-        *p++ = (char)(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
-    }
-    *p++ = '\r'; *p++ = '\n';
-    LogLine(buf, (SIZE_T)(p - buf));
-}
-
-static VOID LogBytes(_In_z_ const char *tag, _In_bytecount_(len) const UCHAR *buf, _In_ SIZE_T len)
-{
-    /* Same bounding rule as LogEvent so SET_STATE hex dumps always survive. */
-    if (!(tag[0] == 'S' && tag[1] == 'E' && tag[2] == 'T')) {
-        static volatile LONG counter = 0;
-        if (InterlockedIncrement(&counter) > 400) return;
-    }
-    char msg[112]; char *p = msg;
-    while (*tag) *p++ = *tag++;
-    *p++ = ' ';
-    SIZE_T n = (len > 32) ? 32 : len;
-    for (SIZE_T i = 0; i < n; i++) {
-        int hi = (buf[i] >> 4) & 0xF;
-        int lo = buf[i] & 0xF;
-        *p++ = (char)(hi < 10 ? '0' + hi : 'A' + hi - 10);
-        *p++ = (char)(lo < 10 ? '0' + lo : 'A' + lo - 10);
-        *p++ = ' ';
-    }
-    *p++ = '\r'; *p++ = '\n';
-    LogLine(msg, (SIZE_T)(p - msg));
 }
 
 /* ---- ControllerIndex from parent devnode --------------------------- */
@@ -401,50 +316,6 @@ XusbShimDeviceAdd(
     WstrAppendUlong(ctx->OutputMappingName, ctx->ControllerIndex,
                     sizeof(ctx->OutputMappingName) / sizeof(WCHAR));
 
-    CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
-
-    /* Build-timestamp banner so we can tell which version of the filter
-     * is live. __DATE__ / __TIME__ are compile-time constants — the log
-     * banner distinguishes a rebuild vs. a stale DLL. */
-    {
-        static const char banner[] =
-            "==== HMXusbShim build " __DATE__ " " __TIME__ " ====\r\n";
-        LogLine(banner, sizeof(banner) - 1);
-    }
-    LogEvent("DeviceAdd idx", ctx->ControllerIndex);
-
-    /* Log the HID child's own DEVPKEY_Device_InstanceId so we can
-     * verify at test time that the filter attached to the expected
-     * node (HID\VID_045E&PID_028E&IG_00\...) vs something unexpected. */
-    {
-        static const DEVPROPKEY DEVPKEY_Device_InstanceId_Local = {
-            { 0x78c34fc8, 0x104a, 0x4aca, { 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57 } },
-            256
-        };
-        WDF_DEVICE_PROPERTY_DATA prop;
-        WDF_DEVICE_PROPERTY_DATA_INIT(&prop, &DEVPKEY_Device_InstanceId_Local);
-        prop.Lcid = LOCALE_NEUTRAL;
-        WCHAR id[200] = {0};
-        ULONG req = 0;
-        DEVPROPTYPE pt = 0;
-        if (NT_SUCCESS(WdfDeviceQueryPropertyEx(device, &prop, sizeof(id), id, &req, &pt))) {
-            /* Log first 64 wchars as ASCII-ish (not true UTF16->ASCII but
-             * the HID\VID_...&PID_... portion is ASCII clean). */
-            char msg[128];
-            char *p = msg;
-            const char tag[] = "InstanceId ";
-            for (int i = 0; tag[i]; i++) *p++ = tag[i];
-            int j = 0;
-            while (id[j] && j < 80) {
-                UCHAR c = (UCHAR)id[j];
-                *p++ = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
-                j++;
-            }
-            *p++ = '\r'; *p++ = '\n';
-            LogLine(msg, (SIZE_T)(p - msg));
-        }
-    }
-
     /* Do NOT publish GUID_DEVINTERFACE_XUSB ({EC87F1E3}) on this HID child.
      *
      * HMCOMPANION (ROOT\HMCOMPANION, XnaComposite class) already publishes
@@ -462,12 +333,11 @@ XusbShimDeviceAdd(
      *
      * See memory:feedback-one-wgi-device-per-controller.md.
      *
-     * xusbshim remains useful as a passive HID upper filter for logging /
-     * observability of the HID child's IOCTL traffic, but it MUST NOT create
-     * its own XUSB interface. The other interface registrations below are
-     * also disabled on the same rationale — any additional WGI-enumerated
-     * interface creates the same duplicate-provider hang. */
-    LogEvent("XUSB-ifreg-skipped-by-design", 0);
+     * xusbshim remains useful as a passive HID upper filter for observability
+     * of the HID child's IOCTL traffic, but it MUST NOT create its own XUSB
+     * interface. The other interface registrations below are also disabled on
+     * the same rationale — any additional WGI-enumerated interface creates
+     * the same duplicate-provider hang. */
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(
         &queueConfig, WdfIoQueueDispatchParallel);
@@ -483,7 +353,6 @@ XusbShimDeviceCleanup(_In_ WDFOBJECT Object)
     PDEVICE_CTX ctx = GetDevCtx((WDFDEVICE)Object);
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
-    LogEvent("DeviceCleanup", ctx->ControllerIndex);
 }
 
 VOID
@@ -502,16 +371,12 @@ XusbShimIoDefault(
     if (params.Type == WdfRequestTypeDeviceControl ||
         params.Type == WdfRequestTypeDeviceControlInternal) {
         ULONG code = params.Parameters.DeviceIoControl.IoControlCode;
-        LogEvent(
-            params.Type == WdfRequestTypeDeviceControl ? "IOCTL" : "INT-IOCTL",
-            code);
 
-        /* Known XUSB IOCTLs: log payload + handle locally. */
+        /* Known XUSB IOCTLs: handle locally. */
         if (code == IOCTL_XUSB_SET_STATE) {
             PVOID  buf;
             size_t sz;
             if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &buf, &sz))) {
-                LogBytes("SET_STATE-in", (const UCHAR*)buf, sz);
                 /* Normalize to the same 5-byte XUSB GET_STATE-response layout
                  * HMCOMPANION publishes and the test harness decodes:
                  *   [0x00, 0x00, lo_motor, hi_motor, 0x00]
@@ -749,7 +614,6 @@ XusbShimIoDefault(
             PVOID  outBuf;
             size_t outLen;
             if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
-                LogEvent("CAPS-requested-size", (ULONG)outLen);
                 SIZE_T copy;
                 if (outLen >= 36) {
                     copy = 36;
@@ -765,11 +629,6 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
     }
-    /* Intentionally not logging non-IOCTL requests (IRP_MJ_READ etc.). Logging
-     * every read synchronously opens/writes/closes the log file, which adds
-     * per-IRP latency on the HID input path and causes visibly choppy gamepad
-     * tester rotation on downstream consumers. SET_STATE is our target and is
-     * captured in the IOCTL path above. */
 
     if (!handledLocally) {
         WDF_REQUEST_SEND_OPTIONS opts;
