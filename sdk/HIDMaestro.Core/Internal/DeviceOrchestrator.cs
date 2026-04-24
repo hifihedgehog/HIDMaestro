@@ -246,7 +246,8 @@ internal static class DeviceOrchestrator
         }
 
         // Enumerators we own under ROOT and SWD: legacy VID_* (ROOT) and
-        // post-slot-1-skip-fix HIDMAESTROGP_* / HIDMAESTRO_VID_* (SWD).
+        // any HIDMAESTRO-prefixed SWD enumerator (gamepad companion form is
+        // HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00).
         foreach (var enumRoot in new[] { "ROOT", "SWD" })
         try
         {
@@ -255,8 +256,7 @@ internal static class DeviceOrchestrator
             foreach (var subName in enumKey.GetSubKeyNames())
             {
                 bool isVidForm = subName.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                bool isSwdForm = subName.StartsWith("HIDMAESTROGP_", StringComparison.OrdinalIgnoreCase)
-                              || subName.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase);
+                bool isSwdForm = subName.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                 if (!isVidForm && !isSwdForm) continue;
                 using var vidKey = enumKey.OpenSubKey(subName);
                 if (vidKey == null) continue;
@@ -975,8 +975,8 @@ internal static class DeviceOrchestrator
             }
             companionIndexes.Add(controllerIndex);  // include current even if HMCOMPANION isn't enum-visible yet
 
-            // Sweep BOTH ROOT (legacy `VID_*&IG_00`) and SWD
-            // (`HIDMAESTROGP_*&IG_00`) gamepad-parent enumerators.
+            // Sweep BOTH ROOT (legacy `VID_*&IG_00`) and SWD (any HIDMAESTRO*
+            // gamepad-parent enumerator, currently HIDMAESTRO_VID_*_PID_*&IG_00).
             foreach (var enumRoot in new[] { "ROOT", "SWD" })
             {
                 using var rootEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
@@ -984,8 +984,7 @@ internal static class DeviceOrchestrator
                 foreach (var sub in rootEnum.GetSubKeyNames())
                 {
                     bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isSwdForm = sub.StartsWith("HIDMAESTROGP_", StringComparison.OrdinalIgnoreCase)
-                                  || sub.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase);
+                    bool isSwdForm = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                     if (!isVidForm && !isSwdForm) continue;
                     using var subKey = rootEnum.OpenSubKey(sub);
                     if (subKey == null) continue;
@@ -1229,8 +1228,7 @@ internal static class DeviceOrchestrator
                 foreach (var sub in rootEnum.GetSubKeyNames())
                 {
                     bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isSwdForm = sub.StartsWith("HIDMAESTROGP_", StringComparison.OrdinalIgnoreCase)
-                                  || sub.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase);
+                    bool isSwdForm = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                     if (!isVidForm && !isSwdForm) continue;
                     using var subKey = rootEnum.OpenSubKey(sub);
                     if (subKey == null) continue;
