@@ -31,11 +31,11 @@ internal static class SharedMemoryIO
 {
     // ── Layout constants — match driver/driver.h ──────────────────────────
     //
-    // HIDMAESTRO_SHARED_INPUT (86 bytes):
+    // HIDMAESTRO_SHARED_INPUT (278 bytes):
     //   ULONG  SeqNo                offset 0
     //   ULONG  DataSize              offset 4
-    //   UCHAR  Data[64]              offset 8
-    //   UCHAR  GipData[14]           offset 72
+    //   UCHAR  Data[256]             offset 8
+    //   UCHAR  GipData[14]           offset 264
     //
     // HIDMAESTRO_SHARED_OUTPUT (264 bytes):
     //   ULONG  SeqNo                 offset 0
@@ -43,8 +43,19 @@ internal static class SharedMemoryIO
     //   UCHAR  ReportId              offset 5
     //   USHORT DataSize              offset 6
     //   UCHAR  Data[256]             offset 8
+    //
+    // Data[] widened from 64→256 bytes 2026-04-23: DualSense BT report 0x31
+    // is 78 bytes, Switch Pro standard input report can run to ~64, and
+    // gyro/accelerometer values live LATE in those reports. The prior 64-byte
+    // pipe silently truncated exactly the motion fields Dolphin / Cemu /
+    // yuzu / Citron / RetroArch read via HIDAPI. GipData offset follows
+    // directly after, so SHARED_INPUT_SIZE = 4 + 4 + 256 + 14 = 278.
 
-    public const int SHARED_INPUT_SIZE  = 86;
+    public const int DATA_OFFSET        = 8;
+    public const int DATA_CAPACITY      = 256;
+    public const int GIP_DATA_OFFSET    = DATA_OFFSET + DATA_CAPACITY;   // 264
+    public const int GIP_DATA_LENGTH    = 14;
+    public const int SHARED_INPUT_SIZE  = GIP_DATA_OFFSET + GIP_DATA_LENGTH; // 278
     public const int SHARED_OUTPUT_SIZE = 4 + 1 + 1 + 2 + 256;
 
     public const byte OUT_SOURCE_HID_OUTPUT  = 0;
@@ -176,10 +187,10 @@ internal static class SharedMemoryIO
 
         // 2. Write payload (DataSize + Data + GipData)
         Marshal.WriteInt32(view, 4, dataLen);
-        for (int i = 0; i < 64; i++)
-            Marshal.WriteByte(view, 8 + i, i < dataLen ? data[dataOffset + i] : (byte)0);
-        for (int i = 0; i < 14; i++)
-            Marshal.WriteByte(view, 72 + i, gipData[i]);
+        for (int i = 0; i < DATA_CAPACITY; i++)
+            Marshal.WriteByte(view, DATA_OFFSET + i, i < dataLen ? data[dataOffset + i] : (byte)0);
+        for (int i = 0; i < GIP_DATA_LENGTH; i++)
+            Marshal.WriteByte(view, GIP_DATA_OFFSET + i, gipData[i]);
 
         // 3. Mark write complete (even seqNo)
         Thread.MemoryBarrier();

@@ -98,10 +98,14 @@ AppendUlongDecimal(WCHAR *dest, ULONG value, SIZE_T maxChars)
 }
 
 #pragma pack(push, 1)
+/* Must stay in sync with HIDMAESTRO_SHARED_INPUT in driver/driver.h.
+ * Data[] widened from 64 to 256 bytes 2026-04-23 to carry full DualSense
+ * BT / Switch Pro gyro-bearing reports through the shared memory pipe
+ * without truncation. */
 typedef struct {
     ULONG SeqNo;
     ULONG DataSize;
-    UCHAR Data[64];
+    UCHAR Data[256];
     UCHAR GipData[14];
 } SHARED_INPUT;
 
