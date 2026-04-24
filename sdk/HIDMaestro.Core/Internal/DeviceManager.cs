@@ -489,7 +489,7 @@ public static class DeviceManager
 
             // Step 3.5: devcon fallback — per feedback-devcon-for-cleanup, the
             // CM/SetupDi APIs sometimes leave a phantom that pnputil also can't
-            // shift (observed during this session on ROOT\HMCOMPANION\0000 and
+            // shift (observed during this session on ROOT\HIDMAESTRO\0000 and
             // ROOT\VID_045E...). `devcon remove @<id>` bypasses both paths and
             // tears the node out cleanly in most of those cases. Only run if
             // devcon is locatable — it ships with the WDK, not the OS, so

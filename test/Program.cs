@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -229,23 +230,28 @@ class Program
 
         // Phase 1: create all controllers sequentially
         var slots = new List<RunningController>();
+        var phase1Sw = Stopwatch.StartNew();
         for (int i = 0; i < profileIds.Length; i++)
         {
             var profile = ctx.GetProfile(profileIds[i]);
             if (profile == null) return Error($"Profile not found: {profileIds[i]}");
+            var perSlotSw = Stopwatch.StartNew();
             Console.WriteLine($"  Creating controller {i}: {profile.Id} ({profile.Name})");
             var slot = new RunningController { Ctrl = ctx.CreateController(profile) };
+            Console.WriteLine($"    -> created in {perSlotSw.ElapsedMilliseconds} ms");
             // Pre-park BEFORE the pattern thread starts so the very first
             // submitted frame is (0, 0), not whatever the circle was at.
             if (startPaused) { slot.ParkX = 0f; slot.ParkY = 0f; }
             HookOutputReceived(slot.Ctrl, i);
             slots.Add(slot);
         }
+        Console.WriteLine($"  Phase 1 (creation) total: {phase1Sw.ElapsedMilliseconds} ms for {slots.Count} slot(s)");
 
         // Phase 1.5: re-apply friendly names (PnP race fix — see HMContext.FinalizeNames doc).
+        var finalizeSw = Stopwatch.StartNew();
         Console.Write("  Finalizing device names... ");
         ctx.FinalizeNames();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({finalizeSw.ElapsedMilliseconds} ms)");
 
         // --mark: auto-activate mark mode before the pattern threads start, so
         // each controller's pattern thread comes up with MarkButton=i set and
@@ -397,15 +403,24 @@ class Program
         }
 
         var cleanupSw = Stopwatch.StartNew();
+        // Cancel + join all pattern threads first so submission stops
+        // everywhere before we begin kernel-side teardown.
         for (int i = 0; i < slots.Count; i++)
+            try { slots[i].Cts.Cancel(); } catch { }
+        for (int i = 0; i < slots.Count; i++)
+            try { slots[i].Thread?.Join(2000); } catch { }
+        // Use the SDK's batch-teardown entrypoint: parallelizes the per-
+        // controller DIF_REMOVE work and runs the system-wide HID orphan
+        // sweep ONCE at the end (instead of N times concurrently).
+        var ctrls = slots.Where(s => s.Ctrl != null!).Select(s => s.Ctrl).ToArray();
+        var ctrlToIdx = new Dictionary<HMController, int>();
+        for (int i = 0; i < slots.Count; i++)
+            if (slots[i].Ctrl != null!) ctrlToIdx[slots[i].Ctrl] = i;
+        ctx.DisposeControllersInParallel(ctrls, (c, ms) =>
         {
-            var perCtrl = Stopwatch.StartNew();
-            var s = slots[i];
-            try { s.Cts.Cancel(); } catch { }
-            try { s.Thread?.Join(2000); } catch { }
-            try { s.Ctrl.Dispose(); } catch { }
-            Console.WriteLine($"  disposed slot {i} in {perCtrl.ElapsedMilliseconds} ms");
-        }
+            int idx = ctrlToIdx.TryGetValue(c, out var v) ? v : -1;
+            Console.WriteLine($"  disposed slot {idx} in {ms} ms");
+        });
         Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
         if (rateHz >= 500) timeEndPeriod(1);
         return 0;

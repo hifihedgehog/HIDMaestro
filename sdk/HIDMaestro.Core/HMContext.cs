@@ -84,7 +84,7 @@ public sealed class HMContext : IDisposable
 
         // Proactive ghost sweep FIRST, before FullDeploy. Without this, when a
         // prior process crashed or was force-killed (Dispose never ran), its
-        // virtual controllers + HMCOMPANION stay PnP-live and REMAIN BOUND to
+        // virtual controllers + HIDMAESTRO stay PnP-live and REMAIN BOUND to
         // the old INF. On the next launch, DriverBuilder.FullDeploy calls
         // pnputil /delete-driver /uninstall /force — which fails with "One or
         // more devices are presently installed using the specified INF" and
@@ -104,13 +104,6 @@ public sealed class HMContext : IDisposable
         // binary replaces the DriverStore contents.
         Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
 
-        // Always run the full deploy. The previous version gated on
-        // IsDriverInstalled — but a stale half-removed package would make
-        // that gate return true and skip the install entirely, leaving
-        // WUDFHost serving devices from an OLD binary. That failure mode
-        // hid the CPU-saturation fix for hours during testing. The pnputil
-        // install is fast (a few seconds) and safely overwrites whatever
-        // is in the store, so unconditional install is strictly better.
         if (!DriverBuilder.FullDeploy())
             throw new InvalidOperationException(
                 "Driver install failed. Run elevated and check pnputil output.");
@@ -123,6 +116,42 @@ public sealed class HMContext : IDisposable
     public static void RemoveAllVirtualControllers()
     {
         Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
+    }
+
+    /// <summary>Disposes a set of controllers concurrently, suppressing the
+    /// per-controller HID orphan sweep and running it once at the end. The
+    /// per-controller wall-clock for each Dispose() call is reported through
+    /// <paramref name="perControllerCallback"/> so callers can log a
+    /// "disposed slot N in M ms" line for each. Use from any caller that
+    /// already has a list of HMControllers to dispose together (e.g., a
+    /// test harness's end-of-run cleanup); HMContext.Dispose itself uses an
+    /// equivalent path internally.</summary>
+    public void DisposeControllersInParallel(
+        IEnumerable<HMController> controllers,
+        Action<HMController, long>? perControllerCallback = null)
+    {
+        if (controllers == null) throw new ArgumentNullException(nameof(controllers));
+        var arr = controllers.Where(c => c != null).ToArray();
+        if (arr.Length == 0) return;
+        if (arr.Length == 1)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try { arr[0].Dispose(); } catch { }
+            perControllerCallback?.Invoke(arr[0], sw.ElapsedMilliseconds);
+            return;
+        }
+        _batchDisposing = true;
+        try
+        {
+            System.Threading.Tasks.Parallel.ForEach(arr, c =>
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try { c.Dispose(); } catch { }
+                perControllerCallback?.Invoke(c, sw.ElapsedMilliseconds);
+            });
+        }
+        finally { _batchDisposing = false; }
+        Internal.DeviceOrchestrator.RemoveOrphanHidChildrenBatch();
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -362,10 +391,17 @@ public sealed class HMContext : IDisposable
     }
 
     // Called by HMController.Dispose; the context tears down its half of the state.
+    /// <summary>Set during HMContext.Dispose's parallel batch teardown so
+    /// per-controller TeardownController calls skip the system-wide HID
+    /// orphan sweep — the sweep runs ONCE after the batch instead of N
+    /// times concurrently.</summary>
+    private bool _batchDisposing;
+
     internal void OnControllerDisposing(HMController controller)
     {
         lock (_lock) _controllers.Remove(controller.Index);
-        Internal.DeviceOrchestrator.TeardownController(controller.Index, controller.InstanceId);
+        Internal.DeviceOrchestrator.TeardownController(
+            controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
     }
 
     private void ThrowIfDisposed()
@@ -374,7 +410,16 @@ public sealed class HMContext : IDisposable
     }
 
     /// <summary>Disposes every controller this context owns and frees its
-    /// resources. Safe to call multiple times.</summary>
+    /// resources. Safe to call multiple times.
+    ///
+    /// <para>Per-controller teardown blocks 5-11s waiting on Windows PnP's
+    /// synchronous DIF_REMOVE (xinputhid filter unload for BT, HMCOMPANION
+    /// teardown for non-xinputhid Xbox). The per-controller work is fully
+    /// independent — different devnodes, different ContainerIDs, different
+    /// kernel locks — so we run all dispose calls in parallel and the
+    /// wall-clock collapses from sum(N) to max(N). For 4 controllers
+    /// that's typically 34s -> ~10s.</para>
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
@@ -386,9 +431,27 @@ public sealed class HMContext : IDisposable
             toDispose = _controllers.Values.ToArray();
             _controllers.Clear();
         }
-        foreach (var c in toDispose)
+        if (toDispose.Length == 0) return;
+        if (toDispose.Length == 1)
         {
-            try { c.Dispose(); } catch { /* swallow during shutdown */ }
+            try { toDispose[0].Dispose(); } catch { /* swallow during shutdown */ }
+            return;
         }
+        _batchDisposing = true;
+        try
+        {
+            System.Threading.Tasks.Parallel.ForEach(toDispose, c =>
+            {
+                try { c.Dispose(); } catch { /* swallow during shutdown */ }
+            });
+        }
+        finally
+        {
+            _batchDisposing = false;
+        }
+        // Run the system-wide HID orphan sweep ONCE after all per-controller
+        // teardowns complete. This avoids N concurrent system-wide HID
+        // enumerations during the parallel batch.
+        Internal.DeviceOrchestrator.RemoveOrphanHidChildrenBatch();
     }
 }

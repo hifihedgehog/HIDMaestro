@@ -24,7 +24,7 @@ Class       = HIDClass
 ClassGuid   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusbshim_class.cat
-DriverVer   = 04/23/2026,1.1.19.0
+DriverVer   = 04/24/2026,1.1.20.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -56,7 +56,7 @@ AddReg = XusbShim_AddReg
 
 [XusbShim_AddReg]
 HKR,,"UpperFilters",0x00010008,"WUDFRd"
-; Security descriptor parity with hidmaestro_xusb.inf (HMCOMPANION). SYSTEM +
+; Security descriptor parity with hidmaestro_xusb.inf (HIDMAESTRO). SYSTEM +
 ; BUILTIN\Administrators + World can read/write. Broad ACL so no process is
 ; blocked from opening our XUSB interface by ACL check (Opus gap-analysis #3).
 HKR,,"Security",,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"

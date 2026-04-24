@@ -936,7 +936,7 @@ EvtDeviceAdd(
          * kernel object survives as long as any ref exists — then our
          * CreateEventW above hands us that still-signaled event. The worker
          * immediately sees WAIT_OBJECT_0 on StopEvent and returns 0: HID input
-         * path dead for the rest of this session. (HMCOMPANION still runs its
+         * path dead for the rest of this session. (HIDMAESTRO still runs its
          * own path, so XUSB / Guide still works — which is the exact partial-
          * hang symptom: only Guide flashes after a live-swap on Xbox 360.) */
         ResetEvent(ctx->StopEvent);

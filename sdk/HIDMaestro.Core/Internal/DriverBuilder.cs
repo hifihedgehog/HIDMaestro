@@ -252,7 +252,7 @@ public static class DriverBuilder
 
         // xusbshim removed — its filter INF bound indiscriminately to
         // HID\VID_045E&PID_028E&IG_00 including physical Xbox 360 controllers.
-        // hidmaestro_xusb.inf (HMCOMPANION) REINSTATED 2026-04-23 with setup
+        // hidmaestro_xusb.inf (HIDMAESTRO) REINSTATED 2026-04-23 with setup
         // class changed from XnaComposite to System so Windows.Gaming.Input.dll
         // does not classify it as a second WGI Gamepad. xinput1_4 discovery
         // (which scans the {EC87F1E3} interface class directly) still finds it.
@@ -278,7 +278,27 @@ public static class DriverBuilder
                 }
             }
 
-            if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
+            // pnputil /install fails with rc=259 ("Unable to install driver
+            // package: The requested device interface is not present in the
+            // system") when there are no devices on the system that match the
+            // INF's hardware IDs. That's the EXPECTED state on a fresh /
+            // post-cleanup install: SwDeviceCreate hasn't run yet so no
+            // matching devnodes exist, and the AddInterface directive in
+            // hidmaestro_xusb.inf has nothing to register against. The
+            // /add-driver portion (which is what we actually need — the
+            // package in the DriverStore) succeeded; ignore the /install
+            // miss. The subsequent SwDeviceCreate call will trigger PnP's
+            // proper bind + interface registration.
+            bool noMatchingDevice = output.Contains(
+                "The requested device interface is not present in the system");
+            bool packageAdded = output.Contains("Driver package added successfully");
+
+            if (rc != 0 && noMatchingDevice && packageAdded)
+            {
+                // Expected on first install / post-cleanup. Driver is in the
+                // store; SwDeviceCreate will handle binding. Continue silently.
+            }
+            else if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
             {
                 // xusbshim failure is non-fatal — if the Extension INF doesn't
                 // apply, the rest of the install flow still works and we just
@@ -294,17 +314,14 @@ public static class DriverBuilder
             }
         }
 
-        // Force PnP to rescan existing devices so newly-added INFs apply to
-        // already-present matching devnodes. Without this, an Extension/filter
-        // INF added AFTER the HID child enumerates won't auto-apply until the
-        // device is removed and re-added. /scan-devices hits the whole system
-        // but is cheap (fractions of a second on a clean machine).
-        try
-        {
-            Run(pnputil, "/scan-devices", timeoutMs: 10_000);
-        }
-        catch { /* non-fatal */ }
-
+        // /scan-devices removed (Option 1). Was here to apply newly-added
+        // Extension/filter INFs to pre-existing HID children. We dropped
+        // xusbshim and our remaining INFs are function INFs that bind via
+        // SwDeviceCreate's own install path — /scan-devices was a no-op for
+        // them. On corporate workstations with many devices in the PnP tree
+        // this scan was 5–20 s of pure overhead. RemoveAllVirtualControllers
+        // (called before FullDeploy) DIF_REMOVEs any of our prior-session
+        // devnodes; nothing else needs the scan.
         return true;
     }
 
@@ -327,25 +344,30 @@ public static class DriverBuilder
     {
         _ = rebuild; // intentionally unused
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         Console.Write("  Extracting embedded driver payload... ");
         EnsureExtracted();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Removing old packages... ");
         RemoveOldDriverPackages();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Signing... ");
         if (!SignDrivers()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Generating catalogs... ");
         if (!GenerateCatalogs()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Installing drivers... ");
         if (!InstallDrivers()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK (total {sw.ElapsedMilliseconds} ms)");
 
         return true;
     }

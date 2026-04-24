@@ -110,16 +110,26 @@ internal static class DeviceProperties
     {
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
 
+        // Sweep BOTH SWD\ (post-slot-1-skip-fix) and ROOT\ (legacy) enumerator
+        // roots — multi-controller setups after the migration have HIDMAESTRO
+        // and gamepad companions under SWD\ while older paths may still sit
+        // under ROOT\.
+        foreach (var enumRoot in new[] { "SWD", "ROOT" })
         try
         {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (enumKey == null) return;
+            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+            if (enumKey == null) continue;
 
             foreach (var sub in enumKey.GetSubKeyNames())
             {
-                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                // Accept the pre-SWD `VID_xxx&PID_yyy&IG_00` enumerator (ROOT
+                // path) and any HIDMAESTRO-prefixed SWD enumerator (current
+                // gamepad companion form: HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00).
+                bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
+                bool isSwdForm = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                if (!isVidForm && !isSwdForm) continue;
 
-                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}");
+                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}");
                 if (subKey == null) continue;
 
                 foreach (var inst in subKey.GetSubKeyNames())
@@ -127,7 +137,7 @@ internal static class DeviceProperties
                     if (controllerIndex >= 0)
                     {
                         using var dpKey = Registry.LocalMachine.OpenSubKey(
-                            $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                            $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}\{inst}\Device Parameters");
                         if (dpKey == null) continue;
                         var ci = dpKey.GetValue("ControllerIndex");
                         // Treat missing as index 0 so single-controller setup still works
@@ -135,7 +145,7 @@ internal static class DeviceProperties
                         if (actual != controllerIndex) continue;
                     }
 
-                    string devId = $@"ROOT\{sub}\{inst}";
+                    string devId = $@"{enumRoot}\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
                     {
                         CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_FriendlyName,
@@ -160,7 +170,7 @@ internal static class DeviceProperties
     /// controllerIndex. Used by the orchestration after Phase 1 to overcome
     /// a race where per-controller renames during setup get clobbered by
     /// PnP driver-bind on the first controller. Iterates ALL ROOT\* device
-    /// classes (<c>VID_*&amp;IG_00</c>, <c>HMCOMPANION</c>, <c>HIDClass</c>)
+    /// classes (<c>VID_*&amp;IG_00</c>, <c>HIDMAESTRO</c>, <c>HIDClass</c>)
     /// and matches by <c>Device Parameters\ControllerIndex</c>, applying
     /// FriendlyName + DeviceDesc + BusReportedDeviceDesc to the root device
     /// and every HID child/grandchild.</summary>
@@ -178,16 +188,19 @@ internal static class DeviceProperties
                 DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
         }
 
+        // Sweep both SWD\ (new) and ROOT\ (legacy) enumerator roots.
+        foreach (var enumRoot in new[] { "SWD", "ROOT" })
         try
         {
-            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (rootEnum == null) return;
+            using var rootEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+            if (rootEnum == null) continue;
 
             foreach (var sub in rootEnum.GetSubKeyNames())
             {
                 bool isOurClass = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase);
+                               || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+                               || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                               || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                 if (!isOurClass) continue;
 
                 using var subKey = rootEnum.OpenSubKey(sub);
@@ -196,13 +209,13 @@ internal static class DeviceProperties
                 foreach (var inst in subKey.GetSubKeyNames())
                 {
                     using var dpKey = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                        $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}\{inst}\Device Parameters");
                     if (dpKey == null) continue;
                     var ci = dpKey.GetValue("ControllerIndex");
                     int actual = ci is int v ? v : -1;
                     if (actual != controllerIndex) continue;
 
-                    string instId = $@"ROOT\{sub}\{inst}";
+                    string instId = $@"{enumRoot}\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, instId, 0) != 0) continue;
 
                     Apply(devInst);
