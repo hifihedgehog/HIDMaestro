@@ -1744,8 +1744,7 @@ internal static class DeviceOrchestrator
                 if (classKey != null)
                     foreach (var sub in classKey.GetSubKeyNames())
                         if (sub.Contains("ROOT#") ||
-                            sub.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                            sub.Contains("SWD#HMCOMPANION", StringComparison.OrdinalIgnoreCase))  // legacy carcasses pre-rename
+                            sub.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase))
                             try { classKey.DeleteSubKeyTree(sub); } catch { }
             }
             catch { }
