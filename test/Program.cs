@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -402,15 +403,24 @@ class Program
         }
 
         var cleanupSw = Stopwatch.StartNew();
+        // Cancel + join all pattern threads first so submission stops
+        // everywhere before we begin kernel-side teardown.
         for (int i = 0; i < slots.Count; i++)
+            try { slots[i].Cts.Cancel(); } catch { }
+        for (int i = 0; i < slots.Count; i++)
+            try { slots[i].Thread?.Join(2000); } catch { }
+        // Use the SDK's batch-teardown entrypoint: parallelizes the per-
+        // controller DIF_REMOVE work and runs the system-wide HID orphan
+        // sweep ONCE at the end (instead of N times concurrently).
+        var ctrls = slots.Where(s => s.Ctrl != null!).Select(s => s.Ctrl).ToArray();
+        var ctrlToIdx = new Dictionary<HMController, int>();
+        for (int i = 0; i < slots.Count; i++)
+            if (slots[i].Ctrl != null!) ctrlToIdx[slots[i].Ctrl] = i;
+        ctx.DisposeControllersInParallel(ctrls, (c, ms) =>
         {
-            var perCtrl = Stopwatch.StartNew();
-            var s = slots[i];
-            try { s.Cts.Cancel(); } catch { }
-            try { s.Thread?.Join(2000); } catch { }
-            try { s.Ctrl.Dispose(); } catch { }
-            Console.WriteLine($"  disposed slot {i} in {perCtrl.ElapsedMilliseconds} ms");
-        }
+            int idx = ctrlToIdx.TryGetValue(c, out var v) ? v : -1;
+            Console.WriteLine($"  disposed slot {idx} in {ms} ms");
+        });
         Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
         if (rateHz >= 500) timeEndPeriod(1);
         return 0;

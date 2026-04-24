@@ -1420,6 +1420,13 @@ internal static class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
 
     public static void TeardownController(int controllerIndex, string? instanceId)
+        => TeardownController(controllerIndex, instanceId, skipOrphanSweep: false);
+
+    /// <summary>Internal overload used by HMContext.Dispose's parallel batch
+    /// teardown to skip the system-wide HID orphan sweep on every controller.
+    /// The sweep is idempotent but expensive — running it once at the end of
+    /// the batch (instead of N times concurrently) is a clean win.</summary>
+    internal static void TeardownController(int controllerIndex, string? instanceId, bool skipOrphanSweep)
     {
         try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
 
@@ -1551,6 +1558,16 @@ internal static class DeviceOrchestrator
         // match is intrinsically "our just-removed parents" and only our
         // just-removed parents — live controllers still anchor their HID
         // children to a locatable parent and are untouched.
+        if (!skipOrphanSweep)
+            try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
+    }
+
+    /// <summary>One-time orphan sweep used after a batch teardown
+    /// (HMContext.Dispose with multiple controllers). Skipping the per-
+    /// controller sweep + running this once is what avoids the redundant
+    /// system-wide HID enumeration.</summary>
+    internal static void RemoveOrphanHidChildrenBatch()
+    {
         try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
     }
 
