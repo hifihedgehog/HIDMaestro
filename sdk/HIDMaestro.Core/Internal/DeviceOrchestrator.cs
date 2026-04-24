@@ -761,6 +761,65 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
+    //  SetHidParentUpperFilterXinputhid
+    //  Profile-specific WGI HID-classifier skip. Called only for profiles
+    //  that already publish an HMCOMPANION XUSB provider — so WGI still has
+    //  an XUSB Gamepad source after the HID Gamepad is skipped.
+    // ════════════════════════════════════════════════════════════════════
+
+    private static void SetHidParentUpperFilterXinputhid(int controllerIndex)
+    {
+        // Idempotent: sweep every ROOT HID parent whose HMCOMPANION counterpart
+        // exists (same ControllerIndex registered under ROOT\HMCOMPANION\*).
+        // Writing to just the current controller's instance has a timing race
+        // — Windows PnP occasionally clears properties when a sibling root
+        // device is added shortly after. Sweeping every call converges the
+        // state regardless of which iteration set which value.
+        try
+        {
+            // Build a set of controllerIndexes that have an HMCOMPANION
+            // (profiles with XUSB companions — xbox-360 wired family).
+            var companionIndexes = new HashSet<int>();
+            using (var hmEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\HMCOMPANION"))
+            {
+                if (hmEnum != null)
+                {
+                    foreach (var inst in hmEnum.GetSubKeyNames())
+                    {
+                        using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
+                        if (dp?.GetValue("ControllerIndex") is int ci) companionIndexes.Add(ci);
+                    }
+                }
+            }
+            companionIndexes.Add(controllerIndex);  // include current even if HMCOMPANION isn't enum-visible yet
+
+            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
+            if (rootEnum == null) return;
+            foreach (var sub in rootEnum.GetSubKeyNames())
+            {
+                if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                using var subKey = rootEnum.OpenSubKey(sub);
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
+                {
+                    using var dpKey = Registry.LocalMachine.OpenSubKey(
+                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                    int ci = (dpKey?.GetValue("ControllerIndex") is int v) ? v : -1;
+                    if (!companionIndexes.Contains(ci)) continue;
+                    string instKeyPath = $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}";
+                    using var instKey = Registry.LocalMachine.OpenSubKey(instKeyPath, writable: true);
+                    if (instKey == null) continue;
+                    var existing = instKey.GetValue("UpperFilters") as string[];
+                    if (existing != null && Array.Exists(existing, s => string.Equals(s, "xinputhid", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    instKey.SetValue("UpperFilters", new[] { "xinputhid" }, RegistryValueKind.MultiString);
+                }
+            }
+        }
+        catch { /* best-effort — absent tripwire means 2 Gamepads, not a hard failure */ }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     //  SetBusTypeGuidUsb
     // ════════════════════════════════════════════════════════════════════
 
@@ -1011,6 +1070,22 @@ internal static class DeviceOrchestrator
             string? xusbId = CreateXusbCompanion(controllerIndex, profile);
             if (profile.CompanionOnly && companionId == null)
                 companionId = xusbId;
+
+            // Profiles with an HMCOMPANION XUSB companion need the HID parent
+            // gated out of WGI's HidClient classifier via xinputhid tripwire
+            // (see memory:project-xinputhid-upperfilter-tripwire.md). Without
+            // this, WGI creates TWO Gamepads for the same virtual — one HID-
+            // backed with input but no vibration channel, one XUSB-backed with
+            // vibration but no input. Setting UpperFilters="xinputhid" on the
+            // HID parent makes ProviderManagerWorker::OnPnpDeviceAdded skip
+            // HidClient::CreateProvider, leaving the XUSB-backed Gamepad as
+            // the single WGI entity.
+            //
+            // Must be profile-specific (per-device, not in the INF) — other
+            // profiles (DualSense, Xbox Series BT, Switch Pro, etc.) have no
+            // HMCOMPANION; blocking their HID Gamepad would produce zero WGI
+            // entities for them.
+            SetHidParentUpperFilterXinputhid(controllerIndex);
         }
 
         // ── Step 6: final friendly name ──────────────────────────────────

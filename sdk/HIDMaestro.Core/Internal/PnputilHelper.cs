@@ -32,14 +32,16 @@ namespace HIDMaestro.Internal;
 internal static class PnputilHelper
 {
     /// <summary>The INF original names that belong to HIDMaestro. Used as
-    /// the strict allow-list when filtering enumerated driver records.</summary>
-    /// <summary>INFs we EXPECT to be installed. IsHidMaestroDriverInstalled
-    /// requires all of these to be present.</summary>
+    /// the strict allow-list when filtering enumerated driver records.
+    /// INFs we EXPECT to be installed. IsHidMaestroDriverInstalled
+    /// requires all of these to be present.
+    /// Must match the set actually installed by DriverBuilder.InstallDrivers()
+    /// — keep in sync or FullDeploy will refire per-controller and fail when
+    /// the first controller holds the package.</summary>
     public static readonly string[] HidMaestroInfNames = new[]
     {
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-        "hidmaestro_xusbshim_class.inf",
     };
 
     /// <summary>INFs that RemoveAllHidMaestroPackages should clean up — includes
