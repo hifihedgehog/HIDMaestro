@@ -1212,9 +1212,9 @@ internal static class DeviceOrchestrator
             DeviceProperties.FixHidChildNames(displayName, controllerIndex);
 
         // Set names on root device — locate via Device Parameters\ControllerIndex.
-        // Post-slot-1-skip-fix, the gamepad companion parent lives at
-        // `SWD\HIDMAESTROGP_*`; pre-migration devices still sit under ROOT\VID_*.
-        // Sweep both roots so an in-place upgrade also gets named.
+        // Gamepad companion parent lives at SWD\HIDMAESTRO_VID_*_PID_*&IG_00;
+        // Xbox 360 wired main device lives at ROOT\VID_*&PID_*&IG_00. Sweep
+        // both roots so either path gets named.
         {
         using var _ts = new TimingScope(controllerIndex, profile.Id, "4.set_names_root");
         try
