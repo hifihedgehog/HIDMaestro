@@ -57,7 +57,7 @@ AddReg = HIDMaestro_HW_AddReg
 HKR,,"LowerFilters",0x00010008,"WUDFRd"
 ; NOTE: no "xinputhid" UpperFilter here at the INF level — this INF is shared
 ; by every profile. The tripwire is only desired for profiles that have an
-; HMCOMPANION XUSB companion (Xbox 360 wired family). For non-companion
+; HIDMAESTRO XUSB companion (Xbox 360 wired family). For non-companion
 ; profiles (DualSense, Xbox Series BT, Switch Pro, etc.) the HID path IS the
 ; only WGI Gamepad source, and blocking it with xinputhid would produce zero
 ; Gamepads. DeviceOrchestrator writes this UpperFilter value per-instance

@@ -8,7 +8,7 @@
  *
  * When the interface is opened and IOCTL_XUSB_SET_STATE arrives, the motor
  * bytes are published to `Global\HIDMaestroOutput<N>` (the same shared
- * section HMCOMPANION writes to) with Source = OUT_SOURCE_XINPUT. The SDK's
+ * section HIDMAESTRO writes to) with Source = OUT_SOURCE_XINPUT. The SDK's
  * existing output worker delivers it to OutputReceived — no new SDK code
  * needed.
  *
@@ -54,7 +54,7 @@ static const GUID GUID_DEVINTERFACE_XUSB = {
 };
 
 /* WinExInput — interface that Chromium's gamepad backend uses to detect
- * GamepadAdded arrivals. HMCOMPANION also registers this on its own
+ * GamepadAdded arrivals. HIDMAESTRO also registers this on its own
  * devnode; registering it on the HID child exposes the child directly
  * to Chromium's enumeration without the companion indirection. */
 static const GUID GUID_DEVINTERFACE_WINEXINPUT = {
@@ -310,7 +310,7 @@ XusbShimDeviceAdd(
     PDEVICE_CTX ctx = GetDevCtx(device);
     ReadParentIdentity(device, ctx);
 
-    /* "Global\HIDMaestroOutput<N>" — the section HMCOMPANION writes to. */
+    /* "Global\HIDMaestroOutput<N>" — the section HIDMAESTRO writes to. */
     WstrCopy(ctx->OutputMappingName, L"Global\\HIDMaestroOutput",
              sizeof(ctx->OutputMappingName) / sizeof(WCHAR));
     WstrAppendUlong(ctx->OutputMappingName, ctx->ControllerIndex,
@@ -318,7 +318,7 @@ XusbShimDeviceAdd(
 
     /* Do NOT publish GUID_DEVINTERFACE_XUSB ({EC87F1E3}) on this HID child.
      *
-     * HMCOMPANION (ROOT\HMCOMPANION, XnaComposite class) already publishes
+     * HIDMAESTRO (ROOT\HIDMAESTRO, XnaComposite class) already publishes
      * the XUSB interface. Publishing it from TWO device nodes for one logical
      * controller makes Windows.Gaming.Input.dll's provider-manager hang trying
      * to reconcile two distinct XUSB providers for the same logical Xbox 360
@@ -326,10 +326,10 @@ XusbShimDeviceAdd(
      * dispatching to EVERY gamepad system-wide (including physical Xbox
      * controllers), until GameInputSvc is restarted.
      *
-     * Verified 2026-04-23 empirically: with both HMCOMPANION XUSB interface
+     * Verified 2026-04-23 empirically: with both HIDMAESTRO XUSB interface
      * and xusbshim HID-child XUSB interface active, Chrome WGI vibration
      * stops dispatching on every device. Removing this publication and keeping
-     * HMCOMPANION as the sole XUSB publisher restores WGI function.
+     * HIDMAESTRO as the sole XUSB publisher restores WGI function.
      *
      * See memory:feedback-one-wgi-device-per-controller.md.
      *
@@ -378,7 +378,7 @@ XusbShimIoDefault(
             size_t sz;
             if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &buf, &sz))) {
                 /* Normalize to the same 5-byte XUSB GET_STATE-response layout
-                 * HMCOMPANION publishes and the test harness decodes:
+                 * HIDMAESTRO publishes and the test harness decodes:
                  *   [0x00, 0x00, lo_motor, hi_motor, 0x00]
                  *
                  * Motor position in the INPUT buffer varies by the client's
@@ -423,7 +423,7 @@ XusbShimIoDefault(
              * buttons), and our 10-button descriptor would fail validation
              * → WGI would demote us to RawGameController (no put_Vibration).
              * See memory:project-xusb-ioctl-empirical.md for the full
-             * version-discriminator story. HMCOMPANION uses 0x0101 too. */
+             * version-discriminator story. HIDMAESTRO uses 0x0101 too. */
             UCHAR info[12];
             for (int i = 0; i < 12; i++) info[i] = 0;
             info[0] = 0x03; info[1] = 0x01;       /* Version 0x0103. 2026-04-23 empirical: physical Xbox 360 USB and HIDMaestro Xbox Series BT both return 0x0103 and both receive put_Vibration SET_STATE IOCTLs from Chromium WGI; 0x0101 gets polled but never vibrated. The earlier "0x0103 triggers 15-button validation → RawGameController demotion" concern wasn't borne out by positive control (physical 360 reports 0x0103 and is correctly handled as a 10-button Xbox 360). */
@@ -446,7 +446,7 @@ XusbShimIoDefault(
         }
         else if (code == IOCTL_XUSB_GET_STATE) {
             /* 29-byte neutral gamepad state (no buttons, centered sticks,
-             * zero triggers). Matches HMCOMPANION's layout so xinput1_4
+             * zero triggers). Matches HIDMAESTRO's layout so xinput1_4
              * / WGI polling succeeds even if we're not reading live input
              * through this filter. Real input still flows through the HID
              * interface to consumers via driver.c — this IOCTL response
@@ -476,7 +476,7 @@ XusbShimIoDefault(
         }
         else if (code == IOCTL_XUSB_GET_LED_STATE) {
             /* 3-byte LED state: led num 0, blink 0, initial state 0x06
-             * (matches HMCOMPANION's response). */
+             * (matches HIDMAESTRO's response). */
             UCHAR led[3] = { 0x00, 0x00, 0x06 };
             PVOID  outBuf;
             size_t outLen;
@@ -492,7 +492,7 @@ XusbShimIoDefault(
         else if (code == IOCTL_XUSB_GET_BATTERY_INFO) {
             /* 4-byte battery info matching companion.c exactly:
              * [0, 1, 3, 0] — type=1 (wired), level=3 (full).
-             * Was 0xFF before; HMCOMPANION uses 3 which works. */
+             * Was 0xFF before; HIDMAESTRO uses 3 which works. */
             UCHAR bat[4] = { 0x00, 0x01, 0x03, 0x00 };
             PVOID  outBuf;
             size_t outLen;
@@ -522,7 +522,7 @@ XusbShimIoDefault(
             handledLocally = TRUE;
         }
         else if (code == IOCTL_XUSB_GET_INFORMATION_EX) {
-            /* 64-byte extended info. HMCOMPANION uses the same buffer size.
+            /* 64-byte extended info. HIDMAESTRO uses the same buffer size.
              * xinput1_4 uses this for XInput 1.4+ feature detection; returning
              * the correct header (version + device count + VID/PID) with
              * remaining bytes zeroed is sufficient for the gate check. */

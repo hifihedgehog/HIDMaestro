@@ -111,7 +111,7 @@ internal static class DeviceProperties
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
 
         // Sweep BOTH SWD\ (post-slot-1-skip-fix) and ROOT\ (legacy) enumerator
-        // roots — multi-controller setups after the migration have HMCOMPANION
+        // roots — multi-controller setups after the migration have HIDMAESTRO
         // and gamepad companions under SWD\ while older paths may still sit
         // under ROOT\.
         foreach (var enumRoot in new[] { "SWD", "ROOT" })
@@ -170,7 +170,7 @@ internal static class DeviceProperties
     /// controllerIndex. Used by the orchestration after Phase 1 to overcome
     /// a race where per-controller renames during setup get clobbered by
     /// PnP driver-bind on the first controller. Iterates ALL ROOT\* device
-    /// classes (<c>VID_*&amp;IG_00</c>, <c>HMCOMPANION</c>, <c>HIDClass</c>)
+    /// classes (<c>VID_*&amp;IG_00</c>, <c>HIDMAESTRO</c>, <c>HIDClass</c>)
     /// and matches by <c>Device Parameters\ControllerIndex</c>, applying
     /// FriendlyName + DeviceDesc + BusReportedDeviceDesc to the root device
     /// and every HID child/grandchild.</summary>
@@ -198,7 +198,7 @@ internal static class DeviceProperties
             foreach (var sub in rootEnum.GetSubKeyNames())
             {
                 bool isOurClass = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
+                               || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
                                || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
                                || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                 if (!isOurClass) continue;

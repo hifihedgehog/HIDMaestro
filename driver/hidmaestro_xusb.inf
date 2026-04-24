@@ -9,7 +9,7 @@
 Signature   = "$WINDOWS NT$"
 ; Class = System (not XnaComposite) — intentionally chosen so
 ; Windows.Gaming.Input.dll::ProviderManagerWorker::OnPnpDeviceAdded does NOT
-; classify HMCOMPANION as a WGI Gamepad. XnaComposite auto-publishes the
+; classify HIDMAESTRO as a WGI Gamepad. XnaComposite auto-publishes the
 ; {D61CA365} XnaComposite interface, which hits classifier branch 1 and
 ; creates a second WGI entity alongside the main HID virtual's HID-path
 ; Gamepad — that's the duplicate that hangs Windows.Gaming.Input.
@@ -17,7 +17,7 @@ Signature   = "$WINDOWS NT$"
 ;
 ; xinput1_4.dll's XInput discovery enumerates GUID_DEVINTERFACE_XUSB
 ; {EC87F1E3} interfaces directly and does NOT filter by setup class, so
-; HMCOMPANION remains XInput-discoverable via its AddInterface entry below.
+; HIDMAESTRO remains XInput-discoverable via its AddInterface entry below.
 ; See memory:feedback-one-wgi-device-per-controller.md.
 Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
@@ -66,7 +66,7 @@ HKR,,"XusbMode",0x00010001,1
 ; ancestor UpperFilters chain with IsDeviceOrAncestorFilteredBy(path,
 ; L"xinputhid"). When that returns true AND the device publishes
 ; GUID_DEVINTERFACE_XUSB ({ec87f1e3}), WGI dispatches via the XUSB path
-; (LAB_18005f241) regardless of setup class. Without this, HMCOMPANION
+; (LAB_18005f241) regardless of setup class. Without this, HIDMAESTRO
 ; under System class matches NO dispatch branch and WGI silently skips it,
 ; which is why vibration never reached our SET_STATE handler in prior tests.
 ;
@@ -110,7 +110,7 @@ UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
 ; Per-instance WUDFHost — see hidmaestro.inf for rationale. The async
 ; WAIT_FOR_INPUT pump + 8ms timer would otherwise serialize across
-; every HMCOMPANION instance in a single host.
+; every HIDMAESTRO instance in a single host.
 UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HMXInput_UmdfService]

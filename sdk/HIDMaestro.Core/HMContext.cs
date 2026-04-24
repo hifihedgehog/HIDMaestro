@@ -84,7 +84,7 @@ public sealed class HMContext : IDisposable
 
         // Proactive ghost sweep FIRST, before FullDeploy. Without this, when a
         // prior process crashed or was force-killed (Dispose never ran), its
-        // virtual controllers + HMCOMPANION stay PnP-live and REMAIN BOUND to
+        // virtual controllers + HIDMAESTRO stay PnP-live and REMAIN BOUND to
         // the old INF. On the next launch, DriverBuilder.FullDeploy calls
         // pnputil /delete-driver /uninstall /force — which fails with "One or
         // more devices are presently installed using the specified INF" and

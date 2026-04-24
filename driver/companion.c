@@ -26,7 +26,7 @@ static const GUID WINEXINPUT_GUID =
  * Semantically unknown but appears on Xbox Series BT HID children; Max's
  * external review hypothesized it may be the GIP device interface class
  * WGI uses for gamepad-class promotion of non-xinputhid Xbox paths.
- * Registering it on HMCOMPANION is additive and benign. */
+ * Registering it on HIDMAESTRO is additive and benign. */
 static const GUID WGI_UNK1_GUID =
     { 0x08A7EE33, 0xA682, 0x49EE, { 0xB8, 0xBF, 0x3E, 0x41, 0xC9, 0x9D, 0xB3, 0xC0 } };
 
@@ -357,7 +357,7 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         WdfTimerStart(ctx->PumpTimer, WDF_REL_TIMEOUT_IN_MS(8));
     }
 
-    /* HMCOMPANION publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
+    /* HIDMAESTRO publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
      * UpperFilters="xinputhid" tripwire, ProviderManagerWorker::OnPnpDeviceAdded
      * sees cVar3=true AND interface==XUSB {ec87f1e3}, and dispatches via the
      * XUSB path (LAB_18005f241). Publishing additional interfaces (WinExInput,
@@ -647,9 +647,9 @@ void CompanionIoControl(
          * the bytes (typical packet is 5 bytes: cmd + size + lo motor +
          * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION).
          *
-         * CRITICAL: a stale-HMCOMPANION-after-live-swap gate. When the user
+         * CRITICAL: a stale-HIDMAESTRO-after-live-swap gate. When the user
          * live-swaps from Xbox 360 → DS4, TeardownController removes the
-         * Xbox 360 HMCOMPANION, but devcon can return "Removed on reboot"
+         * Xbox 360 HIDMAESTRO, but devcon can return "Removed on reboot"
          * and the companion persists as a phantom still serving IOCTLs.
          * xinput1_4 / GameInputSvc keep sending IOCTL_XUSB_SET_STATE here;
          * without this gate we publish Source=XInput to the SAME shared

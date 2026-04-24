@@ -234,7 +234,7 @@ internal static class DeviceOrchestrator
     {
         // Remove known non-VID_ enumerators under ROOT (legacy paths)
         string[] fixedPrefixes = { @"ROOT\HID_IG_00", @"ROOT\HIDCLASS", @"ROOT\XnaComposite",
-                                   @"ROOT\HMCOMPANION", @"SWD\HMCOMPANION" };
+                                   @"ROOT\HIDMAESTRO", @"SWD\HIDMAESTRO" };
         foreach (var prefix in fixedPrefixes)
         {
             for (int idx = 0; idx < 10; idx++)
@@ -285,13 +285,13 @@ internal static class DeviceOrchestrator
                 {
                     // Interface-class keys encode devnode paths with `#` in place
                     // of `\`. Match our legacy ROOT\ forms and the post-SWD-migration
-                    // SWD\HIDMAESTRO* + SWD\HMCOMPANION forms.
+                    // SWD\HIDMAESTRO* + SWD\HIDMAESTRO forms.
                     bool isOurDevice =
                         subName.Contains("ROOT#VID_") ||
                         subName.Contains("ROOT#HIDCLASS") ||
                         subName.Contains("ROOT#HID_IG") ||
-                        subName.Contains("ROOT#HMCOMPANION", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("SWD#HMCOMPANION", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
                         subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                     if (!isOurDevice && subName.Contains("ROOT#SYSTEM#"))
                     {
@@ -516,7 +516,7 @@ internal static class DeviceOrchestrator
         // DISABLED per external review: writing a DS4-cloned mapping to
         // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
         // for a 045E VID may confuse WGI's normal Xbox-family handling.
-        // If mainline HMCOMPANION is sufficient (Grok's analysis), this
+        // If mainline HIDMAESTRO is sufficient (Grok's analysis), this
         // write is unneeded and potentially harmful. The method is kept
         // below for manual invocation if future experiments need it.
         // WriteWgiSoftwareRegistry(profile);
@@ -796,16 +796,16 @@ internal static class DeviceOrchestrator
 
     private static string? CreateXusbCompanion(int controllerIndex, ControllerProfile profile)
     {
-        // Look for a live HMCOMPANION already claimed by THIS controllerIndex.
-        // The "HMCOMPANION" enumerator name is load-bearing for WGI's
+        // Look for a live HIDMAESTRO already claimed by THIS controllerIndex.
+        // The "HIDMAESTRO" enumerator name is load-bearing for WGI's
         // RawGameController dedup: with any other name (HIDMAESTRO,
-        // HIDMAESTROCOMPANION, etc.), WGI counts the XUSB companion AND the
+        // HIDMAESTRO, etc.), WGI counts the XUSB companion AND the
         // ROOT\VID_*&PID_* main device as two separate RawGameControllers
         // for the same Xbox 360 controller, even though they share a
-        // ContainerID. HMCOMPANION gets deduped; others don't. Empirical —
-        // I don't know which specific WGI code path treats "HMCOMPANION" as
+        // ContainerID. HIDMAESTRO gets deduped; others don't. Empirical —
+        // I don't know which specific WGI code path treats "HIDMAESTRO" as
         // "merge with sibling," so changing it breaks multi-consumer counts.
-        string? xusbInstId = FindExistingCompanion("HMCOMPANION", controllerIndex);
+        string? xusbInstId = FindExistingCompanion("HIDMAESTRO", controllerIndex);
 
         bool xusbExists = xusbInstId != null;
         if (!xusbExists)
@@ -843,7 +843,7 @@ internal static class DeviceOrchestrator
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
             // Instance suffix = "<pid-hex>_<idx>" — same rationale as the
             // gamepad-companion path: bypass the kernel's sticky per-container
-            // "recently-here" fast path that leaves HMCOMPANION devnodes as
+            // "recently-here" fast path that leaves HIDMAESTRO devnodes as
             // empty shells (no Service/Driver bound, no XUSB interface
             // registered) on subsequent runs in the same machine uptime.
             string instanceSuffix = $"{s_sessionId}_{controllerIndex:D4}";
@@ -855,7 +855,7 @@ internal static class DeviceOrchestrator
                 SwdDeviceFactory.ContainerIdFor(controllerIndex),
                 companionDesc,
                 driverRequired: true,
-                enumeratorName: "HMCOMPANION");
+                enumeratorName: "HIDMAESTRO");
 
             if (result.Success && result.InstanceId != null)
             {
@@ -944,28 +944,28 @@ internal static class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
     //  SetHidParentUpperFilterXinputhid
     //  Profile-specific WGI HID-classifier skip. Called only for profiles
-    //  that already publish an HMCOMPANION XUSB provider — so WGI still has
+    //  that already publish an HIDMAESTRO XUSB provider — so WGI still has
     //  an XUSB Gamepad source after the HID Gamepad is skipped.
     // ════════════════════════════════════════════════════════════════════
 
     private static void SetHidParentUpperFilterXinputhid(int controllerIndex)
     {
-        // Idempotent: sweep every ROOT HID parent whose HMCOMPANION counterpart
-        // exists (same ControllerIndex registered under ROOT\HMCOMPANION\*).
+        // Idempotent: sweep every ROOT HID parent whose HIDMAESTRO counterpart
+        // exists (same ControllerIndex registered under ROOT\HIDMAESTRO\*).
         // Writing to just the current controller's instance has a timing race
         // — Windows PnP occasionally clears properties when a sibling root
         // device is added shortly after. Sweeping every call converges the
         // state regardless of which iteration set which value.
         try
         {
-            // Build a set of controllerIndexes that have an HMCOMPANION
+            // Build a set of controllerIndexes that have an HIDMAESTRO
             // (profiles with XUSB companions — xbox-360 wired family).
             // Sweep BOTH SWD (post-slot-1-skip-fix) and ROOT (legacy)
             // enumerators so a mixed install sees everything.
             var companionIndexes = new HashSet<int>();
             foreach (var enumRoot in new[] { "SWD", "ROOT" })
             {
-                using var hmEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\HMCOMPANION");
+                using var hmEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\HIDMAESTRO");
                 if (hmEnum == null) continue;
                 foreach (var inst in hmEnum.GetSubKeyNames())
                 {
@@ -973,7 +973,7 @@ internal static class DeviceOrchestrator
                     if (dp?.GetValue("ControllerIndex") is int ci) companionIndexes.Add(ci);
                 }
             }
-            companionIndexes.Add(controllerIndex);  // include current even if HMCOMPANION isn't enum-visible yet
+            companionIndexes.Add(controllerIndex);  // include current even if HIDMAESTRO isn't enum-visible yet
 
             // Sweep BOTH ROOT (legacy `VID_*&IG_00`) and SWD (any HIDMAESTRO*
             // gamepad-parent enumerator, currently HIDMAESTRO_VID_*_PID_*&IG_00).
@@ -1023,12 +1023,12 @@ internal static class DeviceOrchestrator
 
         foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
             "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
-            // HMCOMPANION enumerator added per gap analysis item #6:
+            // HIDMAESTRO enumerator added per gap analysis item #6:
             // WGI may check DEVPKEY_Device_BusTypeGuid on the XUSB-interface-
             // providing devnode, expecting GUID_BUS_TYPE_USB for Xbox 360
-            // hardware. HMCOMPANION is the primary XUSB source for non-xinputhid
+            // hardware. HIDMAESTRO is the primary XUSB source for non-xinputhid
             // Xbox profiles; mark it as USB bus type so that check passes.
-            "HMCOMPANION" })
+            "HIDMAESTRO" })
         {
             // Sweep both ROOT and SWD roots for this enumerator.
             foreach (var enumRoot in new[] { "ROOT", "SWD" })
@@ -1062,7 +1062,7 @@ internal static class DeviceOrchestrator
                 {
                     bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
                     bool isOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
+                               || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                     if (!isVidForm && !isOurs) continue;
                     using var vidKey = enumKey.OpenSubKey(sub);
                     if (vidKey == null) continue;
@@ -1288,7 +1288,7 @@ internal static class DeviceOrchestrator
             SetBusTypeGuidUsb();
 
         // Non-xinputhid Xbox: create XUSB companion for XInput.
-        // HMCOMPANION setup class changed from XnaComposite to System in
+        // HIDMAESTRO setup class changed from XnaComposite to System in
         // hidmaestro_xusb.inf so Windows.Gaming.Input.dll doesn't classify it
         // as a WGI Gamepad (would duplicate the main virtual's HID-path
         // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
@@ -1301,7 +1301,7 @@ internal static class DeviceOrchestrator
             if (profile.CompanionOnly && companionId == null)
                 companionId = xusbId;
 
-            // Profiles with an HMCOMPANION XUSB companion need the HID parent
+            // Profiles with an HIDMAESTRO XUSB companion need the HID parent
             // gated out of WGI's HidClient classifier via xinputhid tripwire
             // (see memory:project-xinputhid-upperfilter-tripwire.md). Without
             // this, WGI creates TWO Gamepads for the same virtual — one HID-
@@ -1313,7 +1313,7 @@ internal static class DeviceOrchestrator
             //
             // Must be profile-specific (per-device, not in the INF) — other
             // profiles (DualSense, Xbox Series BT, Switch Pro, etc.) have no
-            // HMCOMPANION; blocking their HID Gamepad would produce zero WGI
+            // HIDMAESTRO; blocking their HID Gamepad would produce zero WGI
             // entities for them.
             using (var _ts2 = new TimingScope(controllerIndex, profile.Id, "5.hidparent_upperfilter_xinputhid"))
                 SetHidParentUpperFilterXinputhid(controllerIndex);
@@ -1454,7 +1454,7 @@ internal static class DeviceOrchestrator
             // shares Global\HIDMaestroOutput{N} with the zombie, surfacing
             // the zombie's rumble publishes on the new controller's SDK
             // (observed: XInput rumble bleeding onto a DS4 after live-swap
-            // from xbox-360-wired, because the prior Xbox 360 HMCOMPANION
+            // from xbox-360-wired, because the prior Xbox 360 HIDMAESTRO
             // failed to tear down in default-mode and the Xbox UI's Guide
             // haptic kept poking its XUSB interface).
             try { DeviceManager.RemoveDevice(instanceId!, forceFallbacks: true); } catch { }
@@ -1471,7 +1471,7 @@ internal static class DeviceOrchestrator
             }
         }
 
-        // Scan and remove HMCOMPANION devices by ControllerIndex. Sweep BOTH
+        // Scan and remove HIDMAESTRO devices by ControllerIndex. Sweep BOTH
         // the SWD enumerator (post-slot-1-skip-fix path) and the legacy ROOT
         // enumerator (devices created by older versions still on-system from
         // a pre-SWD install).
@@ -1480,11 +1480,11 @@ internal static class DeviceOrchestrator
             try
             {
                 using var hmEnum = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\HMCOMPANION");
+                    $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\HIDMAESTRO");
                 if (hmEnum == null) continue;
                 foreach (var inst in hmEnum.GetSubKeyNames())
                 {
-                    string candidate = $@"{enumRoot}\HMCOMPANION\{inst}";
+                    string candidate = $@"{enumRoot}\HIDMAESTRO\{inst}";
                     using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
                     if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                     {
@@ -1599,7 +1599,7 @@ internal static class DeviceOrchestrator
         Thread.Sleep(500);
 
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
-        // Enumerators we always own: VID_*, XnaComposite, HMCompanion, HID_IG_00
+        // Enumerators we always own: VID_*, XnaComposite, HIDMAESTRO, HID_IG_00
         // Shared enumerators (HIDCLASS, SYSTEM): verify hardware ID contains "HIDMaestro"
         foreach (var enumRoot in new[] { "ROOT", "SWD" })
         try
@@ -1611,7 +1611,7 @@ internal static class DeviceOrchestrator
             {
                 bool alwaysOurs = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
                     || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
-                    || sub.Equals("HMCompanion", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
                     || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
                     || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
 
@@ -1706,7 +1706,7 @@ internal static class DeviceOrchestrator
         // prevent direct writes). Leaves the PnP instance keys themselves intact.
         // Sweeps both ROOT\ and SWD\ subtrees.
         {
-            string[] ourEnumerators = { "VID_", "XnaComposite", "HMCompanion", "HID_IG_00", "HIDMAESTRO" };
+            string[] ourEnumerators = { "VID_", "XnaComposite", "HIDMAESTRO", "HID_IG_00", "HIDMAESTRO" };
             foreach (var enumRootName in new[] { "ROOT", "SWD" })
             try
             {
@@ -1745,7 +1745,7 @@ internal static class DeviceOrchestrator
                     foreach (var sub in classKey.GetSubKeyNames())
                         if (sub.Contains("ROOT#") ||
                             sub.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                            sub.Contains("SWD#HMCOMPANION", StringComparison.OrdinalIgnoreCase))
+                            sub.Contains("SWD#HMCOMPANION", StringComparison.OrdinalIgnoreCase))  // legacy carcasses pre-rename
                             try { classKey.DeleteSubKeyTree(sub); } catch { }
             }
             catch { }

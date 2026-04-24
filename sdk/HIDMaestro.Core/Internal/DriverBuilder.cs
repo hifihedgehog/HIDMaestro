@@ -252,7 +252,7 @@ public static class DriverBuilder
 
         // xusbshim removed — its filter INF bound indiscriminately to
         // HID\VID_045E&PID_028E&IG_00 including physical Xbox 360 controllers.
-        // hidmaestro_xusb.inf (HMCOMPANION) REINSTATED 2026-04-23 with setup
+        // hidmaestro_xusb.inf (HIDMAESTRO) REINSTATED 2026-04-23 with setup
         // class changed from XnaComposite to System so Windows.Gaming.Input.dll
         // does not classify it as a second WGI Gamepad. xinput1_4 discovery
         // (which scans the {EC87F1E3} interface class directly) still finds it.
@@ -278,7 +278,27 @@ public static class DriverBuilder
                 }
             }
 
-            if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
+            // pnputil /install fails with rc=259 ("Unable to install driver
+            // package: The requested device interface is not present in the
+            // system") when there are no devices on the system that match the
+            // INF's hardware IDs. That's the EXPECTED state on a fresh /
+            // post-cleanup install: SwDeviceCreate hasn't run yet so no
+            // matching devnodes exist, and the AddInterface directive in
+            // hidmaestro_xusb.inf has nothing to register against. The
+            // /add-driver portion (which is what we actually need — the
+            // package in the DriverStore) succeeded; ignore the /install
+            // miss. The subsequent SwDeviceCreate call will trigger PnP's
+            // proper bind + interface registration.
+            bool noMatchingDevice = output.Contains(
+                "The requested device interface is not present in the system");
+            bool packageAdded = output.Contains("Driver package added successfully");
+
+            if (rc != 0 && noMatchingDevice && packageAdded)
+            {
+                // Expected on first install / post-cleanup. Driver is in the
+                // store; SwDeviceCreate will handle binding. Continue silently.
+            }
+            else if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
             {
                 // xusbshim failure is non-fatal — if the Extension INF doesn't
                 // apply, the rest of the install flow still works and we just
