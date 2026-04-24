@@ -16,7 +16,7 @@ Class       = HIDClass
 ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro.cat
-DriverVer   = 04/23/2026,1.1.6.330
+DriverVer   = 04/23/2026,1.1.6.340
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -95,6 +95,13 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
+; ProcessSharingDisabled = one WUDFHost per device instance. Without this,
+; all N controllers' HID drivers pile into ONE WUDFHost process that
+; serializes all their work on a shared thread pool — CPU saturates and
+; per-controller latency rises as N grows. Each controller only has one
+; thread-worth of traffic, so running each in its own host has negligible
+; memory overhead vs the parallelism win.
+UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HIDMaestro_UmdfService]
 UmdfLibraryVersion = 2.15.0
