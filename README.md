@@ -147,6 +147,18 @@ One string in a device path controls three different detection paths across thre
 
 Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro writes custom mappings that point the trigger axes to the velocity usage indices (5 and 6 instead of the default combined axis 4). This makes WGI's Gamepad object read actual separate trigger values from the Vx/Vy fields.
 
+### xinputhid UpperFilter Tripwire
+
+WGI (`Windows.Gaming.Input.dll`) admits devices into its provider graph through `ProviderManagerWorker::OnPnpDeviceAdded`. A Ghidra decomp of that function on Win11 26200 showed the gate: WGI accepts a device only if its ClassGuid is in a hard-coded four-entry pass-list (`HIDClass`, `XnaComposite`, one other setup class, one GameInput class) OR if `IsDeviceOrAncestorFilteredBy(path, L"xinputhid")` returns true. The fallback check is a literal `wcsncmp` against strings in the device's (or any ancestor's) `UpperFilters` MULTI_SZ.
+
+HIDMaestro's XUSB companion, HMCOMPANION, runs under the System class `{4d36e97d-...}`. That class is not on the pass-list, so before this work WGI silently skipped HMCOMPANION despite it publishing the XUSB device interface — Chromium's `put_Vibration` went nowhere for Xbox 360 Wired.
+
+The fix writes the string `"xinputhid"` to HMCOMPANION's `UpperFilters` registry value via the INF's `HKR` AddReg. `xinputhid.sys` is a HID-class filter, so it never actually attaches to the System-class companion; the string sits inert in the registry and WGI's wstring compare passes anyway. HMCOMPANION enters WGI via the XUSB dispatch path, and `IOCTL_XUSB_SET_STATE` starts reaching the driver with real motor bytes on `put_Vibration`.
+
+The same string gets written per-instance to the HID parent by `DeviceOrchestrator` for XUSB-companion profiles only. That second write blocks WGI's `HidClient::CreateProvider` from synthesizing a duplicate HID-backed Gamepad for the same logical controller, so WGI shows exactly one Gamepad with live input and working vibration instead of two pads splitting the responsibilities.
+
+The 29-byte `IOCTL_XUSB_WAIT_FOR_INPUT` reply format was nailed down in the same decomp pass: `state[9] = 0x00` so `XusbInputParser`'s built-in Gamepad template matches (a prior 0x14 value produced an all-zero `GetCurrentReading` despite input arriving), plus the `state[10] = 0x14` non-zero gate byte, `state[2] = 0x03 RESUMED` on every completion, and version bytes `0x01 0x03` at `state[0..1]`.
+
 ## Comparison
 
 | Feature | HIDMaestro | ViGEmBus | DsHidMini | vJoy |
@@ -174,31 +186,49 @@ User-Mode Test App
   │ Writes input data to per-controller shared memory section
   │ Manages device lifecycle (create, configure, remove)
   │
-  ├──► Shared Memory (per-controller)
-  │     SeqNo(4) + HID Report(64) + GIP Data(14) = 86 bytes
-  │     Event-driven: SDK signals InputDataEvent on each write
+  ├──► Shared Memory (per-controller, pagefile-backed)
+  │     SeqNo(4) + DataSize(4) + Data[256] + GipData[14] = 278 bytes
+  │     Data[256] carries HID input reports up to 256 bytes (DualSense BT
+  │       report 0x31 = 78 bytes, Switch Pro motion-IMU reports, etc.).
+  │     Event-driven: SDK signals InputDataEvent on each write.
   │
   ├──► Main HID Device (HIDMaestro.dll via mshidumdf)
-  │     ROOT\VID_045E&PID_028E&IG_00\0000
+  │     ROOT\VID_045E&PID_028E&IG_00\NNNN
   │     ├─ HID descriptor with Vx/Vy velocity triggers
   │     ├─ Event-driven worker reads shared memory → HID READ_REPORT
   │     │   (seqno-gated: idle CPU cost ~0.04% per controller)
-  │     ├─ USB + WinExInput interfaces
+  │     ├─ USB interface (XUSB-companion profiles also get the xinputhid
+  │     │   UpperFilter written per-instance by the SDK — see Techniques)
+  │     ├─ Legacy WinExInput interface registration retained for historical
+  │     │   compatibility; Ghidra decomp of Windows.Gaming.Input.dll showed
+  │     │   zero references to its GUID, so it is not WGI's actual hook
   │     └─ BTHLEDEVICE CompatibleIDs (Bluetooth profiles)
   │
   └──► XUSB Companion (HMXInput.dll, XnaComposite class)
-        ROOT\HMCompanion\0000  (non-xinputhid Xbox profiles only)
-        ├─ XUSB interface → XInput discovery
-        ├─ WinExInput interface → WGI GamepadAdded
+        ROOT\HMCOMPANION\NNNN  (non-xinputhid Xbox profiles only)
+        ├─ XUSB interface {EC87F1E3-...} → XInput discovery + WGI dispatch
+        ├─ UpperFilters = "xinputhid" (pure registry-string tripwire that
+        │     admits the device to WGI's XUSB path without xinputhid.sys
+        │     actually attaching — see Techniques below)
         ├─ Event-driven: reads GipData from shared memory
-        └─ Handles GET_STATE/GET_CAPABILITIES/SET_STATE IOCTLs
+        └─ Handles GET_STATE/GET_CAPABILITIES/SET_STATE IOCTLs; returns
+           29-byte WAIT_FOR_INPUT frames with state[9]=0x00 so WGI's
+           XusbInputParser matches the Gamepad template's reportId=0
+
+Both INFs set `UmdfHostProcessSharing = ProcessSharingDisabled`, so every
+device instance gets its own WUDFHost process (~8 MB RSS, ~10 threads).
+With 6 simultaneous controllers that's 8 per-instance hosts in place of
+the default 1 shared host. The per-controller IO paths run in parallel
+instead of serializing through one host's thread pool; idle CPU stays
+near zero and peak throughput scales with controller count.
 ```
 
 **Data flows:**
 - **DirectInput** ← HID READ_REPORT ← shared memory (combined Z + Vx/Vy in descriptor)
 - **XInput** ← XUSB GET_STATE ← companion reads GipData from shared memory
 - **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
-- **Browser** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
+- **Browser (plain HID / Xbox Series BT)** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
+- **Browser (Xbox 360 Wired)** ← WGI Gamepad ← HMCOMPANION's XUSB interface, admitted via the xinputhid UpperFilter tripwire. Chromium `put_Vibration` dispatches `IOCTL_XUSB_SET_STATE` with motor bytes back through this path, where the SDK raises `OutputReceived` to the consumer.
 - **Bluetooth ID**: HIDAPI checks CompatibleIDs, reports bus_type=BT
 
 ## Getting Started
@@ -217,8 +247,8 @@ dotnet run --project example\SdkDemo
 
 # Full test app (self-contained: cert + build + sign + install all automatic)
 cd test
-dotnet build -c Debug
-bin\Debug\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
+dotnet build
+bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-360-wired
 
 # Multiple controllers at once (up to 6 verified, any mix of profiles)
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired dualsense
@@ -283,8 +313,8 @@ Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series 
 
 | Profile | DirectInput | XInput | SDL3 | Browser | WGI |
 |---------|------------|--------|------|---------|-----|
-| Xbox 360 Wired | 5 axes, 10 btns | 1 slot, separate triggers | &IG_ path, USB | STANDARD GAMEPAD, separate | 1 interface |
-| Xbox Series BT | 5 axes, 16 btns | 1 slot, separate triggers | &IG_ path, Bluetooth | STANDARD GAMEPAD, separate | 1+ interfaces |
+| Xbox 360 Wired | 5 axes, 10 btns | 1 slot, separate triggers, Guide (Ex) | &IG_ path, USB | STANDARD GAMEPAD, separate | 1 interface |
+| Xbox Series BT | 5 axes, 16 btns (+ Share at btn 12) | 1 slot, separate triggers, Guide (Ex) | &IG_ path, Bluetooth | STANDARD GAMEPAD, separate | 1+ interfaces |
 | DualSense (PS5) | 6 axes, 15 btns | N/A | USB | Detected | N/A |
 | **6-controller mixed** | **All 6 visible** | **4 slots (XInput cap)** | **4 IG + 2 live** | **4 pads (Chromium cap)** | **All 6 visible** |
 
@@ -297,10 +327,12 @@ Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series 
 | DirectInput VID:PID | 045E:028E |
 | XInput slots | 1 |
 | XInput triggers | Separate (LT and RT independent) |
+| XInput Guide | Reachable via `XInputGetStateEx` as `XINPUT_GAMEPAD_GUIDE` (0x0400). The XUSB companion packs `HMButton.Guide` into GIP `btnHigh` bit 0x40 and unpacks it back into `wButtons` in `IOCTL_XUSB_GET_STATE`. xinputhid does not apply to the 360 profile, so the companion path carries it. |
 | SDL3/HIDAPI | Detected via XInput, &IG_ path |
 | Browser Gamepad | "Xbox 360 Controller (XInput STANDARD GAMEPAD)" |
 | Browser triggers | Separate (via Vx/Vy + GameInput mapping) |
-| WGI/WinExInput | 1 enabled interface |
+| Browser vibration | Chromium `put_Vibration` dispatches `IOCTL_XUSB_SET_STATE` to HMCOMPANION via the xinputhid UpperFilter tripwire (WGI's XUSB path). The SDK raises `OutputReceived` to the consumer; forwarding to physical hardware is the consumer's job. |
+| WGI Gamepad | One entry, XUSB-backed through HMCOMPANION |
 | Duplicates | None |
 
 ### Xbox Series X|S Controller (Bluetooth)
@@ -308,14 +340,16 @@ Multi-controller verified with 6 simultaneous mixed controllers (2x Xbox Series 
 | Check | Result |
 |-------|--------|
 | DirectInput axes | 5 |
-| DirectInput buttons | 16 (Win11 xinputhid standard) |
+| DirectInput buttons | 16 (Win11 xinputhid synthesis over a 12-button source descriptor) |
 | DirectInput VID:PID | 045E:0B13 |
 | XInput slots | 1 |
 | XInput triggers | Separate |
+| XInput Guide | Reachable via `XInputGetStateEx` as `XINPUT_GAMEPAD_GUIDE` (0x0400). Routed through the System Main Menu HID usage; xinputhid forwards it natively, so this works on every Series/One/Elite BT+USB profile that shares the GIP descriptor. |
+| Share button | Present in the source descriptor at button 12 (`HMButton.Share`). Visible through xinputhid's 16-button layout; exposed as a plain discrete button rather than a Consumer Page Record so consumers can layer macros on it. |
 | SDL3/HIDAPI | bus_type = Bluetooth |
 | BTHLEDEVICE spoof | Confirmed (HIDAPI bus_type=2) |
 | Browser Gamepad | Detected, separate triggers |
-| WGI/WinExInput | 1+ enabled interfaces |
+| WGI Gamepad | One entry, HID-backed. xinputhid.sys binds on the HID child (the real one, not the registry-string tripwire) and drives WGI admission natively. |
 | Duplicates | None |
 
 ### Screenshots
@@ -379,7 +413,7 @@ OK     HIDClass     HID-compliant game controller HID\VID_045E&PID_028E&IG_00\..
 </details>
 
 <details>
-<summary>XUSB + WinExInput interfaces (click to expand)</summary>
+<summary>HMCOMPANION device interfaces + UpperFilters (click to expand)</summary>
 
 ```
 XUSB Interface:
@@ -387,11 +421,19 @@ XUSB Interface:
   Device: ROOT\HMCOMPANION\0000
   Status: Enabled
 
-WinExInput Interface:
-  Path:   \\?\ROOT#HMCOMPANION#0000#{6c53d5fd-6480-440f-b618-476750c5e1a6}\XI_00
-  Device: ROOT\HMCOMPANION\0000
-  Status: Enabled
+Registry:
+  HKLM\SYSTEM\CurrentControlSet\Enum\ROOT\HMCOMPANION\0000
+    UpperFilters = "xinputhid"       ← WGI dispatch tripwire (INF-written)
+
+Main HID device:
+  HKLM\SYSTEM\CurrentControlSet\Enum\ROOT\VID_045E&PID_028E&IG_00\0000
+    UpperFilters = "xinputhid"       ← prevents duplicate HID-backed
+                                       WGI Gamepad (SDK-written per-instance,
+                                       only for profiles with an XUSB
+                                       companion)
 ```
+
+Only one device interface is registered on HMCOMPANION (XUSB). Publishing a second interface would create a duplicate WGI provider arrival and classifier confusion — the tripwire plus the single XUSB registration is what produces exactly one Gamepad.
 </details>
 
 ### Startup and Hot-Plug Timing
@@ -425,17 +467,25 @@ ROOT\VID_054C&PID_0CE6\NNNN          ← our UMDF2 driver (mshidumdf host)
 
 #### 2. Non-xinputhid Xbox: Xbox 360 Wired (~5.7s)
 
-Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is delivered via a separate HMCOMPANION device running `HMXInput.dll` (XUSB companion).
+Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is delivered via a separate HMCOMPANION device running `HMXInput.dll` (XUSB companion). WGI dispatch also runs through HMCOMPANION, admitted by the xinputhid UpperFilter tripwire described in Techniques.
 
 ```
 ROOT\VID_045E&PID_028E&IG_00\NNNN    ← our UMDF2 driver (main HID device)
+  │                                    UpperFilters += "xinputhid" per-instance
+  │                                    (SDK-written; blocks WGI from building
+  │                                    a second HID-backed Gamepad for this
+  │                                    logical controller)
   └─ HID\VID_045E&PID_028E&IG_00\... ← HID child (raw PDO, input.inf)
 ROOT\HMCOMPANION\NNNN                ← XUSB companion (HMXInput.dll)
-  ├─ XUSB interface → XInput slot
-  └─ WinExInput interface → WGI
+  │                                    UpperFilters = "xinputhid" from INF
+  │                                    (admits HMCOMPANION to WGI's XUSB
+  │                                    dispatch; xinputhid.sys does not
+  │                                    actually attach — wrong device class)
+  └─ XUSB interface → XInput slot + WGI Gamepad (one entry, live input +
+                                     working put_Vibration on Chromium)
 ```
 
-**Medium stack.** Three devices to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~5.7s.
+**Medium stack.** Two device trees to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~5.7s.
 
 #### 3. xinputhid Xbox: Xbox Series X|S Bluetooth (~11s)
 
@@ -500,8 +550,9 @@ To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python sc
 
 | Term | Meaning |
 |------|---------|
-| **XUSB** | Xbox USB protocol. The device interface GUID (`{EC87F1E3-...}`) that `xinput1_4.dll` discovers to find Xbox controllers. |
-| **WinExInput** | Windows Extended Input. A device interface GUID (`{6C53D5FD-...}`) that WGI uses to fire `GamepadAdded` events for browser detection. |
+| **XUSB** | Xbox USB protocol. The device interface GUID (`{EC87F1E3-...}`) that `xinput1_4.dll` discovers to find Xbox controllers, and the one WGI walks for XUSB-backed Gamepads. |
+| **WinExInput** | Windows Extended Input. A device interface GUID (`{6C53D5FD-...}`) registered on HID parents by HIDMaestro for historical reasons. Ghidra decomp of `Windows.Gaming.Input.dll` (Win11 26200) found zero references to this GUID; it is not actually WGI's `GamepadAdded` source. WGI admission comes from the HIDClass pass-list (plain HID profiles) or the xinputhid UpperFilter tripwire (Xbox XUSB-companion profiles). |
+| **xinputhid UpperFilter tripwire** | Registry string `"xinputhid"` written to a device's `DEVPKEY_Device_UpperFilters` (via INF HKR AddReg or SetupAPI) to satisfy WGI's `IsDeviceOrAncestorFilteredBy` wstring compare. Does not load `xinputhid.sys` — the filter only attaches to HID-class devices. Admits a System-class device (HMCOMPANION) to WGI's XUSB dispatch path. See Techniques. |
 | **XUSB Companion** | A separate UMDF2 device (`HMXInput.dll`) that handles XUSB IOCTLs for XInput. Needed because `mshidumdf` suppresses XUSB on HID devices. |
 | **GameInput mapping** | Registry entries at `HKLM\...\GameInput\Devices\{VID}{PID}...` that tell WGI how to map HID axes/buttons to the Gamepad interface. |
 | **&IG_** | "Interface Group" marker in Xbox device paths. Chrome and HIDAPI skip devices with this in the path; SDL3 falls through to its RawInput backend. |

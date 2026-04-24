@@ -7,11 +7,23 @@
 
 [Version]
 Signature   = "$WINDOWS NT$"
-Class       = XnaComposite
-ClassGuid   = {D61CA365-5AF4-4486-998B-9DB4734C6CA3}
+; Class = System (not XnaComposite) — intentionally chosen so
+; Windows.Gaming.Input.dll::ProviderManagerWorker::OnPnpDeviceAdded does NOT
+; classify HMCOMPANION as a WGI Gamepad. XnaComposite auto-publishes the
+; {D61CA365} XnaComposite interface, which hits classifier branch 1 and
+; creates a second WGI entity alongside the main HID virtual's HID-path
+; Gamepad — that's the duplicate that hangs Windows.Gaming.Input.
+; System class is not matched by any classifier branch.
+;
+; xinput1_4.dll's XInput discovery enumerates GUID_DEVINTERFACE_XUSB
+; {EC87F1E3} interfaces directly and does NOT filter by setup class, so
+; HMCOMPANION remains XInput-discoverable via its AddInterface entry below.
+; See memory:feedback-one-wgi-device-per-controller.md.
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 04/21/2026,1.1.18.0
+DriverVer   = 04/23/2026,1.1.19.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -28,7 +40,14 @@ HMXInput.dll = 1
 %ManufacturerName% = Standard,NTamd64
 
 [Standard.NTamd64]
+; VID-specific aliases — PnP's DEVPKEY_Device_MatchingDeviceId will carry
+; the VID_045E string when our Gate 2 fix writes this HwID into the
+; device's multi-sz HardwareID list. Covers the common Xbox 360 family
+; PIDs HIDMaestro may emulate.
 %DeviceDesc% = XUSB_Install, root\VID_045E&PID_028E&XI_00
+%DeviceDesc% = XUSB_Install, root\VID_045E&PID_0291&XI_00
+%DeviceDesc% = XUSB_Install, root\VID_045E&PID_0719&XI_00
+; Generic fallback for any profile whose PID isn't in the specific list.
 %DeviceDesc% = XUSB_Install, root\HIDMaestroXUSB
 
 [XUSB_Install.NT]
@@ -42,22 +61,34 @@ AddReg = XUSB_HW_AddReg
 
 [XUSB_HW_AddReg]
 HKR,,"XusbMode",0x00010001,1
+; "xinputhid" UpperFilter string — this is the WGI dispatch tripwire.
+; ProviderManagerWorker::OnPnpDeviceAdded (all-core.c:~41617) walks the
+; ancestor UpperFilters chain with IsDeviceOrAncestorFilteredBy(path,
+; L"xinputhid"). When that returns true AND the device publishes
+; GUID_DEVINTERFACE_XUSB ({ec87f1e3}), WGI dispatches via the XUSB path
+; (LAB_18005f241) regardless of setup class. Without this, HMCOMPANION
+; under System class matches NO dispatch branch and WGI silently skips it,
+; which is why vibration never reached our SET_STATE handler in prior tests.
+;
+; xinputhid.sys is a HID-class filter — it won't actually attach to this
+; System-class device, so no 16-button descriptor rewrite. This is a pure
+; registry-string tripwire. See memory:project-wgi-pnp-device-settings-registry.md.
+HKR,,"UpperFilters",0x00010008,"xinputhid"
 HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
 [XUSB_Install.NT.Interfaces]
 AddInterface = {EC87F1E3-C13B-4100-B5F7-8B84D54260CB},,XUSB_Interface
-AddInterface = {6C53D5FD-6480-440F-B618-476750C5E1A6},"XI_00",WinExInput_Interface
+; WinExInput {6C53D5FD-6480-440F-B618-476750C5E1A6} intentionally NOT
+; registered. It has ZERO references in Windows.Gaming.Input.dll
+; (verified via full decomp of 3,449 functions on 2026-04-23). Registering
+; both XUSB and WinExInput on this one device causes WGI to see two distinct
+; WGI entities for one virtual controller and hang the entire subsystem.
+; See memory:feedback-one-wgi-device-per-controller.md.
 
 [XUSB_Interface]
 AddReg = XUSB_Interface_AddReg
 
 [XUSB_Interface_AddReg]
-HKR,,"DeviceEnabled",0x00010001,1
-
-[WinExInput_Interface]
-AddReg = WinExInput_Interface_AddReg
-
-[WinExInput_Interface_AddReg]
 HKR,,"DeviceEnabled",0x00010001,1
 
 [XUSB_Install.NT.Services]
@@ -77,9 +108,9 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
-; See hidmaestro.inf for rationale. Each XUSB companion runs in its own
-; WUDFHost to prevent co-tenancy contention with other HIDMaestro virtuals
-; or real xinputhid devices.
+; Per-instance WUDFHost — see hidmaestro.inf for rationale. The async
+; WAIT_FOR_INPUT pump + 8ms timer would otherwise serialize across
+; every HMCOMPANION instance in a single host.
 UmdfHostProcessSharing      = ProcessSharingDisabled
 
 [HMXInput_UmdfService]

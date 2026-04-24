@@ -1,0 +1,95 @@
+;
+; HIDMaestro XUSB Shim — non-Extension variant (Class=HIDClass).
+;
+; Fallback for hidmaestro_xusbshim.inf in case the Extension INF pattern
+; doesn't apply to HID-child PDOs on Windows 11. This INF declares itself
+; as a HIDClass driver for the same HardwareIDs, installs HMXusbShim as
+; a UMDF2 service that attaches as an upper filter via WUDFRd, without
+; replacing the default HidClass function driver.
+;
+; The pattern mirrors xinputhid.inf's structure: HIDClass-class INF that
+; binds to specific HID HardwareIDs, installs a kernel/user-mode driver
+; via a Services/Wdf section, and adds itself to UpperFilters so the
+; existing function driver (HidClass) stays in place underneath.
+;
+; Driver-rank ordering: our HardwareID match is specific (HID\VID_045E&
+; PID_028E&IG_00), so Windows will prefer this INF over HidClass's
+; generic input.inf matches. That's intended — we still want to register
+; HMXusbShim as the UMDF2 filter that sees XUSB IOCTLs.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745A17A0-74D3-11D0-B6FE-00A0C90F57DA}
+Provider    = %ProviderName%
+CatalogFile = hidmaestro_xusbshim_class.cat
+DriverVer   = 04/23/2026,1.1.19.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+UMDriverCopy   = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+HMXusbShim.dll = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = XusbShim_Install, HID\VID_045E&PID_028E&IG_00
+%DeviceDesc% = XusbShim_Install, HID\VID_045E&PID_0291&IG_00
+%DeviceDesc% = XusbShim_Install, HID\VID_045E&PID_0719&IG_00
+
+[XusbShim_Install.NT]
+CopyFiles = UMDriverCopy
+
+[UMDriverCopy]
+HMXusbShim.dll
+
+[XusbShim_Install.NT.HW]
+AddReg = XusbShim_AddReg
+
+[XusbShim_AddReg]
+HKR,,"UpperFilters",0x00010008,"WUDFRd"
+; Security descriptor parity with hidmaestro_xusb.inf (HMCOMPANION). SYSTEM +
+; BUILTIN\Administrators + World can read/write. Broad ACL so no process is
+; blocked from opening our XUSB interface by ACL check (Opus gap-analysis #3).
+HKR,,"Security",,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
+
+[XusbShim_Install.NT.Services]
+; Default flag (no SPSVCINST_ASSOCSERVICE) — we're an upper filter, NOT the
+; function driver. HidClass remains function driver. Match xinputhid.inf's
+; filter-service pattern: `AddService=xinputhid,,XInput_HidService` with no
+; middle-field flag. Empty middle field = default behavior, purely filter.
+AddService = WUDFRd,,WUDFRD_Service
+
+[WUDFRD_Service]
+DisplayName    = %WudfRdDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
+
+[XusbShim_Install.NT.Wdf]
+UmdfService                 = HMXusbShim, HMXusbShim_UmdfService
+UmdfServiceOrder            = HMXusbShim
+UmdfKernelModeClientPolicy  = AllowKernelModeClients
+UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
+UmdfMethodNeitherAction     = Copy
+UmdfFsContextUsePolicy      = CanUseFsContext2
+
+[HMXusbShim_UmdfService]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary      = %13%\HMXusbShim.dll
+
+[Strings]
+ProviderName     = "HIDMaestro"
+ManufacturerName = "HIDMaestro"
+DeviceDesc       = "HIDMaestro XUSB Interface Shim"
+DiskName         = "HIDMaestro Installation Disk"
+WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"

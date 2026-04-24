@@ -100,13 +100,6 @@ public sealed class HMController : IDisposable
         }
     }
 
-    /// <summary>The XInput slot this controller occupies, if any. Non-Xbox
-    /// profiles return null. Xbox profiles return the assigned slot (0..3)
-    /// once the controller has been registered with xinput1_4. May be null
-    /// briefly during creation; settles within a few hundred ms of
-    /// <see cref="HMContext.CreateController"/> returning.</summary>
-    public int? XInputSlot { get; internal set; }
-
     /// <summary>Push the next input frame to the virtual controller.
     /// The SDK encodes <paramref name="state"/> into the active profile's
     /// HID report layout and publishes it via shared memory.</summary>

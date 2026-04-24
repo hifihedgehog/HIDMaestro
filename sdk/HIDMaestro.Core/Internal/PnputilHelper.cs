@@ -32,11 +32,28 @@ namespace HIDMaestro.Internal;
 internal static class PnputilHelper
 {
     /// <summary>The INF original names that belong to HIDMaestro. Used as
-    /// the strict allow-list when filtering enumerated driver records.</summary>
+    /// the strict allow-list when filtering enumerated driver records.
+    /// INFs we EXPECT to be installed. IsHidMaestroDriverInstalled
+    /// requires all of these to be present.
+    /// Must match the set actually installed by DriverBuilder.InstallDrivers()
+    /// — keep in sync or FullDeploy will refire per-controller and fail when
+    /// the first controller holds the package.</summary>
     public static readonly string[] HidMaestroInfNames = new[]
     {
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
+    };
+
+    /// <summary>INFs that RemoveAllHidMaestroPackages should clean up — includes
+    /// legacy/experimental names so stale packages from prior iterations
+    /// don't linger in the driver store and block reinstall.</summary>
+    public static readonly string[] HidMaestroInfNamesForCleanup = new[]
+    {
+        "hidmaestro.inf",
+        "hidmaestro_xusb.inf",
+        "hidmaestro_xusbshim_class.inf",
+        "hidmaestro_xusbshim.inf",  // legacy Extension variant
+        "hidmaestro_btnfix.inf",    // legacy btnfix experiment
     };
 
     /// <summary>One enumerated driver package record (a single block of
@@ -62,10 +79,22 @@ internal static class PnputilHelper
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
-        string stdout = p.StandardOutput.ReadToEnd();
-        string stderr = p.StandardError.ReadToEnd();
-        p.WaitForExit(timeoutMs);
-        return (p.ExitCode, stdout + stderr);
+        // Drain streams concurrently: ReadToEnd blocks until EOF, which only
+        // happens at process exit — so a synchronous read here would hang past
+        // timeoutMs when pnputil itself hangs. Async read + WaitForExit gives
+        // us a real timeout we can act on.
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(timeoutMs))
+        {
+            try { p.Kill(entireProcessTree: true); } catch { }
+            p.WaitForExit(5_000);
+        }
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        int exitCode;
+        try { exitCode = p.ExitCode; } catch { exitCode = -1; }
+        return (exitCode, stdout + stderr);
     }
 
     /// <summary>Parses the full output of <c>pnputil /enum-drivers</c> into
@@ -129,13 +158,21 @@ internal static class PnputilHelper
 
     /// <summary>Removes one driver package by published name with retry on
     /// "in use" failures. Returns true on success. <paramref name="error"/>
-    /// is set to pnputil's combined stdout+stderr on failure.</summary>
+    /// is set to pnputil's combined stdout+stderr on failure.
+    ///
+    /// Uses <c>/uninstall /force</c>: <c>/uninstall</c> tells pnputil to
+    /// uninstall the driver from any devices still bound (including stale
+    /// PnP bindings that don't show up in <c>/enum-devices</c> — the "device
+    /// is presently installed using the specified INF" failure mode), and
+    /// <c>/force</c> covers the remaining cases where a device is actively
+    /// started. Plain <c>/force</c> alone was not sufficient on stale
+    /// bindings left behind by half-completed teardowns.</summary>
     public static bool DeletePackage(string publishedName, out string error, int retries = 3)
     {
         error = "";
         for (int attempt = 0; attempt < retries; attempt++)
         {
-            var (rc, output) = Run($"/delete-driver {publishedName} /force", timeoutMs: 10_000);
+            var (rc, output) = Run($"/delete-driver {publishedName} /uninstall /force", timeoutMs: 30_000);
             if (rc == 0 && !output.Contains("Failed", StringComparison.OrdinalIgnoreCase))
                 return true;
 
@@ -144,7 +181,8 @@ internal static class PnputilHelper
             // moment to release before retrying. Doesn't matter if the wait is
             // wasted; this only runs during cleanup.
             if (output.Contains("in use", StringComparison.OrdinalIgnoreCase) ||
-                output.Contains("currently being used", StringComparison.OrdinalIgnoreCase))
+                output.Contains("currently being used", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("presently installed", StringComparison.OrdinalIgnoreCase))
             {
                 Thread.Sleep(500);
                 continue;
@@ -161,8 +199,15 @@ internal static class PnputilHelper
     /// prevents the "stale entry blocks reinstall" failure mode.</summary>
     public static void RemoveAllHidMaestroPackages()
     {
+        // Use the broader cleanup allow-list so legacy/experimental INF names
+        // (hidmaestro_xusbshim.inf, hidmaestro_btnfix.inf) also get removed.
+        var cleanup = EnumerateDrivers()
+            .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
+                     && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,
+                                                                             StringComparison.OrdinalIgnoreCase)))
+            .ToList();
         var failures = new List<(string Published, string Error)>();
-        foreach (var pkg in FindHidMaestroPackages())
+        foreach (var pkg in cleanup)
         {
             if (!DeletePackage(pkg.PublishedName, out string err))
                 failures.Add((pkg.PublishedName, err));

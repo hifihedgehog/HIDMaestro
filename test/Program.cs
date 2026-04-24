@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
@@ -67,20 +70,28 @@ class Program
     {
         Console.WriteLine("=== HIDMaestro Test Client ===\n");
 
-        // Single-instance: kill any other HIDMaestroTest processes
-        int myPid = Environment.ProcessId;
-        foreach (var proc in Process.GetProcessesByName("HIDMaestroTest"))
-        {
-            if (proc.Id != myPid)
-            {
-                try { proc.Kill(); proc.WaitForExit(3000); } catch { }
-            }
-        }
-
         // Read-only introspection commands run fine without admin. Everything
         // else needs SeLoadDriverPrivilege for device create / driver install /
         // registry cleanup.
-        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is "list" or "search" or "info" or "build-descriptor" or "extract-profile";
+        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is
+            "list" or "search" or "info" or
+            "build-descriptor" or "extract-profile" or
+            "probe-xusb" or "xusb-vibrate";
+
+        // Single-instance: kill any other HIDMaestroTest processes — but NEVER for
+        // read-only probes, which must coexist with a running emulate.
+        if (!readOnlyCmd)
+        {
+            int myPid = Environment.ProcessId;
+            foreach (var proc in Process.GetProcessesByName("HIDMaestroTest"))
+            {
+                if (proc.Id != myPid)
+                {
+                    try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+                }
+            }
+        }
+
         if (!readOnlyCmd && !IsElevated())
         {
             Console.WriteLine("  Requesting elevation (admin required)...\n");
@@ -136,6 +147,8 @@ class Program
             "issue6-repro" => Issue6ReproCommand(),
             "extract-profile" => ExtractProfileCommand(args.Skip(1).ToArray()),
             "emulate-file" => EmulateFileCommand(args.Skip(1).ToArray()),
+            "probe-xusb" => ProbeXusb(),
+            "xusb-vibrate" => XusbVibrate(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }
@@ -1217,6 +1230,250 @@ class Program
         ctrl.Dispose();
         ctx.Dispose();
         Console.WriteLine("OK\n=== Demo complete ===");
+        return 0;
+    }
+
+    // ── probe-xusb / xusb-vibrate ──
+    // Enumerates GUID_DEVINTERFACE_XUSB_DEVICE (0xec87f1e3-...) and lets us
+    // fire the exact IOCTL Chrome fires for vibrate (0x8000A010, 9-byte input)
+    // on any discovered interface. Used to test whether xusbshim's HID-child
+    // publication receives Chrome's put_Vibration dispatch on current Edge 147.
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVICE_INTERFACE_DATA
+    {
+        public int cbSize;
+        public Guid InterfaceClassGuid;
+        public int Flags;
+        public IntPtr Reserved;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SP_DEVICE_INTERFACE_DETAIL_DATA
+    {
+        public int cbSize;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string DevicePath;
+    }
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevsW(ref Guid ClassGuid, IntPtr Enumerator,
+        IntPtr hwndParent, int Flags);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInterfaces(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
+        ref Guid InterfaceClassGuid, int MemberIndex, ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr DeviceInfoSet,
+        ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData, ref SP_DEVICE_INTERFACE_DETAIL_DATA DeviceInterfaceDetailData,
+        int DeviceInterfaceDetailDataSize, out int RequiredSize, IntPtr DeviceInfoData);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string lpFileName, uint dwDesiredAccess,
+        uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+        uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle hDevice, uint dwIoControlCode,
+        IntPtr lpInBuffer, uint nInBufferSize, IntPtr lpOutBuffer, uint nOutBufferSize,
+        out uint lpBytesReturned, IntPtr lpOverlapped);
+
+    static readonly Guid XusbInterfaceGuid = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
+    const uint IOCTL_XUSB_GET_INFORMATION = 0x80006000;
+    const uint IOCTL_XUSB_GET_CAPABILITIES = 0x8000E004;
+    const uint IOCTL_XUSB_SET_STATE = 0x8000A010;
+    const uint IOCTL_XUSB_WAIT_FOR_INPUT = 0x8000E3AC;
+
+    static string ClassifyXusbPath(string path)
+    {
+        string lower = path.ToLowerInvariant();
+        bool usb = lower.StartsWith(@"\\?\usb#");
+        bool hid = lower.StartsWith(@"\\?\hid#");
+        bool bthle = lower.Contains(@"#{00001812-");
+        bool vid045e = lower.Contains("vid_045e");
+        bool pid028e = lower.Contains("pid_028e");
+        bool pid0b13 = lower.Contains("pid_0b13");
+        bool pid02ff = lower.Contains("pid_02ff");
+        var tags = new List<string>();
+        if (usb) tags.Add("USB");
+        else if (hid && bthle) tags.Add("HID-BTHLE");
+        else if (hid) tags.Add("HID-CHILD");
+        if (vid045e && pid028e) tags.Add("045E:028E Xbox360-wired");
+        else if (vid045e && pid0b13) tags.Add("045E:0B13 XboxSeries");
+        else if (vid045e && pid02ff) tags.Add("045E:02FF XboxOne");
+        return string.Join(" ", tags);
+    }
+
+    static SafeFileHandle OpenXusbLikeChrome(string path)
+    {
+        const uint GENERIC_READ = 0x80000000;
+        const uint GENERIC_WRITE = 0x40000000;
+        const uint FILE_SHARE_READ = 0x01;
+        const uint FILE_SHARE_WRITE = 0x02;
+        const uint OPEN_EXISTING = 3;
+        const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+        return CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+    }
+
+    static List<string> EnumXusbInterfaces()
+    {
+        const int DIGCF_PRESENT = 0x02;
+        const int DIGCF_DEVICEINTERFACE = 0x10;
+        var guid = XusbInterfaceGuid;
+        var result = new List<string>();
+        IntPtr set = SetupDiGetClassDevsW(ref guid, IntPtr.Zero, IntPtr.Zero,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (set == new IntPtr(-1)) return result;
+        try
+        {
+            int index = 0;
+            while (true)
+            {
+                var ifdata = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+                if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref guid, index, ref ifdata)) break;
+                var detail = new SP_DEVICE_INTERFACE_DETAIL_DATA { cbSize = IntPtr.Size == 8 ? 8 : 6 };
+                SetupDiGetDeviceInterfaceDetailW(set, ref ifdata, ref detail,
+                    Marshal.SizeOf<SP_DEVICE_INTERFACE_DETAIL_DATA>(), out _, IntPtr.Zero);
+                result.Add(detail.DevicePath);
+                index++;
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return result;
+    }
+
+    static string HexSlice(byte[] buf, int len)
+    {
+        if (len <= 0) return "(none)";
+        var sb = new StringBuilder();
+        for (int i = 0; i < Math.Min(len, buf.Length); i++) sb.Append($"{buf[i]:X2} ");
+        return sb.ToString().TrimEnd();
+    }
+
+    static string Win32ErrName(int err) => err switch
+    {
+        2 => "FILE_NOT_FOUND",
+        3 => "PATH_NOT_FOUND",
+        5 => "ACCESS_DENIED",
+        6 => "INVALID_HANDLE",
+        31 => "GEN_FAILURE",
+        50 => "NOT_SUPPORTED",
+        87 => "INVALID_PARAMETER",
+        1168 => "NOT_FOUND",
+        _ => "?"
+    };
+
+    static int ProbeXusb()
+    {
+        Console.WriteLine("=== XUSB interface probe ===\n");
+        var paths = EnumXusbInterfaces();
+        if (paths.Count == 0)
+        {
+            Console.WriteLine("No XUSB-interface devices returned by SetupDi.");
+            return 0;
+        }
+        Console.WriteLine($"Found {paths.Count} XUSB interface(s):\n");
+        for (int i = 0; i < paths.Count; i++)
+        {
+            string path = paths[i];
+            Console.WriteLine($"[{i}] {ClassifyXusbPath(path)}");
+            Console.WriteLine($"    {path}");
+            using var h = OpenXusbLikeChrome(path);
+            if (h.IsInvalid)
+            {
+                int err = Marshal.GetLastWin32Error();
+                Console.WriteLine($"    CreateFile: FAIL  err={err} ({Win32ErrName(err)})");
+                Console.WriteLine();
+                continue;
+            }
+            Console.WriteLine($"    CreateFile: OK");
+
+            byte[] outBuf = new byte[64];
+            var outPin = GCHandle.Alloc(outBuf, GCHandleType.Pinned);
+            byte[] in3 = new byte[] { 0x01, 0x01, 0x00 };
+            var in3Pin = GCHandle.Alloc(in3, GCHandleType.Pinned);
+            try
+            {
+                Array.Clear(outBuf);
+                bool ok = DeviceIoControl(h, IOCTL_XUSB_GET_INFORMATION,
+                    IntPtr.Zero, 0, outPin.AddrOfPinnedObject(), 12, out uint ret, IntPtr.Zero);
+                Console.WriteLine($"    GET_INFORMATION: ok={ok} err={Marshal.GetLastWin32Error()} returned={ret} bytes={HexSlice(outBuf, (int)ret)}");
+
+                Array.Clear(outBuf);
+                ok = DeviceIoControl(h, IOCTL_XUSB_GET_CAPABILITIES,
+                    in3Pin.AddrOfPinnedObject(), 3, outPin.AddrOfPinnedObject(), 24, out ret, IntPtr.Zero);
+                Console.WriteLine($"    GET_CAPABILITIES[24]: ok={ok} err={Marshal.GetLastWin32Error()} returned={ret} bytes={HexSlice(outBuf, (int)ret)}");
+
+                // Also fire the EXTENDED variant — WGI uses 36-byte request. Input byte[0]=0x02 is the variant flag.
+                Array.Clear(outBuf);
+                byte[] inEx = new byte[] { 0x02, 0x01, 0x00 };
+                var inExPin = GCHandle.Alloc(inEx, GCHandleType.Pinned);
+                try
+                {
+                    ok = DeviceIoControl(h, IOCTL_XUSB_GET_CAPABILITIES,
+                        inExPin.AddrOfPinnedObject(), 3, outPin.AddrOfPinnedObject(), 36, out ret, IntPtr.Zero);
+                    Console.WriteLine($"    GET_CAPABILITIES[36]: ok={ok} err={Marshal.GetLastWin32Error()} returned={ret} bytes={HexSlice(outBuf, (int)ret)}");
+                }
+                finally { inExPin.Free(); }
+            }
+            finally { outPin.Free(); in3Pin.Free(); }
+            Console.WriteLine();
+        }
+        Console.WriteLine("To vibrate: HIDMaestroTest xusb-vibrate <index> [hex_9_bytes]");
+        return 0;
+    }
+
+    static int XusbVibrate(string[] args)
+    {
+        if (args.Length == 0)
+            return Error("Usage: xusb-vibrate <index> [hex_9_bytes]");
+        if (!int.TryParse(args[0], out int idx)) return Error("index must be integer");
+
+        byte[] payload;
+        if (args.Length >= 2)
+        {
+            string hex = args[1].Replace(" ", "").Replace("-", "");
+            if (hex.Length != 18) return Error($"payload must be 9 bytes (18 hex chars), got {hex.Length}");
+            payload = new byte[9];
+            for (int i = 0; i < 9; i++) payload[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        }
+        else
+            payload = new byte[] { 0x00, 0x08, 0x00, 0x7F, 0x7F, 0x00, 0x00, 0x00, 0x00 };
+
+        var paths = EnumXusbInterfaces();
+        if (idx < 0 || idx >= paths.Count) return Error($"index out of range (have {paths.Count})");
+
+        string path = paths[idx];
+        Console.WriteLine($"Target: [{idx}] {ClassifyXusbPath(path)}");
+        Console.WriteLine($"        {path}");
+        Console.WriteLine($"Payload (9 bytes): {HexSlice(payload, 9)}");
+
+        using var h = OpenXusbLikeChrome(path);
+        if (h.IsInvalid)
+        {
+            int err = Marshal.GetLastWin32Error();
+            Console.WriteLine($"CreateFile FAIL err={err} ({Win32ErrName(err)})");
+            return 1;
+        }
+        var pin = GCHandle.Alloc(payload, GCHandleType.Pinned);
+        try
+        {
+            bool ok = DeviceIoControl(h, IOCTL_XUSB_SET_STATE,
+                pin.AddrOfPinnedObject(), 9, IntPtr.Zero, 0, out uint ret, IntPtr.Zero);
+            Console.WriteLine($"SET_STATE start: ok={ok} err={Marshal.GetLastWin32Error()} returned={ret}");
+            Thread.Sleep(1000);
+            byte[] stop = new byte[9];
+            var stopPin = GCHandle.Alloc(stop, GCHandleType.Pinned);
+            try
+            {
+                ok = DeviceIoControl(h, IOCTL_XUSB_SET_STATE,
+                    stopPin.AddrOfPinnedObject(), 9, IntPtr.Zero, 0, out ret, IntPtr.Zero);
+                Console.WriteLine($"SET_STATE stop:  ok={ok} err={Marshal.GetLastWin32Error()} returned={ret}");
+            }
+            finally { stopPin.Free(); }
+        }
+        finally { pin.Free(); }
         return 0;
     }
 }

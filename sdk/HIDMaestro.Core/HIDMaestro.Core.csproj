@@ -9,7 +9,6 @@
     <LangVersion>latest</LangVersion>
 
     <!-- Library identity -->
-    <Version>1.1.18</Version>
     <AssemblyName>HIDMaestro.Core</AssemblyName>
     <RootNamespace>HIDMaestro</RootNamespace>
     <Description>HIDMaestro UMDF2 virtual HID controller engine — embed in your app to create exact-fidelity virtual game controllers.</Description>
@@ -36,8 +35,10 @@
       <!-- Driver binaries + INFs from build/ -->
       <_HMDriverFiles Include="$(HMBuildDir)HIDMaestro.dll" />
       <_HMDriverFiles Include="$(HMBuildDir)HMXInput.dll" />
+      <_HMDriverFiles Include="$(HMBuildDir)HMXusbShim.dll" Condition="Exists('$(HMBuildDir)HMXusbShim.dll')" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro.inf" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusb.inf" />
+      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusbshim_class.inf" Condition="Exists('$(HMBuildDir)hidmaestro_xusbshim_class.inf')" />
 
       <!-- signtool.exe + its SXS dep tree (from WDK x64) -->
       <_HMSigntool Include="$(HMWdkBin)x64\signtool.exe" />
