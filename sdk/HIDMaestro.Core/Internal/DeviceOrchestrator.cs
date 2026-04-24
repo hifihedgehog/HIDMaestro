@@ -796,9 +796,15 @@ internal static class DeviceOrchestrator
 
     private static string? CreateXusbCompanion(int controllerIndex, ControllerProfile profile)
     {
-        // Look for a live HMCOMPANION already claimed by THIS controllerIndex,
-        // in both the SWD path (new, post-slot-1-skip-fix) and the legacy ROOT
-        // path (for crash-recovery of older-version devices still on-system).
+        // Look for a live HMCOMPANION already claimed by THIS controllerIndex.
+        // The "HMCOMPANION" enumerator name is load-bearing for WGI's
+        // RawGameController dedup: with any other name (HIDMAESTRO,
+        // HIDMAESTROCOMPANION, etc.), WGI counts the XUSB companion AND the
+        // ROOT\VID_*&PID_* main device as two separate RawGameControllers
+        // for the same Xbox 360 controller, even though they share a
+        // ContainerID. HMCOMPANION gets deduped; others don't. Empirical —
+        // I don't know which specific WGI code path treats "HMCOMPANION" as
+        // "merge with sibling," so changing it breaks multi-consumer counts.
         string? xusbInstId = FindExistingCompanion("HMCOMPANION", controllerIndex);
 
         bool xusbExists = xusbInstId != null;
@@ -1056,9 +1062,9 @@ internal static class DeviceOrchestrator
                 foreach (var sub in enumKey.GetSubKeyNames())
                 {
                     bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isSwdForm = sub.StartsWith("HIDMAESTROGP_", StringComparison.OrdinalIgnoreCase)
-                                  || sub.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase);
-                    if (!isVidForm && !isSwdForm) continue;
+                    bool isOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+                               || sub.Equals("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
+                    if (!isVidForm && !isOurs) continue;
                     using var vidKey = enumKey.OpenSubKey(sub);
                     if (vidKey == null) continue;
                     foreach (var inst in vidKey.GetSubKeyNames())
