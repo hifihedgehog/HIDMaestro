@@ -9,7 +9,6 @@
     <LangVersion>latest</LangVersion>
 
     <!-- Library identity -->
-    <Version>1.1.6</Version>
     <AssemblyName>HIDMaestro.Core</AssemblyName>
     <RootNamespace>HIDMaestro</RootNamespace>
     <Description>HIDMaestro UMDF2 virtual HID controller engine — embed in your app to create exact-fidelity virtual game controllers.</Description>

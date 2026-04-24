@@ -12,6 +12,13 @@
          rejected by the FailOnDebug target below. -->
     <Configurations>Release</Configurations>
     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+
+    <!-- Single source of truth for version across every managed project
+         in the tree. Must match the 3 driver INFs' DriverVer
+         major.minor.patch (see driver/*.inf). Bump this plus the INFs
+         together — see memory:feedback-bump-versions-on-release.md for
+         the full checklist. -->
+    <Version>1.1.19</Version>
   </PropertyGroup>
 
   <!-- Hard-fail any Debug build at MSBuild evaluation time. MSBuild accepts
