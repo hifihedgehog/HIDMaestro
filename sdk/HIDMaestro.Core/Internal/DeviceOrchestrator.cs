@@ -24,6 +24,21 @@ internal static class DeviceOrchestrator
 
     private static bool s_ghostsCleaned;
 
+    /// <summary>
+    /// Unique per-process session id, prepended to every SwD instance-ID
+    /// suffix so the kernel PnP state doesn't see our (enumerator + suffix
+    /// + containerId) as "the same device as last run." Windows retains a
+    /// sticky per-container record after SwDeviceClose — a subsequent
+    /// SwDeviceCreate with an IDENTICAL tuple takes a fast "re-enumerate"
+    /// path that leaves the devnode as an empty shell (no Service/Driver
+    /// bound, no interface classes registered). Varying the suffix per
+    /// session forces a true fresh install every time. FindExistingCompanion
+    /// matches by ControllerIndex in Device Parameters (not by suffix), so
+    /// this is transparent to teardown / sweep code.
+    /// </summary>
+    private static readonly string s_sessionId =
+        System.Diagnostics.Process.GetCurrentProcess().Id.ToString("X").ToUpperInvariant();
+
     // ════════════════════════════════════════════════════════════════════
     //  Timing instrumentation — gated by env var HIDMAESTRO_TIMING=1.
     //  When enabled, each SetupController step's duration is appended to
@@ -715,7 +730,11 @@ internal static class DeviceOrchestrator
             // Stopped, and the HID child is Disconnected. `HIDMAESTROGP_<vid>_<pid>`
             // avoids the trigger substring entirely.
             string gpSwdEnumerator = gpEnumeratorSwd;
-            string instanceSuffix = $"{controllerIndex:D4}";
+            // Instance suffix = "<pid-hex>_<idx>". Varying the suffix per
+            // process instance bypasses Windows' sticky per-container
+            // "recently-here" fast path that otherwise leaves this devnode
+            // as an empty shell on subsequent runs.
+            string instanceSuffix = $"{s_sessionId}_{controllerIndex:D4}";
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Gamepad";
 
             var result = SwdDeviceFactory.Create(
@@ -814,9 +833,12 @@ internal static class DeviceOrchestrator
                 "USB\\Class_FF",
             };
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-            // Suffix encodes controllerIndex so the final instance path is
-            // deterministic and easy to scan/teardown.
-            string instanceSuffix = $"{controllerIndex:D4}";
+            // Instance suffix = "<pid-hex>_<idx>" — same rationale as the
+            // gamepad-companion path: bypass the kernel's sticky per-container
+            // "recently-here" fast path that leaves HMCOMPANION devnodes as
+            // empty shells (no Service/Driver bound, no XUSB interface
+            // registered) on subsequent runs in the same machine uptime.
+            string instanceSuffix = $"{s_sessionId}_{controllerIndex:D4}";
 
             var result = SwdDeviceFactory.Create(
                 instanceSuffix,
