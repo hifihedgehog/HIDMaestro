@@ -108,6 +108,34 @@ if exist "%DRIVER_DIR%\xusbshim.c" (
     )
 )
 
+:: ----------------------------------------------------------------------
+:: hmswd.exe — SWD-enumerated device creation helper. Invoked by the SDK
+:: to create devices with real ContainerIds (bypasses a .NET P/Invoke
+:: incompatibility with cfgmgr32!SwDeviceCreate on Win11 26200 — see
+:: driver\hmswd\hmswd.c header for context).
+:: ----------------------------------------------------------------------
+if exist "%DRIVER_DIR%\hmswd\hmswd.c" (
+    echo.
+    echo Compiling hmswd.exe ...
+    cl.exe /nologo /W3 /O1 /DUNICODE /D_UNICODE /EHsc ^
+        "/I%UM_INC%" "/I%SHARED_INC%" ^
+        "/Fo%OUT_DIR%\\" ^
+        /c "%DRIVER_DIR%\hmswd\hmswd.c"
+    if errorlevel 1 (
+        echo HMSWD COMPILE FAILED
+        exit /b 1
+    )
+    link.exe /nologo ^
+        "/OUT:%OUT_DIR%\hmswd.exe" ^
+        "/LIBPATH:%UM_LIB%" ^
+        "%OUT_DIR%\hmswd.obj" ^
+        swdevice.lib cfgmgr32.lib ole32.lib
+    if errorlevel 1 (
+        echo HMSWD LINK FAILED
+        exit /b 1
+    )
+)
+
 :: Stamp each INF's DriverVer with today's date + HHmm build number.
 :: The committed source INF keeps a stable 1.x.y.0 for review; the build/
 :: INF gets a fresh stamp so every package is uniquely versioned — pnputil

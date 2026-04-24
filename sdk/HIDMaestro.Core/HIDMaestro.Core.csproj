@@ -39,6 +39,10 @@
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro.inf" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusb.inf" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusbshim_class.inf" Condition="Exists('$(HMBuildDir)hidmaestro_xusbshim_class.inf')" />
+      <!-- hmswd.exe — SWD device creation helper, shelled out to by
+           SwdDeviceFactory for the ROOT\ → SWD\ migration (slot-1-skip fix).
+           Embedded here so single-file deployment still has it. -->
+      <_HMDriverFiles Include="$(HMBuildDir)hmswd.exe" Condition="Exists('$(HMBuildDir)hmswd.exe')" />
 
       <!-- signtool.exe + its SXS dep tree (from WDK x64) -->
       <_HMSigntool Include="$(HMWdkBin)x64\signtool.exe" />

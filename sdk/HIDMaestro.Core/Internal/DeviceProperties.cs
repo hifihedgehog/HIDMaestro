@@ -110,16 +110,21 @@ internal static class DeviceProperties
     {
         byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
 
+        // Sweep BOTH SWD\ (post-slot-1-skip-fix) and ROOT\ (legacy) enumerator
+        // roots — multi-controller setups after the migration have HMCOMPANION
+        // and gamepad companions under SWD\ while older paths may still sit
+        // under ROOT\.
+        foreach (var enumRoot in new[] { "SWD", "ROOT" })
         try
         {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (enumKey == null) return;
+            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+            if (enumKey == null) continue;
 
             foreach (var sub in enumKey.GetSubKeyNames())
             {
                 if (!sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
 
-                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}");
+                using var subKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}");
                 if (subKey == null) continue;
 
                 foreach (var inst in subKey.GetSubKeyNames())
@@ -127,7 +132,7 @@ internal static class DeviceProperties
                     if (controllerIndex >= 0)
                     {
                         using var dpKey = Registry.LocalMachine.OpenSubKey(
-                            $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                            $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}\{inst}\Device Parameters");
                         if (dpKey == null) continue;
                         var ci = dpKey.GetValue("ControllerIndex");
                         // Treat missing as index 0 so single-controller setup still works
@@ -135,7 +140,7 @@ internal static class DeviceProperties
                         if (actual != controllerIndex) continue;
                     }
 
-                    string devId = $@"ROOT\{sub}\{inst}";
+                    string devId = $@"{enumRoot}\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
                     {
                         CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_FriendlyName,
@@ -178,10 +183,12 @@ internal static class DeviceProperties
                 DEVPROP_TYPE_STRING, strBytes, (uint)strBytes.Length, 0);
         }
 
+        // Sweep both SWD\ (new) and ROOT\ (legacy) enumerator roots.
+        foreach (var enumRoot in new[] { "SWD", "ROOT" })
         try
         {
-            using var rootEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT");
-            if (rootEnum == null) return;
+            using var rootEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+            if (rootEnum == null) continue;
 
             foreach (var sub in rootEnum.GetSubKeyNames())
             {
@@ -196,13 +203,13 @@ internal static class DeviceProperties
                 foreach (var inst in subKey.GetSubKeyNames())
                 {
                     using var dpKey = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Enum\ROOT\{sub}\{inst}\Device Parameters");
+                        $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}\{inst}\Device Parameters");
                     if (dpKey == null) continue;
                     var ci = dpKey.GetValue("ControllerIndex");
                     int actual = ci is int v ? v : -1;
                     if (actual != controllerIndex) continue;
 
-                    string instId = $@"ROOT\{sub}\{inst}";
+                    string instId = $@"{enumRoot}\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, instId, 0) != 0) continue;
 
                     Apply(devInst);
