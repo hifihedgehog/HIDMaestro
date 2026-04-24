@@ -314,17 +314,14 @@ public static class DriverBuilder
             }
         }
 
-        // Force PnP to rescan existing devices so newly-added INFs apply to
-        // already-present matching devnodes. Without this, an Extension/filter
-        // INF added AFTER the HID child enumerates won't auto-apply until the
-        // device is removed and re-added. /scan-devices hits the whole system
-        // but is cheap (fractions of a second on a clean machine).
-        try
-        {
-            Run(pnputil, "/scan-devices", timeoutMs: 10_000);
-        }
-        catch { /* non-fatal */ }
-
+        // /scan-devices removed (Option 1). Was here to apply newly-added
+        // Extension/filter INFs to pre-existing HID children. We dropped
+        // xusbshim and our remaining INFs are function INFs that bind via
+        // SwDeviceCreate's own install path — /scan-devices was a no-op for
+        // them. On corporate workstations with many devices in the PnP tree
+        // this scan was 5–20 s of pure overhead. RemoveAllVirtualControllers
+        // (called before FullDeploy) DIF_REMOVEs any of our prior-session
+        // devnodes; nothing else needs the scan.
         return true;
     }
 
@@ -347,25 +344,30 @@ public static class DriverBuilder
     {
         _ = rebuild; // intentionally unused
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         Console.Write("  Extracting embedded driver payload... ");
         EnsureExtracted();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Removing old packages... ");
         RemoveOldDriverPackages();
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Signing... ");
         if (!SignDrivers()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Generating catalogs... ");
         if (!GenerateCatalogs()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
 
+        sw.Restart();
         Console.Write("  Installing drivers... ");
         if (!InstallDrivers()) return false;
-        Console.WriteLine("OK");
+        Console.WriteLine($"OK (total {sw.ElapsedMilliseconds} ms)");
 
         return true;
     }
