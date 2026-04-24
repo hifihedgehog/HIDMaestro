@@ -446,12 +446,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 
     BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
 
-    ULONG expectedSize;
-    if (hasReportId) {
-        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
-    } else {
-        expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
-    }
+    ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
 
     ULONG maxData;
     if (hasReportId) {
@@ -668,16 +663,6 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
 }
 
-/* ================================================================== */
-/* SelfManagedIo: retry XUSB interface enable after device fully starts */
-static NTSTATUS EvtSelfManagedIoInit(_In_ WDFDEVICE Device)
-{
-    UNREFERENCED_PARAMETER(Device);
-    /* XUSB interface is NOT registered on the main device — companion handles it.
-     * Do NOT re-enable stale XUSB interfaces here. */
-    return STATUS_SUCCESS;
-}
-
 /*  DriverEntry                                                        */
 /* ================================================================== */
 
@@ -734,14 +719,6 @@ EvtDeviceAdd(
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
     attributes.EvtCleanupCallback = EvtDeviceContextCleanup;
-
-    /* SelfManagedIo callback: retry XUSB interface enable after device starts */
-    {
-        WDF_PNPPOWER_EVENT_CALLBACKS pnpCallbacks;
-        WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpCallbacks);
-        pnpCallbacks.EvtDeviceSelfManagedIoInit = EvtSelfManagedIoInit;
-        WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpCallbacks);
-    }
 
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
     if (!NT_SUCCESS(status)) return status;

@@ -79,10 +79,22 @@ internal static class PnputilHelper
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
-        string stdout = p.StandardOutput.ReadToEnd();
-        string stderr = p.StandardError.ReadToEnd();
-        p.WaitForExit(timeoutMs);
-        return (p.ExitCode, stdout + stderr);
+        // Drain streams concurrently: ReadToEnd blocks until EOF, which only
+        // happens at process exit — so a synchronous read here would hang past
+        // timeoutMs when pnputil itself hangs. Async read + WaitForExit gives
+        // us a real timeout we can act on.
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(timeoutMs))
+        {
+            try { p.Kill(entireProcessTree: true); } catch { }
+            p.WaitForExit(5_000);
+        }
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        int exitCode;
+        try { exitCode = p.ExitCode; } catch { exitCode = -1; }
+        return (exitCode, stdout + stderr);
     }
 
     /// <summary>Parses the full output of <c>pnputil /enum-drivers</c> into

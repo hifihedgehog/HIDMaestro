@@ -100,10 +100,20 @@ internal static class DeviceOrchestrator
             RedirectStandardError = true, CreateNoWindow = true
         };
         using var proc = Process.Start(psi)!;
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(timeoutMs);
-        return (proc.ExitCode, stdout + stderr);
+        // See PnputilHelper.Run: sync ReadToEnd blocks past timeoutMs when the
+        // child hangs. Async read + Kill-on-timeout makes the timeout real.
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            proc.WaitForExit(5_000);
+        }
+        string stdout = stdoutTask.GetAwaiter().GetResult();
+        string stderr = stderrTask.GetAwaiter().GetResult();
+        int exitCode;
+        try { exitCode = proc.ExitCode; } catch { exitCode = -1; }
+        return (exitCode, stdout + stderr);
     }
 
     // ════════════════════════════════════════════════════════════════════
