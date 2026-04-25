@@ -4,16 +4,14 @@
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x0719",
-  "driverPid": "0x02FF",
   "productString": "Xbox 360 Wireless Receiver for Windows",
-  "manufacturerString": "\u00a9Microsoft Corporation",
+  "manufacturerString": "©Microsoft Corporation",
   "type": "gamepad",
   "connection": "wireless-adapter",
-  "descriptor": "05010905a101a10009300931150027ffff0000950275108102c0a10009330934150027ffff0000950275108102c005010932150026ff039501750a81021500250075069501810305010935150026ff039501750a81021500250075069501810305091901290a950a750181021500250075069501810305010939150125083500463b0166140075049501814275049501150025003500450065008103a102050f0997150025017504950191021500250091030970150025647508950491020950660110550e26ff009501910209a7910265005500097c9102c005010980a10009851500250195017501810215002500750795018103c005060920150026ff00750895018102c0",
+  "descriptor": "05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c0a1000932150026ffff350046ffff950175108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103750895028103c0",
   "nativeDescriptor": null,
-  "inputReportSize": 17,
-  "notes": "This is the wireless receiver, not the controller itself. The receiver is the USB device; individual wireless controllers do not have USB PIDs. Uses vendor-specific USB class (0xFF/0x5D/0x01). PID 0x0291 is the v2 receiver.",
+  "inputReportSize": 14,
+  "notes": "Wireless receiver, not the controller itself. The receiver is the USB device; individual wireless controllers do not have USB PIDs. Real protocol uses vendor-specific USB class (0xFF/0x5D/0x01); nativeDescriptor=null reflects that there is no HID descriptor on the wire. PID 0x0291 is the v2 receiver. Descriptor mirrors xbox-360-type2's gamepad layout (X+Y, Rx+Ry, combined Z trigger, 10 buttons, hat) since wireless receivers typically pair with the standard gamepad subtype. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
   "deviceDescription": "Xbox 360 Wireless Receiver for Windows",
-  "triggerMode": "combined",
-  "driverMode": "xinputhid"
+  "triggerMode": "combined"
 }
