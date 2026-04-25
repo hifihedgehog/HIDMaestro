@@ -141,50 +141,6 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  SWD HSWDEVICE handle store — keeps SwDeviceCreate handles alive for
-    //  the lifetime of each SDK controller. Closing the handle triggers PnP
-    //  removal for devices created with SWDeviceLifetimeHandle; since we use
-    //  SWDeviceLifetimeParentPresent (per SwdDeviceFactory.Create) the device
-    //  persists beyond handle close and is removed via PnP DIF_REMOVE in
-    //  TeardownController — the handle still needs to be closed to avoid
-    //  a cfgmgr32 handle leak.
-    // ════════════════════════════════════════════════════════════════════
-
-    private sealed class SwdHandles
-    {
-        public IntPtr XusbCompanion;   // hidmaestro_xusb.inf device
-        public IntPtr GamepadCompanion; // Xbox Series BT xinputhid HID device
-    }
-
-    private static readonly Dictionary<int, SwdHandles> s_swdHandles = new();
-    private static readonly object s_swdHandlesLock = new();
-
-    private static SwdHandles GetOrCreateSwdHandles(int controllerIndex)
-    {
-        lock (s_swdHandlesLock)
-        {
-            if (!s_swdHandles.TryGetValue(controllerIndex, out var h))
-            {
-                h = new SwdHandles();
-                s_swdHandles[controllerIndex] = h;
-            }
-            return h;
-        }
-    }
-
-    private static void CloseSwdHandlesFor(int controllerIndex)
-    {
-        SwdHandles? h;
-        lock (s_swdHandlesLock)
-        {
-            if (!s_swdHandles.TryGetValue(controllerIndex, out h)) return;
-            s_swdHandles.Remove(controllerIndex);
-        }
-        SwdDeviceFactory.CloseHandle(h.XusbCompanion);
-        SwdDeviceFactory.CloseHandle(h.GamepadCompanion);
-    }
-
-    // ════════════════════════════════════════════════════════════════════
     //  Per-controllerIndex teardown gate — defense-in-depth coordination
     //  between TeardownController and SetupController.
     //
@@ -357,7 +313,71 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  CleanupGhostDevices
+    //  Cleanup-paths topology
+    //
+    //  Five distinct cleanup entry points, each with a specific scope and
+    //  trigger. Reading order: triggered earliest first.
+    //
+    //   1. RemoveAllVirtualControllers (public)
+    //        Trigger:  consumer calls explicitly (PadForge calls it at
+    //                  startup AND from its ProcessExit handler)
+    //        Scope:    full purge — every ROOT/SWD enumerator subtree owned
+    //                  by HM, every HID orphan child, EC87F1E3 and
+    //                  WinExInput interface registrations, joy.cpl OEM
+    //                  cache. Uses fast=true + forceFallbacks=true so
+    //                  pnputil/devcon are tried for stuck phantoms.
+    //        Cost:     seconds to tens of seconds when stale state exists
+    //
+    //   2. CleanupGhostDevices (private)
+    //        Trigger:  lazy, once per process via the s_ghostsCleaned gate
+    //                  in SetupController's first invocation
+    //        Scope:    similar enumerator walk to (1) plus the EC87F1E3
+    //                  registry pruning. Uses fast=true with no forceFall-
+    //                  backs (the post-v1.1.31 perf fix made fallbacks for
+    //                  SWD\ a no-op anyway). Calls (4) and (5) below.
+    //        Cost:     ~hundreds of ms on a clean machine, more if
+    //                  phantoms exist
+    //
+    //   3. RemoveOrphanHidChildren (public, in DeviceManager)
+    //        Trigger:  TeardownController calls it after each per-
+    //                  controller teardown (skipped during batch dispose
+    //                  via skipOrphanSweep flag, which calls (3) once
+    //                  after the batch instead of N times during)
+    //        Scope:    HID-class children whose parent devnode is gone.
+    //                  Most common after a force-kill where SDL3/etc.
+    //                  held the HID handle past the parent removal.
+    //
+    //   4. DisableGhostXusbInterfaces (private)
+    //        Trigger:  invoked by (2)
+    //        Scope:    {EC87F1E3} interface entries that are still listed
+    //                  but have a gone or stuck devnode behind them.
+    //
+    //   5. RemoveAccumulatedHmPhantoms (internal, in DeviceManager)
+    //        Trigger:  invoked by (2) [added in v1.1.32]
+    //        Scope:    SetupDiGetClassDevs(DIGCF_ALLCLASSES) walk of every
+    //                  HM-named devinfo record that is NOT currently
+    //                  PRESENT, calls SetupDiRemoveDevice on each. This
+    //                  is the only path that actually deletes the
+    //                  per-instance registry hive cache for non-present
+    //                  devnodes (the other paths leave hidden devices
+    //                  in Device Manager).
+    //
+    //  Why so many paths: each fixed a different observable symptom over
+    //  the v1.1.x series. (1) was the original consumer purge. (2) was
+    //  added so even consumers that don't call (1) still get a clean
+    //  slate. (3) was added when force-kill scenarios surfaced HID
+    //  orphans that (1) and (2) missed. (4) was added when stale XUSB
+    //  interface registrations occupied XInput slots even after their
+    //  devnodes were gone. (5) was added in v1.1.32 to clean the
+    //  registry-cache "hidden devices" accumulation that the per-call
+    //  unique SwD suffix scheme inevitably produces over many sessions.
+    //
+    //  Consolidation tradeoff: extracting the shared enumerator walks
+    //  into one helper would reduce duplication by ~40 lines but loses
+    //  the per-path tuning (timeouts, fast/force flags, walk-prefix
+    //  variants) that has been adjusted for specific failure modes. The
+    //  current shape is verbose but each call site is self-contained;
+    //  any future regression localizes cleanly.
     // ════════════════════════════════════════════════════════════════════
 
     private static void CleanupGhostDevices()
@@ -890,7 +910,6 @@ internal static class DeviceOrchestrator
 
             if (result.Success && result.InstanceId != null)
             {
-                GetOrCreateSwdHandles(controllerIndex).GamepadCompanion = result.SwDeviceHandle;
                 gpInstId = result.InstanceId;
 
                 // Write ControllerIndex so any downstream consumer that reads
@@ -999,7 +1018,6 @@ internal static class DeviceOrchestrator
 
             if (result.Success && result.InstanceId != null)
             {
-                GetOrCreateSwdHandles(controllerIndex).XusbCompanion = result.SwDeviceHandle;
                 xusbInstId = result.InstanceId;
 
                 // Write ControllerIndex to Device Parameters so the companion
@@ -1254,6 +1272,10 @@ internal static class DeviceOrchestrator
         // block. No-op when no teardown was in flight.
         WaitForPriorTeardown(controllerIndex);
 
+        var setupTotalSw = Stopwatch.StartNew();
+        LogDiag($">>> SETUP  ENTER ctrl={controllerIndex} profile={profile.Id} vid=0x{profile.VendorId:X4} pid=0x{profile.ProductId:X4} uses_upper_filter={profile.UsesUpperFilter} companion_only={profile.CompanionOnly}");
+        string? returnedId = null;
+        try {
         using var _total = new TimingScope(controllerIndex, profile.Id, "TOTAL");
 
         // Snapshot XInput slot count BEFORE any setup so the post-setup wait
@@ -1271,6 +1293,7 @@ internal static class DeviceOrchestrator
         // Once-per-session cleanup
         if (!s_ghostsCleaned)
         {
+            var cleanupSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "0.ghost_cleanup");
             CleanupGhostDevices();
             DisableGhostXusbInterfaces();
@@ -1302,6 +1325,7 @@ internal static class DeviceOrchestrator
             }
 
             s_ghostsCleaned = true;
+            LogDiag($"    once-per-session cleanup ran in {cleanupSw.ElapsedMilliseconds}ms");
         }
 
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.gameinput_svc"))
@@ -1322,12 +1346,19 @@ internal static class DeviceOrchestrator
         // is the canonical entry point and is called once at app startup.
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "2.driver_install_check"))
         {
+            var driverSw = Stopwatch.StartNew();
+            bool deployed = false;
             if (!DriverBuilder.IsDriverInstalled())
             {
+                deployed = true;
                 if (!DriverBuilder.FullDeploy())
+                {
+                    LogDiag($"    driver install FAILED (FullDeploy returned false) after {driverSw.ElapsedMilliseconds}ms");
                     throw new InvalidOperationException(
                         "Driver install failed. Run elevated and check pnputil output.");
+                }
             }
+            LogDiag($"    driver install check (deployed={deployed}) in {driverSw.ElapsedMilliseconds}ms");
         }
 
         // ── Step 3: create device(s) ────────────────────────────────────
@@ -1337,19 +1368,26 @@ internal static class DeviceOrchestrator
         if (profile.UsesUpperFilter)
         {
             // xinputhid path: companion-only (no main HID device)
+            var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_gamepad_companion");
             companionId = CreateGamepadCompanion(controllerIndex, profile);
+            LogDiag($"    CreateGamepadCompanion -> {(companionId ?? "(null)")} in {createSw.ElapsedMilliseconds}ms");
         }
         else if (!profile.CompanionOnly)
         {
             // Plain HID or non-xinputhid Xbox: create main device node
+            var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_main_devnode");
             var result = DeviceNodeCreator.CreateDeviceNode(profile, infPath, controllerIndex);
             if (!result.Success || result.InstanceId == null)
+            {
+                LogDiag($"    DeviceNodeCreator.CreateDeviceNode FAILED after {createSw.ElapsedMilliseconds}ms");
                 throw new InvalidOperationException(
                     $"DeviceNodeCreator.CreateDeviceNode failed for profile " +
                     $"'{profile.Id}' at index {controllerIndex}.");
+            }
             mainInstanceId = result.InstanceId;
+            LogDiag($"    CreateDeviceNode -> {mainInstanceId} in {createSw.ElapsedMilliseconds}ms");
         }
 
         // ── Step 4: wait for HID child + name finalization ───────────────
@@ -1360,7 +1398,11 @@ internal static class DeviceOrchestrator
             using var _ts = new TimingScope(controllerIndex, profile.Id, "4.wait_hid_child");
             string? parentId = mainInstanceId ?? companionId;
             if (parentId != null)
-                WaitForHidChild(parentId, timeoutMs: 10000);
+            {
+                var hidSw = Stopwatch.StartNew();
+                bool gotChild = WaitForHidChild(parentId, timeoutMs: 10000);
+                LogDiag($"    WaitForHidChild({parentId}) -> {gotChild} in {hidSw.ElapsedMilliseconds}ms");
+            }
         }
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "4.fix_hid_child_names_1"))
@@ -1451,8 +1493,10 @@ internal static class DeviceOrchestrator
         if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
             string? xusbId;
+            var xusbSw = Stopwatch.StartNew();
             using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.create_xusb_companion"))
                 xusbId = CreateXusbCompanion(controllerIndex, profile);
+            LogDiag($"    CreateXusbCompanion -> {(xusbId ?? "(null)")} in {xusbSw.ElapsedMilliseconds}ms");
             if (profile.CompanionOnly && companionId == null)
                 companionId = xusbId;
 
@@ -1498,10 +1542,16 @@ internal static class DeviceOrchestrator
                 Thread.Sleep(100);
             }
             // Either the slot was claimed, or 15s elapsed and we move on.
+            LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms");
         }
 
         // Return main instance ID, or companion ID for companion-only profiles
-        return mainInstanceId ?? companionId;
+        returnedId = mainInstanceId ?? companionId;
+        return returnedId;
+        }
+        finally {
+            LogDiag($"<<< SETUP  EXIT  ctrl={controllerIndex} returnedId={(returnedId ?? "(null)")} total={setupTotalSw.ElapsedMilliseconds}ms");
+        }
     }
 
     /// <summary>
@@ -1634,10 +1684,6 @@ internal static class DeviceOrchestrator
         // for a different profile at the same ControllerIndex) require the
         // explicit ordering, otherwise the prior controller's Sw-managed
         // devnodes leave zombies that occupy XInput slots forever.
-        var swdSw = Stopwatch.StartNew();
-        try { CloseSwdHandlesFor(controllerIndex); } catch { }
-        LogDiag($"    CloseSwdHandlesFor(ctrl={controllerIndex}) took {swdSw.ElapsedMilliseconds}ms");
-
         if (!string.IsNullOrEmpty(instanceId))
         {
             // forceFallbacks: this is the live-swap teardown path. We must
@@ -1651,11 +1697,10 @@ internal static class DeviceOrchestrator
             // failed to tear down in default-mode and the Xbox UI's Guide
             // haptic kept poking its XUSB interface).
             //
-            // For Sw-managed parents, this is a no-op — CloseSwdHandlesFor
-            // above already removed them via clean cascade. For legacy
-            // ROOT-enumerator parents (Xbox 360 wired's main HID via
-            // DeviceNodeCreator's DIF_REGISTERDEVICE path, plain HID
-            // profiles), this is the actual removal step.
+            // SwD-enumerated parents go through SwdDeviceFactory.Remove
+            // (lifetime-downgrade + SwDeviceClose) inside RemoveDevice's
+            // SWD\ branch; legacy ROOT-enumerator parents (Xbox 360 wired
+            // main HID, plain HID profiles) take the DIF_REMOVE path.
             //
             // timeoutMs=120000: per the SDK README, xinputhid filter unload
             // for BT typically takes 5-11 seconds, but on heavily loaded or
@@ -1694,10 +1739,10 @@ internal static class DeviceOrchestrator
         // Backstop: scan and remove HIDMAESTRO devices by ControllerIndex.
         // Sweep BOTH the SWD enumerator (post-slot-1-skip-fix path) and the
         // legacy ROOT enumerator (devices created by older versions still on
-        // a pre-SWD install). After CloseSwdHandlesFor above, this should
-        // be a no-op — kept as belt-and-suspenders against any path where
-        // the Sw handle map didn't get the entry (e.g., crash recovery from
-        // a previous session whose handles never made it into s_swdHandles).
+        // a pre-SWD install). Belt-and-suspenders against any path where
+        // the per-controller teardown above missed an instance (e.g.,
+        // crash recovery from a previous session, or hand-installed
+        // legacy companions still on a pre-SWD layout).
         foreach (var enumRoot in new[] { "SWD", "ROOT" })
         {
             try
@@ -1831,15 +1876,18 @@ internal static class DeviceOrchestrator
 
     private const uint EVENT_MODIFY_STATE = 0x0002;
 
-    public static void RemoveAllVirtualControllers()
+    /// <summary>
+    /// Signal every named HIDMaestro StopEvent (slots 0..15), then sleep
+    /// 500ms to give blocked WUDFHost worker threads a chance to exit.
+    /// Without this, after a force-kill the workers stay blocked on
+    /// WaitForMultipleObjects(StopEvent, InputDataEvent) and PnP removal
+    /// blocks ~1s/device waiting for the kernel query-remove to time
+    /// out. With the signal: workers exit, WUDFHost releases, subsequent
+    /// DIF_REMOVE completes in milliseconds. For graceful shutdown the
+    /// signal makes cleanup near-instant.
+    /// </summary>
+    private static void SignalStopEventsAndDrain()
     {
-        // Signal all named StopEvents so the driver's worker threads exit.
-        // After a force-kill, WUDFHost still hosts our driver whose worker
-        // is blocked on WaitForMultipleObjects(StopEvent, InputDataEvent).
-        // Without this signal, PnP removal blocks ~1s per device waiting
-        // for the kernel query-remove to time out. With the signal, the
-        // worker exits immediately, WUDFHost releases, and PnP completes
-        // the removal in milliseconds.
         for (int i = 0; i < 16; i++)
         {
             IntPtr ev = OpenEventW(EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroStopEvent{i}");
@@ -1849,14 +1897,12 @@ internal static class DeviceOrchestrator
                 CloseHandle(ev);
             }
         }
-        // Give worker threads time to exit. The signal breaks the circular
-        // deadlock (PnP waits for WUDFHost, WUDFHost waits for worker),
-        // which speeds up subsequent DIF_REMOVE calls. WUDFHost still
-        // needs kernel-side PnP processing per device, so cleanup after
-        // a force-kill remains bounded by Windows' IRP_MN_QUERY_REMOVE
-        // timeout (~1s/device). For graceful shutdown (quit command),
-        // the signal makes cleanup near-instant.
         Thread.Sleep(500);
+    }
+
+    public static void RemoveAllVirtualControllers()
+    {
+        SignalStopEventsAndDrain();
 
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
         // Enumerators we always own: VID_*, XnaComposite, HIDMAESTRO, HID_IG_00
@@ -1906,14 +1952,6 @@ internal static class DeviceOrchestrator
             }
         }
         catch { }
-
-        // Close any lingering HSWDEVICE handles from this process's SDK session.
-        int[] allKnown;
-        lock (s_swdHandlesLock) { allKnown = s_swdHandles.Keys.ToArray(); }
-        foreach (var idx in allKnown)
-        {
-            try { CloseSwdHandlesFor(idx); } catch { }
-        }
 
         // Remove orphaned HID children (survive parent removal as "Unknown").
         try

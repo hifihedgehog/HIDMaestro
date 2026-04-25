@@ -52,14 +52,13 @@ internal static class SwdDeviceFactory
 
     public readonly struct Result
     {
-        public readonly bool Success;
+        public readonly bool    Success;
         public readonly string? InstanceId;       // e.g. "SWD\\HIDMAESTRO\\HMC_0001"
-        public readonly IntPtr  SwDeviceHandle;   // reserved — always IntPtr.Zero in OOP mode
         public readonly int     HResult;
 
-        public Result(bool success, string? instanceId, IntPtr handle, int hr)
+        public Result(bool success, string? instanceId, int hr)
         {
-            Success = success; InstanceId = instanceId; SwDeviceHandle = handle; HResult = hr;
+            Success = success; InstanceId = instanceId; HResult = hr;
         }
     }
 
@@ -110,7 +109,7 @@ internal static class SwdDeviceFactory
     {
         string? helperPath = EnsureHelperExtracted();
         if (helperPath == null || !File.Exists(helperPath))
-            return new Result(false, null, IntPtr.Zero, unchecked((int)0x80070002)); // ERROR_FILE_NOT_FOUND
+            return new Result(false, null, unchecked((int)0x80070002)); // ERROR_FILE_NOT_FOUND
 
         // hmswd expects '|' as the list separator.
         string hwList     = string.Join('|', hardwareIds ?? Array.Empty<string>());
@@ -147,12 +146,12 @@ internal static class SwdDeviceFactory
             {
                 using var proc = Process.Start(psi);
                 if (proc == null)
-                    return new Result(false, null, IntPtr.Zero, unchecked((int)0x80070005)); // ACCESS_DENIED
+                    return new Result(false, null, unchecked((int)0x80070005)); // ACCESS_DENIED
 
                 if (!proc.WaitForExit(perAttemptTimeoutMs))
                 {
                     try { proc.Kill(entireProcessTree: true); } catch { }
-                    return new Result(false, null, IntPtr.Zero, unchecked((int)0x80070102)); // WAIT_TIMEOUT
+                    return new Result(false, null, unchecked((int)0x80070102)); // WAIT_TIMEOUT
                 }
 
                 string stdoutLocal = proc.StandardOutput.ReadToEnd();
@@ -171,8 +170,8 @@ internal static class SwdDeviceFactory
                 {
                     stdoutLocal = stdoutLocal.Trim();
                     if (stdoutLocal.StartsWith("OK ", StringComparison.Ordinal))
-                        return new Result(true, stdoutLocal.Substring(3).Trim(), IntPtr.Zero, 0);
-                    return new Result(false, null, IntPtr.Zero, unchecked((int)0x80004005));
+                        return new Result(true, stdoutLocal.Substring(3).Trim(), 0);
+                    return new Result(false, null, unchecked((int)0x80004005));
                 }
 
                 // Parse HRESULT from stderr if present
@@ -193,11 +192,11 @@ internal static class SwdDeviceFactory
                 }
                 // Exit code 3 from hmswd = callback timeout; propagate as WAIT_TIMEOUT
                 if (proc.ExitCode == 3) hr = unchecked((int)0x80070102);
-                return new Result(false, null, IntPtr.Zero, hr);
+                return new Result(false, null, hr);
             }
             catch (Exception)
             {
-                return new Result(false, null, IntPtr.Zero, unchecked((int)0x80004005));
+                return new Result(false, null, unchecked((int)0x80004005));
             }
         }
 
@@ -219,16 +218,6 @@ internal static class SwdDeviceFactory
             if (unchecked((uint)last.HResult) != 0x80070102u) break;
         }
         return last;
-    }
-
-    /// <summary>OOP helper mode: device lifetime is <c>ParentPresent</c> (survives
-    /// helper exit); removal is via standard PnP DIF_REMOVE. No HSWDEVICE
-    /// handle is returned from Create, so CloseHandle is a no-op for now.
-    /// Kept in the API for forward-compatibility with an eventual direct
-    /// P/Invoke path.</summary>
-    public static void CloseHandle(IntPtr hSwDevice)
-    {
-        // no-op — see class doc.
     }
 
     /// <summary>

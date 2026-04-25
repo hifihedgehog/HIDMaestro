@@ -241,7 +241,13 @@ function Stop-HMTestProcess {
 function Wait-CreateBound {
     param(
         [string]$ProfileId,
-        [int]$TimeoutMs = 30000
+        # Generous timeout: the FIRST scenario in a battery run can take
+        # significantly longer than steady-state because the test process's
+        # HMContext init does a full RemoveAllVirtualControllers + driver
+        # install check + (post-v1.1.32) phantom-sweep over any
+        # accumulated state from prior sessions. 30s is enough for
+        # subsequent runs but can clip the first run on a heavy machine.
+        [int]$TimeoutMs = 60000
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
