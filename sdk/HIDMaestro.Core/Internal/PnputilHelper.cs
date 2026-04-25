@@ -44,16 +44,11 @@ internal static class PnputilHelper
         "hidmaestro_xusb.inf",
     };
 
-    /// <summary>INFs that RemoveAllHidMaestroPackages should clean up — includes
-    /// legacy/experimental names so stale packages from prior iterations
-    /// don't linger in the driver store and block reinstall.</summary>
+    /// <summary>INFs that RemoveAllHidMaestroPackages should clean up.</summary>
     public static readonly string[] HidMaestroInfNamesForCleanup = new[]
     {
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-        "hidmaestro_xusbshim_class.inf",
-        "hidmaestro_xusbshim.inf",  // legacy Extension variant
-        "hidmaestro_btnfix.inf",    // legacy btnfix experiment
     };
 
     /// <summary>One enumerated driver package record (a single block of
@@ -199,8 +194,6 @@ internal static class PnputilHelper
     /// prevents the "stale entry blocks reinstall" failure mode.</summary>
     public static void RemoveAllHidMaestroPackages()
     {
-        // Use the broader cleanup allow-list so legacy/experimental INF names
-        // (hidmaestro_xusbshim.inf, hidmaestro_btnfix.inf) also get removed.
         var cleanup = EnumerateDrivers()
             .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
                      && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,

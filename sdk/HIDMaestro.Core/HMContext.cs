@@ -413,7 +413,7 @@ public sealed class HMContext : IDisposable
     /// resources. Safe to call multiple times.
     ///
     /// <para>Per-controller teardown blocks 5-11s waiting on Windows PnP's
-    /// synchronous DIF_REMOVE (xinputhid filter unload for BT, HMCOMPANION
+    /// synchronous DIF_REMOVE (xinputhid filter unload for BT, XUSB companion
     /// teardown for non-xinputhid Xbox). The per-controller work is fully
     /// independent — different devnodes, different ContainerIDs, different
     /// kernel locks — so we run all dispose calls in parallel and the

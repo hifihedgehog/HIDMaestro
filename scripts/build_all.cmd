@@ -4,17 +4,17 @@ setlocal enabledelayedexpansion
 :: ==========================================================================
 :: build_all.cmd - One-shot build for a fresh clone.
 ::
-:: HIDMaestro has native driver components (HIDMaestro.dll + HMXInput.dll
-:: + optional HMXusbShim.dll) that MUST exist in build\ before the .NET SDK
-:: is compiled. The SDK's PackResources pre-build target copies those
-:: binaries into Resources/ to embed them into HIDMaestro.Core.dll, but the
-:: pre-build is evaluated AFTER MSBuild's item-evaluation phase - if
-:: build\ is empty on a fresh clone, the embedded-resource glob emits zero
-:: items and the assembly compiles with NO driver embedded.
+:: HIDMaestro has native driver components (HIDMaestro.dll + HMXInput.dll)
+:: that MUST exist in build\ before the .NET SDK is compiled. The SDK's
+:: PackResources pre-build target copies those binaries into Resources/
+:: to embed them into HIDMaestro.Core.dll, but the pre-build is evaluated
+:: AFTER MSBuild's item-evaluation phase - if build\ is empty on a fresh
+:: clone, the embedded-resource glob emits zero items and the assembly
+:: compiles with NO driver embedded.
 ::
 :: This script performs the correct build order in one pass:
 ::   1. scripts\build.cmd           - driver.c -> build\HIDMaestro.dll
-::                                    (also stamps INFs + builds xusbshim if present)
+::                                    (also stamps INFs)
 ::   2. scripts\build_companion.cmd - companion.c -> build\HMXInput.dll
 ::   3. dotnet build                - first SDK build populates Resources/
 ::   4. dotnet build (again)        - second SDK build embeds fresh bytes

@@ -66,10 +66,8 @@ public static class DriverBuilder
         // Drivers + INFs
         "HIDMaestro.dll",
         "HMXInput.dll",
-        "HMXusbShim.dll",
         "hidmaestro.inf",
         "hidmaestro_xusb.inf",
-        "hidmaestro_xusbshim_class.inf",
 
         // signtool.exe + its SXS dep tree (x64)
         "signtool.exe",
@@ -192,7 +190,7 @@ public static class DriverBuilder
         string dir = EnsureExtracted();
         string signtool = Path.Combine(dir, "signtool.exe");
 
-        foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll", "HMXusbShim.dll" })
+        foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
         {
             string path = Path.Combine(dir, dll);
             if (!File.Exists(path)) continue;
@@ -250,33 +248,16 @@ public static class DriverBuilder
         string pnputil = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
-        // xusbshim removed — its filter INF bound indiscriminately to
-        // HID\VID_045E&PID_028E&IG_00 including physical Xbox 360 controllers.
-        // hidmaestro_xusb.inf (HIDMAESTRO) REINSTATED 2026-04-23 with setup
-        // class changed from XnaComposite to System so Windows.Gaming.Input.dll
-        // does not classify it as a second WGI Gamepad. xinput1_4 discovery
-        // (which scans the {EC87F1E3} interface class directly) still finds it.
+        // hidmaestro.inf is the main HID driver. hidmaestro_xusb.inf is the
+        // XUSB companion (setup class System so Windows.Gaming.Input.dll does
+        // not classify it as a second WGI Gamepad; xinput1_4 discovery scans
+        // the {EC87F1E3} interface class directly so it still finds it).
         foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
             var (rc, output) = Run(pnputil, $"/add-driver \"{path}\" /install",
                 timeoutMs: 30_000);
-
-            // xusbshim is experimental — log its outcome verbosely regardless
-            // of whether pnputil marks the install as successful, so we can
-            // tell at a glance if the Extension INF applied to matching
-            // HID children or silently fell through.
-            if (inf == "hidmaestro_xusbshim_class.inf")
-            {
-                Console.WriteLine($"    [xusbshim] pnputil rc={rc}");
-                foreach (var line in output.Split('\n'))
-                {
-                    var trimmed = line.TrimEnd();
-                    if (trimmed.Length > 0)
-                        Console.WriteLine($"    [xusbshim] {trimmed}");
-                }
-            }
 
             // pnputil /install fails with rc=259 ("Unable to install driver
             // package: The requested device interface is not present in the
@@ -300,23 +281,12 @@ public static class DriverBuilder
             }
             else if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
             {
-                // xusbshim failure is non-fatal — if the Extension INF doesn't
-                // apply, the rest of the install flow still works and we just
-                // lose the experimental filter. Log and continue.
-                if (inf == "hidmaestro_xusbshim_class.inf")
-                {
-                    Console.WriteLine($"    [xusbshim] install reported failure but continuing " +
-                                      $"(main driver + companion unaffected)");
-                    continue;
-                }
                 Console.WriteLine($"\n    pnputil failed for {inf}: {output.Trim()}");
                 return false;
             }
         }
 
-        // /scan-devices removed (Option 1). Was here to apply newly-added
-        // Extension/filter INFs to pre-existing HID children. We dropped
-        // xusbshim and our remaining INFs are function INFs that bind via
+        // /scan-devices removed (Option 1). Our INFs are function INFs that bind via
         // SwDeviceCreate's own install path — /scan-devices was a no-op for
         // them. On corporate workstations with many devices in the PnP tree
         // this scan was 5–20 s of pure overhead. RemoveAllVirtualControllers

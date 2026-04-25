@@ -3,12 +3,9 @@
 // a WPF window (focus so DI works) and to %TEMP%\dinput_enum.txt so the
 // caller can read it back without screen-scraping.
 //
-// The HID path (DirectInput's default) wants HIDClass devnodes. The XInput-
-// compat shim on Windows also exposes XUSB-interface devices. Compare
-// enumerations in two states:
-//   1. Virtual with main HID + HID child + HMCOMPANION (current).
-//   2. Virtual with only HMCOMPANION (main removed).
-// If state 2 still shows our 045E:028E, Option A preserves DI visibility.
+// Use as a regression check when changing how virtuals are enumerated:
+// confirm a profile's expected VID/PID still surfaces in DInput, and that
+// the XUSB-interface compat shim doesn't double-list it.
 
 using System;
 using System.IO;

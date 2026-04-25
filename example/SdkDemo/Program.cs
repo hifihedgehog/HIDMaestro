@@ -408,7 +408,7 @@ Console.WriteLine("OK");
 // Profile: xbox-360-wired | VID 045E PID 028E | No Report ID | 18 bytes
 // Note: Xbox 360 uses SubmitState (not raw) because HMGamepadState
 // maps 1:1 to the descriptor's standard fields. No vendor-specific
-// touchpad/gyro region. XInput delivery is via HMCOMPANION.
+// touchpad/gyro region. XInput delivery is via the XUSB companion.
 Console.WriteLine("\n  12a. Xbox 360 Wired — via SubmitState");
 {
     var x360Ref = ctx.GetProfile("xbox-360-wired")!;

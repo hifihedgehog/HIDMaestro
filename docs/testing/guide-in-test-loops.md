@@ -5,9 +5,9 @@
 When a HIDMaestro virtual reports Guide pressed, Windows Xbox UI fires a
 Guide-long-press haptic ack (`hi=0x7F` short burst) to the controller's
 XInput slot. If a continuous test-pulse loop cycles Guide, that haptic ack
-streams into `C:\ProgramData\HIDMaestro\xusbshim_log.txt` and pollutes any
-investigation that watches `[HMCOMP] IOCTL 8000A010 [...]` entries or
-`SET_STATE-in` bytes for real haptic dispatch (e.g. browser vibration).
+floods any haptic-trace tooling — the shell-emitted SET_STATE bytes
+overlap and mask real haptic dispatch (e.g. browser vibration) under
+investigation.
 
 Two investigation hours were lost to this in 2026-04 when the author
 misread the shell haptic pattern as "driver-side dispatch signal." See

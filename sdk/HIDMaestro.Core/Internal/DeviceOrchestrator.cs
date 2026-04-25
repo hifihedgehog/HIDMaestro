@@ -291,7 +291,6 @@ internal static class DeviceOrchestrator
                         subName.Contains("ROOT#HIDCLASS") ||
                         subName.Contains("ROOT#HID_IG") ||
                         subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
                         subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
                     if (!isOurDevice && subName.Contains("ROOT#SYSTEM#"))
                     {
@@ -753,8 +752,8 @@ internal static class DeviceOrchestrator
                 GetOrCreateSwdHandles(controllerIndex).GamepadCompanion = result.SwDeviceHandle;
                 gpInstId = result.InstanceId;
 
-                // Write ControllerIndex so any downstream filter that reads
-                // it (e.g. xusbshim-era code paths) can locate its shared
+                // Write ControllerIndex so any downstream consumer that reads
+                // it (companion driver, future filters) can locate its shared
                 // memory. Matches pre-migration behavior.
                 try
                 {
@@ -1264,12 +1263,12 @@ internal static class DeviceOrchestrator
                     WaitForDeviceStarted(hidChildId, timeoutMs: 5000);
 
                     // Write ControllerIndex directly to the HID child's HW key
-                    // so xusbshim (and any future HID-child filter) can read
-                    // it without having to walk up to the parent devnode via
-                    // DEVPKEY_Device_Parent. Robustness belt-and-suspenders:
-                    // the parent walk works but this shortcut eliminates a
-                    // failure mode if WdfDeviceQueryPropertyEx returns stale
-                    // or missing parent data mid-enumeration.
+                    // so any future HID-child filter can read it without having
+                    // to walk up to the parent devnode via DEVPKEY_Device_Parent.
+                    // Robustness belt-and-suspenders: the parent walk works
+                    // but this shortcut eliminates a failure mode if
+                    // WdfDeviceQueryPropertyEx returns stale or missing parent
+                    // data mid-enumeration.
                     try
                     {
                         string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{hidChildId}\Device Parameters";
@@ -1831,7 +1830,7 @@ internal static class DeviceOrchestrator
         // Wait for WUDFHost processes to release our DLLs.
         try
         {
-            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll" };
+            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
             foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
             {
                 try
@@ -1914,7 +1913,7 @@ internal static class DeviceOrchestrator
 
         // Our own UMDF drivers — fine to terminate a host that runs only these.
         var ourDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll", "HMXusbShim.dll",
+            "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll",
         };
 
         foreach (var proc in System.Diagnostics.Process.GetProcessesByName("WUDFHost"))

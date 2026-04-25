@@ -752,9 +752,8 @@ class Program
                 // individually observable in any consumer (joy.cpl, browser
                 // Gamepad Tester). Guide is deliberately OMITTED because the
                 // Windows shell fires a Guide-long-press haptic ack to slot 0
-                // whenever Guide is seen pressed on our virtual, which
-                // pollutes the xusbshim/HMCOMP log with `[00 00 00 7F 02]`
-                // and masks real Chromium playEffect dispatch.
+                // whenever Guide is seen pressed on our virtual, which masks
+                // real Chromium playEffect dispatch in haptic-trace tooling.
                 Buttons      = (((int)t % 2 == 0) ? HMButton.A : HMButton.None)
                              | ((((int)(t / 3)) % 2 == 0) ? HMButton.Share : HMButton.None),
             };
@@ -1251,8 +1250,7 @@ class Program
     // ── probe-xusb / xusb-vibrate ──
     // Enumerates GUID_DEVINTERFACE_XUSB_DEVICE (0xec87f1e3-...) and lets us
     // fire the exact IOCTL Chrome fires for vibrate (0x8000A010, 9-byte input)
-    // on any discovered interface. Used to test whether xusbshim's HID-child
-    // publication receives Chrome's put_Vibration dispatch on current Edge 147.
+    // on any discovered interface.
 
     [StructLayout(LayoutKind.Sequential)]
     struct SP_DEVICE_INTERFACE_DATA

@@ -108,7 +108,7 @@ internal static class SwdDeviceFactory
         int callbackTimeoutMs = 35000,
         string? enumeratorName = null)
     {
-        string helperPath = EnsureHelperExtracted();
+        string? helperPath = EnsureHelperExtracted();
         if (helperPath == null || !File.Exists(helperPath))
             return new Result(false, null, IntPtr.Zero, unchecked((int)0x80070002)); // ERROR_FILE_NOT_FOUND
 

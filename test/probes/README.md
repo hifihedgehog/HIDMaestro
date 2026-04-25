@@ -16,6 +16,8 @@ All probes target HIDMaestro virtuals by default but work against physical Xbox-
 | "Can I override cross-process gamepad dispatch via a user-mode custom factory?" | [wgi_custom_factory](wgi_custom_factory/) — `GameControllerFactoryManager::RegisterCustomFactoryForHardwareId`/`ForXusbType` |
 | "Do our HID output report handlers (IOCTL_HID_WRITE_REPORT etc.) fire for this profile?" | [hid_output_report_probe](hid_output_report_probe/) |
 | "What source-file strings are embedded in a Windows runtime DLL?" | [wgi_dll_string_scan.ps1](wgi_dll_string_scan.ps1) |
+| "Does this profile's VID/PID surface in DirectInput's enumeration?" | [dinput_enum](dinput_enum/) — `IDirectInput8::EnumDevices(DI8DEVCLASS_GAMECTRL)` with WPF host (DInput needs window focus) |
+| "Does WGI see this device at all (presence-only, no vibration fired)?" | [wgi_read_probe](wgi_read_probe/) — native C++ `Windows.Gaming.Input.Gamepad` enumeration sampler |
 
 ## Near-duplicates and when to use which
 

@@ -582,11 +582,12 @@ void CompanionIoControl(
          * -> silently dropped put_Vibration. */
         /* Two distinct wire formats, verified 2026-04-23 against a live
          * physical Xbox 360 wired controller's xusb22.sys 36-byte response.
-         * See driver/xusbshim.c:IOCTL_XUSB_GET_CAPABILITIES for the full
-         * layout comment. When WGI calls GET_CAPABILITIES with output size
-         * 36, it expects V2 extended format (header + V1 struct at byte 16).
-         * Returning V1-shaped data in a 36-byte buffer makes WGI read
-         * garbage at the V2 field offsets and the device looks malformed. */
+         * V1 (24-byte) layout: subtype/flags/buttons/triggers/axes/motors.
+         * V2 (36-byte) layout: 16-byte header + V1 struct at byte 16.
+         * When WGI calls GET_CAPABILITIES with output size 36, it expects V2
+         * extended format. Returning V1-shaped data in a 36-byte buffer makes
+         * WGI read garbage at the V2 field offsets and the device looks
+         * malformed. */
         /* Motor max speed fields set to 0xFFFF to advertise rumble capability.
          * Previous zero values made WGI's QueryDeviceCapabilities report
          * supportedRumble=0x3 but mappedRumble=0x0 (motors detected but not

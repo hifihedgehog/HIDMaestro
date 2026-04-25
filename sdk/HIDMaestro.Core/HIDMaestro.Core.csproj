@@ -35,10 +35,8 @@
       <!-- Driver binaries + INFs from build/ -->
       <_HMDriverFiles Include="$(HMBuildDir)HIDMaestro.dll" />
       <_HMDriverFiles Include="$(HMBuildDir)HMXInput.dll" />
-      <_HMDriverFiles Include="$(HMBuildDir)HMXusbShim.dll" Condition="Exists('$(HMBuildDir)HMXusbShim.dll')" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro.inf" />
       <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusb.inf" />
-      <_HMDriverFiles Include="$(HMBuildDir)hidmaestro_xusbshim_class.inf" Condition="Exists('$(HMBuildDir)hidmaestro_xusbshim_class.inf')" />
       <!-- hmswd.exe — SWD device creation helper, shelled out to by
            SwdDeviceFactory for the ROOT\ → SWD\ migration (slot-1-skip fix).
            Embedded here so single-file deployment still has it. -->

@@ -113,6 +113,6 @@ internal static class P
         }
 
         Console.WriteLine();
-        Console.WriteLine("Probe complete. Check C:\\ProgramData\\HIDMaestro\\xusbshim_log.txt for any driver-side bytes from the attempts above.");
+        Console.WriteLine("Probe complete.");
     }
 }

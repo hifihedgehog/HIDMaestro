@@ -747,7 +747,7 @@ def main():
             # Xbox profile present — at least one slot must be live AND the
             # XUSB device interface count should match the number of Xbox
             # profiles (2 xinputhid-bound HID children per Xbox Series BT +
-            # 2 HMCOMPANION per Xbox 360 wired, etc.).
+            # 2 HIDMAESTRO XUSB companions per Xbox 360 wired, etc.).
             if xi["count"] >= 1 and any(s["moving"] for s in xi["slots"]):
                 slot_summary = ", ".join(
                     f"slot{s['slot']} pkt={s['pkt_last']} LX={s['lx']:+d} LY={s['ly']:+d}"
