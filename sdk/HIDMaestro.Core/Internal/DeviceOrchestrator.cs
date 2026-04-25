@@ -436,6 +436,17 @@ internal static class DeviceOrchestrator
             }
             catch { }
         }
+
+        // Sweep accumulated HIDMaestro phantom devnodes from prior sessions.
+        // v1.1.30's per-call unique SwD instance suffix prevents the
+        // empty-shell bug at create time, but Windows preserves a per-
+        // instance registry hive entry indefinitely after each teardown,
+        // so heavy users see "hidden devices" in Device Manager pile up
+        // across many sessions. SetupDiRemoveDevice via DIGCF_ALLCLASSES
+        // deletes the registry cache cleanly. Only touches PHANTOM
+        // entries; PRESENT devnodes are explicitly skipped, so this is
+        // safe to call while a session is live.
+        try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
     }
 
     // ════════════════════════════════════════════════════════════════════
