@@ -18,7 +18,7 @@
          major.minor.patch (see driver/*.inf). Bump this plus the INFs
          together — see memory:feedback-bump-versions-on-release.md for
          the full checklist. -->
-    <Version>1.1.26</Version>
+    <Version>1.1.27</Version>
   </PropertyGroup>
 
   <!-- Hard-fail any Debug build at MSBuild evaluation time. MSBuild accepts

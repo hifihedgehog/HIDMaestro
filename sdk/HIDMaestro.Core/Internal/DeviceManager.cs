@@ -480,9 +480,23 @@ public static class DeviceManager
                     using var proc = System.Diagnostics.Process.Start(psi);
                     if (proc != null)
                     {
-                        proc.StandardOutput.ReadToEnd();
-                        proc.StandardError.ReadToEnd();
-                        proc.WaitForExit(5000);
+                        // Async read + Kill-on-timeout — matches the pattern in
+                        // DeviceOrchestrator.RunProcess. Sync ReadToEnd blocks
+                        // when pnputil hangs (observed during 5+ minute startup
+                        // freeze on a force-killed prior session's SWD orphan
+                        // that pnputil couldn't shift), preventing the
+                        // WaitForExit timeout from ever firing. Background
+                        // pipe drain plus an explicit Kill makes the 5-second
+                        // budget real.
+                        var outTask = proc.StandardOutput.ReadToEndAsync();
+                        var errTask = proc.StandardError.ReadToEndAsync();
+                        if (!proc.WaitForExit(5000))
+                        {
+                            try { proc.Kill(entireProcessTree: true); } catch { }
+                            proc.WaitForExit(2000);
+                        }
+                        try { outTask.GetAwaiter().GetResult(); } catch { }
+                        try { errTask.GetAwaiter().GetResult(); } catch { }
                     }
                 }
                 catch { }
@@ -515,9 +529,20 @@ public static class DeviceManager
                         using var proc = System.Diagnostics.Process.Start(psi);
                         if (proc != null)
                         {
-                            proc.StandardOutput.ReadToEnd();
-                            proc.StandardError.ReadToEnd();
-                            proc.WaitForExit(5000);
+                            // Same async-read + Kill-on-timeout shape as the
+                            // pnputil block above. devcon hangs on phantom
+                            // SWD orphans that the kernel won't release until
+                            // reboot — without Kill the entire cleanup loop
+                            // hung indefinitely waiting on ReadToEnd.
+                            var outTask = proc.StandardOutput.ReadToEndAsync();
+                            var errTask = proc.StandardError.ReadToEndAsync();
+                            if (!proc.WaitForExit(5000))
+                            {
+                                try { proc.Kill(entireProcessTree: true); } catch { }
+                                proc.WaitForExit(2000);
+                            }
+                            try { outTask.GetAwaiter().GetResult(); } catch { }
+                            try { errTask.GetAwaiter().GetResult(); } catch { }
                         }
                     }
                     catch { }
