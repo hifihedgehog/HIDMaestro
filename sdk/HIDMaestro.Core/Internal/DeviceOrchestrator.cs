@@ -1429,30 +1429,42 @@ internal static class DeviceOrchestrator
     {
         try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
 
+        // Capture the HID children of the parent BEFORE any removal step.
+        // Once the parent goes, CM_Get_Child / CM_Get_Sibling on it stops
+        // working — so any explicit per-child cleanup needs the list in
+        // hand first. Covers issue #11 (xbox-360-wired orphan that
+        // v1.1.17's post-teardown orphan-sweep was missing because its
+        // ROOT parent was still lingering as phantom when the sweep ran).
+        List<string> preCapturedHidChildren = new List<string>();
         if (!string.IsNullOrEmpty(instanceId))
         {
-            // Capture the HID children of this root device BEFORE removing it.
-            // Windows is supposed to cascade-remove HID children when their
-            // parent goes, but in practice on Win11 26200 the child PDO can
-            // land in a half-dead state where:
-            //   - its parent's devnode is gone (or still phantom from async
-            //     removal), so the orphan-sweep's "parent truly gone" check
-            //     skips it;
-            //   - the PDO itself is still enumerable by SDL / RawInput
-            //     (instance ID visible) but not usable (device path empty);
-            //   - the HID class driver's per-collection bookkeeping hasn't
-            //     released it even though its parent is being removed.
-            //
-            // Explicit pre-capture avoids racing the kernel's cascade: we
-            // know the full child list while the parent is still live, then
-            // we can DIF_REMOVE each child alongside the parent teardown.
-            // Covers issue #11 (xbox-360-wired orphan that v1.1.17's
-            // post-teardown orphan-sweep was missing because its ROOT
-            // parent was still lingering as phantom when the sweep ran).
-            List<string> preCapturedHidChildren;
             try { preCapturedHidChildren = DeviceManager.GetAllHidChildIds(instanceId!); }
             catch { preCapturedHidChildren = new List<string>(); }
+        }
 
+        // Close all SwDeviceCreate-owned handles for this controller FIRST.
+        // SwDeviceCreate-managed devices (xinputhid-path gamepad companion
+        // at SWD\HIDMAESTRO_VID_*_PID_*&IG_00, and the XUSB companion at
+        // SWD\HIDMAESTRO\<sid>_<idx>) clean up properly only when their
+        // HSWDEVICE handle is released. Calling DIF_REMOVE on a Sw-created
+        // devnode FIRST leaves the SWDEVICE kernel refcount dangling — the
+        // devnode goes from PnP but the kernel-side state (interface-class
+        // registrations, slot-allocator entries) lingers. SwDeviceClose
+        // first triggers Windows' clean cascade: devnode removal +
+        // interface-class cleanup + HID children cascade-remove + Sw kernel
+        // state released, in the correct order.
+        //
+        // On process exit, Windows handles all of this for free regardless
+        // of user-mode order — that's why baseline tests (create N → exit)
+        // pass even with the wrong order. Mid-process live profile swaps
+        // (HMController.Dispose followed immediately by CreateController
+        // for a different profile at the same ControllerIndex) require the
+        // explicit ordering, otherwise the prior controller's Sw-managed
+        // devnodes leave zombies that occupy XInput slots forever.
+        try { CloseSwdHandlesFor(controllerIndex); } catch { }
+
+        if (!string.IsNullOrEmpty(instanceId))
+        {
             // forceFallbacks: this is the live-swap teardown path. We must
             // leave nothing behind — if the old device persists as a phantom,
             // its driver's WUDFHost kept alive by it, CM IOCTLs keep being
@@ -1463,24 +1475,33 @@ internal static class DeviceOrchestrator
             // from xbox-360-wired, because the prior Xbox 360 HIDMAESTRO
             // failed to tear down in default-mode and the Xbox UI's Guide
             // haptic kept poking its XUSB interface).
+            //
+            // For Sw-managed parents, this is a no-op — CloseSwdHandlesFor
+            // above already removed them via clean cascade. For legacy
+            // ROOT-enumerator parents (Xbox 360 wired's main HID via
+            // DeviceNodeCreator's DIF_REGISTERDEVICE path, plain HID
+            // profiles), this is the actual removal step.
             try { DeviceManager.RemoveDevice(instanceId!, forceFallbacks: true); } catch { }
 
             // Now explicitly remove each captured HID child. If Windows
-            // already cascade-removed them, these calls are harmless no-ops
-            // (DifRemoveDevice on a non-existent instance returns gracefully).
-            // If cascade failed or is still in flight, this ensures the
-            // child is cleanly torn down rather than lingering as an
-            // enumerable-but-unusable PDO.
+            // already cascade-removed them (typical for Sw-managed parents
+            // after SwDeviceClose, or for ROOT parents after DIF_REMOVE),
+            // these calls are harmless no-ops. If cascade failed or is
+            // still in flight, this ensures the child is cleanly torn down
+            // rather than lingering as an enumerable-but-unusable PDO.
             foreach (var childId in preCapturedHidChildren)
             {
                 try { DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true, forceFallbacks: true); } catch { }
             }
         }
 
-        // Scan and remove HIDMAESTRO devices by ControllerIndex. Sweep BOTH
-        // the SWD enumerator (post-slot-1-skip-fix path) and the legacy ROOT
-        // enumerator (devices created by older versions still on-system from
-        // a pre-SWD install).
+        // Backstop: scan and remove HIDMAESTRO devices by ControllerIndex.
+        // Sweep BOTH the SWD enumerator (post-slot-1-skip-fix path) and the
+        // legacy ROOT enumerator (devices created by older versions still on
+        // a pre-SWD install). After CloseSwdHandlesFor above, this should
+        // be a no-op — kept as belt-and-suspenders against any path where
+        // the Sw handle map didn't get the entry (e.g., crash recovery from
+        // a previous session whose handles never made it into s_swdHandles).
         foreach (var enumRoot in new[] { "SWD", "ROOT" })
         {
             try
@@ -1501,15 +1522,16 @@ internal static class DeviceOrchestrator
             catch { }
         }
 
-        // Close any HSWDEVICE handles we hold for this controller. Devices
-        // created via SWDeviceLifetimeParentPresent persist past handle close
-        // (PnP DIF_REMOVE above is what actually removes them), but the
-        // handle still needs to be released to free cfgmgr32 state.
-        try { CloseSwdHandlesFor(controllerIndex); } catch { }
-
         // Also scan VID_*&IG_00 companions (xinputhid gamepad companions).
-        // Sweep SWD (new) + ROOT (legacy).
-        foreach (var enumRoot in new[] { "SWD", "ROOT" })
+        // Sweep SWD (new) + ROOT (legacy) + HID (xinputhid synthesizes
+        // multiple top-level HID collections per parent — when one
+        // survives the kernel cascade after SwDeviceClose, the surviving
+        // sibling under HID\HIDMAESTRO_VID_*_PID_*&IG_00 must be reaped
+        // by ControllerIndex match here, otherwise it lingers as a
+        // duplicate XInput slot until reboot. Live-swap repro: Series BT
+        // → Xbox 360 wired → Series BT was leaving a HID child orphan
+        // that no other sweep caught).
+        foreach (var enumRoot in new[] { "SWD", "ROOT", "HID" })
         {
             try
             {
