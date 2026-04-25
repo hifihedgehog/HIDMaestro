@@ -1,6 +1,6 @@
 {
   "id": "xbox-360-flight-stick",
-  "name": "Xbox 360 Flight Stick (XInput HID)",
+  "name": "Xbox 360 Flight Stick",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",

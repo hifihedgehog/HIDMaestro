@@ -1,6 +1,6 @@
 {
   "id": "xbox-360-type2",
-  "name": "Xbox 360 Controller Type 2 (XInput HID)",
+  "name": "Xbox 360 Controller Type 2",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",

@@ -1,6 +1,6 @@
 {
   "id": "xbox-360-guitar-v1",
-  "name": "Xbox 360 Guitar Controller v1 (XInput HID)",
+  "name": "Xbox 360 Guitar Controller v1",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",

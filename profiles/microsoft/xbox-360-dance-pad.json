@@ -1,6 +1,6 @@
 {
   "id": "xbox-360-dance-pad",
-  "name": "Xbox 360 Dance Pad (XInput HID)",
+  "name": "Xbox 360 Dance Pad",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",

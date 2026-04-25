@@ -1,6 +1,6 @@
 {
   "id": "xbox-360-wheel-v1",
-  "name": "Xbox 360 Racing Wheel v1 (XInput HID)",
+  "name": "Xbox 360 Racing Wheel v1",
   "vendor": "Microsoft",
   "vid": "0x045E",
   "pid": "0x028E",
