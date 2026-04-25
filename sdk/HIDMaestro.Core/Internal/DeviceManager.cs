@@ -440,6 +440,23 @@ public static class DeviceManager
             CM_Uninstall_DevNode(devInst, 0);
             goneAfterDif = false; // don't wait, don't confirm
         }
+        else if (instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase))
+        {
+            // SwDevice teardown via the documented lifetime-downgrade path.
+            // DIF_REMOVE on a SwDeviceLifetimeParentPresent device is
+            // transient on Win11 26200 — the kernel re-enumerates the
+            // devnode within 5-30s because HTREE\ROOT\0 (the parent) is
+            // always present. SwDeviceCreate-reconnect + lifetime=Handle
+            // + SwDeviceClose is the only way to actually terminate the
+            // lifetime contract. Verified empirically 2026-04-25 against
+            // a resurrected BT SwDevice: device transitioned to PHANTOM
+            // and stayed PHANTOM for 20+ seconds (vs DIF_REMOVE+pnputil-
+            // /force which let it resurrect within 10s).
+            var swSw = System.Diagnostics.Stopwatch.StartNew();
+            int hr = SwdDeviceFactory.Remove(instanceId);
+            goneAfterDif = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS;
+            DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} present={!goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
+        }
         else
         {
             DifRemoveDevice(instanceId);
@@ -460,10 +477,14 @@ public static class DeviceManager
         // "Driver package added successfully. (Needed repairing)" and
         // restores the OLD bytes from internal cache, so the fresh v1.1.5
         // self-heal binary literally never loads and input keeps hanging.
+        // pnputil and devcon both silently no-op on SWD\HIDMAESTRO\* phantoms
+        // left behind by SwDeviceLifetimeParentPresent — verified empirically
+        // 2026-04-25 (24s wall time for 11 phantoms, 10 still present after).
+        // Skipping the fallback for SWD\ entries cuts startup cleanup from
+        // tens of seconds to milliseconds when prior-session phantoms exist.
         if ((!fast || forceFallbacks) && !goneAfterDif &&
             (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
-             instanceId.StartsWith("HID\\",  StringComparison.OrdinalIgnoreCase) ||
-             instanceId.StartsWith("SWD\\",  StringComparison.OrdinalIgnoreCase)))
+             instanceId.StartsWith("HID\\",  StringComparison.OrdinalIgnoreCase)))
         {
             bool stillPhantom = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
             if (stillPhantom)

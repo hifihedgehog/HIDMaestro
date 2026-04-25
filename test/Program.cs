@@ -77,7 +77,8 @@ class Program
         bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is
             "list" or "search" or "info" or
             "build-descriptor" or "extract-profile" or
-            "probe-xusb" or "xusb-vibrate";
+            "probe-xusb" or "xusb-vibrate" or
+            "make-custom-profile";  // pure file-IO + descriptor synthesis, no PnP
 
         // Single-instance: kill any other HIDMaestroTest processes — but NEVER for
         // read-only probes, which must coexist with a running emulate.
@@ -148,6 +149,7 @@ class Program
             "issue6-repro" => Issue6ReproCommand(),
             "extract-profile" => ExtractProfileCommand(args.Skip(1).ToArray()),
             "emulate-file" => EmulateFileCommand(args.Skip(1).ToArray()),
+            "make-custom-profile" => MakeCustomProfile(args.Skip(1).ToArray()),
             "probe-xusb" => ProbeXusb(),
             "xusb-vibrate" => XusbVibrate(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
@@ -205,6 +207,12 @@ class Program
         // which comes from the pattern thread's Thread.Sleep(4)). PadForge polls
         // at 1 kHz; issue #3 uses 1 kHz and 125 Hz for saturation-rate tests.
         int rateHz = 250;
+        // --profile-dir <path> : load additional profile JSONs from a directory
+        // alongside the embedded catalog. Used by the regression battery to
+        // author PadForge-style custom profiles (BEEF:F000 etc.) and reference
+        // them by ID in stdin swap commands. Must come before the profile-ID
+        // arguments. Multiple --profile-dir flags allowed.
+        var extraProfileDirs = new List<string>();
         for (int i = 0; i < profileIds.Length; i++)
         {
             if (profileIds[i] == "--rate-hz" && i + 1 < profileIds.Length
@@ -212,17 +220,30 @@ class Program
             {
                 rateHz = r;
                 profileIds = profileIds.Where((_, idx) => idx != i && idx != i + 1).ToArray();
-                break;
+                i = -1; // restart scan since indices shifted
+                continue;
+            }
+            if (profileIds[i] == "--profile-dir" && i + 1 < profileIds.Length)
+            {
+                extraProfileDirs.Add(profileIds[i + 1]);
+                profileIds = profileIds.Where((_, idx) => idx != i && idx != i + 1).ToArray();
+                i = -1; // restart scan since indices shifted
+                continue;
             }
         }
         profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
         if (profileIds.Length == 0)
-            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] <profile-id> [profile-id ...]");
+            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] [--profile-dir <path>]... <profile-id> [profile-id ...]");
         Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");
 
         using var ctx = new HMContext();
         int loaded = ctx.LoadDefaultProfiles();
         Console.WriteLine($"  Loaded {loaded} profiles (embedded)");
+        foreach (var dir in extraProfileDirs)
+        {
+            int extra = ctx.LoadProfilesFromDirectory(dir);
+            Console.WriteLine($"  Loaded {extra} extra profile(s) from {dir}");
+        }
 
         Console.Write("  Installing driver... ");
         ctx.InstallDriver();
@@ -1197,6 +1218,73 @@ class Program
         {
             try { System.IO.Directory.Delete(tmp, recursive: true); } catch { }
         }
+    }
+
+    // ── make-custom-profile ──
+    //
+    // Build a PadForge-style custom profile (BEEF:F000 faux-VID convention,
+    // 2x16-bit sticks + 2x8-bit triggers + 1 hat + 11 buttons, gamepad
+    // collection) via HMProfileBuilder + HidDescriptorBuilder and write it
+    // as JSON to <out-dir>. The regression battery uses this to author a
+    // custom profile on disk, then loads it via `emulate --profile-dir
+    // <dir>` so swap commands can target it by ID.
+    //
+    // This is the same API surface PadForge uses to construct its own
+    // Custom profile (see HMaestroProfileCatalog.BuildCustomProfile in
+    // the PadForge source) — testing this round-trip ensures the SDK's
+    // custom-profile path gets the same swap-teardown coverage as the
+    // embedded catalog profiles.
+    static int MakeCustomProfile(string[] args)
+    {
+        if (args.Length < 1)
+            return Error("Usage: make-custom-profile <out-dir> [id] [vid-hex] [pid-hex]");
+        string outDir = args[0];
+        string id = args.Length > 1 ? args[1] : "padforge-custom";
+        ushort vid = args.Length > 2 ? Convert.ToUInt16(args[2], 16) : (ushort)0xBEEF;
+        ushort pid = args.Length > 3 ? Convert.ToUInt16(args[3], 16) : (ushort)0xF000;
+
+        // Mirror PadForge's HMaestroProfileCatalog.BuildCustomProfile:
+        // 2 16-bit sticks, 2 8-bit triggers, 1 hat switch, 11 buttons,
+        // gamepad collection.
+        byte[] descriptor = new HidDescriptorBuilder()
+            .Gamepad()
+            .AddStick("Left", 16)
+            .AddStick("Right", 16)
+            .AddTrigger("Left", 8)
+            .AddTrigger("Right", 8)
+            .AddHat()
+            .AddButtons(11)
+            .Build();
+
+        // Hex-encode for the JSON. Profiles in the embedded catalog use
+        // lowercase hex without separators (see profiles/amazon/luna-usb.json).
+        string descHex = Convert.ToHexString(descriptor).ToLowerInvariant();
+
+        // Match the field names + casing used by the embedded JSONs.
+        var json = new System.Text.StringBuilder();
+        json.AppendLine("{");
+        json.AppendLine($"  \"id\": \"{id}\",");
+        json.AppendLine($"  \"name\": \"PadForge Custom (regression)\",");
+        json.AppendLine($"  \"vendor\": \"Custom\",");
+        json.AppendLine($"  \"vid\": \"0x{vid:X4}\",");
+        json.AppendLine($"  \"pid\": \"0x{pid:X4}\",");
+        json.AppendLine($"  \"productString\": \"PadForge Game Controller\",");
+        json.AppendLine($"  \"manufacturerString\": \"PadForge\",");
+        json.AppendLine($"  \"type\": \"gamepad\",");
+        json.AppendLine($"  \"connection\": \"usb\",");
+        json.AppendLine($"  \"descriptor\": \"{descHex}\",");
+        json.AppendLine($"  \"inputReportSize\": null,");
+        json.AppendLine($"  \"notes\": \"Synthesized via HMProfileBuilder+HidDescriptorBuilder, mirrors PadForge's HMaestroProfileCatalog.BuildCustomProfile.\"");
+        json.AppendLine("}");
+
+        System.IO.Directory.CreateDirectory(outDir);
+        string outPath = System.IO.Path.Combine(outDir, $"{id}.json");
+        System.IO.File.WriteAllText(outPath, json.ToString());
+        Console.WriteLine($"  Wrote custom profile JSON: {outPath}");
+        Console.WriteLine($"    id: {id}");
+        Console.WriteLine($"    VID/PID: 0x{vid:X4}/0x{pid:X4}");
+        Console.WriteLine($"    descriptor: {descriptor.Length} bytes");
+        return 0;
     }
 
     // ── sdk-demo ──

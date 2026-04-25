@@ -231,6 +231,99 @@ internal static class SwdDeviceFactory
         // no-op — see class doc.
     }
 
+    /// <summary>
+    /// Permanently remove a SwDevice via the documented teardown path:
+    /// <c>SwDeviceCreate</c> with the original args (reconnects to the
+    /// existing device, returns a fresh handle), then
+    /// <c>SwDeviceSetLifetime(Handle)</c> + <c>SwDeviceClose</c>. This is
+    /// the only way to defeat <c>SwDeviceLifetimeParentPresent</c>'s
+    /// auto-resurrect — DIF_REMOVE and pnputil /force both succeed
+    /// cosmetically but the kernel re-enumerates the SwDevice via the
+    /// lifetime contract because parent (HTREE\ROOT\0) is always present.
+    ///
+    /// The required args (HardwareIds, CompatibleIDs, ContainerID,
+    /// DeviceDesc) are reconstructed from the registry hive entry at
+    /// <c>HKLM\SYSTEM\CurrentControlSet\Enum\&lt;instanceId&gt;</c>. If
+    /// the registry entry is missing, the device is already fully gone.
+    /// </summary>
+    public static int Remove(string instanceId)
+    {
+        if (instanceId == null) return unchecked((int)0x80070057); // E_INVALIDARG
+
+        // instanceId format: SWD\<enumerator>\<suffix>
+        // Parse to extract enumerator + suffix.
+        int firstSep = instanceId.IndexOf('\\');
+        int lastSep = instanceId.LastIndexOf('\\');
+        if (firstSep < 0 || lastSep <= firstSep) return unchecked((int)0x80070057);
+        string root       = instanceId.Substring(0, firstSep);
+        string enumerator = instanceId.Substring(firstSep + 1, lastSep - firstSep - 1);
+        string suffix     = instanceId.Substring(lastSep + 1);
+
+        if (!root.Equals("SWD", StringComparison.OrdinalIgnoreCase))
+            return unchecked((int)0x80070057); // not a SWD instance
+
+        // Read args back from the registry hive entry.
+        string regPath = $@"SYSTEM\CurrentControlSet\Enum\{instanceId}";
+        string[] hwIds;
+        string[] compatIds;
+        Guid containerId;
+        string description;
+
+        using (var regKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath))
+        {
+            if (regKey == null) return 0; // already gone — nothing to remove
+            hwIds       = regKey.GetValue("HardwareID") as string[]    ?? Array.Empty<string>();
+            compatIds   = regKey.GetValue("CompatibleIDs") as string[] ?? Array.Empty<string>();
+            string?  cidStr      = regKey.GetValue("ContainerID") as string;
+            string?  rawDesc     = regKey.GetValue("DeviceDesc")  as string;
+            // DeviceDesc format may be "@path,%key%;default" — strip to default.
+            description = rawDesc ?? "HIDMaestro Device";
+            int semicolon = description.LastIndexOf(';');
+            if (semicolon >= 0) description = description.Substring(semicolon + 1);
+            if (string.IsNullOrWhiteSpace(description)) description = "HIDMaestro Device";
+
+            if (cidStr == null || !Guid.TryParse(cidStr, out containerId))
+                return unchecked((int)0x80004005); // E_FAIL — no container, can't reconnect
+        }
+
+        string? helperPath = EnsureHelperExtracted();
+        if (helperPath == null || !File.Exists(helperPath))
+            return unchecked((int)0x80070002); // ERROR_FILE_NOT_FOUND
+
+        var psi = new ProcessStartInfo
+        {
+            FileName  = helperPath,
+            UseShellExecute        = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            CreateNoWindow         = true,
+            WorkingDirectory       = Path.GetTempPath(),
+        };
+        psi.ArgumentList.Add("remove");
+        psi.ArgumentList.Add(enumerator);
+        psi.ArgumentList.Add(suffix);
+        psi.ArgumentList.Add(containerId.ToString("B"));
+        psi.ArgumentList.Add(string.Join('|', hwIds));
+        psi.ArgumentList.Add(string.Join('|', compatIds));
+        psi.ArgumentList.Add(description);
+
+        try
+        {
+            using var proc = Process.Start(psi);
+            if (proc == null) return unchecked((int)0x80070005);
+            if (!proc.WaitForExit(30_000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                return unchecked((int)0x80070102); // WAIT_TIMEOUT
+            }
+            return proc.ExitCode;
+        }
+        catch
+        {
+            return unchecked((int)0x80004005);
+        }
+    }
+
     // ── helper extraction ────────────────────────────────────────────────
 
     private static readonly object s_extractLock = new();

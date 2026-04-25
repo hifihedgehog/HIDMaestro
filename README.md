@@ -317,6 +317,17 @@ The test app is fully self-contained. On first run it:
 
 No external scripts, no manual setup, no popups. Just the one console window. Requires elevation (administrator privileges).
 
+### Live-swap regression battery
+
+`test/regression/swap_regression.ps1` is a 23-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all five controller archetypes (Xbox 360 Wired, Xbox Series Bluetooth, DualSense, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`). Run from an elevated PowerShell:
+
+```powershell
+./test/regression/swap_regression.ps1                # full battery, ~32 min
+./test/regression/swap_regression.ps1 -Filter 'S08*' # one scenario, ~1-2 min
+```
+
+Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path.
+
 ## Profile System
 
 Controller profiles are JSON files in `profiles/`:
