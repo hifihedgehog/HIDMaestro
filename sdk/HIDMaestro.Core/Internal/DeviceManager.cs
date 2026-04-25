@@ -744,10 +744,17 @@ public static class DeviceManager
     }
 
     /// <summary>
-    /// Scans HKLM\SYSTEM\CurrentControlSet\Enum\HID for orphaned HID children
-    /// matching VID_045E*IG_00* or HIDCLASS entries whose ROOT parent no longer exists.
-    /// Removes each orphan via DIF_REMOVE.
-    /// Returns the number of orphans removed.
+    /// Scans HKLM\SYSTEM\CurrentControlSet\Enum\HID for orphaned HM HID
+    /// children whose parent (ROOT\ or SWD\) no longer exists. Removes each
+    /// via DIF_REMOVE. Returns the number of orphans removed.
+    ///
+    /// HM ownership is identified by the HardwareIDs of the HID instance —
+    /// every HM HID child carries "HID\HIDMaestro" + "HID\HIDMaestroGamepad"
+    /// entries from the INF. That's contractual and stable across:
+    ///   - the v1.1.20 ROOT\ -> SWD\ enumerator migration
+    ///   - VID-spoofing Xbox profiles vs HIDMAESTRO-prefix non-Xbox profiles
+    /// — so it correctly catches every flavor of HM child without name-
+    /// pattern brittleness.
     /// </summary>
     public static int RemoveOrphanHidChildren()
     {
@@ -762,13 +769,6 @@ public static class DeviceManager
 
             foreach (string deviceName in hidKey.GetSubKeyNames())
             {
-                // Match VID_045E*IG_00* or HIDCLASS entries
-                string upper = deviceName.ToUpperInvariant();
-                bool isMatch = (upper.Contains("VID_045E") && upper.Contains("IG_00"))
-                            || upper.Contains("HIDCLASS");
-                if (!isMatch)
-                    continue;
-
                 using var deviceKey = hidKey.OpenSubKey(deviceName);
                 if (deviceKey == null)
                     continue;
@@ -777,16 +777,36 @@ public static class DeviceManager
                 {
                     string hidInstanceId = $@"HID\{deviceName}\{instanceName}";
 
-                    // Read the parent instance ID from the registry
+                    // Confirm this HID child belongs to HIDMaestro via its
+                    // HardwareIDs. Hardcoded VID/IG_ string matching (the
+                    // pre-fix approach) missed Sony/Nintendo profiles and
+                    // post-v1.1.20 HIDMAESTRO-prefix children entirely.
+                    using var instKey = deviceKey.OpenSubKey(instanceName);
+                    if (instKey == null)
+                        continue;
+                    var hwIds = instKey.GetValue("HardwareID") as string[];
+                    bool isHmChild = hwIds != null && Array.Exists(hwIds, id =>
+                        id.IndexOf("HIDMaestro", StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (!isHmChild)
+                        continue;
+
+                    // Read the parent instance ID
                     string? parentId = GetRegistryParentId(enumHidPath, deviceName, instanceName);
                     if (parentId == null)
                         continue;
 
-                    // Check if the parent ROOT device still exists (live or phantom)
-                    if (!parentId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase))
+                    // Accept ROOT\ (legacy pre-v1.1.20) and SWD\ (current).
+                    // The pre-fix code only accepted ROOT\, so post-SWD-
+                    // migration orphans were never cleaned up — every live
+                    // profile swap leaked an HID child until reboot.
+                    bool parentIsHmEnum =
+                        parentId.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) ||
+                        parentId.StartsWith(@"SWD\", StringComparison.OrdinalIgnoreCase);
+                    if (!parentIsHmEnum)
                         continue;
 
-                    // If parent can be located, it's not an orphan
+                    // If parent can be located (live or phantom), it's not
+                    // orphaned.
                     if (CM_Locate_DevNodeW(out uint _, parentId, 0) == CR_SUCCESS)
                         continue;
                     if (CM_Locate_DevNodeW(out uint _, parentId, 1) == CR_SUCCESS)
