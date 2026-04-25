@@ -460,7 +460,8 @@ public static class DeviceManager
         // self-heal binary literally never loads and input keeps hanging.
         if ((!fast || forceFallbacks) && !goneAfterDif &&
             (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
-             instanceId.StartsWith("HID\\", StringComparison.OrdinalIgnoreCase)))
+             instanceId.StartsWith("HID\\",  StringComparison.OrdinalIgnoreCase) ||
+             instanceId.StartsWith("SWD\\",  StringComparison.OrdinalIgnoreCase)))
         {
             bool stillPhantom = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
             if (stillPhantom)
