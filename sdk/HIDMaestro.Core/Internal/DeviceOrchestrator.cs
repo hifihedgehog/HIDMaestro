@@ -25,19 +25,69 @@ internal static class DeviceOrchestrator
     private static bool s_ghostsCleaned;
 
     /// <summary>
-    /// Unique per-process session id, prepended to every SwD instance-ID
-    /// suffix so the kernel PnP state doesn't see our (enumerator + suffix
-    /// + containerId) as "the same device as last run." Windows retains a
-    /// sticky per-container record after SwDeviceClose — a subsequent
-    /// SwDeviceCreate with an IDENTICAL tuple takes a fast "re-enumerate"
-    /// path that leaves the devnode as an empty shell (no Service/Driver
-    /// bound, no interface classes registered). Varying the suffix per
-    /// session forces a true fresh install every time. FindExistingCompanion
+    /// Per-process base for SwD instance-ID suffixes. Combined with a
+    /// per-creation atomic sequence number (see <see cref="NextSwdSuffix"/>)
+    /// so every SwDeviceCreate call within this process gets a UNIQUE
+    /// (enumerator + suffix + ContainerId) tuple. Required because Windows
+    /// retains a sticky per-container record after SwDeviceClose — a
+    /// subsequent SwDeviceCreate with an IDENTICAL tuple takes a fast
+    /// "re-enumerate" path that leaves the devnode as an empty shell
+    /// (no Service/Driver bound, no interface classes registered). The bug
+    /// reproduces both across-process AND within-process: prior fix only
+    /// varied across process launches, leaving same-process live-swap
+    /// recreations broken on the 2nd swap onward. FindExistingCompanion
     /// matches by ControllerIndex in Device Parameters (not by suffix), so
-    /// this is transparent to teardown / sweep code.
+    /// varying suffixes per call is transparent to teardown / sweep code.
     /// </summary>
     private static readonly string s_sessionId =
         System.Diagnostics.Process.GetCurrentProcess().Id.ToString("X").ToUpperInvariant();
+
+    private static int s_swdCreateSeq;
+
+    /// <summary>
+    /// Generates a unique SwD instance-suffix for one SwDeviceCreate call.
+    /// Format: "&lt;pid-hex&gt;&lt;seq-hex&gt;_&lt;ctrl-idx&gt;". Sequence number
+    /// is process-scoped and atomic; suffix becomes unique even when the
+    /// same controllerIndex is recreated multiple times in the same process.
+    /// </summary>
+    private static string NextSwdSuffix(int controllerIndex)
+    {
+        int seq = System.Threading.Interlocked.Increment(ref s_swdCreateSeq);
+        return $"{s_sessionId}{seq:X4}_{controllerIndex:D4}";
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  Diagnostic log for teardown investigations — gated by env var
+    //  HIDMAESTRO_DIAG=1. Writes to %TEMP%\HIDMaestro\teardown_diag.log.
+    //  Each TeardownController / RemoveDevice / WaitForDeviceRemoval call
+    //  emits one line with timestamp + elapsed-ms + outcome. Off by default
+    //  to keep production runs file-write-clean; flip the env var to repro
+    //  any future "device left behind after teardown" regression.
+    // ════════════════════════════════════════════════════════════════════
+    private static readonly bool s_diagEnabled =
+        Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
+    private static readonly object s_diagLock = new();
+    private static string? s_diagPath;
+
+    internal static void LogDiag(string message)
+    {
+        if (!s_diagEnabled) return;
+        lock (s_diagLock)
+        {
+            try
+            {
+                if (s_diagPath == null)
+                {
+                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
+                    Directory.CreateDirectory(dir);
+                    s_diagPath = Path.Combine(dir, "teardown_diag.log");
+                }
+                File.AppendAllText(s_diagPath!,
+                    $"[{DateTime.Now:HH:mm:ss.fff}] tid={Environment.CurrentManagedThreadId,-3} {message}\n");
+            }
+            catch { }
+        }
+    }
 
     // ════════════════════════════════════════════════════════════════════
     //  Timing instrumentation — gated by env var HIDMAESTRO_TIMING=1.
@@ -811,11 +861,11 @@ internal static class DeviceOrchestrator
             // `&` between VID and PID for `_` breaks the substring match
             // without touching anything else.
             string gpSwdEnumerator = gpEnumeratorSwd;
-            // Instance suffix = "<pid-hex>_<idx>". Varying the suffix per
-            // process instance bypasses Windows' sticky per-container
-            // "recently-here" fast path that otherwise leaves this devnode
-            // as an empty shell on subsequent runs.
-            string instanceSuffix = $"{s_sessionId}_{controllerIndex:D4}";
+            // Per-call unique instance suffix bypasses Windows' sticky
+            // per-container "recently-here" fast path that otherwise leaves
+            // this devnode as an empty shell on RECREATION (across-process
+            // or within-process — e.g. PadForge live-profile-swap).
+            string instanceSuffix = NextSwdSuffix(controllerIndex);
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Gamepad";
 
             var result = SwdDeviceFactory.Create(
@@ -920,12 +970,12 @@ internal static class DeviceOrchestrator
                 "USB\\Class_FF",
             };
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-            // Instance suffix = "<pid-hex>_<idx>" — same rationale as the
+            // Per-call unique instance suffix — same rationale as the
             // gamepad-companion path: bypass the kernel's sticky per-container
             // "recently-here" fast path that leaves HIDMAESTRO devnodes as
-            // empty shells (no Service/Driver bound, no XUSB interface
-            // registered) on subsequent runs in the same machine uptime.
-            string instanceSuffix = $"{s_sessionId}_{controllerIndex:D4}";
+            // empty shells (no Service/Driver, no XUSB interface registered)
+            // on RECREATION (across-process or within-process live-swap).
+            string instanceSuffix = NextSwdSuffix(controllerIndex);
 
             var result = SwdDeviceFactory.Create(
                 instanceSuffix,
@@ -1522,6 +1572,9 @@ internal static class DeviceOrchestrator
     /// the batch (instead of N times concurrently) is a clean win.</summary>
     internal static void TeardownController(int controllerIndex, string? instanceId, bool skipOrphanSweep)
     {
+        var totalSw = Stopwatch.StartNew();
+        LogDiag($">>> TEARDOWN ENTER ctrl={controllerIndex} instanceId={instanceId ?? "(null)"}");
+
         // Acquire the per-controllerIndex teardown gate IMMEDIATELY at entry.
         // SetupController for the same index will block on this gate at its
         // own entry until we Set it again at the END of this function. This
@@ -1548,6 +1601,8 @@ internal static class DeviceOrchestrator
             try { preCapturedHidChildren = DeviceManager.GetAllHidChildIds(instanceId!); }
             catch { preCapturedHidChildren = new List<string>(); }
         }
+        LogDiag($"    pre-captured HID children: {preCapturedHidChildren.Count}");
+        foreach (var c in preCapturedHidChildren) LogDiag($"      child: {c}");
 
         // Close all SwDeviceCreate-owned handles for this controller FIRST.
         // SwDeviceCreate-managed devices (xinputhid-path gamepad companion
@@ -1568,7 +1623,9 @@ internal static class DeviceOrchestrator
         // for a different profile at the same ControllerIndex) require the
         // explicit ordering, otherwise the prior controller's Sw-managed
         // devnodes leave zombies that occupy XInput slots forever.
+        var swdSw = Stopwatch.StartNew();
         try { CloseSwdHandlesFor(controllerIndex); } catch { }
+        LogDiag($"    CloseSwdHandlesFor(ctrl={controllerIndex}) took {swdSw.ElapsedMilliseconds}ms");
 
         if (!string.IsNullOrEmpty(instanceId))
         {
@@ -1601,7 +1658,11 @@ internal static class DeviceOrchestrator
             // historical pre-regression value: generous enough that real
             // cascades always finish inside it, capped so a truly hung
             // kernel doesn't block forever.
-            try { DeviceManager.RemoveDevice(instanceId!, timeoutMs: 120_000, forceFallbacks: true); } catch { }
+            var parentSw = Stopwatch.StartNew();
+            bool parentRemoved = false;
+            try { parentRemoved = DeviceManager.RemoveDevice(instanceId!, timeoutMs: 120_000, forceFallbacks: true); }
+            catch (Exception ex) { LogDiag($"    parent RemoveDevice EXCEPTION: {ex.Message}"); }
+            LogDiag($"    parent RemoveDevice({instanceId}) returned {parentRemoved} after {parentSw.ElapsedMilliseconds}ms");
 
             // Now explicitly remove each captured HID child. If Windows
             // already cascade-removed them (typical for Sw-managed parents
@@ -1611,7 +1672,11 @@ internal static class DeviceOrchestrator
             // rather than lingering as an enumerable-but-unusable PDO.
             foreach (var childId in preCapturedHidChildren)
             {
-                try { DeviceManager.RemoveDevice(childId, timeoutMs: 120_000, fast: true, forceFallbacks: true); } catch { }
+                var childSw = Stopwatch.StartNew();
+                bool childRemoved = false;
+                try { childRemoved = DeviceManager.RemoveDevice(childId, timeoutMs: 120_000, fast: true, forceFallbacks: true); }
+                catch (Exception ex) { LogDiag($"    child RemoveDevice EXCEPTION ({childId}): {ex.Message}"); }
+                LogDiag($"    child RemoveDevice({childId}) returned {childRemoved} after {childSw.ElapsedMilliseconds}ms");
             }
         }
 
@@ -1640,7 +1705,11 @@ internal static class DeviceOrchestrator
                         // managed XUSB companions on slow machines have
                         // time to fully cascade before the gate signals
                         // SetupController to proceed.
-                        try { DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); } catch { }
+                        var sweepSw = Stopwatch.StartNew();
+                        bool sweepRemoved = false;
+                        try { sweepRemoved = DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); }
+                        catch (Exception ex) { LogDiag($"    HIDMAESTRO sweep EXCEPTION ({candidate}): {ex.Message}"); }
+                        LogDiag($"    HIDMAESTRO sweep RemoveDevice({candidate}) returned {sweepRemoved} after {sweepSw.ElapsedMilliseconds}ms");
                     }
                 }
             }
@@ -1676,7 +1745,11 @@ internal static class DeviceOrchestrator
                             // 120s timeout — same rationale as the HIDMAESTRO
                             // sweep above: full cascade-complete on slow
                             // machines must not race the gate.
-                            try { DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); } catch { }
+                            var igSw = Stopwatch.StartNew();
+                            bool igRemoved = false;
+                            try { igRemoved = DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); }
+                            catch (Exception ex) { LogDiag($"    IG_00 sweep EXCEPTION ({candidate}): {ex.Message}"); }
+                            LogDiag($"    IG_00 sweep RemoveDevice({candidate}) returned {igRemoved} after {igSw.ElapsedMilliseconds}ms");
                         }
                     }
                 }
@@ -1717,6 +1790,7 @@ internal static class DeviceOrchestrator
             // can now proceed. Reached via every code path including
             // exceptions inside the teardown body.
             EndTeardownGate(controllerIndex);
+            LogDiag($"<<< TEARDOWN EXIT  ctrl={controllerIndex} total={totalSw.ElapsedMilliseconds}ms");
         }
     }
 

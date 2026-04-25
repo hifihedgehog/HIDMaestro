@@ -443,7 +443,9 @@ public static class DeviceManager
         else
         {
             DifRemoveDevice(instanceId);
+            var waitSw = System.Diagnostics.Stopwatch.StartNew();
             goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
+            DeviceOrchestrator.LogDiag($"      WaitForDeviceRemoval({instanceId}, {timeoutMs}ms) returned {goneAfterDif} after {waitSw.ElapsedMilliseconds}ms");
         }
 
         // Step 3: pnputil + devcon fallbacks. Normally gated on !fast (skipped
