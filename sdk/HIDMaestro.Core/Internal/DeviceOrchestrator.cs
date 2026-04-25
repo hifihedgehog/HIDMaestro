@@ -135,6 +135,86 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
+    //  Per-controllerIndex teardown gate — defense-in-depth coordination
+    //  between TeardownController and SetupController.
+    //
+    //  PadForge's swap path is:
+    //      vc.Dispose()           // sync, blocks polling thread
+    //      _ctx.CreateController()  // immediately after Dispose returns
+    //
+    //  PadForge's contract assumes Dispose returns ONLY after the prior
+    //  device's full kernel cascade (xinputhid unbind, interface-class
+    //  cleanup, ContainerID GC, slot release) is complete. The gate
+    //  enforces that contract from BOTH sides:
+    //
+    //  Primary path: TeardownController calls WaitForDeviceRemoval
+    //    (CM_Register_Notification → CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED).
+    //    The notification fires only after the OS finalizes removal.
+    //
+    //  Defense-in-depth: a per-index ManualResetEventSlim. TeardownController
+    //    Resets at entry and Sets at exit. SetupController Waits on it at
+    //    entry. If the primary wait times out or returns early for any
+    //    reason (kernel slow, xinputhid stuck, future regression), the
+    //    new SetupController for the same index still blocks at the gate
+    //    until the prior teardown's exit completes — preventing the
+    //    "duplicate controller because the new bind pre-empted the old
+    //    teardown" symptom.
+    //
+    //  Initial state of every gate is signaled (created lazily, fresh).
+    //  Different controllerIndex values get separate gates — parallel
+    //  teardown of unrelated controllers isn't serialized.
+    // ════════════════════════════════════════════════════════════════════
+
+    private static readonly Dictionary<int, ManualResetEventSlim> s_teardownGates = new();
+    private static readonly object s_teardownGatesLock = new();
+
+    private static ManualResetEventSlim GetTeardownGate(int controllerIndex)
+    {
+        lock (s_teardownGatesLock)
+        {
+            if (!s_teardownGates.TryGetValue(controllerIndex, out var ev))
+            {
+                // Created in signaled state — no teardown is in flight yet.
+                ev = new ManualResetEventSlim(initialState: true);
+                s_teardownGates[controllerIndex] = ev;
+            }
+            return ev;
+        }
+    }
+
+    private static void BeginTeardownGate(int controllerIndex)
+    {
+        var ev = GetTeardownGate(controllerIndex);
+        ev.Reset();
+    }
+
+    private static void EndTeardownGate(int controllerIndex)
+    {
+        ManualResetEventSlim? ev;
+        lock (s_teardownGatesLock)
+        {
+            s_teardownGates.TryGetValue(controllerIndex, out ev);
+        }
+        ev?.Set();
+    }
+
+    /// <summary>Block until any in-flight TeardownController for this
+    /// controllerIndex has fully completed. Called by SetupController at
+    /// entry. Returns immediately if no teardown is in flight (gate already
+    /// signaled). 30-second hard cap protects against a Reset-without-Set
+    /// regression — beyond which we proceed regardless and trust the
+    /// primary cascade-complete wait inside TeardownController.</summary>
+    private static void WaitForPriorTeardown(int controllerIndex, int timeoutMs = 120_000)
+    {
+        ManualResetEventSlim? ev;
+        lock (s_teardownGatesLock)
+        {
+            s_teardownGates.TryGetValue(controllerIndex, out ev);
+        }
+        ev?.Wait(timeoutMs);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     //  P/Invoke: SetupAPI
     // ════════════════════════════════════════════════════════════════════
 
@@ -1098,6 +1178,21 @@ internal static class DeviceOrchestrator
             throw new ArgumentException(
                 $"Profile '{profile.Id}' has no HID descriptor.", nameof(profile));
 
+        // Defense-in-depth gate: block until any in-flight TeardownController
+        // for this controllerIndex has fully completed (including
+        // WaitForDeviceRemoval's CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED
+        // event). PadForge's contract — "Dispose returns when teardown is
+        // complete" — is enforced primarily by RemoveDevice's
+        // WaitForDeviceRemoval inside TeardownController, but if that wait
+        // ever returns early (timeout, unexpected exception, future
+        // regression), this gate prevents a new SetupController for the
+        // same index from racing the prior teardown's kernel cascade and
+        // creating a duplicate. Initial gate state is signaled, so the
+        // first SetupController for an index never blocks. After a
+        // successful TeardownController, the gate is Set in its finally
+        // block. No-op when no teardown was in flight.
+        WaitForPriorTeardown(controllerIndex);
+
         using var _total = new TimingScope(controllerIndex, profile.Id, "TOTAL");
 
         // Snapshot XInput slot count BEFORE any setup so the post-setup wait
@@ -1427,6 +1522,18 @@ internal static class DeviceOrchestrator
     /// the batch (instead of N times concurrently) is a clean win.</summary>
     internal static void TeardownController(int controllerIndex, string? instanceId, bool skipOrphanSweep)
     {
+        // Acquire the per-controllerIndex teardown gate IMMEDIATELY at entry.
+        // SetupController for the same index will block on this gate at its
+        // own entry until we Set it again at the END of this function. This
+        // is the contract enforcement: no SetupController for index N can
+        // proceed while a TeardownController for index N is still in flight,
+        // even if HMController.Dispose returned early to the caller. Released
+        // in finally below.
+        BeginTeardownGate(controllerIndex);
+
+        try
+        {
+
         try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
 
         // Capture the HID children of the parent BEFORE any removal step.
@@ -1481,7 +1588,20 @@ internal static class DeviceOrchestrator
             // ROOT-enumerator parents (Xbox 360 wired's main HID via
             // DeviceNodeCreator's DIF_REGISTERDEVICE path, plain HID
             // profiles), this is the actual removal step.
-            try { DeviceManager.RemoveDevice(instanceId!, forceFallbacks: true); } catch { }
+            //
+            // timeoutMs=120000: per the SDK README, xinputhid filter unload
+            // for BT typically takes 5-11 seconds, but on heavily loaded or
+            // slow user machines (low-end CPU + many active HID stacks +
+            // Windows running PnP coinstaller work in parallel) the
+            // cascade can stretch much further. A 5s or even 15s timeout
+            // is a hard error mode — RemoveDevice returns with
+            // goneAfterDif=false and the caller moves on while the kernel
+            // is still cleaning up, breaking PadForge's "Dispose returns
+            // when teardown is fully complete" contract. 120s is the
+            // historical pre-regression value: generous enough that real
+            // cascades always finish inside it, capped so a truly hung
+            // kernel doesn't block forever.
+            try { DeviceManager.RemoveDevice(instanceId!, timeoutMs: 120_000, forceFallbacks: true); } catch { }
 
             // Now explicitly remove each captured HID child. If Windows
             // already cascade-removed them (typical for Sw-managed parents
@@ -1491,7 +1611,7 @@ internal static class DeviceOrchestrator
             // rather than lingering as an enumerable-but-unusable PDO.
             foreach (var childId in preCapturedHidChildren)
             {
-                try { DeviceManager.RemoveDevice(childId, timeoutMs: 3000, fast: true, forceFallbacks: true); } catch { }
+                try { DeviceManager.RemoveDevice(childId, timeoutMs: 120_000, fast: true, forceFallbacks: true); } catch { }
             }
         }
 
@@ -1515,7 +1635,12 @@ internal static class DeviceOrchestrator
                     using var dp = hmEnum.OpenSubKey($@"{inst}\Device Parameters");
                     if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                     {
-                        try { DeviceManager.RemoveDevice(candidate, forceFallbacks: true); } catch { }
+                        // 120s timeout — same generous budget as the
+                        // primary parent removal above, so SwDevice-
+                        // managed XUSB companions on slow machines have
+                        // time to fully cascade before the gate signals
+                        // SetupController to proceed.
+                        try { DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); } catch { }
                     }
                 }
             }
@@ -1548,7 +1673,10 @@ internal static class DeviceOrchestrator
                         using var dp = vidKey.OpenSubKey($@"{instName}\Device Parameters");
                         if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                         {
-                            try { DeviceManager.RemoveDevice(candidate, forceFallbacks: true); } catch { }
+                            // 120s timeout — same rationale as the HIDMAESTRO
+                            // sweep above: full cascade-complete on slow
+                            // machines must not race the gate.
+                            try { DeviceManager.RemoveDevice(candidate, timeoutMs: 120_000, forceFallbacks: true); } catch { }
                         }
                     }
                 }
@@ -1581,6 +1709,15 @@ internal static class DeviceOrchestrator
         // children to a locatable parent and are untouched.
         if (!skipOrphanSweep)
             try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
+
+        }
+        finally
+        {
+            // Release the gate — SetupController for this controllerIndex
+            // can now proceed. Reached via every code path including
+            // exceptions inside the teardown body.
+            EndTeardownGate(controllerIndex);
+        }
     }
 
     /// <summary>One-time orphan sweep used after a batch teardown
