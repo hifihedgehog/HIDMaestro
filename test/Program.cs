@@ -1244,14 +1244,18 @@ class Program
         ushort pid = args.Length > 3 ? Convert.ToUInt16(args[3], 16) : (ushort)0xF000;
 
         // Mirror PadForge's HMaestroProfileCatalog.BuildCustomProfile:
-        // 2 16-bit sticks, 2 8-bit triggers, 1 hat switch, 11 buttons,
-        // gamepad collection.
+        // 2 16-bit sticks, 2 16-bit triggers, 1 hat switch, 11 buttons,
+        // gamepad collection. Triggers raised from 8-bit to 16-bit
+        // 2026-04-26 to match PadForge's bump for full precision
+        // (65,536 levels per trigger). Still byte-aligned per
+        // HidDescriptorBuilder's bits%8==0 constraint, so no Const-pad
+        // phantom-axis risk in Chromium's RawInput parser.
         byte[] descriptor = new HidDescriptorBuilder()
             .Gamepad()
             .AddStick("Left", 16)
             .AddStick("Right", 16)
-            .AddTrigger("Left", 8)
-            .AddTrigger("Right", 8)
+            .AddTrigger("Left", 16)
+            .AddTrigger("Right", 16)
             .AddHat()
             .AddButtons(11)
             .Build();
