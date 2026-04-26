@@ -245,12 +245,33 @@ typedef struct _HIDMAESTRO_SHARED_PID_STATE {
     UCHAR           State_EffectBlockIndex;
     UCHAR           State_Flags;
     UCHAR           _pad1[2];
+
+    /* v1.1.37 — driver-side EBI free-list. Bit N (0..31) set ⇒ EBI N+1
+     * is allocated. Driver atomically allocates next free EBI on
+     * SetFeature(0x11 Create New Effect) inside the IOCTL handler so
+     * dinput8's follow-up GetFeature(0x12) reads consistent state.
+     * Mirrors vJoy's `Ffb_GetNextFreeEffect`. The 32-bit width caps
+     * us at 32 simultaneous effects, well above any consumer-pool
+     * value we'd realistically advertise via Pool_MaxSimultaneousEffects.
+     *
+     * Update protocol: driver uses InterlockedOr/And to flip bits;
+     * the field is OUTSIDE the seqlock'd block intentionally so EBI
+     * alloc/free never has to synchronize with PublishPid* writers.
+     * BL_* fields ARE inside the seqlock and the driver writes them
+     * atomically with SeqNo increment after a successful allocation. */
+    volatile ULONG  EbiAllocBitmap;
+
+    /* v1.1.37 — driver tracks EBI count for fast pool-exhaustion check.
+     * Updated atomically alongside EbiAllocBitmap. */
+    volatile ULONG  EbiAllocatedCount;
 } HIDMAESTRO_SHARED_PID_STATE, *PHIDMAESTRO_SHARED_PID_STATE;
 #pragma pack(pop)
 
 /* Default PID Report IDs per the canonical HID PID 1.0 descriptor.
  * Profiles may use different IDs; the driver falls back to STATUS_NOT_SUPPORTED
  * for unknown IDs, preserving today's behavior. */
+#define HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID  0x11
+#define HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID         0x1F
 #define HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID  0x12
 #define HIDMAESTRO_PID_POOL_REPORT_ID        0x13
 #define HIDMAESTRO_PID_STATE_REPORT_ID       0x14

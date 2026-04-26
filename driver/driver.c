@@ -472,6 +472,56 @@ HmDbgAppendPrefix(char *p, char *end, PDEVICE_CONTEXT ctx,
     return p;
 }
 
+/* v1.1.37 — file-based trace fallback. DbgView's Session 0 capture is
+ * unreliable across Windows versions (issue #16: PadForge couldn't capture
+ * v1.1.36's OutputDebugStringA output via DbgView or a custom user-mode
+ * DBWIN_BUFFER listener — Session 0 boundary blocks both).
+ *
+ * When env var HMAESTRO_TRACE=1, every trace line also goes to
+ * %PROGRAMDATA%\HIDMaestro\driver-trace.log (LocalService can write here
+ * via the Public ACL on ProgramData). OutputDebugStringA is always called
+ * for any debugger that IS attached.
+ *
+ * The env var is sampled lazily on first emit and cached. Setting it
+ * after WUDFHost is already running won't take effect until the host
+ * restarts, but that matches PadForge's expected workflow ("setx + restart
+ * service-process").
+ */
+static volatile LONG g_HmTraceFileChecked = 0;
+static volatile LONG g_HmTraceFileEnabled = 0;
+static SRWLOCK       g_HmTraceFileLock    = SRWLOCK_INIT;
+static const WCHAR   g_HmTraceFilePath[]  = L"C:\\ProgramData\\HIDMaestro\\driver-trace.log";
+
+static VOID
+HmTraceEmit(_In_ PCSTR text)
+{
+    OutputDebugStringA(text);
+
+    if (InterlockedCompareExchange(&g_HmTraceFileChecked, 1, 0) == 0) {
+        WCHAR val[8] = {0};
+        DWORD got = GetEnvironmentVariableW(L"HMAESTRO_TRACE", val, ARRAYSIZE(val));
+        if (got > 0 && got < ARRAYSIZE(val) && val[0] == L'1' && val[1] == 0) {
+            /* Best-effort directory create — ignored if it already exists. */
+            CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
+            InterlockedExchange(&g_HmTraceFileEnabled, 1);
+        }
+    }
+    if (g_HmTraceFileEnabled == 0) return;
+
+    AcquireSRWLockExclusive(&g_HmTraceFileLock);
+    HANDLE h = CreateFileW(g_HmTraceFilePath,
+                           FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        SIZE_T n = 0;
+        while (text[n] != 0) n++;
+        DWORD written = 0;
+        WriteFile(h, text, (DWORD)n, &written, NULL);
+        CloseHandle(h);
+    }
+    ReleaseSRWLockExclusive(&g_HmTraceFileLock);
+}
+
 static VOID
 HmDbgPidGetFeatureGate(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
                        _In_ ULONG outSize, _In_ NTSTATUS status,
@@ -485,7 +535,7 @@ HmDbgPidGetFeatureGate(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
     p = HmDbgAppendHex(p, end, (ULONG)status, 8);
     p = HmDbgAppendCstr(p, end, "\n");
     *p = 0;
-    OutputDebugStringA(buf);
+    HmTraceEmit(buf);
 }
 
 static VOID
@@ -505,7 +555,126 @@ HmDbgPidGetFeatureBytes(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
     }
     p = HmDbgAppendCstr(p, end, "\n");
     *p = 0;
-    OutputDebugStringA(buf);
+    HmTraceEmit(buf);
+}
+
+/* v1.1.37 — driver-side EBI allocator. Picks the next free EBI from the
+ * shared section's bitmap, updates BL_* fields atomically (with seqlock),
+ * and increments the allocated count. Pool full → BL_LoadStatus = Full
+ * (PID 1.0 §5.5 enum value 2), no bit set.
+ *
+ * Called synchronously from the IOCTL_UMDF_HID_SET_FEATURE handler when
+ * dinput8 issues SetFeature(0x11 Create New Effect). The follow-up
+ * GetFeature(0x12) on the same handshake reads the same BL_* fields,
+ * which are now populated. Mirrors vJoy's `Ffb_GetNextFreeEffect` +
+ * `pid->PIDBlockLoad.*` synchronous update inside `Ffb_ProcessPacket`.
+ */
+static VOID
+AllocateEbiInBlockLoad(_In_ PDEVICE_CONTEXT ctx)
+{
+    volatile HIDMAESTRO_SHARED_PID_STATE *pid =
+        (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+    if (pid == NULL) return;
+
+    /* Cap effect count by Pool_MaxSimultaneousEffects (consumer-published).
+     * 0 means consumer hasn't published a Pool yet, in which case we use
+     * the bitmap width (32) as an upper bound. */
+    UCHAR cap = pid->Pool_MaxSimultaneousEffects;
+    if (cap == 0 || cap > 32) cap = 32;
+
+    /* Find first clear bit in the lowest `cap` positions. Atomic OR ensures
+     * concurrent allocations from another thread don't double-issue. */
+    UCHAR allocatedEbi = 0;
+    UCHAR loadStatus = 2; /* Full (PID 1.0 §5.5) */
+    ULONG remainingPool = 0;
+
+    for (UCHAR ebi = 1; ebi <= cap; ebi++) {
+        ULONG bit = 1UL << (ebi - 1);
+        ULONG prev = (ULONG)InterlockedOr((volatile LONG *)&pid->EbiAllocBitmap, (LONG)bit);
+        if ((prev & bit) == 0) {
+            /* We just transitioned this bit from 0 to 1 — we own EBI. */
+            allocatedEbi = ebi;
+            loadStatus = 1; /* Success */
+            InterlockedIncrement((volatile LONG *)&pid->EbiAllocatedCount);
+            break;
+        }
+        /* Bit was already set; another thread (or prior allocation) owns
+         * it. Continue without unsetting. InterlockedOr is idempotent. */
+    }
+
+    /* RAMPoolAvailable: total pool minus a synthetic per-effect cost.
+     * Real PID devices report bytes free; our consumer doesn't track the
+     * underlying physical pool, so we approximate as
+     *   (RAMPoolSize / cap) * (cap - allocatedCount)
+     * which gives dinput8 a monotonic shrinkage as effects are created. */
+    USHORT poolSize = pid->Pool_RAMPoolSize;
+    ULONG allocCount = (ULONG)pid->EbiAllocatedCount;
+    if (cap > 0 && allocCount <= cap) {
+        remainingPool = ((ULONG)poolSize / cap) * (cap - allocCount);
+    }
+
+    /* Seqlock-write the BL_* fields. Odd SeqNo signals "writer in progress"
+     * to the reader (ReadPidState retries). */
+    ULONG seq = pid->SeqNo + 1; /* odd */
+    pid->SeqNo = seq;
+    MemoryBarrier();
+    pid->BL_EffectBlockIndex   = allocatedEbi;
+    pid->BL_LoadStatus         = loadStatus;
+    pid->BL_RAMPoolAvailable   = (USHORT)remainingPool;
+    MemoryBarrier();
+    pid->SeqNo = seq + 1; /* even */
+
+    /* Trace */
+    {
+        char buf[200]; char *p = buf; char *end = buf + sizeof(buf);
+        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
+        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
+        p = HmDbgAppendCstr(p, end, "] alloc-ebi: ebi=");
+        p = HmDbgAppendDec(p, end, allocatedEbi);
+        p = HmDbgAppendCstr(p, end, " status=");
+        p = HmDbgAppendDec(p, end, loadStatus);
+        p = HmDbgAppendCstr(p, end, " remaining=0x");
+        p = HmDbgAppendHex(p, end, remainingPool, 4);
+        p = HmDbgAppendCstr(p, end, " bitmap=0x");
+        p = HmDbgAppendHex(p, end, pid->EbiAllocBitmap, 8);
+        p = HmDbgAppendCstr(p, end, "\n");
+        *p = 0;
+        HmTraceEmit(buf);
+    }
+}
+
+/* v1.1.37 — driver-side EBI free. Atomically clears the bit. No-op if the
+ * bit is already clear (defensive against duplicate Block Free packets).
+ * Mirrors vJoy's `Ffb_BlockIndexFree` + RAMPool update.
+ */
+static VOID
+FreeEbi(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR ebi)
+{
+    if (ebi < 1 || ebi > 32) return;
+
+    volatile HIDMAESTRO_SHARED_PID_STATE *pid =
+        (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+    if (pid == NULL) return;
+
+    ULONG bit = 1UL << (ebi - 1);
+    ULONG prev = (ULONG)InterlockedAnd((volatile LONG *)&pid->EbiAllocBitmap, (LONG)~bit);
+    if ((prev & bit) != 0) {
+        InterlockedDecrement((volatile LONG *)&pid->EbiAllocatedCount);
+    }
+
+    /* Trace */
+    {
+        char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
+        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
+        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
+        p = HmDbgAppendCstr(p, end, "] free-ebi: ebi=");
+        p = HmDbgAppendDec(p, end, ebi);
+        p = HmDbgAppendCstr(p, end, " bitmap=0x");
+        p = HmDbgAppendHex(p, end, pid->EbiAllocBitmap, 8);
+        p = HmDbgAppendCstr(p, end, "\n");
+        *p = 0;
+        HmTraceEmit(buf);
+    }
 }
 
 /* Publish a captured output report to the shared section.
@@ -1250,6 +1419,14 @@ EvtIoDeviceControl(
          * for some configuration writes; some HID stacks route data here.
          * Forward to the output shared section tagged as a feature report so
          * the consumer can distinguish from regular output reports.
+         *
+         * v1.1.37 — PID FFB Create New Effect (0x11) and Block Free (0x1F)
+         * are handled SYNCHRONOUSLY inside this IOCTL handler, before
+         * forwarding to the consumer. Mirrors vJoy's `Ffb_ProcessPacket`
+         * for `HID_ID_NEWEFREP+0x10`: kernel/driver allocates the EBI in
+         * the same address space as the device-extension state so dinput8's
+         * follow-up GetFeature(0x12) reads consistent state without
+         * crossing the WUDFHost ↔ consumer process boundary. Issue #16.
          */
         PVOID  featureBuf;
         size_t featureSize;
@@ -1262,6 +1439,22 @@ EvtIoDeviceControl(
             UCHAR  reportId = (featureSize > 0) ? p[0] : 0;
             const UCHAR *payload = (featureSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
+
+            /* PID FFB Create New Effect: allocate next free EBI from the
+             * driver's bitmap and write to BL_* fields atomically. */
+            if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
+                && EnsurePidStateMapping(ctx))
+            {
+                AllocateEbiInBlockLoad(ctx);
+            }
+            /* PID FFB Block Free: payload[0] is the EBI to free. */
+            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+                     && payloadLen >= 1
+                     && EnsurePidStateMapping(ctx))
+            {
+                FreeEbi(ctx, payload[0]);
+            }
+
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE,
                           reportId, payload, payloadLen);
         }
@@ -1291,16 +1484,21 @@ EvtIoDeviceControl(
          * convention and HIDMaestro's pre-v1.1.35 behavior of
          * STATUS_NOT_SUPPORTED across all GetFeature calls.
          *
-         * Block Load gate (v1.1.36): even when PidEnabled=1, GetFeature(0x12)
-         * returns STATUS_NOT_SUPPORTED if BL_LoadStatus is outside the
-         * spec-valid 1..3 range (i.e. zero-initialized after Pool/State
-         * publish but before any PublishPidBlockLoad). Returning a
-         * LoadStatus=0 byte to dinput8 violates HID PID 1.0 §5.5 (selector
-         * domain) and was implicated in dinput8!CDIEffect::CreateEffect
-         * crashing with 0xC0000005 inside FfbTest's CreateEffect path on
-         * v1.1.35 — see issue #16. With this gate, dinput8 only ever sees
-         * a real Block Load that the consumer published synchronously
-         * from its OutputReceived(SetFeature(CreateNewEffect)) handler.
+         * Block Load gate (v1.1.36, retained as defensive check): even
+         * when PidEnabled=1, GetFeature(0x12) returns STATUS_NOT_SUPPORTED
+         * if BL_LoadStatus is outside the spec-valid 1..3 range. v1.1.37
+         * driver-side EBI allocation populates BL fields synchronously
+         * inside the SetFeature(0x11) handler, so the gate normally only
+         * triggers in the brief window before any Create New Effect
+         * arrives.
+         *
+         * GetFeature(0x11 Create New Effect) is bidirectional in the
+         * canonical PID descriptor. v1.1.37 mirrors vJoy: returns
+         * STATUS_SUCCESS with the buffer untouched (vJoy's vJoyGetFeature
+         * has no case for HID_ID_NEWEFREP and falls through with the
+         * default STATUS_SUCCESS init). HIDMaestro pre-1.1.37 returned
+         * STATUS_NOT_SUPPORTED, a divergence from vJoy that may have
+         * contributed to issue #16.
          */
         PVOID  outBuf;
         size_t outSize;
@@ -1314,6 +1512,18 @@ EvtIoDeviceControl(
         }
 
         UCHAR reportId = ((UCHAR *)outBuf)[0];
+
+        /* v1.1.37: GetFeature(0x11) — silent success (mirrors vJoy).
+         * Buffer left untouched (caller's reportId byte at p[0] survives).
+         * Predates the PidEnabled gate intentionally so this works even
+         * for non-FFB consumers, matching vJoy's "always SUCCESS for
+         * unhandled report IDs" fallthrough behavior. */
+        if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID) {
+            status = STATUS_SUCCESS;
+            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
+                                   "create-new-effect-passthrough");
+            break;
+        }
 
         HIDMAESTRO_SHARED_PID_STATE pid = {0};
         BOOLEAN haveState = ReadPidState(ctx, &pid);

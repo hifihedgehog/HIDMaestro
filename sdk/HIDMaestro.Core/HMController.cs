@@ -107,18 +107,50 @@ public sealed class HMController : IDisposable
         }
     }
 
-    /// <summary>Publish the current PID Block Load Report state (HID PID 1.0 §5.5).
-    /// Single slot — most recent publish overwrites. Call <b>synchronously
-    /// from the OutputReceived handler</b> that received the Create New Effect
-    /// SetFeature, before the handler returns. dinput8!CDIEffect::CreateEffect
-    /// issues HidD_GetFeature(BlockLoad) immediately after the SetFeature
-    /// returns; publishing on the same callback thread guarantees the right
-    /// Block Load is in the shared slot when that GetFeature arrives. Async
-    /// publish (queue to another thread) introduces a race the consumer is
-    /// responsible for avoiding.</summary>
-    /// <param name="effectBlockIndex">EBI assigned to the just-created effect (1-based).</param>
-    /// <param name="loadStatus">1=Success, 2=Full, 3=Error per the PID spec.</param>
-    /// <param name="ramPoolAvailable">Bytes still free in the effect pool after this allocation.</param>
+    /// <summary>v1.1.37 — Read the Block Load Report state the driver
+    /// populated synchronously inside its SetFeature(0x11 Create New Effect)
+    /// IOCTL handler. The driver picks the EBI from a free-list bitmap and
+    /// updates BL fields atomically before completing the IOCTL, so by the
+    /// time this consumer's <c>OutputReceived</c> handler fires for the
+    /// SetFeature notification (8 ms-ish later via the SDK's poll loop),
+    /// the BL state is already canonical. Read it here and wire the EBI
+    /// to your effect-tracking dictionary.
+    ///
+    /// Returns a default-zero <see cref="HMPidBlockLoad"/> if the consumer
+    /// hasn't called <see cref="PublishPidPool"/> yet (FFB not enabled —
+    /// the shared section doesn't exist).</summary>
+    public HMPidBlockLoad GetCurrentPidBlockLoad()
+    {
+        ThrowIfDisposed();
+        lock (_pidStateLock)
+        {
+            IntPtr view = EnsurePidStateViewLocked();
+            if (view == IntPtr.Zero) return default;
+            var (ebi, stat, ram) = SharedMemoryIO.ReadPidBlockLoad(view);
+            return new HMPidBlockLoad(ebi, stat, ram);
+        }
+    }
+
+    /// <summary>Legacy / override — manually publish the Block Load
+    /// Report state. <b>v1.1.37 made this optional.</b> The driver now
+    /// allocates EBIs and writes BL fields synchronously inside its
+    /// SetFeature(0x11) IOCTL handler (mirroring vJoy's
+    /// <c>Ffb_GetNextFreeEffect</c>), so the canonical pattern is for the
+    /// consumer to <i>read</i> the assigned EBI via
+    /// <see cref="GetCurrentPidBlockLoad"/> rather than write its own.
+    ///
+    /// Calling this method overwrites the driver's allocation. Useful only
+    /// if the consumer has a reason to mint EBIs itself (specific
+    /// reservation policy, mapping back to physical-side handles). Single
+    /// slot — most recent publish overwrites.
+    ///
+    /// <para><b>Note on threading:</b> <c>OutputReceived</c> is delivered on
+    /// the SDK's poll thread (~8 ms latency). It is <i>not</i> synchronous
+    /// with the kernel SetFeature IOCTL. The pre-1.1.37 doc here was wrong
+    /// to suggest otherwise — calling Publish from the handler runs after
+    /// dinput8 has already issued its follow-up GetFeature(BlockLoad), so
+    /// the publish lands too late to influence that read. The driver-side
+    /// allocation in v1.1.37 is what makes the handshake work.</para></summary>
     public void PublishPidBlockLoad(byte effectBlockIndex, PidLoadStatus loadStatus,
                                     ushort ramPoolAvailable)
     {

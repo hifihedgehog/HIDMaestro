@@ -75,8 +75,10 @@ internal static class SharedMemoryIO
     //   UCHAR   State_EffectBlockIndex      offset 16
     //   UCHAR   State_Flags                 offset 17
     //   UCHAR   _pad1[2]                    offset 18
-    //   total: 20 bytes (rounded to 24 for clean alignment via _pad1)
-    public const int PID_STATE_SIZE                = 24;
+    //   ULONG   EbiAllocBitmap              offset 20  (v1.1.37)
+    //   ULONG   EbiAllocatedCount           offset 24  (v1.1.37)
+    //   total: 28 bytes (rounded to 32 for alignment)
+    public const int PID_STATE_SIZE                = 32;
     public const int PID_OFFSET_SEQNO              = 0;
     public const int PID_OFFSET_ENABLED            = 4;
     public const int PID_OFFSET_BL_EBI             = 8;
@@ -87,6 +89,8 @@ internal static class SharedMemoryIO
     public const int PID_OFFSET_POOL_MEMMGMT       = 15;
     public const int PID_OFFSET_STATE_EBI          = 16;
     public const int PID_OFFSET_STATE_FLAGS        = 17;
+    public const int PID_OFFSET_EBI_BITMAP         = 20;
+    public const int PID_OFFSET_EBI_COUNT          = 24;
 
     // SDDL granting Local System, Builtin Admins, and LocalService full
     // access plus World read. LocalService is what WUDFHost runs as for
@@ -269,6 +273,34 @@ internal static class SharedMemoryIO
         Marshal.WriteByte(view, PID_OFFSET_STATE_EBI,   effectBlockIndex);
         Marshal.WriteByte(view, PID_OFFSET_STATE_FLAGS, stateFlags);
         PidStateEndWrite(view, ref seqNo);
+    }
+
+    /// <summary>v1.1.37 — seqlocked read of the Block Load fields the
+    /// driver populates synchronously inside its
+    /// IOCTL_UMDF_HID_SET_FEATURE(0x11) handler. Returns the EBI the
+    /// driver just assigned, the load status (1=Success, 2=Full,
+    /// 3=Error), and the remaining RAM pool. Retries on writer-mid-update
+    /// (very brief; the driver writes 4 bytes under SeqNo).</summary>
+    public static (byte ebi, byte loadStatus, ushort ramPoolAvailable)
+        ReadPidBlockLoad(IntPtr view)
+    {
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            uint seq1 = (uint)Marshal.ReadInt32(view, PID_OFFSET_SEQNO);
+            if ((seq1 & 1) != 0) { Thread.SpinWait(8); continue; } /* writer mid-update */
+            Thread.MemoryBarrier();
+            byte ebi   = Marshal.ReadByte(view,  PID_OFFSET_BL_EBI);
+            byte stat  = Marshal.ReadByte(view,  PID_OFFSET_BL_LOADSTATUS);
+            ushort ram = (ushort)Marshal.ReadInt16(view, PID_OFFSET_BL_RAMAVAIL);
+            Thread.MemoryBarrier();
+            uint seq2 = (uint)Marshal.ReadInt32(view, PID_OFFSET_SEQNO);
+            if (seq1 == seq2) return (ebi, stat, ram);
+        }
+        // Fall through after retries — return whatever the last sample was.
+        return (
+            Marshal.ReadByte(view,  PID_OFFSET_BL_EBI),
+            Marshal.ReadByte(view,  PID_OFFSET_BL_LOADSTATUS),
+            (ushort)Marshal.ReadInt16(view, PID_OFFSET_BL_RAMAVAIL));
     }
 
     /// <summary>Returns the signaling event handle for a controller's input

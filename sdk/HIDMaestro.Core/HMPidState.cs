@@ -51,3 +51,33 @@ public enum PidStateFlags : byte
     /// <summary>The most-recently-referenced effect is currently playing.</summary>
     EffectPlaying = 1 << 5,
 }
+
+/// <summary>v1.1.37 — snapshot of the PID Block Load Report fields the
+/// driver populates synchronously inside its SetFeature(0x11 Create New
+/// Effect) IOCTL handler. Returned by
+/// <see cref="HMController.GetCurrentPidBlockLoad"/>. The consumer reads
+/// this from its <c>OutputReceived</c> handler for Report ID 0x11 to
+/// learn which EBI the driver just assigned — the driver does the picking
+/// now (mirroring vJoy's <c>Ffb_GetNextFreeEffect</c>); the consumer's
+/// role is to observe and wire the EBI to its own effect tracking.</summary>
+public readonly struct HMPidBlockLoad
+{
+    /// <summary>Effect Block Index (1..N) the driver allocated. 0 means
+    /// no effect has been created yet (or the pool was empty when the
+    /// last Create New Effect arrived; check <see cref="LoadStatus"/>).</summary>
+    public byte EffectBlockIndex { get; }
+
+    /// <summary>Result per HID PID 1.0 §5.5: Success/Full/Error.</summary>
+    public PidLoadStatus LoadStatus { get; }
+
+    /// <summary>RAM pool bytes still free after the driver's last
+    /// allocation.</summary>
+    public ushort RAMPoolAvailable { get; }
+
+    internal HMPidBlockLoad(byte ebi, byte status, ushort ram)
+    {
+        EffectBlockIndex = ebi;
+        LoadStatus = (PidLoadStatus)status;
+        RAMPoolAvailable = ram;
+    }
+}
