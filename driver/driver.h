@@ -33,17 +33,38 @@
  * Common definitions shared with the vhidmini2 sample.
  * These must match what MsHidUmdf.sys expects.
  */
+/*
+ * v1.1.39 — IOCTL_UMDF_HID_* corrected values per WDK
+ * <hidport.h> (10.0.26100/km/hidport.h:196-200):
+ *
+ *   #define IOCTL_UMDF_HID_SET_FEATURE        HID_CTL_CODE(20)  = 0x000B0053
+ *   #define IOCTL_UMDF_HID_GET_FEATURE        HID_CTL_CODE(21)  = 0x000B0057
+ *   #define IOCTL_UMDF_HID_SET_OUTPUT_REPORT  HID_CTL_CODE(22)  = 0x000B005B
+ *   #define IOCTL_UMDF_HID_GET_INPUT_REPORT   HID_CTL_CODE(23)  = 0x000B005F
+ *
+ * Pre-1.1.39, this header defined fabricated values (0x210003, 0x210007,
+ * 0x21000B, 0x21000F) that DO NOT match what mshidumdf delivers. Every
+ * SetFeature/GetFeature/SetOutputReport/GetInputReport handler we
+ * shipped since v1.1.35 has compiled but never fired — the case
+ * statement constants didn't match the framework's IoControlCode, so
+ * dispatch fell through to default and returned STATUS_NOT_IMPLEMENTED.
+ *
+ * <hidport.h> already provides the right values via <hidclass.h> +
+ * HID_CTL_CODE; we just include hidport.h in driver.h above. These
+ * #ifndef guards are kept only as a safety net in case the WDK header
+ * is unavailable, but should never actually fire on a current WDK.
+ */
 #ifndef IOCTL_UMDF_HID_SET_FEATURE
-#define IOCTL_UMDF_HID_SET_FEATURE          0x210003
+#define IOCTL_UMDF_HID_SET_FEATURE          HID_CTL_CODE(20)
 #endif
 #ifndef IOCTL_UMDF_HID_GET_FEATURE
-#define IOCTL_UMDF_HID_GET_FEATURE          0x210007
+#define IOCTL_UMDF_HID_GET_FEATURE          HID_CTL_CODE(21)
 #endif
 #ifndef IOCTL_UMDF_HID_SET_OUTPUT_REPORT
-#define IOCTL_UMDF_HID_SET_OUTPUT_REPORT    0x21000B
+#define IOCTL_UMDF_HID_SET_OUTPUT_REPORT    HID_CTL_CODE(22)
 #endif
 #ifndef IOCTL_UMDF_HID_GET_INPUT_REPORT
-#define IOCTL_UMDF_HID_GET_INPUT_REPORT     0x21000F
+#define IOCTL_UMDF_HID_GET_INPUT_REPORT     HID_CTL_CODE(23)
 #endif
 
 /* ------------------------------------------------------------------ */

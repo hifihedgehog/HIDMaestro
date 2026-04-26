@@ -24,7 +24,7 @@
 //
 //   5. Second SetFeature(0x11) — EBI=2, Bitmap=0x03, Count=2.
 //
-//   6. HidD_SetFeature(0x1F Block Free) for EBI=1 — driver clears bit 0.
+//   6. HidD_SetFeature(0x1B Block Free) for EBI=1 — driver clears bit 0.
 //      Bitmap=0x02, Count=1. Subsequent SetFeature(0x11) reuses EBI=1
 //      (lowest free slot policy).
 //
@@ -70,7 +70,7 @@ internal static class Program
     //
     // 0x11 = Create New Effect: Feature, Var, Output direction (host writes
     //        type+byteCount, optionally reads back EBI). 3 bytes of payload.
-    // 0x1F = Block Free: Feature, Var. 1 byte EBI.
+    // 0x1B = Block Free: Feature, Var. 1 byte EBI.
     // 0x12 = Block Load: Feature for read-back (4 bytes payload).
     // 0x13 = Pool: Feature for read-back (4 bytes payload).
     // 0x14 = State: Feature for read-back (2 bytes payload).
@@ -94,8 +94,8 @@ internal static class Program
         0x85, 0x13, 0x09, 0x13, 0x95, 0x04, 0xB1, 0x02,
         // 0x14 State — 2 bytes payload
         0x85, 0x14, 0x09, 0x14, 0x95, 0x02, 0xB1, 0x02,
-        // 0x1F Block Free — 1 byte payload (EBI to free)
-        0x85, 0x1F, 0x09, 0x1F, 0x95, 0x01, 0xB1, 0x02,
+        // 0x1B Block Free — 1 byte payload (EBI to free)
+        0x85, 0x1B, 0x09, 0x1B, 0x95, 0x01, 0xB1, 0x02,
 
         0xC0,
     };
@@ -251,8 +251,8 @@ internal static class Program
                 else Console.WriteLine($"OK (ebi=2, bitmap=0x{bitmap:X8}, count={count})");
 
                 // Step 6 — Block Free EBI=1, then realloc reuses EBI=1.
-                Console.Write("  [SetFeature 0x1F EBI=1] driver frees ... ");
-                SendSetFeature(hid!, 0x1F, new byte[] { 0x01 });
+                Console.Write("  [SetFeature 0x1B EBI=1] driver frees ... ");
+                SendSetFeature(hid!, 0x1B, new byte[] { 0x01 });
                 ReadSectionBytes(sectionName, out section);
                 bitmap = BitConverter.ToUInt32(section, OFF_EBI_BITMAP);
                 count = BitConverter.ToUInt32(section, OFF_EBI_COUNT);

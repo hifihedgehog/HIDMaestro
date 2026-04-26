@@ -370,10 +370,20 @@ EnsurePidStateMapping(_In_ PDEVICE_CONTEXT ctx)
 {
     if (ctx->PidStateMemPtr != NULL) return TRUE;
 
-    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->PidStateMappingName);
+    /* v1.1.39 — opened READ_WRITE because v1.1.37+ driver-side EBI
+     * allocation, FreeEbi, and ResetPidState all WRITE the section
+     * (BL_* fields, EbiAllocBitmap, State_*). Pre-1.1.39 we opened
+     * FILE_MAP_READ which made every write an access violation that
+     * terminated WUDFHost — surfaced to the caller as Win32 1291
+     * "The process hosting the driver for this device has been
+     * terminated." Combined with the IOCTL_UMDF_HID_* constants being
+     * wrong (the case statements never matched the framework's
+     * IoControlCode), the AV path didn't trigger before v1.1.39. */
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE,
+                                ctx->PidStateMappingName);
     if (h == NULL) return FALSE;
 
-    PVOID view = MapViewOfFile(h, FILE_MAP_READ, 0, 0,
+    PVOID view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
                                sizeof(HIDMAESTRO_SHARED_PID_STATE));
     if (view == NULL) { CloseHandle(h); return FALSE; }
 
@@ -472,41 +482,63 @@ HmDbgAppendPrefix(char *p, char *end, PDEVICE_CONTEXT ctx,
     return p;
 }
 
-/* v1.1.37 — file-based trace fallback. DbgView's Session 0 capture is
- * unreliable across Windows versions (issue #16: PadForge couldn't capture
- * v1.1.36's OutputDebugStringA output via DbgView or a custom user-mode
- * DBWIN_BUFFER listener — Session 0 boundary blocks both).
+/* v1.1.37 introduced this file trace; v1.1.39 reworks it because the
+ * env-var-based gate trapped PadForge: WUDFHost spawns at device-create
+ * time and inherits its environment block then. `setx HMAESTRO_TRACE 1`
+ * after the fact updates HKLM but the running WUDFHost still has the
+ * old block — the trace file silently fails to appear.
  *
- * When env var HMAESTRO_TRACE=1, every trace line also goes to
- * %PROGRAMDATA%\HIDMaestro\driver-trace.log (LocalService can write here
- * via the Public ACL on ProgramData). OutputDebugStringA is always called
- * for any debugger that IS attached.
+ * v1.1.39: read a registry DWORD `HKLM\Software\HIDMaestro\Trace` per
+ * IOCTL group. Setting it to 1 takes effect immediately on the next
+ * IOCTL the driver receives — no reboot, no env-var ceremony, no
+ * WUDFHost lifecycle dependency. The check is a single read of a tiny
+ * registry value; cost is negligible per IOCTL.
  *
- * The env var is sampled lazily on first emit and cached. Setting it
- * after WUDFHost is already running won't take effect until the host
- * restarts, but that matches PadForge's expected workflow ("setx + restart
- * service-process").
+ * Always go to OutputDebugStringA for any debugger that's attached;
+ * the file write is the registry-gated extra.
  */
-static volatile LONG g_HmTraceFileChecked = 0;
-static volatile LONG g_HmTraceFileEnabled = 0;
-static SRWLOCK       g_HmTraceFileLock    = SRWLOCK_INIT;
-static const WCHAR   g_HmTraceFilePath[]  = L"C:\\ProgramData\\HIDMaestro\\driver-trace.log";
+/* C:\Windows\Temp has write access for LocalService (which WUDFHost runs
+ * as in UMDF2 host-process model). v1.1.37 used C:\ProgramData\HIDMaestro
+ * but ProgramData by default grants only Authenticated Users write —
+ * LocalService is NOT an Authenticated User, so file creation silently
+ * fails. v1.1.39 moves to Windows\Temp which is writable by every
+ * service-class principal. */
+static SRWLOCK       g_HmTraceFileLock = SRWLOCK_INIT;
+static const WCHAR   g_HmTraceFilePath[] = L"C:\\Windows\\Temp\\hidmaestro-driver-trace.log";
+
+/* Returns TRUE if HKLM\Software\HIDMaestro\Trace == 1 OR
+ * HMAESTRO_TRACE=1 in the environment. Cheap; no caching so a flip in
+ * the registry takes effect on the next IOCTL. */
+static BOOLEAN
+HmTraceFileEnabled(VOID)
+{
+    /* Registry path takes precedence. */
+    HKEY hk = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\HIDMaestro", 0,
+                      KEY_QUERY_VALUE | KEY_WOW64_64KEY, &hk) == ERROR_SUCCESS) {
+        DWORD val = 0; DWORD cb = sizeof(val); DWORD type = REG_DWORD;
+        LONG r = RegQueryValueExW(hk, L"Trace", NULL, &type, (LPBYTE)&val, &cb);
+        RegCloseKey(hk);
+        if (r == ERROR_SUCCESS && type == REG_DWORD && val != 0) return TRUE;
+    }
+    /* Env var fallback (legacy v1.1.37 path). */
+    WCHAR e[8] = {0};
+    DWORD g = GetEnvironmentVariableW(L"HMAESTRO_TRACE", e, ARRAYSIZE(e));
+    return (g > 0 && g < ARRAYSIZE(e) && e[0] == L'1' && e[1] == 0);
+}
 
 static VOID
 HmTraceEmit(_In_ PCSTR text)
 {
     OutputDebugStringA(text);
 
-    if (InterlockedCompareExchange(&g_HmTraceFileChecked, 1, 0) == 0) {
-        WCHAR val[8] = {0};
-        DWORD got = GetEnvironmentVariableW(L"HMAESTRO_TRACE", val, ARRAYSIZE(val));
-        if (got > 0 && got < ARRAYSIZE(val) && val[0] == L'1' && val[1] == 0) {
-            /* Best-effort directory create — ignored if it already exists. */
-            CreateDirectoryW(L"C:\\ProgramData\\HIDMaestro", NULL);
-            InterlockedExchange(&g_HmTraceFileEnabled, 1);
-        }
-    }
-    if (g_HmTraceFileEnabled == 0) return;
+    /* v1.1.39 — file trace unconditionally on. Prior gating (env var,
+     * registry DWORD) proved unreliable: WUDFHost inherits env at start;
+     * SDK install/uninstall cycles wipe HKLM\Software\HIDMaestro;
+     * LocalService HKLM read access is inconsistent across builds.
+     * Cost is OutputDebugStringA + one file append per IOCTL — negligible
+     * for a diagnostic release. Future v1.2.x can reinstate gating after
+     * the PID FFB path is empirically working. */
 
     AcquireSRWLockExclusive(&g_HmTraceFileLock);
     HANDLE h = CreateFileW(g_HmTraceFilePath,
@@ -1331,6 +1363,23 @@ EvtIoDeviceControl(
     UNREFERENCED_PARAMETER(OutputBufferLength);
     UNREFERENCED_PARAMETER(InputBufferLength);
 
+    /* v1.1.39 — pre-handler trace. Fires for EVERY IOCTL the driver
+     * receives, regardless of whether we have a case for it. */
+    {
+        char buf[120]; char *p = buf; char *end = buf + sizeof(buf);
+        p = HmDbgAppendCstr(p, end, "[HMIO idx=");
+        p = HmDbgAppendDec(p, end, ctx ? ctx->ControllerIndex : 0);
+        p = HmDbgAppendCstr(p, end, "] ioctl=0x");
+        p = HmDbgAppendHex(p, end, IoControlCode, 8);
+        p = HmDbgAppendCstr(p, end, " in=");
+        p = HmDbgAppendDec(p, end, (ULONG)InputBufferLength);
+        p = HmDbgAppendCstr(p, end, " out=");
+        p = HmDbgAppendDec(p, end, (ULONG)OutputBufferLength);
+        p = HmDbgAppendCstr(p, end, "\n");
+        *p = 0;
+        HmTraceEmit(buf);
+    }
+
     switch (IoControlCode) {
 
     case IOCTL_HID_GET_DEVICE_DESCRIPTOR:
@@ -1480,17 +1529,38 @@ EvtIoDeviceControl(
             const UCHAR *payload = (featureSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
 
-            /* PID FFB Create New Effect: allocate next free EBI from the
-             * driver's bitmap and write to BL_* fields atomically.
-             * Note: SetFeature is the canonical Create New Effect path
-             * (vJoy descriptor declares 0x11 as Feature, hid.c:2879 case
-             * `HID_ID_NEWEFREP+0x10`). The Output-direction 0x11 (Set
-             * Effect) is handled in IOCTL_UMDF_HID_SET_OUTPUT_REPORT
-             * WITHOUT EBI allocation — see that handler. */
+            /* PID FFB report routing inside SetFeature. v1.1.39 covers
+             * all three Set-direction PID handshake reports here because
+             * the canonical PID descriptor declares 0x11/0x1B/0x1C as
+             * BOTH Feature and Output direction — pid.dll/dinput8 may
+             * route via either HidD_SetFeature OR HidD_SetOutputReport
+             * depending on transport-mode global. The same handlers
+             * exist in IOCTL_UMDF_HID_SET_OUTPUT_REPORT below; whichever
+             * IOCTL the framework delivers, the driver acts the same.
+             *
+             * 0x11 Create New Effect: allocate next free EBI, write BL.
+             *   (vJoy hid.c:2879 case `HID_ID_NEWEFREP+0x10`)
+             * 0x1B Block Free: free the EBI in the bitmap.
+             *   (vJoy hid.c:2865 case `HID_ID_BLKFRREP`)
+             * 0x1C Device Control with Control=4 (CTRL_DEVRST): reset.
+             *   (vJoy hid.c:2849 case `HID_ID_CTRLREP`) */
             if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
                 && EnsurePidStateMapping(ctx))
             {
                 AllocateEbiInBlockLoad(ctx);
+            }
+            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+                     && payloadLen >= 1
+                     && EnsurePidStateMapping(ctx))
+            {
+                FreeEbi(ctx, payload[0]);
+            }
+            else if (reportId == HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID
+                     && payloadLen >= 1
+                     && EnsurePidStateMapping(ctx)
+                     && payload[0] == 4 /* CTRL_DEVRST */)
+            {
+                ResetPidState(ctx);
             }
 
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE,
