@@ -420,6 +420,94 @@ ReadPidState(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_PID_STATE *out)
     return retries > 0;
 }
 
+/* PID FFB IOCTL_UMDF_HID_GET_FEATURE trace helpers.
+ *
+ * The driver runs in WUDFHost (user-mode UMDF2). OutputDebugStringA
+ * delivers to any attached debugger / DbgView session and is filtered to
+ * a no-op when nothing is attached, so cost is negligible. UMDF doesn't
+ * link MSVCRT, so all formatting is hand-rolled.
+ *
+ * Format: "[HMPID idx=N] rid=0xXX in=NNN <verb> ..."
+ */
+static char *
+HmDbgAppendCstr(char *p, char *end, const char *s)
+{
+    while (*s && p + 1 < end) *p++ = *s++;
+    return p;
+}
+
+static char *
+HmDbgAppendHex(char *p, char *end, ULONG v, int digits)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char tmp[16]; int n = 0;
+    while (n < digits && n < (int)sizeof(tmp)) {
+        tmp[n++] = hex[v & 0xF];
+        v >>= 4;
+    }
+    while (n > 0 && p + 1 < end) *p++ = tmp[--n];
+    return p;
+}
+
+static char *
+HmDbgAppendDec(char *p, char *end, ULONG v)
+{
+    char tmp[16]; int n = 0;
+    if (v == 0) { tmp[n++] = '0'; }
+    else { while (v > 0 && n < 15) { tmp[n++] = '0' + (char)(v % 10); v /= 10; } }
+    while (n > 0 && p + 1 < end) *p++ = tmp[--n];
+    return p;
+}
+
+static char *
+HmDbgAppendPrefix(char *p, char *end, PDEVICE_CONTEXT ctx,
+                  UCHAR reportId, ULONG outSize)
+{
+    p = HmDbgAppendCstr(p, end, "[HMPID idx=");
+    p = HmDbgAppendDec(p, end, ctx ? ctx->ControllerIndex : 0);
+    p = HmDbgAppendCstr(p, end, "] rid=0x");
+    p = HmDbgAppendHex(p, end, reportId, 2);
+    p = HmDbgAppendCstr(p, end, " in=");
+    p = HmDbgAppendDec(p, end, outSize);
+    return p;
+}
+
+static VOID
+HmDbgPidGetFeatureGate(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
+                       _In_ ULONG outSize, _In_ NTSTATUS status,
+                       _In_ PCSTR reason)
+{
+    char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
+    p = HmDbgAppendPrefix(p, end, ctx, reportId, outSize);
+    p = HmDbgAppendCstr(p, end, " gate=");
+    p = HmDbgAppendCstr(p, end, reason);
+    p = HmDbgAppendCstr(p, end, " status=0x");
+    p = HmDbgAppendHex(p, end, (ULONG)status, 8);
+    p = HmDbgAppendCstr(p, end, "\n");
+    *p = 0;
+    OutputDebugStringA(buf);
+}
+
+static VOID
+HmDbgPidGetFeatureBytes(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
+                        _In_ ULONG outSize,
+                        _In_reads_bytes_(packedLen) const UCHAR *outBuf,
+                        _In_ ULONG packedLen)
+{
+    char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
+    p = HmDbgAppendPrefix(p, end, ctx, reportId, outSize);
+    p = HmDbgAppendCstr(p, end, " ok bytes[");
+    p = HmDbgAppendDec(p, end, packedLen);
+    p = HmDbgAppendCstr(p, end, "]=");
+    for (ULONG i = 0; i < packedLen && p + 4 < end; i++) {
+        if (i > 0) *p++ = ' ';
+        p = HmDbgAppendHex(p, end, outBuf[i], 2);
+    }
+    p = HmDbgAppendCstr(p, end, "\n");
+    *p = 0;
+    OutputDebugStringA(buf);
+}
+
 /* Publish a captured output report to the shared section.
  * Source: HIDMAESTRO_OUTPUT_SOURCE_*  reportId: HID Report ID byte (0 if none)
  * data/size: payload (size will be clamped to 256). Seqlock-write pattern
@@ -1202,6 +1290,17 @@ EvtIoDeviceControl(
          * STATUS_NOT_SUPPORTED — matching vJoy's "FFB not enabled"
          * convention and HIDMaestro's pre-v1.1.35 behavior of
          * STATUS_NOT_SUPPORTED across all GetFeature calls.
+         *
+         * Block Load gate (v1.1.36): even when PidEnabled=1, GetFeature(0x12)
+         * returns STATUS_NOT_SUPPORTED if BL_LoadStatus is outside the
+         * spec-valid 1..3 range (i.e. zero-initialized after Pool/State
+         * publish but before any PublishPidBlockLoad). Returning a
+         * LoadStatus=0 byte to dinput8 violates HID PID 1.0 §5.5 (selector
+         * domain) and was implicated in dinput8!CDIEffect::CreateEffect
+         * crashing with 0xC0000005 inside FfbTest's CreateEffect path on
+         * v1.1.35 — see issue #16. With this gate, dinput8 only ever sees
+         * a real Block Load that the consumer published synchronously
+         * from its OutputReceived(SetFeature(CreateNewEffect)) handler.
          */
         PVOID  outBuf;
         size_t outSize;
@@ -1227,12 +1326,22 @@ EvtIoDeviceControl(
             status = (reportId == HIDMAESTRO_PID_POOL_REPORT_ID)
                    ? STATUS_NO_SUCH_DEVICE
                    : STATUS_NOT_SUPPORTED;
+            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
+                                   "no-pid-enabled");
             break;
         }
 
         UCHAR *p = (UCHAR *)outBuf;
 
         if (reportId == HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID) {
+            /* Spec gate: LoadStatus must be 1..3 per HID PID 1.0 §5.5.
+             * Zero means no PublishPidBlockLoad has fired yet. */
+            if (pid.BL_LoadStatus < 1 || pid.BL_LoadStatus > 3) {
+                status = STATUS_NOT_SUPPORTED;
+                HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
+                                       "bl-not-published");
+                break;
+            }
             /* Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB] */
             if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
             p[0] = reportId;
@@ -1242,6 +1351,7 @@ EvtIoDeviceControl(
             p[4] = (UCHAR)((pid.BL_RAMPoolAvailable >> 8) & 0xFF);
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
+            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 5);
         }
         else if (reportId == HIDMAESTRO_PID_POOL_REPORT_ID) {
             /* Wire format: [reportId, RAMPool LSB, RAMPool MSB, MaxSim, MemMgmt] */
@@ -1253,6 +1363,7 @@ EvtIoDeviceControl(
             p[4] = pid.Pool_MemoryManagement;
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
+            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 5);
         }
         else if (reportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
             /* Wire format: [reportId, EBI, StateFlags] */
@@ -1262,10 +1373,13 @@ EvtIoDeviceControl(
             p[2] = pid.State_Flags;
             WdfRequestSetInformation(Request, 3);
             status = STATUS_SUCCESS;
+            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 3);
         }
         else {
             /* Unknown feature report ID — preserve legacy NOT_SUPPORTED. */
             status = STATUS_NOT_SUPPORTED;
+            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
+                                   "unknown-rid");
         }
         break;
     }

@@ -786,6 +786,29 @@ function Scenario-Multi-CustomInMix {
     }
 }
 
+# S24: PID Force Feedback shared-section round-trip. Verifies that
+# HMController.PublishPidPool / PublishPidBlockLoad / PublishPidState
+# write the bytes the driver's IOCTL_UMDF_HID_GET_FEATURE handler reads.
+# The probe creates its own controller, opens the named section
+# (Global\HIDMaestroPidState{N}) directly, and asserts every published
+# field is exactly what's in the section. Also asserts the lazy section
+# is NOT created until first PublishPid* (vJoy-style "FFB not enabled"
+# gate) and that BL_LoadStatus stays 0 between PublishPidPool and the
+# first PublishPidBlockLoad (the v1.1.36 spec gate).
+#
+# Closes the v1.1.35 test blindspot that issue #16 surfaced.
+function Scenario-PidFfb-RoundTrip {
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidFfbRoundtrip.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "pid_ffb_roundtrip probe not built. Run: dotnet build test/probes/pid_ffb_roundtrip -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw "PidFfbRoundtrip exited $($p.ExitCode)"
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -813,7 +836,8 @@ $scenarios = @(
     @{ Name = 'S20_Multi_HeterogeneousCascade';   Body = ${function:Scenario-Multi-HeterogeneousCascade} },
     @{ Name = 'S21_Custom_CreateIdle';            Body = ${function:Scenario-Custom-CreateIdle} },
     @{ Name = 'S22_Custom_SwapCycle';             Body = ${function:Scenario-Custom-SwapCycle} },
-    @{ Name = 'S23_Multi_CustomInMix';            Body = ${function:Scenario-Multi-CustomInMix} }
+    @{ Name = 'S23_Multi_CustomInMix';            Body = ${function:Scenario-Multi-CustomInMix} },
+    @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
