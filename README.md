@@ -12,9 +12,13 @@
 
 *Glory, honor, and praise to the Lord Jesus Christ, the source of all truth, forever and ever.*
 
+---
+
 A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.
 
 HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines. The stack builds on the UMDF2 + xinputhid approach that [Nefarius](https://nefarius.at/) used in [DsHidMini](https://github.com/nefarius/DsHidMini).
+
+---
 
 ## What it replaces
 
