@@ -22,10 +22,17 @@ class Program
         return hwnd;
     }
 
-    static void Main()
+    static int Main(string[] args)
     {
         Console.WriteLine("vJoy Force Feedback Test Tool");
         Console.WriteLine("=============================\n");
+
+        // --probes-only: run the auto-probe loops (Constant Force + Sine
+        // CreateEffect) and exit without entering the interactive menu.
+        // Used by the HM S26 battery scenario so a clean exit code 0 means
+        // "PID FFB CreateEffect end-to-end succeeded" and any non-zero
+        // exit is a real failure (no spurious .NET ReadKey crashes).
+        bool probesOnly = args.Any(a => a.Equals("--probes-only", StringComparison.OrdinalIgnoreCase));
 
         using var di = new DirectInput();
 
@@ -35,7 +42,7 @@ class Program
         if (allDevices.Count == 0)
         {
             Console.WriteLine("No game controllers found.");
-            return;
+            return 2;
         }
 
         Console.WriteLine($"Game controllers: {allDevices.Count} total, {ffbDevices.Count} with FFB\n");
@@ -57,7 +64,7 @@ class Program
             Console.WriteLine("  1. vJoy uses PID_BEAD hardware ID (not PID_0FFB)");
             Console.WriteLine("  2. Device node was recreated after PID change");
             Console.WriteLine("  3. PadForge has created at least one vJoy controller");
-            return;
+            return 3;
         }
 
         // Select FFB device.
@@ -77,7 +84,7 @@ class Program
             if (ffbIndex < 0)
             {
                 Console.WriteLine("Selected device does not support FFB.");
-                return;
+                return 5;
             }
             selection = ffbIndex;
         }
@@ -133,7 +140,7 @@ class Program
                 Console.WriteLine("No axes found at all.");
                 joystick.Unacquire();
                 if (hwnd != IntPtr.Zero) DestroyWindow(hwnd);
-                return;
+                return 4;
             }
             foreach (var ax in axisObjects.Take(2))
                 Console.WriteLine($"  {ax.Name} (offset {ax.Offset})");
@@ -242,6 +249,17 @@ class Program
         // 9000 = from East = pushes stick left, 27000 = from West = pushes stick right.
         int currentDirection = 0; // default: pushes stick south (force from north)
 
+        // --probes-only: exit cleanly here. The auto-probe loops above
+        // already exercised CreateEffect for ConstantForce + Sine; if
+        // they printed "SUCCESS:", that's the regression-relevant signal.
+        if (probesOnly)
+        {
+            int constSuccess = constantEffect != null ? 1 : 0;
+            int sineSuccess  = sineEffect != null ? 1 : 0;
+            Console.WriteLine($"\n--probes-only: ConstantForce={(constSuccess > 0 ? "OK" : "FAIL")} Sine={(sineSuccess > 0 ? "OK" : "FAIL")}");
+            return constSuccess > 0 ? 0 : 1;
+        }
+
         Console.WriteLine("\nCommands:");
         Console.WriteLine("  [1] Constant - light   (2500)");
         Console.WriteLine("  [2] Constant - medium  (5000)");
@@ -318,6 +336,7 @@ class Program
         joystick.Unacquire();
         if (hwnd != IntPtr.Zero) DestroyWindow(hwnd);
         Console.WriteLine("\nDone.");
+        return 0;
     }
 
     static void SetConstantForce(Effect? effect, int magnitude, int direction, int[] axisOffsets)
