@@ -102,6 +102,42 @@ ctrl1.OutputReceived += (controller, packet) =>
                       $"reportId=0x{packet.ReportId:X2} len={packet.Data.Length}");
 };
 
+// ── 4b. PID Force Feedback (HID PID 1.0) ─────────────────────────────
+// Profiles with a HID PID 1.0 force-feedback collection in their
+// descriptor (Logitech wheels, some HOTAS, DirectInput FFB joysticks)
+// expect the device to answer HidD_GetFeature for three Report IDs:
+//   0x12  Block Load  — issued after dinput8 sends Create New Effect
+//   0x13  Pool         — issued by EnumEffects / IDirectInputDevice8::Initialize
+//   0x14  PID State    — issued during effect Start/Stop
+//
+// HIDMaestro reads these from a per-controller shared section the
+// consumer fills via PublishPidPool / PublishPidBlockLoad / PublishPidState.
+// Before the first PublishPidPool call, the driver returns
+// STATUS_NO_SUCH_DEVICE for the Pool Report (matches vJoy's "FFB not
+// enabled" convention) so DirectInput cleanly concludes "device exists
+// but no FFB" rather than hanging or retrying.
+//
+// Publish the Pool once at startup to enable FFB (consumers that don't
+// support FFB simply skip this call). Block Load must be published
+// SYNCHRONOUSLY from the OutputReceived handler that received the
+// Create New Effect SetFeature, before the handler returns —
+// dinput8!CDIEffect::CreateEffect issues HidD_GetFeature(BlockLoad)
+// immediately after the SetFeature returns.
+ctrl0.PublishPidPool(
+    ramPoolSize:             0xFFFF,
+    simultaneousEffectsMax:  16,
+    deviceManagedPool:       true,
+    sharedParameterBlocks:   false);
+ctrl0.PublishPidState(effectBlockIndex: 0,
+    PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
+Console.WriteLine("  PID FFB enabled on ctrl0 (Pool + initial State published)");
+
+// Inside an OutputReceived handler that decodes Create New Effect:
+//   ctrl.PublishPidBlockLoad(
+//       effectBlockIndex: nextEbi,
+//       loadStatus:       PidLoadStatus.Success,   // or Full / Error
+//       ramPoolAvailable: (ushort)(0xFFFF - usedBytes));
+
 // ── 5. Submit input using the full HMGamepadState surface ────────────
 // SubmitState is the canonical input path: caller drives the cadence,
 // SDK encodes the abstract state into the active profile's HID

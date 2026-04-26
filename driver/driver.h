@@ -143,6 +143,15 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   OutputSeqNoLocal;       /* Last value we wrote (so we always increment) */
     ULONG   OutputWriteCount;       /* Stale-detection: writes since last re-open (#2) */
 
+    /* PID FFB state channel — consumer→driver state for HidD_GetFeature
+     * responses on the canonical PID Report IDs (0x12 Block Load, 0x13
+     * Pool, 0x14 State). Driver reads via seqlock on IOCTL_UMDF_HID_GET_
+     * FEATURE; consumer writes via HMController.PublishPid* methods.
+     * Lazy-mapped: NULL until the SDK creates Global\HIDMaestroPidState<N>. */
+    HANDLE  PidStateMemHandle;
+    PVOID   PidStateMemPtr;
+    WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
+
     /* Diagnostics */
     LONG    InputReportsSubmitted;
     LONG    OutputReportsReceived;
@@ -199,6 +208,52 @@ typedef struct _HIDMAESTRO_SHARED_OUTPUT {
     UCHAR           Data[256];       /* Raw output payload */
 } HIDMAESTRO_SHARED_OUTPUT, *PHIDMAESTRO_SHARED_OUTPUT;
 #pragma pack(pop)
+
+/* PID Force-Feedback state section: written by SDK consumer
+ * (HMController.PublishPid*), read by driver on IOCTL_UMDF_HID_GET_FEATURE.
+ * Single-slot last-write-wins per the HID PID 1.0 spec (Block Load Report
+ * is "the result of the most recent Create New Effect"). Mirrors vJoy's
+ * device-extension PID storage shape, but on the user side of the shared
+ * mapping because HIDMaestro is UMDF2 (driver runs in user-mode WUDFHost).
+ *
+ * PidEnabled gate: zero-initialized when the SDK creates the section.
+ * First call to HMController.PublishPidPool flips it to 1, atomic with
+ * the Pool fields write under the same seqlock cycle. Driver checks
+ * PidEnabled before reading any other field — when 0, returns
+ * STATUS_NO_SUCH_DEVICE for Pool (matches vJoy's "FFB not enabled"
+ * convention) and STATUS_NOT_SUPPORTED for Block Load / State.
+ *
+ * Wire layout matches the PID 1.0 report formats so the driver can copy
+ * fields straight into the IOCTL output buffer with minimal packing. */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_PID_STATE {
+    volatile ULONG  SeqNo;           /* Incremented each write — seqlock */
+    UCHAR           PidEnabled;      /* 0 until first PublishPidPool */
+    UCHAR           _pad0[3];
+
+    /* Block Load Report (Report ID 0x12, per HID PID 1.0 §5.5) */
+    UCHAR           BL_EffectBlockIndex;
+    UCHAR           BL_LoadStatus;        /* 1=Success, 2=Full, 3=Error */
+    USHORT          BL_RAMPoolAvailable;
+
+    /* PID Pool Report (Report ID 0x13, per HID PID 1.0 §5.7) */
+    USHORT          Pool_RAMPoolSize;
+    UCHAR           Pool_MaxSimultaneousEffects;
+    UCHAR           Pool_MemoryManagement;  /* bit0=DeviceManagedPool, bit1=SharedParamBlocks */
+
+    /* PID State Report (Report ID 0x14, per HID PID 1.0 §5.8) */
+    UCHAR           State_EffectBlockIndex;
+    UCHAR           State_Flags;
+    UCHAR           _pad1[2];
+} HIDMAESTRO_SHARED_PID_STATE, *PHIDMAESTRO_SHARED_PID_STATE;
+#pragma pack(pop)
+
+/* Default PID Report IDs per the canonical HID PID 1.0 descriptor.
+ * Profiles may use different IDs; the driver falls back to STATUS_NOT_SUPPORTED
+ * for unknown IDs, preserving today's behavior. */
+#define HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID  0x12
+#define HIDMAESTRO_PID_POOL_REPORT_ID        0x13
+#define HIDMAESTRO_PID_STATE_REPORT_ID       0x14
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
 

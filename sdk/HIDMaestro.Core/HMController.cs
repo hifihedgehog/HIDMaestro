@@ -68,6 +68,88 @@ public sealed class HMController : IDisposable
     /// this virtual controller. Subscribers must be thread-safe.</summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
+    // PID FFB state section. Lazy: created on the first PublishPid* call so
+    // a non-FFB consumer never allocates the section. Once created, the
+    // driver's IOCTL_UMDF_HID_GET_FEATURE handler reads from it on every
+    // HidD_GetFeature for the canonical PID Report IDs (0x12, 0x13, 0x14).
+    private IntPtr _pidStateView;
+    private uint _pidStateSeqNo;
+    private readonly object _pidStateLock = new();
+
+    private IntPtr EnsurePidStateViewLocked()
+    {
+        if (_pidStateView == IntPtr.Zero)
+            _pidStateView = SharedMemoryIO.EnsurePidStateMapping(Index);
+        return _pidStateView;
+    }
+
+    /// <summary>Publish the current PID Pool Report state (HID PID 1.0 §5.7).
+    /// First call enables FFB on this controller — until called at least once,
+    /// HidD_GetFeature on the Pool Report ID returns STATUS_NO_SUCH_DEVICE
+    /// (matching vJoy's "FFB not enabled" convention), so DInput cleanly
+    /// concludes "device exists but no FFB" rather than retrying.
+    /// Subsequent calls update the pool state.</summary>
+    /// <param name="ramPoolSize">Total RAM pool size in bytes.</param>
+    /// <param name="simultaneousEffectsMax">Max effects the device can play simultaneously.</param>
+    /// <param name="deviceManagedPool">True if the device manages effect block allocation.</param>
+    /// <param name="sharedParameterBlocks">True if effect parameter blocks can be shared.</param>
+    public void PublishPidPool(ushort ramPoolSize, byte simultaneousEffectsMax,
+                               bool deviceManagedPool, bool sharedParameterBlocks)
+    {
+        ThrowIfDisposed();
+        lock (_pidStateLock)
+        {
+            IntPtr view = EnsurePidStateViewLocked();
+            if (view == IntPtr.Zero) return;
+            SharedMemoryIO.WritePidPool(view, ref _pidStateSeqNo,
+                ramPoolSize, simultaneousEffectsMax,
+                deviceManagedPool, sharedParameterBlocks);
+        }
+    }
+
+    /// <summary>Publish the current PID Block Load Report state (HID PID 1.0 §5.5).
+    /// Single slot — most recent publish overwrites. Call <b>synchronously
+    /// from the OutputReceived handler</b> that received the Create New Effect
+    /// SetFeature, before the handler returns. dinput8!CDIEffect::CreateEffect
+    /// issues HidD_GetFeature(BlockLoad) immediately after the SetFeature
+    /// returns; publishing on the same callback thread guarantees the right
+    /// Block Load is in the shared slot when that GetFeature arrives. Async
+    /// publish (queue to another thread) introduces a race the consumer is
+    /// responsible for avoiding.</summary>
+    /// <param name="effectBlockIndex">EBI assigned to the just-created effect (1-based).</param>
+    /// <param name="loadStatus">1=Success, 2=Full, 3=Error per the PID spec.</param>
+    /// <param name="ramPoolAvailable">Bytes still free in the effect pool after this allocation.</param>
+    public void PublishPidBlockLoad(byte effectBlockIndex, PidLoadStatus loadStatus,
+                                    ushort ramPoolAvailable)
+    {
+        ThrowIfDisposed();
+        lock (_pidStateLock)
+        {
+            IntPtr view = EnsurePidStateViewLocked();
+            if (view == IntPtr.Zero) return;
+            SharedMemoryIO.WritePidBlockLoad(view, ref _pidStateSeqNo,
+                effectBlockIndex, (byte)loadStatus, ramPoolAvailable);
+        }
+    }
+
+    /// <summary>Publish the current PID State Report (HID PID 1.0 §5.8).
+    /// Reflects current device state for the most-recently-referenced
+    /// effect. Update whenever Effect Operation Start/Stop, Device Reset,
+    /// Device Pause, or Actuators Enable/Disable changes the state.</summary>
+    /// <param name="effectBlockIndex">Currently active EBI (0 if none).</param>
+    /// <param name="flags">Bitfield of <see cref="PidStateFlags"/> reflecting current state.</param>
+    public void PublishPidState(byte effectBlockIndex, PidStateFlags flags)
+    {
+        ThrowIfDisposed();
+        lock (_pidStateLock)
+        {
+            IntPtr view = EnsurePidStateViewLocked();
+            if (view == IntPtr.Zero) return;
+            SharedMemoryIO.WritePidState(view, ref _pidStateSeqNo,
+                effectBlockIndex, (byte)flags);
+        }
+    }
+
     internal HMController(HMContext context, int index, HMProfile profile, string? instanceId)
     {
         _context = context;

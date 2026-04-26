@@ -96,6 +96,12 @@ InitInstancePaths(
         AppendUlongDecimal(ctx->OutputMappingName, index, cap);
     }
     {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroPidState";
+        SIZE_T cap = sizeof(ctx->PidStateMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->PidStateMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->PidStateMappingName, index, cap);
+    }
+    {
         static const WCHAR prefix[] = L"Global\\HIDMaestroInputEvent";
         SIZE_T cap = sizeof(ctx->InputEventName) / sizeof(WCHAR);
         RtlCopyMemory(ctx->InputEventName, prefix, sizeof(prefix));
@@ -351,6 +357,67 @@ EnsureOutputMapping(_In_ PDEVICE_CONTEXT ctx)
     ctx->OutputMemPtr = view;
     ctx->OutputWriteCount = 0;
     return TRUE;
+}
+
+/* Lazy-open of the PID FFB state section. Returns FALSE if the SDK
+ * consumer hasn't created Global\HIDMaestroPidState<N> yet (e.g.
+ * non-FFB consumer that never calls HMController.PublishPid*). The
+ * GetFeature handler treats FALSE as "FFB not available" and returns
+ * STATUS_NO_SUCH_DEVICE for the Pool report, matching vJoy's
+ * convention for FFB-disabled devices. */
+static BOOLEAN
+EnsurePidStateMapping(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->PidStateMemPtr != NULL) return TRUE;
+
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->PidStateMappingName);
+    if (h == NULL) return FALSE;
+
+    PVOID view = MapViewOfFile(h, FILE_MAP_READ, 0, 0,
+                               sizeof(HIDMAESTRO_SHARED_PID_STATE));
+    if (view == NULL) { CloseHandle(h); return FALSE; }
+
+    ctx->PidStateMemHandle = h;
+    ctx->PidStateMemPtr = view;
+    return TRUE;
+}
+
+/* Seqlocked snapshot of the PID state section. Returns FALSE if the
+ * mapping is not open or the snapshot couldn't stabilize across the
+ * read window (extremely rare; only happens if the SDK is publishing
+ * concurrently across multiple PublishPid* calls in flight on
+ * different threads, which the API doesn't sanction). */
+static BOOLEAN
+ReadPidState(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_PID_STATE *out)
+{
+    if (ctx->PidStateMemPtr == NULL && !EnsurePidStateMapping(ctx))
+        return FALSE;
+
+    volatile HIDMAESTRO_SHARED_PID_STATE *src =
+        (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+    ULONG seq1, seq2;
+    int retries = 4;
+    do {
+        seq1 = src->SeqNo;
+        if (seq1 & 1) { /* publisher mid-write; brief retry */
+            seq1 = src->SeqNo;
+        }
+        MemoryBarrier();
+        out->PidEnabled                     = src->PidEnabled;
+        out->BL_EffectBlockIndex            = src->BL_EffectBlockIndex;
+        out->BL_LoadStatus                  = src->BL_LoadStatus;
+        out->BL_RAMPoolAvailable            = src->BL_RAMPoolAvailable;
+        out->Pool_RAMPoolSize               = src->Pool_RAMPoolSize;
+        out->Pool_MaxSimultaneousEffects    = src->Pool_MaxSimultaneousEffects;
+        out->Pool_MemoryManagement          = src->Pool_MemoryManagement;
+        out->State_EffectBlockIndex         = src->State_EffectBlockIndex;
+        out->State_Flags                    = src->State_Flags;
+        MemoryBarrier();
+        seq2 = src->SeqNo;
+        if (seq1 == seq2 && !(seq1 & 1)) break;
+    } while (--retries > 0);
+
+    return retries > 0;
 }
 
 /* Publish a captured output report to the shared section.
@@ -678,6 +745,8 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
+    if (ctx->PidStateMemPtr) { UnmapViewOfFile(ctx->PidStateMemPtr); ctx->PidStateMemPtr = NULL; }
+    if (ctx->PidStateMemHandle) { CloseHandle(ctx->PidStateMemHandle); ctx->PidStateMemHandle = NULL; }
 }
 
 /*  DriverEntry                                                        */
@@ -1112,9 +1181,94 @@ EvtIoDeviceControl(
         break;
     }
 
-    case IOCTL_UMDF_HID_GET_FEATURE:
-        status = STATUS_NOT_SUPPORTED;
+    case IOCTL_UMDF_HID_GET_FEATURE: {
+        /*
+         * HidD_GetFeature path. DirectInput's PID FFB handshake reads
+         * Block Load (0x12), PID Pool (0x13), and PID State (0x14) via
+         * this IOCTL during dinput8!CDIEffect::CreateEffect. The SDK
+         * consumer (e.g. PadForge) publishes the current values to the
+         * shared PidState section via HMController.PublishPid*. We read
+         * them via seqlock and pack into the IOCTL output buffer.
+         *
+         * Architectural model mirrors vJoy: device-extension state lives
+         * on the user side of the kernel-user boundary because HIDMaestro
+         * is UMDF2 (driver runs in WUDFHost user-mode). Synchronous read
+         * from shared memory; no IPC round-trip, no timeout, no responder
+         * thread.
+         *
+         * Backward compat: if no SDK has published (PidEnabled == 0) or
+         * the section doesn't exist (consumer doesn't use FFB), Pool
+         * returns STATUS_NO_SUCH_DEVICE and Block Load / State return
+         * STATUS_NOT_SUPPORTED — matching vJoy's "FFB not enabled"
+         * convention and HIDMaestro's pre-v1.1.35 behavior of
+         * STATUS_NOT_SUPPORTED across all GetFeature calls.
+         */
+        PVOID  outBuf;
+        size_t outSize;
+
+        status = WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outSize);
+        if (!NT_SUCCESS(status)) break;
+
+        if (outSize < 1) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        UCHAR reportId = ((UCHAR *)outBuf)[0];
+
+        HIDMAESTRO_SHARED_PID_STATE pid = {0};
+        BOOLEAN haveState = ReadPidState(ctx, &pid);
+
+        if (!haveState || !pid.PidEnabled) {
+            /* No SDK consumer publishing FFB state. Pool Report MUST
+             * return STATUS_NO_SUCH_DEVICE so DInput definitively
+             * concludes "device exists but no FFB" rather than
+             * retrying. Other report IDs return NOT_SUPPORTED. */
+            status = (reportId == HIDMAESTRO_PID_POOL_REPORT_ID)
+                   ? STATUS_NO_SUCH_DEVICE
+                   : STATUS_NOT_SUPPORTED;
+            break;
+        }
+
+        UCHAR *p = (UCHAR *)outBuf;
+
+        if (reportId == HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID) {
+            /* Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB] */
+            if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
+            p[0] = reportId;
+            p[1] = pid.BL_EffectBlockIndex;
+            p[2] = pid.BL_LoadStatus;
+            p[3] = (UCHAR)(pid.BL_RAMPoolAvailable & 0xFF);
+            p[4] = (UCHAR)((pid.BL_RAMPoolAvailable >> 8) & 0xFF);
+            WdfRequestSetInformation(Request, 5);
+            status = STATUS_SUCCESS;
+        }
+        else if (reportId == HIDMAESTRO_PID_POOL_REPORT_ID) {
+            /* Wire format: [reportId, RAMPool LSB, RAMPool MSB, MaxSim, MemMgmt] */
+            if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
+            p[0] = reportId;
+            p[1] = (UCHAR)(pid.Pool_RAMPoolSize & 0xFF);
+            p[2] = (UCHAR)((pid.Pool_RAMPoolSize >> 8) & 0xFF);
+            p[3] = pid.Pool_MaxSimultaneousEffects;
+            p[4] = pid.Pool_MemoryManagement;
+            WdfRequestSetInformation(Request, 5);
+            status = STATUS_SUCCESS;
+        }
+        else if (reportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
+            /* Wire format: [reportId, EBI, StateFlags] */
+            if (outSize < 3) { status = STATUS_BUFFER_TOO_SMALL; break; }
+            p[0] = reportId;
+            p[1] = pid.State_EffectBlockIndex;
+            p[2] = pid.State_Flags;
+            WdfRequestSetInformation(Request, 3);
+            status = STATUS_SUCCESS;
+        }
+        else {
+            /* Unknown feature report ID — preserve legacy NOT_SUPPORTED. */
+            status = STATUS_NOT_SUPPORTED;
+        }
         break;
+    }
 
     case IOCTL_UMDF_HID_SET_OUTPUT_REPORT: {
         /*

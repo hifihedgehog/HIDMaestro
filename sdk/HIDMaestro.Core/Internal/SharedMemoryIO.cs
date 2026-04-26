@@ -62,6 +62,32 @@ internal static class SharedMemoryIO
     public const byte OUT_SOURCE_HID_FEATURE = 1;
     public const byte OUT_SOURCE_XINPUT      = 2;
 
+    // HIDMAESTRO_SHARED_PID_STATE (24 bytes) — match driver/driver.h:
+    //   ULONG   SeqNo                       offset  0   (seqlock)
+    //   UCHAR   PidEnabled                  offset  4   (gate; 0 = no FFB)
+    //   UCHAR   _pad0[3]                    offset  5
+    //   UCHAR   BL_EffectBlockIndex         offset  8
+    //   UCHAR   BL_LoadStatus               offset  9
+    //   USHORT  BL_RAMPoolAvailable         offset 10
+    //   USHORT  Pool_RAMPoolSize            offset 12
+    //   UCHAR   Pool_MaxSimultaneousEffects offset 14
+    //   UCHAR   Pool_MemoryManagement       offset 15
+    //   UCHAR   State_EffectBlockIndex      offset 16
+    //   UCHAR   State_Flags                 offset 17
+    //   UCHAR   _pad1[2]                    offset 18
+    //   total: 20 bytes (rounded to 24 for clean alignment via _pad1)
+    public const int PID_STATE_SIZE                = 24;
+    public const int PID_OFFSET_SEQNO              = 0;
+    public const int PID_OFFSET_ENABLED            = 4;
+    public const int PID_OFFSET_BL_EBI             = 8;
+    public const int PID_OFFSET_BL_LOADSTATUS      = 9;
+    public const int PID_OFFSET_BL_RAMAVAIL        = 10;
+    public const int PID_OFFSET_POOL_RAMSIZE       = 12;
+    public const int PID_OFFSET_POOL_MAXSIM        = 14;
+    public const int PID_OFFSET_POOL_MEMMGMT       = 15;
+    public const int PID_OFFSET_STATE_EBI          = 16;
+    public const int PID_OFFSET_STATE_FLAGS        = 17;
+
     // SDDL granting Local System, Builtin Admins, and LocalService full
     // access plus World read. LocalService is what WUDFHost runs as for
     // UMDF2, so the driver/companion need full access to read input and
@@ -84,6 +110,8 @@ internal static class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputEvents   = new();
     private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
+    private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
     /// <summary>Returns the view pointer for the controller's INPUT section,
     /// creating the section on first call. Thread-safe via per-call lock —
@@ -147,6 +175,100 @@ internal static class SharedMemoryIO
             s_outputViews[controllerIndex] = view;
             return view;
         }
+    }
+
+    /// <summary>Returns the view pointer for the controller's PID FFB
+    /// state section, creating the section on first call. The driver
+    /// attaches read-only and reads on every IOCTL_UMDF_HID_GET_FEATURE.
+    /// Lazy: a non-FFB consumer that never publishes PID state never
+    /// triggers this — the section simply doesn't exist and the driver
+    /// falls back to STATUS_NO_SUCH_DEVICE / STATUS_NOT_SUPPORTED for
+    /// any PID GetFeature, matching pre-FFB behavior.</summary>
+    public static IntPtr EnsurePidStateMapping(int controllerIndex)
+    {
+        lock (s_pidStateViews)
+        {
+            if (s_pidStateViews.TryGetValue(controllerIndex, out IntPtr existing))
+                return existing;
+
+            string name = $@"Global\HIDMaestroPidState{controllerIndex}";
+            (IntPtr h, IntPtr view) = CreateSection(name, PID_STATE_SIZE);
+
+            // Zero-init: PidEnabled=0 means the driver returns
+            // STATUS_NO_SUCH_DEVICE for Pool / NOT_SUPPORTED for others
+            // until the consumer's first PublishPidPool flips the gate.
+            for (int i = 0; i < PID_STATE_SIZE; i++)
+                Marshal.WriteByte(view, i, 0);
+
+            s_pidStateHandles[controllerIndex] = h;
+            s_pidStateViews[controllerIndex] = view;
+            return view;
+        }
+    }
+
+    /// <summary>Atomic seqlock write of the full PID state struct. The
+    /// caller has already mutated the relevant fields; this method
+    /// publishes the new SeqNo so the driver's seqlocked read picks up
+    /// a consistent snapshot. Single-writer (the SDK consumer) →
+    /// single-reader (the driver per-IOCTL); seqlock retry handles the
+    /// (rare) reader-mid-write window.</summary>
+    private static void PidStateBeginWrite(IntPtr view, ref uint seqNo)
+    {
+        // Mark write-in-progress (odd seqNo)
+        uint pending = seqNo + 1;
+        Marshal.WriteInt32(view, PID_OFFSET_SEQNO, (int)pending);
+        Thread.MemoryBarrier();
+    }
+
+    private static void PidStateEndWrite(IntPtr view, ref uint seqNo)
+    {
+        // Mark write-complete (even seqNo)
+        Thread.MemoryBarrier();
+        seqNo += 2;
+        Marshal.WriteInt32(view, PID_OFFSET_SEQNO, (int)seqNo);
+    }
+
+    /// <summary>Publish PID Pool Report fields and flip PidEnabled to 1.
+    /// First call enables FFB on this controller; subsequent calls update
+    /// the pool state.</summary>
+    public static void WritePidPool(IntPtr view, ref uint seqNo,
+                                    ushort ramPoolSize, byte maxSimultaneousEffects,
+                                    bool deviceManagedPool, bool sharedParameterBlocks)
+    {
+        PidStateBeginWrite(view, ref seqNo);
+        Marshal.WriteByte(view,  PID_OFFSET_ENABLED,           1);
+        Marshal.WriteInt16(view, PID_OFFSET_POOL_RAMSIZE,      (short)ramPoolSize);
+        Marshal.WriteByte(view,  PID_OFFSET_POOL_MAXSIM,       maxSimultaneousEffects);
+        byte memMgmt = (byte)((deviceManagedPool ? 0x01 : 0x00) |
+                              (sharedParameterBlocks ? 0x02 : 0x00));
+        Marshal.WriteByte(view,  PID_OFFSET_POOL_MEMMGMT,      memMgmt);
+        PidStateEndWrite(view, ref seqNo);
+    }
+
+    /// <summary>Publish PID Block Load Report fields. Single-slot
+    /// last-write-wins per HID PID 1.0 §5.5 — call from the
+    /// OutputReceived handler that received the Create New Effect
+    /// SetFeature, before returning, so the host's matching
+    /// GetFeature(BlockLoad) reads this snapshot.</summary>
+    public static void WritePidBlockLoad(IntPtr view, ref uint seqNo,
+                                         byte effectBlockIndex, byte loadStatus,
+                                         ushort ramPoolAvailable)
+    {
+        PidStateBeginWrite(view, ref seqNo);
+        Marshal.WriteByte(view,  PID_OFFSET_BL_EBI,        effectBlockIndex);
+        Marshal.WriteByte(view,  PID_OFFSET_BL_LOADSTATUS, loadStatus);
+        Marshal.WriteInt16(view, PID_OFFSET_BL_RAMAVAIL,   (short)ramPoolAvailable);
+        PidStateEndWrite(view, ref seqNo);
+    }
+
+    /// <summary>Publish PID State Report fields.</summary>
+    public static void WritePidState(IntPtr view, ref uint seqNo,
+                                     byte effectBlockIndex, byte stateFlags)
+    {
+        PidStateBeginWrite(view, ref seqNo);
+        Marshal.WriteByte(view, PID_OFFSET_STATE_EBI,   effectBlockIndex);
+        Marshal.WriteByte(view, PID_OFFSET_STATE_FLAGS, stateFlags);
+        PidStateEndWrite(view, ref seqNo);
     }
 
     /// <summary>Returns the signaling event handle for a controller's input
@@ -268,6 +390,16 @@ internal static class SharedMemoryIO
                 CloseHandle(h);
             s_outputHandles.Remove(controllerIndex);
         }
+        lock (s_pidStateViews)
+        {
+            if (s_pidStateViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
+                UnmapViewOfFile(v);
+            s_pidStateViews.Remove(controllerIndex);
+
+            if (s_pidStateHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
+                CloseHandle(h);
+            s_pidStateHandles.Remove(controllerIndex);
+        }
     }
 
     /// <summary>Releases all input and output sections owned by the process.
@@ -295,6 +427,15 @@ internal static class SharedMemoryIO
             foreach (var h in s_outputHandles.Values)
                 if (h != IntPtr.Zero) CloseHandle(h);
             s_outputHandles.Clear();
+        }
+        lock (s_pidStateViews)
+        {
+            foreach (var v in s_pidStateViews.Values)
+                if (v != IntPtr.Zero) UnmapViewOfFile(v);
+            s_pidStateViews.Clear();
+            foreach (var h in s_pidStateHandles.Values)
+                if (h != IntPtr.Zero) CloseHandle(h);
+            s_pidStateHandles.Clear();
         }
     }
 
