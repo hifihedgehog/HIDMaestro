@@ -1603,6 +1603,15 @@ EvtIoDeviceControl(
          *
          * UMDF2 input buffer layout for HID_XFER_PACKET-style IOCTLs is just
          * the raw report bytes (Report ID byte first if descriptor uses IDs).
+         *
+         * v1.1.37 — also handle PID FFB Create New Effect (0x11) and Block
+         * Free (0x1F) here. Some PID descriptors (e.g. PadForge's
+         * transcribed-from-vJoy descriptor at HMaestroFfbDescriptor.cs:45)
+         * declare these reports with Output direction (0x91, 0x02) rather
+         * than Feature (0xB1, ...), so dinput8 may route them via
+         * HidD_SetOutputReport instead of HidD_SetFeature. Defensive
+         * coverage of both paths means the driver allocates EBI synchronously
+         * regardless of which IOCTL dinput picks.
          */
         PVOID  outBuf;
         size_t outBufSize;
@@ -1615,6 +1624,19 @@ EvtIoDeviceControl(
             UCHAR  reportId = (outBufSize > 0) ? p[0] : 0;
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
+
+            if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
+                && EnsurePidStateMapping(ctx))
+            {
+                AllocateEbiInBlockLoad(ctx);
+            }
+            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+                     && payloadLen >= 1
+                     && EnsurePidStateMapping(ctx))
+            {
+                FreeEbi(ctx, payload[0]);
+            }
+
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
                           reportId, payload, payloadLen);
         }

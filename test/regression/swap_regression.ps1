@@ -809,6 +809,35 @@ function Scenario-PidFfb-RoundTrip {
     }
 }
 
+# S25: PID FFB alloc/free + pool exhaustion + multi-controller independence.
+# Companion to S24. Where S24 covers the static SDK→shared-section
+# contract (lazy section creation, Pool/State/BL field round-trip),
+# S25 covers the dynamic v1.1.37 invariants:
+#   - Legacy PublishPidBlockLoad override path: alloc EBI, alloc again,
+#     free, exhaust pool. Verifies the consumer-publish surface still
+#     works (driver bitmap stays untouched — that path is for the
+#     driver-side allocator).
+#   - Multi-controller: two virtuals get independent
+#     Global\HIDMaestroPidState{N} sections; PublishPidPool on A doesn't
+#     leak into B.
+#   - File trace directory at %PROGRAMDATA%\HIDMaestro is creatable so
+#     the v1.1.37 HMAESTRO_TRACE=1 file fallback has a target.
+#   - Best-effort dynamic SetFeature(0x11) / SetOutputReport(0x11) — if
+#     HidClass accepts either, verifies driver allocated EBI synchronously.
+#     If both rejected (descriptor parse), SKIPs — PadForge's FfbTest run
+#     remains the dynamic arbiter.
+function Scenario-PidFfb-AllocFree {
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidFfbAllocFree.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "pid_ffb_alloc_free probe not built. Run: dotnet build test/probes/pid_ffb_alloc_free -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw "PidFfbAllocFree exited $($p.ExitCode)"
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -837,7 +866,8 @@ $scenarios = @(
     @{ Name = 'S21_Custom_CreateIdle';            Body = ${function:Scenario-Custom-CreateIdle} },
     @{ Name = 'S22_Custom_SwapCycle';             Body = ${function:Scenario-Custom-SwapCycle} },
     @{ Name = 'S23_Multi_CustomInMix';            Body = ${function:Scenario-Multi-CustomInMix} },
-    @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} }
+    @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} },
+    @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
