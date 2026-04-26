@@ -136,6 +136,30 @@ internal static class Program
         if (h0 != IntPtr.Zero) { CloseHandle(h0); Console.WriteLine("FAIL: section exists"); failures++; }
         else Console.WriteLine($"OK (Win32={Marshal.GetLastWin32Error()})");
 
+        // Step 1b — v1.1.38: trigger section creation via GetCurrentPidBlockLoad
+        // (EnsurePidStateMapping fires inside the SDK), then verify Pool fields
+        // come up with vJoy-compatible defaults (RAMPoolSize=200, MaxSim=10,
+        // MemMgmt=0) rather than zeros. Audit finding #4 — zero-init was
+        // a real bug because dinput8 may read Pool during enumeration before
+        // any PublishPidPool, and zero RAMPoolSize / MaxSim lead to degenerate
+        // dinput branches.
+        _ = ctrl.GetCurrentPidBlockLoad();
+        Console.Write("  [section defaults] Pool=200/MaxSim=10/MemMgmt=0 ... ");
+        if (!ReadSectionBytes(sectionName, out byte[] sec0)) { Console.WriteLine("FAIL: section not created"); failures++; }
+        else
+        {
+            ushort defRam = BitConverter.ToUInt16(sec0, OFF_POOL_RAM);
+            byte defSim = sec0[OFF_POOL_MAX];
+            byte defMgmt = sec0[OFF_POOL_MM];
+            byte defEnabled = sec0[OFF_ENABLED];
+            if (defRam != 200 || defSim != 10 || defMgmt != 0 || defEnabled != 0)
+            {
+                Console.WriteLine($"FAIL: ram={defRam} sim={defSim} mgmt=0x{defMgmt:X2} enabled={defEnabled} (expected 200/10/0/0)");
+                failures++;
+            }
+            else Console.WriteLine("OK (vJoy-compatible defaults applied at section creation)");
+        }
+
         // Step 2 — PublishPidPool, verify Pool + v1.1.37 EBI bitmap.
         const ushort kRamPoolSize = 0xFFFF;
         const byte   kSimMax       = 4;   // small so step 5 can hit Full

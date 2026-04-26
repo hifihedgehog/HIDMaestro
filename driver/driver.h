@@ -271,7 +271,18 @@ typedef struct _HIDMAESTRO_SHARED_PID_STATE {
  * Profiles may use different IDs; the driver falls back to STATUS_NOT_SUPPORTED
  * for unknown IDs, preserving today's behavior. */
 #define HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID  0x11
-#define HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID         0x1F
+/* PID Block Free Report — 0x1B (NOT 0x1F as v1.1.37 had).
+ * vJoy emits BLKFRREP+0x10*TLID = 0x0B+0x10 = 0x1B for TLID=1
+ * (vJoy-Brunner/driver/sys/hidReportDescSingle.h:558). PadForge's
+ * transcribed descriptor uses the same ID at HMaestroFfbDescriptor.cs:220.
+ * The v1.1.37 0x1F constant was a guess and FreeEbi was dead code on
+ * the hot path. */
+#define HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID         0x1B
+/* PID Device Control Report — 0x1C. vJoy handles CTRL_DEVRST=4 by
+ * resetting the entire PID state (vJoy-Brunner/driver/sys/hid.c:2849).
+ * dinput8's IDirectInputDevice8::SendForceFeedbackCommand(DISFFC_RESET)
+ * lands here. */
+#define HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID     0x1C
 #define HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID  0x12
 #define HIDMAESTRO_PID_POOL_REPORT_ID        0x13
 #define HIDMAESTRO_PID_STATE_REPORT_ID       0x14

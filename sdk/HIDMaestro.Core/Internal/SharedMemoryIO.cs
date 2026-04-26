@@ -198,11 +198,26 @@ internal static class SharedMemoryIO
             string name = $@"Global\HIDMaestroPidState{controllerIndex}";
             (IntPtr h, IntPtr view) = CreateSection(name, PID_STATE_SIZE);
 
-            // Zero-init: PidEnabled=0 means the driver returns
-            // STATUS_NO_SUCH_DEVICE for Pool / NOT_SUPPORTED for others
-            // until the consumer's first PublishPidPool flips the gate.
+            // v1.1.38 — initialize with vJoy-compatible defaults rather
+            // than zeros. vJoy's Ffb_ResetPIDData
+            // (vJoy-Brunner/driver/sys/hid.c:2627) sets RAMPoolSize=200,
+            // MaxSimultaneousEffects=10, MemoryManagement=0 unconditionally
+            // at device-add. dinput8 reads Pool defaults during enumeration
+            // (before any consumer has called PublishPidPool); zero
+            // RAMPoolSize / MaxSim could lead dinput into degenerate
+            // branches (divide-by-zero, no-effects path).
+            //
+            // PidEnabled stays 0 — the consumer still has to PublishPidPool
+            // to flip that, at which point GetFeature(0x13 Pool) starts
+            // returning the consumer's values (overwriting these defaults).
+            // Until then, GetFeature(0x13) returns STATUS_NO_SUCH_DEVICE
+            // per the vJoy "FFB not enabled" convention, but if a path
+            // ever bypasses that gate, sane bytes are present.
             for (int i = 0; i < PID_STATE_SIZE; i++)
                 Marshal.WriteByte(view, i, 0);
+            Marshal.WriteInt16(view, PID_OFFSET_POOL_RAMSIZE, 200);
+            Marshal.WriteByte (view, PID_OFFSET_POOL_MAXSIM, 10);
+            // MemoryManagement stays 0 (host-managed pool, no shared param blocks).
 
             s_pidStateHandles[controllerIndex] = h;
             s_pidStateViews[controllerIndex] = view;

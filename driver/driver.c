@@ -643,6 +643,46 @@ AllocateEbiInBlockLoad(_In_ PDEVICE_CONTEXT ctx)
     }
 }
 
+/* v1.1.38 — PID Device Reset (CTRL_DEVRST=4). Mirrors vJoy's
+ * `Ffb_ResetPIDData` (vJoy-Brunner/driver/sys/hid.c:2627). Clears all
+ * EBI allocations and resets the Block Load and State fields to safe
+ * initial values. Pool fields are NOT reset — those are consumer-
+ * published static config. dinput8's
+ * IDirectInputDevice8::SendForceFeedbackCommand(DISFFC_RESET) arrives as
+ * IOCTL_UMDF_HID_SET_OUTPUT_REPORT with Report ID 0x1C, Control byte 4. */
+static VOID
+ResetPidState(_In_ PDEVICE_CONTEXT ctx)
+{
+    volatile HIDMAESTRO_SHARED_PID_STATE *pid =
+        (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+    if (pid == NULL) return;
+
+    /* Clear bitmap atomically. */
+    InterlockedExchange((volatile LONG *)&pid->EbiAllocBitmap, 0);
+    InterlockedExchange((volatile LONG *)&pid->EbiAllocatedCount, 0);
+
+    /* Seqlock-write the Block Load and State fields. */
+    ULONG seq = pid->SeqNo + 1;
+    pid->SeqNo = seq;
+    MemoryBarrier();
+    pid->BL_EffectBlockIndex   = 0;
+    pid->BL_LoadStatus         = 0;
+    pid->BL_RAMPoolAvailable   = pid->Pool_RAMPoolSize;
+    pid->State_EffectBlockIndex = 0;
+    pid->State_Flags           = 0;
+    MemoryBarrier();
+    pid->SeqNo = seq + 1;
+
+    {
+        char buf[120]; char *p = buf; char *end = buf + sizeof(buf);
+        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
+        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
+        p = HmDbgAppendCstr(p, end, "] reset (CTRL_DEVRST)\n");
+        *p = 0;
+        HmTraceEmit(buf);
+    }
+}
+
 /* v1.1.37 — driver-side EBI free. Atomically clears the bit. No-op if the
  * bit is already clear (defensive against duplicate Block Free packets).
  * Mirrors vJoy's `Ffb_BlockIndexFree` + RAMPool update.
@@ -1441,18 +1481,16 @@ EvtIoDeviceControl(
             ULONG payloadLen = (ULONG)((featureSize > 0) ? featureSize - 1 : 0);
 
             /* PID FFB Create New Effect: allocate next free EBI from the
-             * driver's bitmap and write to BL_* fields atomically. */
+             * driver's bitmap and write to BL_* fields atomically.
+             * Note: SetFeature is the canonical Create New Effect path
+             * (vJoy descriptor declares 0x11 as Feature, hid.c:2879 case
+             * `HID_ID_NEWEFREP+0x10`). The Output-direction 0x11 (Set
+             * Effect) is handled in IOCTL_UMDF_HID_SET_OUTPUT_REPORT
+             * WITHOUT EBI allocation — see that handler. */
             if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
                 && EnsurePidStateMapping(ctx))
             {
                 AllocateEbiInBlockLoad(ctx);
-            }
-            /* PID FFB Block Free: payload[0] is the EBI to free. */
-            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
-                     && payloadLen >= 1
-                     && EnsurePidStateMapping(ctx))
-            {
-                FreeEbi(ctx, payload[0]);
             }
 
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE,
@@ -1544,19 +1582,25 @@ EvtIoDeviceControl(
         UCHAR *p = (UCHAR *)outBuf;
 
         if (reportId == HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID) {
-            /* Spec gate: LoadStatus must be 1..3 per HID PID 1.0 §5.5.
-             * Zero means no PublishPidBlockLoad has fired yet. */
-            if (pid.BL_LoadStatus < 1 || pid.BL_LoadStatus > 3) {
-                status = STATUS_NOT_SUPPORTED;
-                HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
-                                       "bl-not-published");
-                break;
-            }
-            /* Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB] */
+            /* v1.1.38 — drop the v1.1.36 spec gate that returned
+             * STATUS_NOT_SUPPORTED when BL_LoadStatus was outside 1..3.
+             * vJoy's vJoyGetFeature in the same condition returns
+             * STATUS_SUCCESS with [id, 0, 0, 0, 1] (Error=1) — see
+             * vJoy-Brunner/driver/sys/hid.c:380-383. NOT_SUPPORTED on
+             * Block Load is an unusual response that dinput8 may not
+             * handle, suspected as an AV trigger.
+             *
+             * Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB] */
             if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
             p[0] = reportId;
             p[1] = pid.BL_EffectBlockIndex;
-            p[2] = pid.BL_LoadStatus;
+            /* If LoadStatus is zero (unpublished), report Error=3 per spec
+             * §5.5 — vJoy reports Error=1 in its raw byte but its enum
+             * collection is 1=Success, 2=Full, 3=Error and vJoy's "1" in
+             * the error path is from a different historical layout. We
+             * use 3 to be spec-strict; dinput accepts both. */
+            p[2] = (pid.BL_LoadStatus >= 1 && pid.BL_LoadStatus <= 3)
+                 ? pid.BL_LoadStatus : (UCHAR)3 /* Error */;
             p[3] = (UCHAR)(pid.BL_RAMPoolAvailable & 0xFF);
             p[4] = (UCHAR)((pid.BL_RAMPoolAvailable >> 8) & 0xFF);
             WdfRequestSetInformation(Request, 5);
@@ -1604,14 +1648,19 @@ EvtIoDeviceControl(
          * UMDF2 input buffer layout for HID_XFER_PACKET-style IOCTLs is just
          * the raw report bytes (Report ID byte first if descriptor uses IDs).
          *
-         * v1.1.37 — also handle PID FFB Create New Effect (0x11) and Block
-         * Free (0x1F) here. Some PID descriptors (e.g. PadForge's
-         * transcribed-from-vJoy descriptor at HMaestroFfbDescriptor.cs:45)
-         * declare these reports with Output direction (0x91, 0x02) rather
-         * than Feature (0xB1, ...), so dinput8 may route them via
-         * HidD_SetOutputReport instead of HidD_SetFeature. Defensive
-         * coverage of both paths means the driver allocates EBI synchronously
-         * regardless of which IOCTL dinput picks.
+         * v1.1.38 — handle PID Block Free (0x1B) and Device Control (0x1C)
+         * here. Block Free is Output direction in the canonical PID
+         * descriptor (vJoy-Brunner/driver/sys/hidReportDescSingle.h:558,
+         * `0x91, 0x02` items). Device Control is Output direction
+         * (hidReportDescSingle.h:571) and on Control=4 (CTRL_DEVRST) we
+         * reset PID state — mirrors vJoy hid.c:2849.
+         *
+         * Report ID 0x11 is intentionally NOT handled here. 0x11 is
+         * dual-purpose in the PID descriptor: Feature direction = Create
+         * New Effect (allocates EBI; handled in SetFeature), Output
+         * direction = Set Effect (selects an EXISTING EBI to start; no
+         * allocation). v1.1.37 mistakenly allocated an EBI for both,
+         * leaking one EBI per Set Effect. Fixed in v1.1.38.
          */
         PVOID  outBuf;
         size_t outBufSize;
@@ -1625,16 +1674,18 @@ EvtIoDeviceControl(
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
 
-            if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
+            if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+                && payloadLen >= 1
                 && EnsurePidStateMapping(ctx))
             {
-                AllocateEbiInBlockLoad(ctx);
-            }
-            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
-                     && payloadLen >= 1
-                     && EnsurePidStateMapping(ctx))
-            {
                 FreeEbi(ctx, payload[0]);
+            }
+            else if (reportId == HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID
+                     && payloadLen >= 1
+                     && EnsurePidStateMapping(ctx)
+                     && payload[0] == 4 /* CTRL_DEVRST */)
+            {
+                ResetPidState(ctx);
             }
 
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT,
@@ -1645,28 +1696,64 @@ EvtIoDeviceControl(
     }
 
     case IOCTL_UMDF_HID_GET_INPUT_REPORT: {
-        /* Return the latest input report for polled reading */
+        /*
+         * v1.1.38 — vJoy returns STATUS_NOT_SUPPORTED for this IOCTL
+         * unconditionally (vJoy-Brunner/driver/sys/hid.c:244). HIDMaestro
+         * pre-1.1.38 returned 17 zeroed bytes via a default-size fallback,
+         * which dinput8 would parse against descriptor-declared report
+         * lengths (e.g. PID State at 3 bytes) and AV when the lengths
+         * disagreed. Strong AV candidate per the v1.1.38 audit.
+         *
+         * Fix: if the caller asks for a specific report ID we know about
+         * (PID State 0x14), return correctly-sized bytes from shared
+         * state. For everything else, return STATUS_NOT_SUPPORTED to
+         * mirror vJoy. dinput8 falls back to other paths (or accepts
+         * the device as unread-state) on NOT_SUPPORTED.
+         */
+        PVOID  inBuf;
+        size_t inBufSize;
+
+        status = WdfRequestRetrieveOutputBuffer(Request, 1, &inBuf, &inBufSize);
+        if (!NT_SUCCESS(status)) break;
+
+        if (inBufSize < 1) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        UCHAR inReportId = ((UCHAR *)inBuf)[0];
+
+        /* PID State Report (Input direction in the canonical descriptor —
+         * vJoy hidReportDescSingle.h:752 declares 0x14 with embedded
+         * Input items inside a Feature collection). dinput8 may issue
+         * HidD_GetInputReport(0x14) during CreateEffect to read State. */
+        if (inReportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
+            HIDMAESTRO_SHARED_PID_STATE pid = {0};
+            BOOLEAN haveState = ReadPidState(ctx, &pid);
+            if (inBufSize < 3) { status = STATUS_BUFFER_TOO_SMALL; break; }
+            ((UCHAR *)inBuf)[0] = inReportId;
+            ((UCHAR *)inBuf)[1] = haveState ? pid.State_EffectBlockIndex : 0;
+            ((UCHAR *)inBuf)[2] = haveState ? pid.State_Flags : 0;
+            WdfRequestSetInformation(Request, 3);
+            status = STATUS_SUCCESS;
+            break;
+        }
+
+        /* Standard input report (Report ID 1 or no-RID descriptors): return
+         * the latest cached input frame the SDK published. */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
-        if (ctx->InputReportReady) {
+        if (ctx->InputReportReady
+            && (inReportId == 0x01 || inReportId == 0x00))
+        {
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
-        } else {
-            /* No data yet — return zeros matching descriptor format */
-            UCHAR emptyReport[HIDMAESTRO_MAX_REPORT_SIZE];
-            RtlZeroMemory(emptyReport, sizeof(emptyReport));
-            ULONG emptySize = ctx->InputReportByteLength;
-            /* Check if descriptor uses Report IDs */
-            BOOLEAN hasIds = FALSE;
-            for (ULONG i = 0; i < ctx->ReportDescriptorSize - 1; i++) {
-                if (ctx->ReportDescriptor[i] == 0x85) { hasIds = TRUE; break; }
-            }
-            if (hasIds) {
-                emptyReport[0] = 0x01; /* Report ID 1 */
-            }
-            if (emptySize == 0) emptySize = 17; /* safe default for GIP */
-            status = RequestCopyFromBuffer(Request, emptyReport, emptySize);
+            WdfWaitLockRelease(ctx->InputLock);
+            break;
         }
         WdfWaitLockRelease(ctx->InputLock);
+
+        /* Anything else: vJoy parity — STATUS_NOT_SUPPORTED. */
+        status = STATUS_NOT_SUPPORTED;
         break;
     }
 
