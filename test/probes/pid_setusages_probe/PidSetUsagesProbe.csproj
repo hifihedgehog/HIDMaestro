@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>PidSetUsagesProbe</RootNamespace>
+    <AssemblyName>PidSetUsagesProbe</AssemblyName>
+    <!-- FfbTest/ is its own project; exclude from this project's compile glob. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <!-- FfbTest is transcribed from PadForge's tools/vJoy/FfbTest. We
+         compile it as a sibling project so its output (FfbTest.exe +
+         FfbTest.dll + SharpDX deps) lands in FfbTest/bin/.../win-x64/.
+         The AfterBuild target below copies the entire output dir into
+         this probe's output so the probe can spawn FfbTest.exe via
+         Path.Combine(BaseDirectory, "FfbTest.exe"). A non-self-contained
+         .NET 10 launcher needs the .dll alongside it; copying just the
+         .exe (as ProjectReference does) leaves the .dll behind in
+         FfbTest/bin/ and the launcher fails with 0x8000809A. -->
+    <ProjectReference Include="FfbTest\FfbTest.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <!-- Copy FfbTest's full build output (exe + dll + deps) next to our
+       probe's exe after build. The ProjectReference above ensures FfbTest
+       builds first; this target propagates its output. -->
+  <Target Name="CopyFfbTestOutput" AfterTargets="Build">
+    <ItemGroup>
+      <FfbTestOutputs Include="FfbTest\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FfbTestOutputs)"
+          DestinationFolder="$(OutputPath)%(RecursiveDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

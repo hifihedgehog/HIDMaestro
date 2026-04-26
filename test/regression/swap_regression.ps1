@@ -838,6 +838,32 @@ function Scenario-PidFfb-AllocFree {
     }
 }
 
+# S26: PID FFB end-to-end via FfbTest (the SharpDX/DirectInput8 PID
+# harness from the vJoy-Brunner clone, copied into our repo at
+# test/probes/pid_setusages_probe/FfbTest/FfbTest.exe).
+#
+# This scenario was added after the v1.1.35-v1.1.39 PID FFB
+# investigation (issue #16) to close the "best-effort SKIP" trap that
+# made S24/S25 pass while the underlying feature was broken. S26
+# deploys a virtual with the full PadForge HMaestroFfbDescriptor
+# (transcribed) and runs FfbTest against it. FfbTest's auto-probe
+# phase calls CreateEffect(GUID_ConstantForce) and prints `SUCCESS:`
+# per variant on success or `Fatal error 0xC0000005` on a pid.dll AV.
+# The probe parses that output and exits 0 only if a Constant Force
+# CreateEffect succeeded with no AV — which is exactly the regression
+# bar for issue #16.
+function Scenario-PidFfb-FfbTest {
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidSetUsagesProbe.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "pid_setusages_probe not built. Run: dotnet build test/probes/pid_setusages_probe -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("PidSetUsagesProbe exited " + $p.ExitCode + " - Constant Force CreateEffect did not succeed")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -867,7 +893,8 @@ $scenarios = @(
     @{ Name = 'S22_Custom_SwapCycle';             Body = ${function:Scenario-Custom-SwapCycle} },
     @{ Name = 'S23_Multi_CustomInMix';            Body = ${function:Scenario-Multi-CustomInMix} },
     @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} },
-    @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} }
+    @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} },
+    @{ Name = 'S26_PidFfb_FfbTest';               Body = ${function:Scenario-PidFfb-FfbTest} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
