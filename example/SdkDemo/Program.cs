@@ -91,6 +91,17 @@ Console.WriteLine($"  Overrode joy.cpl label for VID_{x360Vid:X4}&PID_{x360Pid:X
 // When a game sends rumble or LED commands to the virtual controller,
 // the SDK delivers them here. The consumer routes them to physical
 // hardware (e.g. PadForge forwards to the real controller).
+//
+// Cadence (v1.1.40+): the SDK polls the driver's 64-slot output ring
+// every ~8 ms and drains every slot written since the last poll, in
+// monotonic SeqNo order. Multiple OutputReceived invocations per poll
+// are normal — DirectInput PID FFB writes Set Effect → Set Constant
+// Force / Set Periodic → Effect Operation Start within 1-3 ms and all
+// three surface here as separate packets (the pre-1.1.40 single-slot
+// channel coalesced those bursts and silently dropped the magnitude
+// packet — see issue #16). Keep handlers cheap (no synchronous I/O,
+// no long locks); a stall longer than ~512 ms while the driver is
+// writing at burst rate begins overwriting the oldest packets.
 ctrl0.OutputReceived += (controller, packet) =>
 {
     Console.WriteLine($"  [output] ctrl0 source={packet.Source} " +
@@ -111,18 +122,27 @@ ctrl1.OutputReceived += (controller, packet) =>
 //   0x14  PID State    — issued during effect Start/Stop
 //
 // HIDMaestro reads these from a per-controller shared section the
-// consumer fills via PublishPidPool / PublishPidBlockLoad / PublishPidState.
-// Before the first PublishPidPool call, the driver returns
-// STATUS_NO_SUCH_DEVICE for the Pool Report (matches vJoy's "FFB not
-// enabled" convention) so DirectInput cleanly concludes "device exists
-// but no FFB" rather than hanging or retrying.
+// consumer fills via PublishPidPool / PublishPidState. Before the
+// first PublishPidPool call, the driver returns STATUS_NO_SUCH_DEVICE
+// for the Pool Report (matches vJoy's "FFB not enabled" convention)
+// so DirectInput cleanly concludes "device exists but no FFB" rather
+// than hanging or retrying.
 //
-// Publish the Pool once at startup to enable FFB (consumers that don't
-// support FFB simply skip this call). Block Load must be published
-// SYNCHRONOUSLY from the OutputReceived handler that received the
-// Create New Effect SetFeature, before the handler returns —
-// dinput8!CDIEffect::CreateEffect issues HidD_GetFeature(BlockLoad)
-// immediately after the SetFeature returns.
+// Block Load is allocated by the driver synchronously inside its
+// SetFeature(0x11 Create New Effect) IOCTL handler — by the time the
+// SDK's OutputReceived fires for the Create New Effect notification,
+// the BL state is already canonical and readable via
+// GetCurrentPidBlockLoad. PublishPidBlockLoad is reserved for
+// consumers that need to override the driver's auto-allocation
+// (e.g., reflecting a real physical device's EBI assignment).
+//
+// Custom-built profiles needing PID FFB should call
+// HidDescriptorBuilder.AddPidFfbBlock when authoring the descriptor —
+// it emits the canonical "minimum viable" PID FFB report set
+// (one Create New Effect Feature, full Output report set). Adding
+// extra Feature reports (0x12/0x13/0x14) inside the same Application
+// Collection AVs pid.dll on Windows 11 Build 26100 — see the doc on
+// HidDescriptorBuilder.AddPidFfbBlock.
 ctrl0.PublishPidPool(
     ramPoolSize:             0xFFFF,
     simultaneousEffectsMax:  16,
@@ -132,11 +152,10 @@ ctrl0.PublishPidState(effectBlockIndex: 0,
     PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
 Console.WriteLine("  PID FFB enabled on ctrl0 (Pool + initial State published)");
 
-// Inside an OutputReceived handler that decodes Create New Effect:
-//   ctrl.PublishPidBlockLoad(
-//       effectBlockIndex: nextEbi,
-//       loadStatus:       PidLoadStatus.Success,   // or Full / Error
-//       ramPoolAvailable: (ushort)(0xFFFF - usedBytes));
+// Read the EBI the driver auto-allocated (after a SetFeature(0x11)
+// arrives via OutputReceived):
+//   var bl = ctrl.GetCurrentPidBlockLoad();
+//   // bl.EffectBlockIndex now holds the EBI dinput8 will reference
 
 // ── 5. Submit input using the full HMGamepadState surface ────────────
 // SubmitState is the canonical input path: caller drives the cadence,
@@ -312,8 +331,12 @@ Thread.Sleep(3000);
 
 // ── 10. Fully custom controller from scratch ─────────────────────────
 // Build a controller that doesn't exist in the catalog — a simple
-// 4-axis, 6-button flight stick with a hat switch.
-Console.WriteLine("\n  Building a custom flight stick from scratch...");
+// 4-axis, 6-button flight stick with a hat switch and DirectInput PID
+// force-feedback. AddPidFfbBlock emits the canonical "minimum viable"
+// FFB report set; pair it with PublishPidPool / PublishPidState (and
+// optionally GetCurrentPidBlockLoad) to expose Logitech-wheel-style
+// FFB to DirectInput consumers.
+Console.WriteLine("\n  Building a custom flight stick (with PID FFB) from scratch...");
 byte[] stickDesc = new HidDescriptorBuilder()
     .Joystick()
     .AddStick("Left", bits: 16)      // main stick X/Y
@@ -321,6 +344,7 @@ byte[] stickDesc = new HidDescriptorBuilder()
     .AddTrigger("Right", bits: 8)    // rudder (Rz)
     .AddButtons(6)
     .AddHat()
+    .AddPidFfbBlock()                // HID PID 1.0 force-feedback block
     .Build();
 
 var flightStick = new HMProfileBuilder()

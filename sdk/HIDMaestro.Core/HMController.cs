@@ -103,7 +103,23 @@ public sealed class HMController : IDisposable
     /// HidD_GetFeature on the Pool Report ID returns STATUS_NO_SUCH_DEVICE
     /// (matching vJoy's "FFB not enabled" convention), so DInput cleanly
     /// concludes "device exists but no FFB" rather than retrying.
-    /// Subsequent calls update the pool state.</summary>
+    /// Subsequent calls update the pool state.
+    ///
+    /// <para><b>Descriptor requirements:</b> the controller's HID descriptor
+    /// must declare the PID FFB report block. Use
+    /// <see cref="HidDescriptorBuilder.AddPidFfbBlock"/> — that method emits
+    /// the canonical "minimum viable" block (Set Effect 0x11, Set Constant
+    /// Force 0x15, Effect Operation 0x1A, Device Control 0x1C, etc., plus
+    /// the single Feature report Create New Effect 0x11). Do NOT add
+    /// additional Feature reports (0x12 Block Load, 0x13 PID Pool, 0x14
+    /// PID State) inside the same Application Collection — the four-feature
+    /// variant from vJoy's reference descriptor causes pid.dll to AV inside
+    /// PID_EffectOperation+0x52 the first time the consumer calls
+    /// CreateEffect on Windows 11 Build 26100 (issue #16). Pool, Block
+    /// Load, and PID State are served by the driver from a separate
+    /// shared-section path that doesn't touch pid.dll's preparsed-data
+    /// parser — that's what <see cref="PublishPidPool"/>, <see cref="PublishPidBlockLoad"/>,
+    /// and <see cref="PublishPidState"/> publish to.</para></summary>
     /// <param name="ramPoolSize">Total RAM pool size in bytes.</param>
     /// <param name="simultaneousEffectsMax">Max effects the device can play simultaneously.</param>
     /// <param name="deviceManagedPool">True if the device manages effect block allocation.</param>

@@ -267,15 +267,55 @@ class Program
         // 9000 = from East = pushes stick left, 27000 = from West = pushes stick right.
         int currentDirection = 0; // default: pushes stick south (force from north)
 
-        // --probes-only: exit cleanly here. The auto-probe loops above
-        // already exercised CreateEffect for ConstantForce + Sine; if
-        // they printed "SUCCESS:", that's the regression-relevant signal.
+        // --probes-only: drive the round-trip — CreateEffect, SetParameters
+        // with a known magnitude, Start. pid.dll writes Set Effect (0x11),
+        // Set Constant Force (0x15, magnitude=5000) / Set Periodic (0x14),
+        // and Effect Operation Start (0x1A) within a 1-3 ms burst. The
+        // HIDMaestro probe asserts those packets all surfaced at the
+        // consumer's OutputReceived handler with non-zero magnitude.
+        // CreateEffect-only is not enough — that tested the descriptor
+        // handshake but never exercised the lossy-channel path that
+        // dropped magnitude packets pre-1.1.40.
         if (probesOnly)
         {
             int constSuccess = constantEffect != null ? 1 : 0;
             int sineSuccess  = sineEffect != null ? 1 : 0;
-            Console.WriteLine($"\n--probes-only: ConstantForce={(constSuccess > 0 ? "OK" : "FAIL")} Sine={(sineSuccess > 0 ? "OK" : "FAIL")}");
-            return constSuccess > 0 ? 0 : 1;
+
+            // Drive Start with magnitude 5000 so pid.dll writes Set
+            // Constant Force 0x15 with payload [EBI, 0x88, 0x13] (5000
+            // = 0x1388 little-endian). Sleep 200 ms to let the magnitude
+            // packet land at the consumer's OutputReceived. Stop.
+            int startOk = 0;
+            if (constantEffect != null)
+            {
+                try
+                {
+                    constantEffect.Start();
+                    Console.WriteLine("  Constant Force Start: OK (magnitude=5000)");
+                    System.Threading.Thread.Sleep(200);
+                    constantEffect.Stop();
+                    startOk = 1;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  Constant Force Start: FAIL — {ex.Message}");
+                }
+            }
+            if (sineEffect != null)
+            {
+                try
+                {
+                    sineEffect.Start();
+                    System.Threading.Thread.Sleep(200);
+                    sineEffect.Stop();
+                }
+                catch { /* informational */ }
+            }
+
+            Console.WriteLine($"\n--probes-only: ConstantForce={(constSuccess > 0 ? "OK" : "FAIL")} Sine={(sineSuccess > 0 ? "OK" : "FAIL")} Start={(startOk > 0 ? "OK" : "FAIL")}");
+            // Pass condition: ConstantForce CreateEffect + Start both succeeded.
+            // The probe-side magnitude assertion is the round-trip check.
+            return (constSuccess > 0 && startOk > 0) ? 0 : 1;
         }
 
         Console.WriteLine("\nCommands:");

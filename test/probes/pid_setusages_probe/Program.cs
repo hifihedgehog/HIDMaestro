@@ -165,17 +165,59 @@ internal static class Program
         ctrl.PublishPidState(effectBlockIndex: 0,
             PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
 
-        // ── Output burst counter ──
-        // Subscribe to OutputReceived to verify the v1.1.40 ring buffer
-        // doesn't coalesce back-to-back writes. The post-FfbTest burst
-        // phase below writes N Output reports in tight succession; the
-        // counter here must equal N when the SDK poll loop drains.
+        // ── Output capture ──
+        // Subscribe to OutputReceived to verify (a) the v1.1.40 ring buffer
+        // doesn't coalesce back-to-back writes, and (b) Set Constant Force
+        // (0x15) magnitude payloads survive the 1-3 ms PID FFB burst.
+        // The post-FfbTest burst phase below writes N Output reports in
+        // tight succession; the counter here must equal N when the SDK
+        // poll loop drains. Separately, the round-trip assertion below
+        // requires a non-zero magnitude reached the handler during the
+        // FfbTest constantEffect.Start() call.
         var outputCounts = new System.Collections.Concurrent.ConcurrentDictionary<byte, int>();
         int totalOutputPackets = 0;
+        // Track Set Constant Force magnitude payloads. Layout (post-RID-strip,
+        // per the descriptor): [0]=EBI, [1..2]=little-endian signed magnitude
+        // in range -10000..10000. FfbTest --probes-only writes 5000 on Start.
+        int constForceMaxMag = 0;
+        int constForcePackets = 0;
+        // Track Set Periodic (0x14) magnitude similarly. Payload layout (post-RID-strip):
+        // [0]=EBI, [1..2]=Magnitude (16-bit unsigned, 0..10000), [3..4]=Offset, [5..6]=Phase, [7..10]=Period.
+        int periodicMaxMag = 0;
+        int periodicPackets = 0;
+        // Track 0x1A Effect Operation packets so we can correlate the burst
+        // (Set Effect → Set Constant Force → Effect Operation Start in 1-3 ms).
+        int effectOpStartPackets = 0;
+
         ctrl.OutputReceived += (_, pkt) =>
         {
             outputCounts.AddOrUpdate(pkt.ReportId, 1, (_, n) => n + 1);
             System.Threading.Interlocked.Increment(ref totalOutputPackets);
+
+            var data = pkt.Data.Span;
+            if (pkt.ReportId == 0x15 && data.Length >= 3)
+            {
+                // Set Constant Force: [EBI, MagLo, MagHi]
+                short mag = (short)(data[1] | (data[2] << 8));
+                int absMag = Math.Abs(mag);
+                System.Threading.Interlocked.Increment(ref constForcePackets);
+                // Track largest magnitude seen via simple race-tolerant max.
+                int prev;
+                do { prev = constForceMaxMag; if (absMag <= prev) break; }
+                while (System.Threading.Interlocked.CompareExchange(ref constForceMaxMag, absMag, prev) != prev);
+            }
+            else if (pkt.ReportId == 0x14 && data.Length >= 3)
+            {
+                ushort mag = (ushort)(data[1] | (data[2] << 8));
+                System.Threading.Interlocked.Increment(ref periodicPackets);
+                int prev;
+                do { prev = periodicMaxMag; if (mag <= prev) break; }
+                while (System.Threading.Interlocked.CompareExchange(ref periodicMaxMag, mag, prev) != prev);
+            }
+            else if (pkt.ReportId == 0x1A && data.Length >= 2 && data[1] == 0x01 /* op = Start */)
+            {
+                System.Threading.Interlocked.Increment(ref effectOpStartPackets);
+            }
         };
 
         // ── Optional: input-pump thread mirroring PadForge.exe ──
@@ -205,11 +247,47 @@ internal static class Program
         }
 
         // ── FfbTest first — clean device, no prior HID I/O ──
-        // The canonical regression test for issue #16. If FfbTest's
-        // CreateEffect succeeds here, PID FFB is empirically working.
+        // The canonical regression test for issue #16. FfbTest --probes-only
+        // creates a Constant Force effect, calls Start (with magnitude=5000),
+        // sleeps 200 ms, calls Stop. pid.dll writes Set Effect (0x11) → Set
+        // Constant Force (0x15, magnitude 5000) → Effect Operation Start
+        // (0x1A) within a 1-3 ms burst. Our OutputReceived hook above
+        // captures every payload. After FfbTest exits, give the SDK poll
+        // loop one more drain cycle, then assert the round-trip.
         int failuresFromFfbTest = RunFfbTest();
+        System.Threading.Thread.Sleep(80);
         pumpCts.Cancel();
         pumpThread?.Join(2000);
+
+        // ── Round-trip magnitude assertion (issue #16 ask 3) ──
+        // Pre-1.1.40 single-slot channel coalesced PID FFB bursts; the
+        // middle (magnitude) packet got dropped. v1.1.40 ring buffer
+        // delivers every slot. Assertion: at least one Set Constant Force
+        // packet with magnitude > 0 reached the consumer's handler during
+        // the FfbTest Start call. Threshold is intentionally permissive
+        // (>= 1) — pid.dll may scale the 5000 we sent down through gain
+        // / direction transforms; the load-bearing question is "did ANY
+        // magnitude bytes reach the handler at all," not "was it exactly
+        // 5000."
+        int roundTripFailures = 0;
+        Console.WriteLine($"  [Round-trip] Set Constant Force packets={constForcePackets} maxMag={constForceMaxMag}");
+        Console.WriteLine($"  [Round-trip] Set Periodic       packets={periodicPackets} maxMag={periodicMaxMag}");
+        Console.WriteLine($"  [Round-trip] Effect Op Start    packets={effectOpStartPackets}");
+        if (failuresFromFfbTest == 0)
+        {
+            // Only assert on a successful FfbTest run (otherwise no Start
+            // happened and no magnitude was ever sent).
+            if (constForceMaxMag == 0 && periodicMaxMag == 0)
+            {
+                Console.WriteLine("  [Round-trip] FAIL: zero magnitude reached the consumer (channel coalesced the burst)");
+                roundTripFailures++;
+            }
+            if (effectOpStartPackets == 0)
+            {
+                Console.WriteLine("  [Round-trip] FAIL: no Effect Operation Start (0x1A op=Start) reached the consumer");
+                roundTripFailures++;
+            }
+        }
 
         // ── HidP introspection probe (diagnostic, post-FfbTest) ──
         // Now exercise HidP_SetUsages, HidP_SetUsageValue, and a
@@ -443,12 +521,17 @@ internal static class Program
 
             // FfbTest already ran above (before the HidP probe phase). The
             // HidP probe results above are diagnostic only — the regression
-            // bar is FfbTest. If FfbTest passed, the probe passes regardless
-            // of HidP-side warnings; if FfbTest failed, the probe fails.
-            if (failuresFromFfbTest == 0)
+            // bar is FfbTest + the round-trip magnitude assertion. If
+            // either fails, the probe fails.
+            if (failuresFromFfbTest == 0 && roundTripFailures == 0)
             {
-                Console.WriteLine($"=== PASS — FfbTest succeeded; HidP probe diagnostic failures: {failures} ===");
+                Console.WriteLine($"=== PASS — FfbTest + round-trip OK; HidP probe diagnostic failures: {failures} ===");
                 return 0;
+            }
+            if (roundTripFailures > 0)
+            {
+                Console.WriteLine($"=== FAIL: round-trip dropped Set Constant Force / Set Periodic magnitude or Effect Op Start (issue #16 lossy-channel regression) ===");
+                return 1;
             }
             Console.WriteLine($"=== FAIL: FfbTest failed (exit code from --probes-only != 0); HidP probe failures: {failures} ===");
             return 1;
@@ -597,213 +680,11 @@ internal static class Program
     /// Create New Effect Feature, etc.). Transcribed verbatim from
     /// PadForge's HMaestroFfbDescriptor.Build(). Used both standalone
     /// inside the simple BuildPidDescriptor and as AddRaw input when
-    /// running --padforge-profile mode through HidDescriptorBuilder.</summary>
-    static byte[] BuildFfbBlock()
-    {
-        var d = new System.Collections.Generic.List<byte>(384);
-        d.AddRange(new byte[] { 0x05, 0x0F });                 // Usage Page Physical Interface
+    /// running --padforge-profile mode through HidDescriptorBuilder.
+    /// Returns the same bytes as HidDescriptorBuilder.MinimumViablePidFfbBlock
+    /// (the canonical block exposed by the SDK's public API).</summary>
+    static byte[] BuildFfbBlock() => HidDescriptorBuilder.MinimumViablePidFfbBlock;
 
-        // Set Effect Report (Output, ID 0x11)
-        d.AddRange(new byte[] { 0x09, 0x21, 0xA1, 0x02, 0x85, 0x11 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x25, 0xA1, 0x02 });
-        d.AddRange(new byte[] {
-            0x09, 0x26, 0x09, 0x27, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32,
-            0x09, 0x33, 0x09, 0x34, 0x09, 0x40, 0x09, 0x41, 0x09, 0x42,
-            0x09, 0x43, 0x09, 0x29
-        });
-        d.AddRange(new byte[] { 0x25, 0x0C, 0x15, 0x01, 0x35, 0x01, 0x45, 0x0C });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x00 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x09, 0x50, 0x09, 0x54, 0x09, 0x51, 0x09, 0xA7 });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x7F });
-        d.AddRange(new byte[] { 0x66, 0x03, 0x10, 0x55, 0xFD });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x04, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x55, 0x00, 0x66, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x09, 0x52 });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x00, 0x35, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x53 });
-        d.AddRange(new byte[] { 0x15, 0x01, 0x25, 0x08, 0x35, 0x01, 0x45, 0x08 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x55, 0xA1, 0x02 });
-        d.AddRange(new byte[] { 0x05, 0x01 });
-        d.AddRange(new byte[] { 0x09, 0x30, 0x09, 0x31 });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x25, 0x01 });
-        d.AddRange(new byte[] { 0x75, 0x01, 0x95, 0x02, 0x91, 0x02 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x05, 0x0F });
-        d.AddRange(new byte[] { 0x09, 0x56, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x95, 0x05, 0x91, 0x03 });
-        d.AddRange(new byte[] { 0x09, 0x57, 0xA1, 0x02 });
-        d.AddRange(new byte[] { 0x0B, 0x01, 0x00, 0x0A, 0x00 });
-        d.AddRange(new byte[] { 0x0B, 0x02, 0x00, 0x0A, 0x00 });
-        d.AddRange(new byte[] { 0x66, 0x14, 0x00, 0x55, 0xFE });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x27, 0xFF, 0x7F, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x35, 0x00, 0x47, 0xA0, 0x8C, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x66, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x02, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x55, 0x00, 0x66, 0x00, 0x00 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x05, 0x0F, 0x09, 0x58, 0xA1, 0x02 });
-        d.AddRange(new byte[] { 0x0B, 0x01, 0x00, 0x0A, 0x00 });
-        d.AddRange(new byte[] { 0x0B, 0x02, 0x00, 0x0A, 0x00 });
-        d.AddRange(new byte[] { 0x26, 0xFD, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x91, 0x02 });
-        d.Add(0xC0);
-        d.Add(0xC0);   // End Set Effect
-
-        // Set Envelope (Output, ID 0x12)
-        d.AddRange(new byte[] { 0x09, 0x5A, 0xA1, 0x02, 0x85, 0x12 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x5B, 0x09, 0x5D });
-        d.AddRange(new byte[] { 0x16, 0x00, 0x00, 0x26, 0x10, 0x27, 0x36, 0x00, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x02, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x5C, 0x09, 0x5E });
-        d.AddRange(new byte[] { 0x66, 0x03, 0x10, 0x55, 0xFD });
-        d.AddRange(new byte[] { 0x27, 0xFF, 0x7F, 0x00, 0x00, 0x47, 0xFF, 0x7F, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x20, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x45, 0x00, 0x66, 0x00, 0x00, 0x55, 0x00 });
-        d.Add(0xC0);
-
-        // Set Condition (Output, ID 0x13)
-        d.AddRange(new byte[] { 0x09, 0x5F, 0xA1, 0x02, 0x85, 0x13 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x23, 0x15, 0x00, 0x25, 0x03, 0x35, 0x00, 0x45, 0x03 });
-        d.AddRange(new byte[] { 0x75, 0x04, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x58, 0xA1, 0x02 });
-        d.AddRange(new byte[] { 0x0B, 0x01, 0x00, 0x0A, 0x00, 0x0B, 0x02, 0x00, 0x0A, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x02, 0x95, 0x02, 0x91, 0x02 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x16, 0xF0, 0xD8, 0x26, 0x10, 0x27, 0x36, 0xF0, 0xD8, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x09, 0x60, 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x36, 0xF0, 0xD8, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x09, 0x61, 0x09, 0x62, 0x95, 0x02, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x16, 0x00, 0x00, 0x26, 0x10, 0x27, 0x36, 0x00, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x09, 0x63, 0x09, 0x64, 0x75, 0x10, 0x95, 0x02, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x65 });
-        d.AddRange(new byte[] { 0x16, 0x00, 0x00, 0x26, 0x10, 0x27, 0x36, 0x00, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x95, 0x01, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // Set Periodic (Output, ID 0x14)
-        d.AddRange(new byte[] { 0x09, 0x6E, 0xA1, 0x02, 0x85, 0x14 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x70, 0x16, 0x00, 0x00, 0x26, 0x10, 0x27, 0x36, 0x00, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x6F, 0x16, 0xF0, 0xD8, 0x26, 0x10, 0x27, 0x36, 0xF0, 0xD8, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x95, 0x01, 0x75, 0x10, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x71, 0x66, 0x14, 0x00, 0x55, 0xFE });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x27, 0x9F, 0x8C, 0x00, 0x00, 0x35, 0x00, 0x47, 0x9F, 0x8C, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x72, 0x15, 0x00, 0x27, 0xFF, 0x7F, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x35, 0x00, 0x47, 0xFF, 0x7F, 0x00, 0x00 });
-        d.AddRange(new byte[] { 0x66, 0x03, 0x10, 0x55, 0xFD });
-        d.AddRange(new byte[] { 0x75, 0x20, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x66, 0x00, 0x00, 0x55, 0x00 });
-        d.Add(0xC0);
-
-        // Set Constant Force (Output, ID 0x15)
-        d.AddRange(new byte[] { 0x09, 0x73, 0xA1, 0x02, 0x85, 0x15 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x70 });
-        d.AddRange(new byte[] { 0x16, 0xF0, 0xD8, 0x26, 0x10, 0x27, 0x36, 0xF0, 0xD8, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // Set Ramp Force (Output, ID 0x16)
-        d.AddRange(new byte[] { 0x09, 0x74, 0xA1, 0x02, 0x85, 0x16 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x75, 0x09, 0x76 });
-        d.AddRange(new byte[] { 0x16, 0xF0, 0xD8, 0x26, 0x10, 0x27, 0x36, 0xF0, 0xD8, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x02, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // Custom Force Data (Output, ID 0x17)
-        d.AddRange(new byte[] { 0x09, 0x68, 0xA1, 0x02, 0x85, 0x17 });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x6C, 0x15, 0x00, 0x26, 0x10, 0x27, 0x35, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x69, 0x15, 0x81, 0x25, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x0C, 0x92, 0x02, 0x01 });
-        d.Add(0xC0);
-
-        // Download Force Sample (Output, ID 0x18)
-        d.AddRange(new byte[] { 0x09, 0x66, 0xA1, 0x02, 0x85, 0x18 });
-        d.AddRange(new byte[] { 0x05, 0x01, 0x09, 0x30, 0x09, 0x31 });
-        d.AddRange(new byte[] { 0x15, 0x81, 0x25, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x02, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // Effect Operation (Output, ID 0x1A)
-        d.AddRange(new byte[] { 0x05, 0x0F });
-        d.AddRange(new byte[] { 0x09, 0x77, 0xA1, 0x02, 0x85, 0x1A });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x78, 0xA1, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x79, 0x09, 0x7A, 0x09, 0x7B });
-        d.AddRange(new byte[] { 0x15, 0x01, 0x25, 0x03, 0x75, 0x08, 0x95, 0x01, 0x91, 0x00 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x09, 0x7C });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x00, 0x35, 0x00, 0x46, 0xFF, 0x00 });
-        d.AddRange(new byte[] { 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // PID Block Free (Output, ID 0x1B)
-        d.AddRange(new byte[] { 0x09, 0x90, 0xA1, 0x02, 0x85, 0x1B });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x25, 0x28, 0x15, 0x01, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // PID Device Control (Output, ID 0x1C)
-        d.AddRange(new byte[] { 0x09, 0x96, 0xA1, 0x02, 0x85, 0x1C });
-        d.AddRange(new byte[] { 0x09, 0x97, 0x09, 0x98, 0x09, 0x99, 0x09, 0x9A, 0x09, 0x9B, 0x09, 0x9C });
-        d.AddRange(new byte[] { 0x15, 0x01, 0x25, 0x06, 0x75, 0x08, 0x95, 0x01, 0x91, 0x00 });
-        d.Add(0xC0);
-
-        // Device Gain (Output, ID 0x1D)
-        d.AddRange(new byte[] { 0x09, 0x7D, 0xA1, 0x02, 0x85, 0x1D });
-        d.AddRange(new byte[] { 0x09, 0x7E, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x35, 0x00, 0x46, 0x10, 0x27 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.Add(0xC0);
-
-        // Set Custom Force (Output, ID 0x1E)
-        d.AddRange(new byte[] { 0x09, 0x6B, 0xA1, 0x02, 0x85, 0x1E });
-        d.AddRange(new byte[] { 0x09, 0x22, 0x15, 0x01, 0x25, 0x28, 0x35, 0x01, 0x45, 0x28 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x6D, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x35, 0x00, 0x46, 0xFF, 0x00 });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x09, 0x51, 0x66, 0x03, 0x10, 0x55, 0xFD });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x7F });
-        d.AddRange(new byte[] { 0x75, 0x10, 0x95, 0x01, 0x91, 0x02 });
-        d.AddRange(new byte[] { 0x55, 0x00, 0x66, 0x00, 0x00 });
-        d.Add(0xC0);
-
-        // ── Create New Effect (Feature, ID 0x11) ──
-        d.AddRange(new byte[] { 0x09, 0xAB, 0xA1, 0x02, 0x85, 0x11 });
-        d.AddRange(new byte[] { 0x09, 0x25, 0xA1, 0x02 });
-        d.AddRange(new byte[] {
-            0x09, 0x26, 0x09, 0x27, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32,
-            0x09, 0x33, 0x09, 0x34, 0x09, 0x40, 0x09, 0x41, 0x09, 0x42,
-            0x09, 0x43, 0x09, 0x29
-        });
-        d.AddRange(new byte[] { 0x25, 0x0C, 0x15, 0x01, 0x35, 0x01, 0x45, 0x0C });
-        d.AddRange(new byte[] { 0x75, 0x08, 0x95, 0x01, 0xB1, 0x00 });
-        d.Add(0xC0);
-        d.AddRange(new byte[] { 0x05, 0x01, 0x09, 0x3B });
-        d.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x01, 0x35, 0x00, 0x46, 0xFF, 0x01 });
-        d.AddRange(new byte[] { 0x75, 0x0A, 0x95, 0x01, 0xB1, 0x02 });
-        d.AddRange(new byte[] { 0x75, 0x06, 0xB1, 0x01 });
-        d.Add(0xC0);
-
-        return d.ToArray();
-    }
 
     // ── HID + SetupAPI P/Invoke ────────────────────────────────────────
 
