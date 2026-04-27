@@ -115,9 +115,10 @@ public sealed class HMController : IDisposable
     /// PID State) inside the same Application Collection — the four-feature
     /// variant from vJoy's reference descriptor causes pid.dll to AV inside
     /// PID_EffectOperation+0x52 the first time the consumer calls
-    /// CreateEffect on Windows 11 Build 26100 (issue #16). Pool, Block
-    /// Load, and PID State are served by the driver from a separate
-    /// shared-section path that doesn't touch pid.dll's preparsed-data
+    /// CreateEffect (DirectX 8-era pid.dll FFB enumeration bug, not
+    /// OS-build-gated; verified empirically on Windows 11 26100 — issue #16).
+    /// Pool, Block Load, and PID State are served by the driver from a
+    /// separate shared-section path that doesn't touch pid.dll's preparsed-data
     /// parser — that's what <see cref="PublishPidPool"/>, <see cref="PublishPidBlockLoad"/>,
     /// and <see cref="PublishPidState"/> publish to.</para></summary>
     /// <param name="ramPoolSize">Total RAM pool size in bytes.</param>

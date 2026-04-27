@@ -28,13 +28,27 @@ public sealed class HidDescriptorBuilder
     private readonly List<byte> _bytes = new();
     private bool _collectionOpen;
     private int _totalInputBits;
+    // The application TLC Usage byte (0x04 = Joystick, 0x05 = Gamepad).
+    // 0 means no TLC opened yet via Joystick()/Gamepad() — caller assembled
+    // the descriptor entirely with AddRaw and we can't introspect intent.
+    private byte _tlcUsage;
+    // Position immediately after the `A1 01` Collection (Application) bytes.
+    // AddPidFfbBlock injects a `85 01` Report ID prefix here when no Report
+    // ID has been emitted yet, so input items get tagged matching the FFB
+    // block's tagged Output reports.
+    private int _appCollectionEndPos;
 
-    /// <summary>Begin a Gamepad application collection (Usage Page 0x01, Usage 0x05).</summary>
+    /// <summary>Begin a Gamepad application collection (Usage Page 0x01, Usage 0x05).
+    /// Note: <see cref="AddPidFfbBlock"/> rejects a Gamepad TLC because DirectInput's
+    /// pid.dll PID FFB enumerator AVs against it; use <see cref="Joystick"/> for
+    /// FFB-capable virtuals.</summary>
     public HidDescriptorBuilder Gamepad()
     {
         _bytes.AddRange(new byte[] { 0x05, 0x01 });       // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x05 });       // Usage (Game Pad)
         _bytes.AddRange(new byte[] { 0xA1, 0x01 });       // Collection (Application)
+        _appCollectionEndPos = _bytes.Count;
+        _tlcUsage = 0x05;
         _collectionOpen = true;
         return this;
     }
@@ -45,6 +59,8 @@ public sealed class HidDescriptorBuilder
         _bytes.AddRange(new byte[] { 0x05, 0x01 });       // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x04 });       // Usage (Joystick)
         _bytes.AddRange(new byte[] { 0xA1, 0x01 });       // Collection (Application)
+        _appCollectionEndPos = _bytes.Count;
+        _tlcUsage = 0x04;
         _collectionOpen = true;
         return this;
     }
@@ -206,21 +222,42 @@ public sealed class HidDescriptorBuilder
     /// Force (0x1E) — plus the single Feature report Create New Effect
     /// (0x11) used for effect allocation.
     ///
+    /// <para><b>Joystick TLC required.</b> Call <see cref="Joystick"/>
+    /// (Usage 0x04) before <see cref="AddPidFfbBlock"/>. DirectInput's
+    /// <c>pid.dll</c> PID FFB enumerator was written against the
+    /// Joystick TLC corpus (vJoy, SideWinder Force Feedback, Logitech
+    /// wheels, Thrustmaster wheels) and AVs inside
+    /// <c>pid!PID_EffectOperation+0x52</c> when CreateEffect is called
+    /// against a Gamepad TLC. The behavior is pid.dll-architectural
+    /// (DirectX 8-era FFB enumeration code, not OS-build-gated) —
+    /// verified empirically on Windows 11 26100 but has been baked
+    /// into pid.dll since FFB enumeration shipped. This method throws
+    /// <see cref="InvalidOperationException"/> if called from a
+    /// <see cref="Gamepad"/> TLC.</para>
+    ///
+    /// <para><b>Report ID prefix on input is required and auto-injected.</b>
+    /// HID validation rejects a descriptor that mixes untagged input
+    /// items with the FFB block's tagged Output reports (0x11, 0x14,
+    /// 0x15, ...). If no Report ID has been emitted at the time
+    /// <c>AddPidFfbBlock</c> is called, this method inserts <c>85 01</c>
+    /// (Report ID 0x01) immediately after the Application Collection
+    /// open so all preceding input items pick up the tag. The total
+    /// wire input report size is then <c>InputReportByteSize + 1</c>;
+    /// <see cref="HMProfileBuilder.FromDescriptorBuilder"/> derives
+    /// this automatically.</para>
+    ///
     /// <para><b>Why only one Feature report?</b> The vJoy / vJoy-Brunner
     /// reference descriptor (<c>hidReportDescFfb.h</c>) declares four
-    /// sibling Feature reports inside the Joystick TLC: Create New
-    /// Effect (0x11), Block Load (0x12), PID Pool (0x13), PID State
-    /// (0x14). On Windows 11 Build 26100 with HIDMaestro's UMDF2
-    /// shared-section transport, that four-feature variant causes a
-    /// <c>0xC0000005</c> AV inside <c>pid!PID_EffectOperation+0x52</c>
-    /// the first time the consumer calls <c>CreateEffect</c> via
-    /// DirectInput8 / SharpDX (issue #16). The crash reproduces with
-    /// the exact bytes vJoy ships and is independent of the SDK side
-    /// — it's a pid.dll preparsed-data interaction we can't fix from
-    /// user mode. The block emitted here drops 0x12, 0x13, 0x14 from
-    /// the Feature side and serves them via shared-section
-    /// <c>HidD_GetFeature</c> handling in the driver instead, which
-    /// is the only configuration that does not AV.</para>
+    /// sibling Feature reports: Create New Effect (0x11), Block Load
+    /// (0x12), PID Pool (0x13), PID State (0x14). With HIDMaestro's
+    /// UMDF2 shared-section transport, the four-feature variant causes
+    /// pid.dll to AV inside <c>PID_EffectOperation+0x52</c> the first
+    /// time the consumer calls CreateEffect via DirectInput8 / SharpDX
+    /// (issue #16). The crash reproduces with the exact bytes vJoy
+    /// ships. The block emitted here drops 0x12, 0x13, 0x14 from the
+    /// Feature side and serves them via shared-section
+    /// <c>HidD_GetFeature</c> handling in the driver instead — the
+    /// only configuration that does not AV.</para>
     ///
     /// <para><b>Don't add additional Feature reports inside the same
     /// Application Collection.</b> If you need extra metadata
@@ -230,15 +267,68 @@ public sealed class HidDescriptorBuilder
     /// <see cref="HMController.PublishPidState"/> — those are served
     /// by the driver from a separate shared-section path that doesn't
     /// touch pid.dll's preparsed-data parser.</para>
-    ///
-    /// <para>This block expects a Joystick or Gamepad TLC already
-    /// opened by <see cref="Joystick"/> / <see cref="Gamepad"/>. Call
-    /// after the input report (sticks, buttons, hat) is fully declared.</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown if the current Application Collection is a Gamepad TLC.
+    /// </exception>
     public HidDescriptorBuilder AddPidFfbBlock()
     {
+        if (_tlcUsage == 0x05)
+        {
+            throw new InvalidOperationException(
+                "AddPidFfbBlock() requires a Joystick (Usage 0x04) Application Collection. " +
+                "DirectInput's pid.dll PID FFB enumerator AVs inside PID_EffectOperation+0x52 " +
+                "when CreateEffect is called against a Gamepad (Usage 0x05) TLC. The behavior " +
+                "is pid.dll-architectural (DirectX 8-era code, not OS-build-gated). Use " +
+                "HidDescriptorBuilder.Joystick() instead, or use Gamepad() for an XInput/WGI " +
+                "rumble path that doesn't go through DirectInput PID FFB.");
+        }
+
+        // Auto-inject Report ID 0x01 prefix on input items if no Report
+        // ID has been emitted yet. The FFB block's tagged Output reports
+        // (0x11, 0x14, 0x15, ...) require input items to also be tagged
+        // or HID validation rejects the mix. Position: immediately after
+        // the Application Collection open, so every prior input item
+        // inherits the tag. If the caller already emitted a Report ID
+        // via AddRaw or by manually composing items, we leave it alone.
+        if (_appCollectionEndPos > 0 && !DescriptorContainsReportId())
+        {
+            _bytes.Insert(_appCollectionEndPos, 0x85);
+            _bytes.Insert(_appCollectionEndPos + 1, 0x01);
+        }
+
         _bytes.AddRange(MinimumViablePidFfbBlock);
         return this;
+    }
+
+    /// <summary>True if the descriptor (as built so far) contains at least
+    /// one HID Report ID Global item (<c>0x85 NN</c>). Used by
+    /// <see cref="HMProfileBuilder.FromDescriptorBuilder"/> to decide
+    /// whether the wire input report size needs the +1 byte for the
+    /// Report ID prefix.</summary>
+    public bool DescriptorContainsReportId()
+    {
+        int i = 0;
+        int n = _bytes.Count;
+        while (i < n)
+        {
+            byte head = _bytes[i++];
+            if (head == 0xFE)
+            {
+                // Long item: 0xFE bDataSize bLongItemTag <data>
+                if (i + 1 >= n) break;
+                int longSize = _bytes[i];
+                i += 2 + longSize;
+                continue;
+            }
+            int bSize = head & 0x03;
+            int dataLen = bSize == 3 ? 4 : bSize;
+            // Report ID = type Global (01), tag 1000 -> bits [7:2] = 0b100001
+            // (head & 0xFC) == 0x84. bSize must be >= 1 (one byte of data).
+            if ((head & 0xFC) == 0x84 && bSize >= 1) return true;
+            i += dataLen;
+        }
+        return false;
     }
 
     /// <summary>The exact descriptor bytes <see cref="AddPidFfbBlock"/>

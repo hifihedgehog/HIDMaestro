@@ -139,10 +139,11 @@ ctrl1.OutputReceived += (controller, packet) =>
 // Custom-built profiles needing PID FFB should call
 // HidDescriptorBuilder.AddPidFfbBlock when authoring the descriptor —
 // it emits the canonical "minimum viable" PID FFB report set
-// (one Create New Effect Feature, full Output report set). Adding
-// extra Feature reports (0x12/0x13/0x14) inside the same Application
-// Collection AVs pid.dll on Windows 11 Build 26100 — see the doc on
-// HidDescriptorBuilder.AddPidFfbBlock.
+// (one Create New Effect Feature, full Output report set), auto-injects
+// the Report ID 0x01 input prefix, and rejects Gamepad-TLC misuse.
+// Adding extra Feature reports (0x12/0x13/0x14) inside the same
+// Application Collection AVs pid.dll (DirectX 8-era FFB enumeration
+// bug, not OS-build-gated) — see the doc on AddPidFfbBlock.
 ctrl0.PublishPidPool(
     ramPoolSize:             0xFFFF,
     simultaneousEffectsMax:  16,
@@ -337,29 +338,26 @@ Thread.Sleep(3000);
 // optionally GetCurrentPidBlockLoad) to expose Logitech-wheel-style
 // FFB to DirectInput consumers.
 Console.WriteLine("\n  Building a custom flight stick (with PID FFB) from scratch...");
-byte[] stickDesc = new HidDescriptorBuilder()
-    .Joystick()
-    .AddStick("Left", bits: 16)      // main stick X/Y
-    .AddTrigger("Left", bits: 8)     // throttle (Z)
-    .AddTrigger("Right", bits: 8)    // rudder (Rz)
+var stickDescBuilder = new HidDescriptorBuilder()
+    .Joystick()                       // Joystick TLC required by AddPidFfbBlock
+    .AddStick("Left", bits: 16)       // main stick X/Y
+    .AddTrigger("Left", bits: 8)      // throttle (Z)
+    .AddTrigger("Right", bits: 8)     // rudder (Rz)
     .AddButtons(6)
     .AddHat()
-    .AddPidFfbBlock()                // HID PID 1.0 force-feedback block
-    .Build();
+    .AddPidFfbBlock();                // HID PID 1.0 FFB block; auto-injects
+                                      // Report ID 0x01 prefix on the input items
 
 var flightStick = new HMProfileBuilder()
     .Id("custom-flight-stick")
     .Name("Custom Flight Stick")
     .Vendor("Custom")
-    .Vid(0x0483).Pid(0x0001)         // arbitrary VID/PID
+    .Vid(0x0483).Pid(0x0001)          // arbitrary VID/PID
     .ProductString("My Flight Stick")
     .ManufacturerString("Homebrew")
     .Type("flightstick")
     .Connection("usb")
-    .Descriptor(stickDesc)
-    .InputReportSize(new HidDescriptorBuilder()
-        .Joystick().AddStick("Left",16).AddTrigger("Left",8)
-        .AddTrigger("Right",8).AddButtons(6).AddHat().InputReportByteSize)
+    .FromDescriptorBuilder(stickDescBuilder)  // descriptor + InputReportSize together
     .Build();
 
 Console.Write($"  Deploying {flightStick.Name} (VID={flightStick.VendorId:X4} PID={flightStick.ProductId:X4}, " +

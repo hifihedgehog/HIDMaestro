@@ -71,32 +71,25 @@ internal static class Program
         // otherwise identical to a PadForge run except for this pump.
         bool pumpInput = args.Any(a => a.Equals("--pump-input", StringComparison.OrdinalIgnoreCase));
 
-        byte[] descriptor;
-        int inputReportSize;
-        if (padForgeProfile)
+        // ── v1.1.41 builder-API preflight ──
+        // Verify the three ergonomic absorptions (Gamepad guard, auto-inject,
+        // FromDescriptorBuilder size derivation) work before we commit to a
+        // descriptor. Any failure here is a regression in the public builder
+        // surface and the probe should bail rather than ship a bad descriptor
+        // to the kernel.
+        try
         {
-            // Mirror PadForge's HMaestroProfileCatalog.BuildCustomProfile exactly.
-            var dB = new HidDescriptorBuilder().Joystick();
-            dB.AddRaw(new byte[] { 0x85, 0x01 });
-            dB.AddStick("Left", 16)
-              .AddStick("Right", 16)
-              .AddTrigger("Left", 16)
-              .AddTrigger("Right", 16)
-              .AddHat()
-              .AddButtons(11)
-              .AddRaw(BuildFfbBlock());
-            descriptor = dB.Build();
-            inputReportSize = dB.InputReportByteSize + 1;
-            Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes (PadForge profile shape, Joystick TLC, input={inputReportSize}B)");
+            new HidDescriptorBuilder().Gamepad().AddButtons(4).AddPidFfbBlock();
+            Console.Error.WriteLine("FAIL: Gamepad TLC + AddPidFfbBlock did not throw");
+            return 90;
         }
-        else
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Joystick"))
         {
-            descriptor = BuildPidDescriptor(joystickTlc);
-            inputReportSize = 6;
-            Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes ({(joystickTlc ? "Joystick" : "Gamepad")} TLC)");
+            // Expected.
         }
+        Console.WriteLine("  Builder preflight: Gamepad TLC guard OK; auto-inject + FromDescriptorBuilder used below");
 
-        var profile = new HMProfileBuilder()
+        HMProfileBuilder profileBuilder = new HMProfileBuilder()
             .Id("pid-setusages-probe")
             .Name("PID SetUsages Probe")
             .Vendor("HIDMaestro")
@@ -104,10 +97,39 @@ internal static class Program
             .ProductString("HIDMaestro PID SetUsages Probe")
             .ManufacturerString("HIDMaestro")
             .Type("joystick")
-            .Connection("usb")
-            .Descriptor(descriptor)
-            .InputReportSize(inputReportSize)
-            .Build();
+            .Connection("usb");
+
+        if (padForgeProfile)
+        {
+            // Mirror PadForge's HMaestroProfileCatalog.BuildCustomProfile,
+            // but using the v1.1.41 one-liner: AddPidFfbBlock() auto-injects
+            // the Report ID 0x01 prefix on the input items, and
+            // FromDescriptorBuilder() derives the wire input size as
+            // InputReportByteSize + 1 (with the +1 for the Report ID byte).
+            // The pre-1.1.41 invocation needed two manual workarounds
+            // (descBuilder.AddRaw({0x85,0x01}) + descBuilder.InputReportByteSize+1)
+            // that PadForge tracked down across several iterations of #16.
+            var dB = new HidDescriptorBuilder().Joystick()
+                .AddStick("Left", 16)
+                .AddStick("Right", 16)
+                .AddTrigger("Left", 16)
+                .AddTrigger("Right", 16)
+                .AddHat()
+                .AddButtons(11)
+                .AddPidFfbBlock();
+            profileBuilder.FromDescriptorBuilder(dB);
+            byte[] descBytes = dB.Build();
+            Console.WriteLine($"  Descriptor size: {descBytes.Length} bytes (PadForge profile shape, v1.1.41 one-liner, Joystick TLC, input={dB.InputReportByteSize + 1}B)");
+        }
+        else
+        {
+            byte[] descriptor = BuildPidDescriptor(joystickTlc);
+            int inputReportSize = 6;
+            profileBuilder.Descriptor(descriptor).InputReportSize(inputReportSize);
+            Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes ({(joystickTlc ? "Joystick" : "Gamepad")} TLC)");
+        }
+
+        var profile = profileBuilder.Build();
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

@@ -109,6 +109,27 @@ public sealed class HMProfileBuilder
     /// <summary>Set the input report size in bytes.</summary>
     public HMProfileBuilder InputReportSize(int size) { _inputReportSize = size; return this; }
 
+    /// <summary>Take both the HID descriptor bytes and the input report
+    /// wire size from a fluent <see cref="HidDescriptorBuilder"/>. The
+    /// wire size is derived as <c>InputReportByteSize + 1</c> when the
+    /// descriptor carries a HID Report ID Global item (auto-injected by
+    /// <see cref="HidDescriptorBuilder.AddPidFfbBlock"/>, or emitted
+    /// manually via <see cref="HidDescriptorBuilder.AddRaw"/>), and
+    /// <c>InputReportByteSize</c> otherwise. Replaces the
+    /// <c>.Descriptor(b.Build()).InputReportSize(b.InputReportByteSize + 1)</c>
+    /// pair that's easy to get wrong (PadForge tracked this down across
+    /// several iterations of issue #16 — the kernel sized the input
+    /// buffer wrong when the +1 was missing, HidClass preparsed data
+    /// was misaligned, and pid.dll resolved Feature reports to Report
+    /// ID 0 instead of the declared values).</summary>
+    public HMProfileBuilder FromDescriptorBuilder(HidDescriptorBuilder builder)
+    {
+        Descriptor(builder.Build());
+        bool hasRid = builder.DescriptorContainsReportId();
+        _inputReportSize = builder.InputReportByteSize + (hasRid ? 1 : 0);
+        return this;
+    }
+
     /// <summary>Set notes/comments (for documentation only, not functional).</summary>
     public HMProfileBuilder Notes(string? notes) { _notes = notes; return this; }
 
