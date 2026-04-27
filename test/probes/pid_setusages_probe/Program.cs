@@ -55,8 +55,46 @@ internal static class Program
         //                  manual testing with FfbTest or any DI consumer.
         bool joystickTlc = !args.Any(a => a.Equals("--gamepad", StringComparison.OrdinalIgnoreCase));
         bool keepAlive   =  args.Any(a => a.Equals("--keep-alive", StringComparison.OrdinalIgnoreCase));
-        byte[] descriptor = BuildPidDescriptor(joystickTlc);
-        Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes ({(joystickTlc ? "Joystick" : "Gamepad")} TLC)");
+        // --padforge-profile: use HidDescriptorBuilder to assemble a profile
+        // that mirrors PadForge's BuildCustomProfile EXACTLY (4 sticks + 2
+        // triggers + hat + 11 buttons + Report ID 0x01 prefix + the FFB
+        // block). Reproduces PadForge's setup vs the simpler default
+        // probe descriptor, to isolate input-report-shape divergence.
+        bool padForgeProfile = args.Any(a => a.Equals("--padforge-profile", StringComparison.OrdinalIgnoreCase));
+        // --shared-param: pass sharedParameterBlocks=true on PublishPidPool
+        // (PadForge's default; my probe's default is false). Pool
+        // MemoryManagement byte goes from 0x01 to 0x03.
+        bool sharedParam = args.Any(a => a.Equals("--shared-param", StringComparison.OrdinalIgnoreCase));
+        // --pump-input: spawn a background thread that calls SubmitState
+        // at ~1 kHz, mirroring PadForge.exe's input pump runtime
+        // behavior. The probe-creates-virtual-then-spawns-FfbTest test is
+        // otherwise identical to a PadForge run except for this pump.
+        bool pumpInput = args.Any(a => a.Equals("--pump-input", StringComparison.OrdinalIgnoreCase));
+
+        byte[] descriptor;
+        int inputReportSize;
+        if (padForgeProfile)
+        {
+            // Mirror PadForge's HMaestroProfileCatalog.BuildCustomProfile exactly.
+            var dB = new HidDescriptorBuilder().Joystick();
+            dB.AddRaw(new byte[] { 0x85, 0x01 });
+            dB.AddStick("Left", 16)
+              .AddStick("Right", 16)
+              .AddTrigger("Left", 16)
+              .AddTrigger("Right", 16)
+              .AddHat()
+              .AddButtons(11)
+              .AddRaw(BuildFfbBlock());
+            descriptor = dB.Build();
+            inputReportSize = dB.InputReportByteSize + 1;
+            Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes (PadForge profile shape, Joystick TLC, input={inputReportSize}B)");
+        }
+        else
+        {
+            descriptor = BuildPidDescriptor(joystickTlc);
+            inputReportSize = 6;
+            Console.WriteLine($"  Descriptor size: {descriptor.Length} bytes ({(joystickTlc ? "Joystick" : "Gamepad")} TLC)");
+        }
 
         var profile = new HMProfileBuilder()
             .Id("pid-setusages-probe")
@@ -68,7 +106,7 @@ internal static class Program
             .Type("joystick")
             .Connection("usb")
             .Descriptor(descriptor)
-            .InputReportSize(6)  // RID + 4 bytes XY + 1 byte buttons
+            .InputReportSize(inputReportSize)
             .Build();
 
         using var ctx = new HMContext();
@@ -91,7 +129,7 @@ internal static class Program
             // GetFeature(Pool) returns STATUS_NO_SUCH_DEVICE and dinput
             // concludes "device exists, no FFB" per the vJoy convention.
             ctrl.PublishPidPool(ramPoolSize: 0xFFFF, simultaneousEffectsMax: 16,
-                                deviceManagedPool: true, sharedParameterBlocks: false);
+                                deviceManagedPool: true, sharedParameterBlocks: sharedParam);
             ctrl.PublishPidState(effectBlockIndex: 0,
                 PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
 
@@ -123,14 +161,42 @@ internal static class Program
         // FfbTest HID activity proved to corrupt device state in some
         // environments (FfbTest CreateEffect AVs in pid.dll cleanup).
         ctrl.PublishPidPool(ramPoolSize: 0xFFFF, simultaneousEffectsMax: 16,
-                            deviceManagedPool: true, sharedParameterBlocks: false);
+                            deviceManagedPool: true, sharedParameterBlocks: sharedParam);
         ctrl.PublishPidState(effectBlockIndex: 0,
             PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
+
+        // ── Optional: input-pump thread mirroring PadForge.exe ──
+        var pumpCts = new System.Threading.CancellationTokenSource();
+        System.Threading.Thread? pumpThread = null;
+        if (pumpInput)
+        {
+            Console.WriteLine("  Starting input pump thread (~1 kHz SubmitState)");
+            pumpThread = new System.Threading.Thread(() =>
+            {
+                var rng = new Random();
+                while (!pumpCts.IsCancellationRequested)
+                {
+                    var s = new HMGamepadState
+                    {
+                        LeftStickX = (float)(rng.NextDouble() * 2 - 1),
+                        LeftStickY = (float)(rng.NextDouble() * 2 - 1),
+                        Buttons = ((rng.Next() & 1) != 0) ? HMButton.A : HMButton.None,
+                    };
+                    try { ctrl.SubmitState(in s); } catch { break; }
+                    try { System.Threading.Thread.Sleep(1); } catch { break; }
+                }
+            }) { IsBackground = true, Name = "PadForgeInputPumpMimic" };
+            pumpThread.Start();
+            // Let the pump get going.
+            System.Threading.Thread.Sleep(500);
+        }
 
         // ── FfbTest first — clean device, no prior HID I/O ──
         // The canonical regression test for issue #16. If FfbTest's
         // CreateEffect succeeds here, PID FFB is empirically working.
         int failuresFromFfbTest = RunFfbTest();
+        pumpCts.Cancel();
+        pumpThread?.Join(2000);
 
         // ── HidP introspection probe (diagnostic, post-FfbTest) ──
         // Now exercise HidP_SetUsages, HidP_SetUsageValue, and a
@@ -430,7 +496,21 @@ internal static class Program
         d.AddRange(new byte[] { 0x75, 0x01, 0x95, 0x08 });
         d.AddRange(new byte[] { 0x81, 0x02 });
 
-        // Inline PadForge HMaestroFfbDescriptor.Build() ───────────────────
+        // Inline PadForge HMaestroFfbDescriptor.Build() — FFB block
+        d.AddRange(BuildFfbBlock());
+
+        d.Add(0xC0); // End Application Collection
+        return d.ToArray();
+    }
+
+    /// <summary>The PID FFB descriptor block (Set Effect, Set Envelope, ...,
+    /// Create New Effect Feature, etc.). Transcribed verbatim from
+    /// PadForge's HMaestroFfbDescriptor.Build(). Used both standalone
+    /// inside the simple BuildPidDescriptor and as AddRaw input when
+    /// running --padforge-profile mode through HidDescriptorBuilder.</summary>
+    static byte[] BuildFfbBlock()
+    {
+        var d = new System.Collections.Generic.List<byte>(384);
         d.AddRange(new byte[] { 0x05, 0x0F });                 // Usage Page Physical Interface
 
         // Set Effect Report (Output, ID 0x11)
@@ -632,7 +712,6 @@ internal static class Program
         d.AddRange(new byte[] { 0x75, 0x06, 0xB1, 0x01 });
         d.Add(0xC0);
 
-        d.Add(0xC0); // End Application Collection
         return d.ToArray();
     }
 
