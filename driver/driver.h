@@ -78,7 +78,6 @@ typedef struct _DEVICE_CONTEXT {
     /* HID report descriptor (set by user-mode, returned to HID class) */
     UCHAR   ReportDescriptor[HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
     ULONG   ReportDescriptorSize;
-    BOOLEAN DescriptorSet;
 
     /* HID device descriptor (wraps ReportDescriptorSize) */
     HID_DESCRIPTOR          HidDescriptor;
@@ -110,11 +109,6 @@ typedef struct _DEVICE_CONTEXT {
      * them as one device. */
     WCHAR   SerialString[64];
     ULONG   SerialStringBytes;
-
-    /* Latest raw output report (received from HID class) */
-    UCHAR   OutputReport[HIDMAESTRO_MAX_REPORT_SIZE];
-    ULONG   OutputReportSize;
-    BOOLEAN OutputReportReady;
 
     /* Queues */
     WDFQUEUE    DefaultQueue;        /* Parallel — HID IOCTLs + our custom IOCTLs */
@@ -173,9 +167,9 @@ typedef struct _DEVICE_CONTEXT {
     PVOID   PidStateMemPtr;
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
 
-    /* Diagnostics */
+    /* XUSB packet number — incremented per input frame, returned in
+     * IOCTL_XUSB_GET_STATE replies so xinput1_4 can detect changes. */
     LONG    InputReportsSubmitted;
-    LONG    OutputReportsReceived;
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 

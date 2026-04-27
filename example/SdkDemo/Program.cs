@@ -293,25 +293,20 @@ Console.WriteLine($"    Report:     {dsProfile.InputReportSize} bytes");
 // custom descriptor. The virtual controller spoofs as a DualSense to
 // every API but has an extra button that the original doesn't.
 Console.WriteLine("\n  Creating custom DualSense variant with 16 buttons...");
-byte[] customDsDesc = new HidDescriptorBuilder()
+var customDsBuilder = new HidDescriptorBuilder()
     .Gamepad()
     .AddStick("Left", bits: 8)       // match DualSense 8-bit sticks
     .AddStick("Right", bits: 8)
     .AddTrigger("Left", bits: 8)
     .AddTrigger("Right", bits: 8)
     .AddButtons(16)                   // 16 buttons (DualSense has 15)
-    .AddHat()
-    .Build();
+    .AddHat();
 
 var customDs = new HMProfileBuilder()
     .FromProfile(dsProfile)           // inherit VID/PID/name/strings
     .Id("dualsense-16btn")
     .Name("DualSense (16 buttons)")
-    .Descriptor(customDsDesc)
-    .InputReportSize(new HidDescriptorBuilder()
-        .Gamepad().AddStick("Left",8).AddStick("Right",8)
-        .AddTrigger("Left",8).AddTrigger("Right",8)
-        .AddButtons(16).AddHat().InputReportByteSize)
+    .FromDescriptorBuilder(customDsBuilder)  // descriptor + InputReportSize together
     .Notes("Custom variant: 16 buttons instead of 15")
     .Build();
 

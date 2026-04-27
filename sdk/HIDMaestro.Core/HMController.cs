@@ -418,6 +418,7 @@ public sealed class HMController : IDisposable
         _disposed = true;
         try { _outputCts.Cancel(); } catch { }
         try { _outputThread?.Join(500); } catch { }
+        try { _outputCts.Dispose(); } catch { }
         _context.OnControllerDisposing(this);
     }
 }

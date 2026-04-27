@@ -18,9 +18,6 @@
 
 #include "driver.h"
 
-/* Default registry path (single-instance fallback) */
-static const WCHAR CONFIG_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\HIDMaestro";
-
 /* Append the decimal representation of a ULONG to a wide-string buffer.
  * Self-contained — no C runtime dependency. The driver doesn't link against
  * MSVCRT, so swprintf/wsprintf aren't available. Buffer must be NUL-terminated. */
@@ -140,30 +137,14 @@ InitInstancePaths(
     }
 }
 
-/* XUSB interface GUID — xinput1_4.dll enumerates this to find Xbox controllers */
-static const GUID XUSB_INTERFACE_CLASS_GUID =
-    { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
-
-/* USB device interface GUID — WGI/GameInputSvc discovers Xbox controllers through this */
-static const GUID USB_DEVICE_INTERFACE_GUID =
-    { 0xA5DCBF10, 0x6530, 0x11D2, { 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED } };
-
-/* WinExInput interface GUID — WGI fires GamepadAdded for devices with this interface + &XI_ path */
-static const GUID WINEXINPUT_INTERFACE_GUID =
-    { 0x6C53D5FD, 0x6480, 0x440F, { 0xB6, 0x18, 0x47, 0x67, 0x50, 0xC5, 0xE1, 0xA6 } };
-
 /* XUSB IOCTL codes (from OpenXinput / XInputHooker) */
 #define IOCTL_XUSB_GET_INFORMATION      0x80006000
 #define IOCTL_XUSB_GET_CAPABILITIES     0x8000E004
 #define IOCTL_XUSB_GET_LED_STATE        0x8000E008
 #define IOCTL_XUSB_GET_STATE            0x8000E00C
 #define IOCTL_XUSB_SET_STATE            0x8000A010
-#define IOCTL_XUSB_WAIT_GUIDE           0x8000E014
-
 #define IOCTL_XUSB_GET_BATTERY_INFO     0x8000E018
-#define IOCTL_XUSB_GET_INFORMATION_EX   0x8000E3FC
-#define IOCTL_XUSB_WAIT_FOR_INPUT       0x8000E3AC
-#define IOCTL_XUSB_POWER_INFO          0x80006380  /* xinputhid sends this repeatedly */
+#define IOCTL_XUSB_POWER_INFO           0x80006380  /* xinputhid sends this repeatedly */
 
 /* ================================================================== */
 /*  Helper: copy bytes to request output buffer                        */
@@ -241,7 +222,6 @@ ReadConfigFromRegistry(
         ctx->ReportDescriptorSize = (ULONG)binSize;
         ctx->HidDescriptor.DescriptorList[0].wReportLength =
             (USHORT)ctx->ReportDescriptorSize;
-        ctx->DescriptorSet = TRUE;
     }
 
     /* Read VendorId (REG_DWORD) */
@@ -430,167 +410,7 @@ ReadPidState(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_PID_STATE *out)
     return retries > 0;
 }
 
-/* PID FFB IOCTL_UMDF_HID_GET_FEATURE trace helpers.
- *
- * The driver runs in WUDFHost (user-mode UMDF2). OutputDebugStringA
- * delivers to any attached debugger / DbgView session and is filtered to
- * a no-op when nothing is attached, so cost is negligible. UMDF doesn't
- * link MSVCRT, so all formatting is hand-rolled.
- *
- * Format: "[HMPID idx=N] rid=0xXX in=NNN <verb> ..."
- */
-static char *
-HmDbgAppendCstr(char *p, char *end, const char *s)
-{
-    while (*s && p + 1 < end) *p++ = *s++;
-    return p;
-}
-
-static char *
-HmDbgAppendHex(char *p, char *end, ULONG v, int digits)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    char tmp[16]; int n = 0;
-    while (n < digits && n < (int)sizeof(tmp)) {
-        tmp[n++] = hex[v & 0xF];
-        v >>= 4;
-    }
-    while (n > 0 && p + 1 < end) *p++ = tmp[--n];
-    return p;
-}
-
-static char *
-HmDbgAppendDec(char *p, char *end, ULONG v)
-{
-    char tmp[16]; int n = 0;
-    if (v == 0) { tmp[n++] = '0'; }
-    else { while (v > 0 && n < 15) { tmp[n++] = '0' + (char)(v % 10); v /= 10; } }
-    while (n > 0 && p + 1 < end) *p++ = tmp[--n];
-    return p;
-}
-
-static char *
-HmDbgAppendPrefix(char *p, char *end, PDEVICE_CONTEXT ctx,
-                  UCHAR reportId, ULONG outSize)
-{
-    p = HmDbgAppendCstr(p, end, "[HMPID idx=");
-    p = HmDbgAppendDec(p, end, ctx ? ctx->ControllerIndex : 0);
-    p = HmDbgAppendCstr(p, end, "] rid=0x");
-    p = HmDbgAppendHex(p, end, reportId, 2);
-    p = HmDbgAppendCstr(p, end, " in=");
-    p = HmDbgAppendDec(p, end, outSize);
-    return p;
-}
-
-/* v1.1.37 introduced this file trace; v1.1.39 reworks it because the
- * env-var-based gate trapped PadForge: WUDFHost spawns at device-create
- * time and inherits its environment block then. `setx HMAESTRO_TRACE 1`
- * after the fact updates HKLM but the running WUDFHost still has the
- * old block — the trace file silently fails to appear.
- *
- * v1.1.39: read a registry DWORD `HKLM\Software\HIDMaestro\Trace` per
- * IOCTL group. Setting it to 1 takes effect immediately on the next
- * IOCTL the driver receives — no reboot, no env-var ceremony, no
- * WUDFHost lifecycle dependency. The check is a single read of a tiny
- * registry value; cost is negligible per IOCTL.
- *
- * Always go to OutputDebugStringA for any debugger that's attached;
- * the file write is the registry-gated extra.
- */
-/* C:\Windows\Temp has write access for LocalService (which WUDFHost runs
- * as in UMDF2 host-process model). v1.1.37 used C:\ProgramData\HIDMaestro
- * but ProgramData by default grants only Authenticated Users write —
- * LocalService is NOT an Authenticated User, so file creation silently
- * fails. v1.1.39 moves to Windows\Temp which is writable by every
- * service-class principal. */
-static SRWLOCK       g_HmTraceFileLock = SRWLOCK_INIT;
-static const WCHAR   g_HmTraceFilePath[] = L"C:\\Windows\\Temp\\hidmaestro-driver-trace.log";
-
-/* Returns TRUE if HKLM\Software\HIDMaestro\Trace == 1 OR
- * HMAESTRO_TRACE=1 in the environment. Cheap; no caching so a flip in
- * the registry takes effect on the next IOCTL. */
-static BOOLEAN
-HmTraceFileEnabled(VOID)
-{
-    /* Registry path takes precedence. */
-    HKEY hk = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\HIDMaestro", 0,
-                      KEY_QUERY_VALUE | KEY_WOW64_64KEY, &hk) == ERROR_SUCCESS) {
-        DWORD val = 0; DWORD cb = sizeof(val); DWORD type = REG_DWORD;
-        LONG r = RegQueryValueExW(hk, L"Trace", NULL, &type, (LPBYTE)&val, &cb);
-        RegCloseKey(hk);
-        if (r == ERROR_SUCCESS && type == REG_DWORD && val != 0) return TRUE;
-    }
-    /* Env var fallback (legacy v1.1.37 path). */
-    WCHAR e[8] = {0};
-    DWORD g = GetEnvironmentVariableW(L"HMAESTRO_TRACE", e, ARRAYSIZE(e));
-    return (g > 0 && g < ARRAYSIZE(e) && e[0] == L'1' && e[1] == 0);
-}
-
-static VOID
-HmTraceEmit(_In_ PCSTR text)
-{
-    OutputDebugStringA(text);
-
-    /* v1.1.39 — file trace unconditionally on. Prior gating (env var,
-     * registry DWORD) proved unreliable: WUDFHost inherits env at start;
-     * SDK install/uninstall cycles wipe HKLM\Software\HIDMaestro;
-     * LocalService HKLM read access is inconsistent across builds.
-     * Cost is OutputDebugStringA + one file append per IOCTL — negligible
-     * for a diagnostic release. Future v1.2.x can reinstate gating after
-     * the PID FFB path is empirically working. */
-
-    AcquireSRWLockExclusive(&g_HmTraceFileLock);
-    HANDLE h = CreateFileW(g_HmTraceFilePath,
-                           FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        SIZE_T n = 0;
-        while (text[n] != 0) n++;
-        DWORD written = 0;
-        WriteFile(h, text, (DWORD)n, &written, NULL);
-        CloseHandle(h);
-    }
-    ReleaseSRWLockExclusive(&g_HmTraceFileLock);
-}
-
-static VOID
-HmDbgPidGetFeatureGate(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
-                       _In_ ULONG outSize, _In_ NTSTATUS status,
-                       _In_ PCSTR reason)
-{
-    char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
-    p = HmDbgAppendPrefix(p, end, ctx, reportId, outSize);
-    p = HmDbgAppendCstr(p, end, " gate=");
-    p = HmDbgAppendCstr(p, end, reason);
-    p = HmDbgAppendCstr(p, end, " status=0x");
-    p = HmDbgAppendHex(p, end, (ULONG)status, 8);
-    p = HmDbgAppendCstr(p, end, "\n");
-    *p = 0;
-    HmTraceEmit(buf);
-}
-
-static VOID
-HmDbgPidGetFeatureBytes(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR reportId,
-                        _In_ ULONG outSize,
-                        _In_reads_bytes_(packedLen) const UCHAR *outBuf,
-                        _In_ ULONG packedLen)
-{
-    char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
-    p = HmDbgAppendPrefix(p, end, ctx, reportId, outSize);
-    p = HmDbgAppendCstr(p, end, " ok bytes[");
-    p = HmDbgAppendDec(p, end, packedLen);
-    p = HmDbgAppendCstr(p, end, "]=");
-    for (ULONG i = 0; i < packedLen && p + 4 < end; i++) {
-        if (i > 0) *p++ = ' ';
-        p = HmDbgAppendHex(p, end, outBuf[i], 2);
-    }
-    p = HmDbgAppendCstr(p, end, "\n");
-    *p = 0;
-    HmTraceEmit(buf);
-}
-
-/* v1.1.37 — driver-side EBI allocator. Picks the next free EBI from the
+/* Driver-side EBI allocator. Picks the next free EBI from the
  * shared section's bitmap, updates BL_* fields atomically (with seqlock),
  * and increments the allocated count. Pool full → BL_LoadStatus = Full
  * (PID 1.0 §5.5 enum value 2), no bit set.
@@ -655,24 +475,6 @@ AllocateEbiInBlockLoad(_In_ PDEVICE_CONTEXT ctx)
     pid->BL_RAMPoolAvailable   = (USHORT)remainingPool;
     MemoryBarrier();
     pid->SeqNo = seq + 1; /* even */
-
-    /* Trace */
-    {
-        char buf[200]; char *p = buf; char *end = buf + sizeof(buf);
-        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
-        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
-        p = HmDbgAppendCstr(p, end, "] alloc-ebi: ebi=");
-        p = HmDbgAppendDec(p, end, allocatedEbi);
-        p = HmDbgAppendCstr(p, end, " status=");
-        p = HmDbgAppendDec(p, end, loadStatus);
-        p = HmDbgAppendCstr(p, end, " remaining=0x");
-        p = HmDbgAppendHex(p, end, remainingPool, 4);
-        p = HmDbgAppendCstr(p, end, " bitmap=0x");
-        p = HmDbgAppendHex(p, end, pid->EbiAllocBitmap, 8);
-        p = HmDbgAppendCstr(p, end, "\n");
-        *p = 0;
-        HmTraceEmit(buf);
-    }
 }
 
 /* v1.1.38 — PID Device Reset (CTRL_DEVRST=4). Mirrors vJoy's
@@ -704,21 +506,11 @@ ResetPidState(_In_ PDEVICE_CONTEXT ctx)
     pid->State_Flags           = 0;
     MemoryBarrier();
     pid->SeqNo = seq + 1;
-
-    {
-        char buf[120]; char *p = buf; char *end = buf + sizeof(buf);
-        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
-        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
-        p = HmDbgAppendCstr(p, end, "] reset (CTRL_DEVRST)\n");
-        *p = 0;
-        HmTraceEmit(buf);
-    }
 }
 
-/* v1.1.37 — driver-side EBI free. Atomically clears the bit. No-op if the
- * bit is already clear (defensive against duplicate Block Free packets).
- * Mirrors vJoy's `Ffb_BlockIndexFree` + RAMPool update.
- */
+/* Driver-side EBI free. Atomically clears the bit. No-op if the bit is
+ * already clear (defensive against duplicate Block Free packets).
+ * Mirrors vJoy's Ffb_BlockIndexFree + RAMPool update. */
 static VOID
 FreeEbi(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR ebi)
 {
@@ -732,20 +524,6 @@ FreeEbi(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR ebi)
     ULONG prev = (ULONG)InterlockedAnd((volatile LONG *)&pid->EbiAllocBitmap, (LONG)~bit);
     if ((prev & bit) != 0) {
         InterlockedDecrement((volatile LONG *)&pid->EbiAllocatedCount);
-    }
-
-    /* Trace */
-    {
-        char buf[160]; char *p = buf; char *end = buf + sizeof(buf);
-        p = HmDbgAppendCstr(p, end, "[HMPID idx=");
-        p = HmDbgAppendDec(p, end, ctx->ControllerIndex);
-        p = HmDbgAppendCstr(p, end, "] free-ebi: ebi=");
-        p = HmDbgAppendDec(p, end, ebi);
-        p = HmDbgAppendCstr(p, end, " bitmap=0x");
-        p = HmDbgAppendHex(p, end, pid->EbiAllocBitmap, 8);
-        p = HmDbgAppendCstr(p, end, "\n");
-        *p = 0;
-        HmTraceEmit(buf);
     }
 }
 
@@ -805,8 +583,6 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     dst->Head = newSeq;
 
     WdfWaitLockRelease(ctx->OutputLock);
-
-    InterlockedIncrement(&ctx->OutputReportsReceived);
 }
 
 /* Read shared input via memory mapping. RAM-only — no disk fallback.
@@ -1162,25 +938,6 @@ EvtDeviceAdd(
     /* Initialize per-instance paths (registry key, shared file) from ControllerIndex */
     InitInstancePaths(ctx, device);
 
-    /* Detect gamepad companion (root\HIDMaestroGamepad) — must NOT register WinExInput.
-     * WinExInput on the companion creates a 3rd browser entry; only the main device
-     * (or XUSB companion) should provide it. */
-    BOOLEAN isGamepadCompanion = FALSE;
-    {
-        WCHAR hwId[256] = {0};
-        ULONG hwIdLen = 0;
-        if (NT_SUCCESS(WdfDeviceQueryProperty(device, DevicePropertyHardwareID,
-                sizeof(hwId), hwId, &hwIdLen)) && hwId[0]) {
-            /* Multi-string: scan all entries */
-            for (WCHAR *p = hwId; *p; p += wcslen(p) + 1) {
-                if (wcsstr(p, L"HIDMaestroGamepad")) {
-                    isGamepadCompanion = TRUE;
-                    break;
-                }
-            }
-        }
-    }
-
     /* Initialize defaults */
     RtlCopyMemory(ctx->ReportDescriptor,
                    G_DefaultReportDescriptor,
@@ -1379,23 +1136,6 @@ EvtIoDeviceControl(
 
     UNREFERENCED_PARAMETER(OutputBufferLength);
     UNREFERENCED_PARAMETER(InputBufferLength);
-
-    /* v1.1.39 — pre-handler trace. Fires for EVERY IOCTL the driver
-     * receives, regardless of whether we have a case for it. */
-    {
-        char buf[120]; char *p = buf; char *end = buf + sizeof(buf);
-        p = HmDbgAppendCstr(p, end, "[HMIO idx=");
-        p = HmDbgAppendDec(p, end, ctx ? ctx->ControllerIndex : 0);
-        p = HmDbgAppendCstr(p, end, "] ioctl=0x");
-        p = HmDbgAppendHex(p, end, IoControlCode, 8);
-        p = HmDbgAppendCstr(p, end, " in=");
-        p = HmDbgAppendDec(p, end, (ULONG)InputBufferLength);
-        p = HmDbgAppendCstr(p, end, " out=");
-        p = HmDbgAppendDec(p, end, (ULONG)OutputBufferLength);
-        p = HmDbgAppendCstr(p, end, "\n");
-        *p = 0;
-        HmTraceEmit(buf);
-    }
 
     switch (IoControlCode) {
 
@@ -1638,15 +1378,12 @@ EvtIoDeviceControl(
 
         UCHAR reportId = ((UCHAR *)outBuf)[0];
 
-        /* v1.1.37: GetFeature(0x11) — silent success (mirrors vJoy).
-         * Buffer left untouched (caller's reportId byte at p[0] survives).
-         * Predates the PidEnabled gate intentionally so this works even
-         * for non-FFB consumers, matching vJoy's "always SUCCESS for
+        /* GetFeature(0x11 Create New Effect) — silent success (mirrors vJoy).
+         * Buffer left untouched. Doesn't gate on PidEnabled so this works
+         * even for non-FFB consumers, matching vJoy's "always SUCCESS for
          * unhandled report IDs" fallthrough behavior. */
         if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID) {
             status = STATUS_SUCCESS;
-            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
-                                   "create-new-effect-passthrough");
             break;
         }
 
@@ -1661,38 +1398,26 @@ EvtIoDeviceControl(
             status = (reportId == HIDMAESTRO_PID_POOL_REPORT_ID)
                    ? STATUS_NO_SUCH_DEVICE
                    : STATUS_NOT_SUPPORTED;
-            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
-                                   "no-pid-enabled");
             break;
         }
 
         UCHAR *p = (UCHAR *)outBuf;
 
         if (reportId == HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID) {
-            /* v1.1.38 — drop the v1.1.36 spec gate that returned
-             * STATUS_NOT_SUPPORTED when BL_LoadStatus was outside 1..3.
-             * vJoy's vJoyGetFeature in the same condition returns
-             * STATUS_SUCCESS with [id, 0, 0, 0, 1] (Error=1) — see
-             * vJoy-Brunner/driver/sys/hid.c:380-383. NOT_SUPPORTED on
-             * Block Load is an unusual response that dinput8 may not
-             * handle, suspected as an AV trigger.
-             *
-             * Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB] */
+            /* Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB].
+             * If LoadStatus is zero (unpublished), report Error=3 per HID PID
+             * spec §5.5 (LoadStatus enum: 1=Success, 2=Full, 3=Error). vJoy
+             * uses Error=1 in its raw byte from a different historical
+             * layout; dinput accepts both. */
             if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
             p[0] = reportId;
             p[1] = pid.BL_EffectBlockIndex;
-            /* If LoadStatus is zero (unpublished), report Error=3 per spec
-             * §5.5 — vJoy reports Error=1 in its raw byte but its enum
-             * collection is 1=Success, 2=Full, 3=Error and vJoy's "1" in
-             * the error path is from a different historical layout. We
-             * use 3 to be spec-strict; dinput accepts both. */
             p[2] = (pid.BL_LoadStatus >= 1 && pid.BL_LoadStatus <= 3)
                  ? pid.BL_LoadStatus : (UCHAR)3 /* Error */;
             p[3] = (UCHAR)(pid.BL_RAMPoolAvailable & 0xFF);
             p[4] = (UCHAR)((pid.BL_RAMPoolAvailable >> 8) & 0xFF);
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
-            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 5);
         }
         else if (reportId == HIDMAESTRO_PID_POOL_REPORT_ID) {
             /* Wire format: [reportId, RAMPool LSB, RAMPool MSB, MaxSim, MemMgmt] */
@@ -1704,7 +1429,6 @@ EvtIoDeviceControl(
             p[4] = pid.Pool_MemoryManagement;
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
-            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 5);
         }
         else if (reportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
             /* Wire format: [reportId, EBI, StateFlags] */
@@ -1714,13 +1438,9 @@ EvtIoDeviceControl(
             p[2] = pid.State_Flags;
             WdfRequestSetInformation(Request, 3);
             status = STATUS_SUCCESS;
-            HmDbgPidGetFeatureBytes(ctx, reportId, (ULONG)outSize, p, 3);
         }
         else {
-            /* Unknown feature report ID — preserve legacy NOT_SUPPORTED. */
             status = STATUS_NOT_SUPPORTED;
-            HmDbgPidGetFeatureGate(ctx, reportId, (ULONG)outSize, status,
-                                   "unknown-rid");
         }
         break;
     }

@@ -207,9 +207,10 @@ internal static class DeviceOrchestrator
     /// <summary>Block until any in-flight TeardownController for this
     /// controllerIndex has fully completed. Called by SetupController at
     /// entry. Returns immediately if no teardown is in flight (gate already
-    /// signaled). 30-second hard cap protects against a Reset-without-Set
-    /// regression — beyond which we proceed regardless and trust the
-    /// primary cascade-complete wait inside TeardownController.</summary>
+    /// signaled). The caller-supplied timeout protects against a
+    /// Reset-without-Set regression — beyond which we proceed regardless
+    /// and trust the primary cascade-complete wait inside
+    /// TeardownController.</summary>
     private static void WaitForPriorTeardown(int controllerIndex, int timeoutMs = 120_000)
     {
         ManualResetEventSlim? ev;
@@ -672,91 +673,6 @@ internal static class DeviceOrchestrator
 
         SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
         SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
-
-        // DISABLED per external review: writing a DS4-cloned mapping to
-        // HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
-        // for a 045E VID may confuse WGI's normal Xbox-family handling.
-        // If mainline HIDMAESTRO is sufficient (Grok's analysis), this
-        // write is unneeded and potentially harmful. The method is kept
-        // below for manual invocation if future experiments need it.
-        // WriteWgiSoftwareRegistry(profile);
-    }
-
-    // ════════════════════════════════════════════════════════════════════
-    //  WriteWgiSoftwareRegistry
-    // ════════════════════════════════════════════════════════════════════
-    // Experimental: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices
-    // is WGI's device-recognition database for non-Microsoft VIDs (DS4, Switch
-    // Pro, Thrustmaster, Hori are all there). No 045E entries natively — Xbox
-    // VIDs normally go through xinputhid/xusb22. But if WGI's gamepad enumeration
-    // consults this registry for 045E too when the usual kernel path isn't
-    // available (our case for PID 028E), writing a compatible entry may unlock
-    // Gamepad class recognition even without xinputhid binding.
-    //
-    // We clone the Sony DualShock 4 layout bytes verbatim since they're the
-    // only well-established "non-Xbox Gamepad" mapping that's known to work.
-    // Button mappings will be wrong initially (DS4 layout applied to Xbox 360
-    // HID bytes), but the primary question is whether WGI wraps the device
-    // as Gamepad at all — once that's established, a correct opcode mapping
-    // can replace this placeholder.
-    //
-    // HapticFeedback=DS4Alt advertises vibration to WGI. Chromium's put_Vibration
-    // may then dispatch via WGI's DS4 haptic protocol handler, producing output
-    // reports that our driver.c can catch on IOCTL_HID_WRITE_REPORT (source=HID).
-
-    private static void WriteWgiSoftwareRegistry(ControllerProfile profile)
-    {
-        // Only apply for Xbox-family VIDs; other profiles have their own natural
-        // paths through the non-MS registry entries that already ship with Win11.
-        if (profile.VendorId != 0x045E) return;
-
-        string key = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
-        try
-        {
-            using var k = Registry.LocalMachine.CreateSubKey(key);
-            if (k == null) return;
-
-            string description = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Xbox Controller";
-            k.SetValue("Description", description, RegistryValueKind.String);
-
-            // DS4-cloned Gamepad opcode mapping. Format is WGI's internal
-            // mapping DSL starting with opcode 0x02. Not correct for Xbox
-            // 360 button layout but exists purely to satisfy "has a Gamepad
-            // mapping" gate check.
-            byte[] gamepadBytes = new byte[]
-            {
-                0x02, 0x05, 0x03, 0x05, 0x04, 0x05, 0x00, 0x85, 0x01, 0x05, 0x02, 0x85, 0x05,
-                0x0A, 0x09, 0x0A, 0x08, 0x0A, 0x01, 0x0A, 0x02, 0x0A, 0x00, 0x0A, 0x03,
-                0x0B, 0x00, 0x4B, 0x00, 0x6B, 0x00, 0x2B, 0x00,
-                0x0A, 0x04, 0x0A, 0x05, 0x0A, 0x0A, 0x0A, 0x0B, 0x08, 0x08, 0x08, 0x08
-            };
-            k.SetValue("Gamepad", gamepadBytes, RegistryValueKind.Binary);
-            k.SetValue("HapticFeedback", "DS4Alt", RegistryValueKind.String);
-
-            using var labels = Registry.LocalMachine.CreateSubKey($@"{key}\Labels\Buttons");
-            if (labels != null)
-            {
-                labels.SetValue("Button0", "A", RegistryValueKind.String);
-                labels.SetValue("Button1", "B", RegistryValueKind.String);
-                labels.SetValue("Button2", "X", RegistryValueKind.String);
-                labels.SetValue("Button3", "Y", RegistryValueKind.String);
-                labels.SetValue("Button4", "LeftShoulder", RegistryValueKind.String);
-                labels.SetValue("Button5", "RightShoulder", RegistryValueKind.String);
-                labels.SetValue("Button6", "View", RegistryValueKind.String);
-                labels.SetValue("Button7", "Menu", RegistryValueKind.String);
-                labels.SetValue("Button8", "LeftThumbstickButton", RegistryValueKind.String);
-                labels.SetValue("Button9", "RightThumbstickButton", RegistryValueKind.String);
-            }
-            using var switches = Registry.LocalMachine.CreateSubKey($@"{key}\Labels\Switches");
-            if (switches != null)
-            {
-                switches.SetValue("Switch0Up", "Up", RegistryValueKind.String);
-                switches.SetValue("Switch0Down", "Down", RegistryValueKind.String);
-                switches.SetValue("Switch0Left", "Left", RegistryValueKind.String);
-                switches.SetValue("Switch0Right", "Right", RegistryValueKind.String);
-            }
-        }
-        catch { /* registry write may fail on non-admin; non-fatal */ }
     }
 
     // ════════════════════════════════════════════════════════════════════

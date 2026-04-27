@@ -22,13 +22,6 @@ static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 static const GUID WINEXINPUT_GUID =
     { 0x6C53D5FD, 0x6480, 0x440F, { 0xB6, 0x18, 0x47, 0x67, 0x50, 0xC5, 0xE1, 0xA6 } };
-/* From WGI's enumeration table (Windows.Gaming.Input.dll @ 0xAA9D0).
- * Semantically unknown but appears on Xbox Series BT HID children; Max's
- * external review hypothesized it may be the GIP device interface class
- * WGI uses for gamepad-class promotion of non-xinputhid Xbox paths.
- * Registering it on HIDMAESTRO is additive and benign. */
-static const GUID WGI_UNK1_GUID =
-    { 0x08A7EE33, 0xA682, 0x49EE, { 0xB8, 0xBF, 0x3E, 0x41, 0xC9, 0x9D, 0xB3, 0xC0 } };
 
 #define IOCTL_XUSB_GET_INFORMATION   0x80006000
 #define IOCTL_XUSB_GET_CAPABILITIES  0x8000E004
@@ -109,20 +102,27 @@ typedef struct {
     UCHAR GipData[14];
 } SHARED_INPUT;
 
-/* Mirror of HIDMAESTRO_SHARED_OUTPUT in driver.h. Companion does not include
- * driver.h (it has its own context type and doesn't pull in HID headers), so
- * the layout is duplicated here. Keep in sync. */
+/* Mirror of HIDMAESTRO_SHARED_OUTPUT (v1.1.40 ring) in driver.h. Companion
+ * doesn't include driver.h (separate context type, no HID headers), so the
+ * layout is duplicated here. Must stay byte-compatible with driver.h. */
+#define HM_OUTPUT_RING_SLOTS     64u
+#define HM_OUTPUT_SLOT_DATA_CAP  256u
+
 typedef struct {
-    volatile ULONG SeqNo;
-    UCHAR  Source;       /* 0=HID output, 1=HID feature, 2=XInput rumble */
-    UCHAR  ReportId;
-    USHORT DataSize;
-    UCHAR  Data[256];
+    volatile ULONG  SeqNo;           /* Per-slot. == Head value at write time. */
+    UCHAR           Source;          /* OUT_SOURCE_XINPUT etc. */
+    UCHAR           ReportId;
+    USHORT          DataSize;
+    UCHAR           Data[HM_OUTPUT_SLOT_DATA_CAP];
+} HM_OUTPUT_SLOT;
+
+typedef struct {
+    volatile ULONG  Head;            /* Monotonic total writes. */
+    ULONG           _Reserved;
+    HM_OUTPUT_SLOT  Slots[HM_OUTPUT_RING_SLOTS];
 } SHARED_OUTPUT;
 #pragma pack(pop)
 
-#define OUT_SOURCE_HID_OUTPUT  0
-#define OUT_SOURCE_HID_FEATURE 1
 #define OUT_SOURCE_XINPUT      2
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
@@ -226,27 +226,33 @@ static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
                           const UCHAR *data, ULONG dataSize)
 {
     if (!EnsureOutputMapping(ctx)) return;
-    if (dataSize > sizeof(((SHARED_OUTPUT*)0)->Data))
-        dataSize = sizeof(((SHARED_OUTPUT*)0)->Data);
+    if (dataSize > HM_OUTPUT_SLOT_DATA_CAP) dataSize = HM_OUTPUT_SLOT_DATA_CAP;
 
     volatile SHARED_OUTPUT *dst = (volatile SHARED_OUTPUT *)ctx->OutputMemPtr;
 
-    /* The companion has a single XUSB queue serializing IOCTLs per device,
-     * so two PublishOutput calls on the same controller can't race here.
-     * The driver and companion both write to the same section but they're
-     * delivering DIFFERENT events at different times — the latest-wins
-     * semantics are what the consumer wants either way. */
-    dst->Source = source;
-    dst->ReportId = reportId;
-    dst->DataSize = (USHORT)dataSize;
-    for (ULONG i = 0; i < dataSize; i++) dst->Data[i] = data[i];
+    /* v1.1.40 ring writer (matches driver.c PublishOutput). The companion's
+     * XUSB queue serializes IOCTLs per device so concurrent PublishOutput
+     * calls within the companion can't race; the driver-side writer and
+     * the companion-side writer can target different slots concurrently
+     * but each slot uses MemoryBarrier-fenced SeqNo for torn-write detection.
+     *
+     * Synchronize with the live Head so we never go backwards relative to
+     * any driver writes that may have happened between sessions: read Head,
+     * compute newSeq = max(Head, OutputSeqNoLocal) + 1. */
+    ULONG headNow = dst->Head;
+    ULONG newSeq = (headNow > ctx->OutputSeqNoLocal ? headNow : ctx->OutputSeqNoLocal) + 1;
+    ctx->OutputSeqNoLocal = newSeq;
+    ULONG slotIdx = (newSeq - 1) % HM_OUTPUT_RING_SLOTS;
+    volatile HM_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
+
+    slot->Source = source;
+    slot->ReportId = reportId;
+    slot->DataSize = (USHORT)dataSize;
+    for (ULONG i = 0; i < dataSize; i++) slot->Data[i] = data[i];
     MemoryBarrier();
-    /* Read-modify-write SeqNo from the section itself so we never go
-     * backwards relative to whatever the driver wrote. */
-    ULONG next = dst->SeqNo + 1;
-    if (next <= ctx->OutputSeqNoLocal) next = ctx->OutputSeqNoLocal + 1;
-    ctx->OutputSeqNoLocal = next;
-    dst->SeqNo = next;
+    slot->SeqNo = newSeq;
+    MemoryBarrier();
+    dst->Head = newSeq;
 }
 
 NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
@@ -519,7 +525,6 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
  * 8ms period roughly matches a wired Xbox 360's 125Hz USB polling cadence.
  * Only one pending request is completed per tick; if WGI's pump is deep
  * enough it'll re-queue immediately and the next tick picks it up. */
-EVT_WDF_TIMER CompanionPumpTimer;
 VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
 {
     WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);

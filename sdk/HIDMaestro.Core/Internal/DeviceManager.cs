@@ -91,7 +91,6 @@ public static class DeviceManager
     }
 
     static readonly Guid HID_INTERFACE_GUID = new("4D1E55B2-F16F-11CF-88CB-001111000030");
-    static readonly Guid XUSB_INTERFACE_GUID = new("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
 
     /// <summary>
     /// Waits for a specific device interface GUID to appear on the given device.
@@ -871,16 +870,17 @@ public static class DeviceManager
                     if (CM_Locate_DevNodeW(out uint _, parentId, 1) == CR_SUCCESS)
                         continue;
 
-                    // Parent is gone — remove the orphan
-                    Console.WriteLine($"  Removing orphan HID child: {hidInstanceId}");
+                    // Parent is gone — remove the orphan silently. Caller
+                    // gets the count for whatever observability it wants.
                     DifRemoveDevice(hidInstanceId);
                     removed++;
                 }
             }
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"  Warning: orphan scan error: {ex.Message}");
+            // Defensive: a single bad HID child node shouldn't abort the
+            // overall sweep. Caller still gets the removed count.
         }
 
         return removed;

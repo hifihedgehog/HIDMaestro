@@ -30,9 +30,7 @@ namespace HIDMaestro;
 /// (admin) for both <see cref="InstallDriver"/> and <see cref="CreateController"/>.
 /// This matches every other virtual-controller library on Windows
 /// (ViGEmBus, vJoy, etc.) and is fundamental — there is no API path that
-/// lets a standard user create a HIDClass device. A future optional service
-/// component may relay create requests on behalf of unprivileged consumers,
-/// but the in-process path always requires admin.</para>
+/// lets a standard user create a HIDClass device.</para>
 /// </summary>
 public sealed class HMContext : IDisposable
 {
@@ -260,10 +258,10 @@ public sealed class HMContext : IDisposable
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
         ThrowIfDisposed();
 
-        // Allocate the next free controller index. Linear scan from 0 — there
-        // is no upper bound (the unlimited-controllers fix in d0ce7fe removed
-        // every i<4 cap on our side). XInput's 4-slot limit only constrains
-        // Xbox-family profiles which aren't supported here yet.
+        // Allocate the next free controller index. Linear scan from 0 — no
+        // upper bound on the SDK side. XInput's 4-slot limit only constrains
+        // Xbox-family profiles (xbox-360-wired, xbox-series-xs-bt, etc.);
+        // non-XInput profiles can run beyond 4 simultaneously.
         int index;
         lock (_lock)
         {

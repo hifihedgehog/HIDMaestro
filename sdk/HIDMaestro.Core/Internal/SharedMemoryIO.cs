@@ -78,10 +78,6 @@ internal static class SharedMemoryIO
     public const int OUTPUT_SLOT_OFFSET_SIZE      = 6;
     public const int OUTPUT_SLOT_OFFSET_DATA      = 8;
 
-    public const byte OUT_SOURCE_HID_OUTPUT  = 0;
-    public const byte OUT_SOURCE_HID_FEATURE = 1;
-    public const byte OUT_SOURCE_XINPUT      = 2;
-
     // HIDMAESTRO_SHARED_PID_STATE (24 bytes) — match driver/driver.h:
     //   ULONG   SeqNo                       offset  0   (seqlock)
     //   UCHAR   PidEnabled                  offset  4   (gate; 0 = no FFB)
@@ -123,9 +119,8 @@ internal static class SharedMemoryIO
     private const uint FILE_MAP_READ  = 0x02;
     private const uint FILE_MAP_WRITE = 0x04;
 
-    // CreateEventW flags
-    private const uint CREATE_EVENT_MANUAL_RESET = 0x00000001;
-    private const uint CREATE_EVENT_INITIAL_SET  = 0x00000002;
+    // CreateEventW EVENT_MODIFY_STATE | SYNCHRONIZE — open existing named
+    // events for SetEvent and waiting from the SDK side.
     private const uint EVENT_MODIFY_STATE        = 0x0002;
     private const uint SYNCHRONIZE               = 0x00100000;
 

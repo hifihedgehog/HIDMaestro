@@ -59,17 +59,6 @@ public sealed class ControllerProfile
     [JsonPropertyName("driverPid")]
     public string? DriverPid { get; set; }
 
-    /// <summary>PID override for HID attributes. Prevents GameInput from matching the real PID.
-    /// Used when we need WGI to use our custom GameInput mapping instead of the built-in one.</summary>
-    [JsonPropertyName("hidPid")]
-    public string? HidPid { get; set; }
-
-    /// <summary>If true, delete the GameInput registry entry for this VID/PID.
-    /// Prevents WGI from claiming the HID device as Gamepad, forcing Chrome to use XInput only.
-    /// This gives separate browser triggers without needing 6 axes in the HID descriptor.</summary>
-    [JsonPropertyName("skipGameInput")]
-    public bool SkipGameInput { get; set; }
-
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
@@ -146,10 +135,6 @@ public sealed class ControllerProfile
     [JsonIgnore]
     public ushort ProductId => Convert.ToUInt16(Pid, 16);
 
-    /// <summary>Effective PID for HID attributes. Uses hidPid override if set, otherwise real PID.</summary>
-    [JsonIgnore]
-    public ushort HidProductId => HidPid != null ? Convert.ToUInt16(HidPid, 16) : ProductId;
-
     /// <summary>Device Manager display name. Uses deviceDescription if set, otherwise productString.</summary>
     [JsonIgnore]
     public string DisplayName => DeviceDescription ?? ProductString;
@@ -179,8 +164,6 @@ public sealed class ProfileDatabase
 
     public IReadOnlyList<ControllerProfile> All => _profiles;
 
-    public int Count => _profiles.Count;
-
     /// <summary>
     /// Loads all .json profile files from the given directory (recursively).
     /// Skips schema.json and any files that fail to parse.
@@ -206,9 +189,10 @@ public sealed class ProfileDatabase
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
                     db._profiles.Add(profile);
             }
-            catch (Exception ex)
+            catch
             {
-                Console.Error.WriteLine($"  Warning: Failed to load {file}: {ex.Message}");
+                // A single malformed JSON shouldn't take down the whole load
+                // pass. Caller's profile lookups will simply miss this entry.
             }
         }
 
@@ -255,47 +239,4 @@ public sealed class ProfileDatabase
         return db;
     }
 
-    /// <summary>Find a profile by its exact ID slug.</summary>
-    public ControllerProfile? GetById(string id) =>
-        _profiles.FirstOrDefault(p => p.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Find profiles by vendor name (case-insensitive partial match).</summary>
-    public IEnumerable<ControllerProfile> FindByVendor(string vendor) =>
-        _profiles.Where(p => p.Vendor.Contains(vendor, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Find profiles by controller type (gamepad, wheel, joystick, etc.).</summary>
-    public IEnumerable<ControllerProfile> FindByType(string type) =>
-        _profiles.Where(p => p.Type.Equals(type, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Find profiles by VID/PID.</summary>
-    public ControllerProfile? FindByVidPid(ushort vid, ushort pid) =>
-        _profiles.FirstOrDefault(p => p.VendorId == vid && p.ProductId == pid);
-
-    /// <summary>Search profiles by name (case-insensitive partial match).</summary>
-    public IEnumerable<ControllerProfile> Search(string query) =>
-        _profiles.Where(p =>
-            p.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-            p.Id.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-            p.ProductString.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-            p.Vendor.Contains(query, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>Returns only profiles that have a HID descriptor ready to deploy.</summary>
-    public IEnumerable<ControllerProfile> GetDeployable() =>
-        _profiles.Where(p => p.HasDescriptor);
-
-    /// <summary>Prints a formatted table of all profiles.</summary>
-    public void PrintAll()
-    {
-        Console.WriteLine($"\n  {"ID",-35} {"Name",-45} {"VID:PID",-12} {"Type",-12} {"Ready"}");
-        Console.WriteLine($"  {new string('-', 35)} {new string('-', 45)} {new string('-', 12)} {new string('-', 12)} {new string('-', 5)}");
-
-        foreach (var p in _profiles)
-        {
-            string vidpid = $"{p.VendorId:X4}:{p.ProductId:X4}";
-            string ready = p.HasDescriptor ? "YES" : "---";
-            Console.WriteLine($"  {p.Id,-35} {p.Name,-45} {vidpid,-12} {p.Type,-12} {ready}");
-        }
-
-        Console.WriteLine($"\n  Total: {_profiles.Count} profiles ({_profiles.Count(p => p.HasDescriptor)} with descriptors)");
-    }
 }

@@ -152,17 +152,6 @@ internal static class HidDeviceEnumerator
         return results;
     }
 
-    /// <summary>Enumerate and return only devices matching a VID:PID.</summary>
-    public static RawHidDevice? FindByVidPid(ushort vid, ushort pid)
-    {
-        foreach (var d in Enumerate())
-        {
-            if (d.VendorId == vid && d.ProductId == pid)
-                return d;
-        }
-        return null;
-    }
-
     private static bool TryReadDevice(IntPtr dis, ref SP_DEVICE_INTERFACE_DATA ifd, ref Guid hidGuid, out RawHidDevice dev)
     {
         dev = new RawHidDevice();

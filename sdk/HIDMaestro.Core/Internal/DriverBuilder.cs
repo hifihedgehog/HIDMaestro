@@ -38,6 +38,11 @@ public static class DriverBuilder
     static (int exitCode, string output) Run(string fileName, string arguments,
         string? workingDir = null, int timeoutMs = 60_000)
     {
+        // Async-drain pattern: synchronous ReadToEnd before WaitForExit
+        // deadlocks when the child fills stderr's 4 KB pipe buffer while
+        // we're draining stdout (child blocks on stderr write, our reader
+        // waits for stdout EOF that only fires at exit). PnputilHelper.Run
+        // and DeviceOrchestrator.RunProcess use the same pattern.
         var psi = new ProcessStartInfo
         {
             FileName = fileName,
@@ -50,10 +55,18 @@ public static class DriverBuilder
         if (workingDir != null) psi.WorkingDirectory = workingDir;
 
         using var proc = Process.Start(psi)!;
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(timeoutMs);
-        return (proc.ExitCode, stdout + stderr);
+        var sb = new System.Text.StringBuilder();
+        proc.OutputDataReceived += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine(e.Data); };
+        proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine(e.Data); };
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            try { proc.WaitForExit(2000); } catch { }
+            return (-1, $"timeout after {timeoutMs} ms\n{sb}");
+        }
+        return (proc.ExitCode, sb.ToString());
     }
 
     // ── Extraction ──────────────────────────────────────────────────────────
@@ -198,10 +211,7 @@ public static class DriverBuilder
                 $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{path}\"",
                 workingDir: dir);
             if (rc != 0)
-            {
-                Console.WriteLine($"  Sign failed for {dll}: {output}");
-                return false;
-            }
+                throw new InvalidOperationException($"signtool failed for {dll}: {output}");
         }
         return true;
     }
@@ -222,10 +232,7 @@ public static class DriverBuilder
 
         var (rc, output) = Run(inf2cat, $"/driver:\"{dir}\" /os:10_X64", workingDir: dir);
         if (rc != 0)
-        {
-            Console.WriteLine($"  inf2cat failed: {output}");
-            return false;
-        }
+            throw new InvalidOperationException($"inf2cat failed: {output}");
 
         foreach (string cat in Directory.GetFiles(dir, "*.cat"))
         {
@@ -233,10 +240,7 @@ public static class DriverBuilder
                 $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
                 workingDir: dir);
             if (rc2 != 0)
-            {
-                Console.WriteLine($"  Catalog sign failed for {cat}: {output2}");
-                return false;
-            }
+                throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
         }
         return true;
     }
@@ -280,10 +284,7 @@ public static class DriverBuilder
                 // store; SwDeviceCreate will handle binding. Continue silently.
             }
             else if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
-            {
-                Console.WriteLine($"\n    pnputil failed for {inf}: {output.Trim()}");
-                return false;
-            }
+                throw new InvalidOperationException($"pnputil failed for {inf}: {output.Trim()}");
         }
 
         // /scan-devices removed (Option 1). Our INFs are function INFs that bind via
@@ -307,37 +308,20 @@ public static class DriverBuilder
     }
 
     /// <summary>Full extract + sign + catalog + install pipeline. Returns
-    /// true on success. The <paramref name="rebuild"/> parameter is retained
-    /// for ABI compatibility but ignored — there is no source build step
-    /// any more (the driver binaries ship pre-built inside the SDK DLL).</summary>
+    /// true on success; throws <see cref="InvalidOperationException"/> with
+    /// the failing tool's output on any pipeline-step failure. The
+    /// <paramref name="rebuild"/> parameter is retained for ABI
+    /// compatibility but ignored — there is no source build step any more
+    /// (the driver binaries ship pre-built inside the SDK DLL).</summary>
     public static bool FullDeploy(bool rebuild = true)
     {
         _ = rebuild; // intentionally unused
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        Console.Write("  Extracting embedded driver payload... ");
         EnsureExtracted();
-        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
-
-        sw.Restart();
-        Console.Write("  Removing old packages... ");
         RemoveOldDriverPackages();
-        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
-
-        sw.Restart();
-        Console.Write("  Signing... ");
-        if (!SignDrivers()) return false;
-        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
-
-        sw.Restart();
-        Console.Write("  Generating catalogs... ");
-        if (!GenerateCatalogs()) return false;
-        Console.WriteLine($"OK ({sw.ElapsedMilliseconds} ms)");
-
-        sw.Restart();
-        Console.Write("  Installing drivers... ");
-        if (!InstallDrivers()) return false;
-        Console.WriteLine($"OK (total {sw.ElapsedMilliseconds} ms)");
+        SignDrivers();
+        GenerateCatalogs();
+        InstallDrivers();
 
         return true;
     }
