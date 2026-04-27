@@ -71,22 +71,40 @@ class Program
         int selection = 0;
         if (ffbDevices.Count > 1)
         {
-            Console.Write("Select device number: ");
-            if (!int.TryParse(Console.ReadLine(), out selection) || selection < 0 || selection >= allDevices.Count)
-                selection = 0;
-
-            var selectedGuid = allDevices[selection].InstanceGuid;
-            int ffbIndex = -1;
-            for (int i = 0; i < ffbDevices.Count; i++)
-                if (ffbDevices[i].InstanceGuid == selectedGuid)
-                { ffbIndex = i; break; }
-
-            if (ffbIndex < 0)
+            if (probesOnly)
             {
-                Console.WriteLine("Selected device does not support FFB.");
-                return 5;
+                // Auto-pick the HIDMaestro device when one is present so the
+                // S26 probe doesn't get stuck behind a real vJoy / SideWinder
+                // FFB device on the same machine. Falls back to index 0.
+                int hmIdx = -1;
+                for (int i = 0; i < ffbDevices.Count; i++)
+                {
+                    var name = ffbDevices[i].InstanceName ?? "";
+                    if (name.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)
+                        || name.Contains("PID SetUsages Probe", StringComparison.OrdinalIgnoreCase))
+                    { hmIdx = i; break; }
+                }
+                selection = hmIdx >= 0 ? hmIdx : 0;
             }
-            selection = ffbIndex;
+            else
+            {
+                Console.Write("Select device number: ");
+                if (!int.TryParse(Console.ReadLine(), out selection) || selection < 0 || selection >= allDevices.Count)
+                    selection = 0;
+
+                var selectedGuid = allDevices[selection].InstanceGuid;
+                int ffbIndex = -1;
+                for (int i = 0; i < ffbDevices.Count; i++)
+                    if (ffbDevices[i].InstanceGuid == selectedGuid)
+                    { ffbIndex = i; break; }
+
+                if (ffbIndex < 0)
+                {
+                    Console.WriteLine("Selected device does not support FFB.");
+                    return 5;
+                }
+                selection = ffbIndex;
+            }
         }
 
         var target = ffbDevices[selection];

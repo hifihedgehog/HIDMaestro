@@ -65,7 +65,22 @@ public sealed class HMController : IDisposable
 
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
-    /// this virtual controller. Subscribers must be thread-safe.</summary>
+    /// this virtual controller. Subscribers must be thread-safe.
+    ///
+    /// <para><b>Cadence and ordering (v1.1.40+):</b> the SDK polls the
+    /// driver's output ring every ~8 ms. On each poll the consumer drains
+    /// every slot the driver has written since the last poll, in
+    /// monotonic SeqNo order. Multiple <c>OutputReceived</c> invocations
+    /// per poll iteration are normal — DirectInput PID FFB writes 3
+    /// packets in 1-3 ms (Set Effect → Set Constant Force → Effect
+    /// Operation Start) and all three surface here.</para>
+    ///
+    /// <para><b>Ring depth:</b> 64 slots × 256-byte payload. If the
+    /// consumer's handler stalls for &gt; 512 ms while the driver is
+    /// writing at burst rate, the oldest packets get overwritten —
+    /// keep the handler cheap (no synchronous I/O, no long locks).
+    /// Pre-1.1.40 was a single-slot channel that silently coalesced
+    /// back-to-back writes; that drop pattern is fixed.</para></summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
     // PID FFB state section. Lazy: created on the first PublishPid* call so
@@ -338,11 +353,9 @@ public sealed class HMController : IDisposable
     private void OutputPollLoop()
     {
         if (_outputView == IntPtr.Zero) return;
-        // Belt-and-suspenders: even with EnsureOutputMapping zeroing the
-        // section on create, initialize lastSeq to whatever SeqNo is
-        // currently published so a first-poll read of any pre-existing
-        // payload (stale or legitimate) never fires a spurious
-        // OutputReceived for the prior session's rumble state.
+        // Initialize lastSeq to the current Head so any pre-existing ring
+        // contents (stale or legitimate) never fire a spurious
+        // OutputReceived for the prior session's data.
         uint lastSeq = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(_outputView, 0);
         byte[] buf = new byte[256];
         var ct = _outputCts.Token;
@@ -350,12 +363,18 @@ public sealed class HMController : IDisposable
         {
             try
             {
-                if (SharedMemoryIO.TryReadOutputFrame(_outputView, ref lastSeq,
+                // v1.1.40 — drain the ring on every poll. pid.dll writes
+                // Set Effect → Set Constant Force → Effect Operation Start
+                // within 1-3 ms; the pre-1.1.40 single-slot channel was
+                // coalescing those bursts vs the 8 ms poll cadence and
+                // losing the middle (magnitude) packet.
+                while (SharedMemoryIO.TryReadOutputFrame(_outputView, ref lastSeq,
                         out byte source, out byte reportId, out int dataSize, buf))
                 {
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
+                    if (ct.IsCancellationRequested) break;
                 }
             }
             catch

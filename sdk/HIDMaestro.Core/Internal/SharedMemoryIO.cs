@@ -37,26 +37,46 @@ internal static class SharedMemoryIO
     //   UCHAR  Data[256]             offset 8
     //   UCHAR  GipData[14]           offset 264
     //
-    // HIDMAESTRO_SHARED_OUTPUT (264 bytes):
-    //   ULONG  SeqNo                 offset 0
-    //   UCHAR  Source                offset 4
-    //   UCHAR  ReportId              offset 5
-    //   USHORT DataSize              offset 6
-    //   UCHAR  Data[256]             offset 8
+    // HIDMAESTRO_SHARED_OUTPUT — RING BUFFER as of v1.1.40.
+    //   ULONG  Head                        offset 0   (monotonic; total writes by driver)
+    //   ULONG  _Reserved                   offset 4
+    //   HIDMAESTRO_OUTPUT_SLOT Slots[N]    offset 8
+    //
+    // Each slot (264 bytes):
+    //   ULONG  SeqNo                  slot+0    (== Head value at the time of write)
+    //   UCHAR  Source                 slot+4
+    //   UCHAR  ReportId               slot+5
+    //   USHORT DataSize               slot+6
+    //   UCHAR  Data[256]              slot+8
+    //
+    // Pre-1.1.40 was a single slot, latest-write-wins. That coalesced
+    // pid.dll's PID FFB write bursts (Set Effect → Set Constant Force →
+    // Effect Operation Start, all within 1-3 ms) vs the SDK's 8 ms
+    // poll interval. Middle packet (the magnitude) dropped, which is
+    // why FFB forces never reached physical devices despite CreateEffect
+    // succeeding. v1.1.40 ring with N=64 slots gives ~512 ms of reader
+    // lag tolerance before oldest packets get overwritten — comfortable
+    // headroom for a 125 Hz consumer vs ~3 ms write bursts.
     //
     // Data[] widened from 64→256 bytes 2026-04-23: DualSense BT report 0x31
-    // is 78 bytes, Switch Pro standard input report can run to ~64, and
-    // gyro/accelerometer values live LATE in those reports. The prior 64-byte
-    // pipe silently truncated exactly the motion fields Dolphin / Cemu /
-    // yuzu / Citron / RetroArch read via HIDAPI. GipData offset follows
-    // directly after, so SHARED_INPUT_SIZE = 4 + 4 + 256 + 14 = 278.
+    // is 78 bytes; Switch Pro standard input report can run to ~64.
 
     public const int DATA_OFFSET        = 8;
     public const int DATA_CAPACITY      = 256;
     public const int GIP_DATA_OFFSET    = DATA_OFFSET + DATA_CAPACITY;   // 264
     public const int GIP_DATA_LENGTH    = 14;
     public const int SHARED_INPUT_SIZE  = GIP_DATA_OFFSET + GIP_DATA_LENGTH; // 278
-    public const int SHARED_OUTPUT_SIZE = 4 + 1 + 1 + 2 + 256;
+
+    // Output ring layout (must match driver/driver.h):
+    public const int OUTPUT_RING_SLOTS  = 64;
+    public const int OUTPUT_SLOT_SIZE   = 4 + 1 + 1 + 2 + 256;     // SeqNo + Source + RID + DataSize + Data[256]
+    public const int OUTPUT_HEADER_SIZE = 4 + 4;                   // Head + _Reserved
+    public const int SHARED_OUTPUT_SIZE = OUTPUT_HEADER_SIZE + OUTPUT_RING_SLOTS * OUTPUT_SLOT_SIZE;
+    public const int OUTPUT_SLOT_OFFSET_SEQNO     = 0;
+    public const int OUTPUT_SLOT_OFFSET_SOURCE    = 4;
+    public const int OUTPUT_SLOT_OFFSET_REPORT_ID = 5;
+    public const int OUTPUT_SLOT_OFFSET_SIZE      = 6;
+    public const int OUTPUT_SLOT_OFFSET_DATA      = 8;
 
     public const byte OUT_SOURCE_HID_OUTPUT  = 0;
     public const byte OUT_SOURCE_HID_FEATURE = 1;
@@ -374,38 +394,69 @@ internal static class SharedMemoryIO
             SetEvent(eventHandle);
     }
 
-    /// <summary>Polled seqlock read of the latest output packet. Returns
-    /// true if a new packet is available (SeqNo advanced past <paramref name="lastSeq"/>);
-    /// false if nothing has changed since the previous call. On success
-    /// <paramref name="lastSeq"/> is updated to the new SeqNo.</summary>
+    /// <summary>v1.1.40 ring read. Reads the next output packet at
+    /// SeqNo <paramref name="lastSeq"/>+1 if available. Returns true with
+    /// the packet bytes if a fresh slot is published; false if nothing
+    /// new since the last call. On success <paramref name="lastSeq"/>
+    /// advances by 1 and the slot's data is copied into <paramref name="dataBuf"/>.
+    ///
+    /// Caller pumps this in a loop on each poll iteration so all slots
+    /// between the previous LastSeen and current Head get drained — see
+    /// <see cref="HMController.OutputPollLoop"/>. Pre-1.1.40 single-slot
+    /// channel coalesced PID FFB packet bursts; this ring drains them.</summary>
     public static bool TryReadOutputFrame(
         IntPtr view, ref uint lastSeq,
         out byte source, out byte reportId, out int dataSize, byte[] dataBuf)
     {
         source = 0; reportId = 0; dataSize = 0;
 
-        uint seq1 = (uint)Marshal.ReadInt32(view, 0);
-        if (seq1 == lastSeq) return false;
+        uint head = (uint)Marshal.ReadInt32(view, 0);
+        if (head == lastSeq) return false;
 
-        // Seqlock read: sample, copy, sample, retry on mismatch.
+        uint nextSeq = lastSeq + 1;
+
+        // Reader fell more than RING_SLOTS behind: oldest packets have
+        // been overwritten. Skip ahead to the oldest still-readable slot
+        // and continue from there. This is a real lossy edge case — if
+        // a consumer is processing significantly slower than the driver
+        // is producing, the tail of the burst wins over the head.
+        if (head > nextSeq + (uint)OUTPUT_RING_SLOTS - 1)
+            nextSeq = head - (uint)OUTPUT_RING_SLOTS + 1;
+
+        int slotIdx = (int)((nextSeq - 1) % (uint)OUTPUT_RING_SLOTS);
+        int slotBase = OUTPUT_HEADER_SIZE + slotIdx * OUTPUT_SLOT_SIZE;
+
+        // Per-slot seqlock: read SeqNo, fields, SeqNo again — retry on
+        // mismatch (writer mid-update on the same slot, very rare given
+        // 64 slots and a single-producer driver).
         int retries = 4;
-        uint seq2;
+        uint slotSeqAfter = 0;
         do
         {
-            source = Marshal.ReadByte(view, 4);
-            reportId = Marshal.ReadByte(view, 5);
-            ushort sz = (ushort)Marshal.ReadInt16(view, 6);
+            uint slotSeqBefore = (uint)Marshal.ReadInt32(view, slotBase + OUTPUT_SLOT_OFFSET_SEQNO);
+            if (slotSeqBefore != nextSeq)
+            {
+                // Slot hasn't been written for our expected SeqNo yet.
+                // This can happen briefly between the writer incrementing
+                // Head and finishing slot.SeqNo. Treat as no new data,
+                // try again on next poll.
+                return false;
+            }
+            source = Marshal.ReadByte(view, slotBase + OUTPUT_SLOT_OFFSET_SOURCE);
+            reportId = Marshal.ReadByte(view, slotBase + OUTPUT_SLOT_OFFSET_REPORT_ID);
+            ushort sz = (ushort)Marshal.ReadInt16(view, slotBase + OUTPUT_SLOT_OFFSET_SIZE);
             if (sz > dataBuf.Length) sz = (ushort)dataBuf.Length;
             dataSize = sz;
             for (int i = 0; i < sz; i++)
-                dataBuf[i] = Marshal.ReadByte(view, 8 + i);
+                dataBuf[i] = Marshal.ReadByte(view, slotBase + OUTPUT_SLOT_OFFSET_DATA + i);
             Thread.MemoryBarrier();
-            seq2 = (uint)Marshal.ReadInt32(view, 0);
-            if (seq1 == seq2) break;
-            seq1 = seq2;
+            slotSeqAfter = (uint)Marshal.ReadInt32(view, slotBase + OUTPUT_SLOT_OFFSET_SEQNO);
+            if (slotSeqAfter == slotSeqBefore) break;
+            // Slot was being rewritten while we read; retry.
         } while (--retries > 0);
 
-        lastSeq = seq2;
+        if (slotSeqAfter == 0) return false; // unstable read after retries
+        lastSeq = nextSeq;
         return true;
     }
 

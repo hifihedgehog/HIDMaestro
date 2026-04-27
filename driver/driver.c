@@ -760,12 +760,14 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
               _In_reads_bytes_(DataSize) const UCHAR *Data,
               _In_ ULONG DataSize)
 {
-    if (DataSize > sizeof(((HIDMAESTRO_SHARED_OUTPUT*)0)->Data))
-        DataSize = sizeof(((HIDMAESTRO_SHARED_OUTPUT*)0)->Data);
+    if (DataSize > HIDMAESTRO_OUTPUT_SLOT_DATA_CAP)
+        DataSize = HIDMAESTRO_OUTPUT_SLOT_DATA_CAP;
 
     /* Serialize writers (the queue dispatches IOCTLs in parallel, so two
-     * threads can call PublishOutput concurrently). The reader is in another
-     * process and uses the seqlock pattern (sample, copy, sample, retry). */
+     * threads can call PublishOutput concurrently). v1.1.40 ring buffer
+     * uses per-slot seqlock for torn-write detection on the reader side;
+     * the WdfWaitLock here ensures only one writer increments Head and
+     * fills its slot at a time. */
     WdfWaitLockAcquire(ctx->OutputLock, NULL);
 
     if (!EnsureOutputMapping(ctx)) {
@@ -776,16 +778,31 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     volatile HIDMAESTRO_SHARED_OUTPUT *dst =
         (volatile HIDMAESTRO_SHARED_OUTPUT *)ctx->OutputMemPtr;
 
-    /* Matches the input direction's seqlock convention: writer increments
-     * SeqNo AFTER the payload is fully written; reader samples SeqNo, copies,
-     * samples SeqNo again, and retries if they differ. */
-    dst->Source = Source;
-    dst->ReportId = ReportId;
-    dst->DataSize = (USHORT)DataSize;
-    for (ULONG i = 0; i < DataSize; i++) dst->Data[i] = Data[i];
-    MemoryBarrier();
+    /* v1.1.40 ring buffer: SeqNo=0 reserved for "never written"; first
+     * write is SeqNo=1. Slot index is (SeqNo - 1) % N. Writer:
+     *   1) compute new SeqNo (Head + 1)
+     *   2) write slot fields including Data[]
+     *   3) MemoryBarrier
+     *   4) write slot.SeqNo = new SeqNo (publishes the slot)
+     *   5) MemoryBarrier + write Head = new SeqNo (publishes the ring head)
+     *
+     * Reader scans slots from LastSeen+1 to Head, validates each by
+     * checking slot.SeqNo == expected, copies, re-checks SeqNo for
+     * torn-write detection. If LastSeen+N < Head, oldest packets have
+     * been overwritten — reader logs and skips ahead to Head-N+1. */
     ctx->OutputSeqNoLocal++;
-    dst->SeqNo = ctx->OutputSeqNoLocal;
+    ULONG newSeq = ctx->OutputSeqNoLocal;
+    ULONG slotIdx = (newSeq - 1) % HIDMAESTRO_OUTPUT_RING_SLOTS;
+    volatile HIDMAESTRO_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
+
+    slot->Source = Source;
+    slot->ReportId = ReportId;
+    slot->DataSize = (USHORT)DataSize;
+    for (ULONG i = 0; i < DataSize; i++) slot->Data[i] = Data[i];
+    MemoryBarrier();
+    slot->SeqNo = newSeq;
+    MemoryBarrier();
+    dst->Head = newSeq;
 
     WdfWaitLockRelease(ctx->OutputLock);
 

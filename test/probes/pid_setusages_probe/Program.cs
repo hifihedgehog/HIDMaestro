@@ -165,6 +165,19 @@ internal static class Program
         ctrl.PublishPidState(effectBlockIndex: 0,
             PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower);
 
+        // ── Output burst counter ──
+        // Subscribe to OutputReceived to verify the v1.1.40 ring buffer
+        // doesn't coalesce back-to-back writes. The post-FfbTest burst
+        // phase below writes N Output reports in tight succession; the
+        // counter here must equal N when the SDK poll loop drains.
+        var outputCounts = new System.Collections.Concurrent.ConcurrentDictionary<byte, int>();
+        int totalOutputPackets = 0;
+        ctrl.OutputReceived += (_, pkt) =>
+        {
+            outputCounts.AddOrUpdate(pkt.ReportId, 1, (_, n) => n + 1);
+            System.Threading.Interlocked.Increment(ref totalOutputPackets);
+        };
+
         // ── Optional: input-pump thread mirroring PadForge.exe ──
         var pumpCts = new System.Threading.CancellationTokenSource();
         System.Threading.Thread? pumpThread = null;
@@ -348,6 +361,83 @@ internal static class Program
             else
             {
                 Console.WriteLine($"  [WriteFile Set Effect] FAIL (Win32={writeErr})");
+                failures++;
+            }
+
+            // ── v1.1.40 ring-buffer roundtrip test ──
+            // Issue #16 ask 3: verify back-to-back Output reports all reach
+            // the consumer's OutputReceived. pid.dll writes Set Effect →
+            // Set Constant Force → Effect Operation Start within 1-3 ms;
+            // the pre-1.1.40 single-slot channel coalesced these to one
+            // packet per ~8 ms poll cycle. v1.1.40 ring should preserve
+            // every write up to RING_SLOTS (64) per drain.
+            //
+            // Test: spam K bursts of 3 distinct Report IDs (0x11, 0x15,
+            // 0x1A) — total 3K writes — then sleep enough for the SDK's
+            // poll loop to drain (≥16 ms = 2 poll cycles, plenty of
+            // headroom). Assert OutputReceived count == 3K, broken down
+            // by Report ID.
+            const int kBursts = 8;          // 8 × 3 = 24 packets, well under ring depth
+            const int kBytesPerWrite = 22;  // typical PID Output payload size
+            byte[] burstBuf = new byte[kBytesPerWrite];
+            outputCounts.Clear();
+            System.Threading.Interlocked.Exchange(ref totalOutputPackets, 0);
+            int writeFailures = 0;
+            for (int i = 0; i < kBursts; i++)
+            {
+                foreach (byte rid in new byte[] { 0x11, 0x15, 0x1A })
+                {
+                    burstBuf[0] = rid;
+                    burstBuf[1] = (byte)(i + 1);  // mark with burst index for traceability
+                    if (!WriteFile(hid, burstBuf, (uint)kBytesPerWrite, out _, IntPtr.Zero))
+                        writeFailures++;
+                }
+            }
+            // Drain window. SDK polls every 8 ms; 5 cycles (40 ms) gives
+            // comfortable headroom even on a busy machine.
+            System.Threading.Thread.Sleep(80);
+            int total = totalOutputPackets;
+            int expected = kBursts * 3;
+            int got11 = outputCounts.TryGetValue((byte)0x11, out int n11) ? n11 : 0;
+            int got15 = outputCounts.TryGetValue((byte)0x15, out int n15) ? n15 : 0;
+            int got1A = outputCounts.TryGetValue((byte)0x1A, out int n1A) ? n1A : 0;
+
+            // Diagnostic via Win32 OpenFileMapping (MemoryMappedFile.OpenExisting
+            // requires more permissions than the section's SDDL grants).
+            int driverHead = -1;
+            string slotDump = "";
+            IntPtr secH2 = OpenFileMappingW2(0x4 /*FILE_MAP_READ*/, false, @"Global\HIDMaestroOutput0");
+            if (secH2 == IntPtr.Zero)
+                Console.WriteLine($"  OpenFileMappingW2 failed Win32={Marshal.GetLastWin32Error()}");
+            if (secH2 != IntPtr.Zero)
+            {
+                IntPtr secView = MapViewOfFile2(secH2, 0x4, 0, 0, (UIntPtr)16904);
+                if (secView != IntPtr.Zero)
+                {
+                    driverHead = Marshal.ReadInt32(secView, 0);
+                    var sb = new System.Text.StringBuilder();
+                    for (int s = 0; s < Math.Min(5, driverHead); s++)
+                    {
+                        int @base = 8 + s * 264;
+                        int seq = Marshal.ReadInt32(secView, @base);
+                        byte src = Marshal.ReadByte(secView, @base + 4);
+                        byte rid = Marshal.ReadByte(secView, @base + 5);
+                        sb.Append($"slot[{s}]:seq={seq},src={src},rid=0x{rid:X2} ");
+                    }
+                    slotDump = sb.ToString();
+                    UnmapViewOfFile2(secView);
+                }
+                CloseHandle2(secH2);
+            }
+            if (slotDump.Length > 0)
+                Console.WriteLine($"  Direct section read: {slotDump}");
+            Console.WriteLine($"  [Ring burst {kBursts}×3] WriteFile failures={writeFailures} " +
+                $"driver Head={driverHead} " +
+                $"OutputReceived total={total} expected={expected} " +
+                $"(rid 0x11={got11}, 0x15={got15}, 0x1A={got1A})");
+            if (total < expected)
+            {
+                Console.WriteLine($"  [Ring burst] FAIL: lost {expected - total} packet(s)");
                 failures++;
             }
 
@@ -762,6 +852,15 @@ internal static class Program
         out uint bytesWritten, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFile(string path, uint a, uint b, IntPtr c, uint d, uint e, IntPtr f);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "OpenFileMappingW")]
+    static extern IntPtr OpenFileMappingW2(uint a, bool b, string c);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "MapViewOfFile")]
+    static extern IntPtr MapViewOfFile2(IntPtr h, uint a, uint b, uint c, UIntPtr n);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "UnmapViewOfFile")]
+    static extern bool UnmapViewOfFile2(IntPtr p);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
+    static extern bool CloseHandle2(IntPtr h);
 
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;

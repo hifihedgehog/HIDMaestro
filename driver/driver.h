@@ -220,13 +220,53 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
 #define HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE  1
 #define HIDMAESTRO_OUTPUT_SOURCE_XINPUT       2
 
+/* Output channel — RING BUFFER as of v1.1.40.
+ *
+ * Pre-1.1.40 was a single slot, latest-write-wins. That coalesced
+ * pid.dll's tight three-packet PID FFB write bursts (Set Effect,
+ * Set Constant Force / Set Periodic, Effect Operation Start) within
+ * 1-3 ms vs the SDK's 8 ms poll interval — middle packets dropped,
+ * magnitude never reached the consumer. See issue #16.
+ *
+ * Now: 64-slot ring with monotonic seqlock per slot. Writer (this
+ * driver, multiple threads via OutputLock) increments a global Head
+ * counter, writes slot[(Head-1) % N], readers (the SDK's poll loop)
+ * track LastSeen and process slots from LastSeen+1 to Head.
+ *
+ * Slot capacity 256 bytes covers DualSense reports (78 bytes) and
+ * any current PID FFB Output (largest is Set Effect at 22 bytes).
+ *
+ * Single-producer (driver IOCTL handler thread) → single-consumer
+ * (SDK poll thread) ring; OutputLock serializes producer races.
+ * Reader uses per-slot SeqNo for torn-write detection within a slot.
+ * If reader falls behind by more than N writes, the oldest packets
+ * get overwritten — that's a real lossy edge case, but with N=64
+ * and a 1-3 ms burst pattern it would take a 512 ms reader stall
+ * to start losing packets. */
+#define HIDMAESTRO_OUTPUT_RING_SLOTS     64u
+#define HIDMAESTRO_OUTPUT_SLOT_DATA_CAP  256u
+
 #pragma pack(push, 1)
-typedef struct _HIDMAESTRO_SHARED_OUTPUT {
-    volatile ULONG  SeqNo;           /* Incremented each write */
+typedef struct _HIDMAESTRO_OUTPUT_SLOT {
+    volatile ULONG  SeqNo;           /* Per-slot. Equal to Head value at the time of write. */
     UCHAR           Source;          /* HIDMAESTRO_OUTPUT_SOURCE_* */
     UCHAR           ReportId;        /* HID Report ID (0 if descriptor uses no IDs) */
     USHORT          DataSize;        /* Bytes valid in Data[] */
-    UCHAR           Data[256];       /* Raw output payload */
+    UCHAR           Data[HIDMAESTRO_OUTPUT_SLOT_DATA_CAP];
+} HIDMAESTRO_OUTPUT_SLOT, *PHIDMAESTRO_OUTPUT_SLOT;
+
+typedef struct _HIDMAESTRO_SHARED_OUTPUT {
+    /* Monotonically-increasing total writes by the driver. The slot at
+     * index ((Head - 1) % HIDMAESTRO_OUTPUT_RING_SLOTS) holds the most
+     * recent write. SeqNo=0 is reserved for "never written" — first
+     * write is SeqNo=1. */
+    volatile ULONG  Head;
+
+    /* Reserved for future use (e.g., a layout version field if the slot
+     * struct ever grows again). */
+    ULONG           _Reserved;
+
+    HIDMAESTRO_OUTPUT_SLOT Slots[HIDMAESTRO_OUTPUT_RING_SLOTS];
 } HIDMAESTRO_SHARED_OUTPUT, *PHIDMAESTRO_SHARED_OUTPUT;
 #pragma pack(pop)
 
