@@ -1,0 +1,15 @@
+{
+  "id": "pxn-vd6",
+  "name": "PXN VD6 WAS Bundle Racing Wheel",
+  "vendor": "PXN",
+  "vid": "0x36E6",
+  "pid": "0x400F",
+  "productString": "PXN VD6",
+  "manufacturerString": "PXN",
+  "deviceDescription": "PXN VD6",
+  "type": "wheel",
+  "connection": "usb",
+  "descriptor": "0600ff0901a10185010901150026ff007508953e81020901150026ff007508953e9106c0",
+  "inputReportSize": 62,
+  "notes": "Composite USB device. Native joystick interface is a vendor-defined raw I/O channel (62 bytes in / 62 bytes out on Report ID 1, USAGE_PAGE 0xFF00) — firmware ships no HID-compliant joystick descriptor. Windows treats the wheel as a steering wheel only when an OEMData registry override is in place (community workaround documented at https://www.reddit.com/r/snowrunner/comments/1bgwa55/). Auxiliary HID interfaces on the composite USB device: standard 15-button mouse and standard HID keyboard. Submitted via issue #14."
+}
