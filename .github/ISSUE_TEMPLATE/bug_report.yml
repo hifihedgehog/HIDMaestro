@@ -1,0 +1,124 @@
+name: Bug report
+description: Report a bug or unexpected behavior in HIDMaestro
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. HIDMaestro touches Windows PnP, driver install, HID, and (for
+        Xbox/XInput profiles) the XUSB stack directly, so up-front state-and-version detail
+        gets the bug diagnosed faster.
+
+        Before filing, please confirm the bug also reproduces against the shipped
+        `HIDMaestroTest.exe` from the latest release, or describe what's different about
+        your setup if it doesn't.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did the SDK do, and what did you expect instead?
+      placeholder: "First CreateController() succeeds; second one throws InvalidOperationException..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal repro
+      description: |
+        Smallest code snippet that triggers the bug. If it only reproduces against your own
+        application code (not `HIDMaestroTest.exe`), include enough of the call sequence
+        that someone can paste it into a fresh console app and run it.
+      render: csharp
+      placeholder: |
+        var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+        var profile = ctx.GetProfile("xbox-360-wired");
+        var c1 = ctx.CreateController(profile);
+        var c2 = ctx.CreateController(profile);  // throws here
+    validations:
+      required: true
+
+  - type: textarea
+    id: stacktrace
+    attributes:
+      label: Exception / stack trace
+      description: |
+        Full text of any thrown exception, including inner exceptions and any output from
+        the underlying tool (pnputil, signtool, devcon, etc.) that the SDK surfaced.
+      render: text
+
+  - type: input
+    id: hm_version
+    attributes:
+      label: HIDMaestro version
+      description: Release tag you're testing against. If building from source, the commit SHA.
+      placeholder: "v1.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows build
+      description: Output of `winver` (or Settings → System → About → OS build).
+      placeholder: "10.0.26200.8246"
+    validations:
+      required: true
+
+  - type: input
+    id: profile
+    attributes:
+      label: Profile in use
+      description: Which embedded profile (or custom-built profile) was being instantiated?
+      placeholder: "xbox-360-wired, dualsense, custom HMProfileBuilder, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: count
+    attributes:
+      label: Controller count
+      description: How many virtual controllers were active when the bug surfaced?
+      placeholder: "Bug appears on second CreateController(); 6-controller mixed loop; etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hm_test_repros
+    attributes:
+      label: Does HIDMaestroTest.exe reproduce it?
+      description: |
+        Run the shipped `HIDMaestroTest.exe` from the latest release ZIP through whatever
+        scenario is closest to your repro. Does the same bug appear there?
+      options:
+        - "Yes, HIDMaestroTest.exe also reproduces"
+        - "No, only my app reproduces"
+        - "Haven't tested HIDMaestroTest.exe"
+        - "Bug is in HIDMaestroTest.exe itself"
+    validations:
+      required: true
+
+  - type: textarea
+    id: state
+    attributes:
+      label: Pre-test state
+      description: |
+        Were there leftover virtual controllers from previous runs? Did you call
+        `HMContext.RemoveAllVirtualControllers()` or similar before the test? Did another
+        tool (HIDMaestroProfileExtractor, PadForge, vJoy, ViGEmBus, HidHide) touch the
+        same VID/PID? Was this first run after a clean reboot?
+      placeholder: |
+        e.g., "First run after reboot. No other HIDMaestro-using app installed. Ran
+        HIDMaestroTest.exe once successfully, then my app failed on second run."
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: |
+        Screenshots, log files, contents of `%TEMP%\HIDMaestro\teardown_diag.log`, or
+        anything else that might help.
