@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Xml.Linq;
 
 namespace HIDMaestro.Internal;
 
@@ -92,39 +93,36 @@ internal static class PnputilHelper
         return (exitCode, stdout + stderr);
     }
 
-    /// <summary>Parses the full output of <c>pnputil /enum-drivers</c> into
-    /// records. Records are delimited by blank lines. Lines whose colon-prefix
-    /// matches a known field are extracted; everything else is ignored. The
-    /// parser is forgiving of pnputil locale variations on whitespace.</summary>
+    /// <summary>Parses <c>pnputil /enum-drivers /format xml</c> into records.
+    /// XML element names are pnputil's internal identifiers, not localized
+    /// resource strings, so this is locale-stable across Windows installs.
+    /// (The previous plain-text parser matched English-literal field labels
+    /// like "Published Name" and silently returned empty on non-English
+    /// Windows installs, which broke <see cref="IsHidMaestroDriverInstalled"/>
+    /// — see issue #17.)</summary>
     public static List<DriverRecord> EnumerateDrivers()
     {
-        var (_, output) = Run("/enum-drivers");
+        var (_, output) = Run("/enum-drivers /format xml");
         var records = new List<DriverRecord>();
 
-        string published = "", original = "", provider = "", version = "";
-        void Flush()
+        if (string.IsNullOrWhiteSpace(output)) return records;
+
+        XDocument doc;
+        try { doc = XDocument.Parse(output); }
+        catch (System.Xml.XmlException) { return records; }
+
+        var root = doc.Root;
+        if (root == null) return records;
+
+        foreach (var driver in root.Elements("Driver"))
         {
+            string published = driver.Attribute("DriverName")?.Value ?? "";
+            string original  = driver.Element("OriginalName")?.Value ?? "";
+            string provider  = driver.Element("ProviderName")?.Value ?? "";
+            string version   = driver.Element("DriverVersion")?.Value ?? "";
             if (!string.IsNullOrEmpty(published))
                 records.Add(new DriverRecord(published, original, provider, version));
-            published = original = provider = version = "";
         }
-
-        foreach (var rawLine in output.Split('\n'))
-        {
-            string line = rawLine.TrimEnd('\r').TrimEnd();
-            if (string.IsNullOrWhiteSpace(line)) { Flush(); continue; }
-
-            int colon = line.IndexOf(':');
-            if (colon <= 0) continue;
-            string key = line.Substring(0, colon).Trim();
-            string val = line.Substring(colon + 1).Trim();
-
-            if (key.Equals("Published Name", StringComparison.OrdinalIgnoreCase)) published = val;
-            else if (key.Equals("Original Name", StringComparison.OrdinalIgnoreCase)) original = val;
-            else if (key.Equals("Provider Name", StringComparison.OrdinalIgnoreCase)) provider = val;
-            else if (key.Equals("Driver Version", StringComparison.OrdinalIgnoreCase)) version = val;
-        }
-        Flush();
         return records;
     }
 

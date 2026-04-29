@@ -260,32 +260,20 @@ public static class DriverBuilder
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
-            var (rc, output) = Run(pnputil, $"/add-driver \"{path}\" /install",
-                timeoutMs: 30_000);
-
-            // pnputil /install fails with rc=259 ("Unable to install driver
-            // package: The requested device interface is not present in the
-            // system") when there are no devices on the system that match the
-            // INF's hardware IDs. That's the EXPECTED state on a fresh /
-            // post-cleanup install: SwDeviceCreate hasn't run yet so no
-            // matching devnodes exist, and the AddInterface directive in
-            // hidmaestro_xusb.inf has nothing to register against. The
-            // /add-driver portion (which is what we actually need — the
-            // package in the DriverStore) succeeded; ignore the /install
-            // miss. The subsequent SwDeviceCreate call will trigger PnP's
-            // proper bind + interface registration.
-            bool noMatchingDevice = output.Contains(
-                "The requested device interface is not present in the system");
-            bool packageAdded = output.Contains("Driver package added successfully");
-
-            if (rc != 0 && noMatchingDevice && packageAdded)
-            {
-                // Expected on first install / post-cleanup. Driver is in the
-                // store; SwDeviceCreate will handle binding. Continue silently.
-            }
-            else if (rc != 0 || output.Contains("Access is denied") || output.Contains("Failed"))
-                throw new InvalidOperationException($"pnputil failed for {inf}: {output.Trim()}");
+            Run(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: 30_000);
+            // pnputil /add-driver does not support /format, so its rc and output
+            // are locale- and version-keyed and unreliable for success detection
+            // (see issue #17). The authoritative success signal is the post-
+            // condition check below — did the package land in the driver store?
+            // PnputilHelper.IsHidMaestroDriverInstalled reads /enum-drivers
+            // /format xml which is locale-stable.
         }
+
+        if (!PnputilHelper.IsHidMaestroDriverInstalled())
+            throw new InvalidOperationException(
+                "pnputil /add-driver completed but driver store does not contain "
+              + "all required HIDMaestro packages. "
+              + $"Required INFs: {string.Join(", ", PnputilHelper.HidMaestroInfNames)}.");
 
         // /scan-devices removed (Option 1). Our INFs are function INFs that bind via
         // SwDeviceCreate's own install path — /scan-devices was a no-op for

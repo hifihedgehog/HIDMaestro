@@ -1,0 +1,18 @@
+{
+  "id": "dualsense-bt-full",
+  "name": "DualSense (PS5, Bluetooth, Full Descriptor)",
+  "vendor": "Sony Interactive Entertainment",
+  "vid": "0x054C",
+  "pid": "0x0CE6",
+  "productString": "DualSense Wireless Controller",
+  "manufacturerString": "Sony Interactive Entertainment",
+  "deviceDescription": "DualSense Wireless Controller",
+  "type": "gamepad",
+  "connection": "bluetooth",
+  "descriptor": "05010905a10185010930093109320935150026ff007508950481020939150025073500463b01651475049501814205091901290e150025017501950e450065008102750695018103050109330934150026ff003500463b0175089502810285310600ff093b150026ff007508954d81020931150026ff007508954d910285320932150026ff007508958d910285330933150026ff00750895cd910285340934150026ff007508960d01910285350935150026ff007508964d01910285360936150026ff007508968d01910285370937150026ff00750896cd01910285380938150026ff007508960d02910285390939150026ff007508962202910285050680ff0933150026ff0075089528b10285080934150026ff007508952fb10285090924150026ff0075089513b10285200926150026ff007508953fb10285220940150026ff007508953fb10285800928150026ff007508953fb10285810929150026ff007508953fb1028582092a150026ff0075089509b1028583092b150026ff007508953fb10285f10931150026ff007508953fb10285f20932150026ff007508950fb10285f00930150026ff007508953fb10285f4092c150026ff007508953fb10285f5092d150026ff0075089507b10285f6092e150026ff007508962202b10285f7092f150026ff0075089507b102c0",
+  "inputReportSize": null,
+  "notes": "Current Sony firmware. productString reports 'DualSense Wireless Controller' (launch firmware reported 'Wireless Controller' — see dualsense-bt for that variant). Adds feature reports F4-F7 missing from the launch capture, including 0xF6 (546-byte IMU calibration response). Descriptor extracted by HIDMaestroProfileExtractor on 2026-04-29 from a newly-purchased DualSense; HIDAPI-reconstructed verbose form (logically equivalent to firmware-emitted descriptor but not byte-identical). Validated end-to-end via PadForge custom-profile path on the same controller. Report 0x01 input layout matches dualsense-bt (4 axes, hat, 14 buttons, 6-bit pad, 2-byte triggers); buttonMap/triggerButtons/axisMap carried over unchanged.",
+  "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
+  "triggerButtons": [6, 7],
+  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
+}
