@@ -66,6 +66,26 @@ User d3xMachina reported "sometimes it takes ages to disconnect the controllers 
 
 **T37 + T38 need C18 to validate as a battery (would need a live re-launch with the new SDK build to see d3x's stuck-teardown path resolved).**
 
+**C18 (T37 + T38 + T39 cumulative validation):** 26/26 PASS in 1977 s. Median 461 ms, p25 = 149 ms, p75 = 557 ms across 119 setups. 9 outliers (within the 6-12 noise band). Battery wall stable in 1949-1978 s range across C10-C18 (all post-Tier-9 batteries within 30 s = noise band). All T22-T39 changes validated cumulatively without regression.
+
+---
+
+## Potential v1.4.0 breakthroughs (not yet attempted)
+
+User asked: "if you can find hacks around [the kernel-PnP floor], that would be cool." User-mode reverse-engineering has gotten us this far; here are the still-unexplored angles ordered by risk:
+
+1. **SwDeviceCreate for the main HID devnode** (was SetupDiCreateDeviceInfo + DIF_REGISTERDEVICE + UpdateDriverForPlugAndPlayDevicesW). The companion devnodes already migrated to SwDeviceCreate in v1.1.30 (slot-1-skip fix); the main devnode stayed on SetupDi because XInput legacy expects `ROOT\VID_*&IG_00` enumerator. SwDeviceCreate accepts a `ROOT\` enumerator string. If verified empirically that XInput's discovery walks `{EC87F1E3}` interface class on the COMPANION (not the main device's enumerator path), we could move the main devnode to SwDeviceCreate too. Estimated saving: ~200-300 ms per Xbox 360 wired controller create (kernel does create+bind in one optimized call vs SetupDi's two-phase). Risk: WGI/SDL3/DirectInput might cache the main devnode's enumerator; need to verify each cares only about HardwareID (which is unchanged) not enumerator path.
+
+2. **Devnode pool with profile reconfig at AddDevice** (eliminate per-CreateController kernel PnP entirely). Pre-create N HIDMaestro devnodes at HMContext.InstallDriver, each with a generic `root\HIDMAESTRO` HardwareID. Driver reads profile-specific HID descriptor at `IOCTL_HID_GET_REPORT_DESCRIPTOR` time from `Device Parameters\<index>\ReportDescriptor`. CreateController = "claim free index + write profile + signal driver to refresh". Estimated saving: ~400-500 ms per controller create after the first warm pool. Risk: WGI/SDL3 cache HardwareID at first-enumeration; runtime descriptor swap needs to be transparent. Driver-side change required.
+
+3. **Re-enable UmdfHostProcessSharing for first-creation perf** (memory says this was disabled because shared host accumulates 9 min CPU across 6 controllers — but a per-pool-of-2 sharing could give cold-host startup amortization while limiting CPU bleed). Risk: needs per-host CPU monitoring + selective sharing; non-trivial.
+
+4. **Internal CreateMultiple batching API** (consumer opts in by passing N profiles together). Single SetupDiCallClassInstaller transaction for N devices. Order preserved by build order. Estimated saving: ~100-200 ms per batch of N>1 vs N sequential calls. Risk: API-surface addition, doesn't help the existing one-at-a-time consumers (PadForge).
+
+5. **Custom kernel filter driver** — explicitly off-table per project memory (would defeat HIDMaestro's reason to exist).
+
+For v1.3.0 this session: I've reached the user-mode floor for the existing architecture. Any further reduction requires one of the above architectural changes, each with non-trivial risk.
+
 ---
 
 ## Why HIDMaestro is slower than ViGEmBus per-controller — and what we've done about it
