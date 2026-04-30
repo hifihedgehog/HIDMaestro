@@ -157,6 +157,41 @@ internal static class PnputilHelper
     {
         if (s_installedConfirmed) return true;
 
+        // T37 — cheap filesystem-level fast path. The DriverStore\FileRepository
+        // directory layout is stable across every supported Windows version;
+        // checking for hidmaestro.inf_* and hidmaestro_xusb.inf_* dirs is the
+        // same signal pnputil /enum-drivers would surface, but in ~5 ms vs
+        // 200–500 ms for the pnputil enum + XML parse. d3xMachina's gh#18
+        // log showed "driver install check (deployed=True) in 1695ms" hitting
+        // the slow path on first call; this fast path eliminates that.
+        // Falls through to the pnputil enum on filesystem-check failure
+        // (e.g., DriverStore inaccessible) so the strict provider-name
+        // filter still validates correctness in edge cases.
+        try
+        {
+            string fileRepo = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "DriverStore", "FileRepository");
+            if (System.IO.Directory.Exists(fileRepo))
+            {
+                bool hasMain = false, hasXusb = false;
+                foreach (var dir in System.IO.Directory.EnumerateDirectories(fileRepo))
+                {
+                    string name = System.IO.Path.GetFileName(dir);
+                    if (!hasMain && name.StartsWith("hidmaestro.inf_", StringComparison.OrdinalIgnoreCase))
+                        hasMain = true;
+                    else if (!hasXusb && name.StartsWith("hidmaestro_xusb.inf_", StringComparison.OrdinalIgnoreCase))
+                        hasXusb = true;
+                    if (hasMain && hasXusb)
+                    {
+                        s_installedConfirmed = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        catch { /* fall through to pnputil enum */ }
+
         var pkgs = FindHidMaestroPackages();
         bool ok = HidMaestroInfNames.All(name =>
             pkgs.Any(p => string.Equals(p.OriginalName, name, StringComparison.OrdinalIgnoreCase)));
