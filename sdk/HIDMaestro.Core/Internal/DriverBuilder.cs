@@ -437,10 +437,18 @@ public static class DriverBuilder
             // hidmaestro.inf_amd64_<hash> and hidmaestro_xusb.inf_amd64_<hash>
             // are the directory names pnputil /add-driver creates. Both must
             // be present to consider the install complete.
-            bool hasMain = Directory.EnumerateDirectories(fileRepo, "hidmaestro.inf_*")
-                .Any();
-            bool hasXusb = Directory.EnumerateDirectories(fileRepo, "hidmaestro_xusb.inf_*")
-                .Any();
+            // T11 — single FileRepository enumeration (~5–20 ms on a busy
+            // store) instead of two; we exit as soon as we find both.
+            bool hasMain = false, hasXusb = false;
+            foreach (var dir in Directory.EnumerateDirectories(fileRepo))
+            {
+                string name = Path.GetFileName(dir);
+                if (!hasMain && name.StartsWith("hidmaestro.inf_", StringComparison.OrdinalIgnoreCase))
+                    hasMain = true;
+                else if (!hasXusb && name.StartsWith("hidmaestro_xusb.inf_", StringComparison.OrdinalIgnoreCase))
+                    hasXusb = true;
+                if (hasMain && hasXusb) return true;
+            }
             return hasMain && hasXusb;
         }
         catch
