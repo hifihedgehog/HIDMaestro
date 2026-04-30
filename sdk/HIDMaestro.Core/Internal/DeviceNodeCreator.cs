@@ -175,7 +175,10 @@ internal static class DeviceNodeCreator
             //
             // PnP picks an instance index that may NOT match controllerIndex (ghosts
             // from previous runs offset numbering). Find OUR newly-created device
-            // by looking for a live device with no ControllerIndex yet.
+            // by looking for a live device with no ControllerIndex yet. T23-2 —
+            // capture the discovered instance ID so the post-UpdateDriver re-walk
+            // below can skip its scan entirely.
+            string? newlyCreatedInstId = null;
             try
             {
                 using var enumKey = Registry.LocalMachine.OpenSubKey(
@@ -192,6 +195,7 @@ internal static class DeviceNodeCreator
                         if (existing == null)
                         {
                             dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
+                            newlyCreatedInstId = instId;
                             break;
                         }
                     }
@@ -228,7 +232,17 @@ internal static class DeviceNodeCreator
             else
                 devEnumer = "HIDClass";
 
-            string? devInstId = null;
+            // T23-2 — fast-path the instance-ID lookup. The pre-DIF_REGISTERDEVICE
+            // walk above already discovered our newly-created devnode. After
+            // UpdateDriverForPlugAndPlayDevicesW the device's enumerator path
+            // doesn't change for the &IG_00 / VID_* path (the device stays at
+            // ROOT\<enumerator>\<inst>). Skip the redundant walk when we
+            // already have the ID; fall through to the registry walk only as
+            // a defensive fallback.
+            string? devInstId = newlyCreatedInstId;
+            if (devInstId != null && CM_Locate_DevNodeW(out uint _, devInstId, 0) != 0)
+                devInstId = null;
+            if (devInstId == null)
             try
             {
                 using var ek = Registry.LocalMachine.OpenSubKey(
