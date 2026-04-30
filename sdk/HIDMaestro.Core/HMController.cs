@@ -420,7 +420,13 @@ public sealed class HMController : IDisposable
                 // Swallow polling errors so a transient kernel-side failure
                 // doesn't kill the reader thread.
             }
-            try { Thread.Sleep(8); } catch { break; }
+            // T10 — wait on the CTS WaitHandle with an 8 ms timeout instead
+            // of Thread.Sleep(8). Cancel returns nearly immediately (kernel
+            // SetEvent on the cancel handle) instead of waiting up to 8 ms
+            // for the next sleep slice to expire. Net Dispose latency drops
+            // from up-to-8 ms to under 1 ms per controller — small but real
+            // for callers that batch-dispose many controllers in series.
+            try { ct.WaitHandle.WaitOne(8); } catch { break; }
         }
     }
 
