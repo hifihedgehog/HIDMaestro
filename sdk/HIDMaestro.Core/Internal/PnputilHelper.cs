@@ -139,14 +139,29 @@ internal static class PnputilHelper
             .ToList();
     }
 
+    // v1.3.0 — per-process positive cache. Once we've confirmed the driver
+    // is installed in this process (or successfully installed it), every
+    // subsequent IsDriverInstalled / IsHidMaestroDriverInstalled call within
+    // this process can skip the pnputil /enum-drivers /format xml call
+    // (which, on machines with hundreds of drivers, takes 200–500 ms even
+    // on a fast box). The negative case is NOT cached — if the driver isn't
+    // installed yet, we want fresh state on every check until it is.
+    private static volatile bool s_installedConfirmed;
+    internal static void InvalidateInstalledCache() => s_installedConfirmed = false;
+    internal static void MarkInstalledConfirmed() => s_installedConfirmed = true;
+
     /// <summary>True iff a HIDMaestro package matching every entry in
     /// <see cref="HidMaestroInfNames"/> is currently in the driver store.
     /// Replaces the previous substring grep on enum output.</summary>
     public static bool IsHidMaestroDriverInstalled()
     {
+        if (s_installedConfirmed) return true;
+
         var pkgs = FindHidMaestroPackages();
-        return HidMaestroInfNames.All(name =>
+        bool ok = HidMaestroInfNames.All(name =>
             pkgs.Any(p => string.Equals(p.OriginalName, name, StringComparison.OrdinalIgnoreCase)));
+        if (ok) s_installedConfirmed = true;
+        return ok;
     }
 
     /// <summary>Removes one driver package by published name with retry on
@@ -192,6 +207,10 @@ internal static class PnputilHelper
     /// prevents the "stale entry blocks reinstall" failure mode.</summary>
     public static void RemoveAllHidMaestroPackages()
     {
+        // Removal busts the per-process positive cache; the next
+        // IsHidMaestroDriverInstalled call will re-enumerate.
+        InvalidateInstalledCache();
+
         var cleanup = EnumerateDrivers()
             .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
                      && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,

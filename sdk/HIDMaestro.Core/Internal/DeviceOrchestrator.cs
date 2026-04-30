@@ -1458,11 +1458,17 @@ internal static class DeviceOrchestrator
             var sw = Stopwatch.StartNew();
             int slotsAfter = slotsBefore;
             int slotWaitBudget = TimeoutScale.Apply(15000);
+            // v1.3.0 — tighter poll cadence (25 ms vs 100 ms) reduces the
+            // worst-case tail wait from ~99 ms to ~24 ms after the slot
+            // actually claims. CountConnectedXInputSlots calls XInputGetState
+            // for slots 0–3 — each call is a few-hundred-µs P/Invoke into
+            // xinput1_4, so 25 ms cadence is well under any meaningful CPU
+            // overhead.
             while (sw.ElapsedMilliseconds < slotWaitBudget)
             {
                 slotsAfter = CountConnectedXInputSlots();
                 if (slotsAfter > slotsBefore) break;
-                Thread.Sleep(100);
+                Thread.Sleep(25);
             }
             // Either the slot was claimed, or the budget elapsed and we move on.
             LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");

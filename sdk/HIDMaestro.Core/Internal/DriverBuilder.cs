@@ -124,48 +124,63 @@ public static class DriverBuilder
     /// <para>Within a single process, idempotent via the
     /// <see cref="StagingDir"/> static cache (set on first successful
     /// extract, never invalidated mid-process).</para></summary>
+    private static readonly object s_extractLock = new();
+
     public static string EnsureExtracted()
     {
+        // Fast path (no lock): cache hit on the static field.
         if (StagingDir != null && Directory.Exists(StagingDir))
             return StagingDir;
 
-        string hashPrefix = EmbeddedManifest.Sha256Hex.Substring(0, 16);
-        string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{hashPrefix}");
-
-        // Cache hit: dir exists with the right set of files at the right
-        // sizes. Trust the contents — corruption is rare and the next
-        // signtool / inf2cat / pnputil run will surface any tampering.
-        if (Directory.Exists(dir) && IsStagingDirComplete(dir))
+        // Slow path: serialize across the (rare) cache-miss case so the
+        // ctor pre-warm task and a foreground InstallDriver call can't
+        // both extract to the same directory and step on each other's
+        // file writes.
+        lock (s_extractLock)
         {
+            // Re-check inside the lock — the other thread may have just
+            // populated the cache.
+            if (StagingDir != null && Directory.Exists(StagingDir))
+                return StagingDir;
+
+            string hashPrefix = EmbeddedManifest.Sha256Hex.Substring(0, 16);
+            string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{hashPrefix}");
+
+            // Cache hit: dir exists with the right set of files at the right
+            // sizes. Trust the contents — corruption is rare and the next
+            // signtool / inf2cat / pnputil run will surface any tampering.
+            if (Directory.Exists(dir) && IsStagingDirComplete(dir))
+            {
+                StagingDir = dir;
+                return dir;
+            }
+
+            // Cache miss or partial dir: re-extract everything.
+            Directory.CreateDirectory(dir);
+
+            var asm = typeof(DriverBuilder).Assembly;
+            var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in asm.GetManifestResourceNames())
+                available[name] = name;
+
+            foreach (string file in EmbeddedFiles)
+            {
+                string logical = "HIDMaestro.Resources." + file;
+                if (!available.TryGetValue(logical, out var actual))
+                    throw new InvalidOperationException(
+                        $"Embedded resource '{logical}' not found in HIDMaestro.Core.dll. " +
+                        "Did the PackResources MSBuild target run?");
+
+                using var stream = asm.GetManifestResourceStream(actual)
+                    ?? throw new InvalidOperationException($"Failed to open resource '{actual}'.");
+                string outPath = Path.Combine(dir, file);
+                using var fs = File.Create(outPath);
+                stream.CopyTo(fs);
+            }
+
             StagingDir = dir;
             return dir;
         }
-
-        // Cache miss or partial dir: re-extract everything.
-        Directory.CreateDirectory(dir);
-
-        var asm = typeof(DriverBuilder).Assembly;
-        var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string name in asm.GetManifestResourceNames())
-            available[name] = name;
-
-        foreach (string file in EmbeddedFiles)
-        {
-            string logical = "HIDMaestro.Resources." + file;
-            if (!available.TryGetValue(logical, out var actual))
-                throw new InvalidOperationException(
-                    $"Embedded resource '{logical}' not found in HIDMaestro.Core.dll. " +
-                    "Did the PackResources MSBuild target run?");
-
-            using var stream = asm.GetManifestResourceStream(actual)
-                ?? throw new InvalidOperationException($"Failed to open resource '{actual}'.");
-            string outPath = Path.Combine(dir, file);
-            using var fs = File.Create(outPath);
-            stream.CopyTo(fs);
-        }
-
-        StagingDir = dir;
-        return dir;
     }
 
     /// <summary>Validates that an existing staging dir contains every

@@ -143,14 +143,34 @@ public sealed class ControllerProfile
     [JsonIgnore]
     public bool HasDescriptor => !string.IsNullOrEmpty(Descriptor);
 
-    /// <summary>Parses the hex descriptor string into raw bytes.</summary>
+    // Lazy-cached parsed descriptor. v1.3.0 — GetDescriptorBytes is called
+    // multiple times per CreateController (HMController ctor +
+    // WriteInstanceConfig + DriverBuilder validation), each time re-running
+    // the Replace + Substring + Convert.ToByte parse loop over the hex
+    // string. Caching the result on the instance saves N–1 parses where
+    // N is the number of times the bytes are needed (typically 2–3).
+    [JsonIgnore]
+    private byte[]? _cachedDescriptor;
+    [JsonIgnore]
+    private bool _descriptorCached;
+
+    /// <summary>Parses the hex descriptor string into raw bytes. Result is
+    /// cached on the instance after the first call; safe to call repeatedly.</summary>
     public byte[]? GetDescriptorBytes()
     {
-        if (string.IsNullOrEmpty(Descriptor)) return null;
+        if (_descriptorCached) return _cachedDescriptor;
+        if (string.IsNullOrEmpty(Descriptor))
+        {
+            _cachedDescriptor = null;
+            _descriptorCached = true;
+            return null;
+        }
         var hex = Descriptor.Replace(" ", "").Replace("-", "");
         var bytes = new byte[hex.Length / 2];
         for (int i = 0; i < bytes.Length; i++)
             bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        _cachedDescriptor = bytes;
+        _descriptorCached = true;
         return bytes;
     }
 }
