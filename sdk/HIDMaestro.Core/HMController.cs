@@ -70,6 +70,11 @@ public sealed class HMController : IDisposable
     // Sized at HidReportBuilder.InputReportByteSize, computed in the ctor.
     private readonly byte[] _reportBuffer;
 
+    // v1.3.0 — per-controller reusable raw report buffer. SubmitRawReport
+    // (DualSense / vendor-protocol path) used to do report.ToArray() per
+    // call; this 64-byte buffer absorbs the copy without the alloc churn.
+    private readonly byte[] _rawReportBuffer = new byte[64];
+
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
     /// this virtual controller. Subscribers must be thread-safe.
@@ -364,12 +369,16 @@ public sealed class HMController : IDisposable
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         if (report.Length > 64) throw new ArgumentException("Report exceeds the 64-byte shared section payload.", nameof(report));
 
-        byte[] copy = report.ToArray();
+        // v1.3.0 — copy into the per-controller reusable buffer instead of
+        // report.ToArray()'ing per call. Vendor-protocol consumers (PadForge
+        // DualSense path, etc.) hit this path at the same rate as
+        // SubmitState; the alloc-per-call cost was visible.
+        report.CopyTo(_rawReportBuffer.AsSpan());
         // Raw mode reuses the GIP buffer at whatever state SubmitState last
         // left it in (or zero if SubmitState was never called) — raw consumers
         // are expected to also call SubmitState if they need GIP/XInput.
         SharedMemoryIO.WriteInputFrame(
-            _inputView, _inputEvent, ref _inputSeqNo, copy, copy.Length, _gipBuf);
+            _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length, _gipBuf);
     }
 
     /// <summary>Background polling loop that reads from the per-controller
