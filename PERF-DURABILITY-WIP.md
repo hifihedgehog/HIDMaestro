@@ -60,6 +60,12 @@ User d3xMachina reported "sometimes it takes ages to disconnect the controllers 
 
 **T37 fix:** drop the `SwdDeviceFactory.Remove` `WaitForExit` budget from 30 s to 8 s base (still scaled by `TimeoutScale.Apply` for slow hardware — Atom 10× → 80 s). Healthy `SwDeviceClose` typically completes in <100 ms; 8 s is plenty for a real cascade. Stuck-helper falls through to the outer `DeviceManager.RemoveDevice` pnputil/devcon fallbacks, which is what was doing the actual cleanup anyway. Direct user-visible impact: 3-controller stuck-teardown drops from ~90 s to ~24 s.
 
+**T38 fix (same gh#18 evidence):** d3xMachina's log also shows `driver install check (deployed=True) in 1695ms` on the first call after process launch. Dominant cost was `pnputil /enum-drivers /format xml` + XML parse. Replaced with a direct `%SYSTEM%\DriverStore\FileRepository` walk for `hidmaestro.inf_*` and `hidmaestro_xusb.inf_*` directories (~5 ms typical). Falls through to pnputil enum on filesystem-walk failure for edge cases. User-visible impact: first-call IsDriverInstalled drops from ~1.7 s to ~5 ms = direct 1.5–1.7 s savings on every cold-process warm-launch.
+
+**C17 (T25–T36 cumulative validation):** 26/26 PASS in 1978 s (-1.9% from baseline). Median 448 ms, p25 = 147 ms, p75 = 561 ms across 119 setups. 9 Series-BT-bind outliers (within the 6–12 noise band). Phase 1 stable across all 8 batteries: median oscillates in 388–448 ms band depending on outlier mix. Battery wall stable in 1949–1978 s range (1.9–3.6% below baseline). All cycle-level + dedup wins land cleanly without regression.
+
+**T37 + T38 need C18 to validate as a battery (would need a live re-launch with the new SDK build to see d3x's stuck-teardown path resolved).**
+
 ---
 
 ## Why HIDMaestro is slower than ViGEmBus per-controller — and what we've done about it
