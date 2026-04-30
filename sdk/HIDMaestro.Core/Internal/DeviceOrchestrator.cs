@@ -1478,21 +1478,33 @@ internal static class DeviceOrchestrator
             using var _ts = new TimingScope(controllerIndex, profile.Id, "7.wait_xinput_slot_claim");
             var sw = Stopwatch.StartNew();
             int slotsAfter = slotsBefore;
-            int slotWaitBudget = TimeoutScale.Apply(15000);
-            // v1.3.0 — tighter poll cadence (25 ms vs 100 ms) reduces the
-            // worst-case tail wait from ~99 ms to ~24 ms after the slot
-            // actually claims. CountConnectedXInputSlots calls XInputGetState
-            // for slots 0–3 — each call is a few-hundred-µs P/Invoke into
-            // xinput1_4, so 25 ms cadence is well under any meaningful CPU
-            // overhead.
-            while (sw.ElapsedMilliseconds < slotWaitBudget)
+            // v1.3.0 — short-circuit when XInput is already at the 4-slot
+            // cap before we even started: there's no slot 5 to wait for.
+            // Without this, every 5th-onward Xbox-family create burns the
+            // full 15 s budget waiting for the impossible. The controller
+            // is still functional via DI/HIDAPI/Browser/WGI; it just
+            // doesn't get an XInput slot. Same outcome, 15 s faster.
+            if (slotsBefore >= 4)
             {
-                slotsAfter = CountConnectedXInputSlots();
-                if (slotsAfter > slotsBefore) break;
-                Thread.Sleep(25);
+                LogDiag($"    XInput slot wait: skipped (slotsBefore={slotsBefore} already at cap)");
             }
-            // Either the slot was claimed, or the budget elapsed and we move on.
-            LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");
+            else
+            {
+                int slotWaitBudget = TimeoutScale.Apply(15000);
+                // Tighter poll cadence (25 ms vs 100 ms) reduces the
+                // worst-case tail wait from ~99 ms to ~24 ms after the slot
+                // actually claims. CountConnectedXInputSlots calls XInputGetState
+                // for slots 0–3 — each call is a few-hundred-µs P/Invoke into
+                // xinput1_4, so 25 ms cadence is well under any meaningful CPU
+                // overhead.
+                while (sw.ElapsedMilliseconds < slotWaitBudget)
+                {
+                    slotsAfter = CountConnectedXInputSlots();
+                    if (slotsAfter > slotsBefore) break;
+                    Thread.Sleep(25);
+                }
+                LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");
+            }
         }
 
         // Return main instance ID, or companion ID for companion-only profiles
