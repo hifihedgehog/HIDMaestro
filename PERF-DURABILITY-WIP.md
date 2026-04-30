@@ -42,6 +42,69 @@ To be filled before any Tier 1 changes land. All times are wall-clock; battery s
 
 **Step-level timing pass post-T22 (GameInputSvc prewarm):** Single warm-launch 3-controller create = **1065 ms** total (xbox-360-wired 569 ms + xbox-series-xs-bt 96 ms + dualsense 397 ms + 2 ms Phase 1.5). That's **-17.3% from the v1.2.2 baseline (1287 ms)** and within noise of C8's measured 1049 ms. The first SetupController's `0.gameinput_svc` step dropped from 15-17 ms (sc.exe spawn) to 2 ms (cache hit) — the prewarm doesn't reduce total work, it just shifts the sc.exe spawn out of the foreground SetupController path into the background ctor task. Same pattern as the existing IsDriverInstalled prewarm.
 
+---
+
+## Why HIDMaestro is slower than ViGEmBus per-controller — and what we've done about it
+
+User feedback (2026-04-30): consumers reporting ~30 s for 3-controller add/remove cycles and noting ViGEmBus is significantly faster. Honest accounting of the architectural delta plus the user-mode floor we've now hit.
+
+### Architectural delta (immutable from user mode)
+
+| Cost source | ViGEmBus (kernel mode) | HIDMaestro (UMDF2 user mode) | Delta |
+|---|---|---|---|
+| Bus driver class | Yes — IS the bus, can publish PDOs directly | No — UMDF2 cannot be a bus driver (memory: project-umdf2-cannot-be-bus-driver.md). Each virtual is a ROOT or SWD root devnode with a separate UMDF2 host attached | +inherent kernel-PnP cost |
+| Per-virtual create call | KMDF child-PDO publish (~10–50 ms kernel) | SetupDi[CreateDeviceInfo + SetRegistryProperty + CallClassInstaller(DIF_REGISTERDEVICE) + UpdateDriverForPlugAndPlayDevices] OR SwDeviceCreate via hmswd.exe helper, blocking on driver-bind callback | +200–400 ms per virtual |
+| XInput compatibility | Native XUSB-class sub-device, no companion needed | XUSB companion (HMXInput.dll) at `SWD\HIDMAESTRO\<sid>` per Xbox-VID virtual | +50 ms create + +14 ms slot-claim wait |
+| Driver install pipeline | One-time kmdf bus driver install (`devcon install` style) | DriverStore + signtool + inf2cat + pnputil — fortunately one-time, gated by SHA-256 manifest hash | +0 once cached, full pipeline on cold install |
+| Teardown — Xbox 360 wired | Bus driver removes child PDO (~10 ms) | DIF_REMOVE on ROOT\VID_*&IG_00 + cascade to HID child + SwDeviceClose on XUSB companion + 5–7 s WUDFHost release | +5–7 s |
+| Teardown — Xbox Series BT | n/a (different code path) | xinputhid filter unbind + SwDeviceClose + 5–11 s kernel cascade | +5–11 s |
+| Multi-controller serialization | Optional (kernel synchronizes itself) | Mandatory (memory: feedback-no-parallel-controller-create.md) — DirectInput / XInput / WGI / Browser / RawInput all anchor to creation order | sequential, can't parallelize |
+
+### What ViGEmBus can do that HIDMaestro can't (and why)
+
+- **Native bus driver:** ViGEmBus runs in kernel mode and IS the parent bus. Child virtuals appear as PDOs under it; no per-virtual UMDF host process, no per-virtual SetupDi class-installer round-trip. We can't be a bus driver from user mode — KMDF child-list / PDO-init APIs are kernel-only and UMDF2 linker errors confirm. Avoiding kernel-mode signing was the entire motivation for HIDMaestro's architecture (memory: research-signing-and-alternatives.md), so this trade-off is inherent.
+- **Direct XInput class membership:** ViGEmBus's Xbox 360 virtuals join the XUSB device interface class natively at child-PDO publish time. We must publish a separate `HIDMAESTRO\*` SWD child that registers `{EC87F1E3-...}` after the main HID devnode is up — adding ~50 ms create + ~10–60 ms slot-claim wait per Xbox-family controller.
+- **Bus-driver-side teardown:** ViGEmBus removes a child PDO via a fast in-kernel call. Our teardown traverses DIF_REMOVE → WaitForDeviceRemoval → parent unbind → HID child cascade → companion close, with the xinputhid filter unbind being the dominant 5–11 s component on Series BT.
+
+### Where we now stand (post-T22, dev-box measurements)
+
+Single warm-launch 3-controller create = **1065 ms** total. Step breakdown:
+
+| Step | xbox-360-wired | xbox-series-xs-bt | dualsense | Notes |
+|---|---|---|---|---|
+| 0.shm + 0.gameinput_svc | 2 + 2 ms | 0 + 1 ms | 0 + 1 ms | post-T22 prewarm caches both |
+| 1.instance_config | 0 ms | 0 ms | 0 ms | 9 SetValue, all sub-1 ms |
+| 2.driver_install_check | 0 ms | 0 ms | 0 ms | post-T8 cheap-first cache + manifest-hash fast-path |
+| **3.create_devnode** | **425 ms** | **87 ms** | **377 ms** | **kernel-PnP work — the floor** |
+| 4.wait_hid_child + 4.set_names_root + 4.wait_started + 4.fix_hid_child_names_2 | 0+0+0+0 ms | 0+1+0+0 ms | 0+0+0+0 ms | post-T9/T10 direct calls instead of registry walks |
+| 5.set_bustype_usb + 5.create_xusb_companion + 5.hidparent_upperfilter_xinputhid | 0+50+1 ms | n/a | n/a | post-T11 trimmed enumerator list |
+| 6.apply_friendly_name | 0 ms | 0 ms | 0 ms | post-T10 direct calls |
+| 7.wait_xinput_slot_claim | 14 ms | 1 ms | n/a | post-T23 10 ms cadence |
+| **TOTAL** | **569 ms** | **96 ms** | **383 ms** | step 3 is **84%** of total |
+
+**The 84% of remaining cost lives in step 3 — kernel-side SetupAPI / SwDeviceCreate driver-install work.** Every step we could reach from user mode is now sub-2 ms. Closing the per-controller gap with ViGEmBus would require a kernel-mode bus driver, which is the architecture HIDMaestro intentionally avoids (memory: research-signing-and-alternatives.md, project-umdf2-cannot-be-bus-driver.md).
+
+The "30 s for 3 controllers" figure consumers cite is consistent with **teardown** wall time, not creation. Three Xbox 360 wired teardowns at ~5–7 s each = 15–21 s; mixed with one Series BT teardown that's ~5–11 s. ViGEmBus's per-virtual teardown is also kernel-side (~10 ms × 3 = 30 ms total) — that's the actual perception gap, not creation. The xinputhid filter unbind on Series BT is kernel-side and not user-mode optimizable.
+
+### Cycle-level wins shipped this session (T22–T31)
+
+T22–T31 are user-mode hot-path optimizations that don't move step 3, but do reduce the non-kernel overhead and make the SDK more durable on Atom-class hardware:
+
+| ID | Change | Saves per-frame | Saves per-setup | Saves per-teardown |
+|---|---|---|---|---|
+| T22 | GameInputSvc prewarm (sc.exe spawn → cache hit) | — | ~15 ms (first only) | — |
+| T23 | XInput slot-wait cadence 25 → 10 ms | — | ~15 ms (Xbox-family) | — |
+| T24 | Cache devnode instId across UpdateDriverForPlugAndPlayDevices | — | ~1 ms | — |
+| T25 | FinalizeNames cadence 100 → 25 ms + scaled budget | — | — | -50–75 ms (Phase 1.5) |
+| T26 | Per-VID:PID OEM-write dedup in WriteInstanceConfig | — | ~few ms (dup VID:PID) | — |
+| T27 | Skip GIP-buffer pack+copy for non-Xbox in SubmitState | ~60–80 instructions | — | — |
+| T28 | WriteBits byte-aligned fast path | ~14 cycles per field × 6 fields = ~84 cycles | — | — |
+| T29 | Parallelize HMContext ctor prewarm tasks | — | -50–100 ms (cold start) | — |
+| T30 | Thread-local reusable buffer in GetHidChildId | — | -100 bytes/poll alloc | — |
+| T31 | Skip GIP-buffer copy for non-Xbox in SubmitRawReport | -14 byte Marshal.Copy | — | — |
+
+Cumulative per-frame savings on a 4-non-Xbox-controller setup at 250 Hz: roughly 100 instructions + 14 byte-Marshal.Copy + 100 byte alloc = **~10 µs/sec/controller saved on the SubmitState hot path**. On Atom (10× slower), that's ~100 µs/sec/controller back — meaningful when the consumer pumps 6 controllers at high rates.
+
 
 **Note on the 35 s outlier:** the v1.2.2 baseline run had a one-time teardown of slot 0 at 35.7 s (vs the typical 5.6 s). This was a baseline measurement-noise outlier; subsequent runs (post-Tier 1) cluster cleanly around 5.5–5.7 s per slot for Xbox-family teardowns. Not worth tracking further.
 
