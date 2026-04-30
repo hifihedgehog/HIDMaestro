@@ -566,12 +566,16 @@ public static class DeviceManager
                             // SWD orphans that the kernel won't release until
                             // reboot — without Kill the entire cleanup loop
                             // hung indefinitely waiting on ReadToEnd.
+                            // T38-2 — scaled budget so Atom-class hardware
+                            // doesn't get a 5 s timeout while everything else
+                            // is 50 s. Was the only un-scaled WaitForExit
+                            // budget in DeviceManager.
                             var outTask = proc.StandardOutput.ReadToEndAsync();
                             var errTask = proc.StandardError.ReadToEndAsync();
-                            if (!proc.WaitForExit(5000))
+                            if (!proc.WaitForExit(TimeoutScale.Apply(5000)))
                             {
                                 try { proc.Kill(entireProcessTree: true); } catch { }
-                                proc.WaitForExit(2000);
+                                proc.WaitForExit(TimeoutScale.Apply(2000));
                             }
                             try { outTask.GetAwaiter().GetResult(); } catch { }
                             try { errTask.GetAwaiter().GetResult(); } catch { }
