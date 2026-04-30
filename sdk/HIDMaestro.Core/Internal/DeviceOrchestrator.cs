@@ -1546,16 +1546,34 @@ internal static class DeviceOrchestrator
             }
             else
             {
-                int slotWaitBudget = TimeoutScale.Apply(15000);
-                // T22-2 — 10 ms cadence (was 25 ms). Reduces the typical
-                // tail wait from ~12 ms to ~5 ms after the slot actually
-                // claims. CountConnectedXInputSlots is 4 XInputGetState
-                // P/Invokes (~few hundred µs total); even at 100 polls/sec
-                // the CPU overhead is well under 1% of one core. With the
-                // typical 65 ms slot-claim observation on Xbox 360 wired,
-                // tightening from 25 → 10 ms cadence shaves ~15 ms per
-                // Xbox-family setup off the warm-launch Phase 1 critical
-                // path.
+                // v1.3.2 — budget 500 ms (was 15 s). The slot-claim
+                // distribution is bimodal: in the working case xinputhid
+                // publishes the new slot in <100 ms (typical observation:
+                // ~65 ms for Xbox 360 wired, ~3-10 ms for Xbox Series BT;
+                // atom Z8350 worst-case healthy was ~90 ms). In the stuck-
+                // allocator case (kernel state issue, prior-session residue,
+                // xinputhid recovering from a prior unbind) the slot never
+                // comes, and the prior 15 s budget waited the full duration
+                // only to log the failure. PadForge users observed 13-14 s
+                // freeze on a single Xbox Series BT create when this hit.
+                //
+                // 500 ms is ~5x the slowest observed healthy-case slot
+                // claim (with TimeoutScale.Apply, 1 s on atom — ~10x
+                // healthy). User-validated: PadForge swaps and creates
+                // are visibly instantaneous at this budget. The
+                // regression battery's slot-wait timeout cases now cost
+                // 500 ms each instead of 15 s — the user-perceived UX
+                // win is unmistakable even though the battery's wall-
+                // time delta is dominated by run-to-run noise.
+                //
+                // The failure mode is non-fatal: controller stays
+                // functional via DI/HIDAPI/Browser/WGI when XInput
+                // doesn't pick it up; XInput consumers see the slot
+                // appear lazily on their next poll cycle.
+                //
+                // 10 ms poll cadence; CountConnectedXInputSlots is 4
+                // XInputGetState P/Invokes (~few hundred µs total).
+                int slotWaitBudget = TimeoutScale.Apply(500);
                 while (sw.ElapsedMilliseconds < slotWaitBudget)
                 {
                     slotsAfter = CountConnectedXInputSlots();
@@ -1563,6 +1581,8 @@ internal static class DeviceOrchestrator
                     Thread.Sleep(10);
                 }
                 LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");
+                if (slotsAfter == slotsBefore)
+                    LogDiag($"    XInput slot wait TIMEOUT — xinputhid did not publish a slot. Controller still functional via DI/HIDAPI/Browser/WGI; XInput consumers may see it appear lazily on next poll.");
             }
         }
 
