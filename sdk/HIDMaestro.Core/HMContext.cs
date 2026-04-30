@@ -65,6 +65,13 @@ public sealed class HMContext : IDisposable
                 // LoadDefaultProfiles call returns immediately. The
                 // parse result is process-wide cached.
                 _ = Internal.ProfileDatabase.LoadEmbedded();
+                // T10 — pre-prime the driver-installed positive cache. If
+                // the driver is already installed (common case after first
+                // launch), this means the first SetupController's
+                // IsDriverInstalled gate is a single bool read instead of
+                // a DriverStore filesystem walk. Cheap (<5 ms) and doesn't
+                // require admin.
+                Internal.DriverBuilder.IsDriverInstalled();
             }
             catch
             {
