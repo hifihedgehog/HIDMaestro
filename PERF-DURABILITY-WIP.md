@@ -100,7 +100,24 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 | T7-05 | 7 | hmswd.exe — keep one persistent helper process, dispatch commands via stdin, eliminate per-call spawn cost | 50–100 ms per SwDeviceCreate | medium | pending | requires hmswd protocol change; defer if scope grows |
 | T7-06 | 7 | `EnsureExtracted` — extract resources in parallel (signtool deps + driver bins) | 200–500 ms saved on cold first run | low | pending |  |
 | T7-07 | 7 | Pre-trigger `EnsureExtracted` from `HMContext` ctor on a background thread so it's done by the time `InstallDriver` is called | 200–500 ms hidden in user think time | low | done | non-blocking warm-up |
-| T7-08 | 7 | `Registry.LocalMachine.OpenSubKey` chains in DeviceProperties — replace with single P/Invoke `RegOpenKeyExW` to keep handle through several SetValue calls | ~10–30 ms per controller cumulative | low | pending |  |
+| T7-08 | 7 | `Registry.LocalMachine.OpenSubKey` chains in DeviceProperties — replace with single P/Invoke `RegOpenKeyExW` to keep handle through several SetValue calls | ~10–30 ms per controller cumulative | low | done | covered by T5-01 (SetAllNamingProperties) |
+| T8-01 | 8 | `EnsureExtracted` thread-safety lock | n/a | low | done | ctor pre-warm + foreground InstallDriver could race |
+| T8-02 | 8 | `IsHidMaestroDriverInstalled` per-process positive cache | ~200–500 ms saved per repeated call | low | done | InvalidateInstalledCache on RemoveAllPackages |
+| T8-03 | 8 | `ControllerProfile.GetDescriptorBytes` lazy cache | ~5 ms saved per CreateController (called 2-3 times each) | low | done |  |
+| T8-04 | 8 | XInput slot-claim wait poll cadence 100 ms → 25 ms | up to 75 ms saved per Xbox-family create | low | done |  |
+| T8-05 | 8 | `EnsureGameInputService` per-process cache | 100–300 ms saved per CreateController after first | low | done | sc.exe spawn skipped |
+| T8-06 | 8 | `WriteGameInputRegistry` open parent gp key once, create children relative | ~5–15 ms saved per CreateController | low | done |  |
+| T8-07 | 8 | `WriteGameInputRegistry` per-VID:PID cache | ~5–15 ms saved per same-VID:PID controller | low | done | identical writes for same profile |
+| T8-08 | 8 | `HMController.Dispose` Join(500) scaled via TimeoutScale | n/a | low | done | scale=10 → 5s join cap |
+| T8-09 | 8 | `DriverStoreContainsHidMaestro` filesystem check replaces pnputil enum on FullDeploy fast path | 200–500 ms saved on warm launches | low | done | FullDeploy now ~5 ms total when hash matches |
+| T8-10 | 8 | `WriteInputFrame` bulk Marshal.Copy (was 256+14 per-byte loops) | ~270 P/Invokes/frame eliminated | low | done | hot path; SubmitState at 250–1000 Hz × N |
+| T8-11 | 8 | `TryReadOutputFrame` bulk Marshal.Copy | analogous output-side win | low | done |  |
+| T8-12 | 8 | `BuildReportInto` buffer-reuse overload (eliminates per-frame byte[] alloc) | reduces GC pressure on SubmitState | low | done | _reportBuffer per-controller |
+| T8-13 | 8 | `SubmitRawReport` per-controller _rawReportBuffer (eliminates .ToArray() per call) | reduces GC pressure on vendor-protocol path | low | done |  |
+| T8-14 | 8 | `LoadEmbedded` process-wide cache + ctor pre-load | 50–150 ms saved per HMContext after first | low | done | shared across HMContext instances |
+| T8-15 | 8 | `LoadProfilesFromDirectory` parallel JSON parse | proportional to core count | low | done | mirrors LoadEmbedded |
+| T8-16 | 8 | `WaitForHidChild` (DeviceOrchestrator) delegates to DeviceManager (CM-signal driven) | up to 99 ms tail wait saved | medium | done |  |
+| T8-17 | 8 | `WaitForDeviceStarted` poll cadence 100 ms → 25 ms | up to 75 ms tail wait saved | low | done |  |
 
 ---
 
