@@ -35,7 +35,7 @@ HIDMaestro runs entirely in user mode. It works with locally generated self-sign
 HIDMaestro uses UMDF2 (User-Mode Driver Framework). The driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro cannot blue-screen the machine. No EV certificate, no WHQL. HIDMaestro works with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
 
 ### Exact Hardware Identity
-Choose from 225 embedded profiles across 32 vendors (Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more), or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Choose from 224 embedded profiles across 32 vendors (Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more), or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -62,14 +62,14 @@ Build the descriptor with [`HidDescriptorBuilder.AddPidFfbBlock`](sdk/HIDMaestro
 Create and remove controllers without reboots. Each controller is independently disposable: remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total. Subsequent runs on the same boot match fresh-boot timings — see Techniques: Session-Unique Instance-ID Suffix for the kernel-state-pollution fix that closes the gap.
 
 ### Profile-Based
-Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
+Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 224 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
 ### Custom Controllers: build or modify any device
 Using the public `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs, consumers can:
 
 - **Clone and modify** an existing profile: e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
 - **Build new controllers from scratch**: define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
-- **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
+- **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 224-profile catalog.
 - **Capture a connected device**: `HMDeviceExtractor.Extract` reads the cached HID descriptor Windows parsed from any real HID device you have plugged in and returns a ready-to-deploy `HMProfile`. No JSON authoring, no descriptor reverse engineering — point it at the controller and you get a matching virtual.
 
 The result is an SDK for fully custom virtual controllers that present as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
@@ -305,7 +305,7 @@ HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired du
 #   pause / resume        idle CPU test (driver should use ~0%)
 #   quit                  graceful shutdown
 
-# List available profiles (225 across 32 vendors)
+# List available profiles (224 across 32 vendors)
 HIDMaestroTest.exe list
 
 # Search profiles
@@ -330,14 +330,16 @@ No external scripts, no manual setup, no popups. Just the one console window. Re
 
 ### Live-swap regression battery
 
-`test/regression/swap_regression.ps1` is a 23-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all five controller archetypes (Xbox 360 Wired, Xbox Series Bluetooth, DualSense, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`). Run from an elevated PowerShell:
+`test/regression/swap_regression.ps1` is a 26-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence plus the HID PID 1.0 force-feedback round-trip, and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all controller archetypes the catalog exercises (Xbox 360 Wired, Xbox Series Bluetooth, Xbox One BT, Xbox Elite v2 BT, DualSense, DualSense BT, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`).
+
+The harness sync is event-driven: the test app emits `[ACK]` on stdout after each stdin command finishes processing, and the harness blocks on that marker. No time-based settle, no scaling — every wait lasts exactly as long as the SDK actually takes. Run from an elevated PowerShell:
 
 ```powershell
-./test/regression/swap_regression.ps1                # full battery, ~32 min
+./test/regression/swap_regression.ps1                # full battery, ~16 min on Ryzen-class
 ./test/regression/swap_regression.ps1 -Filter 'S08*' # one scenario, ~1-2 min
 ```
 
-Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path.
+Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path. Validated 26/26 PASS on a Ryzen 9955HX3D dev box (Win11 26200, ~16 min wall time) and on an Intel Atom Z8350 fixture (Win10 IoT LTSC 19044, ~30 min) — the slow-hardware result is the reason the harness is pure ACK-driven instead of fixed-sleep timed.
 
 ## Profile System
 
@@ -506,11 +508,11 @@ Only one device interface is registered on the XUSB companion. Publishing a seco
 | Warm start, single controller (drivers cached) | **~200ms** |
 | Warm start, 4 mixed controllers (2 BT + 2 Xbox 360 wired) | **~2.2-2.8s** |
 | Warm start, 6 mixed controllers (sequential) | **~3.5s** |
-| Single dispose: plain HID (DualSense, wheels, etc.) | **~200ms** |
-| Single dispose: Xbox 360 Wired (XUSB companion) | ~5.6s |
-| Single dispose: Xbox Series BT (xinputhid filter) | ~11s |
-| 4-controller cleanup (parallel, batch path) | ~30s |
-| 6-controller mixed cleanup (sequential) | ~33s (dominated by Xbox teardown) |
+| Single dispose: plain HID (DualSense, wheels, etc.) | **~80ms** |
+| Single dispose: Xbox 360 Wired (XUSB companion) | **~135ms** (was ~5,700ms before v1.3.1) |
+| Single dispose: Xbox Series BT (xinputhid + SwD parent) | **~500ms** (was ~11s before v1.3.1) |
+| 4-controller cleanup (parallel, batch path) | ~1.5s |
+| 6-controller mixed cleanup (sequential) | ~3-4s |
 
 Cold start includes certificate creation, signing, catalog generation, driver package installation, and device creation. This only happens on first run or after SDK updates. Warm start uses event-driven polled waits that exit as soon as PnP is ready. Zero fixed `Thread.Sleep` calls remain in any creation, cleanup, or finalization path. Controllers are independently disposable: removing one does not disturb the others.
 
@@ -518,7 +520,9 @@ Cold start includes certificate creation, signing, catalog generation, driver pa
 
 **Per-step install breakdown** (visible in stdout when `HMContext.InstallDriver` runs): extract ~20ms · remove old packages ~100ms · sign ~130ms · generate catalogs ~840ms (the largest single step, AV-sensitive) · install drivers ~580ms · total ~1.7s on a clean machine. On corporate workstations with hundreds of devices in the PnP tree, total install can stretch to 5-20s; HIDMaestro doesn't run `pnputil /scan-devices` (it's a no-op for our INFs and was the largest variable contributor).
 
-**Batch teardown:** `HMContext.Dispose()` and the public `DisposeControllersInParallel(controllers, perControllerCallback)` parallelize per-controller `DIF_REMOVE` work and run the system-wide HID orphan sweep once at the end instead of per-controller. The kernel still serializes much of the actual filter/companion unload, so the savings is modest (~3s at N=4) — the per-controller wall-clock numbers above are sequential-dispose worst case. Live profile-switch (single `HMController.Dispose()` mid-session) stays synchronous because slot-allocation determinism requires the old devnode fully gone before the new one is created.
+**Batch teardown:** `HMContext.Dispose()` and the public `DisposeControllersInParallel(controllers, perControllerCallback)` parallelize per-controller `DIF_REMOVE` work and run the system-wide HID orphan sweep once at the end instead of per-controller. With v1.3.1's SwD-first ordering the per-controller cost is already ~135–500ms, so the batch path's wall-clock benefit is now mostly avoiding the per-controller orphan-sweep duplication; for 4-6 mixed controllers the cleanup typically completes in 1.5-4s end to end. Live profile-switch (single `HMController.Dispose()` mid-session) stays synchronous because slot-allocation determinism requires the old devnode fully gone before the new one is created.
+
+**Self-healing on init:** `HMContext.InstallDriver` calls `RemoveAllVirtualControllers` first thing, so any orphans left by a prior crashed session are cleaned up before the new install runs. The same call is exposed publicly as `HMContext.RemoveAllVirtualControllers()` for consumers who want explicit defensive cleanup (e.g. on app exit). In normal operation, individual `HMController.Dispose()` is sufficient — there is no per-process cleanup obligation on shutdown.
 
 ### Profile Architecture Groups and Teardown Timing
 
@@ -526,16 +530,16 @@ Disposal speed depends on which kernel-side drivers are in the device stack. Eac
 
 #### 1. Plain HID: generic gamepads, wheels, HOTAS, flight sticks (~200ms)
 
-Profiles where `driverMode` is not `"xinputhid"` and the VID is not Microsoft (`0x045E`). Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 225-profile catalog.
+Profiles where `driverMode` is not `"xinputhid"` and the VID is not Microsoft (`0x045E`). Includes DualSense, DualShock 4, all Logitech wheels, Thrustmaster HOTAS, flight sticks, pedals, arcade sticks, and most of the 224-profile catalog.
 
 ```
 ROOT\VID_054C&PID_0CE6\NNNN          ← our UMDF2 driver (mshidumdf host)
   └─ HID\VID_054C&PID_0CE6\...       ← raw HID PDO, no upper filter
 ```
 
-**Lightest stack.** One `DIF_REMOVE` on the ROOT parent tears down the entire tree. No XUSB companion device, no Microsoft upper filter. Creation ~200ms, disposal ~200ms.
+**Lightest stack.** One `DIF_REMOVE` on the ROOT parent tears down the entire tree. No XUSB companion device, no Microsoft upper filter. Creation ~200ms, disposal ~80ms.
 
-#### 2. Non-xinputhid Xbox: Xbox 360 Wired (~5.7s)
+#### 2. Non-xinputhid Xbox: Xbox 360 Wired (~135ms post-v1.3.1)
 
 Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is delivered via a separate SWD-enumerated XUSB companion device running `HMXInput.dll`. WGI dispatch also runs through that companion, admitted by the xinputhid UpperFilter tripwire described in Techniques.
 
@@ -562,9 +566,9 @@ SWD\HIDMAESTRO\<sid>_NNNN            ← XUSB companion (HMXInput.dll)
                                      working put_Vibration on Chromium)
 ```
 
-**Medium stack.** Two device trees to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~5.7s.
+**Medium stack.** Two device trees to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~135ms (down from ~5,700ms before v1.3.1 — see "SwD-first removal ordering" below).
 
-#### 3. xinputhid Xbox: Xbox Series X|S Bluetooth (~11s)
+#### 3. xinputhid Xbox: Xbox Series X|S Bluetooth (~500ms post-v1.3.1)
 
 Profiles with `driverMode: "xinputhid"`. These match `xinputhid.inf [GIP_Hid]` by hardware ID (`HID\VID_045E&PID_0B13&IG_00`), which binds Microsoft's `xinputhid.sys` as an upper filter on the HID child. xinputhid provides XInput delivery + 16-button descriptor synthesis natively: no XUSB companion needed, single Device Manager entry.
 
@@ -587,15 +591,23 @@ SWD\HIDMAESTRO_VID_045E_PID_0B13&IG_00\<sid>_NNNN
         └─ 16-button HID synthesis
 ```
 
-**Heaviest stack.** xinputhid is a Microsoft inbox kernel filter driver. Its teardown goes through the full PnP query-remove → class installer → filter unload chain. This is entirely controlled by Microsoft's driver; HIDMaestro cannot speed it up. Creation ~200ms, disposal ~11s.
+**Heaviest stack of the three, but no longer dominant.** xinputhid is a Microsoft inbox kernel filter driver. Pre-v1.3.1, teardown went through the full PnP query-remove → class installer → filter unload chain on every Dispose because `DeviceManager.RemoveDevice` removed HID children before the SwD parent (each child's `WaitForDeviceRemoval` then timed out at 2,000ms because the children couldn't unwind while the parent's HSWDEVICE refcount was still held). v1.3.1 closes the SwD parent first via `SwdDeviceFactory.Remove` and blocks on `CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED`; the children cascade automatically once the kernel releases the parent. Creation ~200ms, disposal ~500ms.
+
+#### SwD-first removal ordering (v1.3.1)
+
+Two of the three architecture groups (Xbox 360 Wired and Xbox Series BT) own a SwDevice-enumerated parent. SwDevice lifetimes are anchored to the HSWDEVICE handle, not the PnP devnode — children of a SwD parent cannot fully unwind their query-remove cascade until the parent's handle drops its kernel refcount. Pre-v1.3.1, `DeviceManager.RemoveDevice` issued `DIF_REMOVE` on every HID child first (each followed by a 2,000ms `WaitForDeviceRemoval` that timed out because the parent was still holding the lifetime lock), then closed the SwDevice handle. Net cost: ~5,700ms for Xbox 360 Wired, ~11,000ms for Xbox Series BT, scaling worse with more children.
+
+v1.3.1 inverts the order: for any `SWD\` parent, close the SwDevice handle FIRST via `SwdDeviceFactory.Remove`, block on `CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED` for the parent (so callers know the kernel has actually propagated removal, not just that the handle closed), then mop up any HID children that survived the cascade — usually none, because the SwD parent's release fires its children's removal in one cascade.
+
+A second optimization in the same change: when a HIDMAESTRO sweep walks registry entries that exist only as PHANTOM (registry residue from prior sessions, no live devnode), skip the `hmswd.exe` SwDeviceCreate-reconnect roundtrip entirely. Saves ~50-75ms per stale entry and prevents creep across same-process recreation cycles.
 
 #### Why this matters for consumers
 
 If your application needs fast profile switching (e.g. remapping a physical controller to a different virtual identity on the fly), the profile architecture group determines the user-perceived latency:
 
-- **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~400ms round trip (200ms dispose + 200ms create). Essentially instant.
-- **Switching to/from Xbox 360 Wired**: ~6-7s (XUSB companion teardown dominates).
-- **Switching to/from Xbox Series BT**: ~11-12s (xinputhid teardown dominates).
+- **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~280ms round trip (~80ms dispose + ~200ms create). Essentially instant.
+- **Switching to/from Xbox 360 Wired**: ~835ms round trip (~135ms dispose + ~700ms create), down from ~6.4s pre-v1.3.1.
+- **Switching to/from Xbox Series BT**: ~700ms round trip (~500ms dispose + ~200ms create), down from ~11s pre-v1.3.1.
 
 ## Why UMDF2 Is Enough
 
