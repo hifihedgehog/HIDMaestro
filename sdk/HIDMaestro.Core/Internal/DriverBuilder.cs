@@ -476,9 +476,25 @@ public static class DriverBuilder
     /// <summary>Checks if ALL required HIDMaestro drivers are in the store.
     /// Strict: requires a record per INF where <c>Provider Name == "HIDMaestro"</c>.
     /// Substring grepping was previously vulnerable to half-removed entries
-    /// matching by accident — see PnputilHelper for the failure-mode notes.</summary>
+    /// matching by accident — see PnputilHelper for the failure-mode notes.
+    ///
+    /// <para>v1.3.0 — cheap-first lookup ladder: (1) per-process positive
+    /// cache (instant after first confirmation); (2) DriverStore filesystem
+    /// check (~1 ms); (3) pnputil enum-drivers /format xml (~200–500 ms).
+    /// Most calls hit (1) or (2); pnputil is only consulted when neither
+    /// shortcut applies, e.g. cold start with no prior HKLM hash.</para></summary>
     public static bool IsDriverInstalled()
     {
+        // Filesystem check is locale-stable and fast. If both required
+        // INFs are in the DriverStore, mark the per-process cache and
+        // return true without touching pnputil.
+        if (DriverStoreContainsHidMaestro())
+        {
+            PnputilHelper.MarkInstalledConfirmed();
+            return true;
+        }
+        // Fall through to the full pnputil-backed check (slow path,
+        // typically only hit at cold start before any install).
         return PnputilHelper.IsHidMaestroDriverInstalled();
     }
 
