@@ -490,12 +490,37 @@ public class HidReportBuilder
 
     static void WriteBits(byte[] buffer, int bitOffset, int bitSize, int value)
     {
+        // T27-2 — fast path for byte-aligned, byte-multiple fields. The vast
+        // majority of HID descriptor fields fit this case: 8-bit triggers/
+        // hat (single byte), 16-bit sticks (two bytes), 32-bit composite
+        // axes (four bytes). Bit-by-bit fallback is only needed for
+        // odd-sized button bitmaps, mid-byte alignment etc. Writing whole
+        // bytes drops per-field cost from ~16-32 ops to ~2-4 ops on the
+        // common case — the dominant gain in SubmitState's hot path on
+        // descriptor-heavy profiles like DualSense.
+        if ((bitOffset & 7) == 0 && (bitSize & 7) == 0)
+        {
+            int byteIdx = bitOffset >> 3;
+            int byteCnt = bitSize >> 3;
+            uint v = (uint)value;
+            for (int i = 0; i < byteCnt; i++)
+            {
+                if ((uint)(byteIdx + i) >= (uint)buffer.Length) break;
+                buffer[byteIdx + i] = (byte)(v & 0xFF);
+                v >>= 8;
+            }
+            return;
+        }
+
+        // Fall-through: arbitrary alignment / non-byte-multiple size. Used
+        // for HID button bitmaps that pack 1 bit per button starting at
+        // mid-byte offsets and similar oddly-aligned fields.
         for (int b = 0; b < bitSize; b++)
         {
             int bit = (value >> b) & 1;
-            int byteIdx = (bitOffset + b) / 8;
-            int bitIdx = (bitOffset + b) % 8;
-            if (byteIdx < buffer.Length)
+            int byteIdx = (bitOffset + b) >> 3;
+            int bitIdx = (bitOffset + b) & 7;
+            if ((uint)byteIdx < (uint)buffer.Length)
             {
                 if (bit != 0)
                     buffer[byteIdx] |= (byte)(1 << bitIdx);
