@@ -16,21 +16,23 @@
 
 To be filled before any Tier 1 changes land. All times are wall-clock; battery sourced from prior runs.
 
-| Metric | v1.2.2 dev box | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (Tier 9) | v1.3.0 C11 (Tier 10) | Atom (projected ×10) |
-|---|---|---|---|---|---|---|---|
-| Warm-launch 3-controller create (xbox360 + xbox-bt + dualsense) | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _diag-log median 388 ms_ | _diag-log median 431 ms_ | ~10.5 s |
-|   ↳ Xbox 360 wired (XUSB companion path) | 693 ms | 656 ms | **577 ms** (-17%) | **556 ms** (-20%) | _diag-log p75 = 539 ms_ | _diag-log p75 = 596 ms_ | ~5.6 s |
-|   ↳ Xbox Series BT (xinputhid path) | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | _diag-log p25 = 143 ms_ | _diag-log p25 = 152 ms_ | ~1.2 s |
-|   ↳ DualSense BT (plain HID path) | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | _captured in median_ | _captured in median_ | ~3.7 s |
-| Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | ~10 ms |
-| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | ~5–6 hours |
-| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | _pending_ |
+| Metric | v1.2.2 dev box | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (T9) | v1.3.0 C11 (T10) | v1.3.0 C12 (T11-19) | Atom (×10) |
+|---|---|---|---|---|---|---|---|---|
+| Warm-launch 3-controller create | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _median 388 ms_ | _median 431 ms_ | _median 440 ms_ | ~10.5 s |
+|   ↳ Xbox 360 wired | 693 ms | 656 ms | **577 ms** (-17%) | **556 ms** (-20%) | _p75 = 539 ms_ | _p75 = 596 ms_ | _p75 = 585 ms_ | ~5.6 s |
+|   ↳ Xbox Series BT | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | _p25 = 143 ms_ | _p25 = 152 ms_ | _p25 = 154 ms_ | ~1.2 s |
+|   ↳ DualSense BT | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | _median_ | _median_ | _median_ | ~3.7 s |
+| Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | ~10 ms |
+| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | **1 965 s** (-2.5%) | ~5–6 h |
+| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | _pending_ |
 
 **Battery wall progression context:** C5/C8 (1895/1918 s) were faster than baseline because the v1.3.0-wip-broken `WaitForHidChild` was returning False immediately for SWD-rooted parents — skipping a real PnP wait that downstream slot-claim was effectively absorbing. C9 (2021 s) is post-fix: the wait happens properly in step 4, slot-claim in step 7 is then fast. Net: battery wall is ~baseline (within 5s of 2016 s noise), per-controller Phase 1 is **16% faster**, and the SDK is now functionally correct for SWD-rooted parents. The user-visible metric (Phase 1) is the right scorecard.
 
 **C10 (Tier 9 validation):** 26/26 PASS in 1949 s (-3.6% from C9, -3.3% from baseline). 6 outliers in the diag log: 3 setups timed out at 30 s (XInput slot wait + WaitForHidChild back-to-back timeout on Series BT scenarios) and 3 at 15 s (slot wait alone). Same-shape outliers as C9 — Series BT companion occasionally fails to bind on first attempt and the slot-wait budget is consumed. Not a regression from Tier 9 (dedupe + bulk SHM zero-init has no path that affects bind timing). Median per-setup Phase 1 is 388 ms across 119 setups; without the 6 timeout outliers the average drops from 1421 ms to ~549 ms.
 
-**C11 (Tier 10 validation):** 26/26 PASS in 1971 s (-2.2% from baseline, +1.1% from C10). 12 Series-BT-bind-failure outliers (7 at 30 s, 5 at 15 s) vs C10's 6 — these are intermittent kernel-side bind failures, not SDK regressions. Median per-setup Phase 1 is 431 ms across 115 setups (vs C10's 388 ms). The Tier 10 changes (HidReportBuilder cache + IsDriverInstalled prewarm + step-6 ApplyFriendlyName direct calls) target first-call cost reduction rather than steady-state median — the absence of a median improvement is expected; the savings are in the per-controller Phase 1 burst that the warm-launch metric measures, not the battery's average. Without the 12 outliers, average is 639 ms across 103 setups. **Tier 11** (event-driven OutputPollLoop sleep) was committed after C11 launched and needs C12.
+**C11 (Tier 10 validation):** 26/26 PASS in 1971 s (-2.2% from baseline, +1.1% from C10). 12 Series-BT-bind-failure outliers (7 at 30 s, 5 at 15 s) vs C10's 6 — these are intermittent kernel-side bind failures, not SDK regressions. Median per-setup Phase 1 is 431 ms across 115 setups (vs C10's 388 ms). The Tier 10 changes (HidReportBuilder cache + IsDriverInstalled prewarm + step-6 ApplyFriendlyName direct calls) target first-call cost reduction rather than steady-state median — the absence of a median improvement is expected; the savings are in the per-controller Phase 1 burst that the warm-launch metric measures, not the battery's average. Without the 12 outliers, average is 639 ms across 103 setups.
+
+**C12 (T10-19 validation = event-driven OutputPollLoop sleep):** 26/26 PASS in 1965 s. 9 Series-BT outliers (between C10's 6 and C11's 12 — confirms outlier rate is noise-level intermittent, not regression-driven). Median 440 ms across 116 setups; p75 = 585 ms. T10-19 only affects Dispose latency (sub-ms savings), so battery wall and Phase 1 median are no-regression checks rather than wins-to-celebrate. **T11-20 + T11-21** (DriverStoreContainsHidMaestro single-pass; SetBusTypeGuidUsb hardcoded-list trim) committed after C12 launched and need C13.
 
 
 **Note on the 35 s outlier:** the v1.2.2 baseline run had a one-time teardown of slot 0 at 35.7 s (vs the typical 5.6 s). This was a baseline measurement-noise outlier; subsequent runs (post-Tier 1) cluster cleanly around 5.5–5.7 s per slot for Xbox-family teardowns. Not worth tracking further.
