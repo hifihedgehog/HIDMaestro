@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -387,15 +388,26 @@ public static class DriverBuilder
     {
         _ = rebuild; // intentionally unused
 
-        // Fast path: matching manifest hash means embedded payload is
-        // bit-identical to what's currently in the DriverStore. Verify
-        // presence one more time via pnputil (cheap; locale-stable XML
-        // path) and skip the whole pipeline if both checks pass.
+        // Fast path: matching manifest hash means the embedded payload is
+        // bit-identical to what was last installed. Verify presence with
+        // a direct DriverStore filesystem check (~1 ms) instead of pnputil
+        // /enum-drivers /format xml (~200–500 ms on a machine with many
+        // installed drivers). The filesystem check is locale-stable and
+        // the OEM-named directory's existence is the same signal pnputil
+        // would surface anyway. If something cleared the hash but didn't
+        // touch the DriverStore, we'd run the full pipeline (slow but
+        // correct); if something cleared the DriverStore but didn't
+        // touch the hash, we'd skip and the next SwDeviceCreate would
+        // surface a missing-driver error to the caller — both edge
+        // cases are recoverable via a single InstallDriver retry.
         string embeddedHash = EmbeddedManifest.Sha256Hex;
         string? installedHash = ReadInstalledManifestHash();
         if (string.Equals(embeddedHash, installedHash, StringComparison.OrdinalIgnoreCase)
-            && PnputilHelper.IsHidMaestroDriverInstalled())
+            && DriverStoreContainsHidMaestro())
         {
+            // Mark the per-process cache so subsequent IsDriverInstalled
+            // calls don't run pnputil either.
+            PnputilHelper.MarkInstalledConfirmed();
             return true;
         }
 
@@ -407,6 +419,34 @@ public static class DriverBuilder
 
         WriteInstalledManifestHash(embeddedHash);
         return true;
+    }
+
+    /// <summary>Cheap filesystem-level check that the DriverStore has at
+    /// least one HIDMaestro INF directory. Replaces pnputil enum on the
+    /// FullDeploy fast path. The driver-store layout is stable across
+    /// every supported Windows version.</summary>
+    private static bool DriverStoreContainsHidMaestro()
+    {
+        try
+        {
+            string fileRepo = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "DriverStore", "FileRepository");
+            if (!Directory.Exists(fileRepo)) return false;
+
+            // hidmaestro.inf_amd64_<hash> and hidmaestro_xusb.inf_amd64_<hash>
+            // are the directory names pnputil /add-driver creates. Both must
+            // be present to consider the install complete.
+            bool hasMain = Directory.EnumerateDirectories(fileRepo, "hidmaestro.inf_*")
+                .Any();
+            bool hasXusb = Directory.EnumerateDirectories(fileRepo, "hidmaestro_xusb.inf_*")
+                .Any();
+            return hasMain && hasXusb;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? ReadInstalledManifestHash()
