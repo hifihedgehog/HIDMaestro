@@ -232,7 +232,25 @@ public sealed class ProfileDatabase
     /// is the no-disk path used by HMContext.LoadDefaultProfiles() — the
     /// SDK ships with the entire profile catalog baked in so consumers
     /// don't need to ship a sibling profiles/ directory.</summary>
+    // v1.3.0 — process-wide cache. Embedded JSONs are static for the
+    // lifetime of the process; reparsing on every HMContext.LoadDefaultProfiles
+    // is wasted work. First call populates the cache (parallel parse);
+    // subsequent calls return the same instance. Multiple HMContexts share.
+    private static ProfileDatabase? s_cachedEmbedded;
+    private static readonly object s_cachedEmbeddedLock = new();
+
     public static ProfileDatabase LoadEmbedded()
+    {
+        if (s_cachedEmbedded != null) return s_cachedEmbedded;
+        lock (s_cachedEmbeddedLock)
+        {
+            if (s_cachedEmbedded != null) return s_cachedEmbedded;
+            s_cachedEmbedded = LoadEmbeddedFresh();
+            return s_cachedEmbedded;
+        }
+    }
+
+    private static ProfileDatabase LoadEmbeddedFresh()
     {
         var db = new ProfileDatabase();
         var asm = typeof(ProfileDatabase).Assembly;

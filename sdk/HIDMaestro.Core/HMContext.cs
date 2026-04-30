@@ -61,6 +61,10 @@ public sealed class HMContext : IDisposable
             {
                 _ = Internal.EmbeddedManifest.Sha256Hex;
                 Internal.DriverBuilder.EnsureExtracted();
+                // Pre-parse the embedded profile catalog so the first
+                // LoadDefaultProfiles call returns immediately. The
+                // parse result is process-wide cached.
+                _ = Internal.ProfileDatabase.LoadEmbedded();
             }
             catch
             {
