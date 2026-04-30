@@ -116,7 +116,7 @@ internal static class DeviceOrchestrator
     private static readonly bool s_timingEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_TIMING") == "1";
     private static readonly object s_timingLock = new();
-    private static string? s_timingPath;
+    private static StreamWriter? s_timingWriter;
 
     private static void LogTiming(int ctrlIdx, string profileId, string step, long elapsedMs)
     {
@@ -125,14 +125,22 @@ internal static class DeviceOrchestrator
         {
             try
             {
-                if (s_timingPath == null)
+                if (s_timingWriter == null)
                 {
                     string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
                     Directory.CreateDirectory(dir);
-                    s_timingPath = Path.Combine(dir, "setup_timing.log");
+                    string timingPath = Path.Combine(dir, "setup_timing.log");
+                    var fs = new FileStream(timingPath, FileMode.Append, FileAccess.Write,
+                        FileShare.ReadWrite, bufferSize: 4096);
+                    s_timingWriter = new StreamWriter(fs) { AutoFlush = true };
+                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    {
+                        try { lock (s_timingLock) { s_timingWriter?.Dispose(); s_timingWriter = null; } }
+                        catch { }
+                    };
                 }
-                File.AppendAllText(s_timingPath!,
-                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms\n");
+                s_timingWriter.WriteLine(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] ctrl={ctrlIdx} profile={profileId,-24} step={step,-36} {elapsedMs,6}ms");
             }
             catch { }
         }
