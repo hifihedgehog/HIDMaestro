@@ -768,6 +768,16 @@ public static class DeviceManager
     /// Finds the HID child device instance ID for a given parent.
     /// Returns null if no child found.
     /// </summary>
+    // T29-2 — thread-local reusable char buffer. WaitForHidChild polls this
+    // at 25 ms cadence until the HID child appears; on a cold-start setup
+    // that's 4-8 calls per controller, each allocating a fresh char[]. Per-
+    // thread reuse eliminates the GC pressure (esp. relevant on Atom-class
+    // hardware where every alloc avoided is a cycle saved). Sized at 512
+    // chars: covers every realistic device-instance ID length while staying
+    // small enough that the per-thread allocation overhead is one-time.
+    [ThreadStatic]
+    private static char[]? t_devIdBuffer;
+
     public static string? GetHidChildId(string parentInstanceId)
     {
         if (CM_Locate_DevNodeW(out uint parentInst, parentInstanceId, 0) != CR_SUCCESS)
@@ -779,7 +789,9 @@ public static class DeviceManager
         if (CM_Get_Device_ID_Size(out uint idLen, childInst, 0) != CR_SUCCESS)
             return null;
 
-        var buffer = new char[idLen + 1];
+        var buffer = t_devIdBuffer;
+        if (buffer == null || buffer.Length < idLen + 1)
+            buffer = t_devIdBuffer = new char[Math.Max(512, (int)idLen + 1)];
         if (CM_Get_Device_IDW(childInst, buffer, (uint)buffer.Length, 0) != CR_SUCCESS)
             return null;
 
