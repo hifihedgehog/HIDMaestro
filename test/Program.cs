@@ -305,10 +305,19 @@ class Program
         Console.WriteLine("    park off                      leave park mode and resume the time-varying pattern");
         Console.WriteLine("    remove <index>                dispose a single controller (others stay live)");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
+        // Emit a stdout marker after every command finishes processing so
+        // a stdin-driven harness (e.g. swap_regression.ps1) can block on
+        // command completion without resorting to time-based heuristics.
+        // The marker is the LAST line printed for each iteration, and is
+        // emitted via try/finally so it covers continue branches AND the
+        // quit branch's break. Empty input lines are skipped before the
+        // try block so they do not produce stray ACKs.
         while (Console.ReadLine() is string line)
         {
             line = line.Trim();
             if (line.Length == 0) continue;
+            try
+            {
             if (line.Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
             if (line.Equals("pause", StringComparison.OrdinalIgnoreCase))
             {
@@ -421,6 +430,11 @@ class Program
             }
 
             Console.WriteLine($"  ! unknown command: {line}");
+            }
+            finally
+            {
+                Console.WriteLine("[ACK]");
+            }
         }
 
         var cleanupSw = Stopwatch.StartNew();

@@ -101,6 +101,62 @@ if (-not $KeepLogs) {
     if (Test-Path $diagLog) { Remove-Item $diagLog -Force }
 }
 
+# -- Probe DLL freshness gate --------------------------------------------
+# Probes (S24-S26) reference HIDMaestro.Core via ProjectReference. If a
+# probe was last built against an older SDK version, its bin/.../win-x64/
+# carries a stale HIDMaestro.Core.dll and the probe runs against THAT
+# stale managed code -- a false PASS that proves nothing about the SDK
+# version we're shipping. Compare every probe's HIDMaestro.Core.dll
+# against the SDK csproj's <Version> and refuse to start the battery if
+# any are mismatched, naming the offenders so the recipe `dotnet build`
+# command line is obvious.
+$repoRoot   = Resolve-Path (Join-Path $scriptDir '..\..') -EA SilentlyContinue
+$buildPropsPath = if ($repoRoot) { Join-Path $repoRoot 'Directory.Build.props' } else { $null }
+# Source-tree-only gate. When the harness is shipped inside a release
+# bundle alongside HIDMaestroTest (no source checkout), there is no
+# Directory.Build.props to read; skip the version check rather than
+# fail a release-bundle run.
+$buildProps = if ($buildPropsPath -and (Test-Path $buildPropsPath)) {
+    Get-Content $buildPropsPath -Raw
+} else { '' }
+$verRegex   = [regex]'<Version>([0-9.]+)</Version>'
+$verMatch   = $verRegex.Match($buildProps)
+if ($verMatch.Success) {
+    $expectedVer = [Version]($verMatch.Groups[1].Value + '.0')
+    $probePaths = @(
+        Join-Path $scriptDir '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+    )
+    $stale = @()
+    foreach ($p in $probePaths) {
+        $resolved = [System.IO.Path]::GetFullPath($p)
+        if (-not (Test-Path $resolved)) {
+            # Probe not built. The S24-S26 scenarios already fail with a
+            # clear "build the probe" exception, so don't double-error
+            # here. This gate is specifically for STALE probes.
+            continue
+        }
+        $actualVer = [System.Reflection.AssemblyName]::GetAssemblyName($resolved).Version
+        if ($actualVer -ne $expectedVer) {
+            $stale += [PSCustomObject]@{ Path = $resolved; Have = $actualVer; Want = $expectedVer }
+        }
+    }
+    if ($stale.Count -gt 0) {
+        Write-Host "STALE PROBE BINARIES -- refusing to run with mismatched HIDMaestro.Core:" -ForegroundColor Red
+        foreach ($s in $stale) {
+            Write-Host ("  " + $s.Path) -ForegroundColor Red
+            Write-Host ("    have $($s.Have), want $($s.Want)") -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "Rebuild from repo root with:" -ForegroundColor Yellow
+        Write-Host "  dotnet build test\probes\pid_ffb_roundtrip\PidFfbRoundtrip.csproj -c Release -r win-x64" -ForegroundColor Yellow
+        Write-Host "  dotnet build test\probes\pid_ffb_alloc_free\PidFfbAllocFree.csproj -c Release -r win-x64" -ForegroundColor Yellow
+        Write-Host "  dotnet build test\probes\pid_setusages_probe\PidSetUsagesProbe.csproj -c Release -r win-x64" -ForegroundColor Yellow
+        exit 2
+    }
+}
+
 # Ensure HIDMAESTRO_DIAG=1 in the spawned process's environment so the
 # diag log captures every teardown step. Helps post-mortem when a
 # scenario fails. Set Process-scope so child processes inherit.
@@ -194,9 +250,27 @@ function Start-HMTestProcess {
     # Inherit HIDMAESTRO_DIAG so the test app logs every teardown.
     $psi.EnvironmentVariables['HIDMAESTRO_DIAG'] = '1'
 
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    # Drain stdout/stderr async so the pipes do not block.
-    $null = $proc.StandardOutput.ReadToEndAsync()
+    # Test app prints "[ACK]" on stdout after each stdin command. The
+    # harness reads stdout synchronously inside Send-Cmd, drains
+    # everything until [ACK] is seen, and treats EOF as "process gone".
+    # No event handlers, no runspaces, no script-scope state: a single
+    # owner of the stream avoids the lifetime quirks that silently
+    # terminated repeated Start-HMTestProcess calls when we tried
+    # Register-ObjectEvent or Tasks.Run with GetNewClosure across
+    # PowerShell 5.1.
+    #
+    # Stderr drain: not async -- the test app rarely writes to stderr,
+    # and only on errors. Pipe buffer (4 KB) tolerates a couple lines.
+    # If atom hits a stderr-heavy crash we'll see it via the test
+    # process exiting and ReadLine returning null in Send-Cmd.
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.EnableRaisingEvents = $true
+    $null = $proc.Start()
+    # Async-drain stderr so its 4 KB pipe buffer never fills (which would
+    # block any Console.Error.Write the test app might do, deadlocking
+    # cleanup). The Task is fire-and-forget; it auto-completes when the
+    # test process exits and stderr hits EOF.
     $null = $proc.StandardError.ReadToEndAsync()
     return $proc
 }
@@ -205,7 +279,8 @@ function Send-Cmd {
     param(
         [System.Diagnostics.Process]$Proc,
         [string]$Cmd,
-        [switch]$NoFlush
+        [switch]$NoFlush,
+        [switch]$NoWaitAck
     )
     if ($Proc.HasExited) {
         $code = $Proc.ExitCode
@@ -216,9 +291,24 @@ function Send-Cmd {
     if ($VerbosePreference -eq 'Continue') {
         Write-Host ('    [stdin] ' + $Cmd) -ForegroundColor DarkGray
     }
+    if ($NoWaitAck) { return }
+
+    # Drain test-process stdout line by line until we see '[ACK]'. The
+    # test app emits this token after each stdin command finishes
+    # processing; ReadLine blocks until a newline arrives, so the harness
+    # waits exactly as long as the SDK actually takes -- no time budget,
+    # no scaling, no kill timer. ReadLine returns $null on EOF (the test
+    # process closed stdout, e.g. after exit), in which case we just
+    # return -- the next Send-Cmd will fail-fast on $Proc.HasExited and
+    # raise a clear "process already exited" error to the scenario.
+    while ($true) {
+        $line = $Proc.StandardOutput.ReadLine()
+        if ($null -eq $line) { return }
+        if ($line.Trim() -eq '[ACK]') { return }
+    }
 }
 
-# v1.3.0 — battery is scale-aware. Read HIDMAESTRO_TIMEOUT_SCALE once at
+# v1.3.0 -- battery is scale-aware. Read HIDMAESTRO_TIMEOUT_SCALE once at
 # script load, multiply every wall-clock budget by it. Default 1.0 reproduces
 # pre-1.3.0 behavior exactly. Range clamped to [0.1, 100.0]; out-of-range
 # values fall back to 1.0 with a warning.
@@ -242,13 +332,21 @@ function Sleep-Scaled { param([int]$Seconds) Start-Sleep -Milliseconds (HMScaleM
 function Stop-HMTestProcess {
     param(
         [System.Diagnostics.Process]$Proc,
-        [int]$GracefulMs = 30000
+        [int]$GracefulMs = 300000
     )
     if (-not $Proc.HasExited) {
-        try { Send-Cmd -Proc $Proc -Cmd 'quit' } catch {}
-        if (-not $Proc.WaitForExit((HMScaleMs $GracefulMs))) {
+        # Send 'quit' but do NOT wait for an [ACK] -- the test app's quit
+        # branch breaks the stdin loop BEFORE the cleanup section runs,
+        # and process exit is what we actually care about. WaitForExit is
+        # the authoritative "all dispose handlers ran, kernel teardowns
+        # finished, process gone" signal. Generous ceiling (5 min default)
+        # only matters if the SDK genuinely hangs in cleanup.
+        try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
+        $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
+        if (-not $Proc.WaitForExit($GracefulMs)) {
             try { $Proc.Kill($true) } catch {}
-            $Proc.WaitForExit((HMScaleMs 5000)) | Out-Null
+            $Proc.WaitForExit(5000) | Out-Null
+            Write-Host ("    [Stop-HMTestProcess] KILLED after " + $waitSw.ElapsedMilliseconds + "ms (graceful budget=" + $GracefulMs + "ms)") -ForegroundColor DarkYellow
             return 'KILLED'
         }
         return 'GRACEFUL'
@@ -281,13 +379,83 @@ function Wait-CreateBound {
     return $false
 }
 
-# Sleep that lets PnP cascade settle. Xbox 360 wired teardown takes ~5s
-# (XUSB companion). Series BT takes ~10s (xinputhid filter unbind).
-# Plain HID is sub-second. 12s covers every profile family with margin.
-# Scaled by HIDMAESTRO_TIMEOUT_SCALE.
+# Wait until the SDK-driven create/teardown has actually propagated to
+# PnP and then settled. Two phases:
+#
+#   Phase A (change detection): poll the present-devnode set until it
+#     differs from the snapshot taken at function entry. The harness
+#     has just sent a stdin command to the test process; we don't know
+#     when the test process will pick it up (single-threaded stdin
+#     reader, may still be busy creating its initial controller batch
+#     on slow machines, may have other commands queued ahead of ours).
+#     Without this phase, the prior stability-only check would exit
+#     early on the first poll because nothing had started changing
+#     yet -- the test process simply hadn't begun processing the
+#     command. On atom (Z8350) the queued-command latency can be
+#     30+ s during the initial-batch phase of multi-controller
+#     scenarios. Generous Phase A budget so we wait out the queue.
+#
+#   Phase B (stability): once a change is observed, poll until the
+#     present set is stable for two consecutive 200 ms samples. The
+#     SDK's TeardownController blocks on CM_NOTIFY_ACTION_DEVICEINSTANCE-
+#     REMOVED so by the time it returns the kernel has already settled,
+#     so this is usually one or two polls.
+#
+# If Phase A times out without seeing a change, Phase B becomes a
+# brief no-op and we return -- that's the "command was a no-op or
+# already complete by the time we got here" path. Total worst case is
+# Phase A budget, well above any observed latency.
 function Wait-CascadeSettle {
-    $ms = HMScaleMs 12000
-    Start-Sleep -Milliseconds $ms
+    $changeBudgetMs    = HMScaleMs 60000   # max wait for first state change
+    # Phase B's wall-clock cap. Loop EXITS as soon as 2 consecutive 200 ms
+    # samples agree, which on a fast box is ~600 ms -- the budget only
+    # bites if state churns nonstop. On atom (Z8350, scale=2) a single
+    # xbox-360-wired->BT swap can churn for ~40 s when xinputhid hits the
+    # 30 s XInput-slot-wait timeout inside SetupController. Phase B must
+    # outlast that or it returns mid-swap, the harness sends the next
+    # command, commands queue up, Stop-HMTestProcess's graceful budget
+    # bursts, Kill fires, devnodes leak. 60 s scaled covers it with
+    # margin.
+    $stabilityBudgetMs = HMScaleMs 60000
+    $stableN           = 2
+
+    # Pull and consume the most recent Send-Cmd snapshot. If null, the
+    # caller didn't send a command before this settle (e.g. the final
+    # post-Stop-HMTestProcess settle in Test-Scenario), so skip Phase A
+    # entirely and just check stability.
+    $baseline = $script:HMSendCmdBaseline
+    $script:HMSendCmdBaseline = $null
+
+    if ($null -ne $baseline) {
+        # Phase A: wait for state to differ from the pre-Send-Cmd baseline.
+        # Detects when the test process has begun propagating the command
+        # we sent. Critical on slow boxes where stdin commands can queue
+        # behind an in-progress initial-batch creation; without this,
+        # stability-only would exit on the first poll because the test
+        # process simply hadn't started processing yet.
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt $changeBudgetMs) {
+            $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
+            if ($cur -ne $baseline) { break }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+
+    # Phase B: wait for stability after change.
+    $stableSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prev  = ''
+    $count = 0
+    while ($stableSw.ElapsedMilliseconds -lt $stabilityBudgetMs) {
+        $cur = ((Get-HMPresentDevnodes) | Sort-Object) -join '|'
+        if ($cur -eq $prev) {
+            $count++
+            if ($count -ge $stableN) { return }
+        } else {
+            $count = 0
+            $prev  = $cur
+        }
+        Start-Sleep -Milliseconds 200
+    }
 }
 
 # Run a scenario function and capture PASS/FAIL with leftover diagnosis.
@@ -790,7 +958,7 @@ function Scenario-Custom-SwapCycle {
 
 # S23: Multi-controller mix including the custom profile. A full
 # representative consumer config: Xbox 360 wired, Xbox Series BT,
-# DualSense, Switch Pro, and a PadForge-style custom — all five
+# DualSense, Switch Pro, and a PadForge-style custom -- all five
 # families/families-equivalents at once. Then a swap targeting the
 # custom slot to verify it tears down clean alongside the rest.
 function Scenario-Multi-CustomInMix {
@@ -835,21 +1003,21 @@ function Scenario-PidFfb-RoundTrip {
 }
 
 # S25: PID FFB alloc/free + pool exhaustion + multi-controller independence.
-# Companion to S24. Where S24 covers the static SDK→shared-section
+# Companion to S24. Where S24 covers the static SDK->shared-section
 # contract (lazy section creation, Pool/State/BL field round-trip),
 # S25 covers the dynamic v1.1.37 invariants:
 #   - Legacy PublishPidBlockLoad override path: alloc EBI, alloc again,
 #     free, exhaust pool. Verifies the consumer-publish surface still
-#     works (driver bitmap stays untouched — that path is for the
+#     works (driver bitmap stays untouched -- that path is for the
 #     driver-side allocator).
 #   - Multi-controller: two virtuals get independent
 #     Global\HIDMaestroPidState{N} sections; PublishPidPool on A doesn't
 #     leak into B.
 #   - File trace directory at %PROGRAMDATA%\HIDMaestro is creatable so
 #     the v1.1.37 HMAESTRO_TRACE=1 file fallback has a target.
-#   - Best-effort dynamic SetFeature(0x11) / SetOutputReport(0x11) — if
+#   - Best-effort dynamic SetFeature(0x11) / SetOutputReport(0x11) -- if
 #     HidClass accepts either, verifies driver allocated EBI synchronously.
-#     If both rejected (descriptor parse), SKIPs — PadForge's FfbTest run
+#     If both rejected (descriptor parse), SKIPs -- PadForge's FfbTest run
 #     remains the dynamic arbiter.
 function Scenario-PidFfb-AllocFree {
     $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidFfbAllocFree.exe'
@@ -875,7 +1043,7 @@ function Scenario-PidFfb-AllocFree {
 # phase calls CreateEffect(GUID_ConstantForce) and prints `SUCCESS:`
 # per variant on success or `Fatal error 0xC0000005` on a pid.dll AV.
 # The probe parses that output and exits 0 only if a Constant Force
-# CreateEffect succeeded with no AV — which is exactly the regression
+# CreateEffect succeeded with no AV -- which is exactly the regression
 # bar for issue #16.
 function Scenario-PidFfb-FfbTest {
     $probe = Join-Path $PSScriptRoot '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidSetUsagesProbe.exe'

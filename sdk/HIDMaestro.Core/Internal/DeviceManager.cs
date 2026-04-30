@@ -417,10 +417,83 @@ public static class DeviceManager
         // Any devices that survive as phantoms get caught by the ghost
         // cleanup at the start of the next SetupController run.
 
-        // Step 1: Find and remove all children first
+        bool isSwdParent = instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase);
+
+        // For SWD parents, close the SwDevice handle FIRST, then mop up
+        // surviving children. HID children of an SwD parent cannot fully
+        // unwind until the parent's HSWDEVICE handle releases its kernel
+        // refcount (DIF_REMOVE on the child completes the handle/PDO
+        // detach but the queries can't drain while the parent still
+        // holds the lifetime lock). The pre-fix child-first order paid
+        // 2000ms per HID child on WaitForDeviceRemoval (timed out, child
+        // didn't actually go), then the parent close took 55ms and
+        // cascaded the children automatically. Net: ~5.4s per SWD
+        // teardown for one HID child, scaling worse with more children.
+        // Post-fix: parent close first (~55ms), child-survivor sweep is
+        // a fast no-op for the typical case where Windows already
+        // cascade-removed them with the SwD parent.
         var childIds = GetAllChildDeviceIds(devInst);
+        bool goneAfterDif = false;
+
+        // For SWD parents that are PHANTOM-only (registry residue, no live
+        // devnode), skip the hmswd.exe roundtrip — there's no live device
+        // to terminate. Each helper spawn costs ~50-75 ms with no useful
+        // work; over a 5-cycle Xbox 360 wired probe the sweep accumulates
+        // 4 phantoms by cycle 5, adding ~250 ms to that teardown for
+        // nothing. Detect via CM_Locate_DevNodeW NORMAL (mode 0) returning
+        // failure while PHANTOM (mode 1) succeeds — the early-bail at the
+        // top of this function only fires when BOTH fail, so we still got
+        // here for phantom-only entries.
+        bool isLive = CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
+        if (isSwdParent && !fast && !isLive)
+        {
+            DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) SKIPPED (phantom-only registry residue)");
+            goneAfterDif = true;
+        }
+        else if (isSwdParent && !fast)
+        {
+            // SwDevice teardown via the documented lifetime-downgrade path.
+            // DIF_REMOVE on a SwDeviceLifetimeParentPresent device is
+            // transient on Win11 26200 — the kernel re-enumerates the
+            // devnode within 5-30s because HTREE\ROOT\0 (the parent) is
+            // always present. SwDeviceCreate-reconnect + lifetime=Handle
+            // + SwDeviceClose is the only way to actually terminate the
+            // lifetime contract. Verified empirically 2026-04-25 against
+            // a resurrected BT SwDevice: device transitioned to PHANTOM
+            // and stayed PHANTOM for 20+ seconds (vs DIF_REMOVE+pnputil-
+            // /force which let it resurrect within 10s).
+            //
+            // SwdDeviceFactory.Remove returns when the HSWDEVICE handle
+            // closes — NOT when the kernel has finished propagating the
+            // devnode removal through the PnP tree. We must block on a
+            // CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED event for the
+            // instance to guarantee the device is fully offline before
+            // proceeding to children/cleanup. CM_Locate_DevNodeW
+            // immediately after Remove() commonly returns "still present"
+            // (verified in the 09:21:18 diag log: present=True after
+            // 56 ms hr=0x0).
+            var swSw = System.Diagnostics.Stopwatch.StartNew();
+            int hr = SwdDeviceFactory.Remove(instanceId);
+            // Block until the kernel actually fires the device-removed
+            // notification — or the timeout expires. Use the caller's
+            // timeoutMs budget so callers explicitly choose how long to
+            // wait. Live-swap callers pass 120_000 ms (the full BT
+            // xinputhid cascade budget); cleanup paths may pass less.
+            goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
+            DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} confirmed_offline={goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
+        }
+
+        // Step 1: Find and remove all children. For SWD parents this
+        // typically becomes a no-op because the SwD close already
+        // cascade-removed them.
         foreach (string childId in childIds)
         {
+            // Skip if the SwD-parent close already cascaded this child away.
+            if (isSwdParent && !fast
+                && CM_Locate_DevNodeW(out _, childId, 0) != CR_SUCCESS
+                && CM_Locate_DevNodeW(out _, childId, 1) != CR_SUCCESS)
+                continue;
+
             if (fast)
             {
                 // Fast mode: CM_Disable + CM_Uninstall directly. Avoids the
@@ -441,30 +514,19 @@ public static class DeviceManager
             }
         }
 
-        // Step 2: Remove the parent
-        bool goneAfterDif;
+        // Step 2: Remove the parent (for non-SWD; SWD already done above)
         if (fast)
         {
             CM_Disable_DevNode(devInst, 0);
             CM_Uninstall_DevNode(devInst, 0);
             goneAfterDif = false; // don't wait, don't confirm
         }
-        else if (instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase))
+        else if (isSwdParent)
         {
-            // SwDevice teardown via the documented lifetime-downgrade path.
-            // DIF_REMOVE on a SwDeviceLifetimeParentPresent device is
-            // transient on Win11 26200 — the kernel re-enumerates the
-            // devnode within 5-30s because HTREE\ROOT\0 (the parent) is
-            // always present. SwDeviceCreate-reconnect + lifetime=Handle
-            // + SwDeviceClose is the only way to actually terminate the
-            // lifetime contract. Verified empirically 2026-04-25 against
-            // a resurrected BT SwDevice: device transitioned to PHANTOM
-            // and stayed PHANTOM for 20+ seconds (vs DIF_REMOVE+pnputil-
-            // /force which let it resurrect within 10s).
-            var swSw = System.Diagnostics.Stopwatch.StartNew();
-            int hr = SwdDeviceFactory.Remove(instanceId);
+            // Already removed at the top of the function. Re-check in case
+            // a survivor sweep above kicked the parent into a transient
+            // state.
             goneAfterDif = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS;
-            DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} present={!goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
         }
         else
         {
