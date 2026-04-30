@@ -300,7 +300,18 @@ internal static class SwdDeviceFactory
         {
             using var proc = Process.Start(psi);
             if (proc == null) return unchecked((int)0x80070005);
-            if (!proc.WaitForExit(TimeoutScale.Apply(30_000)))
+            // T36 — 8 s base (was 30 s). Per github.com/hifihedgehog/HIDMaestro
+            // issue #18 (d3xMachina) consumers can hit the full 30 s timeout
+            // here when hmswd.exe gets stuck on SwDeviceClose because a stale
+            // WUDFHost still holds the device open. The OUTER DeviceManager.
+            // RemoveDevice path falls back to pnputil/devcon when this returns
+            // WAIT_TIMEOUT — those fallbacks do the actual cleanup work, so
+            // hanging here is wasted time. 8 s is generous for a healthy
+            // SwDeviceClose (typically completes in <100 ms) and still gives
+            // the kernel time to release on slow hardware (TimeoutScale.Apply
+            // multiplies for Atom-class). Caller's 120 s outer budget covers
+            // the fallback cascade.
+            if (!proc.WaitForExit(TimeoutScale.Apply(8_000)))
             {
                 try { proc.Kill(entireProcessTree: true); } catch { }
                 return unchecked((int)0x80070102); // WAIT_TIMEOUT
