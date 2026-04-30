@@ -46,6 +46,22 @@ To be filled before any Tier 1 changes land. All times are wall-clock; battery s
 
 ---
 
+## d3xMachina (gh issue #18) — 30 s/controller teardown root-cause
+
+User d3xMachina reported "sometimes it takes ages to disconnect the controllers (like 30 seconds per controller)". Their attached `teardown_diag.log` shows the smoking gun pattern, three teardowns in a row:
+
+```
+[18:54:02.375] SwdDeviceFactory.Remove(SWD\HIDMAESTRO\58980001_0000) hr=0x80070102 present=False after 30104ms
+[18:54:34.803] SwdDeviceFactory.Remove(SWD\HIDMAESTRO\58980003_0002) hr=0x80070102 present=False after 30078ms
+[18:55:06.987] SwdDeviceFactory.Remove(SWD\HIDMAESTRO\58980002_0001) hr=0x80070102 present=False after 30079ms
+```
+
+`hr=0x80070102` is `WAIT_TIMEOUT`. Each one waited the full 30 s timeout in `SwdDeviceFactory.Remove`'s `WaitForExit(30_000)` because `hmswd.exe` was stuck on `SwDeviceClose` (typically because a stale `WUDFHost` still held the device handle open). Total per-3-controller teardown wall time on this stuck-cascade path: **~90 s, of which ~90 s is wasted waiting on the hung helper before the fallbacks even start**.
+
+**T37 fix:** drop the `SwdDeviceFactory.Remove` `WaitForExit` budget from 30 s to 8 s base (still scaled by `TimeoutScale.Apply` for slow hardware — Atom 10× → 80 s). Healthy `SwDeviceClose` typically completes in <100 ms; 8 s is plenty for a real cascade. Stuck-helper falls through to the outer `DeviceManager.RemoveDevice` pnputil/devcon fallbacks, which is what was doing the actual cleanup anyway. Direct user-visible impact: 3-controller stuck-teardown drops from ~90 s to ~24 s.
+
+---
+
 ## Why HIDMaestro is slower than ViGEmBus per-controller — and what we've done about it
 
 User feedback (2026-04-30): consumers reporting ~30 s for 3-controller add/remove cycles and noting ViGEmBus is significantly faster. Honest accounting of the architectural delta plus the user-mode floor we've now hit.
