@@ -399,8 +399,12 @@ public sealed class HMController : IDisposable
         // Raw mode reuses the GIP buffer at whatever state SubmitState last
         // left it in (or zero if SubmitState was never called) — raw consumers
         // are expected to also call SubmitState if they need GIP/XInput.
+        // T30-2 — pass null for gipData on non-Xbox profiles, same logic as
+        // SubmitState's Xbox-only GIP packing. Saves the 14-byte Marshal.Copy
+        // per raw frame on DualSense / Switch Pro / generic gamepad paths.
         SharedMemoryIO.WriteInputFrame(
-            _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length, _gipBuf);
+            _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length,
+            _packsGipBuffer ? _gipBuf : null);
     }
 
     /// <summary>Background polling loop that reads from the per-controller
