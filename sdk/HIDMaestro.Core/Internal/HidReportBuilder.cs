@@ -476,13 +476,20 @@ public class HidReportBuilder
         // HMButton bit positions are translated to descriptor button indices
         // so that semantic names (A, B, LB, Start, etc.) land at the correct
         // positions for the profile's controller family.
-        for (int b = 0; b < 32; b++)
+        // T31-2 — bit-pop instead of full 32-bit scan. With BitOperations
+        // we extract the lowest set bit, process, clear it, and loop only
+        // while bits remain. For a typical state with 0–4 buttons held,
+        // this is 0–4 iterations vs the full 32. Saves ~28 branches per
+        // frame at default state. No-op cost when no buttons held.
+        uint mask = buttonMask;
+        if (guideRoutedToSysMenu) mask &= ~(1u << GUIDE_BIT);
+        while (mask != 0)
         {
-            if (((buttonMask >> b) & 1) == 0) continue;
-            if (b == GUIDE_BIT && guideRoutedToSysMenu) continue;
+            int b = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            mask &= mask - 1;  // clear lowest set bit
             int descBtn = (ButtonMap != null && b < ButtonMap.Length)
                 ? ButtonMap[b] : b;
-            if (descBtn >= 0 && descBtn < Buttons.Count)
+            if ((uint)descBtn < (uint)Buttons.Count)
                 WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
                           Buttons[descBtn].BitSize, 1);
         }
