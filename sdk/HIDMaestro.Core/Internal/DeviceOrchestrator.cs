@@ -1499,17 +1499,20 @@ internal static class DeviceOrchestrator
             else
             {
                 int slotWaitBudget = TimeoutScale.Apply(15000);
-                // Tighter poll cadence (25 ms vs 100 ms) reduces the
-                // worst-case tail wait from ~99 ms to ~24 ms after the slot
-                // actually claims. CountConnectedXInputSlots calls XInputGetState
-                // for slots 0–3 — each call is a few-hundred-µs P/Invoke into
-                // xinput1_4, so 25 ms cadence is well under any meaningful CPU
-                // overhead.
+                // T22-2 — 10 ms cadence (was 25 ms). Reduces the typical
+                // tail wait from ~12 ms to ~5 ms after the slot actually
+                // claims. CountConnectedXInputSlots is 4 XInputGetState
+                // P/Invokes (~few hundred µs total); even at 100 polls/sec
+                // the CPU overhead is well under 1% of one core. With the
+                // typical 65 ms slot-claim observation on Xbox 360 wired,
+                // tightening from 25 → 10 ms cadence shaves ~15 ms per
+                // Xbox-family setup off the warm-launch Phase 1 critical
+                // path.
                 while (sw.ElapsedMilliseconds < slotWaitBudget)
                 {
                     slotsAfter = CountConnectedXInputSlots();
                     if (slotsAfter > slotsBefore) break;
-                    Thread.Sleep(25);
+                    Thread.Sleep(10);
                 }
                 LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");
             }
