@@ -402,9 +402,14 @@ public sealed class HMContext : IDisposable
         // Wait until every controller's HID child is in DN_STARTED state,
         // which means PnP is done binding drivers on that device tree.
         // Replaces a fixed Thread.Sleep(2000) that wasted time on fast
-        // machines and was fragile on slow ones.
+        // machines and was fragile on slow ones. T24-2 — tightened poll
+        // cadence (100 ms → 25 ms). On fast-machine cases where DN_STARTED
+        // is already true on entry, this exits in ≤25 ms instead of waiting
+        // up to 100 ms for the next poll. CM_Get_DevNode_Status is sub-µs
+        // so the per-poll cost is negligible. Budget remains 5000 ms (scaled).
+        int budget = Internal.TimeoutScale.Apply(5000);
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 5000)
+        while (sw.ElapsedMilliseconds < budget)
         {
             bool allStarted = true;
             foreach (var c in all)
@@ -414,7 +419,7 @@ public sealed class HMContext : IDisposable
                     { allStarted = false; break; }
             }
             if (allStarted) break;
-            System.Threading.Thread.Sleep(100);
+            System.Threading.Thread.Sleep(25);
         }
 
         foreach (var c in all)
