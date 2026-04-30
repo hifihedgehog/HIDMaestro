@@ -369,12 +369,18 @@ internal static class SharedMemoryIO
         Marshal.WriteInt32(view, 0, (int)pending);
         Thread.MemoryBarrier();
 
-        // 2. Write payload (DataSize + Data + GipData)
+        // 2. Write payload (DataSize + Data + GipData). v1.3.0 — bulk
+        // Marshal.Copy replaces the prior per-byte Marshal.WriteByte
+        // loops, which were 256 + 14 = 270 P/Invoke calls per frame. At
+        // 250 Hz × 6 controllers that was ~400 000 P/Invokes/sec; a
+        // single bulk copy per region is two P/Invokes/frame total.
+        // We don't zero the unused data tail past dataLen — driver/
+        // consumer reads DataSize and uses only data[0..DataSize-1]; the
+        // tail is irrelevant.
         Marshal.WriteInt32(view, 4, dataLen);
-        for (int i = 0; i < DATA_CAPACITY; i++)
-            Marshal.WriteByte(view, DATA_OFFSET + i, i < dataLen ? data[dataOffset + i] : (byte)0);
-        for (int i = 0; i < GIP_DATA_LENGTH; i++)
-            Marshal.WriteByte(view, GIP_DATA_OFFSET + i, gipData[i]);
+        if (dataLen > 0)
+            Marshal.Copy(data, dataOffset, view + DATA_OFFSET, dataLen);
+        Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
 
         // 3. Mark write complete (even seqNo)
         Thread.MemoryBarrier();
@@ -442,8 +448,12 @@ internal static class SharedMemoryIO
             ushort sz = (ushort)Marshal.ReadInt16(view, slotBase + OUTPUT_SLOT_OFFSET_SIZE);
             if (sz > dataBuf.Length) sz = (ushort)dataBuf.Length;
             dataSize = sz;
-            for (int i = 0; i < sz; i++)
-                dataBuf[i] = Marshal.ReadByte(view, slotBase + OUTPUT_SLOT_OFFSET_DATA + i);
+            // v1.3.0 — bulk Marshal.Copy replaces the prior per-byte
+            // Marshal.ReadByte loop. Same per-frame win as the writer side
+            // (1 P/Invoke instead of N), running on the SDK's output poll
+            // thread which fires every 8 ms for every controller.
+            if (sz > 0)
+                Marshal.Copy(view + slotBase + OUTPUT_SLOT_OFFSET_DATA, dataBuf, 0, sz);
             Thread.MemoryBarrier();
             slotSeqAfter = (uint)Marshal.ReadInt32(view, slotBase + OUTPUT_SLOT_OFFSET_SEQNO);
             if (slotSeqAfter == slotSeqBefore) break;
