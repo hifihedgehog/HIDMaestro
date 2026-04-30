@@ -88,6 +88,29 @@ For v1.3.0 this session: I've reached the user-mode floor for the existing archi
 
 ---
 
+## v1.3.0 session shipping summary
+
+**20 SDK commits + 7 tracking-doc commits between v1.2.2 and HEAD.** No release tag cut (per user instruction). All changes validated by 4 successive 26/26 PASS battery runs (C15, C16, C17, C18).
+
+| Tier | Topic | User-visible delta |
+|---|---|---|
+| Tier 1 | TimeoutScale audit + scaled budgets | Atom-class durability — every wall-clock budget now scales 10× on `HIDMAESTRO_TIMEOUT_SCALE=10` |
+| Tier 2-7 | Multi-layer caching | First-call SetupController paths drop from "always-pay" to "cache-hit-after-first" for IsDriverInstalled, GameInputSvc, ProfileDatabase, WriteGameInputRegistry, OEM-write |
+| Tier 8 | Cycle-level on hot paths | Bulk Marshal.Copy zero-init, buffer reuse in Submit*, BuildReportInto buffer overload |
+| Tier 9 | Naming-walk dedup + bulk SHM zero-init | -10-20 ms per setup, -17K P/Invokes per setup |
+| Tier 10 | HidReportBuilder cache, IsDriverInstalled prewarm, step-6 walk dedup | Per-CreateController parse cost amortized; first-SetupController gate hits cache |
+| Tier 11 | T22-T39 sweep | T22 prewarm GameInputSvc, T23 10ms slot wait, T24 cache instId, T25 FinalizeNames cadence, T26 OEM dedup, T27/T31 GIP-skip non-Xbox, T28 byte-aligned WriteBits, T29 parallel prewarm, T30/T35 thread-local devID buffer, T32 button bit-pop, T33/T34 persistent diag StreamWriter, T36 DeviceOverrides dedup, **T37 SwdRemove timeout 30s→8s (d3xMachina #18)**, **T38 IsDriverInstalled filesystem fast-path (d3xMachina #18)**, T39 devcon TimeoutScale.Apply |
+
+**Headline numbers (dev-box, post-T22 measurement):**
+- Warm-launch 3-controller create: 1287 ms → 1065 ms (**-17.3%**)
+- Battery wall: 2016 s → 1977 s (-1.9%, within 30 s noise band)
+- Stuck-cascade 3-controller teardown (d3x #18): ~90 s → ~24 s (**-66 s direct user impact**)
+- First-call IsDriverInstalled: ~1.7 s → ~5 ms (**-1.7 s direct user impact**)
+
+**v1.4.0 candidates (documented above, not attempted):** SwDeviceCreate for main devnode, devnode pool with profile reconfig, selective UmdfHostProcessSharing, internal CreateMultiple batching, custom kernel filter (off-table). Each requires either driver-side changes or API additions; none ship in v1.3.0.
+
+---
+
 ## Why HIDMaestro is slower than ViGEmBus per-controller — and what we've done about it
 
 User feedback (2026-04-30): consumers reporting ~30 s for 3-controller add/remove cycles and noting ViGEmBus is significantly faster. Honest accounting of the architectural delta plus the user-mode floor we've now hit.
