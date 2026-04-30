@@ -218,7 +218,7 @@ internal static class DeviceOrchestrator
         {
             s_teardownGates.TryGetValue(controllerIndex, out ev);
         }
-        ev?.Wait(timeoutMs);
+        ev?.Wait(TimeoutScale.Apply(timeoutMs));
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -301,10 +301,10 @@ internal static class DeviceOrchestrator
         // child hangs. Async read + Kill-on-timeout makes the timeout real.
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
         var stderrTask = proc.StandardError.ReadToEndAsync();
-        if (!proc.WaitForExit(timeoutMs))
+        if (!proc.WaitForExit(TimeoutScale.Apply(timeoutMs)))
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
-            proc.WaitForExit(5_000);
+            proc.WaitForExit(TimeoutScale.Apply(5_000));
         }
         string stdout = stdoutTask.GetAwaiter().GetResult();
         string stderr = stderrTask.GetAwaiter().GetResult();
@@ -952,9 +952,13 @@ internal static class DeviceOrchestrator
                 // the time the callback fires. Still wait a short time for the
                 // interface to actually register (some PnP coinstallers are
                 // asynchronous even after driver load).
+                // Floor-bumped 2 → 5 s base in v1.3.0 — 2 s was tight even on
+                // fast hw; some XUSB coinstallers can take 1–4 s to register
+                // the interface even after the SwDeviceCreate callback fires.
+                // Scaling is layered on top of the 5 s base by DeviceManager.
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    if (DeviceManager.WaitForDeviceInterface(xusbInstId, XusbInterfaceGuid, timeoutMs: 2000))
+                    if (DeviceManager.WaitForDeviceInterface(xusbInstId, XusbInterfaceGuid, timeoutMs: 5000))
                         break;
                     DeviceManager.RestartDevice(xusbInstId);
                 }
@@ -1352,8 +1356,10 @@ internal static class DeviceOrchestrator
                         int actual = (dpKey?.GetValue("ControllerIndex") is int v) ? v : 0;
                         if (actual != controllerIndex) continue;
                         string rootId = $@"{enumRoot}\{sub}\{inst}";
-                        DeviceProperties.SetBusReportedDeviceDesc(rootId, displayName);
-                        DeviceProperties.SetDeviceFriendlyName(rootId, displayName);
+                        // v1.3.0 — coalesced setter halves the CM kernel-transition
+                        // cost vs the separate SetBusReportedDeviceDesc + SetDeviceFriendlyName
+                        // pair (one CM_Locate + one CM_Get_Child instead of two each).
+                        DeviceProperties.SetAllNamingProperties(rootId, displayName);
                         found = true; break;
                     }
                     if (found) break;
@@ -1451,14 +1457,15 @@ internal static class DeviceOrchestrator
             using var _ts = new TimingScope(controllerIndex, profile.Id, "7.wait_xinput_slot_claim");
             var sw = Stopwatch.StartNew();
             int slotsAfter = slotsBefore;
-            while (sw.ElapsedMilliseconds < 15000)
+            int slotWaitBudget = TimeoutScale.Apply(15000);
+            while (sw.ElapsedMilliseconds < slotWaitBudget)
             {
                 slotsAfter = CountConnectedXInputSlots();
                 if (slotsAfter > slotsBefore) break;
                 Thread.Sleep(100);
             }
-            // Either the slot was claimed, or 15s elapsed and we move on.
-            LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms");
+            // Either the slot was claimed, or the budget elapsed and we move on.
+            LogDiag($"    XInput slot wait: before={slotsBefore} after={slotsAfter} in {sw.ElapsedMilliseconds}ms (budget={slotWaitBudget}ms)");
         }
 
         // Return main instance ID, or companion ID for companion-only profiles
@@ -1478,14 +1485,12 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static bool WaitForHidChild(string parentInstanceId, int timeoutMs)
     {
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
-        {
-            if (DeviceManager.GetHidChildId(parentInstanceId) != null)
-                return true;
-            Thread.Sleep(100);
-        }
-        return false;
+        // v1.3.0 — delegate to DeviceManager.WaitForHidChild which uses
+        // CM_Register_Notification (signal-driven, no polling tail). The
+        // local copy was a 100 ms poll loop that added up to 99 ms of
+        // worst-case wait per call after the child PDO actually arrived.
+        // DeviceManager applies TimeoutScale internally; don't double-scale.
+        return DeviceManager.WaitForHidChild(parentInstanceId, timeoutMs);
     }
 
     /// <summary>
@@ -1495,8 +1500,15 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static bool WaitForDeviceStarted(string instanceId, int timeoutMs)
     {
+        // CM_Register_Notification doesn't signal on DN_STARTED transitions
+        // (PnP only surfaces add/remove/interface events), so this stays as
+        // a poll loop. v1.3.0 — tighter poll cadence (25 ms vs 100 ms)
+        // reduces the worst-case tail wait from ~99 ms to ~24 ms after
+        // the device actually starts. The 75 ms saved on every Xbox-family
+        // create adds up across multi-controller batches.
+        int budget = TimeoutScale.Apply(timeoutMs);
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
+        while (sw.ElapsedMilliseconds < budget)
         {
             if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == 0)
             {
@@ -1504,7 +1516,7 @@ internal static class DeviceOrchestrator
                     && (status & DN_STARTED) != 0)
                     return true;
             }
-            Thread.Sleep(100);
+            Thread.Sleep(25);
         }
         return false;
     }
@@ -1813,7 +1825,7 @@ internal static class DeviceOrchestrator
                 CloseHandle(ev);
             }
         }
-        Thread.Sleep(500);
+        Thread.Sleep(TimeoutScale.Apply(500));
     }
 
     public static void RemoveAllVirtualControllers()
@@ -2040,7 +2052,7 @@ internal static class DeviceOrchestrator
                         { hostsOurs = true; break; }
                     }
                     if (hostsOurs)
-                        wudf.WaitForExit(10000);
+                        wudf.WaitForExit(TimeoutScale.Apply(10000));
                 }
                 catch { }
             }
@@ -2149,7 +2161,7 @@ internal static class DeviceOrchestrator
 
                 if (hostsOurs && !hostsThirdParty)
                 {
-                    try { proc.Kill(); proc.WaitForExit(2000); } catch { }
+                    try { proc.Kill(); proc.WaitForExit(TimeoutScale.Apply(2000)); } catch { }
                 }
             }
             catch { /* access denied, process exited, etc. — skip this host */ }

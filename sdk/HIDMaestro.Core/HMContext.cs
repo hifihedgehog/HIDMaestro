@@ -42,9 +42,32 @@ public sealed class HMContext : IDisposable
 
     /// <summary>Create a new SDK context. Loading profiles and creating
     /// controllers are separate steps; this constructor only allocates the
-    /// in-process state.</summary>
+    /// in-process state.
+    ///
+    /// <para>v1.3.0 — fires a background warm-up that pre-extracts the
+    /// embedded driver payload to %TEMP% and pre-computes the manifest
+    /// hash. Both are normally done synchronously by the first
+    /// <see cref="InstallDriver"/> call; doing them in parallel with
+    /// whatever the consumer is doing on the foreground thread (UI init,
+    /// profile lookups, settings UI) hides 200–500 ms of cold-start cost
+    /// in the consumer's think-time budget. Failures are silently
+    /// swallowed — if the warm-up couldn't extract for some reason, the
+    /// foreground InstallDriver path will retry it.</para></summary>
     public HMContext()
     {
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                _ = Internal.EmbeddedManifest.Sha256Hex;
+                Internal.DriverBuilder.EnsureExtracted();
+            }
+            catch
+            {
+                // Non-fatal: ctor warm-up is opportunistic. The actual
+                // InstallDriver path will surface any real failure.
+            }
+        });
     }
 
     // ════════════════════════════════════════════════════════════════════

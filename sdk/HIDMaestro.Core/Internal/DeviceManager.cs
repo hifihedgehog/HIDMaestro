@@ -136,7 +136,7 @@ public static class DeviceManager
                 // Re-check after registration (race window)
                 if (HasInterface(instanceId, interfaceGuid))
                     return true;
-                return readyEvent.Wait(timeoutMs);
+                return readyEvent.Wait(TimeoutScale.Apply(timeoutMs));
             }
             finally
             {
@@ -215,7 +215,7 @@ public static class DeviceManager
                     && CM_Get_Child(out childInst, parentInst, 0) == CR_SUCCESS)
                     return true;
 
-                return readyEvent.Wait(timeoutMs);
+                return readyEvent.Wait(TimeoutScale.Apply(timeoutMs));
             }
             finally
             {
@@ -267,7 +267,7 @@ public static class DeviceManager
                 if (CM_Locate_DevNodeW(out devInst2, instanceId, 0) != CR_SUCCESS)
                     return true;
 
-                return goneEvent.Wait(timeoutMs);
+                return goneEvent.Wait(TimeoutScale.Apply(timeoutMs));
             }
             finally
             {
@@ -522,10 +522,10 @@ public static class DeviceManager
                         // budget real.
                         var outTask = proc.StandardOutput.ReadToEndAsync();
                         var errTask = proc.StandardError.ReadToEndAsync();
-                        if (!proc.WaitForExit(5000))
+                        if (!proc.WaitForExit(TimeoutScale.Apply(5000)))
                         {
                             try { proc.Kill(entireProcessTree: true); } catch { }
-                            proc.WaitForExit(2000);
+                            proc.WaitForExit(TimeoutScale.Apply(2000));
                         }
                         try { outTask.GetAwaiter().GetResult(); } catch { }
                         try { errTask.GetAwaiter().GetResult(); } catch { }

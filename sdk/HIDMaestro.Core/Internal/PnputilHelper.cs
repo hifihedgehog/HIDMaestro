@@ -81,10 +81,10 @@ internal static class PnputilHelper
         // us a real timeout we can act on.
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(timeoutMs))
+        if (!p.WaitForExit(TimeoutScale.Apply(timeoutMs)))
         {
             try { p.Kill(entireProcessTree: true); } catch { }
-            p.WaitForExit(5_000);
+            p.WaitForExit(TimeoutScale.Apply(5_000));
         }
         string stdout = stdoutTask.GetAwaiter().GetResult();
         string stderr = stderrTask.GetAwaiter().GetResult();
@@ -177,7 +177,7 @@ internal static class PnputilHelper
                 output.Contains("currently being used", StringComparison.OrdinalIgnoreCase) ||
                 output.Contains("presently installed", StringComparison.OrdinalIgnoreCase))
             {
-                Thread.Sleep(500);
+                Thread.Sleep(TimeoutScale.Apply(500));
                 continue;
             }
             // Some other failure (corrupt INF, missing perm, …) — don't retry.

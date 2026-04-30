@@ -200,7 +200,7 @@ internal static class SwdDeviceFactory
             }
         }
 
-        int perAttempt = Math.Min(callbackTimeoutMs, 15000);
+        int perAttempt = TimeoutScale.Apply(Math.Min(callbackTimeoutMs, 15000));
         int[] backoffMs = { 0, 1500, 3000 };
         Result last = default;
         for (int attempt = 0; attempt < backoffMs.Length; attempt++)
@@ -209,7 +209,7 @@ internal static class SwdDeviceFactory
             {
                 // Let PnP quiesce — a prior pnputil /add-driver /install can
                 // still be draining bind notifications when we get here.
-                Thread.Sleep(backoffMs[attempt]);
+                Thread.Sleep(TimeoutScale.Apply(backoffMs[attempt]));
             }
             last = RunOnce(perAttempt);
             if (last.Success) return last;
@@ -300,7 +300,7 @@ internal static class SwdDeviceFactory
         {
             using var proc = Process.Start(psi);
             if (proc == null) return unchecked((int)0x80070005);
-            if (!proc.WaitForExit(30_000))
+            if (!proc.WaitForExit(TimeoutScale.Apply(30_000)))
             {
                 try { proc.Kill(entireProcessTree: true); } catch { }
                 return unchecked((int)0x80070102); // WAIT_TIMEOUT

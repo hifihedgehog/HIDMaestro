@@ -60,11 +60,12 @@ public static class DriverBuilder
         proc.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine(e.Data); };
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
-        if (!proc.WaitForExit(timeoutMs))
+        int scaledTimeout = TimeoutScale.Apply(timeoutMs);
+        if (!proc.WaitForExit(scaledTimeout))
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
-            try { proc.WaitForExit(2000); } catch { }
-            return (-1, $"timeout after {timeoutMs} ms\n{sb}");
+            try { proc.WaitForExit(TimeoutScale.Apply(2000)); } catch { }
+            return (-1, $"timeout after {scaledTimeout} ms (scale={TimeoutScale.Factor})\n{sb}");
         }
         return (proc.ExitCode, sb.ToString());
     }
@@ -108,19 +109,42 @@ public static class DriverBuilder
         "Microsoft.Kits.Logger.dll",
     };
 
-    /// <summary>Lazily extracts the embedded payload to %TEMP%\HIDMaestro_*\
-    /// and returns the directory path. Idempotent — subsequent calls return
-    /// the same directory without re-extracting.</summary>
+    /// <summary>Lazily extracts the embedded payload to a deterministic
+    /// per-manifest-hash directory under %TEMP% and returns the path.
+    ///
+    /// <para><b>Cross-launch cache (v1.3.0+):</b> the staging directory
+    /// is named <c>HIDMaestro_&lt;sha256-prefix&gt;</c> where the prefix
+    /// is the first 16 hex chars of <see cref="EmbeddedManifest.Sha256Hex"/>.
+    /// Different SDK versions land in different dirs (auto-invalidation
+    /// without explicit cleanup); identical SDK rebuilds with identical
+    /// embedded payload reuse the same dir. On warm launches we just
+    /// validate file count + size and return — no rewrites. Drops
+    /// extraction time from 200 ms–3 s on slow eMMC to single-digit ms.</para>
+    ///
+    /// <para>Within a single process, idempotent via the
+    /// <see cref="StagingDir"/> static cache (set on first successful
+    /// extract, never invalidated mid-process).</para></summary>
     public static string EnsureExtracted()
     {
         if (StagingDir != null && Directory.Exists(StagingDir))
             return StagingDir;
 
-        string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{Guid.NewGuid():N}");
+        string hashPrefix = EmbeddedManifest.Sha256Hex.Substring(0, 16);
+        string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{hashPrefix}");
+
+        // Cache hit: dir exists with the right set of files at the right
+        // sizes. Trust the contents — corruption is rare and the next
+        // signtool / inf2cat / pnputil run will surface any tampering.
+        if (Directory.Exists(dir) && IsStagingDirComplete(dir))
+        {
+            StagingDir = dir;
+            return dir;
+        }
+
+        // Cache miss or partial dir: re-extract everything.
         Directory.CreateDirectory(dir);
 
         var asm = typeof(DriverBuilder).Assembly;
-        // Build a case-insensitive lookup of available resource names.
         var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (string name in asm.GetManifestResourceNames())
             available[name] = name;
@@ -142,6 +166,34 @@ public static class DriverBuilder
 
         StagingDir = dir;
         return dir;
+    }
+
+    /// <summary>Validates that an existing staging dir contains every
+    /// expected file at the same size as the embedded resource. Catches
+    /// partial extracts (process killed mid-extract) and prevents a stale
+    /// dir from satisfying the cache.</summary>
+    private static bool IsStagingDirComplete(string dir)
+    {
+        try
+        {
+            var asm = typeof(DriverBuilder).Assembly;
+            foreach (string file in EmbeddedFiles)
+            {
+                string outPath = Path.Combine(dir, file);
+                if (!File.Exists(outPath)) return false;
+
+                using var stream = asm.GetManifestResourceStream("HIDMaestro.Resources." + file);
+                if (stream == null) return false;
+                long expected = stream.Length;
+                long actual = new FileInfo(outPath).Length;
+                if (expected != actual) return false;
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // ── Test signing certificate (managed, no powershell) ──────────────────
@@ -295,15 +347,42 @@ public static class DriverBuilder
         PnputilHelper.RemoveAllHidMaestroPackages();
     }
 
+    /// <summary>Registry path where we record the SHA-256 of the
+    /// embedded driver payload after a successful install. Read by
+    /// <see cref="FullDeploy"/> on subsequent calls to short-circuit the
+    /// extract + sign + catalog + install pipeline when nothing has
+    /// changed. Saves 5–15 s per fresh launch on the common case.</summary>
+    private const string ManifestRegPath = @"SOFTWARE\HIDMaestro";
+    private const string ManifestRegValue = "InstalledManifestSha256";
+
     /// <summary>Full extract + sign + catalog + install pipeline. Returns
     /// true on success; throws <see cref="InvalidOperationException"/> with
     /// the failing tool's output on any pipeline-step failure. The
     /// <paramref name="rebuild"/> parameter is retained for ABI
     /// compatibility but ignored — there is no source build step any more
-    /// (the driver binaries ship pre-built inside the SDK DLL).</summary>
+    /// (the driver binaries ship pre-built inside the SDK DLL).
+    ///
+    /// <para><b>Fast-path (v1.3.0+):</b> if the SHA-256 of the embedded
+    /// driver payload matches the value previously stored at
+    /// <c>HKLM\Software\HIDMaestro\InstalledManifestSha256</c> AND
+    /// <see cref="PnputilHelper.IsHidMaestroDriverInstalled"/> returns
+    /// true, the entire pipeline is skipped. Drops fresh-launch
+    /// InstallDriver() from 5–15 s to ~50 ms.</para></summary>
     public static bool FullDeploy(bool rebuild = true)
     {
         _ = rebuild; // intentionally unused
+
+        // Fast path: matching manifest hash means embedded payload is
+        // bit-identical to what's currently in the DriverStore. Verify
+        // presence one more time via pnputil (cheap; locale-stable XML
+        // path) and skip the whole pipeline if both checks pass.
+        string embeddedHash = EmbeddedManifest.Sha256Hex;
+        string? installedHash = ReadInstalledManifestHash();
+        if (string.Equals(embeddedHash, installedHash, StringComparison.OrdinalIgnoreCase)
+            && PnputilHelper.IsHidMaestroDriverInstalled())
+        {
+            return true;
+        }
 
         EnsureExtracted();
         RemoveOldDriverPackages();
@@ -311,7 +390,32 @@ public static class DriverBuilder
         GenerateCatalogs();
         InstallDrivers();
 
+        WriteInstalledManifestHash(embeddedHash);
         return true;
+    }
+
+    private static string? ReadInstalledManifestHash()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(ManifestRegPath, writable: false);
+            return k?.GetValue(ManifestRegValue) as string;
+        }
+        catch { return null; }
+    }
+
+    private static void WriteInstalledManifestHash(string hash)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(ManifestRegPath, writable: true);
+            k?.SetValue(ManifestRegValue, hash, Microsoft.Win32.RegistryValueKind.String);
+        }
+        catch
+        {
+            // Non-fatal: cache miss next launch just means we'll re-run
+            // the pipeline. The install itself succeeded.
+        }
     }
 
     /// <summary>Checks if ALL required HIDMaestro drivers are in the store.

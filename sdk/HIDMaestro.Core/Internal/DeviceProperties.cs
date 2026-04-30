@@ -96,6 +96,41 @@ internal static class DeviceProperties
         return true;
     }
 
+    /// <summary>v1.3.0 — coalesced setter that does what
+    /// <see cref="SetBusReportedDeviceDesc"/> + <see cref="SetDeviceFriendlyName"/>
+    /// do back-to-back, but resolves the devnode + HID child once instead of
+    /// twice. Saves 2 CM_Locate_DevNodeW + 2 CM_Get_Child kernel transitions
+    /// per controller — small but called per-CreateController on the
+    /// critical path. Returns false if the root devnode wasn't located.</summary>
+    public static bool SetAllNamingProperties(string rootInstanceId, string name)
+    {
+        if (CM_Locate_DevNodeW(out uint devInst, rootInstanceId, 0) != 0)
+            return false;
+
+        byte[] strBytes = Encoding.Unicode.GetBytes(name + "\0");
+        uint len = (uint)strBytes.Length;
+
+        // Root: BusReportedDeviceDesc + FriendlyName + DeviceDesc
+        CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_BusReportedDeviceDesc,
+            DEVPROP_TYPE_STRING, strBytes, len, 0);
+        CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_FriendlyName,
+            DEVPROP_TYPE_STRING, strBytes, len, 0);
+        CM_Set_DevNode_PropertyW(devInst, ref DEVPKEY_DeviceDesc,
+            DEVPROP_TYPE_STRING, strBytes, len, 0);
+
+        // HID child (if any): same triple
+        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
+        {
+            CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_BusReportedDeviceDesc,
+                DEVPROP_TYPE_STRING, strBytes, len, 0);
+            CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_FriendlyName,
+                DEVPROP_TYPE_STRING, strBytes, len, 0);
+            CM_Set_DevNode_PropertyW(childInst, ref DEVPKEY_DeviceDesc,
+                DEVPROP_TYPE_STRING, strBytes, len, 0);
+        }
+        return true;
+    }
+
     /// <summary>Sets FriendlyName + DeviceDesc on every <c>ROOT\VID_*</c>
     /// HIDMaestro root device whose <c>Device Parameters\ControllerIndex</c>
     /// matches <paramref name="controllerIndex"/>, plus the device's first HID

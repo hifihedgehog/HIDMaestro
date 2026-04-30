@@ -218,6 +218,27 @@ function Send-Cmd {
     }
 }
 
+# v1.3.0 — battery is scale-aware. Read HIDMAESTRO_TIMEOUT_SCALE once at
+# script load, multiply every wall-clock budget by it. Default 1.0 reproduces
+# pre-1.3.0 behavior exactly. Range clamped to [0.1, 100.0]; out-of-range
+# values fall back to 1.0 with a warning.
+$script:HMScale = 1.0
+if ($env:HIDMAESTRO_TIMEOUT_SCALE) {
+    $parsed = 0.0
+    if ([double]::TryParse($env:HIDMAESTRO_TIMEOUT_SCALE,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed) -and $parsed -ge 0.1 -and $parsed -le 100.0) {
+        $script:HMScale = $parsed
+        Write-Host "Battery timeout scale: $script:HMScale (HIDMAESTRO_TIMEOUT_SCALE active)"
+    } else {
+        Write-Warning "HIDMAESTRO_TIMEOUT_SCALE='$env:HIDMAESTRO_TIMEOUT_SCALE' invalid or out of range [0.1, 100]; using 1.0"
+    }
+}
+
+function HMScaleMs { param([int]$Ms) [int][Math]::Min([int]::MaxValue, $Ms * $script:HMScale) }
+function Sleep-Scaled { param([int]$Seconds) Start-Sleep -Milliseconds (HMScaleMs ($Seconds * 1000)) }
+
 function Stop-HMTestProcess {
     param(
         [System.Diagnostics.Process]$Proc,
@@ -225,9 +246,9 @@ function Stop-HMTestProcess {
     )
     if (-not $Proc.HasExited) {
         try { Send-Cmd -Proc $Proc -Cmd 'quit' } catch {}
-        if (-not $Proc.WaitForExit($GracefulMs)) {
+        if (-not $Proc.WaitForExit((HMScaleMs $GracefulMs))) {
             try { $Proc.Kill($true) } catch {}
-            $Proc.WaitForExit(5000) | Out-Null
+            $Proc.WaitForExit((HMScaleMs 5000)) | Out-Null
             return 'KILLED'
         }
         return 'GRACEFUL'
@@ -247,10 +268,12 @@ function Wait-CreateBound {
         # install check + (post-v1.1.32) phantom-sweep over any
         # accumulated state from prior sessions. 30s is enough for
         # subsequent runs but can clip the first run on a heavy machine.
+        # Scaled by HIDMAESTRO_TIMEOUT_SCALE.
         [int]$TimeoutMs = 60000
     )
+    $budget = HMScaleMs $TimeoutMs
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+    while ($sw.ElapsedMilliseconds -lt $budget) {
         $present = Get-HMPresentDevnodes
         if ($present.Count -gt 0) { return $true }
         Start-Sleep -Milliseconds 250
@@ -261,8 +284,10 @@ function Wait-CreateBound {
 # Sleep that lets PnP cascade settle. Xbox 360 wired teardown takes ~5s
 # (XUSB companion). Series BT takes ~10s (xinputhid filter unbind).
 # Plain HID is sub-second. 12s covers every profile family with margin.
+# Scaled by HIDMAESTRO_TIMEOUT_SCALE.
 function Wait-CascadeSettle {
-    Start-Sleep -Seconds 12
+    $ms = HMScaleMs 12000
+    Start-Sleep -Milliseconds $ms
 }
 
 # Run a scenario function and capture PASS/FAIL with leftover diagnosis.
@@ -328,7 +353,7 @@ function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
         Wait-CascadeSettle
@@ -346,7 +371,7 @@ function Scenario-Single-360-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -368,7 +393,7 @@ function Scenario-Single-LongCycle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
         foreach ($p in $sequence) {
             Send-Cmd -Proc $proc -Cmd ('0 ' + $p)
             Wait-CascadeSettle
@@ -383,7 +408,7 @@ function Scenario-Single-BT-360-BT {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -398,7 +423,7 @@ function Scenario-Single-Mixed-Families {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.DualSense);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.SwitchPro);   Wait-CascadeSettle
@@ -416,7 +441,7 @@ function Scenario-Single-SameProfileSwap {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);   Wait-CascadeSettle
@@ -434,7 +459,7 @@ function Scenario-Multi-CreateAll-Idle {
     )
     try {
         # Multi-create takes longer; give it 15s for all slots to bind.
-        Start-Sleep -Seconds 15
+        Sleep-Scaled 15
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -448,7 +473,7 @@ function Scenario-Multi-SwapOneSlot {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Start-Sleep -Seconds 15
+        Sleep-Scaled 15
         # Swap slot 1 through a full cycle; slots 0,2,3 should be untouched.
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.XboxBT);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -466,7 +491,7 @@ function Scenario-Multi-SwapAllSlots {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Start-Sleep -Seconds 15
+        Sleep-Scaled 15
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);       Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.DualSense);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('2 ' + $Profiles.SwitchPro);    Wait-CascadeSettle
@@ -484,7 +509,7 @@ function Scenario-Multi-RemoveOne {
         $Profiles.DualSense
     )
     try {
-        Start-Sleep -Seconds 15
+        Sleep-Scaled 15
         Send-Cmd -Proc $proc -Cmd 'remove 1';   Wait-CascadeSettle
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
@@ -500,7 +525,7 @@ function Scenario-Multi-MultipleXinputhid {
         $Profiles.XboxBT, $Profiles.XboxOneBT, $Profiles.XboxEliteBT
     )
     try {
-        Start-Sleep -Seconds 18
+        Sleep-Scaled 18
         # Swap slot 1 to non-xinputhid family, then back.
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('1 ' + $Profiles.XboxOneBT); Wait-CascadeSettle
@@ -515,18 +540,18 @@ function Scenario-Multi-MultipleXinputhid {
 # session's RemoveAllVirtualControllers can not drain.
 function Scenario-ForceKill-Recovery {
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360, $Profiles.XboxBT)
-    Start-Sleep -Seconds 15
+    Sleep-Scaled 15
     # Hard-kill: no quit, no clean dispose. Simulates user closing
     # PadForge from Task Manager / a crash.
     try { $proc1.Kill($true) } catch {}
     $proc1.WaitForExit(5000) | Out-Null
-    Start-Sleep -Seconds 3
+    Sleep-Scaled 3
 
     # Now run a clean session that should clean up the orphans on
     # startup and leave a clean post-state on quit.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.DualSense)
     try {
-        Start-Sleep -Seconds 12
+        Sleep-Scaled 12
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
@@ -539,7 +564,7 @@ function Scenario-ForceKill-Recovery {
 # fixes it. This regression-catches if that prefix ever stops varying.
 function Scenario-AcrossProcess-Recreation {
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT, $Profiles.Xbox360)
-    Start-Sleep -Seconds 15
+    Sleep-Scaled 15
     Stop-HMTestProcess -Proc $proc1 | Out-Null
     Wait-CascadeSettle  # wait for the prior proc's teardowns to fully drain
 
@@ -547,7 +572,7 @@ function Scenario-AcrossProcess-Recreation {
     # subsequent runs.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT, $Profiles.Xbox360)
     try {
-        Start-Sleep -Seconds 15
+        Sleep-Scaled 15
         # Also exercise a swap on this second run to confirm the
         # recreated devnodes are functional, not empty shells.
         Send-Cmd -Proc $proc2 -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -565,7 +590,7 @@ function Scenario-RapidSwaps-NoSettle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         # Queue 4 swap commands with no inter-command sleep. Each one
         # processes after the prior LiveSwap returns synchronously; no
@@ -576,7 +601,7 @@ function Scenario-RapidSwaps-NoSettle {
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360)
         # Now wait long enough for ALL queued swaps to drain. Each is
         # ~5-15s depending on family; budget 60s for the full chain.
-        Start-Sleep -Seconds 60
+        Sleep-Scaled 60
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -594,7 +619,7 @@ function Scenario-Multi-SixControllers {
     try {
         # 6-controller create takes longer due to per-instance PnP
         # work; give it 25s.
-        Start-Sleep -Seconds 25
+        Sleep-Scaled 25
         # Swap a slot beyond XInput's 4 to verify high-index ContainerID
         # encoding and teardown behave correctly.
         Send-Cmd -Proc $proc -Cmd ('5 ' + $Profiles.Xbox360);   Wait-CascadeSettle
@@ -612,7 +637,7 @@ function Scenario-Single-SameVidPid {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         # xbox-360-arcade-stick: same 045E:028E as xbox-360-wired.
         Send-Cmd -Proc $proc -Cmd '0 xbox-360-arcade-stick';     Wait-CascadeSettle
@@ -631,13 +656,13 @@ function Scenario-ForceKill-MidCascade {
     $proc1 = Start-HMTestProcess -ProfileIds @($Profiles.XboxBT)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.XboxBT)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 6   # let xinputhid bind
+        Sleep-Scaled 6   # let xinputhid bind
 
         # Kick off swap-back-to-360. BT teardown will run xinputhid
         # filter-unbind cascade (~10s).
         Send-Cmd -Proc $proc1 -Cmd ('0 ' + $Profiles.Xbox360)
         # Sleep long enough that the swap is mid-cascade but not done.
-        Start-Sleep -Seconds 5
+        Sleep-Scaled 5
     } finally {
         # Hard-kill while teardown still in flight.
         try { $proc1.Kill($true) } catch {}
@@ -645,13 +670,13 @@ function Scenario-ForceKill-MidCascade {
     }
 
     # Wait for any in-flight kernel work to complete or stall.
-    Start-Sleep -Seconds 5
+    Sleep-Scaled 5
 
     # Fresh session should reliably clean up whatever was left in mid-
     # cascade state.
     $proc2 = Start-HMTestProcess -ProfileIds @($Profiles.SwitchPro)
     try {
-        Start-Sleep -Seconds 12
+        Sleep-Scaled 12
     } finally {
         Stop-HMTestProcess -Proc $proc2 | Out-Null
     }
@@ -665,7 +690,7 @@ function Scenario-Single-AlternatingPattern {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
         if (-not (Wait-CreateBound -ProfileId $Profiles.Xbox360)) { throw "initial create timeout" }
-        Start-Sleep -Seconds 4
+        Sleep-Scaled 4
 
         # A=Xbox360, B=XboxBT, C=DualSense.
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle  # A->B
@@ -692,7 +717,7 @@ function Scenario-Multi-RapidMultiSlotSwap {
         $Profiles.Xbox360, $Profiles.Xbox360
     )
     try {
-        Start-Sleep -Seconds 18  # 4-controller initial bind
+        Sleep-Scaled 18  # 4-controller initial bind
 
         # Queue 4 swaps for 4 different slots with no inter-command sleep.
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT)
@@ -700,7 +725,7 @@ function Scenario-Multi-RapidMultiSlotSwap {
         Send-Cmd -Proc $proc -Cmd ('2 ' + $Profiles.SwitchPro)
         Send-Cmd -Proc $proc -Cmd ('3 ' + $Profiles.XboxOneBT)
         # Each swap takes 5-15s depending on family; budget generously.
-        Start-Sleep -Seconds 80
+        Sleep-Scaled 80
     } finally {
         Stop-HMTestProcess -Proc $proc -GracefulMs 60000 | Out-Null
     }
@@ -721,7 +746,7 @@ function Scenario-Multi-HeterogeneousCascade {
         $Profiles.DualSense   # plain HID, no companions
     )
     try {
-        Start-Sleep -Seconds 18
+        Sleep-Scaled 18
         # No swaps; we want to test the simultaneous-dispose path that
         # only fires on `quit` / context-Dispose.
     } finally {
@@ -738,7 +763,7 @@ function Scenario-Multi-HeterogeneousCascade {
 function Scenario-Custom-CreateIdle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Custom)
     try {
-        Start-Sleep -Seconds 10
+        Sleep-Scaled 10
     } finally {
         Stop-HMTestProcess -Proc $proc | Out-Null
     }
@@ -751,7 +776,7 @@ function Scenario-Custom-CreateIdle {
 function Scenario-Custom-SwapCycle {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Custom)
     try {
-        Start-Sleep -Seconds 8
+        Sleep-Scaled 8
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.Custom);    Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('0 ' + $Profiles.XboxBT);    Wait-CascadeSettle
@@ -777,7 +802,7 @@ function Scenario-Multi-CustomInMix {
         $Profiles.Custom
     )
     try {
-        Start-Sleep -Seconds 22  # 5-controller initial bind
+        Sleep-Scaled 22  # 5-controller initial bind
         # Swap the custom slot through a couple of family transitions.
         Send-Cmd -Proc $proc -Cmd ('4 ' + $Profiles.Xbox360);   Wait-CascadeSettle
         Send-Cmd -Proc $proc -Cmd ('4 ' + $Profiles.Custom);    Wait-CascadeSettle
