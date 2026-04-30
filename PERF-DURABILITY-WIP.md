@@ -16,23 +16,18 @@
 
 To be filled before any Tier 1 changes land. All times are wall-clock; battery sourced from prior runs.
 
-| Metric | v1.2.2 dev box | v1.3.0 C1 (Tier 1 only) | v1.3.0 full (Tiers 1-7+cache) | Atom (projected ×10) |
-|---|---|---|---|---|
-| Warm-launch 3-controller create (xbox360 + xbox-bt + dualsense) | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | ~10.9 s |
-|   ↳ Xbox 360 wired (XUSB companion path) | 693 ms | 656 ms | **577 ms** (-17%) | ~5.8 s |
-|   ↳ Xbox Series BT (xinputhid path) | 166 ms | 198 ms | **122 ms** (-27%) | ~1.2 s |
-|   ↳ DualSense BT (plain HID path) | 427 ms | 432 ms | **390 ms** (-9%) | ~3.9 s |
-| Finalize device names | 2 ms | 1 ms | 1 ms | ~10 ms |
-| 3-controller teardown total | **35 732 ms** ⚠ | (varies) | **~16.8 s** (clean) | huge |
-|   ↳ DualSense BT (slot 2) | 5 596 ms | (varies) | ~5.6 s | ~56 s |
-|   ↳ Xbox Series BT (slot 1, xinputhid) | 5 736 ms | (varies) | ~5.6 s | ~56 s |
-|   ↳ Xbox 360 wired (slot 0, XUSB companion) | **35 726 ms** ⚠ baseline outlier | varies | ~5.6 s typical | ~56 s |
-| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | _running_ | ~5–6 hours |
-| swap_regression battery PASS count | 26/26 | **26/26** | _running_ | _pending_ |
+| Metric | v1.2.2 dev box | v1.3.0 C1 (Tier 1 only) | v1.3.0 C5 (Tiers 1-7) | v1.3.0 C8 (Tiers 1-8) | Atom (projected ×10) |
+|---|---|---|---|---|---|
+| Warm-launch 3-controller create (xbox360 + xbox-bt + dualsense) | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | ~10.5 s |
+|   ↳ Xbox 360 wired (XUSB companion path) | 693 ms | 656 ms | **577 ms** (-17%) | **556 ms** (-20%) | ~5.6 s |
+|   ↳ Xbox Series BT (xinputhid path) | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | ~1.2 s |
+|   ↳ DualSense BT (plain HID path) | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | ~3.7 s |
+| Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | ~10 ms |
+| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | _C8 running_ | ~5–6 hours |
+| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | _C8 running_ | _pending_ |
+
 
 **Note on the 35 s outlier:** the v1.2.2 baseline run had a one-time teardown of slot 0 at 35.7 s (vs the typical 5.6 s). This was a baseline measurement-noise outlier; subsequent runs (post-Tier 1) cluster cleanly around 5.5–5.7 s per slot for Xbox-family teardowns. Not worth tracking further.
-
-**⚠ Outlier note — slot 0 teardown:** Xbox 360 wired disposal at 35.7 s (vs ~5.7 s for the other two combined) is anomalous. Likely the gamepad-companion HID-IG-00 cascade waiting on its full 120 000 ms timeout for one of the sweep removals. Worth investigating during Tier 5 / Tier 7; the 120 s budget might be over-applied somewhere or there's a real PnP wait we should make a backstop instead of a primary wait.
 
 ---
 
