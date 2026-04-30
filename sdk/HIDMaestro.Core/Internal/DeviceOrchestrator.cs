@@ -67,7 +67,7 @@ internal static class DeviceOrchestrator
     private static readonly bool s_diagEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
     private static readonly object s_diagLock = new();
-    private static string? s_diagPath;
+    private static StreamWriter? s_diagWriter;
 
     internal static void LogDiag(string message)
     {
@@ -76,14 +76,32 @@ internal static class DeviceOrchestrator
         {
             try
             {
-                if (s_diagPath == null)
+                if (s_diagWriter == null)
                 {
                     string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
                     Directory.CreateDirectory(dir);
-                    s_diagPath = Path.Combine(dir, "teardown_diag.log");
+                    string diagPath = Path.Combine(dir, "teardown_diag.log");
+                    // T32-2 — keep the StreamWriter open across LogDiag calls
+                    // and flush per write. Was File.AppendAllText (open/write/
+                    // close per call); during HIDMAESTRO_DIAG=1 battery runs
+                    // that's ~3-4K file ops adding 10-40 s to the wall time.
+                    // FileShare.ReadWrite so external tools can tail the file.
+                    var fs = new FileStream(diagPath, FileMode.Append, FileAccess.Write,
+                        FileShare.ReadWrite, bufferSize: 4096);
+                    s_diagWriter = new StreamWriter(fs) { AutoFlush = true };
+                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    {
+                        try { lock (s_diagLock) { s_diagWriter?.Dispose(); s_diagWriter = null; } }
+                        catch { }
+                    };
                 }
-                File.AppendAllText(s_diagPath!,
-                    $"[{DateTime.Now:HH:mm:ss.fff}] tid={Environment.CurrentManagedThreadId,-3} {message}\n");
+                s_diagWriter.Write('[');
+                s_diagWriter.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
+                s_diagWriter.Write("] tid=");
+                s_diagWriter.Write(Environment.CurrentManagedThreadId.ToString().PadRight(3));
+                s_diagWriter.Write(' ');
+                s_diagWriter.Write(message);
+                s_diagWriter.Write('\n');
             }
             catch { }
         }
