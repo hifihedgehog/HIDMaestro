@@ -638,13 +638,18 @@ public static class DeviceManager
     }
 
     /// <summary>
-    /// Gets the device instance ID string for a given devnode.
+    /// Gets the device instance ID string for a given devnode. T33-2 — uses
+    /// the same thread-local reusable buffer as GetHidChildId so per-call
+    /// char[] allocations on enumeration paths (GetAllChildDeviceIds,
+    /// RemoveOrphanHidChildren) don't generate GC pressure on slow hardware.
     /// </summary>
     static string? GetDeviceId(uint devInst)
     {
         if (CM_Get_Device_ID_Size(out uint idLen, devInst, 0) != CR_SUCCESS)
             return null;
-        var buffer = new char[idLen + 1];
+        var buffer = t_devIdBuffer;
+        if (buffer == null || buffer.Length < idLen + 1)
+            buffer = t_devIdBuffer = new char[Math.Max(512, (int)idLen + 1)];
         if (CM_Get_Device_IDW(devInst, buffer, (uint)buffer.Length, 0) != CR_SUCCESS)
             return null;
         return new string(buffer, 0, (int)idLen);
