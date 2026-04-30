@@ -70,6 +70,29 @@ internal sealed class Program
     [DllImport("hid.dll")]
     private static extern int HidP_GetCaps(IntPtr PreparsedData, out HIDP_CAPS Capabilities);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct XINPUT_GAMEPAD
+    {
+        public ushort wButtons;
+        public byte bLeftTrigger, bRightTrigger;
+        public short sThumbLX, sThumbLY, sThumbRX, sThumbRY;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct XINPUT_STATE
+    {
+        public uint dwPacketNumber;
+        public XINPUT_GAMEPAD Gamepad;
+    }
+    [DllImport("xinput1_4.dll")]
+    private static extern uint XInputGetState(uint dwUserIndex, out XINPUT_STATE pState);
+
+    private static int CountConnectedXInputSlots()
+    {
+        int n = 0;
+        for (uint i = 0; i < 4; i++) if (XInputGetState(i, out _) == 0) n++;
+        return n;
+    }
+
     public static int Main(string[] args)
     {
         Console.WriteLine("=== v1.4.0 Experiment 1: descriptor-swap viability probe ===\n");
@@ -108,6 +131,9 @@ internal sealed class Program
         Console.WriteLine($"  HID child after profile A create: {hidChildIdA ?? "(none)"}");
         var capsA = TryReadHidCaps(hidChildIdA);
         Console.WriteLine($"  HIDP_CAPS (profile A): UsagePage=0x{capsA?.UsagePage:X4} Usage=0x{capsA?.Usage:X4} InputReportLen={capsA?.InputReportByteLength} ButtonCaps={capsA?.NumberInputButtonCaps} ValueCaps={capsA?.NumberInputValueCaps}");
+
+        int xinputBefore = CountConnectedXInputSlots();
+        Console.WriteLine($"  XInput slots connected (profile A active): {xinputBefore}/4");
 
         // ── Phase 2: write profile B's descriptor to registry ───────────────
         // Driver reads from HKLM\SOFTWARE\HIDMaestro\Controller{N}\ReportDescriptor
@@ -184,6 +210,54 @@ internal sealed class Program
         Console.WriteLine($"\n  HID child after disable+enable: {hidChildIdB ?? "(none)"}");
         var capsB = TryReadHidCaps(hidChildIdB);
         Console.WriteLine($"  HIDP_CAPS (after swap): UsagePage=0x{capsB?.UsagePage:X4} Usage=0x{capsB?.Usage:X4} InputReportLen={capsB?.InputReportByteLength} ButtonCaps={capsB?.NumberInputButtonCaps} ValueCaps={capsB?.NumberInputValueCaps}");
+
+        int xinputAfter = CountConnectedXInputSlots();
+        Console.WriteLine($"  XInput slots connected (main devnode swapped only): {xinputAfter}/4");
+
+        // ── Phase 6: also disable+enable the XUSB companion ─────────────────
+        // The XUSB companion at SWD\HIDMAESTRO\<sid>_<idx> registers the
+        // {EC87F1E3} interface class that XInput discovery walks. Disabling
+        // the main devnode doesn't drop XInput visibility because the
+        // companion still publishes the interface class. For a true Xbox-VID
+        // identity swap we need to disable the companion too.
+        Console.WriteLine($"\n--- XUSB companion disable+enable ---");
+        string? companionInstId = null;
+        try
+        {
+            using var swd = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\SWD\HIDMAESTRO");
+            if (swd != null)
+            {
+                foreach (var sub in swd.GetSubKeyNames())
+                {
+                    using var dp = swd.OpenSubKey($@"{sub}\Device Parameters");
+                    if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
+                    {
+                        companionInstId = $@"SWD\HIDMAESTRO\{sub}";
+                        break;
+                    }
+                }
+            }
+        }
+        catch { }
+        Console.WriteLine($"  XUSB companion: {companionInstId ?? "(not found)"}");
+
+        if (companionInstId != null && CM_Locate_DevNodeW(out uint compDevInst, companionInstId, 0) == 0)
+        {
+            var compSw = Stopwatch.StartNew();
+            uint dh = CM_Disable_DevNode(compDevInst, 0);
+            long dms = compSw.ElapsedMilliseconds;
+            int xinputDuringDisable = CountConnectedXInputSlots();
+            Console.WriteLine($"  Companion CM_Disable_DevNode -> hr=0x{dh:X8} in {dms} ms; XInput slots: {xinputDuringDisable}/4");
+
+            compSw.Restart();
+            uint eh = CM_Enable_DevNode(compDevInst, 0);
+            long ems = compSw.ElapsedMilliseconds;
+            System.Threading.Thread.Sleep(150); // allow XInput to re-poll
+            int xinputAfterReenable = CountConnectedXInputSlots();
+            Console.WriteLine($"  Companion CM_Enable_DevNode -> hr=0x{eh:X8} in {ems} ms; XInput slots after settle: {xinputAfterReenable}/4");
+
+            Console.WriteLine($"  Companion cycle total: {dms + ems} ms");
+        }
 
         // ── Phase 5: verdict ────────────────────────────────────────────────
         Console.WriteLine($"\n=== Verdict ===");
