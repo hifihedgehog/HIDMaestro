@@ -1416,15 +1416,15 @@ internal static class DeviceOrchestrator
         // as a WGI Gamepad (would duplicate the main virtual's HID-path
         // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
         // {EC87F1E3} XUSB device interface class.
+        string? xusbCompanionId = null;
         if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
         {
-            string? xusbId;
             var xusbSw = Stopwatch.StartNew();
             using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.create_xusb_companion"))
-                xusbId = CreateXusbCompanion(controllerIndex, profile);
-            LogDiag($"    CreateXusbCompanion -> {(xusbId ?? "(null)")} in {xusbSw.ElapsedMilliseconds}ms");
+                xusbCompanionId = CreateXusbCompanion(controllerIndex, profile);
+            LogDiag($"    CreateXusbCompanion -> {(xusbCompanionId ?? "(null)")} in {xusbSw.ElapsedMilliseconds}ms");
             if (profile.CompanionOnly && companionId == null)
-                companionId = xusbId;
+                companionId = xusbCompanionId;
 
             // Profiles with an HIDMAESTRO XUSB companion need the HID parent
             // gated out of WGI's HidClient classifier via xinputhid tripwire
@@ -1445,8 +1445,26 @@ internal static class DeviceOrchestrator
         }
 
         // ── Step 6: final friendly name ──────────────────────────────────
+        // T10 — direct application on the specific instance IDs we created
+        // instead of walking SWD\ + ROOT\ + HIDCLASS by ControllerIndex.
+        // We have parentId (mainInstanceId or companionId) and (for
+        // non-xinputhid Xbox profiles) xusbCompanionId. The original walk
+        // applied to root + every child + every sibling; SetAllNamingProperties
+        // applies to root + first HID child which covers the same naming
+        // surface for our devices (single HID child, no second-level
+        // grandchildren). Keep ApplyFriendlyNameForController as a fallback
+        // commented out — easy revert if a future PnP edge surfaces a
+        // device we missed here.
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "6.apply_friendly_name"))
-            DeviceProperties.ApplyFriendlyNameForController(controllerIndex, displayName);
+        {
+            string? primaryId = mainInstanceId ?? companionId;
+            if (primaryId != null)
+                try { DeviceProperties.SetAllNamingProperties(primaryId, displayName); }
+                catch { }
+            if (xusbCompanionId != null && xusbCompanionId != primaryId)
+                try { DeviceProperties.SetAllNamingProperties(xusbCompanionId, displayName); }
+                catch { }
+        }
 
         // ── Step 7: wait for XInput slot claim ───────────────────────────
         // Without this, xinputhid (slow) and our XUSB companion (fast) race
