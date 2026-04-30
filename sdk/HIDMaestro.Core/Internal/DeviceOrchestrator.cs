@@ -615,8 +615,21 @@ internal static class DeviceOrchestrator
     //  WriteGameInputRegistry
     // ════════════════════════════════════════════════════════════════════
 
+    // v1.3.0 — per-VID:PID write cache. WriteGameInputRegistry is called
+    // per CreateController, but the data written is keyed only by
+    // VID:PID — two controllers using the same profile produce identical
+    // writes. Skip the redundant work after the first per-VID:PID call.
+    private static readonly HashSet<uint> s_gameInputRegistryWritten = new();
+    private static readonly object s_gameInputRegistryLock = new();
+
     private static void WriteGameInputRegistry(ControllerProfile profile)
     {
+        uint vidPidKey = ((uint)profile.VendorId << 16) | profile.ProductId;
+        lock (s_gameInputRegistryLock)
+        {
+            if (!s_gameInputRegistryWritten.Add(vidPidKey)) return;
+        }
+
         string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
         try { Registry.LocalMachine.DeleteSubKeyTree(deviceKey, false); } catch { }
 
