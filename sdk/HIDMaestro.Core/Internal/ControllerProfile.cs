@@ -173,6 +173,32 @@ public sealed class ControllerProfile
         _descriptorCached = true;
         return bytes;
     }
+
+    // v1.3.0 T10 — lazy-cached parsed HidReportBuilder. HMController.ctor
+    // calls HidReportBuilder.Parse(descriptor, axisMap) on every
+    // CreateController, which walks the descriptor byte-by-byte building
+    // InputFields + ResolveSemantics + ApplyAxisMap. Same descriptor +
+    // same axisMap = identical output, so a per-profile cache eliminates
+    // the per-controller parse cost. The builder is configured once
+    // (ButtonMap + TriggerButtons set immediately after Parse) and then
+    // only read by SubmitState — safe to share across HMController
+    // instances using the same profile.
+    [JsonIgnore]
+    private HidReportBuilder? _cachedReportBuilder;
+
+    /// <summary>Returns a parsed + configured HidReportBuilder for this
+    /// profile. Cached on the instance after the first call. Subsequent
+    /// CreateController calls for the same profile reuse the cached
+    /// instance (read-only after configuration).</summary>
+    internal HidReportBuilder GetOrBuildReportBuilder()
+    {
+        if (_cachedReportBuilder != null) return _cachedReportBuilder;
+        var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap);
+        b.ButtonMap = ButtonMap;
+        b.TriggerButtons = TriggerButtons;
+        _cachedReportBuilder = b;
+        return b;
+    }
 }
 
 /// <summary>

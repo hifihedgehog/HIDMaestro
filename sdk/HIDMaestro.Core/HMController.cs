@@ -233,9 +233,11 @@ public sealed class HMController : IDisposable
         InstanceId = instanceId;
         Profile = profile;
 
-        _reportBuilder = HidReportBuilder.Parse(profile.Inner.GetDescriptorBytes()!, profile.Inner.AxisMap);
-        _reportBuilder.ButtonMap = profile.Inner.ButtonMap;
-        _reportBuilder.TriggerButtons = profile.Inner.TriggerButtons;
+        // v1.3.0 T10 — cached per-profile builder; same descriptor + same
+        // maps produce identical output, so each CreateController for a
+        // given profile reuses the same configured builder instead of
+        // re-parsing the descriptor on every ctor.
+        _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
