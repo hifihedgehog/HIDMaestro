@@ -589,8 +589,15 @@ internal static class DeviceOrchestrator
     //  EnsureGameInputService
     // ════════════════════════════════════════════════════════════════════
 
+    // v1.3.0 — per-process cache: GameInputSvc state is global to the OS,
+    // not per-controller. Checking on every CreateController spawned sc.exe
+    // 1–3 times (100–300 ms even when nothing changed). Once we've confirmed
+    // the service is running in this process, subsequent calls are a no-op.
+    private static volatile bool s_gameInputSvcRunning;
+
     private static void EnsureGameInputService()
     {
+        if (s_gameInputSvcRunning) return;
         try
         {
             var (_, status) = RunProcess("sc.exe", "query GameInputSvc");
@@ -599,6 +606,7 @@ internal static class DeviceOrchestrator
                 RunProcess("sc.exe", "config GameInputSvc start= auto");
                 RunProcess("sc.exe", "start GameInputSvc");
             }
+            s_gameInputSvcRunning = true;
         }
         catch { }
     }
@@ -620,29 +628,29 @@ internal static class DeviceOrchestrator
 
         using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
 
-        string gpPath = $@"{deviceKey}\Gamepad";
-        string[] subs = { "Menu","View","A","B","X","Y","LeftShoulder","RightShoulder",
-            "LeftThumbstickButton","RightThumbstickButton",
-            "DPadUp","DPadDown","DPadLeft","DPadRight",
-            "LeftTrigger","RightTrigger",
-            "LeftThumbstickX","LeftThumbstickY","RightThumbstickX","RightThumbstickY" };
-        foreach (var sub in subs)
-            Registry.LocalMachine.CreateSubKey($@"{gpPath}\{sub}");
+        // v1.3.0 — keep the parent gpPath key open and create children
+        // through it instead of through Registry.LocalMachine. Each
+        // CreateSubKey/OpenSubKey via the static class opens the registry
+        // tree from HKLM root every time. Holding a parent handle and
+        // creating children relative to it cuts the per-key cost roughly
+        // in half. Also single-passes create + write per child — previously
+        // we created all 20 children, then re-opened each to set values.
+        using var gp = Registry.LocalMachine.CreateSubKey($@"{deviceKey}\Gamepad");
 
         void SetAxis(string name, int index, bool invert = false)
         {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            using var k = gp!.CreateSubKey(name);
             k.SetValue("AxisIndex", index, RegistryValueKind.DWord);
             if (invert) k.SetValue("Invert", 1, RegistryValueKind.DWord);
         }
         void SetButton(string name, int index)
         {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            using var k = gp!.CreateSubKey(name);
             k.SetValue("ButtonIndex", index, RegistryValueKind.DWord);
         }
         void SetDPad(string name, string position)
         {
-            using var k = Registry.LocalMachine.OpenSubKey($@"{gpPath}\{name}", true)!;
+            using var k = gp!.CreateSubKey(name);
             k.SetValue("SwitchIndex", 0, RegistryValueKind.DWord);
             k.SetValue("SwitchPosition", position, RegistryValueKind.String);
             k.SetValue("IncludeAdjacent", 1, RegistryValueKind.DWord);
