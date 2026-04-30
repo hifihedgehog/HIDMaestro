@@ -611,6 +611,14 @@ internal static class DeviceOrchestrator
         catch { }
     }
 
+    /// <summary>T11 — pre-warm hook called from HMContext's background ctor
+    /// task. Same logic as the gated <see cref="EnsureGameInputService"/>
+    /// but exposed at internal scope so callers outside of SetupController
+    /// can pre-prime the per-process cache. Safe to call concurrently with
+    /// SetupController's own EnsureGameInputService invocation — the
+    /// volatile-bool gate means only one path actually does the sc.exe work.</summary>
+    internal static void PrewarmGameInputService() => EnsureGameInputService();
+
     // ════════════════════════════════════════════════════════════════════
     //  WriteGameInputRegistry
     // ════════════════════════════════════════════════════════════════════

@@ -72,6 +72,11 @@ public sealed class HMContext : IDisposable
                 // a DriverStore filesystem walk. Cheap (<5 ms) and doesn't
                 // require admin.
                 Internal.DriverBuilder.IsDriverInstalled();
+                // T11 — pre-prime the GameInputSvc-running cache so the
+                // first SetupController's step 0.gameinput_svc is a single
+                // bool read instead of a 15+ ms sc.exe spawn. The service
+                // state is global to the OS, not per-controller.
+                Internal.DeviceOrchestrator.PrewarmGameInputService();
             }
             catch
             {
