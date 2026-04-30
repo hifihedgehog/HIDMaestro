@@ -16,15 +16,15 @@
 
 To be filled before any Tier 1 changes land. All times are wall-clock; battery sourced from prior runs.
 
-| Metric | v1.2.2 baseline | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (T9) | v1.3.0 C11 (T10) | v1.3.0 C12 (T11-19) | v1.3.0 C14 (T11-20/21) | v1.3.0 timing-pass | v1.3.0 post-T22 | v1.3.0 C15 (T22) | Atom (×10) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Warm-launch 3-controller create | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _median 388 ms_ | _median 431 ms_ | _median 440 ms_ | _median 407 ms_ | **1 132 ms** (-12%) | **1 065 ms** (**-17.3%**) | _median 437 ms_ | ~10.5 s |
+| Metric | v1.2.2 baseline | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (T9) | v1.3.0 C11 (T10) | v1.3.0 C12 (T11-19) | v1.3.0 C14 (T11-20/21) | v1.3.0 timing-pass | v1.3.0 post-T22 | v1.3.0 C15 (T22) | v1.3.0 C16 (T23+T24) | Atom (×10) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Warm-launch 3-controller create | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _median 388 ms_ | _median 431 ms_ | _median 440 ms_ | _median 407 ms_ | **1 132 ms** (-12%) | **1 065 ms** (**-17.3%**) | _median 437 ms_ | _median 430 ms_ | ~10.5 s |
 |   ↳ Xbox 360 wired | 693 ms | 656 ms | **577 ms** (-17%) | **556 ms** (-20%) | _p75 = 539 ms_ | _p75 = 596 ms_ | _p75 = 585 ms_ | _p75 = 549 ms_ | ~5.6 s |
 |   ↳ Xbox Series BT | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | _p25 = 143 ms_ | _p25 = 152 ms_ | _p25 = 154 ms_ | _p25 = 149 ms_ | ~1.2 s |
 |   ↳ DualSense BT | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | _median_ | _median_ | _median_ | _median_ | ~3.7 s |
-| Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 2 ms | 2 ms | 1 ms | ~10 ms |
-| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | **1 965 s** (-2.5%) | **1 970 s** (-2.3%) | n/a | n/a | **1 952 s** (-3.2%) | ~5–6 h |
-| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | n/a | n/a | **26/26** | _pending_ |
+| Finalize device names | 2 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 1 ms | 2 ms | 2 ms | 1 ms | 1 ms | ~10 ms |
+| swap_regression battery wall | 2 016 s | **1 934 s** (-4%) | **1 895 s** (-6%) | **2 021 s** | **1 949 s** (-3.3%) | **1 971 s** (-2.2%) | **1 965 s** (-2.5%) | **1 970 s** (-2.3%) | n/a | n/a | **1 952 s** (-3.2%) | **1 973 s** (-2.1%) | ~5–6 h |
+| swap_regression battery PASS count | 26/26 | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | **26/26** | n/a | n/a | **26/26** | **26/26** | _pending_ |
 
 **Battery wall progression context:** C5/C8 (1895/1918 s) were faster than baseline because the v1.3.0-wip-broken `WaitForHidChild` was returning False immediately for SWD-rooted parents — skipping a real PnP wait that downstream slot-claim was effectively absorbing. C9 (2021 s) is post-fix: the wait happens properly in step 4, slot-claim in step 7 is then fast. Net: battery wall is ~baseline (within 5s of 2016 s noise), per-controller Phase 1 is **16% faster**, and the SDK is now functionally correct for SWD-rooted parents. The user-visible metric (Phase 1) is the right scorecard.
 
@@ -41,6 +41,8 @@ To be filled before any Tier 1 changes land. All times are wall-clock; battery s
 **Step-level timing pass (HIDMAESTRO_TIMING=1, post-Tier-11):** Single warm-launch 3-controller create = **1132 ms** total (xbox-360-wired 587 ms + xbox-series-xs-bt 148 ms + dualsense 383 ms + 14 ms Phase 1.5 finalize). The dominant cost in every profile is **step 3 (create devnode / create_main_devnode / create_gamepad_companion)**: 425, 139, 377 ms respectively — 84% of the per-setup total. That's the SetupAPI / SwDeviceCreate kernel-PnP call doing real device-install work. Every other step is now sub-2 ms (set_names_root, fix_hid_child_names_2, set_bustype_usb, apply_friendly_name, instance_config, driver_install_check all ≤1 ms). The non-PnP work has effectively been driven to the floor; further user-mode optimization will not move the needle without changing how we drive PnP itself.
 
 **Step-level timing pass post-T22 (GameInputSvc prewarm):** Single warm-launch 3-controller create = **1065 ms** total (xbox-360-wired 569 ms + xbox-series-xs-bt 96 ms + dualsense 397 ms + 2 ms Phase 1.5). That's **-17.3% from the v1.2.2 baseline (1287 ms)** and within noise of C8's measured 1049 ms. The first SetupController's `0.gameinput_svc` step dropped from 15-17 ms (sc.exe spawn) to 2 ms (cache hit) — the prewarm doesn't reduce total work, it just shifts the sc.exe spawn out of the foreground SetupController path into the background ctor task. Same pattern as the existing IsDriverInstalled prewarm.
+
+**C16 (T23 + T24 cumulative validation):** 26/26 PASS in 1973 s (-2.1% from baseline). 7 Series-BT-bind-failure outliers (within the noise band of C10-C15's 6-12 outliers per battery). Median 430 ms across 116 setups, p25 = 166 ms, p75 = 536 ms — Phase 1 stable at ~430 ms median across all post-Tier-9 batteries. The diag log confirms T23's 10 ms cadence is firing: XInput slot waits typically complete in 1-14 ms (vs pre-T23's 14-65 ms range). T25-T32 (FinalizeNames cadence, OEM dedup, GIP-skip, byte-aligned WriteBits, parallel prewarm, thread-local devID buffer, SubmitRawReport GIP-skip, button-mask bit-pop) need C17 to validate.
 
 ---
 
