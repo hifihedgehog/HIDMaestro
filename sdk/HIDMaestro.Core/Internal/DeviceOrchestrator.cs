@@ -1512,12 +1512,23 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static bool WaitForHidChild(string parentInstanceId, int timeoutMs)
     {
-        // v1.3.0 — delegate to DeviceManager.WaitForHidChild which uses
-        // CM_Register_Notification (signal-driven, no polling tail). The
-        // local copy was a 100 ms poll loop that added up to 99 ms of
-        // worst-case wait per call after the child PDO actually arrived.
-        // DeviceManager applies TimeoutScale internally; don't double-scale.
-        return DeviceManager.WaitForHidChild(parentInstanceId, timeoutMs);
+        // v1.3.0 wip 12 — kept the registry-poll shape after empirical
+        // diag-log evidence that DeviceManager.WaitForHidChild's
+        // CM_Register_Notification path returns False immediately for SWD-
+        // rooted gamepad-companion parents (the registration call itself
+        // errors before xinputhid has had time to bind the HID child PDO).
+        // Polling is robust to that race; the 25 ms tighter cadence vs
+        // the v1.2.x 100 ms cadence is the actual win here (75 ms tail
+        // wait saved per controller after the child appears).
+        int budget = TimeoutScale.Apply(timeoutMs);
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < budget)
+        {
+            if (DeviceManager.GetHidChildId(parentInstanceId) != null)
+                return true;
+            Thread.Sleep(25);
+        }
+        return false;
     }
 
     /// <summary>
