@@ -729,7 +729,10 @@ public static class DeviceManager
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS)
             return false;
         CM_Disable_DevNode(devInst, 0);
-        // Wait for driver to unload before re-enabling
+        // Wait for driver to unload before re-enabling. The 5 s base is
+        // a backstop — WaitForDeviceRemoval is signal-driven internally
+        // via CM_Register_Notification, this just caps the wait.
+        // WaitForDeviceRemoval applies TimeoutScale internally.
         WaitForDeviceRemoval(instanceId, 5000);
         // Re-locate (may have become phantom after disable)
         CM_Locate_DevNodeW(out devInst, instanceId, 1); // phantom flag
