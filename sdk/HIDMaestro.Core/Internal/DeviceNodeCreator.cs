@@ -49,6 +49,12 @@ namespace HIDMaestro.Internal;
 /// </summary>
 internal static class DeviceNodeCreator
 {
+    // T34 — per-hwId DeviceOverrides write dedup. Same hwId = same override
+    // path, so writing the same Removable=1 value more than once per process
+    // is wasted work. ConcurrentBag-flavored dedup (HashSet behind a lock).
+    private static readonly System.Collections.Generic.HashSet<string> s_deviceOverridesWritten =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object s_deviceOverridesLock = new();
     /// <summary>HID class GUID — every virtual controller is created in this class.</summary>
     private static readonly Guid HIDClassGuid =
         new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
@@ -150,14 +156,27 @@ internal static class DeviceNodeCreator
                 // DeviceOverrides marks the device as Removable BEFORE registration.
                 // This tells PnP to generate a unique ContainerId per instance instead
                 // of merging all our ROOT devices into one container in Settings.
-                try
+                // T34 — per-hwId dedup: the override path is keyed only by hwId,
+                // so the same write happens for every controller of the same profile.
+                // Skip after the first per-process per-hwId write.
+                bool needsOverride;
+                lock (s_deviceOverridesLock)
+                    needsOverride = s_deviceOverridesWritten.Add(hwId);
+                if (needsOverride)
                 {
-                    string overrideHwId = hwId.Replace('\\', '#');
-                    string overridePath = $@"SYSTEM\CurrentControlSet\Control\DeviceOverrides\{overrideHwId}\*";
-                    using var overrideKey = Registry.LocalMachine.CreateSubKey(overridePath);
-                    overrideKey.SetValue("Removable", 1, RegistryValueKind.DWord);
+                    try
+                    {
+                        string overrideHwId = hwId.Replace('\\', '#');
+                        string overridePath = $@"SYSTEM\CurrentControlSet\Control\DeviceOverrides\{overrideHwId}\*";
+                        using var overrideKey = Registry.LocalMachine.CreateSubKey(overridePath);
+                        overrideKey.SetValue("Removable", 1, RegistryValueKind.DWord);
+                    }
+                    catch
+                    {
+                        // Re-allow retry on next call if the write failed.
+                        lock (s_deviceOverridesLock) s_deviceOverridesWritten.Remove(hwId);
+                    }
                 }
-                catch { /* non-fatal — ContainerID step below catches the consequences */ }
 
                 // DIF_REGISTERDEVICE actually creates the PnP node. This is admin-only
                 // (SeLoadDriverPrivilege) — failures here mean the consumer process
