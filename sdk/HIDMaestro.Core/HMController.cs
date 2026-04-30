@@ -226,6 +226,13 @@ public sealed class HMController : IDisposable
         }
     }
 
+    // T26-2 — set once at ctor, read every frame in SubmitState. Only Xbox-
+    // VID profiles have an XUSB companion (HMXInput.dll) that reads the
+    // GIP-format byte slice; for every other profile the bytes are
+    // unconditionally unused, so we can skip the per-frame packing AND the
+    // 14-byte Marshal.Copy entirely. ~60-80 instructions saved per frame.
+    private readonly bool _packsGipBuffer;
+
     internal HMController(HMContext context, int index, HMProfile profile, string? instanceId)
     {
         _context = context;
@@ -239,6 +246,13 @@ public sealed class HMController : IDisposable
         // re-parsing the descriptor on every ctor.
         _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
+
+        // Xbox-family check: VID 0x045E (Microsoft) profiles use HMXInput.dll
+        // as their XUSB companion which reads the GIP-format buffer slice
+        // from shared memory on IOCTL_XUSB_GET_STATE. Sony / Nintendo /
+        // generic gamepads have no XUSB companion bound — skip the 14-byte
+        // packing and copy.
+        _packsGipBuffer = profile.Inner.VendorId == 0x045E;
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
@@ -295,46 +309,49 @@ public sealed class HMController : IDisposable
             buttonMask: (uint)state.Buttons);
         byte[] report = _reportBuffer;
 
-        // Pack the GIP-format buffer that the XUSB companion (HMXInput.dll)
-        // reads for IOCTL_XUSB_GET_STATE. Only meaningful for non-xinputhid
-        // Xbox profiles (Xbox 360 wired etc.) — for other profiles no XUSB
-        // companion is bound and the bytes are unused. We pack unconditionally
-        // because checking the profile per-frame is more expensive than
-        // writing 14 bytes.
-        ushort gipLx = (ushort)(mlx * 65535);
-        ushort gipLy = (ushort)(mly * 65535);
-        ushort gipRx = (ushort)(mrx * 65535);
-        ushort gipRy = (ushort)(mry * 65535);
-        ushort gipLt = (ushort)(mlt * 1023);
-        ushort gipRt = (ushort)(mrt * 1023);
-        _gipBuf[0]  = (byte)(gipLx & 0xFF); _gipBuf[1]  = (byte)(gipLx >> 8);
-        _gipBuf[2]  = (byte)(gipLy & 0xFF); _gipBuf[3]  = (byte)(gipLy >> 8);
-        _gipBuf[4]  = (byte)(gipRx & 0xFF); _gipBuf[5]  = (byte)(gipRx >> 8);
-        _gipBuf[6]  = (byte)(gipRy & 0xFF); _gipBuf[7]  = (byte)(gipRy >> 8);
-        _gipBuf[8]  = (byte)(gipLt & 0xFF); _gipBuf[9]  = (byte)(gipLt >> 8);
-        _gipBuf[10] = (byte)(gipRt & 0xFF); _gipBuf[11] = (byte)(gipRt >> 8);
-        // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
-        uint b = (uint)state.Buttons;
-        byte btnLow = 0;
-        if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
-        if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
-        if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
-        if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
-        if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
-        if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
-        if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
-        if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
-        _gipBuf[12] = btnLow;
-        // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
-        // 4-bit hat (companion.c does (btnHigh >> 2) & 0x0F), so Guide has
-        // to live above the hat — bit 6 (0x40). HMXInput.dll's
-        // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
-        // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
-        byte btnHigh = 0;
-        if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
-        if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
-        if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
-        _gipBuf[13] = btnHigh;
+        // T26-2 — pack the GIP-format buffer ONLY for Xbox-VID profiles.
+        // The XUSB companion (HMXInput.dll) reads this slice on
+        // IOCTL_XUSB_GET_STATE; non-Xbox profiles have no XUSB companion
+        // bound, so the bytes are unused — skip the per-frame packing
+        // entirely (~60-80 instructions saved). The downstream Marshal.Copy
+        // is also skipped via the gipData=null path in WriteInputFrame.
+        if (_packsGipBuffer)
+        {
+            ushort gipLx = (ushort)(mlx * 65535);
+            ushort gipLy = (ushort)(mly * 65535);
+            ushort gipRx = (ushort)(mrx * 65535);
+            ushort gipRy = (ushort)(mry * 65535);
+            ushort gipLt = (ushort)(mlt * 1023);
+            ushort gipRt = (ushort)(mrt * 1023);
+            _gipBuf[0]  = (byte)(gipLx & 0xFF); _gipBuf[1]  = (byte)(gipLx >> 8);
+            _gipBuf[2]  = (byte)(gipLy & 0xFF); _gipBuf[3]  = (byte)(gipLy >> 8);
+            _gipBuf[4]  = (byte)(gipRx & 0xFF); _gipBuf[5]  = (byte)(gipRx >> 8);
+            _gipBuf[6]  = (byte)(gipRy & 0xFF); _gipBuf[7]  = (byte)(gipRy >> 8);
+            _gipBuf[8]  = (byte)(gipLt & 0xFF); _gipBuf[9]  = (byte)(gipLt >> 8);
+            _gipBuf[10] = (byte)(gipRt & 0xFF); _gipBuf[11] = (byte)(gipRt >> 8);
+            // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
+            uint b = (uint)state.Buttons;
+            byte btnLow = 0;
+            if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
+            if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
+            if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
+            if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
+            if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
+            if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
+            if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
+            if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
+            _gipBuf[12] = btnLow;
+            // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
+            // 4-bit hat (companion.c does (btnHigh >> 2) & 0x0F), so Guide has
+            // to live above the hat — bit 6 (0x40). HMXInput.dll's
+            // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
+            // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
+            byte btnHigh = 0;
+            if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
+            if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
+            if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
+            _gipBuf[13] = btnHigh;
+        }
 
         // Strip the Report ID byte (if any) before writing the HID native
         // bytes. BuildReport puts the Report ID at position 0 when the
@@ -344,8 +361,11 @@ public sealed class HMController : IDisposable
         // match the shared memory section's data area size.
         int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
         int dataLen = Math.Min(report.Length - dataStart, 64);
+        // T26-2 — pass null for gipData on non-Xbox profiles so WriteInputFrame
+        // skips the 14-byte Marshal.Copy.
         SharedMemoryIO.WriteInputFrame(
-            _inputView, _inputEvent, ref _inputSeqNo, report, dataLen, _gipBuf, dataStart);
+            _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
+            _packsGipBuffer ? _gipBuf : null, dataStart);
     }
 
     /// <summary>Push a raw HID input report for features that

@@ -365,7 +365,7 @@ internal static class SharedMemoryIO
     /// without opening the event). The SetEvent call is skipped in that
     /// case — the write still completes normally.</para></summary>
     public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
-                                       byte[] data, int dataLen, byte[] gipData,
+                                       byte[] data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0)
     {
         // 1. Mark write in progress (odd seqNo)
@@ -380,11 +380,16 @@ internal static class SharedMemoryIO
         // single bulk copy per region is two P/Invokes/frame total.
         // We don't zero the unused data tail past dataLen — driver/
         // consumer reads DataSize and uses only data[0..DataSize-1]; the
-        // tail is irrelevant.
+        // tail is irrelevant. T26-2 — gipData is null for non-Xbox
+        // profiles (no XUSB companion bound), so we can skip the 14-byte
+        // copy entirely. Section is zero-initialized at create time, so
+        // the GIP slice stays zeros (which is what HMXInput.dll would read
+        // anyway if the profile somehow gained an XUSB companion mid-life).
         Marshal.WriteInt32(view, 4, dataLen);
         if (dataLen > 0)
             Marshal.Copy(data, dataOffset, view + DATA_OFFSET, dataLen);
-        Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
+        if (gipData != null)
+            Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
 
         // 3. Mark write complete (even seqNo)
         Thread.MemoryBarrier();
