@@ -1120,14 +1120,13 @@ internal static class DeviceOrchestrator
         };
         byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
 
-        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite",
-            "VID_045E&PID_02FF&IG_00", "VID_045E&PID_0B13&IG_00",
-            // HIDMAESTRO enumerator added per gap analysis item #6:
-            // WGI may check DEVPKEY_Device_BusTypeGuid on the XUSB-interface-
-            // providing devnode, expecting GUID_BUS_TYPE_USB for Xbox 360
-            // hardware. HIDMAESTRO is the primary XUSB source for non-xinputhid
-            // Xbox profiles; mark it as USB bus type so that check passes.
-            "HIDMAESTRO" })
+        // T11 — trimmed list. The dynamic VID_*/HIDMAESTRO* scan below
+        // (lines 1156+) covers VID_045E&PID_02FF&IG_00, VID_045E&PID_0B13&IG_00,
+        // and HIDMAESTRO automatically — they all match the dynamic prefixes.
+        // Only the non-VID/non-HIDMAESTRO enumerators (HID_IG_00, HIDClass,
+        // XnaComposite) need explicit hardcoded coverage. Cuts 60 redundant
+        // CM_Locate calls per setup (3 enumerators × 2 roots × 10 indices).
+        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
         {
             // Sweep both ROOT and SWD roots for this enumerator.
             foreach (var enumRoot in new[] { "ROOT", "SWD" })
