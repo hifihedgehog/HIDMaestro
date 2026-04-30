@@ -361,6 +361,29 @@ public class HidReportBuilder
         uint buttonMask = 0) // Bit 0 = button 1, etc.
     {
         byte[] report = new byte[InputReportByteSize];
+        BuildReportInto(report, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger, hatValue, buttonMask);
+        return report;
+    }
+
+    /// <summary>v1.3.0 — buffer-reuse overload. Caller supplies a byte[]
+    /// of length <see cref="InputReportByteSize"/>; we zero it and pack
+    /// the report into it. Avoids the 1500 alloc/sec churn at default
+    /// SubmitState rate × multi-controller, which translates to less GC
+    /// pressure and tighter cache behavior on slow hw.</summary>
+    public void BuildReportInto(byte[] report,
+        double leftX = 0.5, double leftY = 0.5,
+        double rightX = 0.5, double rightY = 0.5,
+        double leftTrigger = 0.0, double rightTrigger = 0.0,
+        int hatValue = 0,
+        uint buttonMask = 0)
+    {
+        if (report == null) throw new ArgumentNullException(nameof(report));
+        if (report.Length < InputReportByteSize)
+            throw new ArgumentException(
+                $"BuildReportInto: caller buffer is {report.Length} bytes, "
+              + $"need {InputReportByteSize}.", nameof(report));
+
+        Array.Clear(report, 0, InputReportByteSize);
         if (InputReportId != 0)
             report[0] = InputReportId;
 
@@ -463,8 +486,6 @@ public class HidReportBuilder
                 WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
                           Buttons[descBtn].BitSize, 1);
         }
-
-        return report;
     }
 
     static void WriteBits(byte[] buffer, int bitOffset, int bitSize, int value)

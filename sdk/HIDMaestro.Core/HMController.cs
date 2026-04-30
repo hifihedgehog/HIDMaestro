@@ -63,6 +63,13 @@ public sealed class HMController : IDisposable
     //   [13]    btnHigh (Back=0x01 Start=0x02 …)
     private readonly byte[] _gipBuf = new byte[14];
 
+    // v1.3.0 — per-controller reusable HID input report buffer. SubmitState
+    // calls BuildReportInto(_reportBuffer, ...) instead of BuildReport which
+    // allocates a fresh byte[] each frame. At 250 Hz × N controllers the
+    // alloc churn was real GC pressure; reusing avoids it entirely.
+    // Sized at HidReportBuilder.InputReportByteSize, computed in the ctor.
+    private readonly byte[] _reportBuffer;
+
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
     /// this virtual controller. Subscribers must be thread-safe.
@@ -224,6 +231,7 @@ public sealed class HMController : IDisposable
         _reportBuilder = HidReportBuilder.Parse(profile.Inner.GetDescriptorBytes()!, profile.Inner.AxisMap);
         _reportBuilder.ButtonMap = profile.Inner.ButtonMap;
         _reportBuilder.TriggerButtons = profile.Inner.TriggerButtons;
+        _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
@@ -271,12 +279,14 @@ public sealed class HMController : IDisposable
         double mlt = Math.Clamp(state.LeftTrigger, 0f, 1f);
         double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
 
-        byte[] report = _reportBuilder.BuildReport(
+        // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
+        _reportBuilder.BuildReportInto(_reportBuffer,
             leftX: mlx, leftY: mly,
             rightX: mrx, rightY: mry,
             leftTrigger: mlt, rightTrigger: mrt,
             hatValue: (int)state.Hat,
             buttonMask: (uint)state.Buttons);
+        byte[] report = _reportBuffer;
 
         // Pack the GIP-format buffer that the XUSB companion (HMXInput.dll)
         // reads for IOCTL_XUSB_GET_STATE. Only meaningful for non-xinputhid
