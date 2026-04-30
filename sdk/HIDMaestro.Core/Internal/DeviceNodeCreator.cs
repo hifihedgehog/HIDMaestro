@@ -255,10 +255,16 @@ internal static class DeviceNodeCreator
                 DeviceManager.WaitForHidChild(devInstId);
             }
 
-            // Apply the friendly name to the new device + its HID children, filtered
-            // by controllerIndex so multi-controller setups don't clobber each other.
+            // Apply the friendly name directly to the device we just created
+            // (parentId is in scope). The prior FixHidChildNames call walked
+            // SWD\ + ROOT\ enumerator subtrees by ControllerIndex to find the
+            // same devnode we already have — pure overhead. SetAllNamingProperties
+            // is a strict superset (BusReportedDeviceDesc + FriendlyName +
+            // DeviceDesc on root + first HID child) and skips the walk.
             string displayName = profile.DeviceDescription ?? profile.ProductString;
-            DeviceProperties.FixHidChildNames(displayName, controllerIndex);
+            if (devInstId != null)
+                try { DeviceProperties.SetAllNamingProperties(devInstId, displayName); }
+                catch { }
 
             return new Result(true, devInstId);
         }

@@ -150,8 +150,9 @@ internal static class SharedMemoryIO
             // explicitly write SeqNo=0 so a stale section from a previous
             // run (under the same name) doesn't carry forward a non-zero
             // sequence number that the driver would treat as "no change".
-            for (int i = 0; i < SHARED_INPUT_SIZE; i++)
-                Marshal.WriteByte(view, i, 0);
+            // Bulk Marshal.Copy from a freshly allocated zero buffer is one
+            // P/Invoke; the prior per-byte loop was 278 P/Invokes per setup.
+            Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
 
             // Companion signaling event. Auto-reset (manual_reset=FALSE), not
             // initially set. The driver's per-device worker thread waits on
@@ -187,8 +188,10 @@ internal static class SharedMemoryIO
             // first sample and replays prior-session FFB as a brand-new
             // OutputReceived packet — on repeat if a consumer process's
             // XInput/HID handle still talks to the ghost slot.
-            for (int i = 0; i < SHARED_OUTPUT_SIZE; i++)
-                Marshal.WriteByte(view, i, 0);
+            // Bulk Marshal.Copy from a freshly allocated zero buffer is one
+            // P/Invoke; the prior per-byte loop was ~17K P/Invokes per setup
+            // (SHARED_OUTPUT_SIZE = 16,904 bytes).
+            Marshal.Copy(new byte[SHARED_OUTPUT_SIZE], 0, view, SHARED_OUTPUT_SIZE);
 
             s_outputHandles[controllerIndex] = h;
             s_outputViews[controllerIndex] = view;
@@ -228,8 +231,9 @@ internal static class SharedMemoryIO
             // Until then, GetFeature(0x13) returns STATUS_NO_SUCH_DEVICE
             // per the vJoy "FFB not enabled" convention, but if a path
             // ever bypasses that gate, sane bytes are present.
-            for (int i = 0; i < PID_STATE_SIZE; i++)
-                Marshal.WriteByte(view, i, 0);
+            // PID_STATE_SIZE is small (24 bytes) but bulk-zero is still
+            // a single P/Invoke vs PID_STATE_SIZE separate WriteBytes.
+            Marshal.Copy(new byte[PID_STATE_SIZE], 0, view, PID_STATE_SIZE);
             Marshal.WriteInt16(view, PID_OFFSET_POOL_RAMSIZE, 200);
             Marshal.WriteByte (view, PID_OFFSET_POOL_MAXSIM, 10);
             // MemoryManagement stays 0 (host-managed pool, no shared param blocks).

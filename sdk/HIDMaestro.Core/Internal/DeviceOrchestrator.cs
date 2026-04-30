@@ -1346,48 +1346,21 @@ internal static class DeviceOrchestrator
             }
         }
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
-        using (var _ts = new TimingScope(controllerIndex, profile.Id, "4.fix_hid_child_names_1"))
-            DeviceProperties.FixHidChildNames(displayName, controllerIndex);
 
-        // Set names on root device — locate via Device Parameters\ControllerIndex.
-        // Gamepad companion parent lives at SWD\HIDMAESTRO_VID_*_PID_*&IG_00;
-        // Xbox 360 wired main device lives at ROOT\VID_*&PID_*&IG_00. Sweep
-        // both roots so either path gets named.
+        // Apply names directly to the parent we just created. We already have
+        // the instance ID from CreateDeviceNode/CreateGamepadCompanion, so the
+        // pre-v1.3.0-T9 enumerator walk that scanned SWD\ + ROOT\ subtrees
+        // matching Device Parameters\ControllerIndex is pure overhead — it
+        // was finding the same devnode every time. SetAllNamingProperties is
+        // a strict superset of FixHidChildNames (BusReportedDeviceDesc +
+        // FriendlyName + DeviceDesc on root + first HID child), so dropping
+        // the prior FixHidChildNames pre-call here is also a clean win.
         {
-        using var _ts = new TimingScope(controllerIndex, profile.Id, "4.set_names_root");
-        try
-        {
-            bool found = false;
-            foreach (var enumRoot in new[] { "SWD", "ROOT" })
-            {
-                if (found) break;
-                using var rootEnum = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
-                if (rootEnum == null) continue;
-                foreach (var sub in rootEnum.GetSubKeyNames())
-                {
-                    bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isSwdForm = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                    if (!isVidForm && !isSwdForm) continue;
-                    using var subKey = rootEnum.OpenSubKey(sub);
-                    if (subKey == null) continue;
-                    foreach (var inst in subKey.GetSubKeyNames())
-                    {
-                        using var dpKey = Registry.LocalMachine.OpenSubKey(
-                            $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{sub}\{inst}\Device Parameters");
-                        int actual = (dpKey?.GetValue("ControllerIndex") is int v) ? v : 0;
-                        if (actual != controllerIndex) continue;
-                        string rootId = $@"{enumRoot}\{sub}\{inst}";
-                        // v1.3.0 — coalesced setter halves the CM kernel-transition
-                        // cost vs the separate SetBusReportedDeviceDesc + SetDeviceFriendlyName
-                        // pair (one CM_Locate + one CM_Get_Child instead of two each).
-                        DeviceProperties.SetAllNamingProperties(rootId, displayName);
-                        found = true; break;
-                    }
-                    if (found) break;
-                }
-            }
-        }
-        catch { }
+            using var _ts = new TimingScope(controllerIndex, profile.Id, "4.set_names_root");
+            string? parentForNaming = mainInstanceId ?? companionId;
+            if (parentForNaming != null)
+                try { DeviceProperties.SetAllNamingProperties(parentForNaming, displayName); }
+                catch { }
         }
 
         // Final name fix — poll for the device to be fully started (DN_STARTED)
@@ -1420,8 +1393,18 @@ internal static class DeviceOrchestrator
                 }
             }
         }
-        using (var _ts = new TimingScope(controllerIndex, profile.Id, "4.fix_hid_child_names_2"))
-            DeviceProperties.FixHidChildNames(displayName, controllerIndex);
+        // Post-WaitForDeviceStarted name re-application: by this point the
+        // HID class driver has bound and may have stomped on FriendlyName /
+        // DeviceDesc with INF defaults; re-applying makes our names stick.
+        // We have parentId already, so call directly instead of walking
+        // SWD\ + ROOT\ enumerator subtrees by ControllerIndex.
+        {
+            using var _ts = new TimingScope(controllerIndex, profile.Id, "4.fix_hid_child_names_2");
+            string? parentForRename = mainInstanceId ?? companionId;
+            if (parentForRename != null)
+                try { DeviceProperties.SetAllNamingProperties(parentForRename, displayName); }
+                catch { }
+        }
 
         // ── Step 5: bus type + companions ─────────────────────────────────
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.set_bustype_usb"))
