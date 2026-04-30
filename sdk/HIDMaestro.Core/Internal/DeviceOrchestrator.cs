@@ -749,16 +749,38 @@ internal static class DeviceOrchestrator
         // and restores on Clear / RecoverOrphans. The HKLM write here stays
         // because it's non-destructive (HKCU wins for joy.cpl anyway) and
         // some legacy MME consumers do read HKLM.
-        string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}";
-        try
+        // T25-2 — per-VID:PID dedup. The OEM write is keyed only by
+        // VID:PID, not controllerIndex, so two controllers using the same
+        // profile produce identical writes. Skip after the first per-VID:PID.
+        uint oemKey = ((uint)profile.VendorId << 16) | profile.ProductId;
+        bool needsOemWrite;
+        lock (s_oemWrittenLock)
+            needsOemWrite = s_oemWritten.Add(oemKey);
+        if (needsOemWrite)
         {
-            using var oem = Registry.LocalMachine.CreateSubKey(oemKeyPath);
-            oem?.SetValue("OEMName", displayName, RegistryValueKind.String);
-            oem?.DeleteValue("OEMData", false);
-            try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", throwOnMissingSubKey: false); } catch { }
+            string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}";
+            try
+            {
+                using var oem = Registry.LocalMachine.CreateSubKey(oemKeyPath);
+                oem?.SetValue("OEMName", displayName, RegistryValueKind.String);
+                oem?.DeleteValue("OEMData", false);
+                try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", throwOnMissingSubKey: false); } catch { }
+            }
+            catch
+            {
+                // Re-allow retry on a future call if the write failed (e.g.
+                // permission glitch). Caller may invalidate the cache via
+                // RemoveAllVirtualControllers.
+                lock (s_oemWrittenLock) s_oemWritten.Remove(oemKey);
+            }
         }
-        catch { }
     }
+
+    // T25-2 — per-VID:PID OEM-write dedup. WriteInstanceConfig is called
+    // per CreateController; the HKLM Joystick OEM cache is keyed only by
+    // VID:PID and writing the same data more than once is wasted work.
+    private static readonly HashSet<uint> s_oemWritten = new();
+    private static readonly object s_oemWrittenLock = new();
 
     // ════════════════════════════════════════════════════════════════════
     //  CreateGamepadCompanion (xinputhid path)
