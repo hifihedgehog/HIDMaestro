@@ -197,25 +197,32 @@ public sealed class ProfileDatabase
 
         var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
-        foreach (var file in Directory.EnumerateFiles(profilesDir, "*.json", SearchOption.AllDirectories))
+        // v1.3.0 — parallel parse mirroring LoadEmbedded. Disk reads are
+        // serialized at the kernel level on most filesystems, but JSON
+        // parse is CPU-bound and benefits from cores. For a directory
+        // with hundreds of profiles, this matters more than the embedded
+        // case because disk-load amortization dominates.
+        var files = Directory.EnumerateFiles(profilesDir, "*.json", SearchOption.AllDirectories)
+            .Where(f => !Path.GetFileName(f).Equals("schema.json", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var parsed = new System.Collections.Concurrent.ConcurrentBag<ControllerProfile>();
+        System.Threading.Tasks.Parallel.ForEach(files, file =>
         {
-            if (Path.GetFileName(file).Equals("schema.json", StringComparison.OrdinalIgnoreCase))
-                continue;
-
             try
             {
                 var json = File.ReadAllText(file);
                 var profile = JsonSerializer.Deserialize<ControllerProfile>(json, options);
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
-                    db._profiles.Add(profile);
+                    parsed.Add(profile);
             }
             catch
             {
                 // A single malformed JSON shouldn't take down the whole load
                 // pass. Caller's profile lookups will simply miss this entry.
             }
-        }
+        });
 
+        db._profiles.AddRange(parsed);
         db._profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
         return db;
     }
