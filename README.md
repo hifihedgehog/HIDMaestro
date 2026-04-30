@@ -566,7 +566,7 @@ SWD\HIDMAESTRO\<sid>_NNNN            ← XUSB companion (HMXInput.dll)
                                      working put_Vibration on Chromium)
 ```
 
-**Medium stack.** Two device trees to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. Creation ~700ms, disposal ~135ms (down from ~5,700ms before v1.3.1 — see "SwD-first removal ordering" below).
+**Medium stack on teardown, multi-second on creation.** Two device trees to tear down. The XUSB companion runs its own WUDFHost instance hosting `HMXInput.dll`, which needs its own PnP release cycle. v1.3.1's SwD-first ordering brought disposal to ~135 ms (down from ~5,700 ms). Creation goes through `CreateDeviceNode` for the main HID + `CreateXusbCompanion` for the SWD companion + `WaitForXInputSlotClaim` (15 s budget); real-world creation cost is dominated by the slot-claim wait and is profile-and-kernel-state-dependent rather than a fixed number — budget several seconds for a fresh create.
 
 #### 3. xinputhid Xbox: Xbox Series X|S Bluetooth (~500ms post-v1.3.1)
 
@@ -591,7 +591,9 @@ SWD\HIDMAESTRO_VID_045E_PID_0B13&IG_00\<sid>_NNNN
         └─ 16-button HID synthesis
 ```
 
-**Heaviest stack of the three, but no longer dominant.** xinputhid is a Microsoft inbox kernel filter driver. Pre-v1.3.1, teardown went through the full PnP query-remove → class installer → filter unload chain on every Dispose because `DeviceManager.RemoveDevice` removed HID children before the SwD parent (each child's `WaitForDeviceRemoval` then timed out at 2,000ms because the children couldn't unwind while the parent's HSWDEVICE refcount was still held). v1.3.1 closes the SwD parent first via `SwdDeviceFactory.Remove` and blocks on `CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED`; the children cascade automatically once the kernel releases the parent. Creation ~200ms, disposal ~500ms.
+**Teardown side now in the hundreds of ms, creation side still slow.** xinputhid is a Microsoft inbox kernel filter driver. Pre-v1.3.1 *teardown* went through the full PnP query-remove → class installer → filter unload chain on every Dispose because `DeviceManager.RemoveDevice` removed HID children before the SwD parent (each child's `WaitForDeviceRemoval` then timed out at 2,000ms because the children couldn't unwind while the parent's HSWDEVICE refcount was still held). v1.3.1 closes the SwD parent first via `SwdDeviceFactory.Remove` and blocks on `CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED`; the children cascade automatically once the kernel releases the parent. Disposal ~500ms.
+
+*Creation* is unchanged from prior versions and is multi-second. `SetupController` runs three sequential wait budgets after `CreateGamepadCompanion`: `WaitForHidChild` (10 s), `WaitForDeviceStarted` (5 s), and `WaitForXInputSlotClaim` (15 s, Xbox-VID profiles only). These are budgets, not fixed sleeps — each exits the moment its condition is met — but real workloads have been observed at 5-15+ s end to end on the slot-claim wait alone, especially when xinputhid's slot allocator is recovering from prior state. Creation cost is profile-and-kernel-state-dependent rather than a fixed number; budgeting 5-15 s for a Xbox Series BT virtual is realistic until the optimization candidate noted in v1.3.1's release notes lands.
 
 #### SwD-first removal ordering (v1.3.1)
 
@@ -605,9 +607,11 @@ A second optimization in the same change: when a HIDMAESTRO sweep walks registry
 
 If your application needs fast profile switching (e.g. remapping a physical controller to a different virtual identity on the fly), the profile architecture group determines the user-perceived latency:
 
-- **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~280ms round trip (~80ms dispose + ~200ms create). Essentially instant.
-- **Switching to/from Xbox 360 Wired**: ~835ms round trip (~135ms dispose + ~700ms create), down from ~6.4s pre-v1.3.1.
-- **Switching to/from Xbox Series BT**: ~700ms round trip (~500ms dispose + ~200ms create), down from ~11s pre-v1.3.1.
+- **Switching between plain HID profiles** (DualSense ↔ DualShock 4, or any non-Xbox pair): ~280 ms round trip (~80 ms dispose + ~200 ms create). Essentially instant.
+- **Switching to/from Xbox 360 Wired**: ~135 ms dispose (down from ~5,700 ms pre-v1.3.1) + creation that runs through `WaitForXInputSlotClaim` (15 s budget). Best-case create is sub-second when the kernel slot allocator publishes immediately; worst-case is several seconds when it doesn't. Round-trip switching latency is creation-dominated post-v1.3.1.
+- **Switching to/from Xbox Series BT**: ~500 ms dispose (down from ~11 s pre-v1.3.1) + the same multi-second xinputhid creation cost (`WaitForHidChild` + `WaitForDeviceStarted` + `WaitForXInputSlotClaim`). Real-consumer measurements have shown 13-14 s for a single create when the slot-claim wait runs near its budget.
+
+The creation-side cost is the open optimization candidate — see v1.3.1 release notes.
 
 ## Why UMDF2 Is Enough
 
