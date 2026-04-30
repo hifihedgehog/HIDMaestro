@@ -113,6 +113,9 @@ Every wall-clock budget that could trip on slow hardware. Categories from the au
 | T8-15 | 8 | `LoadProfilesFromDirectory` parallel JSON parse | proportional to core count | low | done | mirrors LoadEmbedded |
 | T8-16 | 8 | `WaitForHidChild` (DeviceOrchestrator) delegates to DeviceManager (CM-signal driven) | up to 99 ms tail wait saved | medium | done |  |
 | T8-17 | 8 | `WaitForDeviceStarted` poll cadence 100 ms → 25 ms | up to 75 ms tail wait saved | low | done |  |
+| T8-18 | 8 | `IsDriverInstalled` cheap-first lookup ladder (FS check before pnputil) | 200–500 ms saved on cold-start IsDriverInstalled() before cache primes | low | done | filesystem check + cache hint |
+| T8-19 | 8 | XInput slot wait short-circuit when slotsBefore >= 4 | 15 s saved per Xbox-family create after cap is hit | low | done | cap is XInput hardcoded 4-slot |
+| T8-20 | 8 | `DeviceOrchestrator.WaitForHidChild` revert CM-delegation; keep 25 ms poll | up to 75 ms tail wait | medium | done | CM_Register_Notification fails for SWD-rooted parents before child PDO enumerates; polling is robust |
 
 ---
 
