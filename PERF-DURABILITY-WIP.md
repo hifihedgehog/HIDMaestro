@@ -16,9 +16,9 @@
 
 To be filled before any Tier 1 changes land. All times are wall-clock; battery sourced from prior runs.
 
-| Metric | v1.2.2 dev box | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (T9) | v1.3.0 C11 (T10) | v1.3.0 C12 (T11-19) | v1.3.0 C14 (T11-20/21) | v1.3.0 timing-pass | Atom (×10) |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Warm-launch 3-controller create | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _median 388 ms_ | _median 431 ms_ | _median 440 ms_ | _median 407 ms_ | **1 132 ms** (-12%) | ~10.5 s |
+| Metric | v1.2.2 dev box | v1.3.0 C1 | v1.3.0 C5 | v1.3.0 C8 | v1.3.0 C10 (T9) | v1.3.0 C11 (T10) | v1.3.0 C12 (T11-19) | v1.3.0 C14 (T11-20/21) | v1.3.0 timing-pass | v1.3.0 post-T22 | Atom (×10) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Warm-launch 3-controller create | **1 287 ms** | 1 288 ms | **1 090 ms** (-15%) | **1 049 ms** (-18.5%) | _median 388 ms_ | _median 431 ms_ | _median 440 ms_ | _median 407 ms_ | **1 132 ms** (-12%) | **1 065 ms** (**-17.3%**) | ~10.5 s |
 |   ↳ Xbox 360 wired | 693 ms | 656 ms | **577 ms** (-17%) | **556 ms** (-20%) | _p75 = 539 ms_ | _p75 = 596 ms_ | _p75 = 585 ms_ | _p75 = 549 ms_ | ~5.6 s |
 |   ↳ Xbox Series BT | 166 ms | 198 ms | **122 ms** (-27%) | **119 ms** (-28%) | _p25 = 143 ms_ | _p25 = 152 ms_ | _p25 = 154 ms_ | _p25 = 149 ms_ | ~1.2 s |
 |   ↳ DualSense BT | 427 ms | 432 ms | **390 ms** (-9%) | **373 ms** (-13%) | _median_ | _median_ | _median_ | _median_ | ~3.7 s |
@@ -39,6 +39,8 @@ To be filled before any Tier 1 changes land. All times are wall-clock; battery s
 **C14 (T11-20 + T11-21 repro check):** 26/26 PASS in 1969.6 s. Confirms C13 was flaky, not a regression from T11-20 (DriverStoreContainsHidMaestro single-pass) or T11-21 (SetBusTypeGuidUsb hardcoded-list trim). Median 407 ms across 119 setups; 8 Series-BT outliers. Phase 1 progression looks healthy and stable: 388 → 431 → 440 → 407 ms across C10-C14 — all within 60 ms noise band, all 16-23% below the v1.2.2 baseline (1287 ms aggregate / ~432 ms per-controller).
 
 **Step-level timing pass (HIDMAESTRO_TIMING=1, post-Tier-11):** Single warm-launch 3-controller create = **1132 ms** total (xbox-360-wired 587 ms + xbox-series-xs-bt 148 ms + dualsense 383 ms + 14 ms Phase 1.5 finalize). The dominant cost in every profile is **step 3 (create devnode / create_main_devnode / create_gamepad_companion)**: 425, 139, 377 ms respectively — 84% of the per-setup total. That's the SetupAPI / SwDeviceCreate kernel-PnP call doing real device-install work. Every other step is now sub-2 ms (set_names_root, fix_hid_child_names_2, set_bustype_usb, apply_friendly_name, instance_config, driver_install_check all ≤1 ms). The non-PnP work has effectively been driven to the floor; further user-mode optimization will not move the needle without changing how we drive PnP itself.
+
+**Step-level timing pass post-T22 (GameInputSvc prewarm):** Single warm-launch 3-controller create = **1065 ms** total (xbox-360-wired 569 ms + xbox-series-xs-bt 96 ms + dualsense 397 ms + 2 ms Phase 1.5). That's **-17.3% from the v1.2.2 baseline (1287 ms)** and within noise of C8's measured 1049 ms. The first SetupController's `0.gameinput_svc` step dropped from 15-17 ms (sc.exe spawn) to 2 ms (cache hit) — the prewarm doesn't reduce total work, it just shifts the sc.exe spawn out of the foreground SetupController path into the background ctor task. Same pattern as the existing IsDriverInstalled prewarm.
 
 
 **Note on the 35 s outlier:** the v1.2.2 baseline run had a one-time teardown of slot 0 at 35.7 s (vs the typical 5.6 s). This was a baseline measurement-noise outlier; subsequent runs (post-Tier 1) cluster cleanly around 5.5–5.7 s per slot for Xbox-family teardowns. Not worth tracking further.
