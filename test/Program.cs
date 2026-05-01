@@ -102,13 +102,22 @@ class Program
 
         // Safety net: always purge devices on exit so testing leaves no trace.
         // Skip for read-only commands since that path needs admin for the
-        // registry cleanup it performs.
+        // registry cleanup it performs. Also skip the ProcessExit handler
+        // under HIDMAESTRO_QUIET=1 (regression battery): the per-scenario
+        // cleanup already disposed every controller via HMContext.Dispose,
+        // and re-running RemoveAllVirtualControllers from ProcessExit adds
+        // 5–20 s of redundant DifRemoveDevice work that delays the test
+        // process exit and trips the harness's Wait-CascadeSettle window.
+        bool quietMode = Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1";
         if (!readOnlyCmd)
         {
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            if (!quietMode)
             {
-                try { HMContext.RemoveAllVirtualControllers(); } catch { }
-            };
+                AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                {
+                    try { HMContext.RemoveAllVirtualControllers(); } catch { }
+                };
+            }
             try { HMContext.RemoveAllVirtualControllers(); } catch { }
         }
 
@@ -234,6 +243,21 @@ class Program
         profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
         if (profileIds.Length == 0)
             return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] [--profile-dir <path>]... <profile-id> [profile-id ...]");
+        // Under HIDMAESTRO_QUIET=1 (regression battery), the stdout pipe is
+        // not drained by the harness between Send-Cmd calls. Per-controller
+        // setup output (Loaded N profiles / Creating controller / ->created
+        // in N ms / Phase 1 total / etc.) plus the help text accumulates
+        // ~2-4 KB by the time the stdin loop starts — the next
+        // Console.WriteLine then blocks on the full pipe and the test
+        // process hangs forever waiting on a buffer that never drains.
+        // Redirect all chatter to TextWriter.Null. Keep the original stdout
+        // around for the post-command [ACK] marker that the harness blocks
+        // on, so command-completion signaling still works.
+        var s_origConsoleOut = Console.Out;
+        if (Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1")
+        {
+            Console.SetOut(System.IO.TextWriter.Null);
+        }
         Console.WriteLine($"  Submission rate: {rateHz} Hz (~{1000 / rateHz} ms/frame)");
 
         using var ctx = new HMContext();
@@ -305,6 +329,93 @@ class Program
         Console.WriteLine("    park off                      leave park mode and resume the time-varying pattern");
         Console.WriteLine("    remove <index>                dispose a single controller (others stay live)");
         Console.WriteLine("    <index> <profile-id>          replace controller at index with new profile");
+        // Heartbeat thread: appends a single line to the diag log every 5s
+        // so we can distinguish "process is alive but main thread blocked"
+        // from "process is genuinely dead." Background thread (auto-killed
+        // on process exit). Uses TestDebugLog which is file-based; never
+        // touches stdout so it can't be poisoned by a full stdout pipe.
+        var hbCts = new CancellationTokenSource();
+        var hbThread = new Thread(() =>
+        {
+            int n = 0;
+            while (!hbCts.IsCancellationRequested)
+            {
+                TestDebugLog($"heartbeat #{n++} (stdin loop alive, threads OK)");
+                try { hbCts.Token.WaitHandle.WaitOne(5000); } catch { break; }
+            }
+        }) { IsBackground = true, Name = "TestHeartbeat" };
+        hbThread.Start();
+
+        // Stdin protocol bypasses: Win11 26200's redirected-stdin under
+        // PowerShell 5.1 has known buffering / encoding quirks that delay
+        // line delivery 15+ s OR drop them entirely. We drive command
+        // delivery via a named EventWaitHandle (kernel object): the
+        // harness signals it when it wants the test process to quit, and
+        // a background thread here waits on it. Bulletproof, zero pipe
+        // semantics. Stdin still works as a fallback for swap commands
+        // (which are still pipe-based per the existing protocol).
+        TestDebugLog("stdin loop: spawning stdin-pump + quit-event watcher");
+        var quitEventName = $"Global\\HMTest_Quit_{Environment.ProcessId}";
+        TestDebugLog($"quit-event name: {quitEventName}");
+        var stdinInbox = new System.Collections.Concurrent.BlockingCollection<string>(
+            new System.Collections.Concurrent.ConcurrentQueue<string>());
+        // Quit-event watcher thread.
+        var quitEvent = new System.Threading.EventWaitHandle(false,
+            System.Threading.EventResetMode.ManualReset, quitEventName);
+        var quitWatcher = new Thread(() =>
+        {
+            TestDebugLog("quit-watcher: waiting for named event");
+            try { quitEvent.WaitOne(); } catch { }
+            TestDebugLog("quit-watcher: SIGNALED — injecting 'quit' into inbox");
+            try { stdinInbox.Add("quit"); } catch { }
+        }) { IsBackground = true, Name = "quit-watcher" };
+        quitWatcher.Start();
+        // Stdin pump thread: reads stdin byte-by-byte for swap commands.
+        var stdinPump = new Thread(() =>
+        {
+            TestDebugLog("stdin-pump: thread started");
+            try
+            {
+                var stdinStream = Console.OpenStandardInput();
+                var sb = new System.Text.StringBuilder();
+                var oneByte = new byte[1];
+                bool firstChars = true;
+                int bomState = 0; // 0=expect EF, 1=got EF expect BB, 2=got EFBB expect BF, 3=BOM consumed
+                while (true)
+                {
+                    int n = stdinStream.Read(oneByte, 0, 1);
+                    if (n <= 0) break;  // EOF
+                    // Skip leading UTF-8 BOM (EF BB BF) once. PowerShell's
+                    // Process.StandardInput writes the BOM by default
+                    // because StandardInputEncoding defaults to a writer
+                    // that emits one. Without skipping, the first command
+                    // arrives as "[BOM]quit" and string-equality against
+                    // "quit" fails.
+                    if (firstChars && bomState < 3)
+                    {
+                        if (bomState == 0 && oneByte[0] == 0xEF) { bomState = 1; continue; }
+                        if (bomState == 1 && oneByte[0] == 0xBB) { bomState = 2; continue; }
+                        if (bomState == 2 && oneByte[0] == 0xBF) { bomState = 3; firstChars = false; continue; }
+                        // Not BOM after all — replay the bytes we held back.
+                        firstChars = false;
+                        if (bomState >= 1) sb.Append((char)0xEF);
+                        if (bomState >= 2) sb.Append((char)0xBB);
+                        bomState = 3;
+                    }
+                    if (oneByte[0] == 0x0A /* \n */)
+                    {
+                        var line = sb.ToString().TrimEnd('\r');
+                        sb.Clear();
+                        TestDebugLog($"stdin-pump: line='{line}'");
+                        stdinInbox.Add(line);
+                    }
+                    else { sb.Append((char)oneByte[0]); }
+                }
+            }
+            catch (Exception ex) { TestDebugLog($"stdin-pump: EXCEPTION: {ex.Message}"); }
+            finally { try { stdinInbox.CompleteAdding(); } catch { } }
+        }) { IsBackground = true, Name = "stdin-pump" };
+        stdinPump.Start();
         // Emit a stdout marker after every command finishes processing so
         // a stdin-driven harness (e.g. swap_regression.ps1) can block on
         // command completion without resorting to time-based heuristics.
@@ -312,13 +423,20 @@ class Program
         // emitted via try/finally so it covers continue branches AND the
         // quit branch's break. Empty input lines are skipped before the
         // try block so they do not produce stray ACKs.
-        while (Console.ReadLine() is string line)
+        string? line;
+        while (!stdinInbox.IsCompleted)
         {
+            if (!stdinInbox.TryTake(out line, 100)) continue;
+            if (line == null) continue;
             line = line.Trim();
             if (line.Length == 0) continue;
             try
             {
-            if (line.Equals("quit", StringComparison.OrdinalIgnoreCase)) break;
+            if (line.Equals("quit", StringComparison.OrdinalIgnoreCase))
+            {
+                TestDebugLog("stdin loop: 'quit' received — breaking loop");
+                break;
+            }
             if (line.Equals("pause", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var s in slots) s.Paused = true;
@@ -433,17 +551,28 @@ class Program
             }
             finally
             {
-                Console.WriteLine("[ACK]");
+                // [ACK] goes to the ORIGINAL stdout, not the silenced
+                // TextWriter.Null we may have redirected to under
+                // HIDMAESTRO_QUIET=1 — the harness blocks on this marker.
+                s_origConsoleOut.WriteLine("[ACK]");
+                s_origConsoleOut.Flush();
             }
         }
 
         var cleanupSw = Stopwatch.StartNew();
+        TestDebugLog("cleanup ENTER");
+        try { hbCts.Cancel(); } catch { }
         // Cancel + join all pattern threads first so submission stops
         // everywhere before we begin kernel-side teardown.
         for (int i = 0; i < slots.Count; i++)
             try { slots[i].Cts.Cancel(); } catch { }
+        TestDebugLog($"  CTS cancelled for {slots.Count} slot(s)");
         for (int i = 0; i < slots.Count; i++)
+        {
+            var joinSw = Stopwatch.StartNew();
             try { slots[i].Thread?.Join(2000); } catch { }
+            TestDebugLog($"  slot[{i}] thread join in {joinSw.ElapsedMilliseconds}ms");
+        }
         // Use the SDK's batch-teardown entrypoint: parallelizes the per-
         // controller DIF_REMOVE work and runs the system-wide HID orphan
         // sweep ONCE at the end (instead of N times concurrently).
@@ -451,14 +580,61 @@ class Program
         var ctrlToIdx = new Dictionary<HMController, int>();
         for (int i = 0; i < slots.Count; i++)
             if (slots[i].Ctrl != null!) ctrlToIdx[slots[i].Ctrl] = i;
+        TestDebugLog($"  DisposeControllersInParallel ENTER ctrls={ctrls.Length}");
         ctx.DisposeControllersInParallel(ctrls, (c, ms) =>
         {
             int idx = ctrlToIdx.TryGetValue(c, out var v) ? v : -1;
             Console.WriteLine($"  disposed slot {idx} in {ms} ms");
+            TestDebugLog($"    callback: slot={idx} ms={ms}");
         });
+        TestDebugLog($"  DisposeControllersInParallel EXIT total={cleanupSw.ElapsedMilliseconds}ms");
         Console.WriteLine($"  total cleanup: {cleanupSw.ElapsedMilliseconds} ms");
         if (rateHz >= 500) timeEndPeriod(1);
+        TestDebugLog("cleanup EXIT — returning from Emulate");
+        // Under regression battery (HIDMAESTRO_QUIET=1), all kernel-side
+        // teardown is done via DisposeControllersInParallel above. The
+        // remaining `using var ctx` Dispose is a no-op (controllers list
+        // is empty) but .NET runtime shutdown / DllMain DLL_PROCESS_DETACH
+        // / finalizer queue takes ~15-20 s on Win11 26200, which delays
+        // the harness's per-scenario verify. Self-kill via TerminateProcess
+        // bypasses all of that — kernel-side is already clean, nothing of
+        // value remains to be unwound.
+        if (Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1")
+        {
+            TestDebugLog("self-kill via Process.Kill()");
+            Process.GetCurrentProcess().Kill();
+        }
         return 0;
+    }
+
+    /// <summary>Append a debug line to the test-app cleanup log. File-based
+    /// (vs Console) so we can see where the test process is during quit
+    /// even if stdout has filled or the harness isn't draining. Path:
+    /// %TEMP%\HIDMaestro\teardown_diag.log (same as SDK's LogDiag) so the
+    /// test-app and SDK timelines interleave.</summary>
+    static readonly object s_debugLogLock = new();
+    static void TestDebugLog(string msg)
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "HIDMaestro");
+            System.IO.Directory.CreateDirectory(dir);
+            var line = $"[{DateTime.Now:HH:mm:ss.fff}] tid={Thread.CurrentThread.ManagedThreadId} TEST: {msg}\n";
+            lock (s_debugLogLock)
+            {
+                // Open with FileShare.ReadWrite so this coexists with the
+                // SDK's LogDiag StreamWriter (which holds the file open with
+                // FileShare.ReadWrite). Default File.AppendAllText uses
+                // FileShare.None and silently fails when the SDK has it open.
+                using var fs = new System.IO.FileStream(
+                    System.IO.Path.Combine(dir, "teardown_diag.log"),
+                    System.IO.FileMode.Append, System.IO.FileAccess.Write,
+                    System.IO.FileShare.ReadWrite);
+                using var sw = new System.IO.StreamWriter(fs);
+                sw.Write(line);
+            }
+        }
+        catch { }
     }
 
     // ── custom ──
@@ -615,12 +791,26 @@ class Program
         slot.Thread.Start();
     }
 
+    /// <summary>True when HIDMAESTRO_QUIET=1; suppresses per-packet
+    /// OutputReceived prints. The regression battery sets this so the
+    /// test app's stdout pipe buffer doesn't fill during the long
+    /// Sleep-Scaled windows (Windows fires Guide-haptic / XInput rumble
+    /// updates regularly, each producing ~150 bytes; the harness only
+    /// drains stdout inside Send-Cmd so accumulated bytes between
+    /// commands fill the 4 KB pipe in seconds, blocking the test app's
+    /// next Console.WriteLine indefinitely — which manifests as a
+    /// multi-minute hang between quit and cleanup, leading to KILL
+    /// before kernel teardown can complete).</summary>
+    static readonly bool s_quietMode =
+        Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1";
+
     /// <summary>Subscribe to OutputReceived for the given controller and print
     /// each packet (decoded if recognized, hex-dumped otherwise). The handler
     /// runs on the SDK's polling thread, not the test app's UI thread, so
     /// keep it cheap and Console-only.</summary>
     static void HookOutputReceived(HMController ctrl, int idx)
     {
+        if (s_quietMode) return;  // suppress per-packet prints under regression
         ctrl.OutputReceived += (c, pkt) =>
         {
             string label = c.Profile.Inner.DeviceDescription
@@ -783,6 +973,11 @@ class Program
                 RightStickY = 0f,
                 LeftTrigger  = lt,
                 RightTrigger = rt,
+                // Cycle hat through N..NW at 2 Hz. v1.3.3 (#19) — exercising
+                // the d-pad path here makes the canonical test runner visibly
+                // catch any future regression in HMController.SubmitState's
+                // GIP-buffer hat packing.
+                Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),
                 // A at 1Hz, Share at 0.33Hz — distinct cadences so each is
                 // individually observable in any consumer (joy.cpl, browser
                 // Gamepad Tester). Guide is deliberately OMITTED because the

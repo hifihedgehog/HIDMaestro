@@ -257,6 +257,7 @@ internal static class Program
                     {
                         LeftStickX = (float)(rng.NextDouble() * 2 - 1),
                         LeftStickY = (float)(rng.NextDouble() * 2 - 1),
+                        Hat        = (HMHat)(rng.Next(0, 9)),  // v1.3.3 — exercise d-pad path
                         Buttons = ((rng.Next() & 1) != 0) ? HMButton.A : HMButton.None,
                     };
                     try { ctrl.SubmitState(in s); } catch { break; }

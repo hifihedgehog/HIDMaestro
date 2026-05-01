@@ -127,6 +127,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -249,28 +250,57 @@ function Start-HMTestProcess {
     $psi.CreateNoWindow = $true
     # Inherit HIDMAESTRO_DIAG so the test app logs every teardown.
     $psi.EnvironmentVariables['HIDMAESTRO_DIAG'] = '1'
+    # Silence per-packet OutputReceived prints. Without this, Windows-fired
+    # Guide-haptic / XInput rumble updates accumulate ~150 bytes each in the
+    # test app's stdout pipe; the harness only drains stdout inside Send-Cmd,
+    # so the 4 KB pipe buffer fills within seconds across Sleep-Scaled
+    # windows. The next Console.WriteLine in the test app then blocks
+    # indefinitely on the full pipe, manifesting as a 3-minute gap between
+    # quit and cleanup — long enough to trigger Stop-HMTestProcess KILL
+    # before kernel teardown can run, leaving SwD-companion devnodes that
+    # the kernel re-enumerates from the surviving registry hive (the
+    # S07/S19/S20 leftover pattern, 2026-05-01).
+    $psi.EnvironmentVariables['HIDMAESTRO_QUIET'] = '1'
 
-    # Test app prints "[ACK]" on stdout after each stdin command. The
-    # harness reads stdout synchronously inside Send-Cmd, drains
-    # everything until [ACK] is seen, and treats EOF as "process gone".
-    # No event handlers, no runspaces, no script-scope state: a single
-    # owner of the stream avoids the lifetime quirks that silently
-    # terminated repeated Start-HMTestProcess calls when we tried
-    # Register-ObjectEvent or Tasks.Run with GetNewClosure across
-    # PowerShell 5.1.
-    #
-    # Stderr drain: not async -- the test app rarely writes to stderr,
-    # and only on errors. Pipe buffer (4 KB) tolerates a couple lines.
-    # If atom hits a stderr-heavy crash we'll see it via the test
-    # process exiting and ReadLine returning null in Send-Cmd.
+    # Async stdout drain. Per research + empirical (Win11 26200 + PS 5.1):
+    #   - Register-ObjectEvent -Action deadlocks (action runs in runspace
+    #     queue; Send-Cmd's blocking wait starves the queue).
+    #   - PowerShell scriptblock cast to [DataReceivedEventHandler] CRASHES
+    #     when fired from ThreadPool (PSMethod/runspace mismatch).
+    # Working pattern: Add-Type a C# class whose method matches the event
+    # delegate signature; bind it via [Delegate]::CreateDelegate. The
+    # handler then runs purely in CLR ThreadPool space, never touching
+    # PowerShell's runspace, so it cannot deadlock OR crash.
+    if (-not ('HMRegression.HMDrain' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace HMRegression {
+    public class HMDrain {
+        public System.Collections.Concurrent.ConcurrentQueue<string> Queue =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+        public System.Threading.ManualResetEventSlim Signal =
+            new System.Threading.ManualResetEventSlim(false);
+        public void OnLine(object sender, System.Diagnostics.DataReceivedEventArgs e) {
+            if (e.Data != null) {
+                Queue.Enqueue(e.Data);
+                Signal.Set();
+            }
+        }
+    }
+}
+'@ -ErrorAction SilentlyContinue
+    }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
     $proc.EnableRaisingEvents = $true
+    $drain = New-Object HMRegression.HMDrain
+    $delegateType = [System.Diagnostics.DataReceivedEventHandler]
+    $miOnLine = $drain.GetType().GetMethod('OnLine')
+    $delegate = [System.Delegate]::CreateDelegate($delegateType, $drain, $miOnLine)
+    $proc.add_OutputDataReceived($delegate)
+    Add-Member -InputObject $proc -MemberType NoteProperty -Name HMDrain -Value $drain -Force
     $null = $proc.Start()
-    # Async-drain stderr so its 4 KB pipe buffer never fills (which would
-    # block any Console.Error.Write the test app might do, deadlocking
-    # cleanup). The Task is fire-and-forget; it auto-completes when the
-    # test process exits and stderr hits EOF.
+    $proc.BeginOutputReadLine()
+    # Stderr async-drain via Task is fine; we don't read stderr.
     $null = $proc.StandardError.ReadToEndAsync()
     return $proc
 }
@@ -293,18 +323,21 @@ function Send-Cmd {
     }
     if ($NoWaitAck) { return }
 
-    # Drain test-process stdout line by line until we see '[ACK]'. The
-    # test app emits this token after each stdin command finishes
-    # processing; ReadLine blocks until a newline arrives, so the harness
-    # waits exactly as long as the SDK actually takes -- no time budget,
-    # no scaling, no kill timer. ReadLine returns $null on EOF (the test
-    # process closed stdout, e.g. after exit), in which case we just
-    # return -- the next Send-Cmd will fail-fast on $Proc.HasExited and
-    # raise a clear "process already exited" error to the scenario.
+    # Drain stdout from the per-process HMDrain instance populated by the
+    # add_OutputDataReceived handler (ThreadPool-driven). Wait(50) gives
+    # the runspace a 50 ms heartbeat and yields back to PowerShell so
+    # other cmdlets / event pumps can run; never blocks indefinitely on
+    # a single .Wait. No budget; only exits on [ACK] or HasExited.
+    $drain = $Proc.HMDrain
     while ($true) {
-        $line = $Proc.StandardOutput.ReadLine()
-        if ($null -eq $line) { return }
-        if ($line.Trim() -eq '[ACK]') { return }
+        $line = $null
+        if ($drain.Queue.TryDequeue([ref]$line)) {
+            if ($line.Trim() -eq '[ACK]') { return }
+            continue
+        }
+        if ($Proc.HasExited) { return }
+        [void]$drain.Signal.Wait(50)
+        $drain.Signal.Reset()
     }
 }
 
@@ -332,23 +365,30 @@ function Sleep-Scaled { param([int]$Seconds) Start-Sleep -Milliseconds (HMScaleM
 function Stop-HMTestProcess {
     param(
         [System.Diagnostics.Process]$Proc,
-        [int]$GracefulMs = 300000
+        # Retained for ABI compatibility with callers that still pass it;
+        # ignored. We wait indefinitely for the test process to exit on
+        # its own — no KILL budget, no scaled timeout. If the test process
+        # genuinely hangs, that's a real bug to surface in the diag log,
+        # not paper over with a deadline.
+        [int]$GracefulMs = 0
     )
+    $null = $GracefulMs
     if (-not $Proc.HasExited) {
-        # Send 'quit' but do NOT wait for an [ACK] -- the test app's quit
-        # branch breaks the stdin loop BEFORE the cleanup section runs,
-        # and process exit is what we actually care about. WaitForExit is
-        # the authoritative "all dispose handlers ran, kernel teardowns
-        # finished, process gone" signal. Generous ceiling (5 min default)
-        # only matters if the SDK genuinely hangs in cleanup.
-        try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
-        $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
-        if (-not $Proc.WaitForExit($GracefulMs)) {
-            try { $Proc.Kill($true) } catch {}
-            $Proc.WaitForExit(5000) | Out-Null
-            Write-Host ("    [Stop-HMTestProcess] KILLED after " + $waitSw.ElapsedMilliseconds + "ms (graceful budget=" + $GracefulMs + "ms)") -ForegroundColor DarkYellow
-            return 'KILLED'
+        # Signal quit via named EventWaitHandle. The test app spawns a
+        # background quit-watcher thread that injects "quit" into its
+        # internal stdin-inbox when this event fires. This bypasses every
+        # stdin pipe / Console buffering issue that plagued the earlier
+        # quit-via-stdin attempts on Win11 26200.
+        $eventName = "Global\HMTest_Quit_$($Proc.Id)"
+        try {
+            $waitHandle = [System.Threading.EventWaitHandle]::OpenExisting($eventName)
+            $null = $waitHandle.Set()
+            $waitHandle.Dispose()
+        } catch {
+            # Fallback: send via stdin (works on Atom / older OS).
+            try { Send-Cmd -Proc $Proc -Cmd 'quit' -NoWaitAck } catch {}
         }
+        $Proc.WaitForExit()
         return 'GRACEFUL'
     }
     return 'ALREADY_EXITED'
@@ -1057,6 +1097,24 @@ function Scenario-PidFfb-FfbTest {
     }
 }
 
+# S27: Xbox 360 wired d-pad XInput round-trip. Closes issue #19. Submits each
+# HMHat direction via HMController.SubmitState on an xbox-360-wired virtual,
+# reads XInputGetState through xinput1_4 -> xusb22.sys -> IOCTL_XUSB_GET_STATE,
+# and asserts wButtons.DPAD_* matches the expected mask. Pre-v1.3.3 the SDK
+# never wrote the 4-bit hat into the GIP buffer's btnHigh, so the companion's
+# (btnHigh >> 2) & 0x0F always read zero and wButtons.DPAD_* never fired.
+function Scenario-Xbox360-Dpad-XInput {
+    $probe = Join-Path $PSScriptRoot '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\XboxDpadXInputCheck.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "xbox_dpad_xinput_check not built. Run: dotnet build test/probes/xbox_dpad_xinput_check -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("XboxDpadXInputCheck exited " + $p.ExitCode + " - one or more d-pad directions did not match expected wButtons.DPAD_* mask")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1087,7 +1145,8 @@ $scenarios = @(
     @{ Name = 'S23_Multi_CustomInMix';            Body = ${function:Scenario-Multi-CustomInMix} },
     @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} },
     @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} },
-    @{ Name = 'S26_PidFfb_FfbTest';               Body = ${function:Scenario-PidFfb-FfbTest} }
+    @{ Name = 'S26_PidFfb_FfbTest';               Body = ${function:Scenario-PidFfb-FfbTest} },
+    @{ Name = 'S27_Xbox360_Dpad_XInput';          Body = ${function:Scenario-Xbox360-Dpad-XInput} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

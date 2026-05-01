@@ -342,13 +342,22 @@ public sealed class HMController : IDisposable
             if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
             _gipBuf[12] = btnLow;
             // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
-            // 4-bit hat (companion.c does (btnHigh >> 2) & 0x0F), so Guide has
-            // to live above the hat — bit 6 (0x40). HMXInput.dll's
+            // 4-bit hat — companion.c does (btnHigh >> 2) & 0x0F and switches
+            // the result into wButtons.DPAD_* (companion.c:421-426). Guide
+            // sits above the hat at bit 6 (0x40); HMXInput.dll's
             // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
             // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
+            // Pre-v1.3.3 the hat bits were never written, so XInput consumers
+            // hitting xusb22 directly (SDL3 XInput backend, sample-quality
+            // XInput apps) saw no d-pad on Xbox 360 wired (#19). HID-derived
+            // consumers (joy.cpl/DI, SDL3-HID, browsers via WGI) were
+            // unaffected because BuildReportInto correctly populates the
+            // descriptor's Hat Switch usage. Mask against 0x0F so a future
+            // HMHat extension can't smear into Back/Start bits below.
             byte btnHigh = 0;
             if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
             if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
+            btnHigh |= (byte)(((byte)state.Hat & 0x0F) << 2);
             if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
             _gipBuf[13] = btnHigh;
         }
