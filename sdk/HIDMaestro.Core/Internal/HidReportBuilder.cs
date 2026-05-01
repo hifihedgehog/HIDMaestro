@@ -358,10 +358,14 @@ public class HidReportBuilder
         double rightX = 0.5, double rightY = 0.5,
         double leftTrigger = 0.0, double rightTrigger = 0.0,
         int hatValue = 0, // 0=neutral, 1-8=directions
-        uint buttonMask = 0) // Bit 0 = button 1, etc.
+        uint buttonMask = 0, // Bit 0 = button 1, etc.
+        float? hatDegrees = null,
+        int? hatHundredths = null,
+        ushort? hatRaw = null)
     {
         byte[] report = new byte[InputReportByteSize];
-        BuildReportInto(report, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger, hatValue, buttonMask);
+        BuildReportInto(report, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger,
+                        hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw);
         return report;
     }
 
@@ -369,13 +373,20 @@ public class HidReportBuilder
     /// of length <see cref="InputReportByteSize"/>; we zero it and pack
     /// the report into it. Avoids the 1500 alloc/sec churn at default
     /// SubmitState rate × multi-controller, which translates to less GC
-    /// pressure and tighter cache behavior on slow hw.</summary>
+    /// pressure and tighter cache behavior on slow hw.
+    /// v1.3.4 — added hatDegrees/hatHundredths/hatRaw nullable parameters
+    /// for high-resolution hat sources (HOTAS, flight sticks). Priority
+    /// chain in the encoder block below: hatDegrees > hatHundredths >
+    /// hatRaw > hatValue (octant) > null state.</summary>
     public void BuildReportInto(byte[] report,
         double leftX = 0.5, double leftY = 0.5,
         double rightX = 0.5, double rightY = 0.5,
         double leftTrigger = 0.0, double rightTrigger = 0.0,
         int hatValue = 0,
-        uint buttonMask = 0)
+        uint buttonMask = 0,
+        float? hatDegrees = null,
+        int? hatHundredths = null,
+        ushort? hatRaw = null)
     {
         if (report == null) throw new ArgumentNullException(nameof(report));
         if (report.Length < InputReportByteSize)
@@ -425,21 +436,57 @@ public class HidReportBuilder
 
         if (HatSwitch != null)
         {
-            int hatRaw;
-            if (hatValue == 0)
+            // Priority chain: hatDegrees > hatHundredths > hatRaw > hatValue > null.
+            // First non-null wins; remaining inputs ignored for this frame.
+            int range = HatSwitch.LogicalMax - HatSwitch.LogicalMin + 1;
+            int hatRawWritten;
+            if (hatDegrees.HasValue)
+            {
+                // Normalize to [0, 360). Snap to nearest descriptor position.
+                // The trailing % range handles the wrap-around case where the
+                // angle rounds up to range (e.g. 350° on an 8-position hat
+                // would otherwise round to idx=8 = LogicalMax+1).
+                double a = ((hatDegrees.Value % 360.0) + 360.0) % 360.0;
+                int idx = (int)Math.Round(a / 360.0 * range) % range;
+                hatRawWritten = HatSwitch.LogicalMin + idx;
+            }
+            else if (hatHundredths.HasValue)
+            {
+                // Integer-only path. Truncates rather than rounds (matches
+                // vJoy's wire-format convention).
+                int v = ((hatHundredths.Value % 36000) + 36000) % 36000;
+                int idx = (int)((long)v * range / 36000);
+                hatRawWritten = HatSwitch.LogicalMin + idx;
+            }
+            else if (hatRaw.HasValue)
+            {
+                // Bit-exact: clamp into descriptor's range silently.
+                hatRawWritten = Math.Clamp((int)hatRaw.Value,
+                                           HatSwitch.LogicalMin,
+                                           HatSwitch.LogicalMax);
+            }
+            else if (hatValue == 0)
             {
                 // Neutral: write null state (value outside logical range).
                 // LogMin=1,Max=8: null=0. LogMin=0,Max=7: null=Max+1.
-                hatRaw = HatSwitch.LogicalMin == 0
+                hatRawWritten = HatSwitch.LogicalMin == 0
                     ? HatSwitch.LogicalMax + 1
                     : 0;
             }
             else
             {
-                // hatValue 1-8 (N,NE,E,SE,S,SW,W,NW). Shift to descriptor's range.
-                hatRaw = hatValue + HatSwitch.LogicalMin - 1;
+                // Octant 1-8 (N,NE,E,SE,S,SW,W,NW). Scale into the
+                // descriptor's range so high-res hats place octants at
+                // the matching 45° positions instead of crowding into
+                // the first 8 indices. For range=8 this collapses to
+                // (hatValue-1) — backwards-compatible with the legacy
+                // 8-position behavior. For range=16: NE → idx 2,
+                // E → idx 4, SE → idx 6, etc. Truncating int division
+                // matches the descriptor's quantization.
+                int octantIdx = (hatValue - 1) * range / 8;
+                hatRawWritten = HatSwitch.LogicalMin + octantIdx;
             }
-            WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRaw);
+            WriteBits(report, HatSwitch.BitOffset + idOffset, HatSwitch.BitSize, hatRawWritten);
         }
 
         // Trigger-to-button derivation: DS4/DualSense hardware reports L2/R2

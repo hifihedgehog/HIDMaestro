@@ -176,26 +176,61 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
-    /// <summary>Add an 8-bit hat switch (D-pad). Uses Report Size 8 instead
-    /// of 4 so the hat absorbs its own byte rather than requiring a Const
-    /// pad item after it. Hat values 1-8 encode the 8 directions; 0 and
-    /// 9-255 are null (via the Null-state flag), identical to a 4-bit hat
-    /// with Logical Max 8 semantically but byte-aligned on the wire. No
-    /// following Const pad item — see AddButtons docs for rationale.</summary>
-    public HidDescriptorBuilder AddHat()
+    /// <summary>Add a hat switch (D-pad / POV) with the given number of
+    /// distinct positions. Default 8 (octants). Useful values:
+    /// 8 (gamepad d-pad / standard 8-way), 16 (HOTAS 22.5° hats), 360 or
+    /// higher (pro flight-stick continuous hats). Uses Report Size 8 for
+    /// byte-aligned wire format when positions ≤ 256; auto-extends to
+    /// Report Size 16 for higher resolutions. Declares LogicalMin=0,
+    /// LogicalMax=positions-1 (the HID standard convention), so values
+    /// 0..positions-1 encode the positions and any value outside that
+    /// range (via the Null-state flag) is null. No following Const pad
+    /// item — see AddButtons docs for rationale.
+    ///
+    /// <para>v1.3.4 — added <paramref name="positions"/> parameter.
+    /// Pre-v1.3.4 this declared LogicalMax=8 for an 8-position hat
+    /// (one too many — wasted one wire value); v1.3.4 corrects to
+    /// LogicalMax=7 to match Xbox 360 / standard HID convention. The
+    /// on-wire byte values for the eight HMHat directions are
+    /// unchanged (encoder writes 0..7 either way), but consumers that
+    /// inspect the descriptor's LogicalMax will see 7 instead of 8.</para>
+    /// </summary>
+    public HidDescriptorBuilder AddHat(int positions = 8)
     {
+        if (positions < 4)
+            throw new ArgumentOutOfRangeException(nameof(positions),
+                "Hat must declare at least 4 positions.");
+
+        // Wire size: 8-bit accommodates up to 256 positions; beyond that
+        // we extend to 16-bit. The encoder's WriteBits handles both.
+        bool wide = positions > 256;
+        byte reportSize = wide ? (byte)16 : (byte)8;
+        int logicalMax = positions - 1;
+        // Physical Max in degrees, the conventional formula:
+        // (positions-1) * 360 / positions. 8 → 315, 16 → 337, 360 → 359.
+        int physicalMax = (positions - 1) * 360 / positions;
+
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x39 });        // Usage (Hat switch)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
-        _bytes.AddRange(new byte[] { 0x25, 0x08 });        // Logical Maximum (8)
+        if (logicalMax <= 0x7F)
+        {
+            _bytes.AddRange(new byte[] { 0x25, (byte)logicalMax });         // Logical Maximum (1-byte)
+        }
+        else
+        {
+            _bytes.AddRange(new byte[] { 0x26, (byte)(logicalMax & 0xFF),
+                                                (byte)((logicalMax >> 8) & 0xFF) }); // Logical Maximum (2-byte)
+        }
         _bytes.AddRange(new byte[] { 0x35, 0x00 });        // Physical Minimum (0)
-        _bytes.AddRange(new byte[] { 0x46, 0x3B, 0x01 });  // Physical Maximum (315)
+        _bytes.AddRange(new byte[] { 0x46, (byte)(physicalMax & 0xFF),
+                                            (byte)((physicalMax >> 8) & 0xFF) }); // Physical Maximum
         _bytes.AddRange(new byte[] { 0x66, 0x14, 0x00 });  // Unit (Degrees)
-        _bytes.AddRange(new byte[] { 0x75, 0x08 });        // Report Size (8) — byte-aligned
+        _bytes.AddRange(new byte[] { 0x75, reportSize });  // Report Size
         _bytes.AddRange(new byte[] { 0x95, 0x01 });        // Report Count (1)
         _bytes.AddRange(new byte[] { 0x81, 0x42 });        // Input (Data,Var,Abs,Null)
 
-        _totalInputBits += 8;
+        _totalInputBits += reportSize;
 
         // Reset physical max and unit so they don't bleed into subsequent items.
         _bytes.AddRange(new byte[] { 0x45, 0x00 });        // Physical Maximum (0)

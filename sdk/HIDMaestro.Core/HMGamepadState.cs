@@ -36,8 +36,31 @@ public struct HMGamepadState
     /// <summary>Pressed buttons as a bitmask.</summary>
     public HMButton Buttons;
 
-    /// <summary>D-pad / hat direction. Use <see cref="HMHat.None"/> when not pressed.</summary>
+    /// <summary>Octant direction (8 cardinal+diagonal positions). Use this for
+    /// XInput-style or 8-way gamepad sources. For higher-resolution hat targets
+    /// (flight sticks, HOTAS), see <see cref="HatDegrees"/>, <see cref="HatHundredths"/>,
+    /// or <see cref="HatRaw"/>.</summary>
     public HMHat Hat;
+
+    /// <summary>Continuous angle in degrees, 0 = North, clockwise. The encoder
+    /// normalizes to [0, 360) and snaps to the nearest descriptor position.
+    /// Use when the source produces an angle. Takes priority over
+    /// <see cref="HatHundredths"/>, <see cref="HatRaw"/>, and <see cref="Hat"/>
+    /// when set.</summary>
+    public float? HatDegrees;
+
+    /// <summary>Angle in hundredths of a degree, 0..35999. Same effect as
+    /// <see cref="HatDegrees"/> but integer-only — use for vJoy migration paths
+    /// or to keep float off the hot path. Used when <see cref="HatDegrees"/>
+    /// is null; takes priority over <see cref="HatRaw"/> and <see cref="Hat"/>.</summary>
+    public int? HatHundredths;
+
+    /// <summary>Raw value written directly into the descriptor's hat field,
+    /// clamped to the descriptor's LogicalMin..LogicalMax. Use only when you
+    /// have queried <see cref="HMProfile.HatLogicalMin"/> /
+    /// <see cref="HMProfile.HatLogicalMax"/> and want exact bits. Used when
+    /// both angle fields are null; takes priority over <see cref="Hat"/>.</summary>
+    public ushort? HatRaw;
 }
 
 /// <summary>Standard gamepad button bitmask. Profile-specific renames (Cross/A, Circle/B,

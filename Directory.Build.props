@@ -14,11 +14,11 @@
     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
 
     <!-- Single source of truth for version across every managed project
-         in the tree. Must match the 3 driver INFs' DriverVer
+         in the tree. Must match the 2 driver INFs' DriverVer
          major.minor.patch (see driver/*.inf). Bump this plus the INFs
          together — see memory:feedback-bump-versions-on-release.md for
          the full checklist. -->
-    <Version>1.3.3</Version>
+    <Version>1.3.4</Version>
   </PropertyGroup>
 
   <!-- Hard-fail any Debug build at MSBuild evaluation time. MSBuild accepts

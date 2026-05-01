@@ -118,6 +118,17 @@ public sealed class HMProfile
     /// <summary>True if the descriptor includes a hat switch (D-pad).</summary>
     public bool HasHat => GetLayout()?.HatSwitch != null;
 
+    /// <summary>The descriptor's Hat Switch LogicalMin, or null if the profile
+    /// has no hat usage. Use with <see cref="HMGamepadState.HatRaw"/> when
+    /// you need bit-exact descriptor values.</summary>
+    public int? HatLogicalMin => GetLayout()?.HatSwitch?.LogicalMin;
+
+    /// <summary>The descriptor's Hat Switch LogicalMax, or null if the profile
+    /// has no hat usage. Together with <see cref="HatLogicalMin"/>, the count
+    /// of distinct hat positions is <c>HatLogicalMax - HatLogicalMin + 1</c>
+    /// (typically 8 for octant hats, 16 for 22.5° hats, more for HOTAS).</summary>
+    public int? HatLogicalMax => GetLayout()?.HatSwitch?.LogicalMax;
+
     /// <summary>Bit size of each stick axis (typically 8 or 16).</summary>
     public int StickBits => GetLayout()?.LeftStickX?.BitSize ?? 0;
 

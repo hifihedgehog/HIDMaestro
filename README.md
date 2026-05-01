@@ -89,7 +89,7 @@ var custom = new HMProfileBuilder()
     .Build();
 using var ctrl = ctx.CreateController(custom);
 
-// Or build a flight stick from nothing
+// Or build a flight stick from nothing — 16-position hat (22.5° per click)
 var stick = new HMProfileBuilder()
     .Id("my-stick").Name("My Flight Stick")
     .Vid(0x0483).Pid(0x0001)
@@ -98,11 +98,20 @@ var stick = new HMProfileBuilder()
         .Joystick()
         .AddStick("Left", 16)
         .AddTrigger("Left", 8).AddTrigger("Right", 8)
-        .AddButtons(12).AddHat()
+        .AddButtons(12).AddHat(positions: 16)
         .Build())
     .InputReportSize(8)
     .Build();
 using var ctrl2 = ctx.CreateController(stick);
+
+// Drive the hat at full descriptor resolution. The encoder picks the
+// first non-null in: HatDegrees > HatHundredths > HatRaw > Hat.
+ctrl2.SubmitState(new HMGamepadState { HatDegrees = 22.5f });   // ENE
+ctrl2.SubmitState(new HMGamepadState { HatHundredths = 11250 }); // 112.5° = ESE
+ctrl2.SubmitState(new HMGamepadState
+{
+    HatRaw = (ushort)(stick.HatLogicalMin!.Value + 7)            // bit-exact
+});
 
 // Or capture a physical controller and deploy as a virtual
 var device = HMDeviceExtractor.ListDevices()

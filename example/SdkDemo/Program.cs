@@ -379,6 +379,82 @@ while (sw.ElapsedMilliseconds < 3_000)
     Thread.Sleep(4);
 }
 
+// ── 10b. High-resolution hat — HOTAS / pro flight-stick targets ──────
+// HMGamepadState ships four input shapes for the hat field; the encoder
+// picks the highest-priority non-null one and ignores the rest. The
+// chain (highest → lowest priority):
+//   HatDegrees     float?  continuous angle, 0=North, clockwise
+//   HatHundredths  int?    hundredths of a degree (0..35999)
+//   HatRaw         ushort? clamped to descriptor LogicalMin..LogicalMax
+//   Hat            HMHat   8-octant enum (back-compat)
+// Use HatDegrees when the source produces an angle. Use HatHundredths
+// for vJoy migrations or hot paths that need integer math. Use HatRaw
+// when you've queried HMProfile.HatLogicalMin/Max and want exact bits.
+// Use Hat for XInput-style 8-way sources (still the only thing the
+// XUSB companion's wButtons.DPAD_* can carry).
+Console.WriteLine("\n  10b. Building a 16-position hat (22.5° per click) for HOTAS targets...");
+var hotasDescBuilder = new HidDescriptorBuilder()
+    .Joystick()
+    .AddStick("Left", bits: 16)
+    .AddTrigger("Left", bits: 8)
+    .AddTrigger("Right", bits: 8)
+    .AddButtons(8)
+    .AddHat(positions: 16);            // 16-position hat: 0..16 with null=0
+
+var hotas = new HMProfileBuilder()
+    .Id("custom-hotas")
+    .Name("Custom HOTAS (16-position hat)")
+    .Vendor("Custom")
+    .Vid(0x0483).Pid(0x0002)
+    .ProductString("Custom HOTAS")
+    .ManufacturerString("Homebrew")
+    .Type("flightstick")
+    .Connection("usb")
+    .FromDescriptorBuilder(hotasDescBuilder)
+    .Build();
+
+Console.Write($"  Deploying {hotas.Name} (LogicalMin={hotas.HatLogicalMin}, " +
+              $"LogicalMax={hotas.HatLogicalMax})... ");
+using var ctrlHotas = ctx.CreateController(hotas);
+Console.WriteLine("OK");
+
+// Demonstrate all four hat-input shapes in sequence
+Console.WriteLine("  Cycling through the four hat-input shapes (1 sec each)...");
+
+// 1. Octant enum — limited to 8 cardinal/diagonal positions
+ctrlHotas.SubmitState(new HMGamepadState { Hat = HMHat.NorthEast });
+Console.WriteLine("    [Hat = HMHat.NorthEast]      → octant input");
+Thread.Sleep(1000);
+
+// 2. HatDegrees — float angle, snaps to nearest of 16 positions (22.5° each)
+ctrlHotas.SubmitState(new HMGamepadState { HatDegrees = 67.5f });
+Console.WriteLine("    [HatDegrees = 67.5f]         → 67.5° → idx 3 (ENE)");
+Thread.Sleep(1000);
+
+// 3. HatHundredths — same idea as HatDegrees but integer-only (hundredths)
+ctrlHotas.SubmitState(new HMGamepadState { HatHundredths = 22500 }); // 225.00°
+Console.WriteLine("    [HatHundredths = 22500]      → 225.00° → idx 10 (SW-ish)");
+Thread.Sleep(1000);
+
+// 4. HatRaw — bit-exact descriptor value
+ctrlHotas.SubmitState(new HMGamepadState
+{
+    HatRaw = (ushort)(hotas.HatLogicalMin!.Value + 7) // mid-range position
+});
+Console.WriteLine($"    [HatRaw = LogicalMin + 7]    → exact descriptor bits");
+Thread.Sleep(1000);
+
+// Wrap-around case: 350° on the 16-position hat is closer to 0° (North)
+// than to 337.5° (NNW), so it correctly snaps to North (idx 0).
+ctrlHotas.SubmitState(new HMGamepadState { HatDegrees = 350f });
+Console.WriteLine("    [HatDegrees = 350f]          → wraps to North (the % range protects LogicalMax)");
+Thread.Sleep(1000);
+
+// Null state — Hat=None, all other fields null → descriptor null state
+ctrlHotas.SubmitState(new HMGamepadState { Hat = HMHat.None });
+Console.WriteLine("    [Hat = HMHat.None]           → null state (no direction)");
+Thread.Sleep(500);
+
 // ── 11. SubmitRawReport — ViGEmBus DS4 migration pattern ─────────────
 // This shows how PadForge (or any app migrating from ViGEmBus) can
 // submit full DS4/DualSense reports including touchpad, gyro, and

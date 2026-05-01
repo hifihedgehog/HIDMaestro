@@ -1595,7 +1595,6 @@ class Program
     const uint IOCTL_XUSB_GET_INFORMATION = 0x80006000;
     const uint IOCTL_XUSB_GET_CAPABILITIES = 0x8000E004;
     const uint IOCTL_XUSB_SET_STATE = 0x8000A010;
-    const uint IOCTL_XUSB_WAIT_FOR_INPUT = 0x8000E3AC;
 
     static string ClassifyXusbPath(string path)
     {

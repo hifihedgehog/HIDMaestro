@@ -16,7 +16,7 @@ namespace HIDMaestro.Internal;
 /// <para><b>Defaults:</b> <c>1.0</c> (every existing fast-machine deployment
 /// behaves identically). Range is clamped to <c>[0.1, 100.0]</c> — values
 /// outside that range fall back to <c>1.0</c> with a single
-/// <c>OutputDebugString</c> warning. <c>HIDMaestroTimeoutScale</c> is read
+/// <c>OutputDebugString</c> warning. <c>HIDMAESTRO_TIMEOUT_SCALE</c> is read
 /// once at type init and cached; changing the env var mid-process does not
 /// affect already-resolved budgets.</para>
 ///

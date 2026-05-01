@@ -306,8 +306,6 @@ internal static class DeviceOrchestrator
     //  Well-known GUIDs
     // ════════════════════════════════════════════════════════════════════
 
-    private static readonly Guid HidClassGuid = new("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
-    private static readonly Guid SystemClassGuid = new("4D36E97D-E325-11CE-BFC1-08002BE10318");
     private static readonly Guid XusbInterfaceGuid = new("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
 
     // ════════════════════════════════════════════════════════════════════

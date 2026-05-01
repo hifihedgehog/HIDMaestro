@@ -128,6 +128,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1115,6 +1116,25 @@ function Scenario-Xbox360-Dpad-XInput {
     }
 }
 
+# S28: fine-grained hat encoder regression. Pure encoder unit test - no virtual
+# device, no driver install. Builds profiles via HidDescriptorBuilder with hat
+# resolutions 8/16/360, encodes reports across all four HMGamepadState hat-input
+# shapes (Hat enum, HatRaw, HatHundredths, HatDegrees), reads back the wire bytes
+# and asserts each input shape produces the expected descriptor field value.
+# Catches future regressions in the v1.3.4 priority chain or the legacy AddHat
+# LogMax convention.
+function Scenario-Hat-Resolution-Check {
+    $probe = Join-Path $PSScriptRoot '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HatResolutionCheck.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "hat_resolution_check not built. Run: dotnet build test/probes/hat_resolution_check -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("HatResolutionCheck exited " + $p.ExitCode + " - one or more hat-input shapes did not encode the expected descriptor bits")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1146,7 +1166,8 @@ $scenarios = @(
     @{ Name = 'S24_PidFfb_RoundTrip';             Body = ${function:Scenario-PidFfb-RoundTrip} },
     @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} },
     @{ Name = 'S26_PidFfb_FfbTest';               Body = ${function:Scenario-PidFfb-FfbTest} },
-    @{ Name = 'S27_Xbox360_Dpad_XInput';          Body = ${function:Scenario-Xbox360-Dpad-XInput} }
+    @{ Name = 'S27_Xbox360_Dpad_XInput';          Body = ${function:Scenario-Xbox360-Dpad-XInput} },
+    @{ Name = 'S28_Hat_Resolution_Encoder';       Body = ${function:Scenario-Hat-Resolution-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

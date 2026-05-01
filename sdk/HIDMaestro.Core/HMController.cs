@@ -301,12 +301,18 @@ public sealed class HMController : IDisposable
         double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
 
         // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
+        // v1.3.4 — pass through high-resolution hat inputs. The encoder's
+        // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
+        // the first non-null and ignores the rest.
         _reportBuilder.BuildReportInto(_reportBuffer,
             leftX: mlx, leftY: mly,
             rightX: mrx, rightY: mry,
             leftTrigger: mlt, rightTrigger: mrt,
             hatValue: (int)state.Hat,
-            buttonMask: (uint)state.Buttons);
+            buttonMask: (uint)state.Buttons,
+            hatDegrees: state.HatDegrees,
+            hatHundredths: state.HatHundredths,
+            hatRaw: state.HatRaw);
         byte[] report = _reportBuffer;
 
         // T26-2 — pack the GIP-format buffer ONLY for Xbox-VID profiles.
@@ -366,10 +372,12 @@ public sealed class HMController : IDisposable
         // bytes. BuildReport puts the Report ID at position 0 when the
         // descriptor declares one. The driver expects the shared memory
         // section to contain only data bytes — the kernel HID stack adds
-        // the Report ID prefix when delivering. dataLen capped at 64 to
-        // match the shared memory section's data area size.
+        // the Report ID prefix when delivering. dataLen capped at the
+        // shared section's Data[] capacity (256 bytes per
+        // SharedMemoryIO.DATA_CAPACITY; widened from 64 in 2026-04-23 to
+        // carry the full DualSense BT 0x31 78-byte report).
         int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
-        int dataLen = Math.Min(report.Length - dataStart, 64);
+        int dataLen = Math.Min(report.Length - dataStart, SharedMemoryIO.DATA_CAPACITY);
         // T26-2 — pass null for gipData on non-Xbox profiles so WriteInputFrame
         // skips the 14-byte Marshal.Copy.
         SharedMemoryIO.WriteInputFrame(
@@ -398,7 +406,10 @@ public sealed class HMController : IDisposable
     {
         ThrowIfDisposed();
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
-        if (report.Length > 64) throw new ArgumentException("Report exceeds the 64-byte shared section payload.", nameof(report));
+        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
+            throw new ArgumentException(
+                $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
+                nameof(report));
 
         // v1.3.0 — copy into the per-controller reusable buffer instead of
         // report.ToArray()'ing per call. Vendor-protocol consumers (PadForge

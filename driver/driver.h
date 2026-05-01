@@ -94,10 +94,6 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   InputReportSize;
     BOOLEAN InputReportReady;
 
-    /* Latest raw GIP data for XUSB GET_STATE (always 14 bytes GIP format) */
-    UCHAR   XusbReport[14];
-    BOOLEAN XusbReportReady;
-
     /* Product string (returned on IOCTL_HID_GET_STRING / HID_STRING_ID_IPRODUCT) */
     WCHAR   ProductString[128];
     ULONG   ProductStringBytes; /* size in bytes including null terminator */
@@ -166,10 +162,6 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  PidStateMemHandle;
     PVOID   PidStateMemPtr;
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
-
-    /* XUSB packet number — incremented per input frame, returned in
-     * IOCTL_XUSB_GET_STATE replies so xinput1_4 can detect changes. */
-    LONG    InputReportsSubmitted;
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 
