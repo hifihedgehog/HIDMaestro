@@ -3,6 +3,10 @@
 // Validates the v1.3.5 vendor-blob extendedReport / extendedOutputReport
 // blocks across the full Sony profile set:
 //
+//   - DS5 USB (Report 0x01) input round-trip — sticks/triggers/buttons/hat
+//     plus LT_DIGITAL/RT_DIGITAL auto-engagement when triggers > 0
+//   - DS4 USB (Report 0x01) input round-trip — sticks/buttons/hat in byte 5
+//     (different layout from DS5)
 //   - DS4 BT (Report 0x11) input + output round-trip with CRC32 prefix
 //     [0xA1, 0x11] / [0xA2, 0x11]
 //   - DS5 USB (Report 0x02) output round-trip (no CRC; USB is reliable)
@@ -27,6 +31,162 @@ internal sealed class Program
 
         int failures = 0;
         int total = 0;
+
+        // ── DS5 USB input encoder (Report 0x01) ────────────────────────
+        Console.WriteLine("--- DS5 USB input (Report 0x01) ---");
+        var ds5Usb = ctx.GetProfile("dualsense")!;
+        if (!ds5Usb.HasExtendedInput)
+        {
+            Console.WriteLine("  [FAIL] dualsense (USB) has no ExtendedReport");
+            return 1;
+        }
+        var ds5UsbInSpec = ds5Usb.ExtendedReport!;
+        Console.WriteLine($"  reportId=0x{ds5UsbInSpec.ReportIdByte:X2} (expected 0x01)  size={ds5UsbInSpec.Size} fields={ds5UsbInSpec.Fields.Count}");
+
+        var ds5UsbState = new HMGamepadState
+        {
+            LeftStickX  = 1.0f,    // byte 1 = 255
+            LeftStickY  = -1.0f,   // byte 2 = 1
+            RightStickX = 0.0f,    // byte 3 = 128
+            RightStickY = 0.5f,    // byte 4 = 192
+            LeftTrigger = 0.7f,    // byte 5 ≈ 178; engages LT_DIGITAL bit
+            RightTrigger = 0.0f,   // byte 6 = 0; LT_DIGITAL stays 0
+            Buttons = HMButton.A | HMButton.LeftBumper | HMButton.Guide,
+            Hat = HMHat.NorthEast,
+        };
+        var ds5UsbInBuf = new byte[ds5UsbInSpec.Size];
+        var ds5UsbInState = new VendorBlobCodec.EncoderState();
+        VendorBlobCodec.EncodeInput(ds5UsbInSpec, in ds5UsbState, ds5UsbInBuf, ds5UsbInState);
+
+        var ds5UsbInAssertions = new (int idx, int expected, string name)[]
+        {
+            (0,  0x01, "Report ID"),
+            (1,  255,  "LeftStickX = +1"),
+            (2,  1,    "LeftStickY = -1"),
+            (3,  128,  "RightStickX = 0"),
+            (4,  192,  "RightStickY = 0.5"),
+            (5,  178,  "LeftTrigger = 0.7"),
+            (6,  0,    "RightTrigger = 0"),
+        };
+        foreach (var (idx, expected, name) in ds5UsbInAssertions)
+        {
+            total++;
+            bool pass = ds5UsbInBuf[idx] == expected;
+            Console.WriteLine($"  [{(pass ? "PASS" : "FAIL")}] {name,-22} buf[{idx,2}]={ds5UsbInBuf[idx]} (expected {expected})");
+            if (!pass) failures++;
+        }
+        // Hat NorthEast = 1 in byte 8 low nibble
+        total++;
+        bool ds5UsbHatPass = (ds5UsbInBuf[8] & 0x0F) == 1;
+        Console.WriteLine($"  [{(ds5UsbHatPass ? "PASS" : "FAIL")}] Hat=NorthEast: byte 8 low nibble = {ds5UsbInBuf[8] & 0x0F} (expected 1)");
+        if (!ds5UsbHatPass) failures++;
+
+        // Cross (HMButton.A) → byte 8 bit 5
+        total++;
+        bool ds5UsbCrossPass = (ds5UsbInBuf[8] & 0x20) != 0;
+        Console.WriteLine($"  [{(ds5UsbCrossPass ? "PASS" : "FAIL")}] Cross/A: byte 8 = 0x{ds5UsbInBuf[8]:X2} (bit 5 expected set)");
+        if (!ds5UsbCrossPass) failures++;
+
+        // L1 (HMButton.LeftBumper) → byte 9 bit 0
+        total++;
+        bool ds5UsbL1Pass = (ds5UsbInBuf[9] & 0x01) != 0;
+        Console.WriteLine($"  [{(ds5UsbL1Pass ? "PASS" : "FAIL")}] L1/LeftBumper: byte 9 = 0x{ds5UsbInBuf[9]:X2} (bit 0 expected set)");
+        if (!ds5UsbL1Pass) failures++;
+
+        // LT_DIGITAL (LeftTrigger > 0) → byte 9 bit 2
+        total++;
+        bool ds5UsbLTDigitalPass = (ds5UsbInBuf[9] & 0x04) != 0;
+        Console.WriteLine($"  [{(ds5UsbLTDigitalPass ? "PASS" : "FAIL")}] LT_DIGITAL (LeftTrigger=0.7 > 0): byte 9 bit 2 expected set");
+        if (!ds5UsbLTDigitalPass) failures++;
+
+        // RT_DIGITAL (RightTrigger == 0) → byte 9 bit 3 NOT set
+        total++;
+        bool ds5UsbRTDigitalPass = (ds5UsbInBuf[9] & 0x08) == 0;
+        Console.WriteLine($"  [{(ds5UsbRTDigitalPass ? "PASS" : "FAIL")}] RT_DIGITAL (RightTrigger=0): byte 9 bit 3 expected clear");
+        if (!ds5UsbRTDigitalPass) failures++;
+
+        // Guide (HMButton.Guide) → byte 10 bit 0
+        total++;
+        bool ds5UsbGuidePass = (ds5UsbInBuf[10] & 0x01) != 0;
+        Console.WriteLine($"  [{(ds5UsbGuidePass ? "PASS" : "FAIL")}] Guide/PS: byte 10 = 0x{ds5UsbInBuf[10]:X2} (bit 0 expected set)");
+        if (!ds5UsbGuidePass) failures++;
+
+        Console.WriteLine();
+
+        // ── DS4 USB input encoder (Report 0x01) ────────────────────────
+        Console.WriteLine("--- DS4 USB input (Report 0x01) ---");
+        var ds4Usb = ctx.GetProfile("dualshock-4-v2")!;
+        if (!ds4Usb.HasExtendedInput)
+        {
+            Console.WriteLine("  [FAIL] dualshock-4-v2 (USB) has no ExtendedReport");
+            return 1;
+        }
+        var ds4UsbInSpec = ds4Usb.ExtendedReport!;
+
+        var ds4UsbState = new HMGamepadState
+        {
+            LeftStickX  =  0.5f,   // byte 1 = 192
+            LeftStickY  =  0.0f,   // byte 2 = 128
+            RightStickX = -0.5f,   // byte 3 = 64
+            RightStickY = -1.0f,   // byte 4 = 1
+            LeftTrigger = 0.0f,    // byte 8 = 0; LT_DIGITAL clear
+            RightTrigger = 1.0f,   // byte 9 = 255; RT_DIGITAL set
+            Buttons = HMButton.B | HMButton.Start,
+            Hat = HMHat.West,
+        };
+        var ds4UsbInBuf = new byte[ds4UsbInSpec.Size];
+        var ds4UsbInEnc = new VendorBlobCodec.EncoderState();
+        VendorBlobCodec.EncodeInput(ds4UsbInSpec, in ds4UsbState, ds4UsbInBuf, ds4UsbInEnc);
+
+        var ds4UsbInAssertions = new (int idx, int expected, string name)[]
+        {
+            (0, 0x01, "Report ID"),
+            (1, 192,  "LeftStickX = +0.5"),
+            (2, 128,  "LeftStickY = 0"),
+            (3, 64,   "RightStickX = -0.5"),
+            (4, 1,    "RightStickY = -1"),
+            (8, 0,    "LeftTrigger = 0"),
+            (9, 255,  "RightTrigger = 1.0"),
+        };
+        foreach (var (idx, expected, name) in ds4UsbInAssertions)
+        {
+            total++;
+            bool pass = ds4UsbInBuf[idx] == expected;
+            Console.WriteLine($"  [{(pass ? "PASS" : "FAIL")}] {name,-22} buf[{idx,2}]={ds4UsbInBuf[idx]} (expected {expected})");
+            if (!pass) failures++;
+        }
+        // Hat West encodes to nibble 6 (HMHat.West=7, encoder writes octant-1=6)
+        total++;
+        int ds4UsbHat = ds4UsbInBuf[5] & 0x0F;
+        bool ds4UsbHatPass = ds4UsbHat == 6;
+        Console.WriteLine($"  [{(ds4UsbHatPass ? "PASS" : "FAIL")}] Hat=West: byte 5 low nibble = {ds4UsbHat} (expected 6)");
+        if (!ds4UsbHatPass) failures++;
+
+        // Circle (B) → byte 5 bit 6 (high nibble bit 2)
+        total++;
+        bool ds4UsbCirclePass = (ds4UsbInBuf[5] & 0x40) != 0;
+        Console.WriteLine($"  [{(ds4UsbCirclePass ? "PASS" : "FAIL")}] Circle/B: byte 5 = 0x{ds4UsbInBuf[5]:X2} (bit 6 expected set)");
+        if (!ds4UsbCirclePass) failures++;
+
+        // Start (Options) → byte 6 bit 5
+        total++;
+        bool ds4UsbStartPass = (ds4UsbInBuf[6] & 0x20) != 0;
+        Console.WriteLine($"  [{(ds4UsbStartPass ? "PASS" : "FAIL")}] Start/Options: byte 6 = 0x{ds4UsbInBuf[6]:X2} (bit 5 expected set)");
+        if (!ds4UsbStartPass) failures++;
+
+        // RT_DIGITAL (RightTrigger > 0) → byte 6 bit 3 set
+        total++;
+        bool ds4UsbRTDigPass = (ds4UsbInBuf[6] & 0x08) != 0;
+        Console.WriteLine($"  [{(ds4UsbRTDigPass ? "PASS" : "FAIL")}] RT_DIGITAL (RightTrigger=1.0): byte 6 bit 3 expected set");
+        if (!ds4UsbRTDigPass) failures++;
+
+        // LT_DIGITAL (LeftTrigger == 0) → byte 6 bit 2 clear
+        total++;
+        bool ds4UsbLTDigPass = (ds4UsbInBuf[6] & 0x04) == 0;
+        Console.WriteLine($"  [{(ds4UsbLTDigPass ? "PASS" : "FAIL")}] LT_DIGITAL (LeftTrigger=0): byte 6 bit 2 expected clear");
+        if (!ds4UsbLTDigPass) failures++;
+
+        Console.WriteLine();
 
         // ── DS4 BT input encoder (Report 0x11) ────────────────────────
         Console.WriteLine("--- DS4 BT input (Report 0x11) ---");
@@ -152,7 +312,6 @@ internal sealed class Program
 
         // ── DS5 USB output round-trip (Report 0x02, no CRC) ────────────
         Console.WriteLine("--- DS5 USB output (Report 0x02) ---");
-        var ds5Usb = ctx.GetProfile("dualsense")!;
         if (!ds5Usb.HasExtendedOutput)
         {
             Console.WriteLine("  [FAIL] dualsense (USB) has no ExtendedOutputReport");
@@ -206,7 +365,6 @@ internal sealed class Program
 
         // ── DS4 USB output round-trip (Report 0x05, no CRC) ────────────
         Console.WriteLine("--- DS4 USB output (Report 0x05) ---");
-        var ds4Usb = ctx.GetProfile("dualshock-4-v2")!;
         if (!ds4Usb.HasExtendedOutput)
         {
             Console.WriteLine("  [FAIL] dualshock-4-v2 has no ExtendedOutputReport");

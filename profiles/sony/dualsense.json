@@ -14,6 +14,25 @@
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
   "triggerButtons": [6, 7],
   "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" },
+  "extendedReport": {
+    "reportId": "0x01",
+    "size": 64,
+    "fields": [
+      { "byte": 1, "type": "uint8-axis",    "semantic": "leftStickX",  "center": 128 },
+      { "byte": 2, "type": "uint8-axis",    "semantic": "leftStickY",  "center": 128 },
+      { "byte": 3, "type": "uint8-axis",    "semantic": "rightStickX", "center": 128 },
+      { "byte": 4, "type": "uint8-axis",    "semantic": "rightStickY", "center": 128 },
+      { "byte": 5, "type": "uint8-trigger", "semantic": "leftTrigger" },
+      { "byte": 6, "type": "uint8-trigger", "semantic": "rightTrigger" },
+      { "byte": 7, "type": "uint8-rolling", "semantic": "sequenceNum", "initial": 0 },
+      { "byte": 8, "bits": "0-3", "type": "hat-octant", "semantic": "hat", "neutralValue": 8 },
+      { "byte": 8, "bits": "4-7", "type": "button-mask", "buttons": ["X", "A", "B", "Y"] },
+      { "byte": 9, "type": "button-mask",
+        "buttons": ["LeftBumper","RightBumper","LT_DIGITAL","RT_DIGITAL","Back","Start","LeftStick","RightStick"] },
+      { "byte": 10, "type": "button-mask",
+        "buttons": ["Guide","Touchpad"] }
+    ]
+  },
   "extendedOutputReport": {
     "reportId": "0x02",
     "size": 48,

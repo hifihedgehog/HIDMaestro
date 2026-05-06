@@ -141,6 +141,21 @@ internal static class VendorBlobCodec
                 {
                     string name = field.Buttons[i];
                     if (string.IsNullOrEmpty(name) || name == "_") continue; // skip placeholder
+                    // Magic names for trigger-engaged digital buttons. DS4/DS5
+                    // hardware reports L2/R2 as both analog axis AND digital
+                    // button; the descriptor-driven encoder uses triggerButtons
+                    // for this. Data-driven path uses these magic names to
+                    // engage the bit when the corresponding state trigger > 0.
+                    if (name == "LT_DIGITAL")
+                    {
+                        if (state.LeftTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
+                        continue;
+                    }
+                    if (name == "RT_DIGITAL")
+                    {
+                        if (state.RightTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
+                        continue;
+                    }
                     if (Enum.TryParse<HMButton>(name, true, out var btn) && (mask & (uint)btn) != 0)
                         packed |= (byte)(1 << (bitLo + i));
                 }
