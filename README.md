@@ -147,11 +147,13 @@ HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x4
 
 Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.
 
-### Data-Driven Vendor-Blob Codec (Sony BT, others)
+### Data-Driven Vendor-Blob Codec (Sony USB + BT)
 
 Sony BT controllers (DualSense, DualSense Edge, DS4 BT) declare their input as a 78-byte vendor-defined "blob" — one opaque field with no descriptor-level breakdown of which bytes carry sticks vs buttons vs gyro vs CRC32. Pre-v1.3.5 the SDK couldn't pack this and fell back to emitting basic Report 1 (9 bytes), which Steam Input misclassified as USB and `dualsense-tester` couldn't parse.
 
 v1.3.5 makes the byte layout data: profile JSON declares `extendedReport` (input) and `extendedOutputReport` (output) blocks describing every field's type, byte position, and bit range. The SDK becomes a generic codec that walks the field list. Future profiles with vendor blobs (Switch Pro extended, vendor-specific wheels) add the JSON only — no SDK code changes per profile.
+
+The full Sony catalog ships with v1.3.5 data-driven blocks: DS5 BT (`dualsense-bt`, `dualsense-bt-full`, `dualsense-edge-bt`) gain both input + output (Report 0x31, 78-byte BT-format with `[0xA1,0x31]`/`[0xA2,0x31]` CRC32 prefixes); DS4 BT (`dualshock-4-v2-bt`) gets input + output (Report 0x11, `[0xA1,0x11]`/`[0xA2,0x11]` CRC32 prefixes); DS5 USB (`dualsense`, `dualsense-edge`) and DS4 USB (`dualshock-4-v1`, `dualshock-4-v1-full`, `dualshock-4-v2`) gain output blocks (Report 0x02 / Report 0x05; no CRC since USB is reliable). PadForge can drive any of them via `HMOutputEncoder.Encode(profile, fields)` without inline byte-packing.
 
 ```jsonc
 "extendedReport": {

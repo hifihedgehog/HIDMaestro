@@ -13,5 +13,23 @@
   "notes": "389-byte descriptor. Source: ShadowBlip/InputPlumber DS_EDGE_USB_DESCRIPTOR, contributed by LtChipotle. Extends standard DualSense (273 bytes) with Edge-specific feature reports 0x60-0x7B for profile/remapping control. Output report 0x02 uses 63 bytes (vs 47 in standard). Feature report 0xF2 uses 52 bytes (vs 15 in standard). The only modern PlayStation controller that does NOT use 'Wireless Controller' as its product string.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
   "triggerButtons": [6, 7],
-  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
+  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" },
+  "extendedOutputReport": {
+    "reportId": "0x02",
+    "size": 64,
+    "fields": [
+      { "byte":  1, "type": "uint8", "semantic": "validFlag0" },
+      { "byte":  2, "type": "uint8", "semantic": "validFlag1" },
+      { "byte":  3, "type": "uint8", "semantic": "rightMotor" },
+      { "byte":  4, "type": "uint8", "semantic": "leftMotor" },
+      { "byte":  9, "type": "uint8", "semantic": "muteLed" },
+      { "bytes": "11-21", "type": "bytes-passthrough", "semantic": "rightTriggerEffect" },
+      { "bytes": "22-32", "type": "bytes-passthrough", "semantic": "leftTriggerEffect" },
+      { "byte": 39, "type": "uint8", "semantic": "validFlag2" },
+      { "byte": 42, "type": "uint8", "semantic": "lightbarSetup" },
+      { "byte": 43, "type": "uint8", "semantic": "ledBrightness" },
+      { "byte": 44, "type": "uint8", "semantic": "playerIndicator" },
+      { "bytes": "45-47", "type": "rgb24", "semantic": "lightbar" }
+    ]
+  }
 }

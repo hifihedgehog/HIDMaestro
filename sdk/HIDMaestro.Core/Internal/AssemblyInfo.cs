@@ -7,3 +7,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("HIDMaestroTest")]
 [assembly: InternalsVisibleTo("SonyBtReport31Check")]
 [assembly: InternalsVisibleTo("SonyBtOutputDecodeCheck")]
+[assembly: InternalsVisibleTo("SonyDataDrivenCoverage")]
