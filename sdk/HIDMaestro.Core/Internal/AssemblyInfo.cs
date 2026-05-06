@@ -5,3 +5,5 @@ using System.Runtime.CompilerServices;
 // etc.) during the gradual extraction so the test app and SDK can stay in
 // parallel as code moves between them.
 [assembly: InternalsVisibleTo("HIDMaestroTest")]
+[assembly: InternalsVisibleTo("SonyBtReport31Check")]
+[assembly: InternalsVisibleTo("SonyBtOutputDecodeCheck")]

@@ -38,17 +38,40 @@ internal static class DeviceOrchestrator
     /// recreations broken on the 2nd swap onward. FindExistingCompanion
     /// matches by ControllerIndex in Device Parameters (not by suffix), so
     /// varying suffixes per call is transparent to teardown / sweep code.
+    ///
+    /// <para>v1.3.5 — mix high-resolution process-start ticks (and a small
+    /// random component) into the session ID. PID alone is insufficient on
+    /// busy hosts where Windows may reuse the same PID across separate test
+    /// runs within hours. Atom 2026-04-30 vs 2026-05-06: PID 0x10E8 reused,
+    /// per-process seq counter restarted from 0, identical (suffix + container)
+    /// tuple regenerated, kernel hit the reuse-existing fast path, S08
+    /// teardown failed E_ACCESSDENIED on the resurrected ghost.</para>
     /// </summary>
-    private static readonly string s_sessionId =
-        System.Diagnostics.Process.GetCurrentProcess().Id.ToString("X").ToUpperInvariant();
+    private static readonly string s_sessionId = ComputeSessionId();
+
+    private static string ComputeSessionId()
+    {
+        // 32-bit PID component (typically 4-5 hex chars) + 32-bit ticks low
+        // (changes every <50 days) + 16-bit random (defense in depth).
+        // Total ~16 hex chars — still well under SetupAPI's 200-char instance
+        // ID limit. Atomic across this process; never collides with itself.
+        int pid    = System.Diagnostics.Process.GetCurrentProcess().Id;
+        long ticks = DateTime.UtcNow.Ticks;
+        int  rnd   = System.Random.Shared.Next();
+        // Combine to 12 hex chars: 8 from XOR(pid, ticks low), 4 from rnd low.
+        uint mix1 = (uint)pid ^ (uint)(ticks & 0xFFFFFFFF);
+        uint mix2 = (uint)((ticks >> 32) & 0xFFFFFFFF) ^ (uint)rnd;
+        return $"{mix1:X8}{(mix2 & 0xFFFF):X4}".ToUpperInvariant();
+    }
 
     private static int s_swdCreateSeq;
 
     /// <summary>
     /// Generates a unique SwD instance-suffix for one SwDeviceCreate call.
-    /// Format: "&lt;pid-hex&gt;&lt;seq-hex&gt;_&lt;ctrl-idx&gt;". Sequence number
-    /// is process-scoped and atomic; suffix becomes unique even when the
-    /// same controllerIndex is recreated multiple times in the same process.
+    /// Format: "&lt;session-hex&gt;&lt;seq-hex&gt;_&lt;ctrl-idx&gt;". Sequence number
+    /// is process-scoped and atomic; combined with the 12-char session prefix
+    /// (PID + ticks + random) the tuple is globally unique even when Windows
+    /// reuses a PID across separate test runs.
     /// </summary>
     private static string NextSwdSuffix(int controllerIndex)
     {

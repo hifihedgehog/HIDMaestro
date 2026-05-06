@@ -95,6 +95,33 @@ public sealed class HMController : IDisposable
     /// back-to-back writes; that drop pattern is fixed.</para></summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
+    /// <summary>v1.3.5 — raised when an inbound output report matches the
+    /// profile's <see cref="HMProfile.HasExtendedOutput"/> spec. The SDK
+    /// decodes the bytes per the profile's <c>extendedOutputReport</c> field
+    /// list and surfaces parsed values (rumble amplitudes, lightbar RGB,
+    /// adaptive-trigger blocks, etc.) keyed by semantic name.
+    ///
+    /// <para>Consumers that want raw bytes still get them via
+    /// <see cref="OutputReceived"/> — both events fire for matching reports.
+    /// Subscribers must be thread-safe (raised on the polling thread).</para></summary>
+    public event EventHandler<HMOutputDecodedEventArgs>? OutputDecoded;
+
+    // v1.3.5 — vendor-blob input encoder state. Built lazily when the profile
+    // declares extendedReport. Holds rolling counters (Sony's framingTag /
+    // reportCounter increment monotonically across SubmitState calls).
+    private VendorBlobCodec.EncoderState? _extEncoderState;
+
+    // v1.3.5 — buffer sized to ExtendedReport.Size, allocated once. NULL
+    // when the profile has no extendedReport.
+    private byte[]? _extendedReportBuffer;
+
+    // v1.3.5 — host-side arm flag. False until a host write matches one of
+    // ExtendedReport.armOn triggers; true thereafter for the lifetime of
+    // this controller. Until armed, SubmitState falls through to the
+    // descriptor-driven BuildReportInto path so consumers that never issue
+    // the handshake still see legacy Report 1 emission.
+    private volatile bool _extendedModeArmed;
+
     // PID FFB state section. Lazy: created on the first PublishPid* call so
     // a non-FFB consumer never allocates the section. Once created, the
     // driver's IOCTL_UMDF_HID_GET_FEATURE handler reads from it on every
@@ -256,6 +283,15 @@ public sealed class HMController : IDisposable
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
+        // v1.3.5 — pre-allocate vendor-blob buffer + encoder state when the
+        // profile declares extendedReport. Saves a per-frame alloc on the
+        // SubmitState hot path for Sony BT profiles.
+        if (profile.ExtendedReport != null)
+        {
+            _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
+            _extEncoderState = new VendorBlobCodec.EncoderState();
+        }
+
         // Output passthrough is best-effort. If the section can't be created
         // (rare — only LocalService permission issues) we just don't raise
         // OutputReceived events.
@@ -300,20 +336,44 @@ public sealed class HMController : IDisposable
         double mlt = Math.Clamp(state.LeftTrigger, 0f, 1f);
         double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
 
-        // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
-        // v1.3.4 — pass through high-resolution hat inputs. The encoder's
-        // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
-        // the first non-null and ignores the rest.
-        _reportBuilder.BuildReportInto(_reportBuffer,
-            leftX: mlx, leftY: mly,
-            rightX: mrx, rightY: mry,
-            leftTrigger: mlt, rightTrigger: mrt,
-            hatValue: (int)state.Hat,
-            buttonMask: (uint)state.Buttons,
-            hatDegrees: state.HatDegrees,
-            hatHundredths: state.HatHundredths,
-            hatRaw: state.HatRaw);
-        byte[] report = _reportBuffer;
+        byte[] report;
+        bool useExtended = Profile.ExtendedReport != null
+                        && _extendedReportBuffer != null
+                        && _extEncoderState != null;
+
+        if (useExtended)
+        {
+            // v1.3.5 — vendor-blob path. Profile.ExtendedReport's field list
+            // drives byte placement. Sticks/triggers/buttons/hat all encode
+            // through VendorBlobCodec; CRC32 (if declared) is computed last.
+            // Profiles with a vendor-blob INPUT (Sony BT 0x31 / DS4 BT 0x11)
+            // ALWAYS emit extended — the descriptor's first input report ID
+            // matches ExtendedReport.reportId, so the kernel re-prepends the
+            // correct ID and consumers see the expected vendor-blob format.
+            // The legacy BuildReportInto path can't pack the vendor-blob's
+            // inner byte layout (the parser sees it as one opaque 77-byte
+            // field) and would produce broken data, so we don't fall through.
+            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+                _extendedReportBuffer!, _extEncoderState!);
+            report = _extendedReportBuffer!;
+        }
+        else
+        {
+            // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
+            // v1.3.4 — pass through high-resolution hat inputs. The encoder's
+            // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
+            // the first non-null and ignores the rest.
+            _reportBuilder.BuildReportInto(_reportBuffer,
+                leftX: mlx, leftY: mly,
+                rightX: mrx, rightY: mry,
+                leftTrigger: mlt, rightTrigger: mrt,
+                hatValue: (int)state.Hat,
+                buttonMask: (uint)state.Buttons,
+                hatDegrees: state.HatDegrees,
+                hatHundredths: state.HatHundredths,
+                hatRaw: state.HatRaw);
+            report = _reportBuffer;
+        }
 
         // T26-2 — pack the GIP-format buffer ONLY for Xbox-VID profiles.
         // The XUSB companion (HMXInput.dll) reads this slice on
@@ -456,6 +516,65 @@ public sealed class HMController : IDisposable
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
+
+                    // v1.3.5 — vendor-blob output decode. When the profile
+                    // declares an extendedOutputReport with a matching
+                    // reportId, decode the bytes into a parsed-field
+                    // dictionary and surface as OutputDecoded. Consumers
+                    // get named values (rumble amplitudes, lightbar RGB,
+                    // adaptive-trigger blocks) instead of raw bytes.
+                    var extOut = Profile.ExtendedOutputReport;
+                    if (extOut != null && reportId == extOut.ReportIdByte
+                        && OutputDecoded != null)
+                    {
+                        try
+                        {
+                            // Reconstruct the full report (RID + data) for
+                            // the codec — VendorBlobCodec expects the RID
+                            // at offset 0. The shared output ring stores
+                            // the RID separately so we synthesize it here.
+                            var full = new byte[dataSize + 1];
+                            full[0] = reportId;
+                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
+
+                            var (fields, crcValid) = VendorBlobCodec.Decode(extOut, full);
+                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            {
+                                ReportId = reportId,
+                                Fields = fields,
+                                RawBytes = full,
+                                CrcValid = crcValid,
+                            });
+                        }
+                        catch
+                        {
+                            // Swallow decode errors so a malformed packet
+                            // doesn't kill the polling thread. OutputReceived
+                            // already fired with the raw bytes; consumers
+                            // that need them have them.
+                        }
+                    }
+
+                    // v1.3.5 — arm-handshake watcher. When the profile
+                    // declares armOn triggers and a matching write arrives,
+                    // flip the armed flag (currently informational; emit-
+                    // direction always uses extendedReport when set).
+                    var extIn = Profile.ExtendedReport;
+                    if (extIn?.ArmOn != null && !_extendedModeArmed)
+                    {
+                        bool isFeature = source == (byte)HMOutputSource.HidFeature;
+                        bool isOutput  = source == (byte)HMOutputSource.HidOutput;
+                        foreach (var trig in extIn.ArmOn)
+                        {
+                            if ((trig.Type == "featureWrite" && isFeature && trig.ReportIdByte == reportId)
+                             || (trig.Type == "outputWrite"  && isOutput  && trig.ReportIdByte == reportId))
+                            {
+                                _extendedModeArmed = true;
+                                break;
+                            }
+                        }
+                    }
+
                     if (ct.IsCancellationRequested) break;
                 }
             }

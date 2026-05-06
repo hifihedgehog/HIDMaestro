@@ -99,6 +99,19 @@ public sealed class ControllerProfile
     [JsonPropertyName("companionOnly")]
     public bool CompanionOnly { get; set; }
 
+    /// <summary>v1.3.5 — optional vendor-blob input report layout. When present,
+    /// the SDK emits this report ID via VendorBlobCodec instead of the
+    /// descriptor's first declared input. Used for protocols where the
+    /// descriptor declares an opaque vendor blob (Sony BT 0x31 / 0x11, etc.).</summary>
+    [JsonPropertyName("extendedReport")]
+    public ExtendedReportSpec? ExtendedReport { get; set; }
+
+    /// <summary>v1.3.5 — optional vendor-blob output report layout. When
+    /// present, the SDK decodes incoming output reports of the declared
+    /// report ID and surfaces parsed-field events via HMController.OutputDecoded.</summary>
+    [JsonPropertyName("extendedOutputReport")]
+    public ExtendedReportSpec? ExtendedOutputReport { get; set; }
+
     /// <summary>
     /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
     /// Combined: Z centers at 50%, LT pulls toward 0%, RT pulls toward 100%.
@@ -199,6 +212,106 @@ public sealed class ControllerProfile
         _cachedReportBuilder = b;
         return b;
     }
+}
+
+/// <summary>v1.3.5 — vendor-blob report layout (input or output direction).
+/// Profile JSON describes the byte layout of a vendor blob; the codec walks
+/// the field list to encode/decode reports in either direction.</summary>
+public sealed class ExtendedReportSpec
+{
+    /// <summary>Hex string for the report ID, e.g. "0x31".</summary>
+    [JsonPropertyName("reportId")]
+    public string ReportId { get; set; } = "";
+
+    /// <summary>Total bytes including report ID byte at offset 0.</summary>
+    [JsonPropertyName("size")]
+    public int Size { get; set; }
+
+    /// <summary>Host-side write triggers that switch this controller into
+    /// emitting the extended report. Until any trigger fires, the descriptor's
+    /// first declared input report ID is emitted instead. Output direction
+    /// ignores this field. Empty/missing means "never armed" (input direction
+    /// stays on the legacy report).</summary>
+    [JsonPropertyName("armOn")]
+    public List<ArmTrigger>? ArmOn { get; set; }
+
+    /// <summary>Ordered field descriptors. See VendorBlobCodec for the type
+    /// vocabulary.</summary>
+    [JsonPropertyName("fields")]
+    public List<FieldSpec> Fields { get; set; } = new();
+
+    [JsonIgnore]
+    public byte ReportIdByte => string.IsNullOrEmpty(ReportId) ? (byte)0
+        : Convert.ToByte(ReportId.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ReportId.Substring(2) : ReportId, 16);
+}
+
+/// <summary>v1.3.5 — host-side write trigger that arms extended-report emission.
+/// Type "featureWrite" matches an outgoing HID feature SetFeature; "outputWrite"
+/// matches an outgoing HID output report. ReportId is hex.</summary>
+public sealed class ArmTrigger
+{
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+
+    [JsonPropertyName("reportId")]
+    public string ReportId { get; set; } = "";
+
+    [JsonIgnore]
+    public byte ReportIdByte => string.IsNullOrEmpty(ReportId) ? (byte)0
+        : Convert.ToByte(ReportId.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ReportId.Substring(2) : ReportId, 16);
+}
+
+/// <summary>v1.3.5 — single-field descriptor inside an ExtendedReportSpec.
+/// Either <see cref="Byte"/> (single byte position) or <see cref="Bytes"/>
+/// (range like "15-22") locates the field; <see cref="Bits"/> further narrows
+/// to a sub-byte bit range. <see cref="Type"/> selects the codec from the
+/// VendorBlobCodec vocabulary.</summary>
+public sealed class FieldSpec
+{
+    [JsonPropertyName("byte")]
+    public int? Byte { get; set; }
+
+    [JsonPropertyName("bytes")]
+    public string? Bytes { get; set; }
+
+    [JsonPropertyName("bits")]
+    public string? Bits { get; set; }
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+
+    [JsonPropertyName("semantic")]
+    public string? Semantic { get; set; }
+
+    [JsonPropertyName("buttons")]
+    public List<string>? Buttons { get; set; }
+
+    [JsonPropertyName("center")]
+    public int? Center { get; set; }
+
+    [JsonPropertyName("neutralValue")]
+    public int? NeutralValue { get; set; }
+
+    [JsonPropertyName("scope")]
+    public CrcScope? Scope { get; set; }
+
+    [JsonPropertyName("initial")]
+    public int? Initial { get; set; }
+}
+
+/// <summary>v1.3.5 — CRC32 scope spec for a crc32-le field. The CRC is
+/// computed over <see cref="Prefix"/> bytes followed by the report bytes
+/// from offset <see cref="From"/> through <see cref="To"/> inclusive.</summary>
+public sealed class CrcScope
+{
+    [JsonPropertyName("prefix")]
+    public List<byte> Prefix { get; set; } = new();
+
+    [JsonPropertyName("from")]
+    public int From { get; set; }
+
+    [JsonPropertyName("to")]
+    public int To { get; set; }
 }
 
 /// <summary>

@@ -8,10 +8,53 @@
   "manufacturerString": "Sony Interactive Entertainment",
   "type": "gamepad",
   "connection": "bluetooth",
-  "descriptor": "05010905a10185010930093109320935150026ff007508950481020939150025073500463b016514750495018142650005091901290e150025017501950e8102750695018101050109330934150026ff007508950281020600ff150026ff007508954d853109319102093b810285320932958d91028533093395cd910285340934960d01910285350935964d01910285360936968d0191028537093796cd01910285380938960d0291028539093996220291020680ff850509339528b10285080934952fb102850909249513b10285200926953fb10285220940953fb10285800928953fb10285810929953fb1028582092a9509b1028583092b953fb10285f10931953fb10285f20932950fb10285f00930953fb102c0",
-  "inputReportSize": null,
-  "notes": "Launch-firmware DualSense (productString 'Wireless Controller'). 279-byte minimized Bluetooth descriptor. Source: DJm00n/ControllersInfo. For controllers manufactured before Sony's firmware update, or never firmware-updated. Current-firmware variant with productString 'DualSense Wireless Controller' and feature reports F4-F7: see dualsense-bt-full. Same VID/PID as USB DualSense but different descriptor layout.",
+  "descriptor": "05010905a10185310600ff093b150026ff007508954d8102050185010930093109320935150026ff007508950481020939150025073500463b016514750495018142650005091901290e150025017501950e8102750695018101050109330934150026ff007508950281020600ff150026ff007508954d853109319102093b810285320932958d91028533093395cd910285340934960d01910285350935964d01910285360936968d0191028537093796cd01910285380938960d0291028539093996220291020680ff850509339528b10285080934952fb102850909249513b10285200926953fb10285220940953fb10285800928953fb10285810929953fb1028582092a9509b1028583092b953fb10285f10931953fb10285f20932950fb10285f00930953fb102c0",
+  "inputReportSize": 78,
+  "notes": "v1.3.5 — descriptor reordered so Report 0x31 INPUT (78-byte vendor blob) is declared FIRST, ensuring the kernel HID stack delivers Report 0x31 to consumers. Also adds Usage 0x3B INPUT in the same block as the existing 0x31 OUTPUT for descriptor parser compatibility. Inner byte layout described by extendedReport. Closes #20 for the launch-firmware DualSense (productString 'Wireless Controller'). For controllers manufactured before Sony's firmware update, or never firmware-updated. Current-firmware variant: see dualsense-bt-full.",
   "buttonMap": [1, 2, 0, 3, 4, 5, 8, 9, 10, 11, 12, 13],
   "triggerButtons": [6, 7],
-  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }
+  "axisMap": { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" },
+  "extendedReport": {
+    "reportId": "0x31",
+    "size": 78,
+    "fields": [
+      { "byte":  1, "type": "uint8-rolling", "semantic": "btSeqTag", "initial": 0 },
+      { "byte":  2, "type": "uint8-axis",    "semantic": "leftStickX",  "center": 128 },
+      { "byte":  3, "type": "uint8-axis",    "semantic": "leftStickY",  "center": 128 },
+      { "byte":  4, "type": "uint8-axis",    "semantic": "rightStickX", "center": 128 },
+      { "byte":  5, "type": "uint8-axis",    "semantic": "rightStickY", "center": 128 },
+      { "byte":  6, "type": "uint8-trigger", "semantic": "leftTrigger" },
+      { "byte":  7, "type": "uint8-trigger", "semantic": "rightTrigger" },
+      { "byte":  8, "type": "uint8-rolling", "semantic": "reportCounter", "initial": 0 },
+      { "byte":  9, "bits": "0-3", "type": "hat-octant", "semantic": "hat", "neutralValue": 8 },
+      { "byte":  9, "bits": "4-7", "type": "button-mask", "buttons": ["X", "A", "B", "Y"] },
+      { "byte": 10, "type": "button-mask",
+        "buttons": ["LeftBumper","RightBumper","_","_","Back","Start","LeftStick","RightStick"] },
+      { "byte": 11, "type": "button-mask",
+        "buttons": ["Guide","Touchpad"] },
+      { "bytes": "74-77", "type": "crc32-le",
+        "scope": { "prefix": [161, 49], "from": 1, "to": 73 } }
+    ]
+  },
+  "extendedOutputReport": {
+    "reportId": "0x31",
+    "size": 78,
+    "fields": [
+      { "byte":  1, "type": "uint8", "semantic": "btTag" },
+      { "byte":  3, "type": "uint8", "semantic": "validFlag0" },
+      { "byte":  4, "type": "uint8", "semantic": "validFlag1" },
+      { "byte":  5, "type": "uint8", "semantic": "rightMotor" },
+      { "byte":  6, "type": "uint8", "semantic": "leftMotor" },
+      { "byte": 11, "type": "uint8", "semantic": "muteLed" },
+      { "bytes": "13-23", "type": "bytes-passthrough", "semantic": "rightTriggerEffect" },
+      { "bytes": "24-34", "type": "bytes-passthrough", "semantic": "leftTriggerEffect" },
+      { "byte": 41, "type": "uint8", "semantic": "validFlag2" },
+      { "byte": 44, "type": "uint8", "semantic": "lightbarSetup" },
+      { "byte": 45, "type": "uint8", "semantic": "ledBrightness" },
+      { "byte": 46, "type": "uint8", "semantic": "playerIndicator" },
+      { "bytes": "47-49", "type": "rgb24", "semantic": "lightbar" },
+      { "bytes": "74-77", "type": "crc32-le",
+        "scope": { "prefix": [162, 49], "from": 1, "to": 73 } }
+    ]
+  }
 }

@@ -147,6 +147,28 @@ HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x4
 
 Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.
 
+### Data-Driven Vendor-Blob Codec (Sony BT, others)
+
+Sony BT controllers (DualSense, DualSense Edge, DS4 BT) declare their input as a 78-byte vendor-defined "blob" — one opaque field with no descriptor-level breakdown of which bytes carry sticks vs buttons vs gyro vs CRC32. Pre-v1.3.5 the SDK couldn't pack this and fell back to emitting basic Report 1 (9 bytes), which Steam Input misclassified as USB and `dualsense-tester` couldn't parse.
+
+v1.3.5 makes the byte layout data: profile JSON declares `extendedReport` (input) and `extendedOutputReport` (output) blocks describing every field's type, byte position, and bit range. The SDK becomes a generic codec that walks the field list. Future profiles with vendor blobs (Switch Pro extended, vendor-specific wheels) add the JSON only — no SDK code changes per profile.
+
+```jsonc
+"extendedReport": {
+  "reportId": "0x31",
+  "size": 78,
+  "fields": [
+    { "byte":  2, "type": "uint8-axis", "semantic": "leftStickX", "center": 128 },
+    { "byte":  9, "bits": "0-3", "type": "hat-octant", "neutralValue": 8 },
+    { "byte":  9, "bits": "4-7", "type": "button-mask", "buttons": ["X","A","B","Y"] },
+    { "bytes": "74-77", "type": "crc32-le",
+      "scope": { "prefix": [161, 49], "from": 1, "to": 73 } }
+  ]
+}
+```
+
+Round-trip in both directions: `controller.OutputDecoded` event surfaces incoming output reports as parsed-field dictionaries (rumble amplitudes, lightbar RGB, adaptive-trigger blobs); `HMOutputEncoder.Encode(profile, fields)` produces wire-format bytes from a parsed-field dictionary, used by consumers driving real devices from synthesized state without reimplementing byte layouts.
+
 ### BTHLEDEVICE Bus Type Spoofing
 
 HIDAPI detects Bluetooth controllers by checking for `BTHLEDEVICE` in the device's CompatibleIDs. HIDMaestro sets this property from user mode during device creation, without Bluetooth hardware and without a kernel bus driver.
