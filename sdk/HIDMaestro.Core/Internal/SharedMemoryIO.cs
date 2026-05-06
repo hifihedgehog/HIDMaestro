@@ -31,11 +31,17 @@ internal static class SharedMemoryIO
 {
     // ── Layout constants — match driver/driver.h ──────────────────────────
     //
-    // HIDMAESTRO_SHARED_INPUT (278 bytes):
+    // HIDMAESTRO_SHARED_INPUT (362 bytes, was 278 pre-v1.3.5):
     //   ULONG  SeqNo                offset 0
-    //   ULONG  DataSize              offset 4
-    //   UCHAR  Data[256]             offset 8
-    //   UCHAR  GipData[14]           offset 264
+    //   ULONG  DataSize             offset 4
+    //   UCHAR  Data[256]            offset 8     ← legacy report data, RID stripped
+    //   UCHAR  GipData[14]          offset 264
+    //   ULONG  ExtendedReportSize   offset 278   ← v1.3.5: 0 = legacy, >0 = use ExtendedReportData
+    //   UCHAR  ExtendedReportData[80] offset 282 ← v1.3.5: full RID-included report (Sony BT 0x31 / 0x11)
+    //
+    // The driver writes EITHER legacy OR extended per frame (mode-switch),
+    // not both. SDK clears ExtendedReportSize on legacy frames so the driver
+    // doesn't reuse stale extended bytes from a prior arming.
     //
     // HIDMAESTRO_SHARED_OUTPUT — RING BUFFER as of v1.1.40.
     //   ULONG  Head                        offset 0   (monotonic; total writes by driver)
@@ -61,11 +67,15 @@ internal static class SharedMemoryIO
     // Data[] widened from 64→256 bytes 2026-04-23: DualSense BT report 0x31
     // is 78 bytes; Switch Pro standard input report can run to ~64.
 
-    public const int DATA_OFFSET        = 8;
-    public const int DATA_CAPACITY      = 256;
-    public const int GIP_DATA_OFFSET    = DATA_OFFSET + DATA_CAPACITY;   // 264
-    public const int GIP_DATA_LENGTH    = 14;
-    public const int SHARED_INPUT_SIZE  = GIP_DATA_OFFSET + GIP_DATA_LENGTH; // 278
+    public const int DATA_OFFSET                = 8;
+    public const int DATA_CAPACITY              = 256;
+    public const int GIP_DATA_OFFSET            = DATA_OFFSET + DATA_CAPACITY;   // 264
+    public const int GIP_DATA_LENGTH            = 14;
+    // v1.3.5 — vendor-blob extended report (mode-switch path).
+    public const int EXTENDED_SIZE_OFFSET       = GIP_DATA_OFFSET + GIP_DATA_LENGTH; // 278
+    public const int EXTENDED_DATA_OFFSET       = EXTENDED_SIZE_OFFSET + 4;          // 282
+    public const int EXTENDED_DATA_CAPACITY     = 80;
+    public const int SHARED_INPUT_SIZE          = EXTENDED_DATA_OFFSET + EXTENDED_DATA_CAPACITY; // 362
 
     // Output ring layout (must match driver/driver.h):
     public const int OUTPUT_RING_SLOTS  = 64;
@@ -366,30 +376,50 @@ internal static class SharedMemoryIO
     /// case — the write still completes normally.</para></summary>
     public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        byte[] data, int dataLen, byte[]? gipData,
-                                       int dataOffset = 0)
+                                       int dataOffset = 0,
+                                       byte[]? extendedData = null, int extendedLen = 0)
     {
         // 1. Mark write in progress (odd seqNo)
         uint pending = seqNo + 1;
         Marshal.WriteInt32(view, 0, (int)pending);
         Thread.MemoryBarrier();
 
-        // 2. Write payload (DataSize + Data + GipData). v1.3.0 — bulk
-        // Marshal.Copy replaces the prior per-byte Marshal.WriteByte
-        // loops, which were 256 + 14 = 270 P/Invoke calls per frame. At
-        // 250 Hz × 6 controllers that was ~400 000 P/Invokes/sec; a
-        // single bulk copy per region is two P/Invokes/frame total.
-        // We don't zero the unused data tail past dataLen — driver/
-        // consumer reads DataSize and uses only data[0..DataSize-1]; the
-        // tail is irrelevant. T26-2 — gipData is null for non-Xbox
-        // profiles (no XUSB companion bound), so we can skip the 14-byte
-        // copy entirely. Section is zero-initialized at create time, so
-        // the GIP slice stays zeros (which is what HMXInput.dll would read
-        // anyway if the profile somehow gained an XUSB companion mid-life).
+        // 2. Write payload (DataSize + Data + GipData + ExtendedReport*).
+        // v1.3.0 — bulk Marshal.Copy replaces the prior per-byte
+        // Marshal.WriteByte loops, which were 256 + 14 = 270 P/Invoke
+        // calls per frame. At 250 Hz × 6 controllers that was ~400 000
+        // P/Invokes/sec; a single bulk copy per region is two
+        // P/Invokes/frame total. We don't zero the unused data tail past
+        // dataLen — driver/consumer reads DataSize and uses only
+        // data[0..DataSize-1]; the tail is irrelevant. T26-2 — gipData
+        // is null for non-Xbox profiles (no XUSB companion bound), so we
+        // can skip the 14-byte copy entirely. Section is zero-initialized
+        // at create time, so the GIP slice stays zeros.
+        //
+        // v1.3.5 — when extendedData != null AND extendedLen > 0, copy
+        // the full RID-included extended report into ExtendedReportData
+        // and set ExtendedReportSize. Driver branches on
+        // ExtendedReportSize > 0 and emits ExtendedReportData verbatim
+        // (no FirstInputReportId prepend). When extendedData is null we
+        // explicitly clear ExtendedReportSize so a previously-armed
+        // controller's stale extended bytes don't leak through after
+        // a legacy-mode frame (e.g. if armOn fires were ever rolled back
+        // — currently they aren't, but cheap insurance).
         Marshal.WriteInt32(view, 4, dataLen);
         if (dataLen > 0)
             Marshal.Copy(data, dataOffset, view + DATA_OFFSET, dataLen);
         if (gipData != null)
             Marshal.Copy(gipData, 0, view + GIP_DATA_OFFSET, GIP_DATA_LENGTH);
+        if (extendedData != null && extendedLen > 0)
+        {
+            int copyLen = Math.Min(extendedLen, EXTENDED_DATA_CAPACITY);
+            Marshal.Copy(extendedData, 0, view + EXTENDED_DATA_OFFSET, copyLen);
+            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, copyLen);
+        }
+        else
+        {
+            Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, 0);
+        }
 
         // 3. Mark write complete (even seqNo)
         Thread.MemoryBarrier();

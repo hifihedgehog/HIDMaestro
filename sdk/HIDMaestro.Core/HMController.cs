@@ -95,6 +95,33 @@ public sealed class HMController : IDisposable
     /// back-to-back writes; that drop pattern is fixed.</para></summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
+    /// <summary>v1.3.5 — raised when an inbound output report matches the
+    /// profile's <see cref="HMProfile.HasExtendedOutput"/> spec. The SDK
+    /// decodes the bytes per the profile's <c>extendedOutputReport</c> field
+    /// list and surfaces parsed values (rumble amplitudes, lightbar RGB,
+    /// adaptive-trigger blocks, etc.) keyed by semantic name.
+    ///
+    /// <para>Consumers that want raw bytes still get them via
+    /// <see cref="OutputReceived"/> — both events fire for matching reports.
+    /// Subscribers must be thread-safe (raised on the polling thread).</para></summary>
+    public event EventHandler<HMOutputDecodedEventArgs>? OutputDecoded;
+
+    // v1.3.5 — vendor-blob input encoder state. Built lazily when the profile
+    // declares extendedReport. Holds rolling counters (Sony's framingTag /
+    // reportCounter increment monotonically across SubmitState calls).
+    private VendorBlobCodec.EncoderState? _extEncoderState;
+
+    // v1.3.5 — buffer sized to ExtendedReport.Size, allocated once. NULL
+    // when the profile has no extendedReport.
+    private byte[]? _extendedReportBuffer;
+
+    // v1.3.5 — host-side arm flag. False until a host write matches one of
+    // ExtendedReport.armOn triggers; true thereafter for the lifetime of
+    // this controller. Until armed, SubmitState falls through to the
+    // descriptor-driven BuildReportInto path so consumers that never issue
+    // the handshake still see legacy Report 1 emission.
+    private volatile bool _extendedModeArmed;
+
     // PID FFB state section. Lazy: created on the first PublishPid* call so
     // a non-FFB consumer never allocates the section. Once created, the
     // driver's IOCTL_UMDF_HID_GET_FEATURE handler reads from it on every
@@ -256,6 +283,15 @@ public sealed class HMController : IDisposable
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
+        // v1.3.5 — pre-allocate vendor-blob buffer + encoder state when the
+        // profile declares extendedReport. Saves a per-frame alloc on the
+        // SubmitState hot path for Sony BT profiles.
+        if (profile.ExtendedReport != null)
+        {
+            _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
+            _extEncoderState = new VendorBlobCodec.EncoderState();
+        }
+
         // Output passthrough is best-effort. If the section can't be created
         // (rare — only LocalService permission issues) we just don't raise
         // OutputReceived events.
@@ -300,20 +336,57 @@ public sealed class HMController : IDisposable
         double mlt = Math.Clamp(state.LeftTrigger, 0f, 1f);
         double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
 
-        // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
-        // v1.3.4 — pass through high-resolution hat inputs. The encoder's
-        // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
-        // the first non-null and ignores the rest.
-        _reportBuilder.BuildReportInto(_reportBuffer,
-            leftX: mlx, leftY: mly,
-            rightX: mrx, rightY: mry,
-            leftTrigger: mlt, rightTrigger: mrt,
-            hatValue: (int)state.Hat,
-            buttonMask: (uint)state.Buttons,
-            hatDegrees: state.HatDegrees,
-            hatHundredths: state.HatHundredths,
-            hatRaw: state.HatRaw);
-        byte[] report = _reportBuffer;
+        byte[] report;
+        // v1.3.5 — vendor-blob path is gated on the host-side arm flag.
+        // Sony BT controllers default to legacy short Report 0x01; the host
+        // (Steam Input, Chrome's Gamepad API, dualsense-tester, ds.daidr.me)
+        // issues a Get_Feature on 0x05 / 0x09 / 0x20 to switch real firmware
+        // into vendor-blob mode (Report 0x31 / 0x11). The arm-watcher in
+        // OutputPollLoop flips _extendedModeArmed when any of those reads
+        // arrives via HidFeatureRead. Until then, fall through to the
+        // descriptor-driven BuildReportInto path so joy.cpl, RawInput, and
+        // generic HID consumers see structured X/Y/Rx/Ry through Report 0x01.
+        // ExtendedReport with a missing armOn list flips this back to "always
+        // extended" — used by output-only profiles or test fixtures where
+        // arming-on-demand is the wrong default.
+        bool armOnDeclared = Profile.ExtendedReport?.ArmOn != null
+                          && Profile.ExtendedReport.ArmOn.Count > 0;
+        bool useExtended = Profile.ExtendedReport != null
+                        && _extendedReportBuffer != null
+                        && _extEncoderState != null
+                        && (!armOnDeclared || _extendedModeArmed);
+
+        if (useExtended)
+        {
+            // Profile.ExtendedReport's field list drives byte placement.
+            // Sticks / triggers / buttons / hat encode through
+            // VendorBlobCodec; CRC32 (if declared) is computed last. For
+            // Sony BT, the buffer is full 78 bytes including byte[0] = RID
+            // (0x31 / 0x11), so the driver must NOT prepend its own RID.
+            // The driver-side WriteToInputReport recognizes the extended
+            // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
+            // alongside the legacy bytes below.
+            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+                _extendedReportBuffer!, _extEncoderState!);
+            report = _extendedReportBuffer!;
+        }
+        else
+        {
+            // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
+            // v1.3.4 — pass through high-resolution hat inputs. The encoder's
+            // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
+            // the first non-null and ignores the rest.
+            _reportBuilder.BuildReportInto(_reportBuffer,
+                leftX: mlx, leftY: mly,
+                rightX: mrx, rightY: mry,
+                leftTrigger: mlt, rightTrigger: mrt,
+                hatValue: (int)state.Hat,
+                buttonMask: (uint)state.Buttons,
+                hatDegrees: state.HatDegrees,
+                hatHundredths: state.HatHundredths,
+                hatRaw: state.HatRaw);
+            report = _reportBuffer;
+        }
 
         // T26-2 — pack the GIP-format buffer ONLY for Xbox-VID profiles.
         // The XUSB companion (HMXInput.dll) reads this slice on
@@ -368,21 +441,45 @@ public sealed class HMController : IDisposable
             _gipBuf[13] = btnHigh;
         }
 
-        // Strip the Report ID byte (if any) before writing the HID native
-        // bytes. BuildReport puts the Report ID at position 0 when the
-        // descriptor declares one. The driver expects the shared memory
-        // section to contain only data bytes — the kernel HID stack adds
-        // the Report ID prefix when delivering. dataLen capped at the
-        // shared section's Data[] capacity (256 bytes per
-        // SharedMemoryIO.DATA_CAPACITY; widened from 64 in 2026-04-23 to
-        // carry the full DualSense BT 0x31 78-byte report).
-        int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
-        int dataLen = Math.Min(report.Length - dataStart, SharedMemoryIO.DATA_CAPACITY);
-        // T26-2 — pass null for gipData on non-Xbox profiles so WriteInputFrame
-        // skips the 14-byte Marshal.Copy.
-        SharedMemoryIO.WriteInputFrame(
-            _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
-            _packsGipBuffer ? _gipBuf : null, dataStart);
+        // v1.3.5 — two write paths, mutually exclusive per frame:
+        //
+        //  • Legacy (default, _extendedModeArmed=false or no ExtendedReport):
+        //    SDK strips the Report ID byte at position 0 and the driver
+        //    re-prepends ctx->FirstInputReportId. Result: the descriptor's
+        //    first declared input report ID arrives at the kernel HID stack
+        //    (e.g. Report 0x01 for Sony BT). joy.cpl, RawInput, and generic
+        //    HID consumers see structured X/Y/Rx/Ry per the legacy descriptor.
+        //
+        //  • Extended (post-arm, useExtended=true): SDK passes the full
+        //    RID-included buffer (e.g. 78-byte Sony BT Report 0x31 with
+        //    CRC32 trailer) via WriteInputFrame's extendedData parameter.
+        //    Driver emits ExtendedReportData verbatim (no RID prepend).
+        //    Steam Input, dualsense-tester, ds.daidr.me, and Chrome's
+        //    Gamepad API decode the vendor-blob format. joy.cpl loses
+        //    sticks in this state — same as real Sony hardware behavior
+        //    once Steam runs and switches the controller to extended mode.
+        //
+        // dataLen capped at SharedMemoryIO.DATA_CAPACITY (256 bytes; widened
+        // from 64 in 2026-04-23). T26-2 — pass null for gipData on non-Xbox
+        // profiles so WriteInputFrame skips the 14-byte Marshal.Copy.
+        if (useExtended)
+        {
+            int extLen = Profile.ExtendedReport!.Size;
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo,
+                Array.Empty<byte>(), 0,
+                _packsGipBuffer ? _gipBuf : null,
+                dataOffset: 0,
+                extendedData: report, extendedLen: extLen);
+        }
+        else
+        {
+            int dataStart = _reportBuilder.InputReportId != 0 ? 1 : 0;
+            int dataLen = Math.Min(report.Length - dataStart, SharedMemoryIO.DATA_CAPACITY);
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
+                _packsGipBuffer ? _gipBuf : null, dataStart);
+        }
     }
 
     /// <summary>Push a raw HID input report for features that
@@ -456,6 +553,77 @@ public sealed class HMController : IDisposable
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
+
+                    // v1.3.5 — vendor-blob output decode. When the profile
+                    // declares an extendedOutputReport with a matching
+                    // reportId, decode the bytes into a parsed-field
+                    // dictionary and surface as OutputDecoded. Consumers
+                    // get named values (rumble amplitudes, lightbar RGB,
+                    // adaptive-trigger blocks) instead of raw bytes.
+                    var extOut = Profile.ExtendedOutputReport;
+                    if (extOut != null && reportId == extOut.ReportIdByte
+                        && OutputDecoded != null)
+                    {
+                        try
+                        {
+                            // Reconstruct the full report (RID + data) for
+                            // the codec — VendorBlobCodec expects the RID
+                            // at offset 0. The shared output ring stores
+                            // the RID separately so we synthesize it here.
+                            var full = new byte[dataSize + 1];
+                            full[0] = reportId;
+                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
+
+                            var (fields, crcValid) = VendorBlobCodec.Decode(extOut, full);
+                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            {
+                                ReportId = reportId,
+                                Fields = fields,
+                                RawBytes = full,
+                                CrcValid = crcValid,
+                            });
+                        }
+                        catch
+                        {
+                            // Swallow decode errors so a malformed packet
+                            // doesn't kill the polling thread. OutputReceived
+                            // already fired with the raw bytes; consumers
+                            // that need them have them.
+                        }
+                    }
+
+                    // v1.3.5 — arm-handshake watcher. When the profile
+                    // declares armOn triggers and a matching host action
+                    // arrives, flip the armed flag — SubmitState then
+                    // switches from legacy Report 0x01 emission to
+                    // vendor-blob Report 0x31 / 0x11 emission via the
+                    // extended shared-memory path (see SubmitState's
+                    // useExtended branch). Sony BT profiles arm on
+                    // Get_Feature 0x05 / 0x09 / 0x20 reads — the same
+                    // handshake real Sony firmware uses to switch from
+                    // basic to extended mode (ref: Linux hid-playstation
+                    // dualsense_create init flow). featureWrite and
+                    // outputWrite trigger types stay supported for
+                    // future profiles that arm on writes (e.g. Switch
+                    // Pro init handshake).
+                    var extIn = Profile.ExtendedReport;
+                    if (extIn?.ArmOn != null && !_extendedModeArmed)
+                    {
+                        bool isFeature     = source == (byte)HMOutputSource.HidFeature;
+                        bool isOutput      = source == (byte)HMOutputSource.HidOutput;
+                        bool isFeatureRead = source == (byte)HMOutputSource.HidFeatureRead;
+                        foreach (var trig in extIn.ArmOn)
+                        {
+                            if ((trig.Type == "featureWrite" && isFeature     && trig.ReportIdByte == reportId)
+                             || (trig.Type == "outputWrite"  && isOutput      && trig.ReportIdByte == reportId)
+                             || (trig.Type == "featureRead"  && isFeatureRead && trig.ReportIdByte == reportId))
+                            {
+                                _extendedModeArmed = true;
+                                break;
+                            }
+                        }
+                    }
+
                     if (ct.IsCancellationRequested) break;
                 }
             }

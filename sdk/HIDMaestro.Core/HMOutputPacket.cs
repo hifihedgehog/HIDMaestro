@@ -57,4 +57,13 @@ public enum HMOutputSource : byte
     /// <summary>XInputSetState. Bytes are the XUSB-wire-format vibration packet,
     /// typically 5 bytes: cmd + size + lo motor + hi motor + reserved.</summary>
     XInput     = 2,
+
+    /// <summary>v1.3.5 — host-issued HidD_GetFeature. Notifies the consumer
+    /// that the host requested a feature READ (not a write) for this report
+    /// ID. Bytes are typically empty — this source is informational, used
+    /// by the SDK's extendedReport.armOn watcher to switch Sony BT
+    /// controllers from legacy Report 0x01 to vendor-blob Report 0x31 / 0x11
+    /// after the host issues Get_Feature 0x05 (calibration), 0x09 (pairing),
+    /// or 0x20 (firmware) — the same handshake real Sony firmware uses.</summary>
+    HidFeatureRead = 3,
 }

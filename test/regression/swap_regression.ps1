@@ -129,6 +129,9 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1135,6 +1138,58 @@ function Scenario-Hat-Resolution-Check {
     }
 }
 
+# S29: Sony BT Report 0x31 input encoder. Closes #20. Verifies the data-driven
+# vendor-blob input encoder produces a correct 78-byte Report 0x31 with the
+# expected stick / trigger / button / hat byte placement and a valid CRC32 footer
+# (prefix [0xA1, 0x31] over bytes 1..73). Pre-v1.3.5 the SDK locked to Report 1
+# and Steam Input / dualsense-tester saw a broken DualSense BT.
+function Scenario-Sony-BT-Report31-Check {
+    $probe = Join-Path $PSScriptRoot '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyBtReport31Check.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "sony_bt_report31_check not built. Run: dotnet build test/probes/sony_bt_report31_check -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyBtReport31Check exited " + $p.ExitCode + " - extended input encoder produced unexpected bytes for dualsense-bt-full")
+    }
+}
+
+# S30: Sony BT extendedOutputReport round-trip. Validates the inverse direction
+# of the v1.3.5 vendor-blob codec: HMOutputEncoder.Encode(profile, fields) produces
+# wire-format bytes whose declared fields land at the right offsets, the CRC32
+# matches an independent computation with prefix [0xA2, 0x31], and decode(encode(x))
+# preserves every declared field's value byte-for-byte.
+function Scenario-Sony-BT-Output-Decode-Check {
+    $probe = Join-Path $PSScriptRoot '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyBtOutputDecodeCheck.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "sony_bt_output_decode_check not built. Run: dotnet build test/probes/sony_bt_output_decode_check -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyBtOutputDecodeCheck exited " + $p.ExitCode + " - output codec did not round-trip cleanly")
+    }
+}
+
+# S31: full Sony data-driven coverage. Validates the v1.3.5 vendor-blob blocks
+# across the full Sony catalog: DS4 BT (Report 0x11) input + output round-trip
+# with CRC32 prefix [0xA1, 0x11] / [0xA2, 0x11], DS5 USB (Report 0x02) output,
+# and DS4 USB (Report 0x05) output. Closes the v1.3.5 scope on every Sony
+# variant the SDK ships - DS5 BT, DS5 BT (full), DS5 Edge BT, DS4 v2 BT, DS5
+# USB, DS5 Edge USB, DS4 v1 USB, DS4 v1 USB (full), DS4 v2 USB.
+function Scenario-Sony-Data-Driven-Coverage {
+    $probe = Join-Path $PSScriptRoot '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyDataDrivenCoverage.exe'
+    $probe = [System.IO.Path]::GetFullPath($probe)
+    if (-not (Test-Path $probe)) {
+        throw "sony_data_driven_coverage not built. Run: dotnet build test/probes/sony_data_driven_coverage -c Release -r win-x64"
+    }
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyDataDrivenCoverage exited " + $p.ExitCode + " - DS4 BT / USB output codec did not round-trip cleanly")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1167,7 +1222,10 @@ $scenarios = @(
     @{ Name = 'S25_PidFfb_AllocFree';             Body = ${function:Scenario-PidFfb-AllocFree} },
     @{ Name = 'S26_PidFfb_FfbTest';               Body = ${function:Scenario-PidFfb-FfbTest} },
     @{ Name = 'S27_Xbox360_Dpad_XInput';          Body = ${function:Scenario-Xbox360-Dpad-XInput} },
-    @{ Name = 'S28_Hat_Resolution_Encoder';       Body = ${function:Scenario-Hat-Resolution-Check} }
+    @{ Name = 'S28_Hat_Resolution_Encoder';       Body = ${function:Scenario-Hat-Resolution-Check} },
+    @{ Name = 'S29_Sony_BT_Report31_Encoder';     Body = ${function:Scenario-Sony-BT-Report31-Check} },
+    @{ Name = 'S30_Sony_BT_Output_RoundTrip';     Body = ${function:Scenario-Sony-BT-Output-Decode-Check} },
+    @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

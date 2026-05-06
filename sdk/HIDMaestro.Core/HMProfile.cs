@@ -149,6 +149,27 @@ public sealed class HMProfile
     /// Rx/Ry→triggers. Null means default heuristic mapping.</summary>
     public Dictionary<string, string>? AxisMap => Inner.AxisMap;
 
+    /// <summary>v1.3.5 — vendor-blob input-report spec, or null. When set,
+    /// HMController.SubmitState emits this report ID via the data-driven
+    /// codec instead of the descriptor-based encoder. Profile-level metadata
+    /// exposed for inspection by consumers and regression probes; field-level
+    /// access goes through <c>Fields</c> on the spec.</summary>
+    public ExtendedReportSpec? ExtendedReport => Inner.ExtendedReport;
+
+    /// <summary>v1.3.5 — vendor-blob output-report spec, or null. When set,
+    /// <see cref="HMController.OutputDecoded"/> surfaces parsed-field events
+    /// for matching inbound report IDs and <see cref="HMOutputEncoder.Encode"/>
+    /// can produce wire-format bytes from parsed-field dictionaries.</summary>
+    public ExtendedReportSpec? ExtendedOutputReport => Inner.ExtendedOutputReport;
+
+    /// <summary>True if the profile declares a vendor-blob input report
+    /// (e.g. Sony BT Report 0x31).</summary>
+    public bool HasExtendedInput => Inner.ExtendedReport != null;
+
+    /// <summary>True if the profile declares a vendor-blob output report
+    /// for parsed-field decoding.</summary>
+    public bool HasExtendedOutput => Inner.ExtendedOutputReport != null;
+
     public override string ToString() => $"{Id} ({Name})";
 
     // Lazily parsed layout cache

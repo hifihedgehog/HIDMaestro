@@ -455,6 +455,78 @@ ctrlHotas.SubmitState(new HMGamepadState { Hat = HMHat.None });
 Console.WriteLine("    [Hat = HMHat.None]           → null state (no direction)");
 Thread.Sleep(500);
 
+// ── 10c. v1.3.5: data-driven vendor-blob input + output ──────────────
+// Sony BT profiles (DualSense BT, DualSense Edge BT, etc.) use a 78-byte
+// vendor-blob HID report (Report 0x31) that the descriptor declares as
+// one opaque field. Pre-v1.3.5 the SDK couldn't pack this — it locked to
+// the descriptor's first input report (Report 1, 9 bytes) and Steam Input
+// / dualsense-tester saw a broken DualSense.
+//
+// v1.3.5 adds extendedReport / extendedOutputReport to the profile JSON
+// describing the vendor blob's inner byte layout. The SDK becomes a
+// generic codec that walks the JSON for both encode and decode.
+Console.WriteLine("\n  10c. Sony BT vendor-blob path (Report 0x31)...");
+{
+    var dsBtProfile = ctx.GetProfile("dualsense-bt-full")!;
+    Console.WriteLine($"    Profile: {dsBtProfile.Id}");
+    Console.WriteLine($"    HasExtendedInput:  {dsBtProfile.HasExtendedInput}");
+    Console.WriteLine($"    HasExtendedOutput: {dsBtProfile.HasExtendedOutput}");
+    if (dsBtProfile.ExtendedReport is { } extIn)
+    {
+        Console.WriteLine($"    Input  reportId=0x{extIn.ReportIdByte:X2}, size={extIn.Size}, fields={extIn.Fields.Count}");
+    }
+    if (dsBtProfile.ExtendedOutputReport is { } extOut)
+    {
+        Console.WriteLine($"    Output reportId=0x{extOut.ReportIdByte:X2}, size={extOut.Size}, fields={extOut.Fields.Count}");
+    }
+
+    // HMOutputEncoder.Encode produces wire-format bytes from parsed fields.
+    // Used by consumers (PadForge) to drive a real DualSense without
+    // reimplementing byte layouts.
+    var outputFields = new System.Collections.Generic.Dictionary<string, object>
+    {
+        { "btTag",         (byte)0x02 },
+        { "validFlag0",    (byte)0xFF },
+        { "validFlag1",    (byte)0xF7 },
+        { "rightMotor",    (byte)128  },
+        { "leftMotor",     (byte)64   },
+        { "lightbarSetup", (byte)0x02 },
+        { "lightbar",      new byte[] { 0xFF, 0x00, 0x80 } },
+    };
+    byte[] outputBytes = HMOutputEncoder.Encode(dsBtProfile, outputFields);
+    Console.WriteLine($"    HMOutputEncoder.Encode produced {outputBytes.Length} bytes (Report ID 0x{outputBytes[0]:X2})");
+    Console.WriteLine($"    rumble bytes: right={outputBytes[5]} left={outputBytes[6]}");
+    Console.WriteLine($"    lightbar RGB at bytes 47-49: {outputBytes[47]:X2} {outputBytes[48]:X2} {outputBytes[49]:X2}");
+    Console.WriteLine($"    CRC32 footer at bytes 74-77 (computed automatically per the JSON spec)");
+
+    // Decode-side subscription. When a deployed dualsense-bt virtual receives
+    // an output report 0x31 from a host (game / Steam Input / DS5 effect tool),
+    // the SDK decodes it via the JSON spec and raises OutputDecoded with
+    // parsed fields keyed by the JSON `semantic` names. Consumers subscribe
+    // and read named values (e.LeftMotor, e.RightMotor, e.LightbarRGB, ...)
+    // instead of byte offsets.
+    using (var ctrlDsBt = ctx.CreateController(dsBtProfile))
+    {
+        ctrlDsBt.OutputDecoded += (sender, e) =>
+        {
+            if (e.Fields.TryGetValue("leftMotor", out var lm)
+                && e.Fields.TryGetValue("rightMotor", out var rm))
+            {
+                Console.WriteLine($"    [decoded] rumble L={lm} R={rm}");
+            }
+            if (e.Fields.TryGetValue("lightbar", out var rgb) && rgb is byte[] c)
+            {
+                Console.WriteLine($"    [decoded] lightbar RGB=#{c[0]:X2}{c[1]:X2}{c[2]:X2}");
+            }
+        };
+        Console.WriteLine($"    Subscribed to OutputDecoded — waiting briefly for any host output...");
+        Thread.Sleep(800);
+        // No host is sending output during this demo, so the event won't
+        // fire. In a real consumer (PadForge), this is where game rumble
+        // / lightbar / adaptive-trigger commands surface as named values.
+    }
+}
+
 // ── 11. SubmitRawReport — ViGEmBus DS4 migration pattern ─────────────
 // This shows how PadForge (or any app migrating from ViGEmBus) can
 // submit full DS4/DualSense reports including touchpad, gyro, and

@@ -619,31 +619,49 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 
     /* Build HID input report from shared file Data (native descriptor format).
      * Report MUST be exactly InputReportByteLength bytes — HidClass rejects
-     * short reports.  Zero-fill first, then overlay actual data. */
+     * short reports.  Zero-fill first, then overlay actual data.
+     *
+     * v1.3.5 — vendor-blob mode-switch path. When the SDK has armed
+     * extended emission (Sony BT post-handshake, ExtendedReportSize > 0),
+     * shared.ExtendedReportData carries the FULL RID-included extended
+     * report (e.g. 78-byte Sony BT Report 0x31 with CRC32 trailer at
+     * bytes 74..77). We pass it through verbatim — no FirstInputReportId
+     * prepend, no zero-padding past the report end (the SDK already
+     * sized it to ExtendedReport.size). When ExtendedReportSize == 0 we
+     * fall through to the legacy path: SDK strips its byte 0 RID and we
+     * re-prepend ctx->FirstInputReportId. */
     UCHAR inputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     RtlZeroMemory(inputReport, sizeof(inputReport));
-    ULONG dataLen = shared.DataSize;
-
-    BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
-
-    ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
-
-    ULONG maxData;
-    if (hasReportId) {
-        maxData = expectedSize > 1 ? expectedSize - 1 : 16;
-    } else {
-        maxData = expectedSize;
-    }
-    if (dataLen > maxData) dataLen = maxData;
-    if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
-
     ULONG inputSize;
-    if (hasReportId) {
-        inputReport[0] = ctx->FirstInputReportId;
-        RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
-        inputSize = expectedSize; /* Always send full expected length */
-    } else {
-        RtlCopyMemory(inputReport, shared.Data, dataLen);
+
+    if (shared.ExtendedReportSize > 0
+        && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData)
+        && shared.ExtendedReportSize <= sizeof(inputReport))
+    {
+        RtlCopyMemory(inputReport, shared.ExtendedReportData, shared.ExtendedReportSize);
+        inputSize = shared.ExtendedReportSize;
+    }
+    else
+    {
+        ULONG dataLen = shared.DataSize;
+        BOOLEAN hasReportId = (ctx->FirstInputReportId != 0);
+        ULONG expectedSize = ctx->InputReportByteLength > 0 ? ctx->InputReportByteLength : 17;
+
+        ULONG maxData;
+        if (hasReportId) {
+            maxData = expectedSize > 1 ? expectedSize - 1 : 16;
+        } else {
+            maxData = expectedSize;
+        }
+        if (dataLen > maxData) dataLen = maxData;
+        if (dataLen > sizeof(shared.Data)) dataLen = sizeof(shared.Data);
+
+        if (hasReportId) {
+            inputReport[0] = ctx->FirstInputReportId;
+            RtlCopyMemory(inputReport + 1, shared.Data, dataLen);
+        } else {
+            RtlCopyMemory(inputReport, shared.Data, dataLen);
+        }
         inputSize = expectedSize; /* Always send full expected length */
     }
 
@@ -1352,6 +1370,8 @@ EvtIoDeviceControl(
          */
         PVOID  outBuf;
         size_t outSize;
+        PVOID  inBuf;
+        size_t inSize;
 
         status = WdfRequestRetrieveOutputBuffer(Request, 1, &outBuf, &outSize);
         if (!NT_SUCCESS(status)) break;
@@ -1361,13 +1381,101 @@ EvtIoDeviceControl(
             break;
         }
 
-        UCHAR reportId = ((UCHAR *)outBuf)[0];
+        /* UMDF2 HID convention: the requested Report ID lives in the
+         * IRP's INPUT buffer (byte 0), not the OUTPUT buffer. The OUTPUT
+         * buffer is what the driver fills with the response. The
+         * IOCTL_UMDF_HID_SET_FEATURE handler above also reads RID from
+         * the input buffer; both paths are symmetric.
+         *
+         * v1.3.5 fix: pre-v1.3.5 read RID from outBuf[0], which was
+         * always 0 because HidClass zeros the output buffer before
+         * dispatch. The PID Block Load / Pool / State paths happened to
+         * work despite the bug because they explicitly handle the PID
+         * report IDs (0x12 / 0x13 / 0x14), and dinput8 only invokes them
+         * via the SetFeature path (which DOES read from the input
+         * buffer). Get_Feature for a real Sony BT handshake (0x05 /
+         * 0x09 / 0x20) was unreachable until this fix. */
+        UCHAR reportId = 0;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &inBuf, &inSize))
+            && inSize >= 1)
+        {
+            reportId = ((const UCHAR *)inBuf)[0];
+        }
+
+        /* v1.3.5 — surface every Get_Feature read to the SDK so the
+         * extendedReport.armOn watcher can flip vendor-blob emission on.
+         * Empty payload — the source + report ID is the entire signal.
+         * Pushed at the top so even a request that returns NOT_SUPPORTED
+         * downstream still fires the arm trigger; consumers test for the
+         * device's existence by reading any feature report and the arm
+         * should fire on the attempt, not on a successful read. */
+        PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE_READ,
+                      reportId, NULL, 0);
 
         /* GetFeature(0x11 Create New Effect) — silent success (mirrors vJoy).
          * Buffer left untouched. Doesn't gate on PidEnabled so this works
          * even for non-FFB consumers, matching vJoy's "always SUCCESS for
          * unhandled report IDs" fallthrough behavior. */
         if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID) {
+            status = STATUS_SUCCESS;
+            break;
+        }
+
+        /* v1.3.5 — Sony BT extended-mode handshake. Real DualSense /
+         * DualShock 4 firmware switches from emitting Report 0x01 (basic)
+         * to Report 0x31 / 0x11 (vendor blob with CRC32) once the host
+         * issues Get_Feature 0x05 (calibration), 0x09 (pairing/MAC), or
+         * 0x20 (firmware) — see Linux drivers/hid/hid-playstation.c
+         * dualsense_create init flow. We serve minimal stubs so consumers
+         * (Steam Input, dualsense-tester, ds.daidr.me, Chrome's Gamepad
+         * API) don't error on the read; the HidFeatureRead notification
+         * above is what actually arms vendor-blob emission via the SDK's
+         * extendedReport.armOn watcher.
+         *
+         * The exact response bytes don't drive arming — empty stubs would
+         * suffice — but daidr's FactoryInfo.vue gates its render on
+         * fwType ∈ {2, 3} (byte 20 of the 0x20 response). We seed
+         * fwType=2 so the panel renders without errors; other fields stay
+         * zero (daidr displays them as 0x00 / empty rather than failing).
+         *
+         * Stubs are always served regardless of profile — arming is a
+         * no-op for profiles without an extendedReport.armOn declaration,
+         * and serving stubs unconditionally avoids needing to thread
+         * "is this a Sony BT device" state into the driver. */
+        if (reportId == 0x05 || reportId == 0x09 || reportId == 0x20) {
+            UCHAR *p = (UCHAR *)outBuf;
+            ULONG stubSize = 0;
+            if (reportId == 0x05) {
+                /* Sony BT calibration: 41 bytes (DS_FEATURE_REPORT_CALIBRATION_SIZE).
+                 * Linux hid-playstation parses this for gyro/accel center+range.
+                 * All-zeros stub leaves both at zero center / zero range; the
+                 * Linux driver's calibration math handles this without crashing
+                 * (zero range becomes "raw passthrough"). */
+                if (outSize < 41) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 41;
+                RtlZeroMemory(p, stubSize);
+                p[0] = reportId;
+            } else if (reportId == 0x09) {
+                /* Sony BT pairing/MAC info: 17 bytes per ds5/ds4 layout.
+                 * [RID, controller_MAC[6], BT_Link_Type, host_MAC[6], reserved...].
+                 * All-zeros stub is fine; consumers use this for diagnostic
+                 * display, not control flow. */
+                if (outSize < 17) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 17;
+                RtlZeroMemory(p, stubSize);
+                p[0] = reportId;
+            } else /* 0x20 */ {
+                /* Sony BT firmware/version info: 64 bytes per nondebug
+                 * dualsense-explorer + daidr/dualsense-tester offsets.
+                 * fwType (byte 20) gates daidr's FactoryInfo render — set
+                 * to 2 so the panel renders. Other fields stay zero. */
+                if (outSize < 64) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 64;
+                RtlZeroMemory(p, stubSize);
+                p[0] = reportId;
+                p[20] = 0x02; /* fwType = 2 */
+            }
+            WdfRequestSetInformation(Request, stubSize);
             status = STATUS_SUCCESS;
             break;
         }
