@@ -71,6 +71,7 @@ internal sealed class Program
         {
             (0,  0x31, "Report ID"),
             (1,  0x02, "btTag"),
+            (2,  0x10, "btFlag (constant 0x10 — Sony BT framing)"),
             (3,  0xFF, "validFlag0"),
             (4,  0xF7, "validFlag1"),
             (5,  200,  "rightMotor"),
@@ -158,6 +159,14 @@ internal sealed class Program
         bool setPass = encMin[5] == 128;
         Console.WriteLine($"  [{(setPass ? "PASS" : "FAIL")}] Set field encodes correctly: rightMotor[5] = {encMin[5]} (expected 128)");
         if (!setPass) failures++;
+
+        // Critical: byte 2 (btFlag) must be 0x10 even when consumer doesn't
+        // pass it. Real Sony BT firmware silently drops the effect packet
+        // if byte 2 is anything other than 0x10. Per dualsense-tester.
+        total++;
+        bool btFlagPass = encMin[2] == 0x10;
+        Console.WriteLine($"  [{(btFlagPass ? "PASS" : "FAIL")}] btFlag default: encMin[2] = 0x{encMin[2]:X2} (expected 0x10 from JSON 'initial': 16)");
+        if (!btFlagPass) failures++;
 
         // ── Test 5: bytes-passthrough for trigger effects ──────────────
         var withTriggers = new Dictionary<string, object>

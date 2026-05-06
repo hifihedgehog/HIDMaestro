@@ -41,6 +41,7 @@
     "size": 78,
     "fields": [
       { "byte":  1, "type": "uint8", "semantic": "btTag" },
+      { "byte":  2, "type": "uint8", "semantic": "btFlag", "initial": 16 },
       { "byte":  3, "type": "uint8", "semantic": "validFlag0" },
       { "byte":  4, "type": "uint8", "semantic": "validFlag1" },
       { "byte":  5, "type": "uint8", "semantic": "rightMotor" },

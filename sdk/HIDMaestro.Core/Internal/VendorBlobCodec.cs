@@ -221,9 +221,21 @@ internal static class VendorBlobCodec
             case "uint8-rolling":
             {
                 if (field.Byte is not int b) return;
-                if (field.Semantic == null) return;
-                if (fields.TryGetValue(field.Semantic, out var val))
+                if (field.Semantic != null && fields.TryGetValue(field.Semantic, out var val))
+                {
                     buffer[b] = ToByte(val);
+                }
+                else if (field.Initial.HasValue)
+                {
+                    // Constant byte the spec wants written even when the
+                    // consumer's parsed-fields dict doesn't carry the
+                    // semantic. Sony BT output's byte-2 framing-flag
+                    // (0x10) is the canonical case: real firmware drops
+                    // the effect packet if byte 2 isn't 0x10. Mirroring
+                    // the input-side EncodeField behavior so consumers
+                    // don't have to remember firmware-mandated constants.
+                    buffer[b] = (byte)field.Initial.Value;
+                }
                 break;
             }
             case "uint8-axis":
