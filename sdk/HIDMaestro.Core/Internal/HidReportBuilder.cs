@@ -13,7 +13,8 @@ public class HidReportBuilder
         ushort UsagePage, ushort Usage,
         int BitOffset, int BitSize,
         int LogicalMin, int LogicalMax,
-        bool IsConstant);
+        bool IsConstant,
+        int ReportCount = 1);
 
     public byte InputReportId { get; private set; }
     public int InputReportBitSize { get; private set; }
@@ -179,7 +180,7 @@ public class HidReportBuilder
                                         if (u > usageMax) u = usageMax;
                                         InputFields.Add(new InputField(usagePage, u,
                                             bitOffset + b * reportSize, reportSize,
-                                            logicalMin, logicalMax, isConstant));
+                                            logicalMin, logicalMax, isConstant, reportCount));
                                     }
                                 }
                                 else
@@ -189,7 +190,7 @@ public class HidReportBuilder
                                         ushort u = c < usages.Count ? usages[c] : (ushort)0;
                                         InputFields.Add(new InputField(usagePage, u,
                                             bitOffset + c * reportSize, reportSize,
-                                            logicalMin, logicalMax, isConstant));
+                                            logicalMin, logicalMax, isConstant, reportCount));
                                     }
                                 }
                                 bitOffset += reportSize * reportCount;
@@ -262,23 +263,32 @@ public class HidReportBuilder
     void ResolveSemantics()
     {
         // Pre-scan: does this descriptor have dedicated Rx (0x33) or Ry (0x34)
-        // usages? If so, Z (0x32) and Rz (0x35) are triggers — the Xbox-style
-        // 6-axis layout. If NOT, and Z+Rz both appear at 8-bit, they're the
+        // usages? If so, Z (0x32) and Rz (0x35) default to trigger semantics
+        // (Xbox-style 6-axis). If NOT, and Z+Rz BOTH appear, they're the
         // right stick — the 4-axis DirectInput layout (the usage pattern
-        // WebKit/Chromium call the "standard gamepad"). Without this
-        // distinction the 8-bit Z/Rz case gets classified as triggers and
-        // RightStickX/RightStickY writes become silent no-ops. See issue #5.
+        // WebKit/Chromium call the "standard gamepad"). Z OR Rz alone (no
+        // pair) means a single trigger axis, not half a stick. See issues #5
+        // and #22.
         bool hasRxOrRy = false;
-        bool hasZ8 = false;
-        bool hasRz8 = false;
+        bool hasZ = false;
+        bool hasRz = false;
         foreach (var f in InputFields)
         {
             if (f.IsConstant || f.UsagePage != 0x01) continue;
             if (f.Usage == 0x33 || f.Usage == 0x34) hasRxOrRy = true;
-            else if (f.Usage == 0x32 && f.BitSize <= 8) hasZ8 = true;
-            else if (f.Usage == 0x35 && f.BitSize <= 8) hasRz8 = true;
+            else if (f.Usage == 0x32) hasZ = true;
+            else if (f.Usage == 0x35) hasRz = true;
         }
-        bool fourAxisDInput = !hasRxOrRy && hasZ8 && hasRz8;
+        bool fourAxisDInput = !hasRxOrRy && hasZ && hasRz;
+
+        // A Z (0x32) or Rz (0x35) field declared with Report Count == 1 and
+        // unsigned range starting at 0 is unambiguously a trigger (matches
+        // what HidDescriptorBuilder.AddTrigger emits). This wins over the
+        // fourAxisDInput heuristic so a (1 stick, 1 trigger) or (2 sticks,
+        // 1 trigger) Custom layout doesn't get its lone trigger silently
+        // claimed as right-stick X. See issue #22.
+        static bool LooksLikeTrigger(InputField f) =>
+            f.ReportCount == 1 && f.LogicalMin == 0;
 
         // Map HID usages to semantic gamepad axes/buttons
         // This works for any standard gamepad descriptor
@@ -293,29 +303,20 @@ public class HidReportBuilder
                     case 0x30: LeftStickX ??= f; break;    // X
                     case 0x31: LeftStickY ??= f; break;    // Y
                     case 0x32:                               // Z
-                        // Z could be right stick or trigger — distinguish by
-                        // bit size AND by whether Rx/Ry exist elsewhere in
-                        // the descriptor. 4-axis DInput (no Rx/Ry, 8-bit
-                        // Z+Rz) maps Z to right stick X.
-                        if (fourAxisDInput)
+                        if (LooksLikeTrigger(f))
+                            LeftTrigger ??= f;
+                        else if (fourAxisDInput)
                             RightStickX ??= f;
-                        else if (f.BitSize > 8)
-                        {
-                            if (f.BitSize >= 16 && RightStickX == null)
-                                RightStickX = f;
-                            else
-                                LeftTrigger ??= f;
-                        }
                         else
                             LeftTrigger ??= f;
                         break;
                     case 0x33: RightStickX ??= f; break;   // Rx
                     case 0x34: RightStickY ??= f; break;   // Ry
                     case 0x35:                               // Rz
-                        if (fourAxisDInput)
+                        if (LooksLikeTrigger(f))
+                            RightTrigger ??= f;
+                        else if (fourAxisDInput)
                             RightStickY ??= f;
-                        else if (f.BitSize >= 16 && RightStickY == null)
-                            RightStickY = f;
                         else
                             RightTrigger ??= f;
                         break;
@@ -428,10 +429,14 @@ public class HidReportBuilder
         }
         else if (LeftTrigger != null)
         {
-            // Combined trigger (Xbox 360 style): single Z axis
-            // Center = 0.5 (both released). LT pulls toward 0, RT pulls toward 1.
-            double combined = 0.5 + (rightTrigger - leftTrigger) * 0.5;
-            WriteField(LeftTrigger, Math.Clamp(combined, 0.0, 1.0));
+            // Lone trigger axis: write the LT value directly. The Xbox-360
+            // combined-Z synthesis only fires when both CombinedTrigger and
+            // RightTrigger are declared (the first branch above) — that's
+            // keyed on the explicit Vx/Vy hidden-pair the descriptor
+            // declares. Single-trigger descriptors (Custom-Extended, wheels
+            // with one pedal, lightguns, etc.) get their value through
+            // unchanged. See issue #22.
+            WriteField(LeftTrigger, leftTrigger);
         }
 
         if (HatSwitch != null)

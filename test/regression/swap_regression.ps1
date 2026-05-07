@@ -132,6 +132,8 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1238,6 +1240,24 @@ function Scenario-V135-Features-Check {
     }
 }
 
+# S33: Trigger axis classifier regression (issue #22). Pure encoder unit test
+# - no virtual device, no driver install. Builds the (1 stick, 1 trigger) and
+# (2 sticks, 1 trigger) Custom-Extended layouts via HidDescriptorBuilder, plus
+# a 4-axis DInput hand-rolled descriptor and the Xbox-360-wired Vx/Vy combined-Z
+# layout, and asserts each shape's Z/Rz fields land in the right semantic slot
+# AND that BuildReport writes the expected wire bytes. Pre-fix the lone trigger
+# in case 1 was claimed as RightStickX (silent 0%), and the lone trigger in
+# case 2 ran the Xbox 360 combined-Z formula and produced an inverted/offset
+# wire value (75% rest -> 25% full press). Catches future regressions in the
+# Z/Rz classifier or the lone-LeftTrigger encoder branch.
+function Scenario-Trigger-Classifier-Check {
+    $probe = Resolve-ProbeBinary 'trigger_classifier_check' 'TriggerClassifierCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("TriggerClassifierCheck exited " + $p.ExitCode + " - one or more trigger-classifier invariants regressed (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1274,7 +1294,8 @@ $scenarios = @(
     @{ Name = 'S29_Sony_BT_Report31_Encoder';     Body = ${function:Scenario-Sony-BT-Report31-Check} },
     @{ Name = 'S30_Sony_BT_Output_RoundTrip';     Body = ${function:Scenario-Sony-BT-Output-Decode-Check} },
     @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} },
-    @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} }
+    @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} },
+    @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

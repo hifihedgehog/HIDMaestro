@@ -1,5 +1,5 @@
-;
-; HIDMaestro XUSB/WinExInput Companion — provides XInput + browser detection.
+﻿;
+; HIDMaestro XUSB/WinExInput Companion â€” provides XInput + browser detection.
 ; Built from driver/companion.c into HMXInput.dll (function driver, no filter).
 ; Registers XUSB (XInput) + WinExInput (WGI GamepadAdded) interfaces.
 ; Reads gamepad state from per-instance shared memory (Global\HIDMaestroInput<N>).
@@ -7,12 +7,12 @@
 
 [Version]
 Signature   = "$WINDOWS NT$"
-; Class = System (not XnaComposite) — intentionally chosen so
+; Class = System (not XnaComposite) â€” intentionally chosen so
 ; Windows.Gaming.Input.dll::ProviderManagerWorker::OnPnpDeviceAdded does NOT
 ; classify HIDMAESTRO as a WGI Gamepad. XnaComposite auto-publishes the
 ; {D61CA365} XnaComposite interface, which hits classifier branch 1 and
 ; creates a second WGI entity alongside the main HID virtual's HID-path
-; Gamepad — that's the duplicate that hangs Windows.Gaming.Input.
+; Gamepad â€” that's the duplicate that hangs Windows.Gaming.Input.
 ; System class is not matched by any classifier branch.
 ;
 ; xinput1_4.dll's XInput discovery enumerates GUID_DEVINTERFACE_XUSB
@@ -23,7 +23,7 @@ Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ProviderName%
 CatalogFile = hidmaestro_xusb.cat
-DriverVer   = 05/07/2026,1.3.5.0
+DriverVer   = 05/07/2026,1.3.6.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -40,7 +40,7 @@ HMXInput.dll = 1
 %ManufacturerName% = Standard,NTamd64
 
 [Standard.NTamd64]
-; VID-specific aliases — PnP's DEVPKEY_Device_MatchingDeviceId will carry
+; VID-specific aliases â€” PnP's DEVPKEY_Device_MatchingDeviceId will carry
 ; the VID_045E string when our Gate 2 fix writes this HwID into the
 ; device's multi-sz HardwareID list. Covers the common Xbox 360 family
 ; PIDs HIDMaestro may emulate.
@@ -61,7 +61,7 @@ AddReg = XUSB_HW_AddReg
 
 [XUSB_HW_AddReg]
 HKR,,"XusbMode",0x00010001,1
-; "xinputhid" UpperFilter string — this is the WGI dispatch tripwire.
+; "xinputhid" UpperFilter string â€” this is the WGI dispatch tripwire.
 ; ProviderManagerWorker::OnPnpDeviceAdded (all-core.c:~41617) walks the
 ; ancestor UpperFilters chain with IsDeviceOrAncestorFilteredBy(path,
 ; L"xinputhid"). When that returns true AND the device publishes
@@ -70,7 +70,7 @@ HKR,,"XusbMode",0x00010001,1
 ; under System class matches NO dispatch branch and WGI silently skips it,
 ; which is why vibration never reached our SET_STATE handler in prior tests.
 ;
-; xinputhid.sys is a HID-class filter — it won't actually attach to this
+; xinputhid.sys is a HID-class filter â€” it won't actually attach to this
 ; System-class device, so no 16-button descriptor rewrite. This is a pure
 ; registry-string tripwire. See memory:project-wgi-pnp-device-settings-registry.md.
 HKR,,"UpperFilters",0x00010008,"xinputhid"
@@ -108,7 +108,7 @@ UmdfKernelModeClientPolicy  = AllowKernelModeClients
 UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
 UmdfMethodNeitherAction     = Copy
 UmdfFsContextUsePolicy      = CanUseFsContext2
-; Per-instance WUDFHost — see hidmaestro.inf for rationale. The async
+; Per-instance WUDFHost â€” see hidmaestro.inf for rationale. The async
 ; WAIT_FOR_INPUT pump + 8ms timer would otherwise serialize across
 ; every HIDMAESTRO instance in a single host.
 UmdfHostProcessSharing      = ProcessSharingDisabled
