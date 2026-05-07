@@ -127,6 +127,66 @@
         ]
       },
       {
+        "byte": 17,
+        "type": "int16-le",
+        "semantic": "gyroPitch"
+      },
+      {
+        "byte": 19,
+        "type": "int16-le",
+        "semantic": "gyroYaw"
+      },
+      {
+        "byte": 21,
+        "type": "int16-le",
+        "semantic": "gyroRoll"
+      },
+      {
+        "byte": 23,
+        "type": "int16-le",
+        "semantic": "accelX"
+      },
+      {
+        "byte": 25,
+        "type": "int16-le",
+        "semantic": "accelY"
+      },
+      {
+        "byte": 27,
+        "type": "int16-le",
+        "semantic": "accelZ"
+      },
+      {
+        "byte": 29,
+        "type": "uint32-le",
+        "semantic": "sensorTimestamp"
+      },
+      {
+        "byte": 34,
+        "type": "touchpad-finger",
+        "semantic": "touchpadFinger0"
+      },
+      {
+        "byte": 38,
+        "type": "touchpad-finger",
+        "semantic": "touchpadFinger1"
+      },
+      {
+        "byte": 54,
+        "bits": "0-3",
+        "type": "uint8-battery",
+        "semantic": "batteryLevel"
+      },
+      {
+        "byte": 54,
+        "bits": "4-7",
+        "type": "bitfield",
+        "buttons": [
+          "batteryCharging",
+          "batteryFull"
+        ]
+      },
+      {
         "bytes": "74-77",
         "type": "crc32-le",
         "scope": {
@@ -160,8 +220,10 @@
     "fields": [
       {
         "byte": 1,
-        "type": "uint8",
-        "semantic": "btTag"
+        "type": "uint8-rolling",
+        "semantic": "btTag",
+        "initial": 0,
+        "stride": 16
       },
       {
         "byte": 2,
@@ -188,6 +250,26 @@
         "byte": 6,
         "type": "uint8",
         "semantic": "leftMotor"
+      },
+      {
+        "byte": 7,
+        "type": "uint8",
+        "semantic": "headphoneVolume"
+      },
+      {
+        "byte": 8,
+        "type": "uint8",
+        "semantic": "speakerVolume"
+      },
+      {
+        "byte": 9,
+        "type": "uint8",
+        "semantic": "micVolume"
+      },
+      {
+        "byte": 10,
+        "type": "uint8",
+        "semantic": "audioControlFlags"
       },
       {
         "byte": 11,
@@ -228,6 +310,11 @@
         "bytes": "47-49",
         "type": "rgb24",
         "semantic": "lightbar"
+      },
+      {
+        "bytes": "3-49",
+        "type": "bytes-passthrough",
+        "semantic": "effectPayload"
       },
       {
         "bytes": "74-77",

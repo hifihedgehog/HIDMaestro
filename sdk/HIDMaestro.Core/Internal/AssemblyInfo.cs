@@ -8,3 +8,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SonyBtReport31Check")]
 [assembly: InternalsVisibleTo("SonyBtOutputDecodeCheck")]
 [assembly: InternalsVisibleTo("SonyDataDrivenCoverage")]
+[assembly: InternalsVisibleTo("V135FeaturesCheck")]

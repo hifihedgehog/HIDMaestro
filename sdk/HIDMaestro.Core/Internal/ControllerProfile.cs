@@ -46,6 +46,35 @@ public sealed class ControllerProfile
     [JsonPropertyName("inputReportSize")]
     public int? InputReportSize { get; set; }
 
+    /// <summary>v1.3.5 — HID device version (the <c>bcdDevice</c> field returned
+    /// by <c>HidD_GetAttributes</c>). Defaults to 0x0100 when omitted, which is
+    /// what most generic gamepad consumers expect for USB devices. Real Sony
+    /// firmware reports 0 over Bluetooth and 0x0100 over USB; Chromium's
+    /// <c>Dualshock4Controller::BusTypeFromVersionNumber</c> reads this exact
+    /// value to decide whether to route vibration writes through the BT
+    /// (Report 0x11) or USB (Report 0x05) code path. Profiles that emulate a
+    /// real Sony BT controller MUST set this to 0 or browser-driven vibration
+    /// silently dispatches to the wrong report ID and the bytes get dropped at
+    /// the HID class layer.</summary>
+    [JsonPropertyName("versionNumber")]
+    public ushort? VersionNumber { get; set; }
+
+    /// <summary>v1.3.5 — fixed bytes the SDK overlays into the legacy input
+    /// report after the descriptor-driven encoder fills it. Each entry is
+    /// <c>{ "byte": N, "value": V }</c> and writes byte V at on-wire offset N.
+    /// Used by Edge profiles to satisfy real-firmware status bytes that
+    /// dualsense-tester (and any other parser that knows the Edge layout)
+    /// reads to decide whether the device is in normal mode vs profile-edit
+    /// mode — e.g. the activeProfile byte at struct offset 48 must be
+    /// non-zero with bits 0-1 clear (real Sony firmware reports 0x80) or
+    /// the page treats every frame as "controller in configuration mode."
+    /// Applied AFTER <c>BuildReportInto</c> on the legacy path; the codec
+    /// path declares the same constants as <c>uint8</c> fields with
+    /// <c>initial</c> values directly inside <c>extendedReport.fields</c>
+    /// (so they participate in CRC32 computation).</summary>
+    [JsonPropertyName("inputDefaults")]
+    public List<InputBytePatch>? InputDefaults { get; set; }
+
     [JsonPropertyName("deviceDescription")]
     public string? DeviceDescription { get; set; }
 
@@ -245,6 +274,17 @@ public sealed class ExtendedReportSpec
         : Convert.ToByte(ReportId.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ReportId.Substring(2) : ReportId, 16);
 }
 
+/// <summary>v1.3.5 — fixed-byte overlay applied to the legacy input report
+/// after BuildReportInto. See <see cref="ControllerProfile.InputDefaults"/>.</summary>
+public sealed class InputBytePatch
+{
+    [JsonPropertyName("byte")]
+    public int Byte { get; set; }
+
+    [JsonPropertyName("value")]
+    public int Value { get; set; }
+}
+
 /// <summary>v1.3.5 — host-side write trigger that arms extended-report emission.
 /// Type "featureWrite" matches an outgoing HID feature SetFeature; "outputWrite"
 /// matches an outgoing HID output report. ReportId is hex.</summary>
@@ -297,6 +337,13 @@ public sealed class FieldSpec
 
     [JsonPropertyName("initial")]
     public int? Initial { get; set; }
+
+    /// <summary>v1.3.5 — increment step for <c>uint8-rolling</c>. Default 1.
+    /// Sony BT effect output's <c>btTag</c> uses stride 16 so the byte cycles
+    /// 0x10, 0x20, … 0xF0, 0x00 — real firmware drops packets whose tag
+    /// doesn't match that pattern, hence the explicit setting.</summary>
+    [JsonPropertyName("stride")]
+    public int? Stride { get; set; }
 }
 
 /// <summary>v1.3.5 — CRC32 scope spec for a crc32-le field. The CRC is

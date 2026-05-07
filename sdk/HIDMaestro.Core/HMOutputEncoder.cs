@@ -14,10 +14,12 @@ namespace HIDMaestro;
 /// already has via the profile JSON. PadForge's DualSense effect pipeline
 /// uses this to replace ~1,400 lines of inline byte packing.</para>
 ///
-/// <para>Stateless: no rolling counters maintained on the SDK side for
-/// output-direction consumers. If the wire format requires a sequence
-/// counter (DS5 BT output's <c>seqTag</c>), the consumer manages it and
-/// passes the current value via the parsed-fields dict.</para>
+/// <para>Per-controller rolling-counter state lives on
+/// <see cref="HMController"/>; reach the auto-advance path via
+/// <see cref="HMController.EncodeOutput"/>. The static <see cref="Encode"/>
+/// overload here is stateless — <c>uint8-rolling</c> fields without a dict
+/// entry fall back to the spec's <c>initial</c> value, suitable for
+/// diagnostic fixtures and one-shot encode tests.</para>
 /// </summary>
 public static class HMOutputEncoder
 {

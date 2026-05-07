@@ -143,11 +143,48 @@ internal static class DeviceNodeCreator
                         1 /*SPDRP_HARDWAREID*/, hwBytes, (uint)hwBytes.Length))
                     return new Result(false, null);
 
-                // USB\MS_COMP_XUSB10 helps WGI/GameInputSvc identify Xbox controllers.
-                // Only relevant for non-xinputhid Xbox profiles.
+                // Compatible IDs serve two purposes:
+                //   1. WGI / GameInputSvc identifies Xbox controllers via
+                //      USB\MS_COMP_XUSB10. Only set for non-xinputhid Xbox.
+                //   2. SDL3 / hidapi (used by Steam Input + every SDL-based
+                //      game) walks up to the parent devnode and substring-greps
+                //      DEVPKEY_Device_CompatibleIds for "USB", "BTHENUM",
+                //      "BTHLEDEVICE", etc. to set is_bluetooth. Without a
+                //      BTHENUM compat ID on a profile declaring connection
+                //      "bluetooth", SDL falls through to bus_type=UNKNOWN
+                //      → is_bluetooth=false → SDL_hidapi_ps5 picks USB
+                //      Report 0x02 effects framing. Steam then misclassifies
+                //      a virtual DualSense BT as USB, breaking effect
+                //      passthrough and the "Bluetooth" badge in the Steam
+                //      Input config UI.
+                //   The BTHENUM string only needs to exist as a substring;
+                //   real BT HID HCI form is `BTHENUM\Dev_VID&02xxxx_PID&yyyy`.
+                //   We mint a matching string from the profile's VID/PID;
+                //   nothing on Windows side actually walks up to a real BT
+                //   radio so the form just has to satisfy hidapi's check.
+                string compatMulti = null!;
                 if (!profile.UsesUpperFilter && profile.VendorId == 0x045E)
                 {
-                    string compatMulti = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0\0";
+                    compatMulti = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0\0";
+                }
+                else if (!profile.UsesUpperFilter
+                      && string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Gated on !UsesUpperFilter so xinputhid profiles (Xbox
+                    // Series BT, Xbox Elite v2 BT, Xbox One BT) keep their
+                    // existing BTHLEDEVICE compat ID on the gamepad-companion
+                    // devnode (DeviceOrchestrator.CreateGamepadCompanion) and
+                    // never get a SECOND, different-shaped BT compat ID on
+                    // the main device. BLE-keyed consumers (Settings →
+                    // Devices "Bluetooth", browser Gamepad API) keep working
+                    // unchanged. Sony BT and any generic non-Xbox BT profile
+                    // (which doesn't go through the xinputhid path) gets the
+                    // BTHENUM string here so SDL3/hidapi's bus-type
+                    // substring-match resolves to BLUETOOTH.
+                    compatMulti = $"BTHENUM\\Dev_VID&02{vid}_PID&{pid}\0BTHENUM\\{{00001124-0000-1000-8000-00805f9b34fb}}_VID&02{vid}_PID&{pid}\0\0";
+                }
+                if (compatMulti != null)
+                {
                     byte[] compatBytes = Encoding.Unicode.GetBytes(compatMulti);
                     SetupDiSetDeviceRegistryPropertyW(dis, devInfoHandle.AddrOfPinnedObject(),
                         2 /*SPDRP_COMPATIBLEIDS*/, compatBytes, (uint)compatBytes.Length);

@@ -182,15 +182,8 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
     ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
     UCHAR           Data[256];       /* HID input report data (native descriptor format) */
     UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
-    /* v1.3.5 — vendor-blob mode-switch path. When ExtendedReportSize > 0,
-     * the driver emits ExtendedReportData[0..ExtendedReportSize] verbatim
-     * (byte 0 IS the Report ID — driver does NOT prepend its descriptor's
-     * FirstInputReportId). Used by Sony BT profiles after the host has
-     * issued a Get_Feature 0x05/0x09/0x20 handshake to switch from legacy
-     * Report 0x01 short to vendor-blob Report 0x31 / 0x11 (78 bytes incl.
-     * CRC32). When ExtendedReportSize == 0 the driver uses the legacy
-     * Data + FirstInputReportId-prepend path unchanged. The SDK writes
-     * EITHER legacy OR extended per frame, not both. */
+    /* v1.3.5 — vendor-blob mode-switch path. Driver passes
+     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
     ULONG           ExtendedReportSize;
     UCHAR           ExtendedReportData[80];
 } HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;

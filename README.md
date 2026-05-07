@@ -35,7 +35,7 @@ HIDMaestro runs entirely in user mode. It works with locally generated self-sign
 HIDMaestro uses UMDF2 (User-Mode Driver Framework). The driver runs in a regular Windows process, not the kernel. A bug in HIDMaestro cannot blue-screen the machine. No EV certificate, no WHQL. HIDMaestro works with locally generated self-signed certificates trusted by the target machine; no purchased certificate or `testsigning` boot mode is required.
 
 ### Exact Hardware Identity
-Choose from 224 embedded profiles across 32 vendors (Xbox 360, Xbox Series X|S, DualSense, Thrustmaster wheels, Logitech HOTAS, flight sticks, racing pedals, fight sticks, and more), or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
+Choose from 225 embedded profiles across 32 vendors (Xbox 360, Xbox Series X|S, DualSense, DualSense Edge, DualShock 4, Thrustmaster wheels, Logitech HOTAS, Microsoft SideWinder FFB sticks, flight sticks, racing pedals, fight sticks, and more), or extend support through data-driven JSON profiles. Profiles define the public-facing identity and report behavior; vendor-specific extras (LEDs, audio, sensors) may require per-device work. For the public-facing identity and report path defined by the profile, HIDMaestro sets the exact VID/PID, product string, HID descriptor, axis count, button count, trigger behavior, and bus type. SDL3's controller database matches it. Steam recognizes it. Chrome identifies it. joy.cpl shows the right name.
 
 ### Cross-API Coverage
 Most solutions get one or two APIs right. HIDMaestro targets all of them simultaneously:
@@ -62,14 +62,14 @@ Build the descriptor with [`HidDescriptorBuilder.AddPidFfbBlock`](sdk/HIDMaestro
 Create and remove controllers without reboots. Each controller is independently disposable: remove one while the others keep running, or switch profiles live within the same process. Single-controller creation takes ~200ms on a warm start; 6-controller mixed creation takes ~3.5s total. Subsequent runs on the same boot match fresh-boot timings — see Techniques: Session-Unique Instance-ID Suffix for the kernel-state-pollution fix that closes the gap.
 
 ### Profile-Based
-Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 224 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
+Every controller is a JSON file: VID, PID, descriptor, trigger mode, connection type are all data-driven. Adding support for a new controller means writing a JSON file, not modifying code. The profiles directory ships 225 profiles across 32 vendors covering gamepads, racing wheels, HOTAS sticks, flight sticks, pedals, arcade sticks, and more.
 
 ### Custom Controllers: build or modify any device
 Using the public `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs, consumers can:
 
 - **Clone and modify** an existing profile: e.g. take a DualSense (15 buttons) and create a variant with 16 buttons. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved, but the descriptor declares the extra button.
 - **Build new controllers from scratch**: define a custom flight stick, racing wheel, or arcade panel with arbitrary VID/PID, product string, axis count, button count, and axis resolution. No hex editing, no descriptor knowledge required.
-- **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 224-profile catalog.
+- **Spoof an arbitrary controller**: if you know a device's VID, PID, and product string, you can create a virtual copy even if it's not in the 225-profile catalog.
 - **Capture a connected device**: `HMDeviceExtractor.Extract` reads the cached HID descriptor Windows parsed from any real HID device you have plugged in and returns a ready-to-deploy `HMProfile`. No JSON authoring, no descriptor reverse engineering — point it at the controller and you get a matching virtual.
 
 The result is an SDK for fully custom virtual controllers that present as real hardware to every API simultaneously, with no kernel driver and no fixed "vJoy Device" identity.
@@ -169,7 +169,11 @@ The full Sony catalog ships with v1.3.5 data-driven blocks: DS5 BT (`dualsense-b
 }
 ```
 
-Round-trip in both directions: `controller.OutputDecoded` event surfaces incoming output reports as parsed-field dictionaries (rumble amplitudes, lightbar RGB, adaptive-trigger blobs); `HMOutputEncoder.Encode(profile, fields)` produces wire-format bytes from a parsed-field dictionary, used by consumers driving real devices from synthesized state without reimplementing byte layouts.
+Round-trip in both directions: `controller.OutputDecoded` event surfaces incoming output reports as parsed-field dictionaries (rumble amplitudes, lightbar RGB, adaptive-trigger blobs); `HMOutputEncoder.Encode(profile, fields)` produces wire-format bytes from a parsed-field dictionary, used by consumers driving real devices from synthesized state without reimplementing byte layouts. `HMController.EncodeOutput(fields)` is the per-controller variant that auto-advances the rolling-counter state (Sony BT `btTag` cycles 0x00→0x10→…→0xF0→0x00 with stride 16) instead of forcing the consumer to track wraparound. `HMController.OnSubmitLatencyMicros` exposes per-frame submit latency for consumers driving timing-sensitive paths.
+
+The encoder/decoder reaches the public input-state surface too. `HMGamepadState` ships per-frame fields the Sony JSON blocks understand: `TouchpadFinger0Active/X/Y/Id` + `TouchpadFinger1Active/X/Y/Id` + `TouchpadPacketCounter`, `GyroPitch/Yaw/Roll` + `AccelX/Y/Z` + `SensorTimestamp` (DS4 100µs ticks; DS5 microseconds), and `BatteryLevel` (0..10) + `BatteryCharging` + `BatteryFull` + `MicMuted` + `HeadphonesConnected`. Profiles that don't declare these regions silently ignore them, so the same caller code works across every controller. `dualsense-tester` (ds.daidr.me) renders touchpad coordinates, the IMU vector, and the battery panel for any DualSense or DualSense Edge virtual (USB or BT) once the consumer fills these fields.
+
+DS4 Bluetooth vibration through the browser Gamepad API is fixed in v1.3.5 by setting the device's `HidD_GetAttributes` `VersionNumber` to 0 — the value Chromium's `DualShock4Controller::BusTypeFromVersionNumber` checks for the BT-format report header. Pre-v1.3.5 the SDK hardcoded `0x0100` (USB), Chromium picked the wrong wire layout, and the rumble bytes never reached the device. Profiles can now override `versionNumber` in JSON; `dualshock-4-v2-bt.json` ships with `0`. Steam Input never used this gate so v1.3.5 doesn't change Steam behavior either way.
 
 ### BTHLEDEVICE Bus Type Spoofing
 
@@ -338,7 +342,7 @@ HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-series-xs-bt xbox-360-wired du
 #   pause / resume        idle CPU test (driver should use ~0%)
 #   quit                  graceful shutdown
 
-# List available profiles (224 across 32 vendors)
+# List available profiles (225 across 32 vendors)
 HIDMaestroTest.exe list
 
 # Search profiles
@@ -363,7 +367,7 @@ No external scripts, no manual setup, no popups. Just the one console window. Re
 
 ### Live-swap regression battery
 
-`test/regression/swap_regression.ps1` is a 26-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence plus the HID PID 1.0 force-feedback round-trip, and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all controller archetypes the catalog exercises (Xbox 360 Wired, Xbox Series Bluetooth, Xbox One BT, Xbox Elite v2 BT, DualSense, DualSense BT, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`).
+`test/regression/swap_regression.ps1` is a 32-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence, the HID PID 1.0 force-feedback round-trip, the high-resolution hat encoder, the Sony BT Report 0x31 vendor-blob encode/decode round-trip across all DS4/DS5 BT profiles, and the v1.3.5 `HMGamepadState` Sony-surface assertions (touchpad, IMU, battery, audio block, DS4 BT armOn IDs, DS5 Edge `activeProfile` `inputDefaults` overlay), and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all controller archetypes the catalog exercises (Xbox 360 Wired, Xbox Series Bluetooth, Xbox One BT, Xbox Elite v2 BT, DualSense, DualSense Edge, DualSense BT, DualShock 4 BT, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`).
 
 The harness sync is event-driven: the test app emits `[ACK]` on stdout after each stdin command finishes processing, and the harness blocks on that marker. No time-based settle, no scaling — every wait lasts exactly as long as the SDK actually takes. Run from an elevated PowerShell:
 
@@ -372,7 +376,7 @@ The harness sync is event-driven: the test app emits `[ACK]` on stdout after eac
 ./test/regression/swap_regression.ps1 -Filter 'S08*' # one scenario, ~1-2 min
 ```
 
-Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path. Validated 26/26 PASS on a Ryzen 9955HX3D dev box (Win11 26200, ~16 min wall time) and on an Intel Atom Z8350 fixture (Win10 IoT LTSC 19044, ~30 min) — the slow-hardware result is the reason the harness is pure ACK-driven instead of fixed-sleep timed.
+Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path. Validated 32/32 PASS on a Ryzen 9955HX3D dev box (Win11 26200, ~10 min wall time) and on an Intel Atom Z8350 fixture (Win10 IoT LTSC 19044, ~75 min at `HIDMAESTRO_TIMEOUT_SCALE=2`) — the slow-hardware result is the reason the harness is pure ACK-driven instead of fixed-sleep timed.
 
 ## Profile System
 

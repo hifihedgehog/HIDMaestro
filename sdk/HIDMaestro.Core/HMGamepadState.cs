@@ -9,9 +9,11 @@ namespace HIDMaestro;
 /// arcade stick. Sticks and triggers use normalized floats; buttons are a
 /// flags enum; hat uses cardinal directions.
 ///
-/// For exotic features that this struct doesn't model (DualSense touchpad
-/// coordinates, gyroscope, motion sensors, etc.) use
-/// <see cref="HMController.SubmitRawReport"/> instead.
+/// v1.3.5 also carries the wide-surface fields modern Sony pads emit
+/// (touchpad, gyro, accel, battery, mic/headphone state). Profiles that
+/// declare matching <c>extendedReport.fields</c> entries pass the values
+/// through to the consumer; profiles that don't ignore them at zero cost.
+/// For wholly custom payloads use <see cref="HMController.SubmitRawReport"/>.
 /// </summary>
 public struct HMGamepadState
 {
@@ -61,6 +63,83 @@ public struct HMGamepadState
     /// <see cref="HMProfile.HatLogicalMax"/> and want exact bits. Used when
     /// both angle fields are null; takes priority over <see cref="Hat"/>.</summary>
     public ushort? HatRaw;
+
+    // ── Touchpad (Sony two-finger packet) ─────────────────────────────────
+
+    /// <summary>True when finger 0 is touching the touchpad.</summary>
+    public bool TouchpadFinger0Active;
+
+    /// <summary>Finger 0 X coordinate, 0..1919 (DualSense / DS4 native range).</summary>
+    public ushort TouchpadFinger0X;
+
+    /// <summary>Finger 0 Y coordinate, 0..1079 (DualSense / DS4 native range).</summary>
+    public ushort TouchpadFinger0Y;
+
+    /// <summary>Finger 0 tracking ID (7 bits, 0..127). Increments per new
+    /// touch. Bit 7 (0x80) is the firmware "lifted" flag — encoder OR's
+    /// it with the active flag automatically when <see cref="TouchpadFinger0Active"/>
+    /// is false.</summary>
+    public byte TouchpadFinger0Id;
+
+    /// <summary>True when finger 1 is touching the touchpad.</summary>
+    public bool TouchpadFinger1Active;
+
+    /// <summary>Finger 1 X coordinate, 0..1919.</summary>
+    public ushort TouchpadFinger1X;
+
+    /// <summary>Finger 1 Y coordinate, 0..1079.</summary>
+    public ushort TouchpadFinger1Y;
+
+    /// <summary>Finger 1 tracking ID (7 bits).</summary>
+    public byte TouchpadFinger1Id;
+
+    /// <summary>Monotonic touchpad packet counter increments per touch event.
+    /// Maps to the <c>touchpadPacketCounter</c> semantic.</summary>
+    public byte TouchpadPacketCounter;
+
+    // ── IMU (raw firmware units) ──────────────────────────────────────────
+
+    /// <summary>Gyro pitch, signed 16-bit. Raw firmware units (no calibration).</summary>
+    public short GyroPitch;
+
+    /// <summary>Gyro yaw, signed 16-bit.</summary>
+    public short GyroYaw;
+
+    /// <summary>Gyro roll, signed 16-bit.</summary>
+    public short GyroRoll;
+
+    /// <summary>Accelerometer X, signed 16-bit.</summary>
+    public short AccelX;
+
+    /// <summary>Accelerometer Y, signed 16-bit.</summary>
+    public short AccelY;
+
+    /// <summary>Accelerometer Z, signed 16-bit.</summary>
+    public short AccelZ;
+
+    /// <summary>Sensor packet timestamp in firmware microseconds (32-bit,
+    /// rolls over). Maps to the <c>sensorTimestamp</c> semantic.</summary>
+    public uint SensorTimestamp;
+
+    // ── Battery + housekeeping ────────────────────────────────────────────
+
+    /// <summary>Battery capacity, 0..10 (Sony firmware convention). Profiles
+    /// that emit a 0..100 percentage scale via the <c>uint8</c> field type
+    /// should pre-scale before populating; the codec writes the byte verbatim.</summary>
+    public byte BatteryLevel;
+
+    /// <summary>Battery is currently charging.</summary>
+    public bool BatteryCharging;
+
+    /// <summary>Battery is at full charge (some pads emit a separate "full" bit
+    /// in addition to the charging bit).</summary>
+    public bool BatteryFull;
+
+    /// <summary>Microphone is muted at the firmware level (DS5 only).</summary>
+    public bool MicMuted;
+
+    /// <summary>Headphones detected on the 3.5 mm jack.</summary>
+    public bool HeadphonesConnected;
 }
 
 /// <summary>Standard gamepad button bitmask. Profile-specific renames (Cross/A, Circle/B,

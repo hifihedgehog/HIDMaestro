@@ -418,6 +418,15 @@ internal static class SharedMemoryIO
         }
         else
         {
+            // Mandatory per-frame clear: named sections (Global\HIDMaestroInput<N>)
+            // can be opened concurrently by other processes (CreateFileMappingW
+            // returns existing handle for any caller passing the same name + SDDL).
+            // Across emulate-app restarts the SDK re-zeros at create time, but
+            // BETWEEN restarts a foreign writer could have left ExtendedReportSize
+            // > 0 + ExtendedReportData populated; with the legacy path running
+            // (USB Sony, generic profiles) that stale extended buffer would be
+            // emitted by the driver, breaking input. Cost is one P/Invoke per
+            // frame.
             Marshal.WriteInt32(view, EXTENDED_SIZE_OFFSET, 0);
         }
 

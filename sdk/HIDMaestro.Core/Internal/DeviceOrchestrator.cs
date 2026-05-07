@@ -776,7 +776,14 @@ internal static class DeviceOrchestrator
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         key.SetValue("VendorId", (int)profile.VendorId, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)profile.ProductId, RegistryValueKind.DWord);
-        key.SetValue("VersionNumber", 0x0100, RegistryValueKind.DWord);
+        // v1.3.5 — VersionNumber default 0x0100 (real Sony USB convention).
+        // BT profiles that emulate a real Sony controller need 0 here so
+        // Chromium's Dualshock4Controller::BusTypeFromVersionNumber routes
+        // browser-driven vibration through SetVibrationBluetooth (Report
+        // 0x11) instead of SetVibrationUsb (Report 0x05). Profiles can
+        // override via the JSON `versionNumber` field.
+        key.SetValue("VersionNumber", (int)(profile.VersionNumber ?? 0x0100),
+                     RegistryValueKind.DWord);
         if (profile.ProductString != null)
             key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
         if (inputReportLen > 0)

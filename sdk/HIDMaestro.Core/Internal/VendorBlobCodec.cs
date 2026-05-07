@@ -98,13 +98,121 @@ internal static class VendorBlobCodec
                     counter = (byte)(field.Initial ?? 0);
                 }
                 buffer[b] = counter;
-                encState.RollingCounters[key] = unchecked((byte)(counter + 1));
+                int step = field.Stride ?? 1;
+                encState.RollingCounters[key] = unchecked((byte)(counter + step));
                 break;
             }
             case "uint8":
             {
                 if (field.Byte is not int b) return;
                 buffer[b] = (byte)(field.Initial ?? 0);
+                break;
+            }
+            case "int16-le":
+            {
+                if (field.Byte is not int b) return;
+                short v = field.Semantic switch
+                {
+                    "gyroPitch" => state.GyroPitch,
+                    "gyroYaw"   => state.GyroYaw,
+                    "gyroRoll"  => state.GyroRoll,
+                    "accelX"    => state.AccelX,
+                    "accelY"    => state.AccelY,
+                    "accelZ"    => state.AccelZ,
+                    _ => (short)0,
+                };
+                if (b + 1 >= buffer.Length) return;
+                buffer[b]     = (byte)(v & 0xFF);
+                buffer[b + 1] = (byte)((v >> 8) & 0xFF);
+                break;
+            }
+            case "uint32-le":
+            {
+                if (field.Byte is not int b) return;
+                uint v = field.Semantic switch
+                {
+                    "sensorTimestamp" => state.SensorTimestamp,
+                    _ => 0u,
+                };
+                if (b + 3 >= buffer.Length) return;
+                buffer[b]     = (byte)(v        & 0xFF);
+                buffer[b + 1] = (byte)((v >>  8) & 0xFF);
+                buffer[b + 2] = (byte)((v >> 16) & 0xFF);
+                buffer[b + 3] = (byte)((v >> 24) & 0xFF);
+                break;
+            }
+            case "touchpad-finger":
+            {
+                // Sony two-finger packet: 4 bytes per finger.
+                //   byte 0: bit 7 = lifted (1 = not touching), bits 0-6 = tracking ID
+                //   byte 1: X low 8 bits
+                //   byte 2: bits 0-3 = X high 4 bits, bits 4-7 = Y low 4 bits
+                //   byte 3: Y high 8 bits
+                // Field's "semantic" picks finger0 vs finger1.
+                if (field.Byte is not int b) return;
+                if (b + 3 >= buffer.Length) return;
+                bool active; ushort x, y; byte id;
+                if (field.Semantic == "touchpadFinger1")
+                {
+                    active = state.TouchpadFinger1Active;
+                    x = state.TouchpadFinger1X;
+                    y = state.TouchpadFinger1Y;
+                    id = state.TouchpadFinger1Id;
+                }
+                else
+                {
+                    active = state.TouchpadFinger0Active;
+                    x = state.TouchpadFinger0X;
+                    y = state.TouchpadFinger0Y;
+                    id = state.TouchpadFinger0Id;
+                }
+                buffer[b]     = (byte)((id & 0x7F) | (active ? 0x00 : 0x80));
+                buffer[b + 1] = (byte)(x & 0xFF);
+                buffer[b + 2] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+                buffer[b + 3] = (byte)((y >> 4) & 0xFF);
+                break;
+            }
+            case "bitfield":
+            {
+                // 1-byte bit-packed flags. Each entry in field.Buttons names a
+                // semantic flag; bit position is the entry's index within the
+                // declared bit range (defaults to 0-7).
+                if (field.Byte is not int b || field.Buttons is null) return;
+                if ((uint)b >= (uint)buffer.Length) return;
+                int bitLo = 0, bitHi = 7;
+                if (TryParseBitRange(field.Bits, out int lo, out int hi)) { bitLo = lo; bitHi = hi; }
+                byte packed = 0;
+                for (int i = 0; i < field.Buttons.Count && (bitLo + i) <= bitHi; i++)
+                {
+                    string name = field.Buttons[i];
+                    if (string.IsNullOrEmpty(name) || name == "_") continue;
+                    bool bit = name switch
+                    {
+                        "batteryCharging"     => state.BatteryCharging,
+                        "batteryFull"         => state.BatteryFull,
+                        "micMuted"            => state.MicMuted,
+                        "headphonesConnected" => state.HeadphonesConnected,
+                        _ => false,
+                    };
+                    if (bit) packed |= (byte)(1 << (bitLo + i));
+                }
+                byte preserveMask = (byte)~(((1 << (bitHi - bitLo + 1)) - 1) << bitLo);
+                buffer[b] = (byte)((buffer[b] & preserveMask) | packed);
+                break;
+            }
+            case "uint8-battery":
+            {
+                // BatteryLevel byte. Semantic can carry a sub-bit range when
+                // combined with a bitfield in the same byte (Sony packs
+                // capacity in low nibble, charging+full in high nibble).
+                if (field.Byte is not int b) return;
+                if ((uint)b >= (uint)buffer.Length) return;
+                int bitLo = 0, bitHi = 7;
+                if (TryParseBitRange(field.Bits, out int lo, out int hi)) { bitLo = lo; bitHi = hi; }
+                int width = bitHi - bitLo + 1;
+                byte mask = (byte)(((1 << width) - 1) << bitLo);
+                byte v = (byte)(state.BatteryLevel & ((1 << width) - 1));
+                buffer[b] = (byte)((buffer[b] & ~mask) | ((v << bitLo) & mask));
                 break;
             }
             case "hat-octant":
@@ -193,17 +301,24 @@ internal static class VendorBlobCodec
 
     /// <summary>Encode a parsed-field dictionary into the byte buffer per the
     /// spec. Used by HMOutputEncoder for consumers that want to drive a real
-    /// device from synthesized state without reimplementing byte layouts.</summary>
+    /// device from synthesized state without reimplementing byte layouts.
+    ///
+    /// <para><paramref name="encState"/> may be null for stateless callers
+    /// (the historical signature). When supplied, <c>uint8-rolling</c> fields
+    /// without a matching dict entry advance an internal rolling counter so
+    /// the spec can own the framingTag pattern (Sony BT effect output's
+    /// <c>btTag</c> stride-16 cycle is the canonical case).</para></summary>
     public static byte[] EncodeOutput(
         ExtendedReportSpec spec,
-        IReadOnlyDictionary<string, object> fields)
+        IReadOnlyDictionary<string, object> fields,
+        EncoderState? encState = null)
     {
         var buffer = new byte[spec.Size];
         buffer[0] = spec.ReportIdByte;
 
         foreach (var field in spec.Fields)
         {
-            EncodeOutputField(field, buffer, fields);
+            EncodeOutputField(field, buffer, fields, encState);
         }
         return buffer;
     }
@@ -211,14 +326,14 @@ internal static class VendorBlobCodec
     private static void EncodeOutputField(
         FieldSpec field,
         byte[] buffer,
-        IReadOnlyDictionary<string, object> fields)
+        IReadOnlyDictionary<string, object> fields,
+        EncoderState? encState)
     {
         // For output, the source of every value is the parsed-fields dict
         // keyed by semantic name. Unmapped fields stay zero.
         switch (field.Type)
         {
             case "uint8":
-            case "uint8-rolling":
             {
                 if (field.Byte is not int b) return;
                 if (field.Semantic != null && fields.TryGetValue(field.Semantic, out var val))
@@ -234,6 +349,37 @@ internal static class VendorBlobCodec
                     // the effect packet if byte 2 isn't 0x10. Mirroring
                     // the input-side EncodeField behavior so consumers
                     // don't have to remember firmware-mandated constants.
+                    buffer[b] = (byte)field.Initial.Value;
+                }
+                break;
+            }
+            case "uint8-rolling":
+            {
+                if (field.Byte is not int b) return;
+                // If the consumer supplied an explicit value, honor it (lets
+                // a caller override the auto-advance for diagnostic fixtures).
+                if (field.Semantic != null && fields.TryGetValue(field.Semantic, out var val))
+                {
+                    buffer[b] = ToByte(val);
+                    break;
+                }
+                // Otherwise the codec auto-advances by stride. Required for
+                // Sony BT effect output's btTag — every distinct call must
+                // emit the next rolling value or real firmware silently
+                // drops the effect packet.
+                if (encState != null)
+                {
+                    string key = field.Semantic ?? $"_o{b}";
+                    if (!encState.RollingCounters.TryGetValue(key, out var counter))
+                    {
+                        counter = (byte)(field.Initial ?? 0);
+                    }
+                    buffer[b] = counter;
+                    int step = field.Stride ?? 1;
+                    encState.RollingCounters[key] = unchecked((byte)(counter + step));
+                }
+                else if (field.Initial.HasValue)
+                {
                     buffer[b] = (byte)field.Initial.Value;
                 }
                 break;

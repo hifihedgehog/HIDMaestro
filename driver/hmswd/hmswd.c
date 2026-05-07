@@ -226,8 +226,21 @@ usage:
             self_log(L"  poll +%dms  cm=%d devStatus=0x%08X problem=%u",
                 lastLogTick - startTick, (int)cr, devStatus, problem);
         }
-        /* Treat "live in PnP tree with DN_STARTED set" as authoritative success. */
-        if (cr == CR_SUCCESS && (devStatus & 0x00000008 /*DN_STARTED*/) != 0) {
+        /* Treat "live in PnP tree with DN_STARTED set" as authoritative
+         * success — but only for CREATE. The fast path was added for
+         * the subsequent-run SwDeviceCreate reuse-fast-path scenario
+         * where the callback never fires even though the devnode is
+         * live. For REMOVE, the SwDevice handle returned by
+         * SwDeviceCreate must be fully bound (callback fired) before
+         * SwDeviceSetLifetime(Handle) is legal — taking the fast path
+         * on REMOVE leaves hDev half-bound and SetLifetime fails with
+         * hr=0x80070032 ERROR_NOT_SUPPORTED, after which a subsequent
+         * SwDeviceClose does NOT downgrade lifetime, the kernel
+         * re-enumerates the SWDeviceLifetimeParentPresent devnode (and
+         * any HID children with bumped instance IDs &1&), and the
+         * harness's leftover detector trips. Reproduces deterministically
+         * on Atom under S08/S11's parallel teardown stress. */
+        if (!isRemove && cr == CR_SUCCESS && (devStatus & 0x00000008 /*DN_STARTED*/) != 0) {
             wait = WAIT_OBJECT_0;
             g_cb_hr = S_OK;
             wcsncpy_s(g_inst_id, 256, expectedInstId, _TRUNCATE);

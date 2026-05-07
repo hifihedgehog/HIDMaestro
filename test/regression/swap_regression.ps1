@@ -1138,17 +1138,31 @@ function Scenario-Hat-Resolution-Check {
     }
 }
 
+# Resolve a probe binary, tolerating both `dotnet build -r win-x64`
+# (output under .../net*/win-x64/) and `dotnet build` without a runtime
+# identifier (output one level up at .../net*/). Probes csproj declare
+# RuntimeIdentifiers=win-x64 but `dotnet build` without -r still emits
+# the cross-platform output, so the win-x64 subdir only exists when -r
+# is passed. Throw with the exact rebuild command if neither path
+# resolves — saves a re-run cycle when a contributor forgets the flag.
+function Resolve-ProbeBinary {
+    param([string]$ProbeDir, [string]$Exe)
+    $base = Join-Path $PSScriptRoot ('..\probes\' + $ProbeDir + '\bin\Release\net10.0-windows10.0.26100.0')
+    $base = [System.IO.Path]::GetFullPath($base)
+    foreach ($sub in @('win-x64\', '')) {
+        $candidate = Join-Path $base ($sub + $Exe)
+        if (Test-Path $candidate) { return $candidate }
+    }
+    throw ("$ProbeDir not built. Run: dotnet build test/probes/$ProbeDir -c Release -r win-x64")
+}
+
 # S29: Sony BT Report 0x31 input encoder. Closes #20. Verifies the data-driven
 # vendor-blob input encoder produces a correct 78-byte Report 0x31 with the
 # expected stick / trigger / button / hat byte placement and a valid CRC32 footer
 # (prefix [0xA1, 0x31] over bytes 1..73). Pre-v1.3.5 the SDK locked to Report 1
 # and Steam Input / dualsense-tester saw a broken DualSense BT.
 function Scenario-Sony-BT-Report31-Check {
-    $probe = Join-Path $PSScriptRoot '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyBtReport31Check.exe'
-    $probe = [System.IO.Path]::GetFullPath($probe)
-    if (-not (Test-Path $probe)) {
-        throw "sony_bt_report31_check not built. Run: dotnet build test/probes/sony_bt_report31_check -c Release -r win-x64"
-    }
+    $probe = Resolve-ProbeBinary 'sony_bt_report31_check' 'SonyBtReport31Check.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
         throw ("SonyBtReport31Check exited " + $p.ExitCode + " - extended input encoder produced unexpected bytes for dualsense-bt-full")
@@ -1161,11 +1175,7 @@ function Scenario-Sony-BT-Report31-Check {
 # matches an independent computation with prefix [0xA2, 0x31], and decode(encode(x))
 # preserves every declared field's value byte-for-byte.
 function Scenario-Sony-BT-Output-Decode-Check {
-    $probe = Join-Path $PSScriptRoot '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyBtOutputDecodeCheck.exe'
-    $probe = [System.IO.Path]::GetFullPath($probe)
-    if (-not (Test-Path $probe)) {
-        throw "sony_bt_output_decode_check not built. Run: dotnet build test/probes/sony_bt_output_decode_check -c Release -r win-x64"
-    }
+    $probe = Resolve-ProbeBinary 'sony_bt_output_decode_check' 'SonyBtOutputDecodeCheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
         throw ("SonyBtOutputDecodeCheck exited " + $p.ExitCode + " - output codec did not round-trip cleanly")
@@ -1179,14 +1189,52 @@ function Scenario-Sony-BT-Output-Decode-Check {
 # variant the SDK ships - DS5 BT, DS5 BT (full), DS5 Edge BT, DS4 v2 BT, DS5
 # USB, DS5 Edge USB, DS4 v1 USB, DS4 v1 USB (full), DS4 v2 USB.
 function Scenario-Sony-Data-Driven-Coverage {
-    $probe = Join-Path $PSScriptRoot '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\SonyDataDrivenCoverage.exe'
-    $probe = [System.IO.Path]::GetFullPath($probe)
-    if (-not (Test-Path $probe)) {
-        throw "sony_data_driven_coverage not built. Run: dotnet build test/probes/sony_data_driven_coverage -c Release -r win-x64"
-    }
+    $probe = Resolve-ProbeBinary 'sony_data_driven_coverage' 'SonyDataDrivenCoverage.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
         throw ("SonyDataDrivenCoverage exited " + $p.ExitCode + " - DS4 BT / USB output codec did not round-trip cleanly")
+    }
+}
+
+# S32: v1.3.5 features + regression check. Combined probe covering every
+# fix from the issue #21 PadForge spot-check rounds:
+#   Round 3 — USB Sony profiles can't trigger the codec hot path
+#             (regression: per-frame VendorBlobCodec.EncodeInput at 250 Hz
+#             on USB DS5 caused stick-jerkiness on ds.daidr.me)
+#   Round 5 — DS5 sensor byte positions (gyro/accel/sensorTimestamp shift +1
+#             because Linux dualsense_input_report struct excludes report_id)
+#   Round 6 — DS4 BT armOn IDs are DS4-canonical (0x02/0xA3, not DS5's
+#             0x05/0x09/0x20)
+#   Round 7 — DS4 BT versionNumber=0 so Chromium's
+#             Dualshock4Controller::BusTypeFromVersionNumber routes vibration
+#             through Report 0x11 BT instead of Report 0x05 USB
+#   Round 8 — DS5 Edge USB activeProfile=0x80 via inputDefaults overlay,
+#             BT Edge same constant declared as a uint8 codec field with
+#             initial=128 ordered before the CRC32 entry so it participates
+#             in the checksum
+#   Round 8b — SDK plumbing: ControllerProfile.InputDefaults +
+#              InputBytePatch list, applied in BOTH SubmitState's legacy
+#              branch AND SubmitRawReport (PadForge's USB path calls both
+#              and the raw bytes would otherwise clobber the overlay)
+#   Round 8c — Edge USB inputDefaults extended to bytes 50/51/52 = 0 to
+#              override PadForge's SonyReportPackers Timer 2 counter at
+#              data[48..51] (was leaking the counter's middle bytes into
+#              triggerLevel and triggering isStickModuleLost ~94% of frames)
+#   Feature 1 — touchpad-finger / int16-le / uint32-le / bitfield /
+#               uint8-battery codec types + sensor/touchpad/battery byte
+#               positions in DS5 USB+BT
+#   Feature 2 — audio block declared in all 9 Sony extendedOutputReport
+#               specs (DS5: headphoneVolume/speakerVolume/micVolume/
+#               audioControlFlags; DS4: stereo headphoneVolumeLeft/Right
+#               + micVolume/speakerVolume)
+#   Feature 3 — DS5 BT btTag uint8-rolling stride 16 (cycles 0x00..0xF0
+#               then wraps; per-controller HMController.EncodeOutput
+#               threads the auto-advancing counter)
+function Scenario-V135-Features-Check {
+    $probe = Resolve-ProbeBinary 'v135_features_check' 'V135FeaturesCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("V135FeaturesCheck exited " + $p.ExitCode + " - one or more v1.3.5 fix invariants regressed (see probe stdout)")
     }
 }
 
@@ -1225,7 +1273,8 @@ $scenarios = @(
     @{ Name = 'S28_Hat_Resolution_Encoder';       Body = ${function:Scenario-Hat-Resolution-Check} },
     @{ Name = 'S29_Sony_BT_Report31_Encoder';     Body = ${function:Scenario-Sony-BT-Report31-Check} },
     @{ Name = 'S30_Sony_BT_Output_RoundTrip';     Body = ${function:Scenario-Sony-BT-Output-Decode-Check} },
-    @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} }
+    @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} },
+    @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

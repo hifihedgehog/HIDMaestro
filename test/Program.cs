@@ -841,13 +841,29 @@ class Program
         if (pkt.Source == HMOutputSource.XInput && data.Length >= 5)
             return $"XInput rumble lo={data[2]} hi={data[3]}";
 
-        // DualSense / DS4 output report (HID OUTPUT, report ID 0x05 / 0x02):
-        // first few bytes carry rumble + LED + adaptive trigger config.
+        // DualSense / DS4 output report (HID OUTPUT). Motor offsets differ
+        // between USB and BT report formats:
+        //   DS5 USB Report 0x02 — motors at data[2..3]
+        //   DS5 BT  Report 0x31 — BT framing prefix shifts motors to data[3..4]
+        //   DS4 USB Report 0x05 — motors at data[3..4] (byte 1 = enable flags)
+        //   DS4 BT  Report 0x11 — Sony BT 0xC0 0x20 framing → motors at data[5..6]
+        //                        (per Chromium dualshock4_controller.cc
+        //                         SetVibrationBluetooth: bytes 6/7 of the
+        //                         RID-included buffer = data[5..6] post-strip).
         if (pkt.Source == HMOutputSource.HidOutput
             && profile.VendorId == 0x054C && data.Length >= 4)
         {
-            // Report ID 0x05 (DualSense USB) layout: byte[2..3] are rumble lo/hi
-            return $"PS rumble lo={data[2]} hi={data[3]} ({data.Length}B)";
+            int rumbleOffset;
+            switch (pkt.ReportId)
+            {
+                case 0x02: rumbleOffset = 2; break; // DS5 USB
+                case 0x31: rumbleOffset = 3; break; // DS5 BT
+                case 0x05: rumbleOffset = 3; break; // DS4 USB
+                case 0x11: rumbleOffset = 5; break; // DS4 BT
+                default:   rumbleOffset = 2; break; // best-effort fallback
+            }
+            if (rumbleOffset + 1 < data.Length)
+                return $"PS rumble weak={data[rumbleOffset]} strong={data[rumbleOffset + 1]} ({data.Length}B)";
         }
 
         // Xbox 360 / One HID rumble output report (when sent via HID OUTPUT)

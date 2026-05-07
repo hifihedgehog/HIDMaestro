@@ -11,6 +11,7 @@
   "descriptor": "05010905a10185010930093109320935150026ff0075089504810209391500250775049501814205091901290e150025017501950e8102750695018101050109330934150026ff007508950281020604ff850209249524b10285a309259530b102850509269528b102850609279534b102850709289530b10285080929952fb1028509092a9513b1020603ff850309219526b10285040922952eb10285f00947953fb10285f10948953fb10285f20949950fb1020600ff85110920150026ff007508954d81020921910285120922958d8102092391028513092495cd81020925910285140926960d0181020927910285150928964d018102092991028516092a968d018102092b91028517092c96cd018102092d91028518092e960d028102092f9102851909309622028102093191020680ff85820922953fb10285830923b10285840924b10285900930b10285910931b10285920932b10285930933b10285940934b10285a00940b10285a40944b10285a70945b10285a80945b10285a90945b10285aa0945b10285ab0945b10285ac0945b10285ad0945b10285b30945b10285b40946b10285b50947b10285d00940b10285d40944b102c0",
   "nativeDescriptor": "05010905a10185010930093109320935150026ff0075089504810209391500250775049501814205091901290e150025017501950e8102750695018101050109330934150026ff007508950281020604ff850209249524b10285a309259530b102850509269528b102850609279534b102850709289530b10285080929952fb1028509092a9513b1020603ff850309219526b10285040922952eb10285f00947953fb10285f10948953fb10285f20949950fb1020600ff85110920150026ff007508954d81020921910285120922958d8102092391028513092495cd81020925910285140926960d0181020927910285150928964d018102092991028516092a968d018102092b91028517092c96cd018102092d91028518092e960d028102092f9102851909309622028102093191020680ff85820922953fb10285830923b10285840924b10285900930b10285910931b10285920932b10285930933b10285940934b10285a00940b10285a40944b10285a70945b10285a80945b10285a90945b10285aa0945b10285ab0945b10285ac0945b10285ad0945b10285b30945b10285b40946b10285b50947b10285d00940b10285d40944b102c0",
   "inputReportSize": 78,
+  "versionNumber": 0,
   "notes": "v1.3.5 — extendedReport (Report 0x11, 78-byte vendor blob with CRC32) is emitted only after the host issues Get_Feature 0x05/0x09/0x20 (armOn trigger). Default state stays on the descriptor-declared Report 0x01 short layout so joy.cpl, RawInput, and generic HID consumers see structured sticks/buttons/triggers. Steam Input, ds4drv-style parsers, and browser HID apps switch the virtual to Report 0x11 emission via the same handshake. Source for original BT descriptor: DJm00n/ControllersInfo. Same PID as USB DS4 v2 but different descriptor layout. nativeDescriptor preserves the original real-hardware descriptor. Closes #20 for the DS4 family.",
   "buttonMap": [
     1,
@@ -125,6 +126,60 @@
         "semantic": "rightTrigger"
       },
       {
+        "byte": 16,
+        "type": "uint8-battery",
+        "semantic": "batteryLevel"
+      },
+      {
+        "byte": 17,
+        "type": "int16-le",
+        "semantic": "gyroPitch"
+      },
+      {
+        "byte": 19,
+        "type": "int16-le",
+        "semantic": "gyroYaw"
+      },
+      {
+        "byte": 21,
+        "type": "int16-le",
+        "semantic": "gyroRoll"
+      },
+      {
+        "byte": 23,
+        "type": "int16-le",
+        "semantic": "accelX"
+      },
+      {
+        "byte": 25,
+        "type": "int16-le",
+        "semantic": "accelY"
+      },
+      {
+        "byte": 27,
+        "type": "int16-le",
+        "semantic": "accelZ"
+      },
+      {
+        "byte": 35,
+        "type": "bitfield",
+        "bits": "0-1",
+        "buttons": [
+          "headphonesConnected",
+          "micMuted"
+        ]
+      },
+      {
+        "byte": 40,
+        "type": "touchpad-finger",
+        "semantic": "touchpadFinger0"
+      },
+      {
+        "byte": 44,
+        "type": "touchpad-finger",
+        "semantic": "touchpadFinger1"
+      },
+      {
         "bytes": "74-77",
         "type": "crc32-le",
         "scope": {
@@ -140,15 +195,11 @@
     "armOn": [
       {
         "type": "featureRead",
-        "reportId": "0x05"
+        "reportId": "0x02"
       },
       {
         "type": "featureRead",
-        "reportId": "0x09"
-      },
-      {
-        "type": "featureRead",
-        "reportId": "0x20"
+        "reportId": "0xa3"
       }
     ]
   },
@@ -158,8 +209,10 @@
     "fields": [
       {
         "byte": 1,
-        "type": "uint8",
-        "semantic": "btTag"
+        "type": "uint8-rolling",
+        "semantic": "btTag",
+        "initial": 0,
+        "stride": 16
       },
       {
         "byte": 2,
@@ -195,6 +248,31 @@
         "byte": 12,
         "type": "uint8",
         "semantic": "flashOff"
+      },
+      {
+        "bytes": "3-33",
+        "type": "bytes-passthrough",
+        "semantic": "effectPayload"
+      },
+      {
+        "byte": 21,
+        "type": "uint8",
+        "semantic": "headphoneVolumeLeft"
+      },
+      {
+        "byte": 22,
+        "type": "uint8",
+        "semantic": "headphoneVolumeRight"
+      },
+      {
+        "byte": 23,
+        "type": "uint8",
+        "semantic": "micVolume"
+      },
+      {
+        "byte": 24,
+        "type": "uint8",
+        "semantic": "speakerVolume"
       },
       {
         "bytes": "74-77",

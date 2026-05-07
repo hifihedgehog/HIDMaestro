@@ -92,14 +92,10 @@ AppendUlongDecimal(WCHAR *dest, ULONG value, SIZE_T maxChars)
 /* Must stay in sync with HIDMAESTRO_SHARED_INPUT in driver/driver.h.
  * Data[] widened from 64 to 256 bytes 2026-04-23 to carry full DualSense
  * BT / Switch Pro gyro-bearing reports through the shared memory pipe
- * without truncation.
- *
- * v1.3.5 — ExtendedReportSize + ExtendedReportData[80] appended for
- * vendor-blob mode-switch (Sony BT extended Report 0x31 / 0x11). The
- * companion only reads the GIP slice for XUSB GET_STATE, so it doesn't
- * touch the extended fields, but the struct layout must match
- * driver/driver.h byte-for-byte to keep the section size and field
- * offsets consistent. */
+ * without truncation. v1.3.5 — added ExtendedReportSize/ExtendedReportData
+ * tail for Sony BT vendor-blob mode-switch path. Companion only reads
+ * SeqNo + GipData; the tail is unused here but mirrored so any
+ * MapViewOfFile sizing or future field offset reuses driver.h's layout. */
 typedef struct {
     ULONG SeqNo;
     ULONG DataSize;

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using HIDMaestro.Internal;
 
@@ -111,6 +112,15 @@ public sealed class HMController : IDisposable
     // reportCounter increment monotonically across SubmitState calls).
     private VendorBlobCodec.EncoderState? _extEncoderState;
 
+    // v1.3.5 — vendor-blob output encoder state. Allocated lazily on the
+    // first EncodeOutput call so consumers that never call it (input-only
+    // virtuals, output-via-OnOutputReceived consumers) skip the dictionary
+    // alloc. Holds rolling counters for output direction — Sony BT effect
+    // output's btTag increments stride-16 per write or real firmware drops
+    // the packet.
+    private VendorBlobCodec.EncoderState? _outputEncoderState;
+    private readonly object _outputEncoderStateLock = new();
+
     // v1.3.5 — buffer sized to ExtendedReport.Size, allocated once. NULL
     // when the profile has no extendedReport.
     private byte[]? _extendedReportBuffer;
@@ -121,6 +131,13 @@ public sealed class HMController : IDisposable
     // descriptor-driven BuildReportInto path so consumers that never issue
     // the handshake still see legacy Report 1 emission.
     private volatile bool _extendedModeArmed;
+
+    /// <summary>Optional diagnostic: invoked at the end of every successful
+    /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
+    /// when investigating per-frame submit latency (e.g. issue #21 USB
+    /// stalls). Called inline on the caller's thread; keep the handler
+    /// short — log to a ring buffer or counter, don't block.</summary>
+    public Action<long>? OnSubmitLatencyMicros { get; set; }
 
     // PID FFB state section. Lazy: created on the first PublishPid* call so
     // a non-FFB consumer never allocates the section. Once created, the
@@ -283,10 +300,17 @@ public sealed class HMController : IDisposable
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 
-        // v1.3.5 — pre-allocate vendor-blob buffer + encoder state when the
-        // profile declares extendedReport. Saves a per-frame alloc on the
-        // SubmitState hot path for Sony BT profiles.
-        if (profile.ExtendedReport != null)
+        // v1.3.5 — pre-allocate vendor-blob buffer + encoder state ONLY when
+        // the profile actually arms (Sony BT post-handshake). Profiles with
+        // extendedReport metadata but no armOn list (every USB Sony profile,
+        // every generic profile) never run the codec, so the buffer alloc
+        // would be dead memory and the SubmitState hot path would carry an
+        // unused extended-write branch. Issue #21 USB jerkiness: keeping
+        // this allocation off entirely on USB profiles is the difference
+        // between v1.3.4-equivalent hot-path codegen and the regressed path.
+        bool armOnDeclared = profile.ExtendedReport?.ArmOn != null
+                          && profile.ExtendedReport.ArmOn.Count > 0;
+        if (profile.ExtendedReport != null && armOnDeclared)
         {
             _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
@@ -317,6 +341,9 @@ public sealed class HMController : IDisposable
     public void SubmitState(in HMGamepadState state)
     {
         ThrowIfDisposed();
+
+        long startTicks = OnSubmitLatencyMicros != null
+            ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
         // HMGamepadState uses [-1..+1] for sticks and [0..1] for triggers.
         // HidReportBuilder.BuildReport expects [0..1] normalized values for
@@ -349,12 +376,25 @@ public sealed class HMController : IDisposable
         // ExtendedReport with a missing armOn list flips this back to "always
         // extended" — used by output-only profiles or test fixtures where
         // arming-on-demand is the wrong default.
-        bool armOnDeclared = Profile.ExtendedReport?.ArmOn != null
-                          && Profile.ExtendedReport.ArmOn.Count > 0;
+        // The codec runs only after the host-side arm-handshake has fired.
+        // Profiles without an armOn list (every USB Sony profile, every
+        // generic profile) never arm, so they always take the legacy
+        // BuildReportInto path — same code path v1.3.4 used. This avoids
+        // the per-frame codec cost (field-list walk, CRC compute, byte
+        // re-encode) on the 250 Hz SubmitState hot path for profiles that
+        // don't need vendor-blob input emission. Bug #21: pre-v1.3.5 USB
+        // profiles had no extendedReport at all and this gate didn't apply;
+        // 0cec81d added extendedReport metadata to USB Sony profiles for
+        // PadForge's bidirectional decode, which silently flipped USB onto
+        // the codec path even though USB doesn't need vendor-blob input
+        // (its descriptor already declares structured X/Y/Rx/Ry usages
+        // that joy.cpl, dinput, and the test app's parsers all decode
+        // correctly). Restoring the v1.3.4 path for USB removes the
+        // regression.
         bool useExtended = Profile.ExtendedReport != null
                         && _extendedReportBuffer != null
                         && _extEncoderState != null
-                        && (!armOnDeclared || _extendedModeArmed);
+                        && _extendedModeArmed;
 
         if (useExtended)
         {
@@ -385,6 +425,26 @@ public sealed class HMController : IDisposable
                 hatDegrees: state.HatDegrees,
                 hatHundredths: state.HatHundredths,
                 hatRaw: state.HatRaw);
+
+            // v1.3.5 — overlay profile-declared fixed bytes (e.g. DS5 Edge
+            // USB activeProfile = 0x80 at byte 49 so dualsense-tester's
+            // useInNormalMode check `byte && (byte & 3) === 0` succeeds —
+            // see profiles/sony/dualsense-edge.json inputDefaults). Codec
+            // path doesn't need this: it walks ExtendedReport.fields which
+            // already lists these as uint8 entries with `initial` values,
+            // so the constants participate in CRC32 computation. Legacy
+            // path has no CRC, so a post-encode overlay is fine.
+            var inputDefaults = Profile.Inner.InputDefaults;
+            if (inputDefaults != null)
+            {
+                int len = _reportBuffer.Length;
+                foreach (var p in inputDefaults)
+                {
+                    if ((uint)p.Byte < (uint)len)
+                        _reportBuffer[p.Byte] = (byte)p.Value;
+                }
+            }
+
             report = _reportBuffer;
         }
 
@@ -480,6 +540,13 @@ public sealed class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
                 _packsGipBuffer ? _gipBuf : null, dataStart);
         }
+
+        if (OnSubmitLatencyMicros != null)
+        {
+            long elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+            long micros = elapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
+            OnSubmitLatencyMicros(micros);
+        }
     }
 
     /// <summary>Push a raw HID input report for features that
@@ -513,6 +580,29 @@ public sealed class HMController : IDisposable
         // DualSense path, etc.) hit this path at the same rate as
         // SubmitState; the alloc-per-call cost was visible.
         report.CopyTo(_rawReportBuffer.AsSpan());
+
+        // v1.3.5 — overlay profile-declared fixed bytes. Note that
+        // SubmitRawReport's `report` arg is DATA-ONLY (no report ID byte
+        // prepended); inputDefaults entries are JSON-keyed by ON-WIRE byte
+        // (where byte 0 is the report ID), so we subtract 1 to land in
+        // the data-buffer coordinate system. PadForge's USB DS5 raw packers
+        // build the standard Sony layout but don't know about Edge-specific
+        // status bytes (activeProfile at struct[48]); without overlaying
+        // here, SubmitRawReport clobbers whatever SubmitState wrote a few
+        // microseconds earlier.
+        var rawDefaults = Profile.Inner.InputDefaults;
+        if (rawDefaults != null)
+        {
+            int len = Math.Min(report.Length, _rawReportBuffer.Length);
+            byte rid = (byte)(_reportBuilder.InputReportId);
+            int dataShift = rid != 0 ? 1 : 0;
+            foreach (var p in rawDefaults)
+            {
+                int idx = p.Byte - dataShift;
+                if ((uint)idx < (uint)len)
+                    _rawReportBuffer[idx] = (byte)p.Value;
+            }
+        }
         // Raw mode reuses the GIP buffer at whatever state SubmitState last
         // left it in (or zero if SubmitState was never called) — raw consumers
         // are expected to also call SubmitState if they need GIP/XInput.
@@ -522,6 +612,38 @@ public sealed class HMController : IDisposable
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length,
             _packsGipBuffer ? _gipBuf : null);
+    }
+
+    /// <summary>v1.3.5 — instance-level <see cref="HMOutputEncoder.Encode"/>
+    /// that threads per-controller rolling-counter state through the codec.
+    ///
+    /// <para>Required for DS5 BT effect output: the spec's <c>btTag</c> field
+    /// is a stride-16 rolling counter, and real Sony firmware drops the
+    /// effect packet if consecutive writes don't carry the next tag value.
+    /// The static <see cref="HMOutputEncoder.Encode"/> overload is stateless
+    /// and falls back to <c>initial</c>; use this method instead so the
+    /// SDK owns the increment.</para>
+    ///
+    /// <para>Per-controller — multiple virtuals never share counter state.
+    /// The internal lock makes this safe to call from any thread.</para>
+    ///
+    /// <para>Throws <see cref="InvalidOperationException"/> if the profile
+    /// has no <c>extendedOutputReport</c> spec.</para></summary>
+    public byte[] EncodeOutput(IReadOnlyDictionary<string, object> fields)
+    {
+        ThrowIfDisposed();
+        if (fields == null) throw new ArgumentNullException(nameof(fields));
+
+        var spec = Profile.ExtendedOutputReport;
+        if (spec == null)
+            throw new InvalidOperationException(
+                $"Profile '{Profile.Id}' has no extendedOutputReport spec — nothing to encode against.");
+
+        lock (_outputEncoderStateLock)
+        {
+            _outputEncoderState ??= new VendorBlobCodec.EncoderState();
+            return VendorBlobCodec.EncodeOutput(spec, fields, _outputEncoderState);
+        }
     }
 
     /// <summary>Background polling loop that reads from the per-controller

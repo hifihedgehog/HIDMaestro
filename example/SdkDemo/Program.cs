@@ -163,12 +163,23 @@ Console.WriteLine("  PID FFB enabled on ctrl0 (Pool + initial State published)")
 // SDK encodes the abstract state into the active profile's HID
 // descriptor and publishes via shared memory.
 //
-// HMGamepadState fields:
-//   LeftStickX/Y, RightStickX/Y  — [-1.0 .. +1.0]
-//   LeftTrigger, RightTrigger     — [ 0.0 .. +1.0]
-//   Buttons                       — HMButton flags (A, B, X, Y, LB, RB, etc.)
-//   Hat                           — HMHat enum (None, N, NE, E, SE, S, SW, W, NW)
-Console.WriteLine("\n  Sending input for 5 seconds (sticks + triggers + buttons + hat)...");
+// HMGamepadState fields (in v1.3.5):
+//   Sticks/triggers       LeftStickX/Y, RightStickX/Y  [-1..+1]
+//                         LeftTrigger, RightTrigger    [ 0..+1]
+//   Buttons               HMButton flags (A, B, X, Y, LB, RB, …)
+//   Hat                   HMHat enum + HatDegrees / HatHundredths / HatRaw
+//   Touchpad              TouchpadFinger0Active/X/Y/Id, TouchpadFinger1*,
+//                         TouchpadPacketCounter
+//   IMU                   GyroPitch/Yaw/Roll, AccelX/Y/Z (int16),
+//                         SensorTimestamp (uint32 µs)
+//   Battery + housekeeping BatteryLevel (0..10), BatteryCharging,
+//                         BatteryFull, MicMuted, HeadphonesConnected
+//
+// The encoder writes whatever fields the active profile's descriptor or
+// extendedReport declares. Profiles that don't declare a touchpad usage
+// silently ignore TouchpadFinger0X et al.; the field stays present on
+// the struct so the same caller code works across every profile.
+Console.WriteLine("\n  Sending input for 5 seconds (sticks + triggers + buttons + hat + touchpad + IMU)...");
 var sw = Stopwatch.StartNew();
 int frames = 0;
 while (sw.ElapsedMilliseconds < 5_000)
@@ -190,6 +201,28 @@ while (sw.ElapsedMilliseconds < 5_000)
         RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 3)),
         Buttons      = ((int)t % 2 == 0) ? HMButton.A : HMButton.B,
         Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),  // cycle N through NW
+
+        // v1.3.5 Sony surface — touchpad finger 0 traces a circle, gravity
+        // vector at +1g on Y for a face-up controller, battery at 80%
+        // charging. ds.daidr.me's touchpad / motion / battery panels render
+        // these for any DualSense (USB or BT, post-arm) virtual.
+        TouchpadFinger0Active = true,
+        TouchpadFinger0X      = (ushort)(960 + 800 * Math.Cos(angle)),
+        TouchpadFinger0Y      = (ushort)(540 + 400 * Math.Sin(angle)),
+        TouchpadFinger0Id     = 1,
+        TouchpadPacketCounter = (byte)((int)(t * 100) & 0xFF),
+        GyroPitch             = (short)(2000 * Math.Sin(angle * 0.3)),
+        GyroYaw               = (short)(2000 * Math.Cos(angle * 0.3)),
+        GyroRoll              = 0,
+        AccelX                = 0,
+        AccelY                = 8000, // ~1g face-up
+        AccelZ                = 0,
+        SensorTimestamp       = (uint)(sw.ElapsedTicks * 1_000_000L
+                                       / Stopwatch.Frequency),
+        BatteryLevel          = 8,
+        BatteryCharging       = true,
+        HeadphonesConnected   = false,
+        MicMuted              = false,
     };
     ctrl0.SubmitState(in state0);
 
