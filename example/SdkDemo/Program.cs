@@ -163,9 +163,11 @@ Console.WriteLine("  PID FFB enabled on ctrl0 (Pool + initial State published)")
 // SDK encodes the abstract state into the active profile's HID
 // descriptor and publishes via shared memory.
 //
-// HMGamepadState fields (in v1.3.5):
-//   Sticks/triggers       LeftStickX/Y, RightStickX/Y  [-1..+1]
-//                         LeftTrigger, RightTrigger    [ 0..+1]
+// HMGamepadState fields (v1.3.9):
+//   Axes                  Dictionary<HMAxis, float>; values [0..1] uniform.
+//                         Drive any descriptor-declared analog input by HID
+//                         usage. Centered = 0.5 on signed axes, released = 0
+//                         on unsigned. Discovery via Profile.Sticks / .Triggers.
 //   Buttons               HMButton flags (A, B, X, Y, LB, RB, …)
 //   Hat                   HMHat enum + HatDegrees / HatHundredths / HatRaw
 //   Touchpad              TouchpadFinger0Active/X/Y/Id, TouchpadFinger1*,
@@ -569,25 +571,23 @@ Console.WriteLine("\n  10c. Sony BT vendor-blob path (Report 0x31)...");
     }
 }
 
-// ── 10d. v1.3.8: arbitrary analog axes via HMAxis / ExtraAxes ────────
-// HMGamepadState's standard slots cover the 4-stick + 2-trigger gamepad
-// shape. For HOTAS sticks with throttle sliders, racing wheels with
-// separate brake/throttle/clutch pedals, flight stick rudder pedals — the
-// fields exist in the HID descriptor but the abstract state struct can't
-// reach them. v1.3.8 adds:
+// ── 10d. Arbitrary analog axes via HMAxis ────────────────────────────
+// For HOTAS sticks with throttle sliders, racing wheels with separate
+// brake/throttle/clutch pedals, flight-stick rudder pedals: drive any
+// descriptor-declared usage directly through state.Axes by HMAxis key.
 //
-//   • HMAxis enum               — every recognized HID Generic Desktop /
-//                                 Simulation Controls analog usage
-//   • HMGamepadState.ExtraAxes  — opt-in Dictionary<HMAxis,float> drive
-//                                 by HID usage. Null = no allocation, no
-//                                 hot-path cost
-//   • HMProfile.AvailableAxes   — discovery: list every HMAxis the
-//                                 descriptor declares
-//   • HidDescriptorBuilder.AddAxis — emit any HMAxis-keyed input field
-//
-// Existing HMGamepadState.LeftStickX / LeftTrigger / etc. still work
-// for ordinary pads. ExtraAxes runs LAST in the encoder so explicit
-// drives override semantic-slot drives at the same descriptor field.
+//   • HMAxis enum               every recognized HID Generic Desktop /
+//                                Simulation Controls analog usage
+//   • state.Axes                Dictionary<HMAxis, float> [0..1] uniform.
+//                                Drive by HID usage; null = no allocation,
+//                                no hot-path cost
+//   • HMProfile.AvailableAxes   discovery: list every HMAxis the
+//                                descriptor declares
+//   • HidDescriptorBuilder.AddAxis emit any HMAxis-keyed input field
+//   • HMGamepadStateHelpers.StandardAxes(profile, ...) ergonomic shortcut
+//                                for the common 6-slot LX/LY/RX/RY/LT/RT
+//                                convention; resolves axis keys from
+//                                Profile.Sticks / .Triggers automatically
 Console.WriteLine("\n  10d. Custom HOTAS with throttle slider + rudder pedal...");
 var hotasAxisBuilder = new HidDescriptorBuilder()
     .Joystick()
