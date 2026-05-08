@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace HIDMaestro;
 
@@ -140,6 +141,89 @@ public struct HMGamepadState
 
     /// <summary>Headphones detected on the 3.5 mm jack.</summary>
     public bool HeadphonesConnected;
+
+    // ── Arbitrary analog axes (HOTAS, wheels, throttle quadrants, pedals) ──
+
+    /// <summary>Drive any descriptor-declared analog axis by HID usage. Use
+    /// when the profile has more than the standard 4 sticks + 2 triggers —
+    /// flight sticks with throttle sliders, racing wheels with separate
+    /// brake/throttle/clutch pedals, HOTAS systems with rudder pedals plus
+    /// a stick. Each value is normalized to [0.0 .. 1.0] and the SDK scales
+    /// it into the descriptor field's logical range.
+    ///
+    /// <para>A profile's reachable axes are listed in
+    /// <see cref="HMProfile.AvailableAxes"/>. Setting an entry whose usage
+    /// the descriptor doesn't declare is a no-op.</para>
+    ///
+    /// <para>When an axis is also reachable via a semantic slot (e.g. the
+    /// SideWinder slider also resolves to <see cref="LeftTrigger"/>),
+    /// <c>ExtraAxes</c> takes precedence — explicit beats implicit.</para>
+    ///
+    /// <para>Null on the hot path costs nothing; the encoder skips the
+    /// dictionary walk entirely. Allocate it once and reuse.</para></summary>
+    public Dictionary<HMAxis, float>? ExtraAxes;
+}
+
+/// <summary>HID-usage-addressable analog axes. Values encode the (UsagePage,
+/// Usage) pair as <c>(page &lt;&lt; 8) | usage</c> so consumers can switch
+/// directly on a descriptor's declared usages.
+///
+/// <para>Generic Desktop (page 0x01): X, Y, Z, Rx, Ry, Rz are standard stick
+/// and trigger usages. Slider, Dial, Wheel cover throttle quadrants and
+/// steering. Vx-Vno are the velocity/relative usages (HM uses Vx/Vy as
+/// the hidden separate-trigger pair the WGI Xbox path needs).</para>
+///
+/// <para>Simulation Controls (page 0x02): the analog flight/automotive/
+/// marine/cycling control set. Anything declared as an Input axis can be
+/// driven through <see cref="HMGamepadState.ExtraAxes"/>.</para></summary>
+public enum HMAxis : ushort
+{
+    None = 0,
+
+    // Generic Desktop (page 0x01)
+    X       = 0x0130,
+    Y       = 0x0131,
+    Z       = 0x0132,
+    Rx      = 0x0133,
+    Ry      = 0x0134,
+    Rz      = 0x0135,
+    Slider  = 0x0136,
+    Dial    = 0x0137,
+    Wheel   = 0x0138,
+    Vx      = 0x0140,
+    Vy      = 0x0141,
+    Vz      = 0x0142,
+    Vbrx    = 0x0143,
+    Vbry    = 0x0144,
+    Vbrz    = 0x0145,
+    Vno     = 0x0146,
+
+    // Simulation Controls (page 0x02)
+    Aileron          = 0x02B0,
+    AileronTrim      = 0x02B1,
+    AntiTorque       = 0x02B2,
+    CollectiveControl= 0x02B5,
+    DiveBrake        = 0x02B6,
+    Elevator         = 0x02B8,
+    ElevatorTrim     = 0x02B9,
+    Rudder           = 0x02BA,
+    Throttle         = 0x02BB,
+    LandingGear      = 0x02BE,
+    ToeBrake         = 0x02BF,
+    WingFlaps        = 0x02C3,
+    Accelerator      = 0x02C4,
+    Brake            = 0x02C5,
+    Clutch           = 0x02C6,
+    Shifter          = 0x02C7,
+    Steering         = 0x02C8,
+    TurretDirection  = 0x02C9,
+    BarrelElevation  = 0x02CA,
+    DivePlane        = 0x02CB,
+    Ballast          = 0x02CC,
+    BicycleCrank     = 0x02CD,
+    HandleBars       = 0x02CE,
+    FrontBrake       = 0x02CF,
+    RearBrake        = 0x02D0,
 }
 
 /// <summary>Standard gamepad button bitmask. Profile-specific renames (Cross/A, Circle/B,

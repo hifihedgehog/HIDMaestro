@@ -96,22 +96,28 @@ public sealed class HMProfile
     /// <summary>Number of buttons declared in the HID descriptor.</summary>
     public int ButtonCount => GetLayout()?.Buttons.Count ?? 0;
 
-    /// <summary>Number of axes (sticks + triggers) declared in the descriptor.</summary>
-    public int AxisCount
+    /// <summary>Number of analog axes declared in the descriptor — counts
+    /// every Generic Desktop / Simulation Controls input axis the parser
+    /// recognizes (sticks, triggers, sliders, throttles, rudders, pedals,
+    /// etc.). Use <see cref="AvailableAxes"/> to enumerate them by HID
+    /// usage.</summary>
+    public int AxisCount => GetLayout()?.AxisFields.Count ?? 0;
+
+    /// <summary>Every analog axis the descriptor declares, addressable by
+    /// HID usage via <see cref="HMGamepadState.ExtraAxes"/>. Empty list
+    /// when the profile has no descriptor or no recognized axes. Stable
+    /// across repeated calls — the underlying layout is parsed once and
+    /// cached.</summary>
+    public IReadOnlyList<HMAxis> AvailableAxes
     {
         get
         {
             var l = GetLayout();
-            if (l == null) return 0;
-            int n = 0;
-            if (l.LeftStickX != null) n++;
-            if (l.LeftStickY != null) n++;
-            if (l.RightStickX != null) n++;
-            if (l.RightStickY != null) n++;
-            if (l.LeftTrigger != null) n++;
-            if (l.RightTrigger != null) n++;
-            if (l.CombinedTrigger != null) n++;
-            return n;
+            if (l == null) return Array.Empty<HMAxis>();
+            var arr = new HMAxis[l.AxisFields.Count];
+            int i = 0;
+            foreach (var k in l.AxisFields.Keys) arr[i++] = k;
+            return arr;
         }
     }
 

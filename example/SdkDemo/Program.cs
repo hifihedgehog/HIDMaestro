@@ -560,6 +560,72 @@ Console.WriteLine("\n  10c. Sony BT vendor-blob path (Report 0x31)...");
     }
 }
 
+// ── 10d. v1.3.8: arbitrary analog axes via HMAxis / ExtraAxes ────────
+// HMGamepadState's standard slots cover the 4-stick + 2-trigger gamepad
+// shape. For HOTAS sticks with throttle sliders, racing wheels with
+// separate brake/throttle/clutch pedals, flight stick rudder pedals — the
+// fields exist in the HID descriptor but the abstract state struct can't
+// reach them. v1.3.8 adds:
+//
+//   • HMAxis enum               — every recognized HID Generic Desktop /
+//                                 Simulation Controls analog usage
+//   • HMGamepadState.ExtraAxes  — opt-in Dictionary<HMAxis,float> drive
+//                                 by HID usage. Null = no allocation, no
+//                                 hot-path cost
+//   • HMProfile.AvailableAxes   — discovery: list every HMAxis the
+//                                 descriptor declares
+//   • HidDescriptorBuilder.AddAxis — emit any HMAxis-keyed input field
+//
+// Existing HMGamepadState.LeftStickX / LeftTrigger / etc. still work
+// for ordinary pads. ExtraAxes runs LAST in the encoder so explicit
+// drives override semantic-slot drives at the same descriptor field.
+Console.WriteLine("\n  10d. Custom HOTAS with throttle slider + rudder pedal...");
+var hotasAxisBuilder = new HidDescriptorBuilder()
+    .Joystick()
+    .AddStick("Left", bits: 16)
+    .AddAxis(HMAxis.Slider,   bits: 8)   // throttle slider on the stick base
+    .AddAxis(HMAxis.Rudder,   bits: 8)   // separate rudder pedal
+    .AddAxis(HMAxis.Throttle, bits: 8)   // secondary throttle (autopilot)
+    .AddButtons(12)
+    .AddHat(positions: 8);
+
+var hotasFull = new HMProfileBuilder()
+    .Id("custom-hotas-full")
+    .Name("Custom HOTAS (Slider + Rudder + Throttle)")
+    .Vendor("Custom")
+    .Vid(0x0483).Pid(0x0003)
+    .ProductString("Custom HOTAS Full")
+    .ManufacturerString("Homebrew")
+    .Type("hotas")
+    .Connection("usb")
+    .FromDescriptorBuilder(hotasAxisBuilder)
+    .Build();
+
+// Discovery: enumerate every analog axis the descriptor declares.
+Console.WriteLine($"    AvailableAxes ({hotasFull.AxisCount}): " +
+                  string.Join(", ", hotasFull.AvailableAxes));
+
+using (var ctrlHotasFull = ctx.CreateController(hotasFull))
+{
+    // Drive every axis in one frame. ExtraAxes is null on every prior
+    // state in this demo — allocate once and reuse for the hot path.
+    var extra = new System.Collections.Generic.Dictionary<HMAxis, float>
+    {
+        [HMAxis.Slider]   = 0.75f,   // throttle slider 75%
+        [HMAxis.Rudder]   = 0.25f,   // rudder pedal slight left
+        [HMAxis.Throttle] = 1.00f,   // secondary throttle full
+    };
+    var hotasState = new HMGamepadState
+    {
+        LeftStickX = 0.10f,
+        LeftStickY = -0.30f,
+        ExtraAxes  = extra,
+    };
+    ctrlHotasFull.SubmitState(in hotasState);
+    Console.WriteLine($"    Submitted: stick + Slider=0.75 + Rudder=0.25 + Throttle=1.00");
+    Thread.Sleep(500);
+}
+
 // ── 11. SubmitRawReport — ViGEmBus DS4 migration pattern ─────────────
 // This shows how PadForge (or any app migrating from ViGEmBus) can
 // submit full DS4/DualSense reports including touchpad, gyro, and

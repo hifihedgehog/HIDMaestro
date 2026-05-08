@@ -142,6 +142,65 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
+    /// <summary>Add an analog axis identified by HID usage. Covers everything
+    /// outside the standard sticks-and-triggers layout: throttle sliders,
+    /// rudders, separate brake/throttle/clutch pedals, steering wheels,
+    /// flight-stick rudder pedals, etc. The matching <see cref="HMAxis"/>
+    /// becomes addressable via <see cref="HMGamepadState.ExtraAxes"/> at
+    /// runtime.
+    ///
+    /// <para><c>bits</c> must be a multiple of 8 to keep the report byte-aligned
+    /// (see <see cref="AddTrigger"/> for the same Chromium phantom-axis
+    /// constraint). <c>logicalMin</c>/<c>logicalMax</c> default to
+    /// [0..(2^bits)-1] — the typical convention for unidirectional axes.
+    /// Pass an explicit signed range for centered axes (e.g. wheels:
+    /// [-32768..32767] at 16 bits).</para></summary>
+    public HidDescriptorBuilder AddAxis(HMAxis axis, int bits = 8,
+                                        int? logicalMin = null,
+                                        int? logicalMax = null)
+    {
+        if (axis == HMAxis.None)
+            throw new ArgumentException("HMAxis.None is not a valid axis.", nameof(axis));
+        if (bits % 8 != 0)
+            throw new ArgumentException(
+                $"AddAxis bits must be a multiple of 8 (got {bits}). " +
+                "Non-aligned sizes introduce phantom axes in Chromium's Gamepad API.",
+                nameof(bits));
+
+        byte page  = (byte)((ushort)axis >> 8);
+        byte usage = (byte)((ushort)axis & 0xFF);
+        int min = logicalMin ?? 0;
+        int max = logicalMax ?? (int)((1L << bits) - 1);
+
+        _bytes.AddRange(new byte[] { 0x05, page });        // Usage Page
+        _bytes.AddRange(new byte[] { 0x09, usage });       // Usage
+
+        // Logical Minimum — pick the smallest item form that fits.
+        if (min >= sbyte.MinValue && min <= sbyte.MaxValue)
+            _bytes.AddRange(new byte[] { 0x15, (byte)min });
+        else if (min >= short.MinValue && min <= short.MaxValue)
+            _bytes.AddRange(new byte[] { 0x16, (byte)(min & 0xFF), (byte)((min >> 8) & 0xFF) });
+        else
+            _bytes.AddRange(new byte[] { 0x17, (byte)min, (byte)(min >> 8),
+                                                 (byte)(min >> 16), (byte)(min >> 24) });
+
+        // Logical Maximum — same item-size selection rule.
+        if (max >= 0 && max <= sbyte.MaxValue)
+            _bytes.AddRange(new byte[] { 0x25, (byte)max });
+        else if (max >= 0 && max <= ushort.MaxValue)
+            _bytes.AddRange(new byte[] { 0x26, (byte)(max & 0xFF), (byte)((max >> 8) & 0xFF) });
+        else
+            _bytes.AddRange(new byte[] { 0x27, (byte)max, (byte)(max >> 8),
+                                                 (byte)(max >> 16), (byte)(max >> 24) });
+
+        _bytes.AddRange(new byte[] { 0x95, 0x01 });        // Report Count (1)
+        _bytes.AddRange(new byte[] { 0x75, (byte)bits });  // Report Size
+        _bytes.AddRange(new byte[] { 0x81, 0x02 });        // Input (Data,Var,Abs)
+
+        _totalInputBits += bits;
+        return this;
+    }
+
     /// <summary>Add N buttons (Button Page, Usage 1..N, 1 bit each). The
     /// declared Report Count is rounded UP to the next multiple of 8 (with
     /// extra Usage Max bump so the round-up bits are "dummy" buttons the

@@ -46,7 +46,7 @@ internal static class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
 
-        var profile = ctx.GetProfile("sidewinder-force-feedback-2-joystick");
+        var profile = ctx.GetProfile("sidewinder-force-feedback-2");
         Check("SideWinder profile loaded from embedded catalog", profile != null);
         if (profile == null) return 1;
 

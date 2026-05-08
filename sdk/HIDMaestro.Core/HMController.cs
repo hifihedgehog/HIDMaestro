@@ -440,7 +440,8 @@ public sealed class HMController : IDisposable
                 buttonMask: (uint)state.Buttons,
                 hatDegrees: state.HatDegrees,
                 hatHundredths: state.HatHundredths,
-                hatRaw: state.HatRaw);
+                hatRaw: state.HatRaw,
+                extraAxes: state.ExtraAxes);
 
             // v1.3.5 — overlay profile-declared fixed bytes (e.g. DS5 Edge
             // USB activeProfile = 0x80 at byte 49 so dualsense-tester's

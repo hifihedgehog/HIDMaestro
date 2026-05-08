@@ -1073,6 +1073,15 @@ class Program
             var builder = HIDMaestro.Internal.HidReportBuilder.Parse(descBytes);
             builder.PrintLayout();
 
+            if (builder.AxisFields.Count > 0)
+            {
+                Console.WriteLine("\n  Available axes (ExtraAxes-addressable):");
+                foreach (var (axis, field) in builder.AxisFields)
+                {
+                    Console.WriteLine($"    {axis,-18} bit {field.BitOffset,3}, {field.BitSize,2}b, range [{field.LogicalMin}..{field.LogicalMax}]");
+                }
+            }
+
             // List all parsed input fields for full visibility
             Console.WriteLine($"\n  All input fields ({builder.InputFields.Count}):");
             foreach (var f in builder.InputFields)

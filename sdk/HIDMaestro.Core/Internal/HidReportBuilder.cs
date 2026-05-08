@@ -62,6 +62,17 @@ public class HidReportBuilder
     /// work via <see cref="ButtonMap"/>.</summary>
     public InputField? SystemMainMenu { get; private set; }
 
+    /// <summary>Every analog input field whose HID usage maps to a known
+    /// <see cref="HMAxis"/>. Populated during ResolveSemantics from BOTH
+    /// Generic Desktop (page 0x01) and Simulation Controls (page 0x02).
+    /// Keyed by the encoded (page &lt;&lt; 8 | usage) pair so consumers can
+    /// drive any descriptor-declared axis via
+    /// <see cref="HMGamepadState.ExtraAxes"/> regardless of whether it
+    /// also lands in a semantic slot. First field wins on duplicate
+    /// usages — matches the <c>??=</c> behavior of the semantic
+    /// classifier.</summary>
+    public Dictionary<HMAxis, InputField> AxisFields { get; } = new();
+
     public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null)
     {
         var builder = new HidReportBuilder();
@@ -296,6 +307,15 @@ public class HidReportBuilder
         {
             if (f.IsConstant) continue;
 
+            // Also catalog every recognized analog usage by HMAxis so
+            // ExtraAxes can address it regardless of semantic-slot fate.
+            if (f.UsagePage == 0x01 || f.UsagePage == 0x02)
+            {
+                var key = (HMAxis)((f.UsagePage << 8) | f.Usage);
+                if (Enum.IsDefined(typeof(HMAxis), key) && !AxisFields.ContainsKey(key))
+                    AxisFields[key] = f;
+            }
+
             if (f.UsagePage == 0x01) // Generic Desktop
             {
                 switch (f.Usage)
@@ -319,6 +339,11 @@ public class HidReportBuilder
                             RightStickY ??= f;
                         else
                             RightTrigger ??= f;
+                        break;
+                    case 0x36:                               // Slider — flight-stick throttle
+                    case 0x37:                               // Dial
+                        if (LeftTrigger == null) LeftTrigger = f;
+                        else if (RightTrigger == null) RightTrigger = f;
                         break;
                     case 0x39: HatSwitch ??= f; break;     // Hat Switch
                     case 0x85: SystemMainMenu ??= f; break; // System Main Menu (Xbox Guide)
@@ -362,11 +387,12 @@ public class HidReportBuilder
         uint buttonMask = 0, // Bit 0 = button 1, etc.
         float? hatDegrees = null,
         int? hatHundredths = null,
-        ushort? hatRaw = null)
+        ushort? hatRaw = null,
+        IReadOnlyDictionary<HMAxis, float>? extraAxes = null)
     {
         byte[] report = new byte[InputReportByteSize];
         BuildReportInto(report, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger,
-                        hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw);
+                        hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw, extraAxes);
         return report;
     }
 
@@ -387,7 +413,8 @@ public class HidReportBuilder
         uint buttonMask = 0,
         float? hatDegrees = null,
         int? hatHundredths = null,
-        ushort? hatRaw = null)
+        ushort? hatRaw = null,
+        IReadOnlyDictionary<HMAxis, float>? extraAxes = null)
     {
         if (report == null) throw new ArgumentNullException(nameof(report));
         if (report.Length < InputReportByteSize)
@@ -544,6 +571,20 @@ public class HidReportBuilder
             if ((uint)descBtn < (uint)Buttons.Count)
                 WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
                           Buttons[descBtn].BitSize, 1);
+        }
+
+        // Explicit-by-usage axis writes. Runs LAST so it overrides any
+        // semantic-slot write that targeted the same descriptor field —
+        // explicit beats implicit. Skipped entirely when the consumer
+        // hasn't allocated the dictionary, keeping the hot path cost-free
+        // for plain gamepad scenarios.
+        if (extraAxes != null && extraAxes.Count > 0)
+        {
+            foreach (var kvp in extraAxes)
+            {
+                if (AxisFields.TryGetValue(kvp.Key, out var field))
+                    WriteField(field, Math.Clamp(kvp.Value, 0f, 1f));
+            }
         }
     }
 

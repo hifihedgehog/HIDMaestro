@@ -136,6 +136,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1302,6 +1303,24 @@ function Scenario-Sidewinder-Ffb-Check {
     }
 }
 
+# S36: arbitrary-axis addressing — HMAxis enum / ExtraAxes / AvailableAxes /
+# AddAxis (v1.3.8). Pre-v1.3.8 HMGamepadState exposed only 4 sticks + 2 triggers,
+# so flight-stick throttle sliders, separate brake/throttle/clutch pedals, HOTAS
+# rudder pedals were unreachable from consumers even when the descriptor declared
+# the field. v1.3.8 adds parallel HID-usage-keyed surfaces. This probe covers:
+# (1) discovery on canonical catalog profiles surfaces the full descriptor axis
+# set; (2) ExtraAxes wire-byte fidelity at the bit offsets/sizes the descriptor
+# declares; (3) HidDescriptorBuilder.AddAxis round-trips through the parser; and
+# (4) explicit-beats-implicit ordering when ExtraAxes and a semantic slot target
+# the same field. No driver install, no virtual device.
+function Scenario-Axis-Addressing-Check {
+    $probe = Resolve-ProbeBinary 'axis_addressing_check' 'AxisAddressingCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("AxisAddressingCheck exited " + $p.ExitCode + " - HMAxis / ExtraAxes / AvailableAxes / AddAxis fidelity regressed (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1341,7 +1360,8 @@ $scenarios = @(
     @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} },
     @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} },
     @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} },
-    @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} }
+    @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} },
+    @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
