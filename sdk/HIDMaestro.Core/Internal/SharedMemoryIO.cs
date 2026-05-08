@@ -88,7 +88,7 @@ internal static class SharedMemoryIO
     public const int OUTPUT_SLOT_OFFSET_SIZE      = 6;
     public const int OUTPUT_SLOT_OFFSET_DATA      = 8;
 
-    // HIDMAESTRO_SHARED_PID_STATE (24 bytes) — match driver/driver.h:
+    // HIDMAESTRO_SHARED_PID_STATE — match driver/driver.h:
     //   ULONG   SeqNo                       offset  0   (seqlock)
     //   UCHAR   PidEnabled                  offset  4   (gate; 0 = no FFB)
     //   UCHAR   _pad0[3]                    offset  5
@@ -103,20 +103,33 @@ internal static class SharedMemoryIO
     //   UCHAR   _pad1[2]                    offset 18
     //   ULONG   EbiAllocBitmap              offset 20  (v1.1.37)
     //   ULONG   EbiAllocatedCount           offset 24  (v1.1.37)
-    //   total: 28 bytes (rounded to 32 for alignment)
-    public const int PID_STATE_SIZE                = 32;
-    public const int PID_OFFSET_SEQNO              = 0;
-    public const int PID_OFFSET_ENABLED            = 4;
-    public const int PID_OFFSET_BL_EBI             = 8;
-    public const int PID_OFFSET_BL_LOADSTATUS      = 9;
-    public const int PID_OFFSET_BL_RAMAVAIL        = 10;
-    public const int PID_OFFSET_POOL_RAMSIZE       = 12;
-    public const int PID_OFFSET_POOL_MAXSIM        = 14;
-    public const int PID_OFFSET_POOL_MEMMGMT       = 15;
-    public const int PID_OFFSET_STATE_EBI          = 16;
-    public const int PID_OFFSET_STATE_FLAGS        = 17;
-    public const int PID_OFFSET_EBI_BITMAP         = 20;
-    public const int PID_OFFSET_EBI_COUNT          = 24;
+    //   UCHAR   PoolReportId                offset 28  (v1.3.7 — 0=canonical 0x13)
+    //   UCHAR   StateReportId               offset 29  (v1.3.7 — 0=canonical 0x14)
+    //   UCHAR   BlockLoadReportId           offset 30  (v1.3.7 — 0=canonical 0x12)
+    //   UCHAR   CreateNewEffectReportId     offset 31  (v1.3.7 — 0=canonical 0x11)
+    //   UCHAR   BlockFreeReportId           offset 32  (v1.3.7 — 0=canonical 0x1B)
+    //   UCHAR   DeviceControlReportId       offset 33  (v1.3.7 — 0=canonical 0x1C)
+    //   UCHAR   _pad2[2]                    offset 34
+    //   total: 36 bytes (rounded to 40 for 8-byte alignment)
+    public const int PID_STATE_SIZE                  = 40;
+    public const int PID_OFFSET_SEQNO                = 0;
+    public const int PID_OFFSET_ENABLED              = 4;
+    public const int PID_OFFSET_BL_EBI               = 8;
+    public const int PID_OFFSET_BL_LOADSTATUS        = 9;
+    public const int PID_OFFSET_BL_RAMAVAIL          = 10;
+    public const int PID_OFFSET_POOL_RAMSIZE         = 12;
+    public const int PID_OFFSET_POOL_MAXSIM          = 14;
+    public const int PID_OFFSET_POOL_MEMMGMT         = 15;
+    public const int PID_OFFSET_STATE_EBI            = 16;
+    public const int PID_OFFSET_STATE_FLAGS          = 17;
+    public const int PID_OFFSET_EBI_BITMAP           = 20;
+    public const int PID_OFFSET_EBI_COUNT            = 24;
+    public const int PID_OFFSET_POOL_RID             = 28;
+    public const int PID_OFFSET_STATE_RID            = 29;
+    public const int PID_OFFSET_BL_RID               = 30;
+    public const int PID_OFFSET_NEW_EFFECT_RID       = 31;
+    public const int PID_OFFSET_BLOCK_FREE_RID       = 32;
+    public const int PID_OFFSET_DEVICE_CONTROL_RID   = 33;
 
     // SDDL granting Local System, Builtin Admins, and LocalService full
     // access plus World read. LocalService is what WUDFHost runs as for
@@ -307,6 +320,29 @@ internal static class SharedMemoryIO
         Marshal.WriteByte(view,  PID_OFFSET_BL_LOADSTATUS, loadStatus);
         Marshal.WriteInt16(view, PID_OFFSET_BL_RAMAVAIL,   (short)ramPoolAvailable);
         PidStateEndWrite(view, ref seqNo);
+    }
+
+    /// <summary>Publish the descriptor-derived PID Report ID overrides.
+    /// Called once per controller right after section creation. Driver
+    /// reads these from shared state and uses them in
+    /// IOCTL_UMDF_HID_GET_FEATURE / IOCTL_UMDF_HID_SET_FEATURE /
+    /// IOCTL_UMDF_HID_SET_OUTPUT_REPORT instead of the canonical
+    /// 0x11/0x12/0x13/0x14/0x1B/0x1C constants. Profiles whose
+    /// descriptor uses the canonical IDs (every builder-emitted
+    /// AddPidFfbBlock descriptor) get zero overrides written here, so
+    /// the driver's `if (sec-&gt;XxxReportId) ...` guards keep canonical
+    /// behavior. Outside the seqlock — written exactly once at
+    /// section setup, before any consumer publishes Pool/State/BL.</summary>
+    public static void WritePidReportIds(IntPtr view,
+        byte poolRid, byte stateRid, byte blockLoadRid,
+        byte createNewEffectRid, byte blockFreeRid, byte deviceControlRid)
+    {
+        Marshal.WriteByte(view, PID_OFFSET_POOL_RID,           poolRid);
+        Marshal.WriteByte(view, PID_OFFSET_STATE_RID,          stateRid);
+        Marshal.WriteByte(view, PID_OFFSET_BL_RID,             blockLoadRid);
+        Marshal.WriteByte(view, PID_OFFSET_NEW_EFFECT_RID,     createNewEffectRid);
+        Marshal.WriteByte(view, PID_OFFSET_BLOCK_FREE_RID,     blockFreeRid);
+        Marshal.WriteByte(view, PID_OFFSET_DEVICE_CONTROL_RID, deviceControlRid);
     }
 
     /// <summary>Publish PID State Report fields.</summary>

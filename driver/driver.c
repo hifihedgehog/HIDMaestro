@@ -1307,26 +1307,41 @@ EvtIoDeviceControl(
              * exist in IOCTL_UMDF_HID_SET_OUTPUT_REPORT below; whichever
              * IOCTL the framework delivers, the driver acts the same.
              *
-             * 0x11 Create New Effect: allocate next free EBI, write BL.
-             *   (vJoy hid.c:2879 case `HID_ID_NEWEFREP+0x10`)
-             * 0x1B Block Free: free the EBI in the bitmap.
-             *   (vJoy hid.c:2865 case `HID_ID_BLKFRREP`)
-             * 0x1C Device Control with Control=4 (CTRL_DEVRST): reset.
-             *   (vJoy hid.c:2849 case `HID_ID_CTRLREP`) */
-            if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID
-                && EnsurePidStateMapping(ctx))
+             * v1.3.7 — Report IDs are profile-specific. SDK writes the
+             * descriptor-derived overrides into the shared section so
+             * non-canonical PID layouts (Microsoft SideWinder uses
+             * Set Effect=0x01, Block Free=0x0B, Device Control=0x0C)
+             * route through the same handlers as the canonical
+             * 0x11/0x1B/0x1C builder-emitted layouts. We MUST open the
+             * shared section BEFORE reading the RID overrides — on
+             * first IOCTL the section is unmapped and an unconditional
+             * read would fall back to canonical IDs and miss
+             * non-canonical RIDs entirely. EnsurePidStateMapping is
+             * idempotent and ~free after the first successful map. */
+            BOOLEAN haveMap = EnsurePidStateMapping(ctx);
+            UCHAR createNewEffectRid = HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID;
+            UCHAR blockFreeRid       = HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID;
+            UCHAR deviceControlRid   = HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID;
+            if (haveMap) {
+                volatile HIDMAESTRO_SHARED_PID_STATE *sec =
+                    (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+                if (sec->CreateNewEffectReportId) createNewEffectRid = sec->CreateNewEffectReportId;
+                if (sec->BlockFreeReportId)       blockFreeRid       = sec->BlockFreeReportId;
+                if (sec->DeviceControlReportId)   deviceControlRid   = sec->DeviceControlReportId;
+            }
+            if (reportId == createNewEffectRid && haveMap)
             {
                 AllocateEbiInBlockLoad(ctx);
             }
-            else if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+            else if (reportId == blockFreeRid
                      && payloadLen >= 1
-                     && EnsurePidStateMapping(ctx))
+                     && haveMap)
             {
                 FreeEbi(ctx, payload[0]);
             }
-            else if (reportId == HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID
+            else if (reportId == deviceControlRid
                      && payloadLen >= 1
-                     && EnsurePidStateMapping(ctx)
+                     && haveMap
                      && payload[0] == 4 /* CTRL_DEVRST */)
             {
                 ResetPidState(ctx);
@@ -1487,11 +1502,31 @@ EvtIoDeviceControl(
             break;
         }
 
-        /* GetFeature(0x11 Create New Effect) — silent success (mirrors vJoy).
+        /* v1.3.7 — descriptor-driven PID Report ID overrides for
+         * non-canonical PID layouts (Microsoft SideWinder etc.). Open
+         * the shared section first so a fresh-IOCTL read on a profile
+         * with non-canonical IDs picks up the SDK-published overrides
+         * instead of falling back to canonical and missing the RID
+         * entirely. EnsurePidStateMapping is idempotent. */
+        (void)EnsurePidStateMapping(ctx);
+        UCHAR createNewEffectRid = HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID;
+        UCHAR poolRid            = HIDMAESTRO_PID_POOL_REPORT_ID;
+        UCHAR stateRid           = HIDMAESTRO_PID_STATE_REPORT_ID;
+        UCHAR blockLoadRid       = HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID;
+        if (ctx->PidStateMemPtr != NULL) {
+            volatile HIDMAESTRO_SHARED_PID_STATE *sec =
+                (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+            if (sec->CreateNewEffectReportId) createNewEffectRid = sec->CreateNewEffectReportId;
+            if (sec->PoolReportId)            poolRid            = sec->PoolReportId;
+            if (sec->StateReportId)           stateRid           = sec->StateReportId;
+            if (sec->BlockLoadReportId)       blockLoadRid       = sec->BlockLoadReportId;
+        }
+
+        /* GetFeature(Create New Effect) — silent success (mirrors vJoy).
          * Buffer left untouched. Doesn't gate on PidEnabled so this works
          * even for non-FFB consumers, matching vJoy's "always SUCCESS for
          * unhandled report IDs" fallthrough behavior. */
-        if (reportId == HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID) {
+        if (reportId == createNewEffectRid) {
             status = STATUS_SUCCESS;
             break;
         }
@@ -1504,7 +1539,7 @@ EvtIoDeviceControl(
              * return STATUS_NO_SUCH_DEVICE so DInput definitively
              * concludes "device exists but no FFB" rather than
              * retrying. Other report IDs return NOT_SUPPORTED. */
-            status = (reportId == HIDMAESTRO_PID_POOL_REPORT_ID)
+            status = (reportId == poolRid)
                    ? STATUS_NO_SUCH_DEVICE
                    : STATUS_NOT_SUPPORTED;
             break;
@@ -1512,7 +1547,7 @@ EvtIoDeviceControl(
 
         UCHAR *p = (UCHAR *)outBuf;
 
-        if (reportId == HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID) {
+        if (reportId == blockLoadRid) {
             /* Wire format: [reportId, EBI, LoadStatus, RAMPool LSB, RAMPool MSB].
              * If LoadStatus is zero (unpublished), report Error=3 per HID PID
              * spec §5.5 (LoadStatus enum: 1=Success, 2=Full, 3=Error). vJoy
@@ -1528,7 +1563,7 @@ EvtIoDeviceControl(
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
         }
-        else if (reportId == HIDMAESTRO_PID_POOL_REPORT_ID) {
+        else if (reportId == poolRid) {
             /* Wire format: [reportId, RAMPool LSB, RAMPool MSB, MaxSim, MemMgmt] */
             if (outSize < 5) { status = STATUS_BUFFER_TOO_SMALL; break; }
             p[0] = reportId;
@@ -1539,7 +1574,7 @@ EvtIoDeviceControl(
             WdfRequestSetInformation(Request, 5);
             status = STATUS_SUCCESS;
         }
-        else if (reportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
+        else if (reportId == stateRid) {
             /* Wire format: [reportId, EBI, StateFlags] */
             if (outSize < 3) { status = STATUS_BUFFER_TOO_SMALL; break; }
             p[0] = reportId;
@@ -1590,15 +1625,24 @@ EvtIoDeviceControl(
             const UCHAR *payload = (outBufSize > 0) ? p + 1 : p;
             ULONG payloadLen = (ULONG)((outBufSize > 0) ? outBufSize - 1 : 0);
 
-            if (reportId == HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID
+            BOOLEAN haveOutMap = EnsurePidStateMapping(ctx);
+            UCHAR blockFreeRid     = HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID;
+            UCHAR deviceControlRid = HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID;
+            if (haveOutMap) {
+                volatile HIDMAESTRO_SHARED_PID_STATE *sec =
+                    (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+                if (sec->BlockFreeReportId)     blockFreeRid     = sec->BlockFreeReportId;
+                if (sec->DeviceControlReportId) deviceControlRid = sec->DeviceControlReportId;
+            }
+            if (reportId == blockFreeRid
                 && payloadLen >= 1
-                && EnsurePidStateMapping(ctx))
+                && haveOutMap)
             {
                 FreeEbi(ctx, payload[0]);
             }
-            else if (reportId == HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID
+            else if (reportId == deviceControlRid
                      && payloadLen >= 1
-                     && EnsurePidStateMapping(ctx)
+                     && haveOutMap
                      && payload[0] == 4 /* CTRL_DEVRST */)
             {
                 ResetPidState(ctx);
@@ -1642,8 +1686,19 @@ EvtIoDeviceControl(
         /* PID State Report (Input direction in the canonical descriptor —
          * vJoy hidReportDescSingle.h:752 declares 0x14 with embedded
          * Input items inside a Feature collection). dinput8 may issue
-         * HidD_GetInputReport(0x14) during CreateEffect to read State. */
-        if (inReportId == HIDMAESTRO_PID_STATE_REPORT_ID) {
+         * HidD_GetInputReport(StateRid) during CreateEffect to read State.
+         * v1.3.7 — match against SDK-published State RID with canonical
+         * fallback so non-canonical PID layouts (SideWinder etc.) resolve.
+         * Open shared section first; otherwise the very first IOCTL read
+         * before any other handler ran would miss the override. */
+        (void)EnsurePidStateMapping(ctx);
+        UCHAR stateRid = HIDMAESTRO_PID_STATE_REPORT_ID;
+        if (ctx->PidStateMemPtr != NULL) {
+            volatile HIDMAESTRO_SHARED_PID_STATE *sec =
+                (volatile HIDMAESTRO_SHARED_PID_STATE *)ctx->PidStateMemPtr;
+            if (sec->StateReportId) stateRid = sec->StateReportId;
+        }
+        if (inReportId == stateRid) {
             HIDMAESTRO_SHARED_PID_STATE pid = {0};
             BOOLEAN haveState = ReadPidState(ctx, &pid);
             if (inBufSize < 3) { status = STATUS_BUFFER_TOO_SMALL; break; }

@@ -319,6 +319,31 @@ typedef struct _HIDMAESTRO_SHARED_PID_STATE {
     /* v1.1.37 — driver tracks EBI count for fast pool-exhaustion check.
      * Updated atomically alongside EbiAllocBitmap. */
     volatile ULONG  EbiAllocatedCount;
+
+    /* v1.3.7 — descriptor-driven PID Report ID overrides. SDK populates
+     * these by walking the profile's HID descriptor at controller-create
+     * time (see PidReportIdExtractor) so the driver can serve PID
+     * Pool/State/BlockLoad and dispatch SetFeature handlers for vendor
+     * descriptors that use non-canonical Report IDs.
+     *
+     * Example: real Microsoft SideWinder Force Feedback 2 firmware uses
+     * Pool=0x03, BlockLoad=0x02, Set Effect=0x01 (Microsoft's chosen
+     * IDs from the SideWinder design pre-PID-1.0-spec); dinput8
+     * enumerates by usage and queries HidD_GetFeature on those exact
+     * RIDs. Pre-v1.3.7 the driver hardcoded 0x12/0x13/0x14 and any
+     * non-canonical RID hit STATUS_NOT_SUPPORTED, breaking FFB
+     * enumeration on the SideWinder virtual.
+     *
+     * Zero means "use canonical default" — every existing profile built
+     * via HidDescriptorBuilder.AddPidFfbBlock keeps the original 0x11/
+     * 0x12/0x13/0x14/0x1B/0x1C IDs and unchanged behavior. */
+    UCHAR PoolReportId;
+    UCHAR StateReportId;
+    UCHAR BlockLoadReportId;
+    UCHAR CreateNewEffectReportId;
+    UCHAR BlockFreeReportId;
+    UCHAR DeviceControlReportId;
+    UCHAR _pad2[2];
 } HIDMAESTRO_SHARED_PID_STATE, *PHIDMAESTRO_SHARED_PID_STATE;
 #pragma pack(pop)
 

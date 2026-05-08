@@ -150,7 +150,23 @@ public sealed class HMController : IDisposable
     private IntPtr EnsurePidStateViewLocked()
     {
         if (_pidStateView == IntPtr.Zero)
+        {
             _pidStateView = SharedMemoryIO.EnsurePidStateMapping(Index);
+            // v1.3.7 — write the profile descriptor's PID Report ID
+            // layout to shared state immediately after section creation,
+            // before any IOCTL handler reads. Builder-emitted descriptors
+            // (every existing profile that uses HidDescriptorBuilder.
+            // AddPidFfbBlock) come back with canonical IDs and the driver's
+            // `if (sec->XxxReportId)` guards skip the override; vendor-PID
+            // descriptors (Microsoft SideWinder Force Feedback 2 with
+            // Pool=0x03, BlockLoad=0x02, Set Effect=0x01) return non-zero
+            // overrides and the driver dispatches IOCTLs to the right RIDs.
+            // See PidReportIdExtractor for the LC-usage match table.
+            var rids = PidReportIdExtractor.Extract(Profile.Inner.GetDescriptorBytes());
+            SharedMemoryIO.WritePidReportIds(_pidStateView,
+                rids.PoolReportId, rids.StateReportId, rids.BlockLoadReportId,
+                rids.CreateNewEffectReportId, rids.BlockFreeReportId, rids.DeviceControlReportId);
+        }
         return _pidStateView;
     }
 

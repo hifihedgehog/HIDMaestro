@@ -135,6 +135,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1277,6 +1278,30 @@ function Scenario-Trigger-Live-Check {
     }
 }
 
+# S35: SideWinder Force Feedback 2 PID FFB end-to-end (v1.3.7).
+#
+# Microsoft SideWinder Force Feedback 2 firmware uses non-canonical PID
+# Report IDs (Pool=0x03, Block Load=0x02, Create New Effect=0x01,
+# Block Free=0x0B, Device Control=0x0C) instead of HM's traditional
+# canonical 0x13/0x12/0x11/0x1B/0x1C. v1.3.7 makes the driver
+# descriptor-aware: SDK runs PidReportIdExtractor on the profile
+# descriptor at controller create, writes the discovered RIDs into the
+# per-controller shared section, and the driver IOCTL handlers route by
+# those RIDs instead of canonical constants.
+#
+# This scenario exercises the full path: load embedded SideWinder profile
+# (with original 1355-byte HMDeviceExtractor descriptor verbatim), create
+# real virtual, publish PidPool, run SetFeature(0x01 Create New Effect)
+# and GetFeature(0x03 Pool) handshake. Both must succeed for dinput8/
+# pid.dll to enumerate FFB on a SideWinder virtual end-to-end.
+function Scenario-Sidewinder-Ffb-Check {
+    $probe = Resolve-ProbeBinary 'sidewinder_ffb_check' 'SideWinderFfbCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SideWinderFfbCheck exited " + $p.ExitCode + " - SideWinder PID FFB end-to-end regressed (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1315,7 +1340,8 @@ $scenarios = @(
     @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} },
     @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} },
     @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} },
-    @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} }
+    @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} },
+    @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

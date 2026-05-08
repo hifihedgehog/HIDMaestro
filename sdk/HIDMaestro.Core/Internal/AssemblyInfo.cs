@@ -11,3 +11,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("V135FeaturesCheck")]
 [assembly: InternalsVisibleTo("TriggerClassifierCheck")]
 [assembly: InternalsVisibleTo("TriggerLiveCheck")]
+[assembly: InternalsVisibleTo("SideWinderFfbCheck")]
