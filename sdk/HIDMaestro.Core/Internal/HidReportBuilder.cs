@@ -437,9 +437,14 @@ public class HidReportBuilder
         {
             if (f.IsConstant) continue;
 
-            // Also catalog every recognized analog usage by HMAxis so
-            // ExtraAxes can address it regardless of semantic-slot fate.
-            if (f.UsagePage == 0x01 || f.UsagePage == 0x02)
+            // Catalog every recognized ANALOG usage by HMAxis. Skip Hat
+            // Switch (0x39) — Hat is its own input shape with the
+            // descriptor's HatSwitch field handling, not part of the
+            // analog-axis encoder pass. HMAxis.Hat exists for layout
+            // references (HMHatBinding.axis) but doesn't get registered
+            // into AxisFields.
+            if ((f.UsagePage == 0x01 || f.UsagePage == 0x02)
+                && !(f.UsagePage == 0x01 && f.Usage == 0x39))
             {
                 var key = (HMAxis)((f.UsagePage << 8) | f.Usage);
                 if (Enum.IsDefined(typeof(HMAxis), key) && !AxisFields.ContainsKey(key))

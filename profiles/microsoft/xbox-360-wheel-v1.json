@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-wheel-v1",
-  "name": "Xbox 360 Racing Wheel v1",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x028E",
-  "productString": "Controller (XBOX 360 For Windows)",
-  "manufacturerString": "Â©Microsoft Corporation",
-  "type": "wheel",
-  "connection": "usb",
-  "descriptor": "05010905a101a1000930150026ffff350046ffff950175108102c005010932150026ff00950175088102050209bb150026ff0095017508810205091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "nativeDescriptor": "05010905a101a1000930150026ffff350046ffff950175108102c005010932150026ff00950175088102050209bb150026ff0095017508810205091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "inputReportSize": 8,
-  "notes": "110-byte descriptor. Source: DJm00n/ControllersInfo xusb_wheel1. 16-bit wheel + 8-bit accelerator + 8-bit brake (Sim Page) + 10 buttons + hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
-  "deviceDescription": "Xbox 360 Controller for Windows",
-  "triggerMode": "combined"
-}
+{"id":"xbox-360-wheel-v1","name":"Xbox 360 Racing Wheel v1","vendor":"Microsoft","vid":"0x045E","pid":"0x028E","productString":"Controller (XBOX 360 For Windows)","manufacturerString":"Â©Microsoft Corporation","type":"wheel","connection":"usb","descriptor":"05010905a101a1000930150026ffff350046ffff950175108102c005010932150026ff00950175088102050209bb150026ff0095017508810205091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","nativeDescriptor":"05010905a101a1000930150026ffff350046ffff950175108102c005010932150026ff00950175088102050209bb150026ff0095017508810205091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","inputReportSize":8,"notes":"110-byte descriptor. Source: DJm00n/ControllersInfo xusb_wheel1. 16-bit wheel + 8-bit accelerator + 8-bit brake (Sim Page) + 10 buttons + hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).","deviceDescription":"Xbox 360 Controller for Windows","triggerMode":"combined","layout":{"kind":"wheel","source":"https://en.wikipedia.org/wiki/Xbox_360_controller","wheel":{"axis":"X","rotationDegrees":270,"forceFeedback":false},"pedals":[{"axis":"Z","role":"throttle"},{"axis":"Throttle","role":"brake"}],"wheelButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3},{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"shifters":[{"kind":"paddle_left","buttonIndex":4,"actuation":"digital"},{"kind":"paddle_right","buttonIndex":5,"actuation":"digital"}]}}

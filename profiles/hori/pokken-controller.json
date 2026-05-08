@@ -1,14 +1,1 @@
-{
-  "id": "hori-pokken-controller",
-  "name": "HORI POKKEN Controller (Switch)",
-  "vendor": "HORI",
-  "vid": "0x0F0D",
-  "pid": "0x0092",
-  "productString": "POKKEN CONTROLLER",
-  "manufacturerString": "HORI CO.,LTD.",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a10115002501350045017501950d05091901290d81029503810105012507463b017504950165140939814265009501810126ff0046ff0009300931093209357508950481020600ff0920950181020a212695089102c0",
-  "inputReportSize": null,
-  "notes": "90-byte descriptor. Source: progmem/Switch-Fightstick HORI_Descriptors. 13 buttons, hat, 4 axes, vendor I/O. Many third-party Switch controllers emulate this device."
-}
+{"id":"hori-pokken-controller","name":"HORI POKKEN Controller (Switch)","vendor":"HORI","vid":"0x0F0D","pid":"0x0092","productString":"POKKEN CONTROLLER","manufacturerString":"HORI CO.,LTD.","type":"gamepad","connection":"usb","descriptor":"05010905a10115002501350045017501950d05091901290d81029503810105012507463b017504950165140939814265009501810126ff0046ff0009300931093209357508950481020600ff0920950181020a212695089102c0","inputReportSize":null,"notes":"90-byte descriptor. Source: progmem/Switch-Fightstick HORI_Descriptors. 13 buttons, hat, 4 axes, vendor I/O. Many third-party Switch controllers emulate this device.","layout":{"kind":"arcade_stick","source":"https://stores.horiusa.com/wireless-pokken-tournament-pro-pad/","joystick":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_b","buttonIndex":0},{"role":"face_a","buttonIndex":1},{"role":"face_y","buttonIndex":2},{"role":"face_x","buttonIndex":3},{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5},{"role":"left_trigger_click","buttonIndex":6},{"role":"right_trigger_click","buttonIndex":7}],"systemButtons":[{"role":"back","buttonIndex":8},{"role":"start","buttonIndex":9},{"role":"guide","buttonIndex":10}]}}

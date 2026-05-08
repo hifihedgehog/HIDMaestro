@@ -1,15 +1,1 @@
-{
-  "id": "steam-deck",
-  "name": "Steam Deck Controller",
-  "vendor": "Valve",
-  "vid": "0x28DE",
-  "pid": "0x1205",
-  "productString": "Steam Deck",
-  "manufacturerString": "Valve Software",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a101a10009300931150026ff00750895028102c0a10009330934150026ff00750895028102c005010932150026ff007508950181020935150026ff007508950181020939150125083500463b016614007504950181427504950115002500350045006500810305091901291515002501750195158102750395018103c0",
-  "nativeDescriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
-  "inputReportSize": 10,
-  "notes": "Standard HID gamepad descriptor: 6 axes (8-bit), 21 buttons, 1 hat. Native descriptor is vendor-specific 64-byte blob. Steam Deck has 4 paddles, QAM button, trackpads, and gyro not represented here."
-}
+{"id":"steam-deck","name":"Steam Deck Controller","vendor":"Valve","vid":"0x28DE","pid":"0x1205","productString":"Steam Deck","manufacturerString":"Valve Software","type":"gamepad","connection":"usb","descriptor":"05010905a101a10009300931150026ff00750895028102c0a10009330934150026ff00750895028102c005010932150026ff007508950181020935150026ff007508950181020939150125083500463b016614007504950181427504950115002500350045006500810305091901291515002501750195158102750395018103c0","nativeDescriptor":"06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0","inputReportSize":10,"notes":"Standard HID gamepad descriptor: 6 axes (8-bit), 21 buttons, 1 hat. Native descriptor is vendor-specific 64-byte blob. Steam Deck has 4 paddles, QAM button, trackpads, and gyro not represented here.","layout":{"kind":"gamepad","source":"https://en.wikipedia.org/wiki/Steam_Deck","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":12},{"side":"right","xAxis":"Rx","yAxis":"Ry","clickButton":13}],"triggers":[{"axis":"Z","side":"left","kind":"analog"},{"axis":"Rz","side":"right","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5},{"role":"left_trigger_click","buttonIndex":6},{"role":"right_trigger_click","buttonIndex":7}],"systemButtons":[{"role":"view","buttonIndex":8},{"role":"menu","buttonIndex":9},{"role":"guide","buttonIndex":10},{"role":"share","buttonIndex":11}],"extraButtons":[{"role":"paddle_p1","buttonIndex":14},{"role":"paddle_p2","buttonIndex":15},{"role":"paddle_p3","buttonIndex":16},{"role":"paddle_p4","buttonIndex":17}],"haptics":{"rumble":"voice_coil_haptic","triggerHaptics":false},"imu":{"accelerometer":true,"gyroscope":true,"magnetometer":false}}}

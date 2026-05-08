@@ -1,14 +1,1 @@
-{
-  "id": "thrustmaster-th8a-shifter",
-  "name": "Thrustmaster TH8A Gear Shifter",
-  "vendor": "Thrustmaster",
-  "vid": "0x044F",
-  "pid": "0xB660",
-  "productString": "Thrustmaster TH8A",
-  "manufacturerString": "Thrustmaster",
-  "type": "other",
-  "connection": "usb",
-  "descriptor": "05010904a101850105091901290a15002501350045017501950a8102750695018101050109300931650026ff0046ff0075089502810206ff000901090281029505810109bb950b9102850206ff0009038102c0",
-  "inputReportSize": null,
-  "notes": "83-byte descriptor. Source: bremme lsusb gist. 10 buttons, 2 axes."
-}
+{"id":"thrustmaster-th8a-shifter","name":"Thrustmaster TH8A Gear Shifter","vendor":"Thrustmaster","vid":"0x044F","pid":"0xB660","productString":"Thrustmaster TH8A","manufacturerString":"Thrustmaster","type":"other","connection":"usb","descriptor":"05010904a101850105091901290a15002501350045017501950a8102750695018101050109300931650026ff0046ff0075089502810206ff000901090281029505810109bb950b9102850206ff0009038102c0","inputReportSize":null,"notes":"83-byte descriptor. Source: bremme lsusb gist. 10 buttons, 2 axes.","layout":{"kind":"shifter","source":"https://www.thrustmaster.com/products/th8a/","modes":["h_pattern","sequential"],"hPatternGears":{"1":{"role":"gear1","buttonIndex":0},"2":{"role":"gear2","buttonIndex":1},"3":{"role":"gear3","buttonIndex":2},"4":{"role":"gear4","buttonIndex":3},"5":{"role":"gear5","buttonIndex":4},"6":{"role":"gear6","buttonIndex":5},"7":{"role":"gear7","buttonIndex":6},"reverse":{"role":"gear_reverse","buttonIndex":7}},"sequentialUpButton":8,"sequentialDownButton":9}}

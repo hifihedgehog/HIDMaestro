@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-wireless",
-  "name": "Xbox 360 Wireless Controller",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x0719",
-  "productString": "Xbox 360 Wireless Receiver for Windows",
-  "manufacturerString": "©Microsoft Corporation",
-  "type": "gamepad",
-  "connection": "wireless-adapter",
-  "descriptor": "05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c0a1000932150026ffff350046ffff950175108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103750895028103c0",
-  "nativeDescriptor": null,
-  "inputReportSize": 14,
-  "notes": "Wireless receiver, not the controller itself. The receiver is the USB device; individual wireless controllers do not have USB PIDs. Real protocol uses vendor-specific USB class (0xFF/0x5D/0x01); nativeDescriptor=null reflects that there is no HID descriptor on the wire. PID 0x0291 is the v2 receiver. Descriptor mirrors xbox-360-type2's gamepad layout (X+Y, Rx+Ry, combined Z trigger, 10 buttons, hat) since wireless receivers typically pair with the standard gamepad subtype. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
-  "deviceDescription": "Xbox 360 Wireless Receiver for Windows",
-  "triggerMode": "combined"
-}
+{"id":"xbox-360-wireless","name":"Xbox 360 Wireless Controller","vendor":"Microsoft","vid":"0x045E","pid":"0x0719","productString":"Xbox 360 Wireless Receiver for Windows","manufacturerString":"©Microsoft Corporation","type":"gamepad","connection":"wireless-adapter","descriptor":"05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c0a1000932150026ffff350046ffff950175108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103750895028103c0","nativeDescriptor":null,"inputReportSize":14,"notes":"Wireless receiver, not the controller itself. The receiver is the USB device; individual wireless controllers do not have USB PIDs. Real protocol uses vendor-specific USB class (0xFF/0x5D/0x01); nativeDescriptor=null reflects that there is no HID descriptor on the wire. PID 0x0291 is the v2 receiver. Descriptor mirrors xbox-360-type2's gamepad layout (X+Y, Rx+Ry, combined Z trigger, 10 buttons, hat) since wireless receivers typically pair with the standard gamepad subtype. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).","deviceDescription":"Xbox 360 Wireless Receiver for Windows","triggerMode":"combined","layout":{"kind":"gamepad","source":"https://en.wikipedia.org/wiki/Xbox_360_controller","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":8},{"side":"right","xAxis":"Rx","yAxis":"Ry","clickButton":9}],"triggers":[{"axis":"Z","side":"left","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5}],"systemButtons":[{"role":"back","buttonIndex":6},{"role":"start","buttonIndex":7}],"haptics":{"rumble":"dual_erm","triggerHaptics":false}}}

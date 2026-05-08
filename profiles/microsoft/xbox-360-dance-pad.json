@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-dance-pad",
-  "name": "Xbox 360 Dance Pad",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x028E",
-  "productString": "Controller (XBOX 360 For Windows)",
-  "manufacturerString": "Â©Microsoft Corporation",
-  "type": "other",
-  "connection": "usb",
-  "descriptor": "05010905a10105091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "nativeDescriptor": "05010905a10105091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "inputReportSize": 4,
-  "notes": "59-byte descriptor. Source: DJm00n/ControllersInfo xusb_dancepad (identical layout to arcade stick: 10 buttons, hat, no axes). Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
-  "deviceDescription": "Xbox 360 Controller for Windows",
-  "triggerMode": "combined"
-}
+{"id":"xbox-360-dance-pad","name":"Xbox 360 Dance Pad","vendor":"Microsoft","vid":"0x045E","pid":"0x028E","productString":"Controller (XBOX 360 For Windows)","manufacturerString":"Â©Microsoft Corporation","type":"other","connection":"usb","descriptor":"05010905a10105091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","nativeDescriptor":"05010905a10105091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","inputReportSize":4,"notes":"59-byte descriptor. Source: DJm00n/ControllersInfo xusb_dancepad (identical layout to arcade stick: 10 buttons, hat, no axes). Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).","deviceDescription":"Xbox 360 Controller for Windows","triggerMode":"combined","layout":{"kind":"dance_pad","source":"https://en.wikipedia.org/wiki/Xbox_360_controller","pads":{"up":{"role":"dpad_up","buttonIndex":0},"down":{"role":"dpad_down","buttonIndex":1},"left":{"role":"dpad_left","buttonIndex":2},"right":{"role":"dpad_right","buttonIndex":3},"a":{"role":"face_a","buttonIndex":4},"b":{"role":"face_b","buttonIndex":5},"x":{"role":"face_x","buttonIndex":6},"y":{"role":"face_y","buttonIndex":7}},"systemButtons":[{"role":"back","buttonIndex":8},{"role":"start","buttonIndex":9}]}}

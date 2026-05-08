@@ -1,15 +1,1 @@
-{
-  "id": "joycon-r",
-  "name": "Nintendo Switch Joy-Con (R)",
-  "vendor": "Nintendo",
-  "vid": "0x057E",
-  "pid": "0x2007",
-  "productString": "Joy-Con (R)",
-  "manufacturerString": "Nintendo Co., Ltd.",
-  "type": "gamepad",
-  "connection": "bluetooth",
-  "descriptor": "05010905a1010509190129101500250175019510810205010939150025073500463b016614007504950181427504950115002500350045006500810305010930093109330934150027ffff0000751095048102c0",
-  "nativeDescriptor": "05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0",
-  "inputReportSize": 11,
-  "notes": "Standard HID gamepad descriptor: 4 axes (16-bit), 16 buttons, 1 hat. Native descriptor is 170-byte multi-Report-ID BT protocol. Joy-Con R has one analog stick."
-}
+{"id":"joycon-r","name":"Nintendo Switch Joy-Con (R)","vendor":"Nintendo","vid":"0x057E","pid":"0x2007","productString":"Joy-Con (R)","manufacturerString":"Nintendo Co., Ltd.","type":"gamepad","connection":"bluetooth","descriptor":"05010905a1010509190129101500250175019510810205010939150025073500463b016614007504950181427504950115002500350045006500810305010930093109330934150027ffff0000751095048102c0","nativeDescriptor":"05010905a1010601ff8521092175089530810285300930750895308102853109317508966901810285320932750896690181028533093375089669018102853f05091901291015002501750195108102050109391500250775049501814205097504950181010501093009310933093416000027ffff00007510950481020601ff85010901750895309102851009107508953091028511091175089530910285120912750895309102c0","inputReportSize":11,"notes":"Standard HID gamepad descriptor: 4 axes (16-bit), 16 buttons, 1 hat. Native descriptor is 170-byte multi-Report-ID BT protocol. Joy-Con R has one analog stick.","layout":{"kind":"gamepad","source":"https://en.wikipedia.org/wiki/Joy-Con","sticks":[{"side":"right","xAxis":"X","yAxis":"Y","clickButton":11}],"triggers":[],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_b","buttonIndex":0},{"role":"face_a","buttonIndex":1},{"role":"face_y","buttonIndex":2},{"role":"face_x","buttonIndex":3}],"shoulderButtons":[{"role":"right_bumper","buttonIndex":5},{"role":"right_trigger_click","buttonIndex":7}],"systemButtons":[{"role":"start","buttonIndex":9},{"role":"guide","buttonIndex":12}],"imu":{"accelerometer":true,"gyroscope":true,"magnetometer":false}}}

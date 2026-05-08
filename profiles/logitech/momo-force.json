@@ -1,14 +1,1 @@
-{
-  "id": "logitech-momo-force",
-  "name": "Logitech MOMO Racing Force (Red)",
-  "vendor": "Logitech",
-  "vid": "0x046D",
-  "pid": "0xC295",
-  "productString": "MOMO Racing",
-  "manufacturerString": "Logitech",
-  "type": "wheel",
-  "connection": "usb",
-  "descriptor": "05010904a101a1029501750a150026ff03350046ff0309308102950875012501450105091901290881020600ff0900950681029501750826ff0046ff0005010931810295030600ff09018102c0a102090295079102c0c0",
-  "inputReportSize": null,
-  "notes": "87-byte descriptor. Source: lgff_wheel_adapter."
-}
+{"id":"logitech-momo-force","name":"Logitech MOMO Racing Force (Red)","vendor":"Logitech","vid":"0x046D","pid":"0xC295","productString":"MOMO Racing","manufacturerString":"Logitech","type":"wheel","connection":"usb","descriptor":"05010904a101a1029501750a150026ff03350046ff0309308102950875012501450105091901290881020600ff0900950681029501750826ff0046ff0005010931810295030600ff09018102c0a102090295079102c0c0","inputReportSize":null,"notes":"87-byte descriptor. Source: lgff_wheel_adapter.","layout":{"kind":"wheel","source":"https://en.wikipedia.org/wiki/Driving_Force_(racing_wheel)","wheel":{"axis":"X","rotationDegrees":240,"forceFeedback":true},"pedals":[],"shifters":[{"kind":"paddle_left","buttonIndex":4,"actuation":"digital"},{"kind":"paddle_right","buttonIndex":5,"actuation":"digital"}]}}

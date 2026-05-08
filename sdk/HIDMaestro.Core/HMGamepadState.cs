@@ -213,6 +213,8 @@ public enum HMAxis : ushort
     Slider  = 0x0136,
     Dial    = 0x0137,
     Wheel   = 0x0138,
+    Hat     = 0x0139,    // Hat Switch (POV / d-pad). Not analog itself but referenced
+                          // by layouts as the dpad/hat field's HID-usage handle.
     Vx      = 0x0140,
     Vy      = 0x0141,
     Vz      = 0x0142,

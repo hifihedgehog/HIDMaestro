@@ -1,14 +1,1 @@
-{
-  "id": "hori-horipad-switch",
-  "name": "HORIPAD for Nintendo Switch",
-  "vendor": "HORI",
-  "vid": "0x0F0D",
-  "pid": "0x00C1",
-  "productString": "HORIPAD for Nintendo Switch",
-  "manufacturerString": "HORI CO.,LTD.",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a10115002501350045017501950e05091901290e81029502810105012507463b017504950165140939814265009501810126ff0046ff000930093109320935750895048102750895018101c0",
-  "inputReportSize": null,
-  "notes": "80-byte descriptor. Source: jwiki95 lsusb dump."
-}
+{"id":"hori-horipad-switch","name":"HORIPAD for Nintendo Switch","vendor":"HORI","vid":"0x0F0D","pid":"0x00C1","productString":"HORIPAD for Nintendo Switch","manufacturerString":"HORI CO.,LTD.","type":"gamepad","connection":"usb","descriptor":"05010905a10115002501350045017501950e05091901290e81029502810105012507463b017504950165140939814265009501810126ff0046ff000930093109320935750895048102750895018101c0","inputReportSize":null,"notes":"80-byte descriptor. Source: jwiki95 lsusb dump.","layout":{"kind":"gamepad","source":"https://stores.horiusa.com/horipad-for-nintendo-switch/","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":12},{"side":"right","xAxis":"Z","yAxis":"Rz","clickButton":13}],"triggers":[],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_b","buttonIndex":0},{"role":"face_a","buttonIndex":1},{"role":"face_y","buttonIndex":2},{"role":"face_x","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5},{"role":"left_trigger_click","buttonIndex":6},{"role":"right_trigger_click","buttonIndex":7}],"systemButtons":[{"role":"back","buttonIndex":8},{"role":"start","buttonIndex":9},{"role":"guide","buttonIndex":10},{"role":"capture","buttonIndex":11}]}}

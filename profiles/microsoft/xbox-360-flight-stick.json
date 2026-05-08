@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-flight-stick",
-  "name": "Xbox 360 Flight Stick",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x028E",
-  "productString": "Controller (XBOX 360 For Windows)",
-  "manufacturerString": "Â©Microsoft Corporation",
-  "type": "flightstick",
-  "connection": "usb",
-  "descriptor": "05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0",
-  "nativeDescriptor": "05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0",
-  "inputReportSize": 10,
-  "notes": "127-byte descriptor. Source: DJm00n/ControllersInfo xusb_flightstick. X+Y stick, Rx+Ry stick, 10 buttons, hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
-  "deviceDescription": "Xbox 360 Controller for Windows",
-  "triggerMode": "combined"
-}
+{"id":"xbox-360-flight-stick","name":"Xbox 360 Flight Stick","vendor":"Microsoft","vid":"0x045E","pid":"0x028E","productString":"Controller (XBOX 360 For Windows)","manufacturerString":"Â©Microsoft Corporation","type":"flightstick","connection":"usb","descriptor":"05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0","nativeDescriptor":"05010905a101a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0","inputReportSize":10,"notes":"127-byte descriptor. Source: DJm00n/ControllersInfo xusb_flightstick. X+Y stick, Rx+Ry stick, 10 buttons, hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).","deviceDescription":"Xbox 360 Controller for Windows","triggerMode":"combined","layout":{"kind":"flight_stick","source":"https://en.wikipedia.org/wiki/Xbox_360_controller","stick":{"side":"left","xAxis":"X","yAxis":"Y"},"throttle":{"axis":"Rx","role":"throttle"},"rudder":{"axis":"Ry","kind":"twist"},"hats":[{"axis":"Hat","positions":8,"location":"stick_top"}],"trigger":{"buttonIndex":0,"stages":1},"stickButtons":[{"role":"unknown","buttonIndex":1},{"role":"unknown","buttonIndex":2},{"role":"unknown","buttonIndex":3}],"baseButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5},{"role":"back","buttonIndex":6},{"role":"start","buttonIndex":7}]}}

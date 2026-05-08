@@ -1,14 +1,1 @@
-{
-  "id": "saitek-x52",
-  "name": "Saitek X52 Flight Control System",
-  "vendor": "Logitech (Saitek)",
-  "vid": "0x06A3",
-  "pid": "0x075C",
-  "productString": "Saitek X52 Flight Control System",
-  "manufacturerString": "Saitek",
-  "type": "hotas",
-  "connection": "usb",
-  "descriptor": "05010904a10901a100093009311500260007750b9502810209351500260003750a950181020932093309340936150026ff007508950481020509190129221500250195227501810275029501810105010939150125083500463b106614007504950181420505092409261500250f750495028102c0c0",
-  "inputReportSize": null,
-  "notes": "119-byte descriptor. Source: Ubuntu Bug #492056 / hid-remapper issue. Non-Pro X52 (PID 075C). X52 Pro (0762) descriptor not publicly available."
-}
+{"id":"saitek-x52","name":"Saitek X52 Flight Control System","vendor":"Logitech (Saitek)","vid":"0x06A3","pid":"0x075C","productString":"Saitek X52 Flight Control System","manufacturerString":"Saitek","type":"hotas","connection":"usb","descriptor":"05010904a10901a100093009311500260007750b9502810209351500260003750a950181020932093309340936150026ff007508950481020509190129221500250195227501810275029501810105010939150125083500463b106614007504950181420505092409261500250f750495028102c0c0","inputReportSize":null,"notes":"119-byte descriptor. Source: Ubuntu Bug #492056 / hid-remapper issue. Non-Pro X52 (PID 075C). X52 Pro (0762) descriptor not publicly available.","layout":{"kind":"hotas","source":"https://en.wikipedia.org/wiki/Saitek_X52","stick":{"side":"left","xAxis":"X","yAxis":"Y"},"stickRudder":{"axis":"Rz","kind":"twist"},"stickHats":[{"axis":"Hat","positions":8,"location":"stick_top"}],"stickTrigger":{"buttonIndex":0,"stages":2},"stickButtons":[{"role":"thumb","buttonIndex":1},{"role":"pinkie","buttonIndex":2},{"role":"unknown","buttonIndex":3}],"throttlePrimary":{"axis":"Z","role":"throttle"},"throttleSecondary":[{"axis":"Rx","role":"mini_stick_x"},{"axis":"Ry","role":"mini_stick_y"},{"axis":"Slider","role":"throttle_slider"}],"throttleButtons":[{"role":"mode_switch_low","buttonIndex":4},{"role":"mode_switch_mid","buttonIndex":5},{"role":"mode_switch_high","buttonIndex":6}]}}

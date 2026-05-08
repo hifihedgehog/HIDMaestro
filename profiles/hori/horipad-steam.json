@@ -1,14 +1,1 @@
-{
-  "id": "hori-horipad-steam",
-  "name": "HORIPAD Steam Controller",
-  "vendor": "HORI",
-  "vid": "0x0F0D",
-  "pid": "0x0196",
-  "productString": "HORIPAD Steam",
-  "manufacturerString": "HORI CO.,LTD.",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a1018507a1000930093109320935150026ff00750895048102c00939150025073500463b016514750495018142050919012914150025017501951481020502150026ff0009c409c59502750881020600ff092095268102850509219520910285120922953f81020923910285140926953f81020927910285100924953f8102850f0928953f9102c0",
-  "inputReportSize": null,
-  "notes": "140-byte descriptor. Source: ShadowBlip/InputPlumber. Report ID 7 = gamepad (4 axes, hat, 20 buttons, triggers)."
-}
+{"id":"hori-horipad-steam","name":"HORIPAD Steam Controller","vendor":"HORI","vid":"0x0F0D","pid":"0x0196","productString":"HORIPAD Steam","manufacturerString":"HORI CO.,LTD.","type":"gamepad","connection":"usb","descriptor":"05010905a1018507a1000930093109320935150026ff00750895048102c00939150025073500463b016514750495018142050919012914150025017501951481020502150026ff0009c409c59502750881020600ff092095268102850509219520910285120922953f81020923910285140926953f81020927910285100924953f8102850f0928953f9102c0","inputReportSize":null,"notes":"140-byte descriptor. Source: ShadowBlip/InputPlumber. Report ID 7 = gamepad (4 axes, hat, 20 buttons, triggers).","layout":{"kind":"gamepad","source":"https://stores.horiusa.com/horipad-for-steam-hall-effect/","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":10},{"side":"right","xAxis":"Z","yAxis":"Rz","clickButton":11}],"triggers":[{"axis":"Brake","side":"left","kind":"analog"},{"axis":"Accelerator","side":"right","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5}],"systemButtons":[{"role":"view","buttonIndex":6},{"role":"menu","buttonIndex":7},{"role":"guide","buttonIndex":8},{"role":"share","buttonIndex":9}],"extraButtons":[{"role":"paddle_p1","buttonIndex":12},{"role":"paddle_p2","buttonIndex":13},{"role":"paddle_p3","buttonIndex":14},{"role":"paddle_p4","buttonIndex":15}],"imu":{"accelerometer":true,"gyroscope":true,"magnetometer":false}}}

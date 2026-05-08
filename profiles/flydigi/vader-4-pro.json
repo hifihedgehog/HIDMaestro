@@ -1,14 +1,1 @@
-{
-  "id": "vader-4-pro",
-  "name": "Flydigi Vader 4 Pro",
-  "vendor": "Flydigi",
-  "vid": "0x04B4",
-  "pid": "0x2412",
-  "productString": "Flydigi Vader 4 Pro",
-  "manufacturerString": "Flydigi",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a10175089504150026ff00350046ff0009300931093209358102750495012507463b01651409398142650025014501050c0969750195018102050909140913091209110910090f090e090c090b090a0909090809070906090509040903090209017501951381020502150026ff0009c509c4950275088102c0",
-  "inputReportSize": 32,
-  "notes": "125-byte descriptor. Source: ShadowBlip/InputPlumber. DInput mode descriptor. 4 axes (8-bit), hat switch, 1 consumer button (Red Menu), 19 buttons, brake/accelerator triggers. No report ID in descriptor (single-report device). VID 0x04B4 is Cypress Semiconductor (Infineon)."
-}
+{"id":"vader-4-pro","name":"Flydigi Vader 4 Pro","vendor":"Flydigi","vid":"0x04B4","pid":"0x2412","productString":"Flydigi Vader 4 Pro","manufacturerString":"Flydigi","type":"gamepad","connection":"usb","descriptor":"05010905a10175089504150026ff00350046ff0009300931093209358102750495012507463b01651409398142650025014501050c0969750195018102050909140913091209110910090f090e090c090b090a0909090809070906090509040903090209017501951381020502150026ff0009c509c4950275088102c0","inputReportSize":32,"notes":"125-byte descriptor. Source: ShadowBlip/InputPlumber. DInput mode descriptor. 4 axes (8-bit), hat switch, 1 consumer button (Red Menu), 19 buttons, brake/accelerator triggers. No report ID in descriptor (single-report device). VID 0x04B4 is Cypress Semiconductor (Infineon).","layout":{"kind":"gamepad","source":"https://www.flydigi.com/en/product/vader-4-pro","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":8},{"side":"right","xAxis":"Z","yAxis":"Rz","clickButton":9}],"triggers":[{"axis":"Brake","side":"left","kind":"analog"},{"axis":"Accelerator","side":"right","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5}],"systemButtons":[{"role":"view","buttonIndex":6},{"role":"menu","buttonIndex":7},{"role":"guide","buttonIndex":10}],"extraButtons":[{"role":"paddle_m1","buttonIndex":11},{"role":"paddle_m2","buttonIndex":12},{"role":"paddle_m3","buttonIndex":13},{"role":"paddle_m4","buttonIndex":14}],"imu":{"accelerometer":true,"gyroscope":true,"magnetometer":false},"haptics":{"rumble":"dual_erm","triggerHaptics":false}}}

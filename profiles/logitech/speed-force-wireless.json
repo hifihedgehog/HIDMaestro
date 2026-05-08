@@ -1,14 +1,1 @@
-{
-  "id": "logitech-speed-force-wireless",
-  "name": "Logitech Speed Force Wireless (Wii)",
-  "vendor": "Logitech",
-  "vid": "0x046D",
-  "pid": "0xC29C",
-  "productString": "Speed Force Wireless",
-  "manufacturerString": "Logitech",
-  "type": "wheel",
-  "connection": "wireless-adapter",
-  "descriptor": "05010904a101a1029501750a150026ff03350046ff03093081020600ff950275012501450109018102950b1901290b050981020600ff95017501090281020501750826ff0046ff000931093295028102c0a1020600ff950709039102c00affff9508b102c0",
-  "inputReportSize": null,
-  "notes": "101-byte descriptor. Source: lgff_wheel_adapter. Wii wheel."
-}
+{"id":"logitech-speed-force-wireless","name":"Logitech Speed Force Wireless (Wii)","vendor":"Logitech","vid":"0x046D","pid":"0xC29C","productString":"Speed Force Wireless","manufacturerString":"Logitech","type":"wheel","connection":"wireless-adapter","descriptor":"05010904a101a1029501750a150026ff03350046ff03093081020600ff950275012501450109018102950b1901290b050981020600ff95017501090281020501750826ff0046ff000931093295028102c0a1020600ff950709039102c00affff9508b102c0","inputReportSize":null,"notes":"101-byte descriptor. Source: lgff_wheel_adapter. Wii wheel.","layout":{"kind":"wheel","source":"https://en.wikipedia.org/wiki/Logitech_Driving_Force_GT","wheel":{"axis":"X","rotationDegrees":900,"forceFeedback":true},"pedals":[{"axis":"Z","role":"accelerator","type":"potentiometer"}],"shifters":[{"kind":"paddle_left","buttonIndex":4,"actuation":"digital"},{"kind":"paddle_right","buttonIndex":5,"actuation":"digital"}]}}

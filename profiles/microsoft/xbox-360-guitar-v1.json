@@ -1,17 +1,1 @@
-{
-  "id": "xbox-360-guitar-v1",
-  "name": "Xbox 360 Guitar Controller v1",
-  "vendor": "Microsoft",
-  "vid": "0x045E",
-  "pid": "0x028E",
-  "productString": "Controller (XBOX 360 For Windows)",
-  "manufacturerString": "Â©Microsoft Corporation",
-  "type": "other",
-  "connection": "usb",
-  "descriptor": "05010905a101a1000935150026ffff350046ffff950175108102c005010936150026ffff95017510810205010937150026ff0095017508810275089501810305091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "nativeDescriptor": "05010905a101a1000935150026ffff350046ffff950175108102c005010936150026ffff95017510810205010937150026ff0095017508810275089501810305091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0",
-  "inputReportSize": 10,
-  "notes": "116-byte descriptor. Source: DJm00n/ControllersInfo xusb_guitar1. Slider + dial + 8-bit wheel + 10 buttons + hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).",
-  "deviceDescription": "Xbox 360 Controller for Windows",
-  "triggerMode": "combined"
-}
+{"id":"xbox-360-guitar-v1","name":"Xbox 360 Guitar Controller v1","vendor":"Microsoft","vid":"0x045E","pid":"0x028E","productString":"Controller (XBOX 360 For Windows)","manufacturerString":"Â©Microsoft Corporation","type":"other","connection":"usb","descriptor":"05010905a101a1000935150026ffff350046ffff950175108102c005010936150026ffff95017510810205010937150026ff0095017508810275089501810305091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","nativeDescriptor":"05010905a101a1000935150026ffff350046ffff950175108102c005010936150026ffff95017510810205010937150026ff0095017508810275089501810305091901290a950a7501810275069501810305010939150125083500463b10660e00750495018142750495018103750895018103c0","inputReportSize":10,"notes":"116-byte descriptor. Source: DJm00n/ControllersInfo xusb_guitar1. Slider + dial + 8-bit wheel + 10 buttons + hat. Routes through hidmaestro_xusb.inf XUSB companion (matches xbox-360-wired path); no xinputhid driver mode (would force 16-button gamepad layout, breaking subtype fidelity).","deviceDescription":"Xbox 360 Controller for Windows","triggerMode":"combined","layout":{"kind":"guitar","source":"https://en.wikipedia.org/wiki/Xbox_360_controller","frets":[{"role":"fret_green","buttonIndex":0},{"role":"fret_red","buttonIndex":1},{"role":"fret_yellow","buttonIndex":2},{"role":"fret_blue","buttonIndex":3},{"role":"fret_orange","buttonIndex":4}],"strum":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"whammyAxis":"Slider","systemButtons":[{"role":"back","buttonIndex":6},{"role":"start","buttonIndex":7}],"soloFrets":[{"role":"solo_green","buttonIndex":8},{"role":"solo_red","buttonIndex":9}]}}

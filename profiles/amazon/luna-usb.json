@@ -1,14 +1,1 @@
-{
-  "id": "amazon-luna-usb",
-  "name": "Amazon Luna Controller (USB)",
-  "vendor": "Amazon",
-  "vid": "0x1949",
-  "pid": "0x0419",
-  "productString": "Luna Controller",
-  "manufacturerString": "Amazon",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a101a100850105091901290c150025017501950c810275019504810105010939150025073500463b01651475089501814265000930093109320935150026ff00750895048102050109330934150026ff00750895028102c0c0",
-  "inputReportSize": null,
-  "notes": "93-byte descriptor. Source: DJm00n/ControllersInfo. VID 0x1949, alternate PID 0x041A also exists."
-}
+{"id":"amazon-luna-usb","name":"Amazon Luna Controller (USB)","vendor":"Amazon","vid":"0x1949","pid":"0x0419","productString":"Luna Controller","manufacturerString":"Amazon","type":"gamepad","connection":"usb","descriptor":"05010905a101a100850105091901290c150025017501950c810275019504810105010939150025073500463b01651475089501814265000930093109320935150026ff00750895048102050109330934150026ff00750895028102c0c0","inputReportSize":null,"notes":"93-byte descriptor. Source: DJm00n/ControllersInfo. VID 0x1949, alternate PID 0x041A also exists.","layout":{"kind":"gamepad","source":"https://en.wikipedia.org/wiki/Amazon_Luna","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":9},{"side":"right","xAxis":"Z","yAxis":"Rz","clickButton":10}],"triggers":[{"axis":"Rx","side":"left","kind":"analog"},{"axis":"Ry","side":"right","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_a","buttonIndex":0},{"role":"face_b","buttonIndex":1},{"role":"face_x","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5}],"systemButtons":[{"role":"back","buttonIndex":6},{"role":"start","buttonIndex":7},{"role":"guide","buttonIndex":8}]}}

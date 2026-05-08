@@ -15,5 +15,82 @@
   "notes": "334-byte Bluetooth descriptor (Linux firmware mode, 15 buttons). Source: DJm00n/ControllersInfo. Has AC Home (0x0C0224) and rumble. See xbox-one-s-bt for 307-byte Windows firmware mode.",
   "deviceDescription": "Xbox Wireless Controller",
   "triggerMode": "separate",
-  "driverMode": "xinputhid"
+  "driverMode": "xinputhid",
+  "layout": {
+    "kind": "gamepad",
+    "source": "https://en.wikipedia.org/wiki/Xbox_Wireless_Controller",
+    "sticks": [
+      {
+        "side": "left",
+        "xAxis": "X",
+        "yAxis": "Y",
+        "clickButton": 8
+      },
+      {
+        "side": "right",
+        "xAxis": "Rx",
+        "yAxis": "Ry",
+        "clickButton": 9
+      }
+    ],
+    "triggers": [
+      {
+        "axis": "Z",
+        "side": "left",
+        "kind": "analog"
+      },
+      {
+        "axis": "Rz",
+        "side": "right",
+        "kind": "analog"
+      }
+    ],
+    "dpad": {
+      "encoding": "hat",
+      "hatAxis": "Hat",
+      "hatPositions": 8
+    },
+    "faceButtons": [
+      {
+        "role": "face_a",
+        "buttonIndex": 0
+      },
+      {
+        "role": "face_b",
+        "buttonIndex": 1
+      },
+      {
+        "role": "face_x",
+        "buttonIndex": 2
+      },
+      {
+        "role": "face_y",
+        "buttonIndex": 3
+      }
+    ],
+    "shoulderButtons": [
+      {
+        "role": "left_bumper",
+        "buttonIndex": 4
+      },
+      {
+        "role": "right_bumper",
+        "buttonIndex": 5
+      }
+    ],
+    "systemButtons": [
+      {
+        "role": "view",
+        "buttonIndex": 6
+      },
+      {
+        "role": "menu",
+        "buttonIndex": 7
+      }
+    ],
+    "haptics": {
+      "rumble": "impulse_triggers",
+      "triggerHaptics": true
+    }
+  }
 }

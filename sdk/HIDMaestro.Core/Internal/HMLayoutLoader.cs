@@ -71,7 +71,7 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
 
 /// <summary>JSON serializer options preconfigured for HMLayout
 /// deserialization. Registered once per ControllerProfile load.</summary>
-internal static class HMLayoutJsonOptions
+public static class HMLayoutJsonOptions
 {
     public static readonly JsonSerializerOptions Default = Build();
 
@@ -84,9 +84,13 @@ internal static class HMLayoutJsonOptions
             ReadCommentHandling = JsonCommentHandling.Skip,
             AllowTrailingCommas = true,
         };
-        // snake_case enum strings: "left_stick_x" <-> HMAxisRole.LeftStickX.
-        opts.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower));
+        // HMAxisJsonConverter must come BEFORE JsonStringEnumConverter or
+        // the latter wins for HMAxis (it's an enum) and produces snake_case
+        // names like "x" / "left_stick_x" instead of the canonical PascalCase
+        // axis names ("X", "Y", "LeftStickX") that the descriptor parser
+        // emits.
         opts.Converters.Add(new HMAxisJsonConverter());
+        opts.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower));
         opts.Converters.Add(new HMLayoutJsonConverter());
         return opts;
     }
@@ -124,6 +128,11 @@ public static class HMLayoutValidator
     public static void Validate(HMLayout layout, HidReportBuilder layoutDescriptor)
     {
         var declaredAxes = new HashSet<HMAxis>(layoutDescriptor.AxisFields.Keys);
+        // Hat Switch is its own input shape (not in AxisFields by design)
+        // but layouts reference it via HMAxis.Hat. Include it in the
+        // validator's declared set when the descriptor declares a hat.
+        if (layoutDescriptor.HatSwitch != null)
+            declaredAxes.Add(HMAxis.Hat);
         int buttonCount = layoutDescriptor.Buttons.Count;
         var ctx = new ValidationContext(declaredAxes, buttonCount, layout.Kind);
         WalkLayout(layout, ctx);

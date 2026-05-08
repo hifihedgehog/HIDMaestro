@@ -1,14 +1,1 @@
-{
-  "id": "ps-move",
-  "name": "PlayStation Move Motion Controller",
-  "vendor": "Sony",
-  "vid": "0x054C",
-  "pid": "0x03D5",
-  "productString": "Motion Controller",
-  "manufacturerString": "Sony",
-  "type": "other",
-  "connection": "usb",
-  "descriptor": "05010904a101a10285017501951515002501350045010509190129158102950b0600ff8103150026ff000501a10075089501350046ff0009308102c00600ff7508950781020501751046ffff27ffff0000950309330934093581020600ff9503810205010901950381020600ff95038102750c46ff0f26ff0f95048102750846ff0026ff00950681027508953009019102750895300901b102c0a1028502750895300901b102c0a10285ee750895300901b102c0a10285ef750895300901b102c0c0",
-  "inputReportSize": null,
-  "notes": "194-byte descriptor. Source: Linux kernel hid-sony.c motion_rdesc."
-}
+{"id":"ps-move","name":"PlayStation Move Motion Controller","vendor":"Sony","vid":"0x054C","pid":"0x03D5","productString":"Motion Controller","manufacturerString":"Sony","type":"other","connection":"usb","descriptor":"05010904a101a10285017501951515002501350045010509190129158102950b0600ff8103150026ff000501a10075089501350046ff0009308102c00600ff7508950781020501751046ffff27ffff0000950309330934093581020600ff9503810205010901950381020600ff95038102750c46ff0f26ff0f95048102750846ff0026ff00950681027508953009019102750895300901b102c0a1028502750895300901b102c0a10285ee750895300901b102c0a10285ef750895300901b102c0c0","inputReportSize":null,"notes":"194-byte descriptor. Source: Linux kernel hid-sony.c motion_rdesc.","layout":{"kind":"motion_wand","source":"https://en.wikipedia.org/wiki/PlayStation_Move","trigger":{"buttonIndex":7,"stages":1},"buttons":[{"role":"face_x","buttonIndex":0},{"role":"face_a","buttonIndex":1},{"role":"face_b","buttonIndex":2},{"role":"face_y","buttonIndex":3},{"role":"move","buttonIndex":4},{"role":"ps","buttonIndex":5},{"role":"start","buttonIndex":6},{"role":"back","buttonIndex":8}],"imu":{"accelerometer":true,"gyroscope":true,"magnetometer":true},"rgbLightbar":true}}

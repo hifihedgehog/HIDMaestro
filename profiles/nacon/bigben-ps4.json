@@ -1,14 +1,1 @@
-{
-  "id": "nacon-bigben-ps4",
-  "name": "Nacon/BigBen PS4 Compact Controller",
-  "vendor": "Nacon",
-  "vid": "0x146B",
-  "pid": "0x0902",
-  "productString": "Bigben Interactive Wired Controller",
-  "manufacturerString": "BigBen Interactive",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": "05010905a10115002501350045017501950d05090905090109020904090709080909090a090b090c090e090f090d810275019503810105012507463b017504950165140939814265009501810126ff0046ff000930093109330934750895048102950a8101050126ff0046ff000932093595028102950881010600ffb1020a2126950891020a212695088102c0",
-  "inputReportSize": null,
-  "notes": "141-byte descriptor (driver fixup). Source: Linux kernel hid-bigbenff.c. 13 buttons, hat, 4 axes, 2 triggers."
-}
+{"id":"nacon-bigben-ps4","name":"Nacon/BigBen PS4 Compact Controller","vendor":"Nacon","vid":"0x146B","pid":"0x0902","productString":"Bigben Interactive Wired Controller","manufacturerString":"BigBen Interactive","type":"gamepad","connection":"usb","descriptor":"05010905a10115002501350045017501950d05090905090109020904090709080909090a090b090c090e090f090d810275019503810105012507463b017504950165140939814265009501810126ff0046ff000930093109330934750895048102950a8101050126ff0046ff000932093595028102950881010600ffb1020a2126950891020a212695088102c0","inputReportSize":null,"notes":"141-byte descriptor (driver fixup). Source: Linux kernel hid-bigbenff.c. 13 buttons, hat, 4 axes, 2 triggers.","layout":{"kind":"gamepad","source":"https://www.nacongaming.com/en/products/wired-compact-controller-for-ps4","sticks":[{"side":"left","xAxis":"X","yAxis":"Y","clickButton":10},{"side":"right","xAxis":"Z","yAxis":"Rz","clickButton":11}],"triggers":[{"axis":"Rx","side":"left","kind":"analog"},{"axis":"Ry","side":"right","kind":"analog"}],"dpad":{"encoding":"hat","hatAxis":"Hat","hatPositions":8},"faceButtons":[{"role":"face_x","buttonIndex":0},{"role":"face_a","buttonIndex":1},{"role":"face_b","buttonIndex":2},{"role":"face_y","buttonIndex":3}],"shoulderButtons":[{"role":"left_bumper","buttonIndex":4},{"role":"right_bumper","buttonIndex":5},{"role":"left_trigger_click","buttonIndex":6},{"role":"right_trigger_click","buttonIndex":7}],"systemButtons":[{"role":"share","buttonIndex":8},{"role":"options","buttonIndex":9},{"role":"ps","buttonIndex":12}]}}
