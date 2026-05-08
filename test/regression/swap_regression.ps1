@@ -134,6 +134,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1258,6 +1259,24 @@ function Scenario-Trigger-Classifier-Check {
     }
 }
 
+# S34: end-to-end trigger-axis live wire check. Creates real virtual
+# controllers via HMContext.CreateController for the (2 sticks, 2 triggers),
+# (2 sticks, 1 trigger), and (1 stick, 1 trigger) PadForge custom shapes,
+# submits state via HMController.SubmitState, opens the HID interface, and
+# reads back the on-wire input report via HidD_GetInputReport. Closes the
+# gap S33 left: S33 verifies BuildReportInto in isolation; S34 proves the
+# whole SubmitState → BuildReportInto → shared memory → driver →
+# HidClass round trip lands the trigger byte where the classifier said
+# it would. The unit-only check passing while the live wire was broken is
+# exactly the failure shape that hit the v1.3.6 release before catch.
+function Scenario-Trigger-Live-Check {
+    $probe = Resolve-ProbeBinary 'trigger_live_check' 'TriggerLiveCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("TriggerLiveCheck exited " + $p.ExitCode + " - end-to-end trigger wire fidelity regressed (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1295,7 +1314,8 @@ $scenarios = @(
     @{ Name = 'S30_Sony_BT_Output_RoundTrip';     Body = ${function:Scenario-Sony-BT-Output-Decode-Check} },
     @{ Name = 'S31_Sony_Data_Driven_Coverage';    Body = ${function:Scenario-Sony-Data-Driven-Coverage} },
     @{ Name = 'S32_V135_Features_Check';          Body = ${function:Scenario-V135-Features-Check} },
-    @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} }
+    @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} },
+    @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

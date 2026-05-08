@@ -10,3 +10,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SonyDataDrivenCoverage")]
 [assembly: InternalsVisibleTo("V135FeaturesCheck")]
 [assembly: InternalsVisibleTo("TriggerClassifierCheck")]
+[assembly: InternalsVisibleTo("TriggerLiveCheck")]
