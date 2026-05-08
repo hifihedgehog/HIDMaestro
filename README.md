@@ -107,8 +107,9 @@ using var ctrl2 = ctx.CreateController(stick);
 // Profiles with more analog axes than 4 sticks + 2 triggers (HOTAS with
 // throttle quadrant, racing wheels with brake/throttle/clutch pedals,
 // flight sticks with rudder pedals) declare each axis by HID usage and
-// drive it via HMGamepadState.ExtraAxes. AvailableAxes enumerates what
-// the descriptor exposes.
+// drive it via state.Axes. profile.AvailableAxes enumerates what the
+// descriptor exposes; profile.Sticks / profile.Triggers are the variable-
+// length simple-view lists.
 var hotas = new HMProfileBuilder()
     .Id("my-hotas").Name("Throttle Quadrant")
     .Vid(0x0483).Pid(0x0010)
@@ -125,9 +126,9 @@ using var ctrl4 = ctx.CreateController(hotas);
 foreach (var a in hotas.AvailableAxes) Console.WriteLine($"  {a}");
 ctrl4.SubmitState(new HMGamepadState
 {
-    LeftStickX = 0.5f, LeftStickY = -0.2f,
-    ExtraAxes = new Dictionary<HMAxis, float>
+    Axes = new Dictionary<HMAxis, float>
     {
+        [HMAxis.X]      = 0.75f, [HMAxis.Y] = 0.4f,   // stick (0.5 = center)
         [HMAxis.Slider] = 0.75f,
         [HMAxis.Rudder] = 0.25f,
         [HMAxis.Brake]  = 0.00f,
@@ -142,6 +143,35 @@ ctrl2.SubmitState(new HMGamepadState
 {
     HatRaw = (ushort)(stick.HatLogicalMin!.Value + 7)            // bit-exact
 });
+
+// v1.3.9 input shape — one unified axes dict drives every analog input.
+// Discover what's drivable via profile.Sticks / profile.Triggers
+// (variable-length lists), then write to state.Axes by HMAxis. Layout-
+// authored profiles map their physical axes deterministically; classifier-
+// derived fallbacks apply for unauthored profiles.
+var pad = ctx.GetProfile("xbox-360-wired")!;
+using var ctrlPad = ctx.CreateController(pad);
+var axes = HMGamepadStateHelpers.StandardAxes(pad,
+    leftStickX: 0.75f, leftStickY: 0.5f,
+    rightStickX: 0.5f, rightStickY: 0.5f,
+    leftTrigger: 0.0f, rightTrigger: 1.0f);
+// Or set any axis directly: state.Axes[HMAxis.Slider] = 0.7f;
+ctrlPad.SubmitState(new HMGamepadState { Axes = axes, Buttons = HMButton.A });
+
+// PadForge-style consumer: render the right widget per profile by Layout.Kind,
+// drive each entry by its HMAxis.
+switch (pad.Layout)
+{
+    case HMWheelLayout w:
+        // w.Wheel.Axis, w.Pedals[].Axis, w.Shifters[].ButtonIndex, ...
+        break;
+    case HMHotasLayout h:
+        // h.Stick, h.ThrottlePrimary, h.ThrottleSecondary[], ...
+        break;
+    case HMGamepadLayout g:
+        // g.Sticks, g.Triggers, g.FaceButtons[], ...
+        break;
+}
 
 // Or capture a physical controller and deploy as a virtual
 var device = HMDeviceExtractor.ListDevices()
@@ -397,7 +427,7 @@ No external scripts, no manual setup, no popups. Just the one console window. Re
 
 ### Live-swap regression battery
 
-`test/regression/swap_regression.ps1` is a 36-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence, the HID PID 1.0 force-feedback round-trip, the high-resolution hat encoder, the Sony BT Report 0x31 vendor-blob encode/decode round-trip across all DS4/DS5 BT profiles, and the v1.3.5 `HMGamepadState` Sony-surface assertions (touchpad, IMU, battery, audio block, DS4 BT armOn IDs, DS5 Edge `activeProfile` `inputDefaults` overlay), and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all controller archetypes the catalog exercises (Xbox 360 Wired, Xbox Series Bluetooth, Xbox One BT, Xbox Elite v2 BT, DualSense, DualSense Edge, DualSense BT, DualShock 4 BT, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`).
+`test/regression/swap_regression.ps1` is a 37-scenario battery that drives the test app through every interesting create / live-swap / remove / force-kill sequence, the HID PID 1.0 force-feedback round-trip, the high-resolution hat encoder, the Sony BT Report 0x31 vendor-blob encode/decode round-trip across all DS4/DS5 BT profiles, and the v1.3.5 `HMGamepadState` Sony-surface assertions (touchpad, IMU, battery, audio block, DS4 BT armOn IDs, DS5 Edge `activeProfile` `inputDefaults` overlay), and verifies no PnP devnodes are left in the `PRESENT` state after each one. Covers all controller archetypes the catalog exercises (Xbox 360 Wired, Xbox Series Bluetooth, Xbox One BT, Xbox Elite v2 BT, DualSense, DualSense Edge, DualSense BT, DualShock 4 BT, Switch Pro, plus a runtime-built custom profile authored via `HMProfileBuilder` + `HidDescriptorBuilder`).
 
 The harness sync is event-driven: the test app emits `[ACK]` on stdout after each stdin command finishes processing, and the harness blocks on that marker. No time-based settle, no scaling — every wait lasts exactly as long as the SDK actually takes. Run from an elevated PowerShell:
 
@@ -406,7 +436,7 @@ The harness sync is event-driven: the test app emits `[ACK]` on stdout after eac
 ./test/regression/swap_regression.ps1 -Filter 'S08*' # one scenario, ~1-2 min
 ```
 
-Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path. Validated 36/36 PASS on a Ryzen 9955HX3D dev box (Win11 26200, ~11 min wall time) and on an Intel Atom Z8350 fixture (Win10 IoT LTSC 19044, ~20 min at `HIDMAESTRO_TIMEOUT_SCALE=2`) — the slow-hardware result is the reason the harness is pure ACK-driven instead of fixed-sleep timed.
+Exit code 0 if every scenario passed, 1 if any failed. Useful before tagging a release: catches the `SwDeviceLifetimeParentPresent` resurrection class of bugs and any future regression in the live-swap teardown path. Validated 37/37 PASS on a Ryzen 9955HX3D dev box (Win11 26200, ~11 min wall time) and on an Intel Atom Z8350 fixture (Win10 IoT LTSC 19044, ~20 min at `HIDMAESTRO_TIMEOUT_SCALE=2`) — the slow-hardware result is the reason the harness is pure ACK-driven instead of fixed-sleep timed.
 
 ## Profile System
 

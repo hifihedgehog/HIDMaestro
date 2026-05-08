@@ -108,9 +108,12 @@ internal static class DeviceOrchestrator
                     // and flush per write. Was File.AppendAllText (open/write/
                     // close per call); during HIDMAESTRO_DIAG=1 battery runs
                     // that's ~3-4K file ops adding 10-40 s to the wall time.
-                    // FileShare.ReadWrite so external tools can tail the file.
+                    // FileShare.ReadWrite | Delete so external tools can tail
+                    // the file AND the harness's per-run Remove-Item can clear
+                    // it even if a prior HIDMaestroTest writer didn't drain
+                    // its ProcessExit cleanly.
                     var fs = new FileStream(diagPath, FileMode.Append, FileAccess.Write,
-                        FileShare.ReadWrite, bufferSize: 4096);
+                        FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
                     s_diagWriter = new StreamWriter(fs) { AutoFlush = true };
                     AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                     {
@@ -154,7 +157,7 @@ internal static class DeviceOrchestrator
                     Directory.CreateDirectory(dir);
                     string timingPath = Path.Combine(dir, "setup_timing.log");
                     var fs = new FileStream(timingPath, FileMode.Append, FileAccess.Write,
-                        FileShare.ReadWrite, bufferSize: 4096);
+                        FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
                     s_timingWriter = new StreamWriter(fs) { AutoFlush = true };
                     AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                     {
