@@ -137,6 +137,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1321,6 +1322,19 @@ function Scenario-Axis-Addressing-Check {
     }
 }
 
+# S37: layout audit (v1.3.9). For every catalog profile, verifies the
+# layout block (when authored) schema-validates against the descriptor and
+# every axis/button reference resolves. For profiles WITHOUT a layout
+# block, asserts the classifier-fallback Sticks/Triggers lists are
+# coherent. No driver install, no virtual device.
+function Scenario-Layout-Audit-Check {
+    $probe = Resolve-ProbeBinary 'layout_audit_check' 'LayoutAuditCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("LayoutAuditCheck exited " + $p.ExitCode + " - layout schema/descriptor mismatch (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1361,7 +1375,8 @@ $scenarios = @(
     @{ Name = 'S33_Trigger_Classifier_Check';     Body = ${function:Scenario-Trigger-Classifier-Check} },
     @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} },
     @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} },
-    @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} }
+    @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} },
+    @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

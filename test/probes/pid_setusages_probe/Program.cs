@@ -255,8 +255,9 @@ internal static class Program
                 {
                     var s = new HMGamepadState
                     {
-                        LeftStickX = (float)(rng.NextDouble() * 2 - 1),
-                        LeftStickY = (float)(rng.NextDouble() * 2 - 1),
+                        Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                            leftStickX: (float)rng.NextDouble(),
+                            leftStickY: (float)rng.NextDouble()),
                         Hat        = (HMHat)(rng.Next(0, 9)),  // v1.3.3 — exercise d-pad path
                         Buttons = ((rng.Next() & 1) != 0) ? HMButton.A : HMButton.None,
                     };

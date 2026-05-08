@@ -220,7 +220,10 @@ internal sealed class Program
             };
             foreach (var (input, expected) in sweeps)
             {
-                ctrl.SubmitState(new HMGamepadState { LeftTrigger = (float)input });
+                ctrl.SubmitState(new HMGamepadState
+                {
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, leftTrigger: (float)input)
+                });
                 Thread.Sleep(40);
                 byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
                 if (wire == null) { Check($"{label} LT={input}: GetInputReport", false); continue; }
@@ -240,7 +243,10 @@ internal sealed class Program
             };
             foreach (var (input, expected) in sweeps)
             {
-                ctrl.SubmitState(new HMGamepadState { RightTrigger = (float)input });
+                ctrl.SubmitState(new HMGamepadState
+                {
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, rightTrigger: (float)input)
+                });
                 Thread.Sleep(40);
                 byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
                 if (wire == null) { Check($"{label} RT={input}: GetInputReport", false); continue; }
@@ -253,13 +259,17 @@ internal sealed class Program
         // Stick mid + max checks (regression on builder-built sticks).
         if (rb.LeftStickX != null)
         {
-            ctrl.SubmitState(new HMGamepadState { LeftStickX = 1.0f });
+            // v1.3.9 — sticks are uniformly [0..1] (1.0 = full right / max).
+            ctrl.SubmitState(new HMGamepadState
+            {
+                Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile, leftStickX: 1.0f)
+            });
             Thread.Sleep(40);
             byte[]? wire = GetCurrentInputReport(path, reportLen, rb.InputReportId);
             if (wire != null)
             {
                 int got = ReadField(wire, rb.LeftStickX, rb.InputReportId);
-                Check($"{label} LSX=+1 → wire {got} = {rb.LeftStickX.LogicalMax}",
+                Check($"{label} LSX=1.0 → wire {got} = {rb.LeftStickX.LogicalMax}",
                       got == rb.LeftStickX.LogicalMax,
                       $"got {got}, expected {rb.LeftStickX.LogicalMax}");
             }

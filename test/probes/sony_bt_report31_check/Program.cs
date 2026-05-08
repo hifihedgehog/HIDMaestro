@@ -60,22 +60,22 @@ internal sealed class Program
             Console.WriteLine("  [PASS] ReportIdByte = 0x31");
         }
 
-        // Test 2: encoder produces correct stick / trigger / button bytes
+        // Test 2: encoder produces correct stick / trigger / button bytes.
+        // v1.3.9 — sticks/triggers passed explicitly to EncodeInput in
+        // uniform [0..1] convention.
         var state = new HMGamepadState
         {
-            LeftStickX  =  1.0f,   // expect byte 2 = 128 + 127 = 255
-            LeftStickY  = -1.0f,   // byte 3 = 128 - 127 = 1
-            RightStickX =  0.0f,   // byte 4 = 128
-            RightStickY =  0.5f,   // byte 5 = 128 + round(63.5) = 192
-            LeftTrigger = 1.0f,    // byte 6 = 255
-            RightTrigger = 0.5f,   // byte 7 = round(127.5) = 128
             Buttons = HMButton.A | HMButton.LeftBumper | HMButton.Guide,
             Hat = HMHat.NorthEast,  // hat-octant value = 1
         };
 
         var buffer = new byte[spec.Size];
         var encState = new VendorBlobCodec.EncoderState();
-        VendorBlobCodec.EncodeInput(spec, in state, buffer, encState);
+        VendorBlobCodec.EncodeInput(spec, in state,
+            leftStickX: 1.0f, leftStickY: 0.0f,        // 1.0 = full right; 0.0 = old -1
+            rightStickX: 0.5f, rightStickY: 0.75f,     // 0.5 = center; 0.75 = old +0.5
+            leftTrigger: 1.0f, rightTrigger: 0.5f,
+            buffer, encState);
 
         total++;
         bool reportIdPass = buffer[0] == 0x31;
@@ -84,11 +84,11 @@ internal sealed class Program
 
         var stickAssertions = new (int idx, int expected, string name)[]
         {
-            (2, 255, "LeftStickX = +1.0"),
-            (3,   1, "LeftStickY = -1.0"),
-            (4, 128, "RightStickX = 0.0"),
-            // RightStickY = 0.5 → 128 + round(0.5*127) = 128 + 64 = 192
-            (5, 192, "RightStickY = 0.5"),
+            (2, 255, "LeftStickX = 1.0"),
+            (3,   0, "LeftStickY = 0.0"),
+            (4, 128, "RightStickX = 0.5 (center)"),
+            // RightStickY = 0.75 → round(0.75 * 255) = 191
+            (5, 191, "RightStickY = 0.75"),
             (6, 255, "LeftTrigger = 1.0"),
             // RightTrigger = 0.5 → round(0.5*255) = 128
             (7, 128, "RightTrigger = 0.5"),
@@ -143,7 +143,11 @@ internal sealed class Program
         total++;
         // First call already happened; next encode should advance the counter at byte 8
         byte counterBefore = buffer[8];
-        VendorBlobCodec.EncodeInput(spec, in state, buffer, encState);
+        VendorBlobCodec.EncodeInput(spec, in state,
+            leftStickX: 1.0f, leftStickY: 0.0f,
+            rightStickX: 0.5f, rightStickY: 0.75f,
+            leftTrigger: 1.0f, rightTrigger: 0.5f,
+            buffer, encState);
         byte counterAfter = buffer[8];
         bool counterPass = counterAfter == (byte)(counterBefore + 1);
         Console.WriteLine($"  [{(counterPass ? "PASS" : "FAIL")}] reportCounter advanced: {counterBefore} → {counterAfter}");
@@ -167,7 +171,11 @@ internal sealed class Program
         {
             total++;
             var hatState = new HMGamepadState { Hat = dir };
-            VendorBlobCodec.EncodeInput(spec, in hatState, buffer, encState);
+            VendorBlobCodec.EncodeInput(spec, in hatState,
+                leftStickX: 0.5f, leftStickY: 0.5f,
+                rightStickX: 0.5f, rightStickY: 0.5f,
+                leftTrigger: 0.0f, rightTrigger: 0.0f,
+                buffer, encState);
             int observed = buffer[9] & 0x0F;
             bool pass = observed == expectedNibble;
             Console.WriteLine($"  [{(pass ? "PASS" : "FAIL")}] Hat={name,-10} → byte 9 low nibble = {observed} (expected {expectedNibble})");

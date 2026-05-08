@@ -112,8 +112,8 @@ internal static class Program
         Check("AxisFields contains Brake",               rb.AxisFields.ContainsKey(HMAxis.Brake));
         Check("AxisFields contains Clutch",              rb.AxisFields.ContainsKey(HMAxis.Clutch));
 
-        // Drive every axis via ExtraAxes; verify each field's wire byte.
-        var built = rb.BuildReport(extraAxes: new Dictionary<HMAxis, float>
+        // Drive every axis via the unified Axes dict; verify each field's wire byte.
+        var built = rb.BuildReport(new Dictionary<HMAxis, float>
         {
             [HMAxis.Slider]   = 1.0f,
             [HMAxis.Rudder]   = 0.5f,
@@ -128,21 +128,21 @@ internal static class Program
         Check("Builder Brake wire byte = 0x3F",    built[rb.AxisFields[HMAxis.Brake].BitOffset / 8]    == 0x3F);
         Check("Builder Clutch wire byte = 0x00",   built[rb.AxisFields[HMAxis.Clutch].BitOffset / 8]   == 0x00);
 
-        // ── Phase 4: Override semantics ───────────────────────────────────
-        Console.WriteLine("\n-- Override semantics (explicit beats implicit) --");
+        // ── Phase 4: Last-write-wins on the unified Axes dict ─────────────
+        Console.WriteLine("\n-- Last-write-wins on the unified Axes dict --");
 
-        // SideWinder's Slider field also resolves to the LeftTrigger semantic
-        // slot via the v1.3.8 classifier extension. Drive both at once and
-        // assert ExtraAxes wins on the wire.
+        // SideWinder's Slider field is the descriptor axis HMAxis.Slider; in
+        // v1.3.9 there is exactly ONE write surface (state.Axes[axis]) so the
+        // last write to a key wins. Verify the dict-driven write lands at
+        // the correct wire byte.
         var sw = ctx.GetProfile("sidewinder-force-feedback-2")!;
         var swRb = HidReportBuilder.Parse(sw.GetDescriptorBytes()!);
-        var report = swRb.BuildReport(
-            leftTrigger: 0.25,                                   // implicit: 0x1F
-            extraAxes: new Dictionary<HMAxis, float> { [HMAxis.Slider] = 1.0f }); // explicit: 0x7F
+        var swReport = swRb.BuildReport(
+            new Dictionary<HMAxis, float> { [HMAxis.Slider] = 1.0f });
 
-        Check("ExtraAxes overrides semantic-slot write at the same field",
-              report[6] == 0x7F,
-              $"got 0x{report[6]:X2}");
+        Check("Slider=1.0 lands at byte 6 = 0x7F on SideWinder descriptor",
+              swReport[6] == 0x7F,
+              $"got 0x{swReport[6]:X2}");
 
         // ── Summary ───────────────────────────────────────────────────────
         Console.WriteLine($"\n=== {(s_failures == 0 ? "PASS" : "FAIL")}: {s_total - s_failures}/{s_total} ===");
@@ -180,7 +180,7 @@ internal static class Program
             Check($"{id} {axis}={val:F2}", false, "(axis not declared in descriptor)");
             return;
         }
-        var report = rb.BuildReport(extraAxes: new Dictionary<HMAxis, float> { [axis] = val });
+        var report = rb.BuildReport(new Dictionary<HMAxis, float> { [axis] = val });
         int got = report[byteOffset];
         Check($"{id} {axis}={val:F2} -> byte[{byteOffset}] = 0x{expected:X2}",
               got == expected,

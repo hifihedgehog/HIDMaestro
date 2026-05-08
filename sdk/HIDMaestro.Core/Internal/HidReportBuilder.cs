@@ -86,6 +86,136 @@ public class HidReportBuilder
         return builder;
     }
 
+    /// <summary>v1.3.9 — apply role-tagged Layout overrides on top of the
+    /// classifier's resolved semantic slots. Profiles whose JSON authors a
+    /// <c>layout</c> block deterministically map their axes into the
+    /// classic 4-slot stick + 2-slot trigger framework based on the
+    /// layout's role tags, so consumers reading <see cref="HMProfile.StickCount"/>
+    /// / <see cref="HMProfile.TriggerCount"/> see the authored truth
+    /// rather than the descriptor-shape heuristic.
+    ///
+    /// <para>Mapping rules per kind:
+    /// <list type="bullet">
+    /// <item>gamepad — leave classifier output alone (already author-aligned)</item>
+    /// <item>joystick / flight_stick — stick.x/y → LeftStick, throttle.axis → LeftTrigger,
+    ///       rudder.axis → RightTrigger; clear right stick</item>
+    /// <item>hotas — stick.x/y → LeftStick, throttle_primary.axis → LeftTrigger,
+    ///       stick_rudder.axis → RightTrigger; clear right stick</item>
+    /// <item>wheel — wheel.axis → LeftStickX, pedal[role=clutch] → LeftStickY,
+    ///       pedal[role=accelerator|throttle] → LeftTrigger,
+    ///       pedal[role=brake] → RightTrigger; clear right stick</item>
+    /// <item>pedals — pedal[role=accelerator|throttle] → LeftTrigger,
+    ///       pedal[role=brake] → RightTrigger; clear sticks</item>
+    /// <item>handbrake / single_axis_accessory — axis → LeftTrigger; clear
+    ///       sticks and right trigger</item>
+    /// <item>arcade_stick / dance_pad / guitar / motion_wand / remote /
+    ///       controller_adapter / shifter — clear sticks and triggers
+    ///       (these devices don't fit the simple-slot framework)</item>
+    /// </list></para>
+    ///
+    /// <para>Buttons are left untouched — descriptor's button array is the
+    /// truth and ButtonMap remaps as before. Layout's button-role
+    /// information is exposed via <see cref="HMProfile.AsGamepad"/> et al.
+    /// without affecting the encoder.</para></summary>
+    public void ApplyLayoutSemantics(HMLayout layout)
+    {
+        if (layout is HMUnspecifiedLayout) return;
+
+        InputField? FindByAxis(HMAxis axis) =>
+            AxisFields.TryGetValue(axis, out var f) ? f : null;
+
+        InputField? FindPedal(IReadOnlyList<HMPedal> pedals, params HMAxisRole[] roles)
+        {
+            foreach (var p in pedals)
+                if (Array.IndexOf(roles, p.Role) >= 0)
+                    return FindByAxis(p.Axis);
+            return null;
+        }
+
+        switch (layout)
+        {
+            case HMGamepadLayout:
+                // Author-aligned; classifier already correct.
+                return;
+
+            case HMJoystickLayout j:
+                LeftStickX  = FindByAxis(j.Stick.XAxis);
+                LeftStickY  = FindByAxis(j.Stick.YAxis);
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = j.Throttle is { } jt ? FindByAxis(jt.Axis) : null;
+                RightTrigger = j.Rudder   is { } jr ? FindByAxis(jr.Axis) : null;
+                CombinedTrigger = null;
+                break;
+
+            case HMFlightStickLayout f:
+                LeftStickX  = FindByAxis(f.Stick.XAxis);
+                LeftStickY  = FindByAxis(f.Stick.YAxis);
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = f.Throttle is { } ft ? FindByAxis(ft.Axis) : null;
+                RightTrigger = f.Rudder   is { } fr ? FindByAxis(fr.Axis) : null;
+                CombinedTrigger = null;
+                break;
+
+            case HMHotasLayout h:
+                LeftStickX  = FindByAxis(h.Stick.XAxis);
+                LeftStickY  = FindByAxis(h.Stick.YAxis);
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = h.ThrottlePrimary is { } hp ? FindByAxis(hp.Axis) : null;
+                RightTrigger = h.StickRudder    is { } hr ? FindByAxis(hr.Axis) : null;
+                CombinedTrigger = null;
+                break;
+
+            case HMWheelLayout w:
+                LeftStickX  = FindByAxis(w.Wheel.Axis);
+                LeftStickY  = FindPedal(w.Pedals, HMAxisRole.Clutch);
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = FindPedal(w.Pedals, HMAxisRole.Accelerator, HMAxisRole.Throttle);
+                RightTrigger = FindPedal(w.Pedals, HMAxisRole.Brake);
+                CombinedTrigger = null;
+                break;
+
+            case HMPedalsLayout p:
+                LeftStickX = null; LeftStickY = null;
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = FindPedal(p.Pedals, HMAxisRole.Accelerator, HMAxisRole.Throttle);
+                RightTrigger = FindPedal(p.Pedals, HMAxisRole.Brake);
+                CombinedTrigger = null;
+                break;
+
+            case HMHandbrakeLayout hb:
+                LeftStickX = null; LeftStickY = null;
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = FindByAxis(hb.Axis);
+                RightTrigger = null;
+                CombinedTrigger = null;
+                break;
+
+            case HMSingleAxisAccessoryLayout sa:
+                LeftStickX = null; LeftStickY = null;
+                RightStickX = null; RightStickY = null;
+                LeftTrigger  = FindByAxis(sa.Axis);
+                RightTrigger = null;
+                CombinedTrigger = null;
+                break;
+
+            case HMArcadeStickLayout:
+            case HMDancePadLayout:
+            case HMGuitarLayout:
+            case HMMotionWandLayout:
+            case HMRemoteLayout:
+            case HMShifterLayout:
+            case HMControllerAdapterLayout:
+                // None of these map onto the simple stick/trigger framework.
+                // Consumers that need to drive them read AvailableAxes /
+                // ExtraAxes / per-kind layout accessors directly.
+                LeftStickX = null; LeftStickY = null;
+                RightStickX = null; RightStickY = null;
+                LeftTrigger = null; RightTrigger = null;
+                CombinedTrigger = null;
+                break;
+        }
+    }
+
     /// <summary>Override semantic axis assignments from an explicit map.
     /// Keys are hex usage codes (e.g. "0x32"), values are semantic names
     /// (leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger,
@@ -375,46 +505,67 @@ public class HidReportBuilder
         }
     }
 
-    /// <summary>
-    /// Build an input report from normalized gamepad values.
-    /// All values are 0.0-1.0 range (sticks: 0.5 = center, triggers: 0.0 = released).
-    /// </summary>
-    public byte[] BuildReport(
+    /// <summary>v1.3.9 — single-source axis-dict encoder. Caller writes
+    /// state.Axes keyed by HID usage; the encoder iterates every declared
+    /// analog input field in the descriptor, reads the dict, and writes
+    /// the report. Axes the consumer doesn't write default to centered
+    /// (signed axes) or released (unsigned axes) automatically.
+    /// All values are <c>[0.0..1.0]</c> normalized.</summary>
+    /// <summary>v1.3.9 — convenience: build an axes dict from the canonical
+    /// 6-slot convention (leftStickX/Y, rightStickX/Y, leftTrigger,
+    /// rightTrigger) using the classifier-resolved semantic slots
+    /// (<see cref="LeftStickX"/>, etc.) as keys. Mainly for tests and one-shot
+    /// frame submissions; production hot paths should pre-populate the dict
+    /// once and update entries by HMAxis directly.</summary>
+    public Dictionary<HMAxis, float> StandardAxes(
         double leftX = 0.5, double leftY = 0.5,
         double rightX = 0.5, double rightY = 0.5,
-        double leftTrigger = 0.0, double rightTrigger = 0.0,
-        int hatValue = 0, // 0=neutral, 1-8=directions
-        uint buttonMask = 0, // Bit 0 = button 1, etc.
-        float? hatDegrees = null,
-        int? hatHundredths = null,
-        ushort? hatRaw = null,
-        IReadOnlyDictionary<HMAxis, float>? extraAxes = null)
+        double leftTrigger = 0.0, double rightTrigger = 0.0)
     {
-        byte[] report = new byte[InputReportByteSize];
-        BuildReportInto(report, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger,
-                        hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw, extraAxes);
-        return report;
+        var d = new Dictionary<HMAxis, float>();
+        static HMAxis Key(InputField f) => (HMAxis)((f.UsagePage << 8) | f.Usage);
+        if (LeftStickX  != null) d[Key(LeftStickX)]  = (float)leftX;
+        if (LeftStickY  != null) d[Key(LeftStickY)]  = (float)leftY;
+        if (RightStickX != null) d[Key(RightStickX)] = (float)rightX;
+        if (RightStickY != null) d[Key(RightStickY)] = (float)rightY;
+        if (LeftTrigger != null) d[Key(LeftTrigger)] = (float)leftTrigger;
+        if (RightTrigger!= null) d[Key(RightTrigger)]= (float)rightTrigger;
+        return d;
     }
 
-    /// <summary>v1.3.0 — buffer-reuse overload. Caller supplies a byte[]
-    /// of length <see cref="InputReportByteSize"/>; we zero it and pack
-    /// the report into it. Avoids the 1500 alloc/sec churn at default
-    /// SubmitState rate × multi-controller, which translates to less GC
-    /// pressure and tighter cache behavior on slow hw.
-    /// v1.3.4 — added hatDegrees/hatHundredths/hatRaw nullable parameters
-    /// for high-resolution hat sources (HOTAS, flight sticks). Priority
-    /// chain in the encoder block below: hatDegrees > hatHundredths >
-    /// hatRaw > hatValue (octant) > null state.</summary>
-    public void BuildReportInto(byte[] report,
-        double leftX = 0.5, double leftY = 0.5,
-        double rightX = 0.5, double rightY = 0.5,
-        double leftTrigger = 0.0, double rightTrigger = 0.0,
+    public byte[] BuildReport(
+        IReadOnlyDictionary<HMAxis, float>? axes = null,
         int hatValue = 0,
         uint buttonMask = 0,
         float? hatDegrees = null,
         int? hatHundredths = null,
-        ushort? hatRaw = null,
-        IReadOnlyDictionary<HMAxis, float>? extraAxes = null)
+        ushort? hatRaw = null)
+    {
+        byte[] report = new byte[InputReportByteSize];
+        BuildReportInto(report, axes, hatValue, buttonMask, hatDegrees, hatHundredths, hatRaw);
+        return report;
+    }
+
+    /// <summary>v1.3.9 — buffer-reuse encoder. Caller supplies a byte[]
+    /// of length <see cref="InputReportByteSize"/>; we zero it and pack
+    /// the report into it. Avoids the per-frame byte[] alloc on the
+    /// SubmitState hot path.
+    ///
+    /// <para>The encoder iterates every analog input field declared in
+    /// the descriptor and reads its value from <paramref name="axes"/>:
+    /// signed-centered axes default to 0.5 (centered) when not in the
+    /// dict; unsigned axes default to 0.0 (released). Combined-Z trigger
+    /// synthesis, hat priority chain (HatDegrees &gt; HatHundredths &gt;
+    /// HatRaw &gt; Hat), trigger-to-button derivation, Guide routing, and
+    /// button packing all run as before — only the axis-write path
+    /// changed from named slots to dict-driven.</para></summary>
+    public void BuildReportInto(byte[] report,
+        IReadOnlyDictionary<HMAxis, float>? axes,
+        int hatValue = 0,
+        uint buttonMask = 0,
+        float? hatDegrees = null,
+        int? hatHundredths = null,
+        ushort? hatRaw = null)
     {
         if (report == null) throw new ArgumentNullException(nameof(report));
         if (report.Length < InputReportByteSize)
@@ -436,34 +587,35 @@ public class HidReportBuilder
             WriteBits(report, field.BitOffset + idOffset, field.BitSize, rawValue);
         }
 
-        WriteField(LeftStickX, leftX);
-        WriteField(LeftStickY, leftY);
-        WriteField(RightStickX, rightX);
-        WriteField(RightStickY, rightY);
-        if (CombinedTrigger != null && RightTrigger != null)
+        double GetAxisValue(HMAxis key, double def)
         {
-            // Dual mode: combined Z for DI + separate Vx/Vy for WGI
-            double combined = 0.5 + (rightTrigger - leftTrigger) * 0.5;
-            WriteField(CombinedTrigger, Math.Clamp(combined, 0.0, 1.0));
-            WriteField(LeftTrigger, leftTrigger);
-            WriteField(RightTrigger, rightTrigger);
+            if (axes != null && axes.TryGetValue(key, out var v))
+                return Math.Clamp(v, 0f, 1f);
+            return def;
         }
-        else if (RightTrigger != null)
+
+        // Per-axis pass: write every declared analog input from the dict.
+        // Auto-default: signed-centered axes (LogicalMin < 0) → 0.5 (centered);
+        // unsigned axes → 0.0 (released).
+        foreach (var (key, field) in AxisFields)
         {
-            // Separate triggers: write each independently
-            WriteField(LeftTrigger, leftTrigger);
-            WriteField(RightTrigger, rightTrigger);
+            double def = field.LogicalMin < 0 ? 0.5 : 0.0;
+            WriteField(field, GetAxisValue(key, def));
         }
-        else if (LeftTrigger != null)
+
+        // Combined-Z trigger synthesis (Xbox 360 wired with Vx/Vy hidden pair):
+        // when CombinedTrigger (Z) is declared alongside Vx/Vy as separate
+        // triggers, the DI-combined Z value is derived from the Vx/Vy values
+        // the consumer wrote. dinput sees combined Z; XInput / WGI see the
+        // separate Vx/Vy.
+        if (CombinedTrigger != null && LeftTrigger != null && RightTrigger != null)
         {
-            // Lone trigger axis: write the LT value directly. The Xbox-360
-            // combined-Z synthesis only fires when both CombinedTrigger and
-            // RightTrigger are declared (the first branch above) — that's
-            // keyed on the explicit Vx/Vy hidden-pair the descriptor
-            // declares. Single-trigger descriptors (Custom-Extended, wheels
-            // with one pedal, lightguns, etc.) get their value through
-            // unchanged. See issue #22.
-            WriteField(LeftTrigger, leftTrigger);
+            var ltKey = (HMAxis)((LeftTrigger.UsagePage << 8) | LeftTrigger.Usage);
+            var rtKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
+            double lt = GetAxisValue(ltKey, 0.0);
+            double rt = GetAxisValue(rtKey, 0.0);
+            double combined = Math.Clamp(0.5 + (rt - lt) * 0.5, 0.0, 1.0);
+            WriteField(CombinedTrigger, combined);
         }
 
         if (HatSwitch != null)
@@ -525,12 +677,16 @@ public class HidReportBuilder
         // as both analog axes AND digital buttons (buttons 7/8 in the DS4
         // descriptor). When TriggerButtons is set, any nonzero trigger value
         // automatically engages the corresponding descriptor button.
-        if (TriggerButtons != null && TriggerButtons.Length >= 2)
+        if (TriggerButtons != null && TriggerButtons.Length >= 2 && LeftTrigger != null && RightTrigger != null)
         {
-            if (leftTrigger > 0.0 && TriggerButtons[0] >= 0 && TriggerButtons[0] < Buttons.Count)
+            var ltKey = (HMAxis)((LeftTrigger.UsagePage << 8) | LeftTrigger.Usage);
+            var rtKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
+            double lt = GetAxisValue(ltKey, 0.0);
+            double rt = GetAxisValue(rtKey, 0.0);
+            if (lt > 0.0 && TriggerButtons[0] >= 0 && TriggerButtons[0] < Buttons.Count)
                 WriteBits(report, Buttons[TriggerButtons[0]].BitOffset + idOffset,
                           Buttons[TriggerButtons[0]].BitSize, 1);
-            if (rightTrigger > 0.0 && TriggerButtons[1] >= 0 && TriggerButtons[1] < Buttons.Count)
+            if (rt > 0.0 && TriggerButtons[1] >= 0 && TriggerButtons[1] < Buttons.Count)
                 WriteBits(report, Buttons[TriggerButtons[1]].BitOffset + idOffset,
                           Buttons[TriggerButtons[1]].BitSize, 1);
         }
@@ -573,19 +729,6 @@ public class HidReportBuilder
                           Buttons[descBtn].BitSize, 1);
         }
 
-        // Explicit-by-usage axis writes. Runs LAST so it overrides any
-        // semantic-slot write that targeted the same descriptor field —
-        // explicit beats implicit. Skipped entirely when the consumer
-        // hasn't allocated the dictionary, keeping the hot path cost-free
-        // for plain gamepad scenarios.
-        if (extraAxes != null && extraAxes.Count > 0)
-        {
-            foreach (var kvp in extraAxes)
-            {
-                if (AxisFields.TryGetValue(kvp.Key, out var field))
-                    WriteField(field, Math.Clamp(kvp.Value, 0f, 1f));
-            }
-        }
     }
 
     static void WriteBits(byte[] buffer, int bitOffset, int bitSize, int value)

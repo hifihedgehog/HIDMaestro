@@ -6,43 +6,48 @@ namespace HIDMaestro;
 /// <summary>
 /// Abstract gamepad state pushed to a virtual controller. The SDK translates
 /// this into the profile's native HID report format using the descriptor —
-/// you don't need to know whether the target is a DualSense, Xbox 360, or
-/// arcade stick. Sticks and triggers use normalized floats; buttons are a
-/// flags enum; hat uses cardinal directions.
+/// the consumer doesn't need to know whether the target is a DualSense, an
+/// Xbox 360, an arcade stick, a wheel, or a flight stick.
 ///
-/// v1.3.5 also carries the wide-surface fields modern Sony pads emit
-/// (touchpad, gyro, accel, battery, mic/headphone state). Profiles that
-/// declare matching <c>extendedReport.fields</c> entries pass the values
-/// through to the consumer; profiles that don't ignore them at zero cost.
-/// For wholly custom payloads use <see cref="HMController.SubmitRawReport"/>.
+/// <para>v1.3.9 — single unified <see cref="Axes"/> dictionary keyed by
+/// <see cref="HMAxis"/> drives every analog input the descriptor declares.
+/// Discovery: <see cref="HMProfile.Sticks"/> and
+/// <see cref="HMProfile.Triggers"/> enumerate which axes the profile
+/// exposes; the consumer writes <c>state.Axes[stick.XAxis] = value</c>.
+/// No special-cased stick/trigger slots, no two-range convention. Buttons
+/// stay as the <see cref="HMButton"/> bitmask (mapped via the profile's
+/// ButtonMap). Sensor surface (touchpad, IMU, battery) keeps its native
+/// representation since those aren't analog axes in the HMAxis sense.</para>
 /// </summary>
 public struct HMGamepadState
 {
-    /// <summary>Left stick X axis. Range: -1.0 (left) .. +1.0 (right). 0 = centered.</summary>
-    public float LeftStickX;
+    /// <summary>Drive any descriptor-declared analog axis by HID usage.
+    /// Each value normalizes to <c>[0.0 .. 1.0]</c>; the SDK scales into
+    /// the descriptor field's <c>LogicalMin..LogicalMax</c>. For signed
+    /// centered axes (sticks, twist rudders), <c>0.5</c> = center.
+    /// For unsigned axes (triggers, throttles, sliders, pedals),
+    /// <c>0.0</c> = released. Axes the consumer doesn't write default
+    /// to centered (signed) or released (unsigned) automatically.
+    ///
+    /// <para>Discovery: <see cref="HMProfile.Sticks"/> /
+    /// <see cref="HMProfile.Triggers"/> list which axes this profile
+    /// exposes and what role each serves. Consumers iterate those lists
+    /// and write <c>state.Axes[entry.Axis] = value</c>.</para>
+    ///
+    /// <para>Null on the hot path is free — the encoder skips the dict
+    /// walk entirely when no axis has been written. Allocate once and
+    /// reuse.</para></summary>
+    public Dictionary<HMAxis, float>? Axes;
 
-    /// <summary>Left stick Y axis. Range: -1.0 (down) .. +1.0 (up). 0 = centered.</summary>
-    public float LeftStickY;
-
-    /// <summary>Right stick X axis. Range: -1.0 (left) .. +1.0 (right). 0 = centered.</summary>
-    public float RightStickX;
-
-    /// <summary>Right stick Y axis. Range: -1.0 (down) .. +1.0 (up). 0 = centered.</summary>
-    public float RightStickY;
-
-    /// <summary>Left trigger. Range: 0.0 (released) .. 1.0 (fully pressed).</summary>
-    public float LeftTrigger;
-
-    /// <summary>Right trigger. Range: 0.0 (released) .. 1.0 (fully pressed).</summary>
-    public float RightTrigger;
-
-    /// <summary>Pressed buttons as a bitmask.</summary>
+    /// <summary>Pressed buttons as a bitmask. Mapped to descriptor button
+    /// indices via the profile's <see cref="HMProfile.ButtonMap"/> (Sony
+    /// profiles remap so <c>HMButton.A</c> → Cross, etc.).</summary>
     public HMButton Buttons;
 
-    /// <summary>Octant direction (8 cardinal+diagonal positions). Use this for
-    /// XInput-style or 8-way gamepad sources. For higher-resolution hat targets
-    /// (flight sticks, HOTAS), see <see cref="HatDegrees"/>, <see cref="HatHundredths"/>,
-    /// or <see cref="HatRaw"/>.</summary>
+    /// <summary>Octant direction (8 cardinal+diagonal positions). Use this
+    /// for XInput-style or 8-way gamepad sources. For higher-resolution
+    /// hat targets (flight sticks, HOTAS), see <see cref="HatDegrees"/>,
+    /// <see cref="HatHundredths"/>, or <see cref="HatRaw"/>.</summary>
     public HMHat Hat;
 
     /// <summary>Continuous angle in degrees, 0 = North, clockwise. The encoder
@@ -141,27 +146,45 @@ public struct HMGamepadState
 
     /// <summary>Headphones detected on the 3.5 mm jack.</summary>
     public bool HeadphonesConnected;
+}
 
-    // ── Arbitrary analog axes (HOTAS, wheels, throttle quadrants, pedals) ──
-
-    /// <summary>Drive any descriptor-declared analog axis by HID usage. Use
-    /// when the profile has more than the standard 4 sticks + 2 triggers —
-    /// flight sticks with throttle sliders, racing wheels with separate
-    /// brake/throttle/clutch pedals, HOTAS systems with rudder pedals plus
-    /// a stick. Each value is normalized to [0.0 .. 1.0] and the SDK scales
-    /// it into the descriptor field's logical range.
-    ///
-    /// <para>A profile's reachable axes are listed in
-    /// <see cref="HMProfile.AvailableAxes"/>. Setting an entry whose usage
-    /// the descriptor doesn't declare is a no-op.</para>
-    ///
-    /// <para>When an axis is also reachable via a semantic slot (e.g. the
-    /// SideWinder slider also resolves to <see cref="LeftTrigger"/>),
-    /// <c>ExtraAxes</c> takes precedence — explicit beats implicit.</para>
-    ///
-    /// <para>Null on the hot path costs nothing; the encoder skips the
-    /// dictionary walk entirely. Allocate it once and reuse.</para></summary>
-    public Dictionary<HMAxis, float>? ExtraAxes;
+/// <summary>Static helpers for populating <see cref="HMGamepadState.Axes"/>
+/// from the canonical "left stick X/Y, right stick X/Y, LT, RT" 6-slot
+/// convention. Resolves the actual HID axes from
+/// <see cref="HMProfile.Sticks"/> / <see cref="HMProfile.Triggers"/> so the
+/// caller doesn't have to know whether the active profile's left stick is
+/// X+Y or Rx+Ry. All values are <c>[0..1]</c> (0.5 = center on signed axes;
+/// 0.0 = released on triggers).</summary>
+public static class HMGamepadStateHelpers
+{
+    /// <summary>Produce a fresh axes dict from the 6-slot convention. For
+    /// hot paths, allocate the dict once and update entries by axis key
+    /// directly via <see cref="HMProfile.Sticks"/>/<see cref="HMProfile.Triggers"/>
+    /// lookups; this helper exists for tests, demos, and one-shot frames
+    /// where ergonomics matter more than allocation.</summary>
+    public static Dictionary<HMAxis, float> StandardAxes(
+        HMProfile profile,
+        float leftStickX = 0.5f, float leftStickY = 0.5f,
+        float rightStickX = 0.5f, float rightStickY = 0.5f,
+        float leftTrigger = 0.0f, float rightTrigger = 0.0f)
+    {
+        var axes = new Dictionary<HMAxis, float>();
+        var sticks = profile.Sticks;
+        var triggers = profile.Triggers;
+        if (sticks.Count > 0)
+        {
+            axes[sticks[0].XAxis] = leftStickX;
+            if (sticks[0].YAxis != HMAxis.None) axes[sticks[0].YAxis] = leftStickY;
+        }
+        if (sticks.Count > 1)
+        {
+            axes[sticks[1].XAxis] = rightStickX;
+            if (sticks[1].YAxis != HMAxis.None) axes[sticks[1].YAxis] = rightStickY;
+        }
+        if (triggers.Count > 0) axes[triggers[0].Axis] = leftTrigger;
+        if (triggers.Count > 1) axes[triggers[1].Axis] = rightTrigger;
+        return axes;
+    }
 }
 
 /// <summary>HID-usage-addressable analog axes. Values encode the (UsagePage,
@@ -175,7 +198,7 @@ public struct HMGamepadState
 ///
 /// <para>Simulation Controls (page 0x02): the analog flight/automotive/
 /// marine/cycling control set. Anything declared as an Input axis can be
-/// driven through <see cref="HMGamepadState.ExtraAxes"/>.</para></summary>
+/// driven through <see cref="HMGamepadState.Axes"/>.</para></summary>
 public enum HMAxis : ushort
 {
     None = 0,

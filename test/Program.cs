@@ -728,22 +728,24 @@ class Program
 
                 ctrl0.SubmitState(new HMGamepadState
                 {
-                    LeftStickX   = (float)Math.Cos(angle),
-                    LeftStickY   = (float)Math.Sin(angle),
-                    RightStickX  = (float)Math.Sin(angle * 0.5),
-                    RightStickY  = (float)Math.Cos(angle * 0.5),
-                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t * 3)),
-                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 3)),
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl0.Profile,
+                        leftStickX:   (float)((Math.Cos(angle) + 1) / 2),
+                        leftStickY:   (float)((Math.Sin(angle) + 1) / 2),
+                        rightStickX:  (float)((Math.Sin(angle * 0.5) + 1) / 2),
+                        rightStickY:  (float)((Math.Cos(angle * 0.5) + 1) / 2),
+                        leftTrigger:  (float)(0.5 + 0.5 * Math.Sin(t * 3)),
+                        rightTrigger: (float)(0.5 + 0.5 * Math.Cos(t * 3))),
                     Buttons      = (HMButton)(1u << ((int)t % 16)),
                     Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),
                 });
 
                 ctrl1.SubmitState(new HMGamepadState
                 {
-                    LeftStickX   = (float)Math.Sin(t * 1.5),
-                    LeftStickY   = (float)Math.Cos(t * 1.5),
-                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t)),
-                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 2)),
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl1.Profile,
+                        leftStickX:   (float)((Math.Sin(t * 1.5) + 1) / 2),
+                        leftStickY:   (float)((Math.Cos(t * 1.5) + 1) / 2),
+                        leftTrigger:  (float)(0.5 + 0.5 * Math.Sin(t)),
+                        rightTrigger: (float)(0.5 + 0.5 * Math.Cos(t * 2))),
                     Buttons      = ((int)t % 3 == 0) ? HMButton.A : HMButton.None,
                     Hat          = (HMHat)(1 + ((int)(t * 3) % 8)),
                 });
@@ -945,8 +947,9 @@ class Program
             {
                 var parkState = new HMGamepadState
                 {
-                    LeftStickX = Math.Clamp(px, -1f, 1f),
-                    LeftStickY = Math.Clamp(py, -1f, 1f),
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                        leftStickX: (Math.Clamp(px, -1f, 1f) + 1f) / 2f,
+                        leftStickY: (Math.Clamp(py, -1f, 1f) + 1f) / 2f),
                 };
                 try { ctrl.SubmitState(in parkState); } catch { break; }
                 try { Thread.Sleep(gateSleepMs); } catch { break; }
@@ -983,12 +986,16 @@ class Program
 
             var state = new HMGamepadState
             {
-                LeftStickX  = stickX,
-                LeftStickY  = stickY,
-                RightStickX = 0f,
-                RightStickY = 0f,
-                LeftTrigger  = lt,
-                RightTrigger = rt,
+                // sticks: stickX/stickY are [-1..+1] from the (0.92 * sin/cos)
+                // inset; map to [0..1] via (v+1)/2. Triggers (lt/rt) are
+                // already in [0..1].
+                Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                    leftStickX:   (stickX + 1f) / 2f,
+                    leftStickY:   (stickY + 1f) / 2f,
+                    rightStickX:  0.5f,
+                    rightStickY:  0.5f,
+                    leftTrigger:  lt,
+                    rightTrigger: rt),
                 // Cycle hat through N..NW at 2 Hz. v1.3.3 (#19) — exercising
                 // the d-pad path here makes the canonical test runner visibly
                 // catch any future regression in HMController.SubmitState's
@@ -1260,12 +1267,13 @@ class Program
             double t = sw.Elapsed.TotalSeconds;
             var state = new HMGamepadState
             {
-                LeftStickX  = (float)Math.Cos(t * 2 * Math.PI),
-                LeftStickY  = (float)Math.Sin(t * 2 * Math.PI),
-                RightStickX = (float)Math.Cos(t * 2 * Math.PI * 2),
-                RightStickY = (float)Math.Sin(t * 2 * Math.PI * 2),
-                LeftTrigger  = 0.25f,
-                RightTrigger = 0.75f,
+                Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                    leftStickX:   (float)((Math.Cos(t * 2 * Math.PI) + 1) / 2),
+                    leftStickY:   (float)((Math.Sin(t * 2 * Math.PI) + 1) / 2),
+                    rightStickX:  (float)((Math.Cos(t * 2 * Math.PI * 2) + 1) / 2),
+                    rightStickY:  (float)((Math.Sin(t * 2 * Math.PI * 2) + 1) / 2),
+                    leftTrigger:  0.25f,
+                    rightTrigger: 0.75f),
                 Buttons = HMButton.A,
             };
             ctrl.SubmitState(in state);
@@ -1435,12 +1443,13 @@ class Program
                 double t = sw.Elapsed.TotalSeconds;
                 var state = new HMGamepadState
                 {
-                    LeftStickX   = (float)Math.Cos(t * 2 * Math.PI),
-                    LeftStickY   = (float)Math.Sin(t * 2 * Math.PI),
-                    RightStickX  = (float)Math.Cos(t * Math.PI),
-                    RightStickY  = (float)Math.Sin(t * Math.PI),
-                    LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t)),
-                    RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t)),
+                    Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                        leftStickX:   (float)((Math.Cos(t * 2 * Math.PI) + 1) / 2),
+                        leftStickY:   (float)((Math.Sin(t * 2 * Math.PI) + 1) / 2),
+                        rightStickX:  (float)((Math.Cos(t * Math.PI) + 1) / 2),
+                        rightStickY:  (float)((Math.Sin(t * Math.PI) + 1) / 2),
+                        leftTrigger:  (float)(0.5 + 0.5 * Math.Sin(t)),
+                        rightTrigger: (float)(0.5 + 0.5 * Math.Cos(t))),
                 };
                 ctrl.SubmitState(in state);
                 Thread.Sleep(8);
@@ -1557,8 +1566,9 @@ class Program
             double t = sw.Elapsed.TotalSeconds * 2 * Math.PI;
             var state = new HMGamepadState
             {
-                LeftStickX = (float)Math.Cos(t),
-                LeftStickY = (float)Math.Sin(t),
+                Axes = HMGamepadStateHelpers.StandardAxes(ctrl.Profile,
+                    leftStickX: (float)((Math.Cos(t) + 1) / 2),
+                    leftStickY: (float)((Math.Sin(t) + 1) / 2)),
             };
             ctrl.SubmitState(in state);
             frame++;

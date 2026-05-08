@@ -43,28 +43,29 @@ internal sealed class Program
         var ds5UsbInSpec = ds5Usb.ExtendedReport!;
         Console.WriteLine($"  reportId=0x{ds5UsbInSpec.ReportIdByte:X2} (expected 0x01)  size={ds5UsbInSpec.Size} fields={ds5UsbInSpec.Fields.Count}");
 
+        // v1.3.9 — uniform [0..1] convention. State only carries non-axis
+        // fields (buttons, hat); the 6 simple-slot values are passed
+        // explicitly to VendorBlobCodec.EncodeInput.
         var ds5UsbState = new HMGamepadState
         {
-            LeftStickX  = 1.0f,    // byte 1 = 255
-            LeftStickY  = -1.0f,   // byte 2 = 1
-            RightStickX = 0.0f,    // byte 3 = 128
-            RightStickY = 0.5f,    // byte 4 = 192
-            LeftTrigger = 0.7f,    // byte 5 ≈ 178; engages LT_DIGITAL bit
-            RightTrigger = 0.0f,   // byte 6 = 0; LT_DIGITAL stays 0
             Buttons = HMButton.A | HMButton.LeftBumper | HMButton.Guide,
             Hat = HMHat.NorthEast,
         };
         var ds5UsbInBuf = new byte[ds5UsbInSpec.Size];
         var ds5UsbInState = new VendorBlobCodec.EncoderState();
-        VendorBlobCodec.EncodeInput(ds5UsbInSpec, in ds5UsbState, ds5UsbInBuf, ds5UsbInState);
+        VendorBlobCodec.EncodeInput(ds5UsbInSpec, in ds5UsbState,
+            leftStickX: 1.0f, leftStickY: 0.0f,        // full right / full up (was +1/-1 in old [-1..+1])
+            rightStickX: 0.5f, rightStickY: 0.75f,     // centered / half right
+            leftTrigger: 0.7f, rightTrigger: 0.0f,
+            ds5UsbInBuf, ds5UsbInState);
 
         var ds5UsbInAssertions = new (int idx, int expected, string name)[]
         {
             (0,  0x01, "Report ID"),
-            (1,  255,  "LeftStickX = +1"),
-            (2,  1,    "LeftStickY = -1"),
-            (3,  128,  "RightStickX = 0"),
-            (4,  192,  "RightStickY = 0.5"),
+            (1,  255,  "LeftStickX = 1.0"),
+            (2,  0,    "LeftStickY = 0.0"),
+            (3,  128,  "RightStickX = 0.5 (center)"),
+            (4,  191,  "RightStickY = 0.75"),
             (5,  178,  "LeftTrigger = 0.7"),
             (6,  0,    "RightTrigger = 0"),
         };
@@ -125,26 +126,24 @@ internal sealed class Program
 
         var ds4UsbState = new HMGamepadState
         {
-            LeftStickX  =  0.5f,   // byte 1 = 192
-            LeftStickY  =  0.0f,   // byte 2 = 128
-            RightStickX = -0.5f,   // byte 3 = 64
-            RightStickY = -1.0f,   // byte 4 = 1
-            LeftTrigger = 0.0f,    // byte 8 = 0; LT_DIGITAL clear
-            RightTrigger = 1.0f,   // byte 9 = 255; RT_DIGITAL set
             Buttons = HMButton.B | HMButton.Start,
             Hat = HMHat.West,
         };
         var ds4UsbInBuf = new byte[ds4UsbInSpec.Size];
         var ds4UsbInEnc = new VendorBlobCodec.EncoderState();
-        VendorBlobCodec.EncodeInput(ds4UsbInSpec, in ds4UsbState, ds4UsbInBuf, ds4UsbInEnc);
+        VendorBlobCodec.EncodeInput(ds4UsbInSpec, in ds4UsbState,
+            leftStickX: 0.75f, leftStickY: 0.5f,    // [0..1]: 0.75=+0.5 of old [-1..+1], 0.5=center
+            rightStickX: 0.25f, rightStickY: 0.0f,  // 0.25=-0.5, 0.0=full
+            leftTrigger: 0.0f, rightTrigger: 1.0f,
+            ds4UsbInBuf, ds4UsbInEnc);
 
         var ds4UsbInAssertions = new (int idx, int expected, string name)[]
         {
             (0, 0x01, "Report ID"),
-            (1, 192,  "LeftStickX = +0.5"),
-            (2, 128,  "LeftStickY = 0"),
-            (3, 64,   "RightStickX = -0.5"),
-            (4, 1,    "RightStickY = -1"),
+            (1, 191,  "LeftStickX = 0.75"),
+            (2, 128,  "LeftStickY = 0.5 (center)"),
+            (3, 64,   "RightStickX = 0.25"),
+            (4, 0,    "RightStickY = 0.0"),
             (8, 0,    "LeftTrigger = 0"),
             (9, 255,  "RightTrigger = 1.0"),
         };
@@ -202,26 +201,24 @@ internal sealed class Program
 
         var state = new HMGamepadState
         {
-            LeftStickX  = 1.0f,    // byte 3 = 255
-            LeftStickY  = -1.0f,   // byte 4 = 1
-            RightStickX = 0.0f,    // byte 5 = 128
-            RightStickY = 0.5f,    // byte 6 = 192
-            LeftTrigger = 1.0f,    // byte 10 = 255
-            RightTrigger = 0.5f,   // byte 11 = 128
             Buttons = HMButton.A | HMButton.LeftBumper | HMButton.Guide,
             Hat = HMHat.NorthEast,
         };
         var buf = new byte[ds4BtSpec.Size];
         var encState = new VendorBlobCodec.EncoderState();
-        VendorBlobCodec.EncodeInput(ds4BtSpec, in state, buf, encState);
+        VendorBlobCodec.EncodeInput(ds4BtSpec, in state,
+            leftStickX: 1.0f, leftStickY: 0.0f,
+            rightStickX: 0.5f, rightStickY: 0.75f,
+            leftTrigger: 1.0f, rightTrigger: 0.5f,
+            buf, encState);
 
         var ds4BtAssertions = new (int idx, int expected, string name)[]
         {
             (0,  0x11, "Report ID"),
-            (3,  255,  "LeftStickX = +1"),
-            (4,  1,    "LeftStickY = -1"),
-            (5,  128,  "RightStickX = 0"),
-            (6,  192,  "RightStickY = 0.5"),
+            (3,  255,  "LeftStickX = 1.0"),
+            (4,  0,    "LeftStickY = 0.0"),
+            (5,  128,  "RightStickX = 0.5 (center)"),
+            (6,  191,  "RightStickY = 0.75"),
             (10, 255,  "LeftTrigger = 1.0"),
             (11, 128,  "RightTrigger = 0.5"),
         };

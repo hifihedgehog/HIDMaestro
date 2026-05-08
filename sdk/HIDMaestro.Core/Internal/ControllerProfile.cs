@@ -122,6 +122,17 @@ public sealed class ControllerProfile
     [JsonPropertyName("axisMap")]
     public Dictionary<string, string>? AxisMap { get; set; }
 
+    /// <summary>v1.3.9 — structured per-profile physical-design declaration.
+    /// Discriminated by <c>kind</c>; concrete shape depends on the kind
+    /// (gamepad / joystick / flight_stick / hotas / wheel / pedals / etc.).
+    /// When present, <see cref="HIDMaestro.HMProfile.Layout"/> exposes the
+    /// typed record and the simple <c>StickCount</c> / <c>TriggerCount</c>
+    /// derived views read from this rather than the descriptor heuristic.
+    /// When absent, classic classifier-derived behavior applies — backward
+    /// compatible with v1.3.8 and earlier.</summary>
+    [JsonPropertyName("layout")]
+    public HMLayout? Layout { get; set; }
+
     /// <summary>If true, skip main HID device — use XUSB companion only.
     /// DI reads from XInput (5 axes), browser reads from XInput (separate triggers).
     /// Used for Xbox 360 where real hardware uses xusb22.sys (no HID).</summary>
@@ -238,6 +249,15 @@ public sealed class ControllerProfile
         var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap);
         b.ButtonMap = ButtonMap;
         b.TriggerButtons = TriggerButtons;
+        // v1.3.9 — when the profile authors a layout block, its role-tagged
+        // axes deterministically override the classifier's semantic-slot
+        // resolution. Validates against the descriptor first; throws
+        // HMLayoutValidationException with a structured path on mismatch.
+        if (Layout is not null and not HMUnspecifiedLayout)
+        {
+            HMLayoutValidator.Validate(Layout, b);
+            b.ApplyLayoutSemantics(Layout);
+        }
         _cachedReportBuilder = b;
         return b;
     }
@@ -381,7 +401,7 @@ public sealed class ProfileDatabase
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var options = HMLayoutJsonOptions.Default;
 
         // v1.3.0 — parallel parse mirroring LoadEmbedded. Disk reads are
         // serialized at the kernel level on most filesystems, but JSON
@@ -440,7 +460,7 @@ public sealed class ProfileDatabase
     {
         var db = new ProfileDatabase();
         var asm = typeof(ProfileDatabase).Assembly;
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var options = HMLayoutJsonOptions.Default;
         const string prefix = "HIDMaestro.Profiles.";
 
         // Collect resource names first so we can parse in parallel. The

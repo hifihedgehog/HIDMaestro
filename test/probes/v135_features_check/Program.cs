@@ -61,7 +61,7 @@ internal sealed class Program
                 SensorTimestamp = 0xDEADBEEFu,
             };
             var buf = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in state, buf, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in state, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, buf, new VendorBlobCodec.EncoderState());
 
             // gyroPitch low/high at bytes 16/17 (struct[15..16])
             Check("gyroPitch low @ byte 16",  buf[16] == 0xDE, $"got 0x{buf[16]:X2}");
@@ -103,7 +103,7 @@ internal sealed class Program
                 SensorTimestamp = 0xDEADBEEFu,
             };
             var buf = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in state, buf, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in state, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, buf, new VendorBlobCodec.EncoderState());
             // BT shifts struct content +1 vs USB (RID at 0, BT framing at 1, struct at 2+)
             Check("BT gyroPitch @ byte 17",       buf[17] == 0xDE, $"got 0x{buf[17]:X2}");
             Check("BT accelX @ byte 23",          buf[23] == 0x34, $"got 0x{buf[23]:X2}");
@@ -133,7 +133,7 @@ internal sealed class Program
                 TouchpadFinger1Id = 17,
             };
             var buf = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in state, buf, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in state, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, buf, new VendorBlobCodec.EncoderState());
 
             // Finger 0 starts at byte 33 (struct[32]). Active so bit 7 cleared.
             Check("finger0 id @ byte 33 (active, bit7 clear)",
@@ -162,21 +162,21 @@ internal sealed class Program
             // Discharging at 50% capacity
             var s1 = new HMGamepadState { BatteryLevel = 7 };
             var b1 = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in s1, b1, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in s1, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, b1, new VendorBlobCodec.EncoderState());
             Check("discharging: bits 0-3 = level 7, bits 4-7 = 0",
                   b1[53] == 7, $"got 0x{b1[53]:X2}");
 
             // Charging at 80% capacity
             var s2 = new HMGamepadState { BatteryLevel = 8, BatteryCharging = true };
             var b2 = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in s2, b2, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in s2, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, b2, new VendorBlobCodec.EncoderState());
             Check("charging: bits 0-3 = level 8, bit 4 set (=0x18)",
                   b2[53] == 0x18, $"got 0x{b2[53]:X2}");
 
             // Full
             var s3 = new HMGamepadState { BatteryLevel = 10, BatteryFull = true };
             var b3 = new byte[spec.Size];
-            VendorBlobCodec.EncodeInput(spec, in s3, b3, new VendorBlobCodec.EncoderState());
+            VendorBlobCodec.EncodeInput(spec, in s3, leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f, leftTrigger: 0.0f, rightTrigger: 0.0f, b3, new VendorBlobCodec.EncoderState());
             Check("full: bits 0-3 = level 10, bit 5 set (=0x2A)",
                   b3[53] == 0x2A, $"got 0x{b3[53]:X2}");
         }
@@ -340,7 +340,10 @@ internal sealed class Program
             var encState = new VendorBlobCodec.EncoderState();
             var btBuf = new byte[btSpec.Size];
             var btState = new HMGamepadState();
-            VendorBlobCodec.EncodeInput(btSpec, in btState, btBuf, encState);
+            VendorBlobCodec.EncodeInput(btSpec, in btState,
+                leftStickX: 0.5f, leftStickY: 0.5f, rightStickX: 0.5f, rightStickY: 0.5f,
+                leftTrigger: 0.0f, rightTrigger: 0.0f,
+                btBuf, encState);
             Check("BT Edge codec writes 0x80 to byte 50",
                   btBuf[50] == 0x80, $"got 0x{btBuf[50]:X2}");
             bool btIsNormal = btBuf[50] != 0 && (btBuf[50] & 0b11) == 0;

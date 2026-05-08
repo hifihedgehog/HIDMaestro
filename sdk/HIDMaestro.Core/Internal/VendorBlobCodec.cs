@@ -33,10 +33,21 @@ internal static class VendorBlobCodec
     // ── Input encoder: HMGamepadState → bytes ─────────────────────────────
 
     /// <summary>Encode an HMGamepadState into the byte buffer per the spec.
-    /// Buffer is zeroed first; report ID byte is written at offset 0.</summary>
+    /// Buffer is zeroed first; report ID byte is written at offset 0.
+    ///
+    /// <para>v1.3.9 — caller passes the pre-resolved 6 simple-slot values
+    /// (left stick X/Y, right stick X/Y, LT, RT) in <c>[0..1]</c> range.
+    /// HMController.SubmitState resolves these from
+    /// <see cref="HMGamepadState.Axes"/> via the profile's
+    /// <see cref="HMProfile.Sticks"/> / <see cref="HMProfile.Triggers"/>.
+    /// All other state fields (touchpad, IMU, battery, hat, buttons) are
+    /// read directly from <paramref name="state"/>.</para></summary>
     public static void EncodeInput(
         ExtendedReportSpec spec,
         in HMGamepadState state,
+        float leftStickX, float leftStickY,
+        float rightStickX, float rightStickY,
+        float leftTrigger, float rightTrigger,
         byte[] buffer,
         EncoderState encState)
     {
@@ -46,9 +57,22 @@ internal static class VendorBlobCodec
         Array.Clear(buffer, 0, spec.Size);
         buffer[0] = spec.ReportIdByte;
 
+        var simple = new SimpleAxes(leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger, rightTrigger);
         foreach (var field in spec.Fields)
         {
-            EncodeField(field, buffer, in state, encState);
+            EncodeField(field, buffer, in state, simple, encState);
+        }
+    }
+
+    private readonly struct SimpleAxes
+    {
+        public readonly float LeftStickX, LeftStickY, RightStickX, RightStickY;
+        public readonly float LeftTrigger, RightTrigger;
+        public SimpleAxes(float lsx, float lsy, float rsx, float rsy, float lt, float rt)
+        {
+            LeftStickX = lsx; LeftStickY = lsy;
+            RightStickX = rsx; RightStickY = rsy;
+            LeftTrigger = lt; RightTrigger = rt;
         }
     }
 
@@ -56,6 +80,7 @@ internal static class VendorBlobCodec
         FieldSpec field,
         byte[] buffer,
         in HMGamepadState state,
+        SimpleAxes simple,
         EncoderState encState)
     {
         switch (field.Type)
@@ -63,16 +88,23 @@ internal static class VendorBlobCodec
             case "uint8-axis":
             {
                 if (field.Byte is not int b) return;
+                // v1.3.9 — sticks are now [0..1] uniformly (0.5 = center).
+                // Profile JSON's "center" override stays for vendor blobs that
+                // place the on-wire center somewhere other than 128.
                 float v = field.Semantic switch
                 {
-                    "leftStickX"  => state.LeftStickX,
-                    "leftStickY"  => state.LeftStickY,
-                    "rightStickX" => state.RightStickX,
-                    "rightStickY" => state.RightStickY,
-                    _ => 0f,
+                    "leftStickX"  => simple.LeftStickX,
+                    "leftStickY"  => simple.LeftStickY,
+                    "rightStickX" => simple.RightStickX,
+                    "rightStickY" => simple.RightStickY,
+                    _ => 0.5f,
                 };
-                int center = field.Center ?? 128;
-                int raw = center + (int)Math.Round(Math.Clamp(v, -1f, 1f) * 127);
+                int raw = (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
+                if (field.Center is int center && center != 128)
+                {
+                    // Re-base: caller's [0..1] becomes [center-127 .. center+127] modulo 0..255.
+                    raw = center + (int)Math.Round((Math.Clamp(v, 0f, 1f) - 0.5f) * 254);
+                }
                 buffer[b] = (byte)Math.Clamp(raw, 0, 255);
                 break;
             }
@@ -81,8 +113,8 @@ internal static class VendorBlobCodec
                 if (field.Byte is not int b) return;
                 float v = field.Semantic switch
                 {
-                    "leftTrigger"  => state.LeftTrigger,
-                    "rightTrigger" => state.RightTrigger,
+                    "leftTrigger"  => simple.LeftTrigger,
+                    "rightTrigger" => simple.RightTrigger,
                     _ => 0f,
                 };
                 int raw = (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
@@ -256,12 +288,12 @@ internal static class VendorBlobCodec
                     // engage the bit when the corresponding state trigger > 0.
                     if (name == "LT_DIGITAL")
                     {
-                        if (state.LeftTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
+                        if (simple.LeftTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
                         continue;
                     }
                     if (name == "RT_DIGITAL")
                     {
-                        if (state.RightTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
+                        if (simple.RightTrigger > 0f) packed |= (byte)(1 << (bitLo + i));
                         continue;
                     }
                     if (Enum.TryParse<HMButton>(name, true, out var btn) && (mask & (uint)btn) != 0)

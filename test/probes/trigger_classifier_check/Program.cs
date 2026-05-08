@@ -88,8 +88,8 @@ internal sealed class Program
 
             // Sweep leftTrigger from 0.0 to 1.0; the trigger field's wire value
             // must rise monotonically from 0 to LogicalMax.
-            byte[] r0 = b.BuildReport(leftTrigger: 0.0);
-            byte[] r1 = b.BuildReport(leftTrigger: 1.0);
+            byte[] r0 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0));
+            byte[] r1 = b.BuildReport(b.StandardAxes(leftTrigger: 1.0));
             int v0 = b.LeftTrigger != null ? ReadField(r0, b.LeftTrigger, b.InputReportId) : -1;
             int v1 = b.LeftTrigger != null ? ReadField(r1, b.LeftTrigger, b.InputReportId) : -1;
             Check("Trigger wire value at LT=0.0 is 0", v0 == 0, $"got {v0}");
@@ -125,8 +125,8 @@ internal sealed class Program
             // the lone-LeftTrigger branch synthesized 0.5 - leftTrigger * 0.5,
             // producing 0.5 at LT=0 and 0.0 at LT=1. After fix, value is
             // direct: 0 at LT=0, full-scale at LT=1.
-            byte[] r0 = b.BuildReport(leftTrigger: 0.0, rightTrigger: 0.0);
-            byte[] r1 = b.BuildReport(leftTrigger: 1.0, rightTrigger: 0.0);
+            byte[] r0 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 0.0));
+            byte[] r1 = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
             int v0 = ReadField(r0, b.LeftTrigger!, b.InputReportId);
             int v1 = ReadField(r1, b.LeftTrigger!, b.InputReportId);
             Check("LT=0.0 wire value is 0 (no combined-Z synthesis)",
@@ -200,8 +200,8 @@ internal sealed class Program
             Check("RightTrigger from Rz", b.RightTrigger != null && b.RightTrigger.Usage == 0x35);
             Check("CombinedTrigger NOT set", b.CombinedTrigger == null);
 
-            byte[] rL = b.BuildReport(leftTrigger: 1.0, rightTrigger: 0.0);
-            byte[] rR = b.BuildReport(leftTrigger: 0.0, rightTrigger: 1.0);
+            byte[] rL = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
+            byte[] rR = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 1.0));
             int lAtFullL = ReadField(rL, b.LeftTrigger!, b.InputReportId);
             int rAtFullL = ReadField(rL, b.RightTrigger!, b.InputReportId);
             int lAtFullR = ReadField(rR, b.LeftTrigger!, b.InputReportId);
@@ -250,7 +250,7 @@ internal sealed class Program
             Check("Xbox shape: RightTrigger from Vy", b.RightTrigger != null && b.RightTrigger.Usage == 0x41);
 
             // Combined-Z formula at LT=1, RT=0 → Z = 0.5 - 0.5 = 0 (LogicalMin).
-            byte[] r = b.BuildReport(leftTrigger: 1.0, rightTrigger: 0.0);
+            byte[] r = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
             int z = ReadField(r, b.CombinedTrigger!, b.InputReportId);
             int vx = ReadField(r, b.LeftTrigger!, b.InputReportId);
             int vy = ReadField(r, b.RightTrigger!, b.InputReportId);
@@ -259,7 +259,7 @@ internal sealed class Program
             Check("Vx at LT=1, RT=0 → full-scale", vx == b.LeftTrigger!.LogicalMax);
             Check("Vy at LT=1, RT=0 → 0", vy == 0);
 
-            byte[] r2 = b.BuildReport(leftTrigger: 0.0, rightTrigger: 1.0);
+            byte[] r2 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 1.0));
             int z2 = ReadField(r2, b.CombinedTrigger!, b.InputReportId);
             Check("Combined Z at LT=0, RT=1 → full-scale",
                   z2 == b.CombinedTrigger.LogicalMax, $"got {z2}, expected {b.CombinedTrigger.LogicalMax}");
@@ -291,7 +291,7 @@ internal sealed class Program
             // Mid-press value: at 0.5, the trigger field should sit at half of
             // LogicalMax (rounded). Pre-fix the inverted/offset combined formula
             // produced 0.5 - 0.5*0.5 = 0.25 of LogicalMax for LT=0.5/RT=0.
-            byte[] r = b.BuildReport(leftTrigger: 0.5);
+            byte[] r = b.BuildReport(b.StandardAxes(leftTrigger: 0.5));
             int v = ReadField(r, b.LeftTrigger!, b.InputReportId);
             int expected = b.LeftTrigger!.LogicalMax / 2;
             // Allow ±2 rounding slack on the encode rounding direction.
@@ -427,8 +427,8 @@ internal sealed class Program
                 // check the wire byte too.
                 if (ok && wantLT)
                 {
-                    byte[] r0 = b.BuildReport(leftTrigger: 0.0, rightTrigger: 0.0);
-                    byte[] r1 = b.BuildReport(leftTrigger: 1.0, rightTrigger: 0.0);
+                    byte[] r0 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 0.0));
+                    byte[] r1 = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
                     int v0 = ReadField(r0, b.LeftTrigger!, b.InputReportId);
                     int v1 = ReadField(r1, b.LeftTrigger!, b.InputReportId);
                     if (v0 != 0) {
@@ -440,8 +440,8 @@ internal sealed class Program
                 }
                 if (ok && wantRT)
                 {
-                    byte[] r0 = b.BuildReport(leftTrigger: 0.0, rightTrigger: 0.0);
-                    byte[] r1 = b.BuildReport(leftTrigger: 0.0, rightTrigger: 1.0);
+                    byte[] r0 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 0.0));
+                    byte[] r1 = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 1.0));
                     int v0 = ReadField(r0, b.RightTrigger!, b.InputReportId);
                     int v1 = ReadField(r1, b.RightTrigger!, b.InputReportId);
                     if (v0 != 0) {
@@ -455,8 +455,8 @@ internal sealed class Program
                 {
                     // Both triggers declared: writing one must not bleed into
                     // the other (no combined-Z synthesis fires).
-                    byte[] rL = b.BuildReport(leftTrigger: 1.0, rightTrigger: 0.0);
-                    byte[] rR = b.BuildReport(leftTrigger: 0.0, rightTrigger: 1.0);
+                    byte[] rL = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
+                    byte[] rR = b.BuildReport(b.StandardAxes(leftTrigger: 0.0, rightTrigger: 1.0));
                     int rt_when_lt = ReadField(rL, b.RightTrigger!, b.InputReportId);
                     int lt_when_rt = ReadField(rR, b.LeftTrigger!, b.InputReportId);
                     if (rt_when_lt != 0) {
@@ -468,8 +468,8 @@ internal sealed class Program
                 }
                 if (ok && wantLSX_fromL)
                 {
-                    byte[] rMid  = b.BuildReport(leftX: 0.5);
-                    byte[] rMax  = b.BuildReport(leftX: 1.0);
+                    byte[] rMid  = b.BuildReport(b.StandardAxes(leftX: 0.5));
+                    byte[] rMax  = b.BuildReport(b.StandardAxes(leftX: 1.0));
                     int vMid = ReadField(rMid, b.LeftStickX!, b.InputReportId);
                     int vMax = ReadField(rMax, b.LeftStickX!, b.InputReportId);
                     int half = b.LeftStickX!.LogicalMax / 2;
@@ -482,8 +482,8 @@ internal sealed class Program
                 }
                 if (ok && wantRSX_present)
                 {
-                    byte[] rMid  = b.BuildReport(rightX: 0.5);
-                    byte[] rMax  = b.BuildReport(rightX: 1.0);
+                    byte[] rMid  = b.BuildReport(b.StandardAxes(rightX: 0.5));
+                    byte[] rMax  = b.BuildReport(b.StandardAxes(rightX: 1.0));
                     int vMid = ReadField(rMid, b.RightStickX!, b.InputReportId);
                     int vMax = ReadField(rMax, b.RightStickX!, b.InputReportId);
                     int half = b.RightStickX!.LogicalMax / 2;

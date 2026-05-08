@@ -103,6 +103,7 @@ public sealed class HMProfile
     /// usage.</summary>
     public int AxisCount => GetLayout()?.AxisFields.Count ?? 0;
 
+
     /// <summary>Every analog axis the descriptor declares, addressable by
     /// HID usage via <see cref="HMGamepadState.ExtraAxes"/>. Empty list
     /// when the profile has no descriptor or no recognized axes. Stable
@@ -175,6 +176,111 @@ public sealed class HMProfile
     /// <summary>True if the profile declares a vendor-blob output report
     /// for parsed-field decoding.</summary>
     public bool HasExtendedOutput => Inner.ExtendedOutputReport != null;
+
+    // ── Structured physical-design layout (v1.3.9) ──────────────────────
+
+    /// <summary>v1.3.9 — structured physical-design declaration. When the
+    /// profile JSON authors a <c>layout</c> block, this returns the typed
+    /// record (<see cref="HMGamepadLayout"/>, <see cref="HMWheelLayout"/>,
+    /// <see cref="HMHotasLayout"/>, etc., one per
+    /// <see cref="HMLayoutKind"/>). When the JSON has no <c>layout</c>
+    /// block, returns null and consumers fall back to classifier-derived
+    /// views (<see cref="StickCount"/>, <see cref="TriggerCount"/>,
+    /// <see cref="AvailableAxes"/>) — backward compatible with v1.3.8 and
+    /// earlier.
+    ///
+    /// <para>Use the <c>As*</c> accessors below for typed access:
+    /// <c>profile.AsWheel()</c>, <c>profile.AsHotas()</c>,
+    /// <c>profile.AsJoystick()</c>, etc.</para></summary>
+    public HMLayout? Layout => Inner.Layout;
+
+    public HMGamepadLayout?             AsGamepad()              => Layout as HMGamepadLayout;
+    public HMJoystickLayout?            AsJoystick()             => Layout as HMJoystickLayout;
+    public HMFlightStickLayout?         AsFlightStick()          => Layout as HMFlightStickLayout;
+    public HMHotasLayout?               AsHotas()                => Layout as HMHotasLayout;
+    public HMWheelLayout?               AsWheel()                => Layout as HMWheelLayout;
+    public HMPedalsLayout?              AsPedals()               => Layout as HMPedalsLayout;
+    public HMShifterLayout?             AsShifter()              => Layout as HMShifterLayout;
+    public HMHandbrakeLayout?           AsHandbrake()            => Layout as HMHandbrakeLayout;
+    public HMSingleAxisAccessoryLayout? AsSingleAxisAccessory()  => Layout as HMSingleAxisAccessoryLayout;
+    public HMArcadeStickLayout?         AsArcadeStick()          => Layout as HMArcadeStickLayout;
+    public HMDancePadLayout?            AsDancePad()             => Layout as HMDancePadLayout;
+    public HMGuitarLayout?              AsGuitar()               => Layout as HMGuitarLayout;
+    public HMMotionWandLayout?          AsMotionWand()           => Layout as HMMotionWandLayout;
+    public HMRemoteLayout?              AsRemote()               => Layout as HMRemoteLayout;
+    public HMControllerAdapterLayout?   AsControllerAdapter()    => Layout as HMControllerAdapterLayout;
+
+    // ── Simple-view derived lists (variable counts, the "I just want
+    //    sticks and triggers" surface PadForge reads to render a per-axis
+    //    binding UI). Layout-derived when authored, classifier-derived
+    //    when not. ─────────────────────────────────────────────────────
+
+    /// <summary>Every analog 2-axis stick the profile exposes, in order.
+    /// Variable count: typical gamepad has 2; flight stick / wheel /
+    /// HOTAS has 1; pedals-only device has 0.</summary>
+    public IReadOnlyList<HMSimpleStick> Sticks => GetSimpleSticks();
+
+    /// <summary>Every analog trigger-shaped axis the profile exposes,
+    /// in order. Variable count: 3-pedal sim set has 3, gamepad has 2,
+    /// handbrake has 1, stick-only device has 0. The first two entries
+    /// are also written through the encoder via the descriptor's standard
+    /// trigger fields; additional triggers are encoder-reachable only
+    /// via <see cref="HMGamepadState.Axes"/> indexed by the entry's
+    /// <c>Axis</c>.</summary>
+    public IReadOnlyList<HMSimpleTrigger> Triggers => GetSimpleTriggers();
+
+    /// <summary>Number of analog 2-axis sticks the profile exposes (alias
+    /// for <c>Sticks.Count</c>).</summary>
+    public int StickCount => Sticks.Count;
+
+    /// <summary>Number of analog trigger-shaped axes the profile exposes
+    /// (alias for <c>Triggers.Count</c>). Variable: 0 for stick-only
+    /// devices, 1 for handbrake, 2 for gamepad, 3 for 3-pedal sim sets.</summary>
+    public int TriggerCount => Triggers.Count;
+
+    private List<HMSimpleStick> GetSimpleSticks()
+    {
+        var l = GetLayout();
+        if (l == null) return new List<HMSimpleStick>();
+        var sticks = new List<HMSimpleStick>();
+        if (l.LeftStickX != null && l.LeftStickY != null)
+        {
+            sticks.Add(new HMSimpleStick {
+                XAxis = (HMAxis)((l.LeftStickX.UsagePage << 8) | l.LeftStickX.Usage),
+                YAxis = (HMAxis)((l.LeftStickY.UsagePage << 8) | l.LeftStickY.Usage),
+                Label = "Left stick"
+            });
+        }
+        if (l.RightStickX != null && l.RightStickY != null)
+        {
+            sticks.Add(new HMSimpleStick {
+                XAxis = (HMAxis)((l.RightStickX.UsagePage << 8) | l.RightStickX.Usage),
+                YAxis = (HMAxis)((l.RightStickY.UsagePage << 8) | l.RightStickY.Usage),
+                Label = "Right stick"
+            });
+        }
+        return sticks;
+    }
+
+    private List<HMSimpleTrigger> GetSimpleTriggers()
+    {
+        var l = GetLayout();
+        if (l == null) return new List<HMSimpleTrigger>();
+        var triggers = new List<HMSimpleTrigger>();
+        if (l.LeftTrigger != null)
+            triggers.Add(new HMSimpleTrigger {
+                Axis = (HMAxis)((l.LeftTrigger.UsagePage << 8) | l.LeftTrigger.Usage),
+                Role = HMAxisRole.LeftTrigger,
+                Label = "Left trigger"
+            });
+        if (l.RightTrigger != null)
+            triggers.Add(new HMSimpleTrigger {
+                Axis = (HMAxis)((l.RightTrigger.UsagePage << 8) | l.RightTrigger.Usage),
+                Role = HMAxisRole.RightTrigger,
+                Label = "Right trigger"
+            });
+        return triggers;
+    }
 
     public override string ToString() => $"{Id} ({Name})";
 

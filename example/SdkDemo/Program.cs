@@ -193,12 +193,17 @@ while (sw.ElapsedMilliseconds < 5_000)
     // automatically engage — matching real DS4/DualSense hardware behavior.
     var state0 = new HMGamepadState
     {
-        LeftStickX   = (float)Math.Cos(angle),
-        LeftStickY   = (float)Math.Sin(angle),
-        RightStickX  = (float)Math.Sin(angle * 0.5),
-        RightStickY  = (float)Math.Cos(angle * 0.5),
-        LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t * 3)),
-        RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 3)),
+        // v1.3.9 — single unified Axes dict drives every analog input.
+        // Helper resolves the canonical 6-slot convention into the active
+        // profile's declared sticks/triggers (Sony's Z=right-stick-X,
+        // Rx=left-trigger axisMap is honored automatically).
+        Axes = HMGamepadStateHelpers.StandardAxes(ctrl0.Profile,
+            leftStickX:   (float)((Math.Cos(angle) + 1) / 2),
+            leftStickY:   (float)((Math.Sin(angle) + 1) / 2),
+            rightStickX:  (float)((Math.Sin(angle * 0.5) + 1) / 2),
+            rightStickY:  (float)((Math.Cos(angle * 0.5) + 1) / 2),
+            leftTrigger:  (float)(0.5 + 0.5 * Math.Sin(t * 3)),
+            rightTrigger: (float)(0.5 + 0.5 * Math.Cos(t * 3))),
         Buttons      = ((int)t % 2 == 0) ? HMButton.A : HMButton.B,
         Hat          = (HMHat)(1 + ((int)(t * 2) % 8)),  // cycle N through NW
 
@@ -229,10 +234,11 @@ while (sw.ElapsedMilliseconds < 5_000)
     // Controller 1 (Xbox 360): opposite direction, different buttons.
     var state1 = new HMGamepadState
     {
-        LeftStickX   = (float)Math.Cos(-angle),
-        LeftStickY   = (float)Math.Sin(-angle),
-        LeftTrigger  = (float)(0.5 + 0.5 * Math.Cos(t * 2)),
-        RightTrigger = (float)(0.5 + 0.5 * Math.Sin(t * 2)),
+        Axes = HMGamepadStateHelpers.StandardAxes(ctrl1.Profile,
+            leftStickX:   (float)((Math.Cos(-angle) + 1) / 2),
+            leftStickY:   (float)((Math.Sin(-angle) + 1) / 2),
+            leftTrigger:  (float)(0.5 + 0.5 * Math.Cos(t * 2)),
+            rightTrigger: (float)(0.5 + 0.5 * Math.Sin(t * 2))),
         Buttons      = ((int)t % 2 == 0) ? HMButton.X : HMButton.Y,
     };
     ctrl1.SubmitState(in state1);
@@ -277,8 +283,9 @@ while (sw.ElapsedMilliseconds < 2_000)
     double t = sw.Elapsed.TotalSeconds;
     var state = new HMGamepadState
     {
-        LeftStickX = (float)Math.Cos(t * 2 * Math.PI),
-        LeftStickY = (float)Math.Sin(t * 2 * Math.PI),
+        Axes = HMGamepadStateHelpers.StandardAxes(ctrl0.Profile,
+            leftStickX: (float)((Math.Cos(t * 2 * Math.PI) + 1) / 2),
+            leftStickY: (float)((Math.Sin(t * 2 * Math.PI) + 1) / 2)),
         Buttons    = HMButton.A,
     };
     ctrl0.SubmitState(in state);
@@ -350,8 +357,9 @@ Console.WriteLine("OK");
 // Submit a frame with button 16 held (the extra button)
 var customState = new HMGamepadState
 {
-    LeftStickX = 0.5f,
-    LeftStickY = -0.5f,
+    Axes = HMGamepadStateHelpers.StandardAxes(ctrl2.Profile,
+        leftStickX: 0.75f,    // (0.5 + 1) / 2 in old [-1..+1] convention = 0.75 in [0..1]
+        leftStickY: 0.25f),   // (-0.5 + 1) / 2 = 0.25
     Buttons = (HMButton)(1u << 15),  // bit 15 = button 16
 };
 ctrl2.SubmitState(in customState);
@@ -401,10 +409,11 @@ while (sw.ElapsedMilliseconds < 3_000)
     double t = sw.Elapsed.TotalSeconds;
     var fs = new HMGamepadState
     {
-        LeftStickX   = (float)Math.Sin(t * 1.5),    // roll
-        LeftStickY   = (float)Math.Cos(t * 1.5),    // pitch
-        LeftTrigger  = (float)(0.5 + 0.5 * Math.Sin(t)),  // throttle
-        RightTrigger = (float)(0.5 + 0.5 * Math.Cos(t * 2)), // rudder
+        Axes = HMGamepadStateHelpers.StandardAxes(ctrl3.Profile,
+            leftStickX:   (float)((Math.Sin(t * 1.5) + 1) / 2),    // roll
+            leftStickY:   (float)((Math.Cos(t * 1.5) + 1) / 2),    // pitch
+            leftTrigger:  (float)(0.5 + 0.5 * Math.Sin(t)),         // throttle
+            rightTrigger: (float)(0.5 + 0.5 * Math.Cos(t * 2))),    // rudder
         Buttons      = ((int)t % 3 == 0) ? HMButton.A : HMButton.None, // trigger button
         Hat          = (HMHat)(1 + ((int)(t * 3) % 8)),
     };
@@ -607,21 +616,19 @@ Console.WriteLine($"    AvailableAxes ({hotasFull.AxisCount}): " +
 
 using (var ctrlHotasFull = ctx.CreateController(hotasFull))
 {
-    // Drive every axis in one frame. ExtraAxes is null on every prior
-    // state in this demo — allocate once and reuse for the hot path.
-    var extra = new System.Collections.Generic.Dictionary<HMAxis, float>
-    {
-        [HMAxis.Slider]   = 0.75f,   // throttle slider 75%
-        [HMAxis.Rudder]   = 0.25f,   // rudder pedal slight left
-        [HMAxis.Throttle] = 1.00f,   // secondary throttle full
-    };
-    var hotasState = new HMGamepadState
-    {
-        LeftStickX = 0.10f,
-        LeftStickY = -0.30f,
-        ExtraAxes  = extra,
-    };
-    ctrlHotasFull.SubmitState(in hotasState);
+    // v1.3.9 — single Axes dict drives every analog input. The classifier
+    // resolved Slider→LeftTrigger via the v1.3.8 case-0x36 extension; the
+    // helper auto-fills the canonical 6-slot mapping from the profile's
+    // Sticks/Triggers (here just LeftStickX/Y from the X+Y stick). The
+    // remaining sim axes (Rudder, Throttle) get written by direct dict
+    // entry since they're outside the 6-slot helper.
+    var axes = HMGamepadStateHelpers.StandardAxes(ctrlHotasFull.Profile,
+        leftStickX: 0.55f,                          // 0.10 in [-1..+1] = 0.55 in [0..1]
+        leftStickY: 0.35f,                          // -0.30 in [-1..+1] = 0.35
+        leftTrigger: 0.75f);                        // Slider→LeftTrigger via classifier
+    axes[HMAxis.Rudder]   = 0.25f;                  // rudder pedal slight left
+    axes[HMAxis.Throttle] = 1.00f;                  // secondary throttle full
+    ctrlHotasFull.SubmitState(new HMGamepadState { Axes = axes });
     Console.WriteLine($"    Submitted: stick + Slider=0.75 + Rudder=0.25 + Throttle=1.00");
     Thread.Sleep(500);
 }
@@ -722,12 +729,13 @@ Console.WriteLine("\n  12a. Xbox 360 Wired — via SubmitState");
     // visible via XInputGetStateEx (ordinal 100).
     var x360State = new HMGamepadState
     {
-        LeftStickX   =  0.5f,
-        LeftStickY   = -0.3f,
-        RightStickX  = -0.2f,
-        RightStickY  =  0.7f,
-        LeftTrigger  =  0.8f,   // Combined Z axis in DI
-        RightTrigger =  0.4f,   // Combined Z axis in DI, separate via Vx/Vy for WGI
+        Axes = HMGamepadStateHelpers.StandardAxes(x360.Profile,
+            leftStickX:   0.75f,    // 0.5 in [-1..+1] = 0.75 in [0..1]
+            leftStickY:   0.35f,    // -0.3 in [-1..+1] = 0.35
+            rightStickX:  0.40f,    // -0.2 in [-1..+1] = 0.40
+            rightStickY:  0.85f,    // 0.7 in [-1..+1] = 0.85
+            leftTrigger:  0.8f,     // Combined Z synthesis fills Z in DI; Vx/Vy carry separate
+            rightTrigger: 0.4f),
         Buttons      =  HMButton.A | HMButton.LeftBumper | HMButton.Guide,  // ALLOW-GUIDE: one-shot tour snapshot demonstrating Guide→wButtons 0x0400 routing, not a loop
         Hat          =  HMHat.North,
     };
@@ -754,12 +762,13 @@ Console.WriteLine("\n  12b. Xbox Series X|S Bluetooth — via SubmitState");
     // Share routes via buttonMap to descriptor button 12 → visible in joy.cpl/DI.
     var xsBtState = new HMGamepadState
     {
-        LeftStickX   =  0.7f,
-        LeftStickY   =  0.3f,
-        RightStickX  = -0.5f,
-        RightStickY  = -0.1f,
-        LeftTrigger  =  1.0f,
-        RightTrigger =  0.0f,
+        Axes = HMGamepadStateHelpers.StandardAxes(xsBt.Profile,
+            leftStickX:   0.85f,    // 0.7 in [-1..+1] = 0.85 in [0..1]
+            leftStickY:   0.65f,    // 0.3 in [-1..+1] = 0.65
+            rightStickX:  0.25f,    // -0.5 in [-1..+1] = 0.25
+            rightStickY:  0.45f,    // -0.1 in [-1..+1] = 0.45
+            leftTrigger:  1.0f,
+            rightTrigger: 0.0f),
         Buttons      =  HMButton.X | HMButton.Y | HMButton.RightBumper
                       | HMButton.Guide | HMButton.Share,  // ALLOW-GUIDE: one-shot tour snapshot showing Series-BT Guide via HID System Main Menu, not a loop
         Hat          =  HMHat.SouthEast,
@@ -784,9 +793,10 @@ Console.WriteLine("\n  12c. DualSense — SubmitState + SubmitRawReport for touc
     // Option A: SubmitState for standard fields only (no touchpad)
     ds.SubmitState(new HMGamepadState
     {
-        LeftStickX  = -0.3f,
-        LeftStickY  =  0.6f,
-        LeftTrigger =  0.5f,
+        Axes = HMGamepadStateHelpers.StandardAxes(ds.Profile,
+            leftStickX:  0.35f,    // -0.3 in [-1..+1] = 0.35 in [0..1]
+            leftStickY:  0.80f,    // 0.6 in [-1..+1] = 0.80
+            leftTrigger: 0.5f),
         Buttons     =  HMButton.A | HMButton.B,  // Cross + Circle
         Hat         =  HMHat.West,
     });

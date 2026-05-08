@@ -361,23 +361,23 @@ public sealed class HMController : IDisposable
         long startTicks = OnSubmitLatencyMicros != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
-        // HMGamepadState uses [-1..+1] for sticks and [0..1] for triggers.
-        // HidReportBuilder.BuildReport expects [0..1] normalized values for
-        // axes (centered at 0.5). Map directly with no sign flip — the
-        // proven test app encoder passed values straight through to
-        // BuildReport without inversion, and it produced correct circles
-        // in joy.cpl / Gamepad Tester for every profile type. HID Y axis
-        // direction is descriptor-defined, not a universal convention, so
-        // the SDK keeps the contract simple: caller's LeftStickY = +1
-        // becomes HID logical max for that field.
-        double Map(float v) => Math.Clamp((v + 1.0) / 2.0, 0.0, 1.0);
+        // v1.3.9 — single unified state.Axes dict drives every analog input.
+        // Resolve the 6 "simple-slot" values (left stick X/Y, right stick
+        // X/Y, LT, RT) by looking up each profile's declared sticks/triggers
+        // in the axes dict. Auto-default: 0.5 (centered) for sticks, 0.0
+        // (released) for triggers.
+        var axes = state.Axes;
+        double GetAxis(HMAxis ax, double def) =>
+            axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
 
-        double mlx = Map(state.LeftStickX);
-        double mly = Map(state.LeftStickY);
-        double mrx = Map(state.RightStickX);
-        double mry = Map(state.RightStickY);
-        double mlt = Math.Clamp(state.LeftTrigger, 0f, 1f);
-        double mrt = Math.Clamp(state.RightTrigger, 0f, 1f);
+        var sticks = Profile.Sticks;
+        var triggers = Profile.Triggers;
+        double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : 0.5;
+        double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
+        double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;
+        double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5) : 0.5;
+        double mlt = triggers.Count > 0 ? GetAxis(triggers[0].Axis, 0.0) : 0.0;
+        double mrt = triggers.Count > 1 ? GetAxis(triggers[1].Axis, 0.0) : 0.0;
 
         byte[] report;
         // v1.3.5 — vendor-blob path is gated on the host-side arm flag.
@@ -423,25 +423,22 @@ public sealed class HMController : IDisposable
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
             VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+                (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
         }
         else
         {
-            // v1.3.0 — buffer-reuse overload eliminates per-frame byte[] alloc.
-            // v1.3.4 — pass through high-resolution hat inputs. The encoder's
-            // priority chain (HatDegrees > HatHundredths > HatRaw > Hat) picks
-            // the first non-null and ignores the rest.
+            // v1.3.9 — unified axes dict drives every declared analog input.
+            // Hat priority chain (HatDegrees > HatHundredths > HatRaw > Hat)
+            // picks the first non-null and ignores the rest.
             _reportBuilder.BuildReportInto(_reportBuffer,
-                leftX: mlx, leftY: mly,
-                rightX: mrx, rightY: mry,
-                leftTrigger: mlt, rightTrigger: mrt,
+                axes: state.Axes,
                 hatValue: (int)state.Hat,
                 buttonMask: (uint)state.Buttons,
                 hatDegrees: state.HatDegrees,
                 hatHundredths: state.HatHundredths,
-                hatRaw: state.HatRaw,
-                extraAxes: state.ExtraAxes);
+                hatRaw: state.HatRaw);
 
             // v1.3.5 — overlay profile-declared fixed bytes (e.g. DS5 Edge
             // USB activeProfile = 0x80 at byte 49 so dualsense-tester's
