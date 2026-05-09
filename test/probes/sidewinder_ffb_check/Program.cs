@@ -1,27 +1,29 @@
-// SideWinder FF2 PID FFB end-to-end check (v1.3.11).
+// SideWinder FF2 PID FFB end-to-end check (v1.3.12).
 //
-// Microsoft SideWinder Force Feedback 2 firmware uses a non-canonical PID
-// Report ID for Create New Effect (0x01 vs canonical 0x11). The original
-// HMDeviceExtractor capture also declared PID Block Load (Feature RID 0x02)
-// and PID Pool (Feature RID 0x03) collections, but those AVs DirectInput's
-// pid.dll CreateEffect path: pid.dll only supports a single Feature report
-// (Create New Effect) per the canonical PID FFB descriptor shape. Real
-// hardware survives because dinput on real-USB-PID takes a different code
-// path; HIDMaestro's UMDF2 emulation routes everything through pid.dll.
+// Microsoft SideWinder Force Feedback 2 native firmware used non-canonical
+// PID Report IDs (Create New Effect 0x01, Set Effect Output 0x01, …, Set
+// Custom Force Output 0x0E). Two layered consequences for HIDMaestro:
+//   1. pid.dll's CreateEffect AVs on TLCs with multiple Feature reports.
+//      The native descriptor declared three (Create New Effect, Block
+//      Load, Pool); real Microsoft hardware survives via a different
+//      dinput path, but HIDMaestro's UMDF2 emulation routes through
+//      pid.dll. v1.3.11 stripped Block Load and Pool to fix the AV.
+//   2. HMController.OutputReceived passes the wire RID through verbatim;
+//      consumers (PadForge etc.) keyed on canonical RIDs (Set Effect 0x11
+//      etc.) couldn't decode the SideWinder's 0x01-0x0E range. v1.3.12
+//      renumbered every FFB Output + Feature RID to canonical so the
+//      shipping descriptor's PID layout matches AddPidFfbBlock structurally.
 //
-// v1.3.11 fix: Block Load and Pool Feature collections were stripped from
-// the shipped descriptor (1355→1221 bytes). The SDK still responds to
-// dinput's HidD_GetFeature(BlockLoad)/(Pool) queries via shared-memory
-// state at the canonical RIDs (0x12/0x13), identical to AddPidFfbBlock-
-// built profiles. The non-canonical Create New Effect RID 0x01 is still
-// declared in the descriptor and exercises the SDK's descriptor-aware
-// dispatch path (PidReportIdExtractor + per-controller shared-section RID
-// publish) introduced in v1.3.7.
+// Original 1355-byte capture preserved verbatim in the profile JSON's
+// nativeDescriptor field per the record-keeping rule. Shipping descriptor
+// is 1221 bytes with all FFB RIDs in the canonical 0x11-0x1E range.
 //
 // This probe loads the embedded SideWinder profile, creates a real
 // virtual, publishes Pool, and runs the SetFeature(Create New Effect) +
-// GetFeature(Pool) handshake. Both must succeed for dinput8/pid.dll to
-// enumerate FFB on a SideWinder virtual end-to-end.
+// GetCurrentPidBlockLoad handshake to confirm the SDK allocates an EBI
+// for CreateEffect via canonical RID 0x11. Combined with the manual
+// FfbTest verification (Device.CreateEffect → SUCCESS for ConstantForce
+// + Sine), this covers the dinput-pid.dll-driver-SDK round trip.
 //
 // Requires admin (driver install + virtual creation). Exit 0 on PASS, 1 on FAIL.
 
@@ -54,31 +56,38 @@ internal static class Program
         Check("SideWinder profile loaded from embedded catalog", profile != null);
         if (profile == null) return 1;
 
-        // Verify the descriptor is the v1.3.11 shipping shape: 1221 bytes,
-        // Block Load + Pool Feature collections stripped from the original
-        // 1355-byte HMDeviceExtractor capture to dodge the pid.dll
-        // multi-Feature CreateEffect AV (see memory:project-piddll-single-
-        // feature-trap.md).
+        // Verify the descriptor is the v1.3.12 shipping shape: 1221 bytes,
+        // Block Load + Pool Feature collections stripped, all FFB RIDs
+        // canonical (Set Effect / Effect Operation / Block Free / Device
+        // Control / Create New Effect 0x11-0x1E). See memory:
+        // project-piddll-single-feature-trap.md for the rationale.
         var desc = profile.GetDescriptorBytes();
-        Check("Descriptor is the v1.3.11 shipping shape (~1221 bytes, multi-Feature stripped)",
+        Check("Descriptor is the v1.3.12 shipping shape (~1221 bytes, fully canonical FFB RIDs)",
               desc != null && desc.Length > 1100 && desc.Length < 1300,
               desc == null ? "(null)" : $"{desc.Length} bytes");
 
-        // PidReportIdExtractor on the shipping descriptor: Create New Effect
-        // is still at the SideWinder's non-canonical RID 0x01 (exercises the
-        // descriptor-aware dispatch path). Pool/BlockLoad fall back to
-        // canonical defaults (0x13/0x12) because their Feature collections
-        // were stripped — the SDK serves those bytes via shared-memory state
-        // at the canonical RIDs.
+        // PidReportIdExtractor on the shipping descriptor: every PID RID is
+        // canonical now. Pool/BlockLoad fall back to defaults because their
+        // Feature collections are stripped (the SDK serves those bytes via
+        // shared-memory state at canonical RIDs). Set Effect / Block Free /
+        // Device Control / Create New Effect are at canonical 0x11/0x1B/
+        // 0x1C/0x11 directly in the descriptor.
         var rids = PidReportIdExtractor.Extract(desc);
         Console.WriteLine($"  Descriptor PID RIDs: {rids}");
-        Check("Create New Effect RID resolved to non-canonical 0x01", rids.CreateNewEffectReportId == 0x01,
+        Check("Create New Effect RID = canonical 0x11", rids.CreateNewEffectReportId == 0x11,
               $"got 0x{rids.CreateNewEffectReportId:X2}");
-        Check("Pool RID falls back to canonical 0x13", rids.PoolReportId == 0x13,
+        Check("Pool RID = canonical 0x13", rids.PoolReportId == 0x13,
               $"got 0x{rids.PoolReportId:X2}");
-        Check("Block Load RID falls back to canonical 0x12", rids.BlockLoadReportId == 0x12,
+        Check("Block Load RID = canonical 0x12", rids.BlockLoadReportId == 0x12,
               $"got 0x{rids.BlockLoadReportId:X2}");
-        Check("AnyOverride flag set (Create New Effect 0x01 != canonical 0x11)", rids.AnyOverride);
+        Check("Block Free RID = canonical 0x1B", rids.BlockFreeReportId == 0x1B,
+              $"got 0x{rids.BlockFreeReportId:X2}");
+        Check("Device Control RID = canonical 0x1C", rids.DeviceControlReportId == 0x1C,
+              $"got 0x{rids.DeviceControlReportId:X2}");
+        // No AnyOverride expected — every RID is canonical. AnyOverride being
+        // false means the descriptor is structurally indistinguishable from
+        // an AddPidFfbBlock-built profile for PID dispatch purposes.
+        Check("AnyOverride flag clear (all RIDs canonical)", !rids.AnyOverride);
 
         if (s_failures > 0) return 1;
 
@@ -106,7 +115,9 @@ internal static class Program
                 $"Pool=0x{section[28]:X2} State=0x{section[29]:X2} BL=0x{section[30]:X2} " +
                 $"NewEffect=0x{section[31]:X2} BlockFree=0x{section[32]:X2} DC=0x{section[33]:X2}");
             Check("Shared Pool RID = canonical 0x13", section[28] == 0x13);
-            Check("Shared NewEffect RID = non-canonical 0x01", section[31] == 0x01);
+            Check("Shared NewEffect RID = canonical 0x11", section[31] == 0x11);
+            Check("Shared BlockFree RID = canonical 0x1B", section[32] == 0x1B);
+            Check("Shared DeviceControl RID = canonical 0x1C", section[33] == 0x1C);
         }
         else
         {
@@ -124,10 +135,10 @@ internal static class Program
         Check("HID handle opened", hidOpen);
         if (!hidOpen) return s_failures > 0 ? 1 : 0;
 
-        // SetFeature(CreateNewEffect at non-canonical RID 0x01) — driver
-        // must allocate EBI synchronously for the SideWinder layout, just
-        // like it does for canonical 0x11 in the standard PID block.
-        // Payload: effectType (Constant Force = 0x01) + byteCount(LE) = 0.
+        // SetFeature(CreateNewEffect at canonical RID 0x11) — driver must
+        // allocate EBI synchronously, identical to AddPidFfbBlock-built
+        // profiles. Payload: effectType (Constant Force = 0x01) +
+        // byteCount(LE) = 0.
         bool sf = SendSetFeature(hid!, rids.CreateNewEffectReportId,
             new byte[] { 0x01, 0x00, 0x00 });
         Check($"HidD_SetFeature(0x{rids.CreateNewEffectReportId:X2} Create New Effect) accepted",
@@ -136,7 +147,7 @@ internal static class Program
         if (sf)
         {
             var bl = ctrl.GetCurrentPidBlockLoad();
-            Check($"Driver allocated EBI=1 for non-canonical Create New Effect RID (got ebi={bl.EffectBlockIndex} status={bl.LoadStatus})",
+            Check($"Driver allocated EBI=1 for canonical Create New Effect RID (got ebi={bl.EffectBlockIndex} status={bl.LoadStatus})",
                   bl.EffectBlockIndex == 1 && bl.LoadStatus == PidLoadStatus.Success);
         }
 
