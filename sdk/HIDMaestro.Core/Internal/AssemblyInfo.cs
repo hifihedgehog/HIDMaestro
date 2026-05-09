@@ -12,3 +12,5 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("TriggerClassifierCheck")]
 [assembly: InternalsVisibleTo("TriggerLiveCheck")]
 [assembly: InternalsVisibleTo("SideWinderFfbCheck")]
+[assembly: InternalsVisibleTo("LayoutAuditCheck")]
+[assembly: InternalsVisibleTo("AxisAddressingCheck")]

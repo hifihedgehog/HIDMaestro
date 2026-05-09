@@ -180,6 +180,35 @@ public sealed class ControllerProfile
     [JsonIgnore]
     public string? UpperFilterName => UsesXinputhid ? "xinputhid" : UsesXusb22 ? "xusb22" : null;
 
+    /// <summary>Whether the profile is an Xbox-family controller (matches
+    /// "xbox" in id / name / product string, case-insensitive). Microsoft VID
+    /// 0x045E covers more than Xbox: SideWinder joysticks, force-feedback
+    /// wheels, mice, keyboards. The XUSB companion is meaningful only for
+    /// Xbox-shape controllers; this property gates the companion-create path
+    /// so a SideWinder Force Feedback 2 (VID=0x045E, joystick TLC) doesn't
+    /// receive an XInput companion device.</summary>
+    [JsonIgnore]
+    public bool IsXboxBranded
+    {
+        get
+        {
+            const StringComparison cmp = StringComparison.OrdinalIgnoreCase;
+            return (Id?.Contains("xbox", cmp) ?? false)
+                || (Name?.Contains("xbox", cmp) ?? false)
+                || (ProductString?.Contains("xbox", cmp) ?? false);
+        }
+    }
+
+    /// <summary>Whether this profile needs an XUSB (XInput) companion devnode.
+    /// True only for non-xinputhid Xbox-family controllers (Xbox 360 wired,
+    /// the wheel/arcade-stick/dance-pad XInput accessories). xinputhid-bound
+    /// profiles publish XUSB through the upper filter on the main HID device,
+    /// not a companion. Non-Xbox Microsoft-VID profiles (SideWinder etc.)
+    /// don't speak XInput at all.</summary>
+    [JsonIgnore]
+    public bool RequiresXusbCompanion =>
+        VendorId == 0x045E && !UsesUpperFilter && IsXboxBranded;
+
     /// <summary>Parsed VID as ushort.</summary>
     [JsonIgnore]
     public ushort VendorId => Convert.ToUInt16(Vid, 16);

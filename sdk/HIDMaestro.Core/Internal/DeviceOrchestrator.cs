@@ -766,8 +766,10 @@ internal static class DeviceOrchestrator
             : ComputeInputReportByteLength(descriptor);
 
         // FunctionMode=1 for non-xinputhid Xbox (XUSB on main device),
-        // FunctionMode=0 for everything else.
-        bool funcMode = profile.VendorId == 0x045E && !profile.UsesUpperFilter;
+        // FunctionMode=0 for everything else. Gated on IsXboxBranded so a
+        // SideWinder / FF wheel / other Microsoft-VID non-Xbox device does
+        // not get its main HID treated as an XInput function.
+        bool funcMode = profile.RequiresXusbCompanion;
 
         string instancePath = RegPathForIndex(controllerIndex);
         using var key = Registry.LocalMachine.CreateSubKey(instancePath);
@@ -1503,7 +1505,7 @@ internal static class DeviceOrchestrator
         // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
         // {EC87F1E3} XUSB device interface class.
         string? xusbCompanionId = null;
-        if (profile.VendorId == 0x045E && !profile.UsesUpperFilter)
+        if (profile.RequiresXusbCompanion)
         {
             var xusbSw = Stopwatch.StartNew();
             using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.create_xusb_companion"))

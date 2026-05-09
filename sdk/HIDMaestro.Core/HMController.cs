@@ -307,12 +307,14 @@ public sealed class HMController : IDisposable
         _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
 
-        // Xbox-family check: VID 0x045E (Microsoft) profiles use HMXInput.dll
-        // as their XUSB companion which reads the GIP-format buffer slice
-        // from shared memory on IOCTL_XUSB_GET_STATE. Sony / Nintendo /
-        // generic gamepads have no XUSB companion bound — skip the 14-byte
-        // packing and copy.
-        _packsGipBuffer = profile.Inner.VendorId == 0x045E;
+        // Only profiles with an XUSB companion (HMXInput.dll) read the
+        // GIP-format buffer slice on IOCTL_XUSB_GET_STATE. xinputhid-bound
+        // Xbox profiles publish XInput through the upper filter, not the
+        // companion, so the GIP slice is unused. Microsoft-VID non-Xbox
+        // profiles (SideWinder etc.) don't speak XInput at all. Skip the
+        // 14-byte packing for both — gated on the same predicate that
+        // controls XUSB companion creation in DeviceOrchestrator.
+        _packsGipBuffer = profile.Inner.RequiresXusbCompanion;
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
 

@@ -106,10 +106,51 @@ internal static class Program
             }
         }
 
+        // v1.3.10 — XUSB-companion gate audit. Walks every deployable profile
+        // and asserts profile.Inner.RequiresXusbCompanion is true ONLY when:
+        //   - VID == 0x045E (Microsoft)
+        //   - DriverMode is not xinputhid / xusb22
+        //   - "xbox" appears in Id / Name / ProductString (case-insensitive)
+        // Catches the SideWinder-class regression where a Microsoft-VID
+        // non-Xbox device (joystick / FF wheel / etc.) accidentally received
+        // an XUSB companion devnode and showed up as an XInput slot.
+        Console.WriteLine();
+        Console.WriteLine("--- XUSB companion gate (v1.3.10) ---");
+        int xusbExpectedTrue = 0, xusbExpectedFalse = 0;
+        foreach (var p in ctx.AllProfiles)
+        {
+            if (!p.IsDeployable) continue;
+
+            bool expected = ExpectedRequiresXusb(p);
+            bool actual = p.Inner.RequiresXusbCompanion;
+            if (expected) xusbExpectedTrue++; else xusbExpectedFalse++;
+
+            Check($"{p.Id}: RequiresXusbCompanion matches gate predicate",
+                  actual == expected,
+                  $"expected={expected} actual={actual} vid=0x{p.VendorId:X4}");
+        }
+        Console.WriteLine($"  XUSB-companion expected true:  {xusbExpectedTrue}");
+        Console.WriteLine($"  XUSB-companion expected false: {xusbExpectedFalse}");
+
         Console.WriteLine();
         Console.WriteLine($"  Catalog: {totalProfiles} deployable profiles");
         Console.WriteLine($"  Authored: {authoredProfiles}  Unspecified: {unspecifiedProfiles}  Unauthored: {unauthoredProfiles}");
         Console.WriteLine($"\n=== {(s_failures == 0 ? "PASS" : "FAIL")}: {s_total - s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    // Independent reimplementation of the XUSB-companion gate predicate.
+    // The SDK's RequiresXusbCompanion (Internal/ControllerProfile.cs) MUST
+    // agree with this for every deployable profile. If they disagree the
+    // SDK's predicate has drifted; check git blame on either side.
+    static bool ExpectedRequiresXusb(HMProfile p)
+    {
+        if (p.VendorId != 0x045E) return false;
+        if (string.Equals(p.DriverMode, "xinputhid", StringComparison.OrdinalIgnoreCase)) return false;
+        if (string.Equals(p.DriverMode, "xusb22", StringComparison.OrdinalIgnoreCase)) return false;
+        const StringComparison cmp = StringComparison.OrdinalIgnoreCase;
+        return (p.Id?.Contains("xbox", cmp) ?? false)
+            || (p.Name?.Contains("xbox", cmp) ?? false)
+            || (p.ProductString?.Contains("xbox", cmp) ?? false);
     }
 }
