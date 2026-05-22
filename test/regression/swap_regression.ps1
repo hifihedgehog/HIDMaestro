@@ -138,6 +138,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1335,6 +1336,19 @@ function Scenario-Layout-Audit-Check {
     }
 }
 
+# S38: Sony BT axis-role regression (v1.3.13, #23). Asserts the Sony
+# Bluetooth profiles' Profile.Sticks/Triggers resolve to the Sony-convention
+# axis keys (right stick Z/Rz, triggers Rx/Ry) and that a Sony-convention
+# state.Axes fill encodes through VendorBlobCodec with no right-stick/trigger
+# swap. No driver install, no virtual device.
+function Scenario-Sony-BT-Axis-Role-Check {
+    $probe = Resolve-ProbeBinary 'sony_bt_axis_role_check' 'SonyBtAxisRoleCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyBtAxisRoleCheck exited " + $p.ExitCode + " - Sony BT axis roles swapped or mis-resolved (see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1376,7 +1390,8 @@ $scenarios = @(
     @{ Name = 'S34_Trigger_Live_Check';           Body = ${function:Scenario-Trigger-Live-Check} },
     @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} },
     @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} },
-    @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} }
+    @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} },
+    @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

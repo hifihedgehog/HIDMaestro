@@ -284,14 +284,29 @@ public sealed class HMProfile
 
     public override string ToString() => $"{Id} ({Name})";
 
-    // Lazily parsed layout cache
+    // Simple-slot resolver. v1.3.13 (#23) — previously this did a bare
+    // HidReportBuilder.Parse(bytes) with no axisMap and no layout
+    // semantics, so GetSimpleSticks/GetSimpleTriggers saw only the raw
+    // HID-usage-code heuristic. For Sony-convention controllers (Z/Rz =
+    // right stick, Rx/Ry = triggers) the heuristic takes the XInput
+    // branch and classifies the axes backwards; the profile JSON's
+    // axisMap / layout that declare the truth were ignored. DualSense /
+    // DualShock 4 Bluetooth profiles emitted right-stick and trigger
+    // axes swapped as a result.
+    //
+    // Fix: resolve through Inner.GetOrBuildReportBuilder() — the exact
+    // builder the encoder consumes. It runs the heuristic, then applies
+    // the profile's axisMap overrides, then ApplyLayoutSemantics. The
+    // discovery surface (Profile.Sticks/Triggers) and the encode path
+    // now read identical role assignments by construction, so they can
+    // never disagree. Profiles with no axisMap and no layout fall
+    // through to the unchanged heuristic.
     private HidReportBuilder? _layout;
     private HidReportBuilder? GetLayout()
     {
         if (_layout != null) return _layout;
-        var bytes = Inner.GetDescriptorBytes();
-        if (bytes == null) return null;
-        _layout = HidReportBuilder.Parse(bytes);
+        if (Inner.GetDescriptorBytes() == null) return null;
+        _layout = Inner.GetOrBuildReportBuilder();
         return _layout;
     }
 }

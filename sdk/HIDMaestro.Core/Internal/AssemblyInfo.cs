@@ -14,3 +14,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SideWinderFfbCheck")]
 [assembly: InternalsVisibleTo("LayoutAuditCheck")]
 [assembly: InternalsVisibleTo("AxisAddressingCheck")]
+[assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]
