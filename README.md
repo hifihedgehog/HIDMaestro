@@ -14,6 +14,14 @@
 
 ---
 
+<p align="center">
+  <a href="https://somsubhra.github.io/github-release-stats/?username=hifihedgehog&repository=HIDMaestro"><img src="https://img.shields.io/github/downloads/hifihedgehog/HIDMaestro/total" alt="Total downloads"></a>
+  <a href="https://discord.gg/qawTZHVhNH"><img src="https://img.shields.io/discord/1507059039844962425?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Discord"></a>
+  <a href="https://hidmaestro.org/"><img src="https://img.shields.io/badge/website-hidmaestro.org-blue" alt="Website"></a>
+  <a href="https://github.com/hifihedgehog"><img src="https://img.shields.io/github/followers/hifihedgehog?style=social&label=Follow" alt="GitHub followers"></a>
+  <a href="https://x.com/hifihedgehog"><img src="https://img.shields.io/badge/X-@hifihedgehog-black?logo=x&logoColor=white" alt="Follow on X"></a>
+</p>
+
 A user-mode virtual game controller platform that presents like real hardware across the Windows gaming input stack.
 
 HIDMaestro creates profile-driven virtual controllers without a custom kernel driver, EV certificate, or reboot cycle. DirectInput, XInput, SDL3, browser Gamepad, and WGI/GameInput can all see the device identity and behavior the profile defines. The stack builds on the UMDF2 + xinputhid approach that [Nefarius](https://nefarius.at/) used in [DsHidMini](https://github.com/nefarius/DsHidMini).
