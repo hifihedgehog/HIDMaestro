@@ -212,6 +212,10 @@ class Program
         // start the circle.
         bool startPaused = profileIds.Contains("--paused-at-zero");
         bool startMarked = profileIds.Contains("--mark");
+        // --neutral: bring every controller up already neutralized. The
+        // pattern thread still runs, but the SDK discards its frames and
+        // publishes neutral input until 'neutral off' is sent over stdin.
+        bool startNeutral = profileIds.Contains("--neutral");
         // --rate-hz N : override the per-virtual SubmitState rate (default 250 Hz,
         // which comes from the pattern thread's Thread.Sleep(4)). PadForge polls
         // at 1 kHz; issue #3 uses 1 kHz and 125 Hz for saturation-rate tests.
@@ -240,9 +244,9 @@ class Program
                 continue;
             }
         }
-        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark").ToArray();
+        profileIds = profileIds.Where(p => p != "--paused-at-zero" && p != "--mark" && p != "--neutral").ToArray();
         if (profileIds.Length == 0)
-            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--rate-hz N] [--profile-dir <path>]... <profile-id> [profile-id ...]");
+            return Error("Usage: HIDMaestroTest emulate [--paused-at-zero] [--mark] [--neutral] [--rate-hz N] [--profile-dir <path>]... <profile-id> [profile-id ...]");
         // Under HIDMAESTRO_QUIET=1 (regression battery), the stdout pipe is
         // not drained by the harness between Send-Cmd calls. Per-controller
         // setup output (Loaded N profiles / Creating controller / ->created
@@ -308,6 +312,15 @@ class Program
             Console.WriteLine($"  --mark: marked {slots.Count} controller(s) — each holds button=its index");
         }
 
+        // --neutral: start every controller in neutral mode. The device is
+        // fully created and visible to games; it just emits neutral input
+        // until 'neutral off' is sent.
+        if (startNeutral)
+        {
+            foreach (var s in slots) s.Ctrl.Neutralized = true;
+            Console.WriteLine($"  --neutral: {slots.Count} controller(s) start neutralized (send 'neutral off' to pass input through)");
+        }
+
         Console.WriteLine($"\n  All {slots.Count} controller(s) ready.\n");
 
         // Phase 2: input threads — one test-pattern thread per controller.
@@ -325,6 +338,7 @@ class Program
         Console.WriteLine("    resume                        resume submitting input frames");
         Console.WriteLine("    mark                          static frame: each ctrl holds button = its index (browser-order test)");
         Console.WriteLine("    unmark                        leave mark mode and resume the time-varying pattern");
+        Console.WriteLine("    neutral [on|off|toggle] [idx|all]  force neutral output (device stays on, sends no input)");
         Console.WriteLine("    park <idx|all> <x> <y>        pin slot N's left stick to literal x,y in [-1..+1]");
         Console.WriteLine("    park off                      leave park mode and resume the time-varying pattern");
         Console.WriteLine("    remove <index>                dispose a single controller (others stay live)");
@@ -459,6 +473,65 @@ class Program
             {
                 foreach (var s in slots) s.MarkButton = -1;
                 Console.WriteLine($"  unmarked {slots.Count} controller(s) — back to time-varying pattern");
+                continue;
+            }
+            // neutral [on|off|toggle] [idx|all]
+            //   Force the virtual controller(s) to emit neutral input (sticks
+            //   centered, triggers released, no buttons) while staying present
+            //   and "connected". The pattern thread keeps submitting the
+            //   time-varying circle, but the SDK discards it and publishes a
+            //   neutral frame — so this is a live demonstration that the flag
+            //   neutralizes whatever the input source is doing, with no
+            //   reconnect. Default action = toggle, default target = all.
+            if (line.StartsWith("neutral", StringComparison.OrdinalIgnoreCase)
+                && (line.Length == 7 || line[7] == ' '))
+            {
+                var sub = line.Substring(7).Trim()
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+                // Parse optional action keyword and optional target.
+                string action = "toggle";
+                string target = "all";
+                int ti = 0;
+                if (sub.Length > ti && (sub[ti].Equals("on", StringComparison.OrdinalIgnoreCase)
+                                     || sub[ti].Equals("off", StringComparison.OrdinalIgnoreCase)
+                                     || sub[ti].Equals("toggle", StringComparison.OrdinalIgnoreCase)))
+                {
+                    action = sub[ti].ToLowerInvariant();
+                    ti++;
+                }
+                if (sub.Length > ti) target = sub[ti];
+
+                // Resolve target slots.
+                var targets = new List<int>();
+                if (target.Equals("all", StringComparison.OrdinalIgnoreCase))
+                {
+                    for (int i = 0; i < slots.Count; i++)
+                        if (slots[i].Ctrl != null!) targets.Add(i);
+                }
+                else if (int.TryParse(target, out int ni) && ni >= 0 && ni < slots.Count)
+                {
+                    if (slots[ni].Ctrl != null!) targets.Add(ni);
+                    else Console.WriteLine($"  ! neutral: slot {ni} is removed");
+                }
+                else
+                {
+                    Console.WriteLine($"  ! neutral usage: neutral [on|off|toggle] [idx|all]");
+                    continue;
+                }
+
+                foreach (int i in targets)
+                {
+                    var ctrl = slots[i].Ctrl;
+                    bool want = action switch
+                    {
+                        "on"  => true,
+                        "off" => false,
+                        _     => !ctrl.Neutralized,   // toggle
+                    };
+                    ctrl.Neutralized = want;
+                    Console.WriteLine($"  slot {i}: neutral = {(want ? "ON  (device stays connected, sending neutral input)" : "OFF (passing input through)")}");
+                }
                 continue;
             }
             // park <idx> <x> <y>     pin slot N's left stick to literal x,y in [-1..+1]

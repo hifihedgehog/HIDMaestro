@@ -71,6 +71,14 @@ public sealed class HMController : IDisposable
     // Sized at HidReportBuilder.InputReportByteSize, computed in the ctor.
     private readonly byte[] _reportBuffer;
 
+    // Canonical per-profile neutral state. Do not use default(HMGamepadState)
+    // as "neutral": many real controller descriptors use unsigned stick axes
+    // (0..255 or 0..65535) where descriptor zero means full-left/up, not
+    // center. Build this once so Neutralized can substitute a correct idle
+    // frame on every profile.
+    private readonly HMGamepadState _neutralState;
+    private HMGamepadState _lastSubmittedState;
+
     // v1.3.0 — per-controller reusable raw report buffer. SubmitRawReport
     // (DualSense / vendor-protocol path) used to do report.ToArray() per
     // call; this 64-byte buffer absorbs the copy without the alloc churn.
@@ -131,6 +139,14 @@ public sealed class HMController : IDisposable
     // descriptor-driven BuildReportInto path so consumers that never issue
     // the handshake still see legacy Report 1 emission.
     private volatile bool _extendedModeArmed;
+
+    // Neutral-input override. When true, every frame submitted through
+    // SubmitState / SubmitRawReport is replaced with a blank neutral frame
+    // before it reaches shared memory, so games / XInput / WGI see no active
+    // input even though the consumer keeps pushing the real gamepad's data.
+    // The device stays present and "connected" (no PnP teardown), so the flag
+    // can be flipped on and off live without reconnecting the controller.
+    private volatile bool _neutralized;
 
     /// <summary>Optional diagnostic: invoked at the end of every successful
     /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
@@ -306,6 +322,7 @@ public sealed class HMController : IDisposable
         // re-parsing the descriptor on every ctor.
         _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
+        _neutralState = BuildNeutralState(profile, _reportBuilder);
 
         // Only profiles with an XUSB companion (HMXInput.dll) read the
         // GIP-format buffer slice on IOCTL_XUSB_GET_STATE. xinputhid-bound
@@ -353,22 +370,121 @@ public sealed class HMController : IDisposable
         }
     }
 
+    private static HMGamepadState BuildNeutralState(HMProfile profile, HidReportBuilder reportBuilder)
+    {
+        var axes = new Dictionary<HMAxis, float>();
+
+        // Generic axis fallback: signed centered axes idle at 0.5; unsigned
+        // non-role axes (throttles, pedals, sliders) idle/release at 0.0.
+        foreach (var (axis, field) in reportBuilder.AxisFields)
+        {
+            if (axis != HMAxis.None)
+                axes[axis] = field.LogicalMin < 0 ? 0.5f : 0.0f;
+        }
+
+        // Role-aware override: sticks are neutral at center even when the
+        // descriptor uses unsigned logical ranges (DS4/DS5/Switch Pro).
+        foreach (var stick in profile.Sticks)
+        {
+            if (stick.XAxis != HMAxis.None) axes[stick.XAxis] = 0.5f;
+            if (stick.YAxis != HMAxis.None) axes[stick.YAxis] = 0.5f;
+        }
+
+        // Triggers/pedals are released at zero.
+        foreach (var trigger in profile.Triggers)
+        {
+            if (trigger.Axis != HMAxis.None) axes[trigger.Axis] = 0.0f;
+        }
+
+        return new HMGamepadState
+        {
+            Axes = axes,
+            Buttons = HMButton.None,
+            Hat = HMHat.None,
+        };
+    }
+
+    /// <summary>Neutral-input override. When set to <c>true</c>, every frame
+    /// the consumer submits through <see cref="SubmitState"/> /
+    /// <see cref="SubmitRawReport"/> is discarded and replaced with a blank
+    /// neutral frame (sticks centered, triggers released, no buttons, hat
+    /// neutral) before it is written to shared memory. As a result games,
+    /// XInput, and WGI see the controller as present and connected but
+    /// completely idle — regardless of what the real input source is doing.
+    ///
+    /// <para>Flipping this flag does <b>not</b> reconnect or remove the
+    /// device: the virtual controller stays enumerated and "on" the whole
+    /// time. Setting it to <c>true</c> immediately publishes one neutral
+    /// frame so any input currently held on the consumer side is released
+    /// right away, without waiting for the consumer's next submit.</para>
+    ///
+    /// <para>Thread-safe to set from any thread (the field is volatile and
+    /// the submit path reads it once per frame).</para></summary>
+    public bool Neutralized
+    {
+        get => _neutralized;
+        set
+        {
+            bool wasNeutral = _neutralized;
+            _neutralized = value;
+            // On the rising edge, push a neutral frame now so the device goes
+            // idle instantly instead of holding the consumer's last frame
+            // until its next SubmitState call.
+            if (value && !wasNeutral && !_disposed)
+            {
+                try
+                {
+                    SubmitStateCore(in _neutralState, rememberSourceState: false);
+                }
+                catch { /* best-effort: a transient write failure here is non-fatal */ }
+            }
+            else if (!value && wasNeutral && !_disposed)
+            {
+                try
+                {
+                    SubmitStateCore(in _lastSubmittedState, rememberSourceState: false);
+                }
+                catch { /* best-effort: the consumer's next SubmitState will refresh input */ }
+            }
+        }
+    }
+
     /// <summary>Push the next input frame to the virtual controller.
     /// The SDK encodes <paramref name="state"/> into the active profile's
-    /// HID report layout and publishes it via shared memory.</summary>
+    /// HID report layout and publishes it via shared memory.
+    ///
+    /// <para>While <see cref="Neutralized"/> is <c>true</c> the submitted
+    /// frame is ignored and a neutral frame is published instead.</para></summary>
     public void SubmitState(in HMGamepadState state)
+        => SubmitStateCore(in state, rememberSourceState: true);
+
+    private void SubmitStateCore(in HMGamepadState state, bool rememberSourceState)
     {
         ThrowIfDisposed();
 
         long startTicks = OnSubmitLatencyMicros != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
+        // Remember the latest source state even while neutralized. When the
+        // flag is turned off, we can immediately republish this state instead
+        // of leaving the virtual stuck on the neutral frame until the source
+        // happens to submit again.
+        if (rememberSourceState)
+            _lastSubmittedState = state;
+
+        // Neutral-input override: substitute the per-profile neutral frame for
+        // the caller's data. Sticks must be explicitly centered for unsigned
+        // descriptors (DS4/DS5/Switch Pro), while triggers/buttons/hat stay
+        // released. Everything downstream (HID report, GIP/XInput buffer,
+        // vendor-blob codec) then encodes an idle controller.
+        HMGamepadState effective = _neutralized ? _neutralState : state;
+
         // v1.3.9 — single unified state.Axes dict drives every analog input.
         // Resolve the 6 "simple-slot" values (left stick X/Y, right stick
         // X/Y, LT, RT) by looking up each profile's declared sticks/triggers
         // in the axes dict. Auto-default: 0.5 (centered) for sticks, 0.0
         // (released) for triggers.
-        var axes = state.Axes;
+        var axes = effective.Axes;
         double GetAxis(HMAxis ax, double def) =>
             axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
 
@@ -424,7 +540,7 @@ public sealed class HMController : IDisposable
             // The driver-side WriteToInputReport recognizes the extended
             // path via the SHARED_INPUT.ExtendedReportSize > 0 hint set
             // alongside the legacy bytes below.
-            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in state,
+            VendorBlobCodec.EncodeInput(Profile.ExtendedReport!, in effective,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt,
                 _extendedReportBuffer!, _extEncoderState!);
             report = _extendedReportBuffer!;
@@ -435,12 +551,12 @@ public sealed class HMController : IDisposable
             // Hat priority chain (HatDegrees > HatHundredths > HatRaw > Hat)
             // picks the first non-null and ignores the rest.
             _reportBuilder.BuildReportInto(_reportBuffer,
-                axes: state.Axes,
-                hatValue: (int)state.Hat,
-                buttonMask: (uint)state.Buttons,
-                hatDegrees: state.HatDegrees,
-                hatHundredths: state.HatHundredths,
-                hatRaw: state.HatRaw);
+                axes: effective.Axes,
+                hatValue: (int)effective.Hat,
+                buttonMask: (uint)effective.Buttons,
+                hatDegrees: effective.HatDegrees,
+                hatHundredths: effective.HatHundredths,
+                hatRaw: effective.HatRaw);
 
             // v1.3.5 — overlay profile-declared fixed bytes (e.g. DS5 Edge
             // USB activeProfile = 0x80 at byte 49 so dualsense-tester's
@@ -485,7 +601,7 @@ public sealed class HMController : IDisposable
             _gipBuf[8]  = (byte)(gipLt & 0xFF); _gipBuf[9]  = (byte)(gipLt >> 8);
             _gipBuf[10] = (byte)(gipRt & 0xFF); _gipBuf[11] = (byte)(gipRt >> 8);
             // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
-            uint b = (uint)state.Buttons;
+            uint b = (uint)effective.Buttons;
             byte btnLow = 0;
             if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
             if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
@@ -512,7 +628,7 @@ public sealed class HMController : IDisposable
             byte btnHigh = 0;
             if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
             if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
-            btnHigh |= (byte)(((byte)state.Hat & 0x0F) << 2);
+            btnHigh |= (byte)(((byte)effective.Hat & 0x0F) << 2);
             if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
             _gipBuf[13] = btnHigh;
         }
@@ -586,6 +702,17 @@ public sealed class HMController : IDisposable
     {
         ThrowIfDisposed();
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
+
+        // Neutral-input override: ignore the raw vendor payload (which can
+        // carry sticks/buttons/gyro/touchpad) and publish a neutral frame via
+        // the structured path instead, so games see an idle controller. We
+        // route through SubmitState so the descriptor-driven neutral report
+        // (and zeroed GIP/XInput buffer) is what reaches the kernel.
+        if (_neutralized)
+        {
+            SubmitStateCore(in _neutralState, rememberSourceState: false);
+            return;
+        }
         if (report.Length > SharedMemoryIO.DATA_CAPACITY)
             throw new ArgumentException(
                 $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
