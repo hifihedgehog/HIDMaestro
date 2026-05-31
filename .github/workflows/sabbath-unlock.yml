@@ -1,18 +1,15 @@
 name: Sabbath unlock
 
 # Releases the interaction limit at 00:01 America/New_York every Monday.
-# GitHub Actions cron is evaluated in UTC; the schedule string below is the
-# literal user-specified expression with timezone intent recorded via the TZ
-# env var. Manual fire is available via workflow_dispatch.
+# The per-cron `timezone` field (shipped 2026-03-19) makes the schedule
+# timezone-aware and DST-correct. Manual fire via workflow_dispatch.
 on:
   schedule:
     - cron: '1 0 * * 1'
+      timezone: "America/New_York"
   workflow_dispatch:
 
 permissions: {}
-
-env:
-  TZ: America/New_York
 
 jobs:
   unlock:
