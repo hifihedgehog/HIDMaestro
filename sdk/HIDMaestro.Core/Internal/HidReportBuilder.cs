@@ -403,30 +403,40 @@ public class HidReportBuilder
 
     void ResolveSemantics()
     {
-        // Pre-scan: does this descriptor have dedicated Rx (0x33) or Ry (0x34)
-        // usages? If so, Z (0x32) and Rz (0x35) default to trigger semantics
-        // (Xbox-style 6-axis). If NOT, and Z+Rz BOTH appear, they're the
-        // right stick — the 4-axis DirectInput layout (the usage pattern
-        // WebKit/Chromium call the "standard gamepad"). Z OR Rz alone (no
-        // pair) means a single trigger axis, not half a stick. See issues #5
-        // and #22.
+        // Pre-scan for two right-stick patterns that fall outside the default
+        // "Rx/Ry = right stick, Z/Rz = triggers" Xbox 360 wire convention:
+        //
+        //   (a) fourAxisDInput — no Rx/Ry at all, Z+Rz both present (WebKit/
+        //       Chromium's "standard gamepad", Logitech F310 DInput mode).
+        //       Z/Rz are the right stick.
+        //   (b) zRzAreSticksByCount — Z or Rz declared with Report Count >= 2,
+        //       i.e. paired-axis stick shape rather than single-axis trigger
+        //       shape. The Rx/Ry-as-triggers convention HidDescriptorBuilder
+        //       emits since v1.3.14 (issue #27: pre-2005 DInput games like
+        //       Jedi Outcast / Serious Sam TFE bind right-stick from
+        //       DIJOYSTATE.lZ/lRz and miss Rx/Ry-only virtuals).
+        //
+        // Z OR Rz alone (no pair, no wide count) means a single trigger axis,
+        // not half a stick. See issues #5, #22, #27.
         bool hasRxOrRy = false;
         bool hasZ = false;
         bool hasRz = false;
+        bool zRzAreSticksByCount = false;
         foreach (var f in InputFields)
         {
             if (f.IsConstant || f.UsagePage != 0x01) continue;
             if (f.Usage == 0x33 || f.Usage == 0x34) hasRxOrRy = true;
-            else if (f.Usage == 0x32) hasZ = true;
-            else if (f.Usage == 0x35) hasRz = true;
+            else if (f.Usage == 0x32) { hasZ = true; if (f.ReportCount >= 2) zRzAreSticksByCount = true; }
+            else if (f.Usage == 0x35) { hasRz = true; if (f.ReportCount >= 2) zRzAreSticksByCount = true; }
         }
         bool fourAxisDInput = !hasRxOrRy && hasZ && hasRz;
+        bool zRzAreSticks = fourAxisDInput || zRzAreSticksByCount;
 
-        // A Z (0x32) or Rz (0x35) field declared with Report Count == 1 and
-        // unsigned range starting at 0 is unambiguously a trigger (matches
-        // what HidDescriptorBuilder.AddTrigger emits). This wins over the
-        // fourAxisDInput heuristic so a (1 stick, 1 trigger) or (2 sticks,
-        // 1 trigger) Custom layout doesn't get its lone trigger silently
+        // A Generic Desktop field declared with Report Count == 1 and unsigned
+        // range starting at 0 is unambiguously a trigger (matches what
+        // HidDescriptorBuilder.AddTrigger emits). This wins over the
+        // right-stick fallback so a (1 stick, 1 trigger) or (2 sticks, 1
+        // trigger) Custom layout doesn't get its lone trigger silently
         // claimed as right-stick X. See issue #22.
         static bool LooksLikeTrigger(InputField f) =>
             f.ReportCount == 1 && f.LogicalMin == 0;
@@ -460,17 +470,27 @@ public class HidReportBuilder
                     case 0x32:                               // Z
                         if (LooksLikeTrigger(f))
                             LeftTrigger ??= f;
-                        else if (fourAxisDInput)
+                        else if (zRzAreSticks)
                             RightStickX ??= f;
                         else
                             LeftTrigger ??= f;
                         break;
-                    case 0x33: RightStickX ??= f; break;   // Rx
-                    case 0x34: RightStickY ??= f; break;   // Ry
+                    case 0x33:                               // Rx
+                        if (LooksLikeTrigger(f))
+                            LeftTrigger ??= f;
+                        else
+                            RightStickX ??= f;
+                        break;
+                    case 0x34:                               // Ry
+                        if (LooksLikeTrigger(f))
+                            RightTrigger ??= f;
+                        else
+                            RightStickY ??= f;
+                        break;
                     case 0x35:                               // Rz
                         if (LooksLikeTrigger(f))
                             RightTrigger ??= f;
-                        else if (fourAxisDInput)
+                        else if (zRzAreSticks)
                             RightStickY ??= f;
                         else
                             RightTrigger ??= f;

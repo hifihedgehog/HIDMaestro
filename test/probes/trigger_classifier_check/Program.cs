@@ -1,33 +1,42 @@
-// Issue #22 — trigger axis classifier regression probe.
+// Issue #22 / #27 — trigger axis classifier regression probe.
 //
-// Exercises the two Custom-Extended layouts the issue body called out as
+// AddStick / AddTrigger Usage-code convention as of v1.3.14 (issue #27):
+//     AddStick("Left")  → X (0x30) + Y (0x31)
+//     AddStick("Right") → Z (0x32) + Rz (0x35)   ← RumblePad / vJoy stick-2
+//     AddTrigger("Left")  → Rx (0x33)
+//     AddTrigger("Right") → Ry (0x34)
+//
+// Exercises the Custom-Extended layouts the issue bodies called out as
 // silently broken pre-fix:
 //
-//   Case 1: 1 stick + 1 trigger        — Z (16-bit, RC=1) was claimed as
-//                                        RightStickX, the trigger byte never
-//                                        moved. After fix: Z routes to
-//                                        LeftTrigger, trigger sweeps 0..max.
+//   Case 1: 1 stick + 1 trigger        — Trigger field (RC=1, LogicalMin=0)
+//                                        must classify as LeftTrigger, not
+//                                        get silently claimed as RightStickX
+//                                        by the unconditional case-0x33 arm.
 //
-//   Case 2: 2 sticks + 1 trigger       — Z classified as LeftTrigger but
-//                                        BuildReport applied the Xbox-360
-//                                        combined-Z formula, so trigger swept
-//                                        75% (released) → 25% (full press).
-//                                        After fix: lone LeftTrigger writes
-//                                        the actual leftTrigger value; sweep
-//                                        is 0..max.
+//   Case 2: 2 sticks + 1 trigger       — Right stick (Z+Rz, RC=2) must
+//                                        classify as RightStickX/Y while the
+//                                        lone Rx trigger (RC=1) lands in
+//                                        LeftTrigger; sweep is direct 0..max
+//                                        with no combined-Z synthesis.
 //
-// Plus a couple of don't-regress cases:
+// Plus the don't-regress cases:
 //
-//   Case 3: 4-axis DInput (X+Y+Z+Rz, no Rx/Ry, both 8 and 16-bit variants) —
-//           Z must still classify as RightStickX, Rz as RightStickY.
+//   Case 3: 6-axis builder layout (X+Y+Z+Rz sticks + Rx+Ry triggers) — the
+//           default builder output.
+//
+//   Case 3b: 4-axis DInput (X+Y+Z+Rz only, no Rx/Ry, RC=1) — the F310 /
+//           WebKit "standard gamepad" pattern. fourAxisDInput rescues Z/Rz
+//           into RightStickX/Y because no triggers exist.
 //
 //   Case 4: 2 sticks + 2 triggers      — independent triggers route to
 //                                        LeftTrigger / RightTrigger and write
 //                                        independently (no combined synthesis).
 //
-//   Case 5: Xbox-360-wired-shape (X+Y+Rx+Ry+Z+Vx+Vy) — Z sits in
-//           CombinedTrigger, Vx in LeftTrigger, Vy in RightTrigger; the
-//           combined-Z formula fires only here.
+//   Case 5: Xbox-360-wired-shape (X+Y+Rx+Ry+Z+Vx+Vy) — Rx/Ry at RC=2 are
+//           the right stick, Z (combined trigger) sits in CombinedTrigger,
+//           Vx in LeftTrigger, Vy in RightTrigger. Hand-rolled raw
+//           descriptor independent of the builder convention.
 //
 // No driver install, no virtual device. Exit 0 on PASS, 1 on FAIL.
 
@@ -82,7 +91,7 @@ internal sealed class Program
             var b = HidReportBuilder.Parse(desc);
             Check("LeftTrigger classified", b.LeftTrigger != null,
                   b.LeftTrigger == null ? "(null)" : $"usage=0x{b.LeftTrigger.Usage:X2} bits={b.LeftTrigger.BitSize} rc={b.LeftTrigger.ReportCount}");
-            Check("RightStickX NOT claimed by Z",
+            Check("RightStickX NOT claimed by Rx (lone trigger)",
                   b.RightStickX == null,
                   b.RightStickX == null ? "" : $"unexpected: usage=0x{b.RightStickX.Usage:X2}");
 
@@ -113,13 +122,13 @@ internal sealed class Program
             var b = HidReportBuilder.Parse(desc);
             Check("LeftStickX classified", b.LeftStickX != null);
             Check("LeftStickY classified", b.LeftStickY != null);
-            Check("RightStickX classified (from Rx)", b.RightStickX != null,
+            Check("RightStickX classified (from Z)", b.RightStickX != null,
                   b.RightStickX == null ? "" : $"usage=0x{b.RightStickX.Usage:X2}");
-            Check("RightStickY classified (from Ry)", b.RightStickY != null);
-            Check("LeftTrigger classified (from Z)", b.LeftTrigger != null,
+            Check("RightStickY classified (from Rz)", b.RightStickY != null);
+            Check("LeftTrigger classified (from Rx)", b.LeftTrigger != null,
                   b.LeftTrigger == null ? "" : $"usage=0x{b.LeftTrigger.Usage:X2}");
             Check("CombinedTrigger NOT set (no Vx)", b.CombinedTrigger == null);
-            Check("RightTrigger NOT set (no Rz, no Vy)", b.RightTrigger == null);
+            Check("RightTrigger NOT set (no Ry, no Vy)", b.RightTrigger == null);
 
             // Sweep leftTrigger 0..1 with rightTrigger left at 0.0. Pre-fix
             // the lone-LeftTrigger branch synthesized 0.5 - leftTrigger * 0.5,
@@ -136,22 +145,22 @@ internal sealed class Program
                   $"got {v1}, expected {b.LeftTrigger.LogicalMax}");
         }
 
-        // ── Case 3: 4-axis DInput (don't-regress) ────────────────────────────
-        Console.WriteLine("\n--- Case 3: 4-axis DInput (8-bit) ---");
+        // ── Case 3: Standard 6-axis (don't-regress) ──────────────────────────
+        Console.WriteLine("\n--- Case 3: Standard 6-axis (8-bit) ---");
         {
             byte[] desc = new HidDescriptorBuilder()
                 .Gamepad()
                 .AddStick("Left", 8)
-                .AddStick("Right", 8)        // emits Rx+Ry, not 4-axis-DInput-style
+                .AddStick("Right", 8)        // emits Z+Rz (RumblePad / vJoy convention)
                 .AddTrigger("Left", 8)
                 .AddTrigger("Right", 8)
                 .AddButtons(10)
                 .Build();
             var b = HidReportBuilder.Parse(desc);
             Check("Standard 6-axis: LeftStickX from X", b.LeftStickX != null && b.LeftStickX.Usage == 0x30);
-            Check("Standard 6-axis: RightStickX from Rx", b.RightStickX != null && b.RightStickX.Usage == 0x33);
-            Check("Standard 6-axis: LeftTrigger from Z", b.LeftTrigger != null && b.LeftTrigger.Usage == 0x32);
-            Check("Standard 6-axis: RightTrigger from Rz", b.RightTrigger != null && b.RightTrigger.Usage == 0x35);
+            Check("Standard 6-axis: RightStickX from Z", b.RightStickX != null && b.RightStickX.Usage == 0x32);
+            Check("Standard 6-axis: LeftTrigger from Rx", b.LeftTrigger != null && b.LeftTrigger.Usage == 0x33);
+            Check("Standard 6-axis: RightTrigger from Ry", b.RightTrigger != null && b.RightTrigger.Usage == 0x34);
         }
 
         // 4-axis DInput (real) — X+Y+Z+Rz only, no Rx/Ry. A hand-built
@@ -196,8 +205,8 @@ internal sealed class Program
                 .AddButtons(10)
                 .Build();
             var b = HidReportBuilder.Parse(desc);
-            Check("LeftTrigger from Z", b.LeftTrigger != null && b.LeftTrigger.Usage == 0x32);
-            Check("RightTrigger from Rz", b.RightTrigger != null && b.RightTrigger.Usage == 0x35);
+            Check("LeftTrigger from Rx", b.LeftTrigger != null && b.LeftTrigger.Usage == 0x33);
+            Check("RightTrigger from Ry", b.RightTrigger != null && b.RightTrigger.Usage == 0x34);
             Check("CombinedTrigger NOT set", b.CombinedTrigger == null);
 
             byte[] rL = b.BuildReport(b.StandardAxes(leftTrigger: 1.0, rightTrigger: 0.0));
@@ -283,10 +292,10 @@ internal sealed class Program
                 .AddButtons(11)
                 .Build();
             var b = HidReportBuilder.Parse(desc);
-            Check("PadForge shape: trigger lands in LeftTrigger",
-                  b.LeftTrigger != null && b.LeftTrigger.Usage == 0x32);
-            Check("PadForge shape: trigger NOT in RightStickX",
-                  b.RightStickX != null && b.RightStickX.Usage == 0x33,
+            Check("PadForge shape: trigger lands in LeftTrigger from Rx",
+                  b.LeftTrigger != null && b.LeftTrigger.Usage == 0x33);
+            Check("PadForge shape: RightStickX classified from Z",
+                  b.RightStickX != null && b.RightStickX.Usage == 0x32,
                   b.RightStickX == null ? "(null)" : $"got 0x{b.RightStickX.Usage:X2}");
             // Mid-press value: at 0.5, the trigger field should sit at half of
             // LogicalMax (rounded). Pre-fix the inverted/offset combined formula
@@ -313,9 +322,10 @@ internal sealed class Program
         {
             int matrixTotal = 0, matrixFails = 0;
             // Stick configs: which sticks are present and in what order. The
-            // builder's first AddStick("Left") emits X+Y, second AddStick("Right")
-            // emits Rx+Ry. Naming order matters because LeftStick vs RightStick
-            // semantics depend on it.
+            // builder's AddStick("Left") emits X+Y, AddStick("Right") emits
+            // Z+Rz (RumblePad / vJoy stick-2 convention, v1.3.14+). Naming
+            // order matters because LeftStick vs RightStick semantics depend
+            // on it.
             (string label, string[] sticks)[] stickConfigs = {
                 ("none",    new string[] { }),
                 ("L",       new[] { "Left" }),
@@ -382,9 +392,9 @@ internal sealed class Program
                 bool wantRT = triggers.Contains("Right");
 
                 // The first AddStick("Right") with no AddStick("Left") still
-                // emits Rx+Ry which the classifier puts into RightStickX/Y
+                // emits Z+Rz which the classifier puts into RightStickX/Y
                 // (not LeftStickX/Y). That's the documented HID-usage mapping;
-                // the builder hands the user the X+Y vs Rx+Ry choice via the
+                // the builder hands the user the X+Y vs Z+Rz choice via the
                 // name argument.
                 bool wantLSX_fromL = sticks.Contains("Left");
                 bool wantRSX_present = sticks.Contains("Right");
@@ -398,20 +408,20 @@ internal sealed class Program
                 if (!wantLSX_fromL && b.LeftStickX != null) {
                     ok = false; detail += $" unexpected LeftStickX usage=0x{b.LeftStickX.Usage:X2};";
                 }
-                if (wantRSX_present && (b.RightStickX == null || b.RightStickX.Usage != 0x33)) {
-                    ok = false; detail += " expected RightStickX from Rx(0x33);";
+                if (wantRSX_present && (b.RightStickX == null || b.RightStickX.Usage != 0x32)) {
+                    ok = false; detail += " expected RightStickX from Z(0x32);";
                 }
                 if (!wantRSX_present && b.RightStickX != null) {
                     ok = false; detail += $" unexpected RightStickX usage=0x{b.RightStickX.Usage:X2};";
                 }
-                if (wantLT && (b.LeftTrigger == null || b.LeftTrigger.Usage != 0x32)) {
-                    ok = false; detail += " expected LeftTrigger from Z(0x32);";
+                if (wantLT && (b.LeftTrigger == null || b.LeftTrigger.Usage != 0x33)) {
+                    ok = false; detail += " expected LeftTrigger from Rx(0x33);";
                 }
                 if (!wantLT && b.LeftTrigger != null) {
                     ok = false; detail += $" unexpected LeftTrigger usage=0x{b.LeftTrigger.Usage:X2};";
                 }
-                if (wantRT && (b.RightTrigger == null || b.RightTrigger.Usage != 0x35)) {
-                    ok = false; detail += " expected RightTrigger from Rz(0x35);";
+                if (wantRT && (b.RightTrigger == null || b.RightTrigger.Usage != 0x34)) {
+                    ok = false; detail += " expected RightTrigger from Ry(0x34);";
                 }
                 if (!wantRT && b.RightTrigger != null) {
                     ok = false; detail += $" unexpected RightTrigger usage=0x{b.RightTrigger.Usage:X2};";

@@ -65,8 +65,14 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
-    /// <summary>Add a 2-axis stick (X+Y or Rx+Ry) inside a Physical collection.</summary>
-    /// <param name="name">"Left" maps to X/Y (usages 0x30/0x31), "Right" maps to Rx/Ry (0x33/0x34).</param>
+    /// <summary>Add a 2-axis stick (X+Y or Z+Rz) inside a Physical collection.</summary>
+    /// <param name="name">"Left" maps to X/Y (usages 0x30/0x31), "Right" maps to Z/Rz (0x32/0x35) —
+    /// the Logitech RumblePad / vJoy stick-2 convention. Pre-Xbox-360-era DirectInput
+    /// games (early-2000s id Tech / Serious Engine titles, etc.) bind the right stick
+    /// from DIJOYSTATE.lZ/lRz; placing it on Rx/Ry would still populate the struct but
+    /// the game's hardcoded field reads would miss it. AddTrigger correspondingly puts
+    /// triggers on Rx/Ry. Real Xbox 360 / DualSense profiles override this via their
+    /// JSON layout + axisMap fields.</param>
     /// <param name="bits">Axis resolution: 8 for [0..255], 16 for [0..65535].</param>
     public HidDescriptorBuilder AddStick(string name, int bits = 16)
     {
@@ -78,14 +84,14 @@ public sealed class HidDescriptorBuilder
         }
         else
         {
-            usage1 = 0x33; usage2 = 0x34; // Rx, Ry
+            usage1 = 0x32; usage2 = 0x35; // Z, Rz (RumblePad / vJoy stick-2 convention)
         }
 
         int logMax = (1 << bits) - 1;
 
         _bytes.AddRange(new byte[] { 0xA1, 0x00 });       // Collection (Physical)
-        _bytes.AddRange(new byte[] { 0x09, usage1 });      // Usage (X or Rx)
-        _bytes.AddRange(new byte[] { 0x09, usage2 });      // Usage (Y or Ry)
+        _bytes.AddRange(new byte[] { 0x09, usage1 });      // Usage (X or Z)
+        _bytes.AddRange(new byte[] { 0x09, usage2 });      // Usage (Y or Rz)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
         if (bits <= 8)
         {
@@ -106,7 +112,10 @@ public sealed class HidDescriptorBuilder
     }
 
     /// <summary>Add a single trigger axis.</summary>
-    /// <param name="name">"Left" maps to Z (0x32), "Right" maps to Rz (0x35).</param>
+    /// <param name="name">"Left" maps to Rx (0x33), "Right" maps to Ry (0x34).
+    /// Paired with AddStick's Z/Rz right-stick convention so a Custom-shape
+    /// gamepad's six analog usages are X, Y, Z, Rx, Ry, Rz — the layout
+    /// vJoy ships by default and that pre-2005 DirectInput titles bind to.</param>
     /// <param name="bits">Axis resolution: 8 for [0..255], 16 for [0..65535].
     /// Must be a multiple of 8 to keep the report byte-aligned. 10-bit or
     /// other non-aligned sizes would force a Const pad item that Chromium's
@@ -121,12 +130,12 @@ public sealed class HidDescriptorBuilder
 
         byte usage = name.Equals("Left", StringComparison.OrdinalIgnoreCase)
                    || name.Equals("L", StringComparison.OrdinalIgnoreCase)
-            ? (byte)0x32 : (byte)0x35;
+            ? (byte)0x33 : (byte)0x34;
 
         int logMax = (1 << bits) - 1;
 
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
-        _bytes.AddRange(new byte[] { 0x09, usage });        // Usage (Z or Rz)
+        _bytes.AddRange(new byte[] { 0x09, usage });        // Usage (Rx or Ry)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
         if (bits <= 8)
             _bytes.AddRange(new byte[] { 0x26, (byte)(logMax & 0xFF), (byte)(logMax >> 8) });
