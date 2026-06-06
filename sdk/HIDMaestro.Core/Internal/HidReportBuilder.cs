@@ -46,6 +46,22 @@ public class HidReportBuilder
     public InputField? LeftStickY { get; private set; }
     public InputField? RightStickX { get; private set; }
     public InputField? RightStickY { get; private set; }
+    /// <summary>Third paired stick (v1.3.15, #124). Surfaced when a
+    /// builder-emitted descriptor calls AddStick three times; the SDK's
+    /// slot-pool allocator routes stick 3 onto Rx (0x33) + Ry (0x34) once
+    /// X/Y and Z/Rz are claimed. Real-hardware profiles populate this via
+    /// JSON layout when applicable.</summary>
+    public InputField? ThirdStickX { get; private set; }
+    /// <summary>Third paired stick Y axis. See <see cref="ThirdStickX"/>.</summary>
+    public InputField? ThirdStickY { get; private set; }
+    /// <summary>Fourth paired stick (v1.3.15, #124). Routes onto Slider
+    /// (0x36) + Dial (0x37). joy.cpl labels them by HUT 1.5 Section 4.3
+    /// names ("Slider" / "Dial"); consumer-side UIs may overlay a generic
+    /// "Stick 4 X/Y" label and address the wire bytes via
+    /// HMAxis.Slider / HMAxis.Dial.</summary>
+    public InputField? FourthStickX { get; private set; }
+    /// <summary>Fourth paired stick Y axis. See <see cref="FourthStickX"/>.</summary>
+    public InputField? FourthStickY { get; private set; }
     public InputField? LeftTrigger { get; private set; }
     public InputField? RightTrigger { get; private set; }
     public InputField? CombinedTrigger { get; private set; } // Z axis for DI combined trigger
@@ -232,19 +248,31 @@ public class HidReportBuilder
                 fieldByUsage[f.Usage] = f;
         }
 
-        // Clear all slots that will be reassigned
+        // v1.3.15 (#124): collect every InputField that the axisMap is about
+        // to reassign, then scrub each of them out of ALL semantic slots
+        // before any assignment runs. ResolveSemantics may have cascaded
+        // those fields into ThirdStickX/Y / FourthStickX/Y (e.g. Sony BT Rx
+        // at ReportCount==2 gets claimed as ThirdStickX before axisMap
+        // overrides it to leftTrigger), and the prior clear-slot loop only
+        // covered the 6 target-named slots — the cascade ghosts survived and
+        // bloated Profile.Sticks.Count.
+        var assignedFields = new HashSet<InputField>();
         foreach (var kvp in map)
         {
-            switch (kvp.Value.ToLowerInvariant())
-            {
-                case "leftstickx":  LeftStickX = null; break;
-                case "leftsticky":  LeftStickY = null; break;
-                case "rightstickx": RightStickX = null; break;
-                case "rightsticky": RightStickY = null; break;
-                case "lefttrigger": LeftTrigger = null; break;
-                case "righttrigger": RightTrigger = null; break;
-            }
+            ushort usage = Convert.ToUInt16(kvp.Key, 16);
+            if (fieldByUsage.TryGetValue(usage, out var f))
+                assignedFields.Add(f);
         }
+        if (LeftStickX  != null && assignedFields.Contains(LeftStickX))  LeftStickX  = null;
+        if (LeftStickY  != null && assignedFields.Contains(LeftStickY))  LeftStickY  = null;
+        if (RightStickX != null && assignedFields.Contains(RightStickX)) RightStickX = null;
+        if (RightStickY != null && assignedFields.Contains(RightStickY)) RightStickY = null;
+        if (ThirdStickX != null && assignedFields.Contains(ThirdStickX)) ThirdStickX = null;
+        if (ThirdStickY != null && assignedFields.Contains(ThirdStickY)) ThirdStickY = null;
+        if (FourthStickX != null && assignedFields.Contains(FourthStickX)) FourthStickX = null;
+        if (FourthStickY != null && assignedFields.Contains(FourthStickY)) FourthStickY = null;
+        if (LeftTrigger  != null && assignedFields.Contains(LeftTrigger))  LeftTrigger  = null;
+        if (RightTrigger != null && assignedFields.Contains(RightTrigger)) RightTrigger = null;
 
         // Apply the overrides
         foreach (var kvp in map)
@@ -441,6 +469,41 @@ public class HidReportBuilder
         static bool LooksLikeTrigger(InputField f) =>
             f.ReportCount == 1 && f.LogicalMin == 0;
 
+        // Cascade claim helpers (v1.3.15, #124). Stick-shaped axes flow
+        // RightStickX → ThirdStickX → FourthStickX in field-encounter order;
+        // trigger-shaped axes flow LeftTrigger → RightTrigger. The builder's
+        // slot-pool allocator emits sticks 1-4 onto X+Y / Z+Rz / Rx+Ry /
+        // Slider+Dial, and these cascades land each declared pair into the
+        // next free semantic slot regardless of which Usage code it sits on.
+        void ClaimRightStickX(InputField f)
+        {
+            if (RightStickX == null) RightStickX = f;
+            else if (ThirdStickX == null) ThirdStickX = f;
+            else if (FourthStickX == null) FourthStickX = f;
+        }
+        void ClaimRightStickY(InputField f)
+        {
+            if (RightStickY == null) RightStickY = f;
+            else if (ThirdStickY == null) ThirdStickY = f;
+            else if (FourthStickY == null) FourthStickY = f;
+        }
+        // Trigger-claim with preference: case 0x32/0x33/0x36 (Z, Rx, Slider)
+        // prefer LeftTrigger; case 0x34/0x35/0x37 (Ry, Rz, Dial) prefer
+        // RightTrigger. Cascade to the other slot when the preferred one is
+        // already taken. Preserves the v1.3.14 (LT=Rx, RT=Ry) layout for the
+        // 2-stick + 2-trigger common case while letting Slider/Dial cascade
+        // naturally for 3-stick + 2-trigger configs (#124).
+        void ClaimLeftTrigger(InputField f)
+        {
+            if (LeftTrigger == null) LeftTrigger = f;
+            else if (RightTrigger == null) RightTrigger = f;
+        }
+        void ClaimRightTrigger(InputField f)
+        {
+            if (RightTrigger == null) RightTrigger = f;
+            else if (LeftTrigger == null) LeftTrigger = f;
+        }
+
         // Map HID usages to semantic gamepad axes/buttons
         // This works for any standard gamepad descriptor
         foreach (var f in InputFields)
@@ -469,36 +532,43 @@ public class HidReportBuilder
                     case 0x31: LeftStickY ??= f; break;    // Y
                     case 0x32:                               // Z
                         if (LooksLikeTrigger(f))
-                            LeftTrigger ??= f;
+                            ClaimLeftTrigger(f);
                         else if (zRzAreSticks)
-                            RightStickX ??= f;
+                            ClaimRightStickX(f);
                         else
-                            LeftTrigger ??= f;
+                            ClaimLeftTrigger(f);
                         break;
                     case 0x33:                               // Rx
                         if (LooksLikeTrigger(f))
-                            LeftTrigger ??= f;
+                            ClaimLeftTrigger(f);
                         else
-                            RightStickX ??= f;
+                            ClaimRightStickX(f);
                         break;
                     case 0x34:                               // Ry
                         if (LooksLikeTrigger(f))
-                            RightTrigger ??= f;
+                            ClaimRightTrigger(f);
                         else
-                            RightStickY ??= f;
+                            ClaimRightStickY(f);
                         break;
                     case 0x35:                               // Rz
                         if (LooksLikeTrigger(f))
-                            RightTrigger ??= f;
+                            ClaimRightTrigger(f);
                         else if (zRzAreSticks)
-                            RightStickY ??= f;
+                            ClaimRightStickY(f);
                         else
-                            RightTrigger ??= f;
+                            ClaimRightTrigger(f);
                         break;
-                    case 0x36:                               // Slider — flight-stick throttle
-                    case 0x37:                               // Dial
-                        if (LeftTrigger == null) LeftTrigger = f;
-                        else if (RightTrigger == null) RightTrigger = f;
+                    case 0x36:                               // Slider — also stick 4 X under v1.3.15 pool
+                        if (LooksLikeTrigger(f))
+                            ClaimLeftTrigger(f);
+                        else
+                            ClaimRightStickX(f);
+                        break;
+                    case 0x37:                               // Dial — also stick 4 Y under v1.3.15 pool
+                        if (LooksLikeTrigger(f))
+                            ClaimRightTrigger(f);
+                        else
+                            ClaimRightStickY(f);
                         break;
                     case 0x39: HatSwitch ??= f; break;     // Hat Switch
                     case 0x85: SystemMainMenu ??= f; break; // System Main Menu (Xbox Guide)

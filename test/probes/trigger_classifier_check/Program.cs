@@ -309,6 +309,77 @@ internal sealed class Program
                   $"got {v}, expected ~{expected}");
         }
 
+        // ── Case 7: 3-stick PadForge Extended (v1.3.15, #124) ────────────────
+        Console.WriteLine("\n--- Case 7: PadForge Extended 3-stick (no triggers) ---");
+        {
+            byte[] desc = new HidDescriptorBuilder()
+                .Joystick()
+                .AddStick("Left", 16)
+                .AddStick("Right", 16)
+                .AddStick("Right", 16)   // stick 3 → Rx/Ry per v1.3.15 pool
+                .AddHat()
+                .AddButtons(13)
+                .Build();
+            var b = HidReportBuilder.Parse(desc);
+            Check("3-stick: LeftStickX from X",      b.LeftStickX  != null && b.LeftStickX.Usage  == 0x30);
+            Check("3-stick: LeftStickY from Y",      b.LeftStickY  != null && b.LeftStickY.Usage  == 0x31);
+            Check("3-stick: RightStickX from Z",     b.RightStickX != null && b.RightStickX.Usage == 0x32);
+            Check("3-stick: RightStickY from Rz",    b.RightStickY != null && b.RightStickY.Usage == 0x35);
+            Check("3-stick: ThirdStickX from Rx",    b.ThirdStickX != null && b.ThirdStickX.Usage == 0x33,
+                  b.ThirdStickX == null ? "(null)" : $"got 0x{b.ThirdStickX.Usage:X2}");
+            Check("3-stick: ThirdStickY from Ry",    b.ThirdStickY != null && b.ThirdStickY.Usage == 0x34);
+            Check("3-stick: FourthStickX null",      b.FourthStickX == null);
+            Check("3-stick: FourthStickY null",      b.FourthStickY == null);
+            Check("3-stick: LeftTrigger null",       b.LeftTrigger  == null);
+            Check("3-stick: RightTrigger null",      b.RightTrigger == null);
+        }
+
+        // ── Case 8: 4-stick PadForge Extended (v1.3.15, #124) ────────────────
+        Console.WriteLine("\n--- Case 8: PadForge Extended 4-stick (no triggers) ---");
+        {
+            byte[] desc = new HidDescriptorBuilder()
+                .Joystick()
+                .AddStick("Left", 16)
+                .AddStick("Right", 16)
+                .AddStick("Right", 16)
+                .AddStick("Right", 16)   // stick 4 → Slider/Dial
+                .AddHat()
+                .AddButtons(13)
+                .Build();
+            var b = HidReportBuilder.Parse(desc);
+            Check("4-stick: LeftStickX from X",      b.LeftStickX  != null && b.LeftStickX.Usage  == 0x30);
+            Check("4-stick: RightStickX from Z",     b.RightStickX != null && b.RightStickX.Usage == 0x32);
+            Check("4-stick: ThirdStickX from Rx",    b.ThirdStickX != null && b.ThirdStickX.Usage == 0x33);
+            Check("4-stick: ThirdStickY from Ry",    b.ThirdStickY != null && b.ThirdStickY.Usage == 0x34);
+            Check("4-stick: FourthStickX from Slider", b.FourthStickX != null && b.FourthStickX.Usage == 0x36,
+                  b.FourthStickX == null ? "(null)" : $"got 0x{b.FourthStickX.Usage:X2}");
+            Check("4-stick: FourthStickY from Dial",   b.FourthStickY != null && b.FourthStickY.Usage == 0x37);
+            Check("4-stick: LeftTrigger null",       b.LeftTrigger  == null);
+            Check("4-stick: RightTrigger null",      b.RightTrigger == null);
+        }
+
+        // ── Case 9: 3-stick + 2-trigger trigger cascade (v1.3.15, #124) ──────
+        Console.WriteLine("\n--- Case 9: 3-stick + 2-trigger trigger cascade ---");
+        {
+            // With sticks 1-3 consuming X/Y, Z/Rz, Rx/Ry, the trigger pool
+            // falls to Slider then Dial.
+            byte[] desc = new HidDescriptorBuilder()
+                .Joystick()
+                .AddStick("Left", 16)
+                .AddStick("Right", 16)
+                .AddStick("Right", 16)
+                .AddTrigger("Left", 8)
+                .AddTrigger("Right", 8)
+                .AddButtons(10)
+                .Build();
+            var b = HidReportBuilder.Parse(desc);
+            Check("3-stick+2-trig: ThirdStickX from Rx",  b.ThirdStickX != null && b.ThirdStickX.Usage == 0x33);
+            Check("3-stick+2-trig: LeftTrigger from Slider", b.LeftTrigger != null && b.LeftTrigger.Usage == 0x36,
+                  b.LeftTrigger == null ? "(null)" : $"got 0x{b.LeftTrigger.Usage:X2}");
+            Check("3-stick+2-trig: RightTrigger from Dial",  b.RightTrigger != null && b.RightTrigger.Usage == 0x37);
+            Check("3-stick+2-trig: FourthStickX null (Slider claimed as trigger)", b.FourthStickX == null);
+        }
+
         // ── Matrix: every layout HidDescriptorBuilder can emit ───────────────
         // The user's instruction: "ensure thorough tests for this issue so any
         // number of buttons, axes, and sticks won't go wonky like this ever
@@ -322,15 +393,17 @@ internal sealed class Program
         {
             int matrixTotal = 0, matrixFails = 0;
             // Stick configs: which sticks are present and in what order. The
-            // builder's AddStick("Left") emits X+Y, AddStick("Right") emits
-            // Z+Rz (RumblePad / vJoy stick-2 convention, v1.3.14+). Naming
-            // order matters because LeftStick vs RightStick semantics depend
-            // on it.
+            // builder's slot-pool allocator (v1.3.15, #124) emits sticks 1-4
+            // onto X+Y, Z+Rz, Rx+Ry, Slider+Dial in priority order, with
+            // "Left" biasing stick 1 to X+Y and "Right" biasing stick 1 to
+            // Z+Rz. Repeated AddStick("Right") cascades through the pool.
             (string label, string[] sticks)[] stickConfigs = {
                 ("none",    new string[] { }),
                 ("L",       new[] { "Left" }),
                 ("R",       new[] { "Right" }),
                 ("L+R",     new[] { "Left", "Right" }),
+                ("L+R+R",   new[] { "Left", "Right", "Right" }),
+                ("L+R+R+R", new[] { "Left", "Right", "Right", "Right" }),
             };
             // Trigger configs: which named triggers are declared.
             (string label, string[] triggers)[] triggerConfigs = {
@@ -362,6 +435,18 @@ internal sealed class Program
                 if (sticks.Length == 0 && sBits != 8) continue;
                 if (triggers.Length == 0 && tBits != 8) continue;
 
+                // v1.3.15 (#124): the slot-pool builder has a hard cap of
+                // 4 paired stick slots + however many of [Rx, Ry, Slider, Dial]
+                // remain after sticks consume Rx/Ry/Slider/Dial. Configs that
+                // would overflow the pool intentionally throw at AddStick /
+                // AddTrigger build time. Skip them — Case 8 already exercises
+                // the 4-stick boundary, and pool-overflow throws are part of
+                // the API contract documented on the methods.
+                int triggerSlotsTaken = 0;
+                if (sticks.Length >= 3) triggerSlotsTaken += 2; // Rx + Ry consumed by stick 3
+                if (sticks.Length >= 4) triggerSlotsTaken += 2; // Slider + Dial consumed by stick 4
+                if (triggers.Length > 4 - triggerSlotsTaken) continue;
+
                 caseIndex++;
                 string label = $"#{caseIndex} sticks={sLabel} triggers={tLabel} sBits={sBits} tBits={tBits} btn={btnCount} hat={hat}";
 
@@ -385,47 +470,98 @@ internal sealed class Program
                     continue;
                 }
 
-                // Classifier expectations.
-                bool wantLSX = sticks.Length >= 1 && sticks[0] == "Left";
-                bool wantRSX_fromR = sticks.Contains("Right");
-                bool wantLT = triggers.Contains("Left");
-                bool wantRT = triggers.Contains("Right");
-
-                // The first AddStick("Right") with no AddStick("Left") still
-                // emits Z+Rz which the classifier puts into RightStickX/Y
-                // (not LeftStickX/Y). That's the documented HID-usage mapping;
-                // the builder hands the user the X+Y vs Z+Rz choice via the
-                // name argument.
-                bool wantLSX_fromL = sticks.Contains("Left");
-                bool wantRSX_present = sticks.Contains("Right");
+                // v1.3.15 (#124): simulate the SDK's slot-pool allocator to
+                // know exactly which Usage code each AddStick / AddTrigger
+                // call SHOULD emit, then verify the classifier surfaces them
+                // in the expected semantic slot (LeftStick → Right → Third →
+                // Fourth; LeftTrigger / RightTrigger by Usage preference).
+                bool xy = false, zRz = false, rxRy = false, slDl = false;
+                bool rxT = false, ryT = false, slT = false, dlT = false;
+                byte expLSX = 0, expRSX = 0, expTSX = 0, expFSX = 0;
+                byte expLT = 0, expRT = 0;
+                foreach (var s in sticks) {
+                    bool isL = s.Equals("Left", StringComparison.OrdinalIgnoreCase);
+                    byte u;
+                    if (isL && !xy)  { xy = true; u = 0x30; }
+                    else if (!isL && !zRz) { zRz = true; u = 0x32; }
+                    else if (!xy)    { xy = true; u = 0x30; }
+                    else if (!zRz)   { zRz = true; u = 0x32; }
+                    else if (!rxRy)  { rxRy = true; u = 0x33; }
+                    else if (!slDl)  { slDl = true; u = 0x36; }
+                    else continue;
+                    if (u == 0x30) expLSX = u;
+                    else if (expRSX == 0) expRSX = u;
+                    else if (expTSX == 0) expTSX = u;
+                    else if (expFSX == 0) expFSX = u;
+                }
+                foreach (var t in triggers) {
+                    bool isL = t.Equals("Left", StringComparison.OrdinalIgnoreCase);
+                    byte u;
+                    if (isL && !rxRy && !rxT) { rxT = true; u = 0x33; }
+                    else if (!isL && !rxRy && !ryT) { ryT = true; u = 0x34; }
+                    else if (!rxRy && !rxT) { rxT = true; u = 0x33; }
+                    else if (!rxRy && !ryT) { ryT = true; u = 0x34; }
+                    else if (!slDl && !slT) { slT = true; u = 0x36; }
+                    else if (!slDl && !dlT) { dlT = true; u = 0x37; }
+                    else continue;
+                    // Classifier preference: 0x32/0x33/0x36 prefer LeftTrigger;
+                    // 0x34/0x35/0x37 prefer RightTrigger.
+                    bool leftPref = (u == 0x32 || u == 0x33 || u == 0x36);
+                    if (leftPref) {
+                        if (expLT == 0) expLT = u;
+                        else if (expRT == 0) expRT = u;
+                    } else {
+                        if (expRT == 0) expRT = u;
+                        else if (expLT == 0) expLT = u;
+                    }
+                }
 
                 bool ok = true;
                 string detail = "";
 
-                if (wantLSX_fromL && (b.LeftStickX == null || b.LeftStickX.Usage != 0x30)) {
-                    ok = false; detail += " expected LeftStickX from X(0x30);";
+                // Stick slot assertions.
+                if (expLSX != 0 && (b.LeftStickX == null || b.LeftStickX.Usage != expLSX)) {
+                    ok = false; detail += $" expected LeftStickX from 0x{expLSX:X2};";
                 }
-                if (!wantLSX_fromL && b.LeftStickX != null) {
+                if (expLSX == 0 && b.LeftStickX != null) {
                     ok = false; detail += $" unexpected LeftStickX usage=0x{b.LeftStickX.Usage:X2};";
                 }
-                if (wantRSX_present && (b.RightStickX == null || b.RightStickX.Usage != 0x32)) {
-                    ok = false; detail += " expected RightStickX from Z(0x32);";
+                if (expRSX != 0 && (b.RightStickX == null || b.RightStickX.Usage != expRSX)) {
+                    ok = false; detail += $" expected RightStickX from 0x{expRSX:X2};";
                 }
-                if (!wantRSX_present && b.RightStickX != null) {
+                if (expRSX == 0 && b.RightStickX != null) {
                     ok = false; detail += $" unexpected RightStickX usage=0x{b.RightStickX.Usage:X2};";
                 }
-                if (wantLT && (b.LeftTrigger == null || b.LeftTrigger.Usage != 0x33)) {
-                    ok = false; detail += " expected LeftTrigger from Rx(0x33);";
+                if (expTSX != 0 && (b.ThirdStickX == null || b.ThirdStickX.Usage != expTSX)) {
+                    ok = false; detail += $" expected ThirdStickX from 0x{expTSX:X2};";
                 }
-                if (!wantLT && b.LeftTrigger != null) {
+                if (expTSX == 0 && b.ThirdStickX != null) {
+                    ok = false; detail += $" unexpected ThirdStickX usage=0x{b.ThirdStickX.Usage:X2};";
+                }
+                if (expFSX != 0 && (b.FourthStickX == null || b.FourthStickX.Usage != expFSX)) {
+                    ok = false; detail += $" expected FourthStickX from 0x{expFSX:X2};";
+                }
+                if (expFSX == 0 && b.FourthStickX != null) {
+                    ok = false; detail += $" unexpected FourthStickX usage=0x{b.FourthStickX.Usage:X2};";
+                }
+
+                // Trigger slot assertions.
+                if (expLT != 0 && (b.LeftTrigger == null || b.LeftTrigger.Usage != expLT)) {
+                    ok = false; detail += $" expected LeftTrigger from 0x{expLT:X2};";
+                }
+                if (expLT == 0 && b.LeftTrigger != null) {
                     ok = false; detail += $" unexpected LeftTrigger usage=0x{b.LeftTrigger.Usage:X2};";
                 }
-                if (wantRT && (b.RightTrigger == null || b.RightTrigger.Usage != 0x34)) {
-                    ok = false; detail += " expected RightTrigger from Ry(0x34);";
+                if (expRT != 0 && (b.RightTrigger == null || b.RightTrigger.Usage != expRT)) {
+                    ok = false; detail += $" expected RightTrigger from 0x{expRT:X2};";
                 }
-                if (!wantRT && b.RightTrigger != null) {
+                if (expRT == 0 && b.RightTrigger != null) {
                     ok = false; detail += $" unexpected RightTrigger usage=0x{b.RightTrigger.Usage:X2};";
                 }
+
+                bool wantLT = expLT != 0;
+                bool wantRT = expRT != 0;
+
                 // CombinedTrigger should never be set for builder-emitted
                 // descriptors — it's a pure Vx/Vy override slot.
                 if (b.CombinedTrigger != null) {
@@ -476,7 +612,7 @@ internal sealed class Program
                         ok = false; detail += $" LT bled to {lt_when_rt} when LT=0 RT=1;";
                     }
                 }
-                if (ok && wantLSX_fromL)
+                if (ok && expLSX != 0)
                 {
                     byte[] rMid  = b.BuildReport(b.StandardAxes(leftX: 0.5));
                     byte[] rMax  = b.BuildReport(b.StandardAxes(leftX: 1.0));
@@ -490,7 +626,7 @@ internal sealed class Program
                         ok = false; detail += $" LSX max wire {vMax} != {b.LeftStickX.LogicalMax};";
                     }
                 }
-                if (ok && wantRSX_present)
+                if (ok && expRSX != 0)
                 {
                     byte[] rMid  = b.BuildReport(b.StandardAxes(rightX: 0.5));
                     byte[] rMax  = b.BuildReport(b.StandardAxes(rightX: 1.0));

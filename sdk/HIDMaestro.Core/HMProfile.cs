@@ -259,6 +259,30 @@ public sealed class HMProfile
                 Label = "Right stick"
             });
         }
+        // v1.3.15 (#124): surface stick 3 and stick 4 when the descriptor
+        // declares them. HidDescriptorBuilder's slot-pool allocator routes
+        // AddStick 3 → Rx/Ry and AddStick 4 → Slider/Dial; the runtime
+        // classifier in ResolveSemantics cascades them into ThirdStick /
+        // FourthStick. Consumers (PadForge Extended 3/4-stick configs) read
+        // Profile.Sticks.Count to drive a per-slot write loop, so surfacing
+        // the extra entries is what makes wire-level 8-axis configurations
+        // observable end-to-end.
+        if (l.ThirdStickX != null && l.ThirdStickY != null)
+        {
+            sticks.Add(new HMSimpleStick {
+                XAxis = (HMAxis)((l.ThirdStickX.UsagePage << 8) | l.ThirdStickX.Usage),
+                YAxis = (HMAxis)((l.ThirdStickY.UsagePage << 8) | l.ThirdStickY.Usage),
+                Label = "Third stick"
+            });
+        }
+        if (l.FourthStickX != null && l.FourthStickY != null)
+        {
+            sticks.Add(new HMSimpleStick {
+                XAxis = (HMAxis)((l.FourthStickX.UsagePage << 8) | l.FourthStickX.Usage),
+                YAxis = (HMAxis)((l.FourthStickY.UsagePage << 8) | l.FourthStickY.Usage),
+                Label = "Fourth stick"
+            });
+        }
         return sticks;
     }
 

@@ -38,6 +38,57 @@ public sealed class HidDescriptorBuilder
     // block's tagged Output reports.
     private int _appCollectionEndPos;
 
+    // Per-Usage claim flags so AddStick/AddTrigger can pull from a fixed pool
+    // without ever emitting duplicate Usage codes. v1.3.15 (#124): repeated
+    // AddStick("Right") used to emit the same Usage pair every time; consumers
+    // with 3+ stick configs (PadForge Extended 4-stick) saw their wire bytes
+    // collapse to two axes in joy.cpl because the HID parser folds duplicate
+    // Usages. The eight tracked Usages are the full DIJOYSTATE2 position-
+    // aspect vocabulary per Microsoft's DirectInput model:
+    //   lX, lY, lZ, lRx, lRy, lRz, rglSlider[0], rglSlider[1]
+    // mapped to Generic Desktop Usages 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+    // 0x36 (Slider), 0x37 (Dial). Wine's enum_objects packs Slider AND Dial
+    // both into rglSlider[0..1] via a shared counter, so they cleanly serve
+    // as the 4th paired-stick fallback. joy.cpl labels them "Slider"/"Dial"
+    // rather than "X Rotation 2"/etc — cosmetic mismatch with PadForge's
+    // "Stick 4 X/Y" UI labels; the bytes flow regardless.
+    private bool _xUsed, _yUsed, _zUsed, _rxUsed, _ryUsed, _rzUsed,
+                 _sliderUsed, _dialUsed;
+
+    // Allocate the next available paired-stick Usage pair. "Left" name biases
+    // the first stick to X/Y; "Right" or any other name biases the first stick
+    // to Z/Rz (v1.3.14's RumblePad/vJoy convention preserved for the common
+    // 2-stick case). When both biased slots are taken, fall through the pool
+    // in priority order: X/Y → Z/Rz → Rx/Ry → Slider/Dial. Returns null when
+    // all four pairs are exhausted.
+    private (byte u1, byte u2)? AllocateStickPair(bool isLeft)
+    {
+        if (isLeft && !_xUsed && !_yUsed) { _xUsed = _yUsed = true; return (0x30, 0x31); }
+        if (!isLeft && !_zUsed && !_rzUsed) { _zUsed = _rzUsed = true; return (0x32, 0x35); }
+        if (!_xUsed && !_yUsed) { _xUsed = _yUsed = true; return (0x30, 0x31); }
+        if (!_zUsed && !_rzUsed) { _zUsed = _rzUsed = true; return (0x32, 0x35); }
+        if (!_rxUsed && !_ryUsed) { _rxUsed = _ryUsed = true; return (0x33, 0x34); }
+        if (!_sliderUsed && !_dialUsed) { _sliderUsed = _dialUsed = true; return (0x36, 0x37); }
+        return null;
+    }
+
+    // Allocate the next available trigger-slot Usage. "Left" name biases the
+    // first call to Rx (0x33); "Right" or any other name biases to Ry (0x34)
+    // — preserves v1.3.14's (LT=Rx, RT=Ry) layout for the 2-stick + 2-trigger
+    // common case. When sticks 3+ consume Rx/Ry as a paired stick, triggers
+    // cascade onto Slider then Dial in encounter order. Returns null when all
+    // four single-axis trigger slots are exhausted.
+    private byte? AllocateTriggerSlot(bool isLeft)
+    {
+        if (isLeft  && !_rxUsed) { _rxUsed = true; return 0x33; }
+        if (!isLeft && !_ryUsed) { _ryUsed = true; return 0x34; }
+        if (!_rxUsed) { _rxUsed = true; return 0x33; }
+        if (!_ryUsed) { _ryUsed = true; return 0x34; }
+        if (!_sliderUsed) { _sliderUsed = true; return 0x36; }
+        if (!_dialUsed) { _dialUsed = true; return 0x37; }
+        return null;
+    }
+
     /// <summary>Begin a Gamepad application collection (Usage Page 0x01, Usage 0x05).
     /// Note: <see cref="AddPidFfbBlock"/> rejects a Gamepad TLC because DirectInput's
     /// pid.dll PID FFB enumerator AVs against it; use <see cref="Joystick"/> for
@@ -65,27 +116,37 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
-    /// <summary>Add a 2-axis stick (X+Y or Z+Rz) inside a Physical collection.</summary>
-    /// <param name="name">"Left" maps to X/Y (usages 0x30/0x31), "Right" maps to Z/Rz (0x32/0x35) —
-    /// the Logitech RumblePad / vJoy stick-2 convention. Pre-Xbox-360-era DirectInput
-    /// games (early-2000s id Tech / Serious Engine titles, etc.) bind the right stick
-    /// from DIJOYSTATE.lZ/lRz; placing it on Rx/Ry would still populate the struct but
-    /// the game's hardcoded field reads would miss it. AddTrigger correspondingly puts
-    /// triggers on Rx/Ry. Real Xbox 360 / DualSense profiles override this via their
-    /// JSON layout + axisMap fields.</param>
+    /// <summary>Add a paired-axis stick inside a Physical collection. The Usage
+    /// pair is drawn from the four-slot pool [X/Y, Z/Rz, Rx/Ry, Slider/Dial] in
+    /// priority order; each call claims the next free pair so repeated
+    /// AddStick calls never emit duplicate Usage codes.</summary>
+    /// <param name="name">"Left" biases the first call to X/Y (0x30/0x31).
+    /// "Right" or any other name biases the first call to Z/Rz (0x32/0x35) —
+    /// the Logitech RumblePad / vJoy stick-2 convention preserved from v1.3.14
+    /// (issue #27): pre-Xbox-360-era DirectInput games bind the right stick
+    /// from DIJOYSTATE.lZ/lRz. Subsequent calls fall through the pool: stick 3
+    /// → Rx/Ry, stick 4 → Slider/Dial. joy.cpl labels stick 4 as
+    /// "Slider"/"Dial" (HUT 1.5 Section 4.3 Miscellaneous Controls), not
+    /// "X Rotation 2"/etc — cosmetic mismatch with consumer-side "Stick 4 X/Y"
+    /// UI labels; the wire bytes are addressable by HMAxis.Slider/Dial. After
+    /// 4 sticks the pool throws — DirectInput's DIJOYSTATE2 has exactly 8
+    /// position-aspect slots (lX..lRz + rglSlider[2]) and no axis Usage
+    /// remains. Real Xbox 360 / DualSense profiles override the pool via
+    /// their JSON layout + axisMap fields.</param>
     /// <param name="bits">Axis resolution: 8 for [0..255], 16 for [0..65535].</param>
     public HidDescriptorBuilder AddStick(string name, int bits = 16)
     {
-        byte usage1, usage2;
-        if (name.Equals("Left", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("L", StringComparison.OrdinalIgnoreCase))
-        {
-            usage1 = 0x30; usage2 = 0x31; // X, Y
-        }
-        else
-        {
-            usage1 = 0x32; usage2 = 0x35; // Z, Rz (RumblePad / vJoy stick-2 convention)
-        }
+        bool isLeft = name.Equals("Left", StringComparison.OrdinalIgnoreCase)
+                   || name.Equals("L", StringComparison.OrdinalIgnoreCase);
+        var pair = AllocateStickPair(isLeft);
+        if (pair == null)
+            throw new InvalidOperationException(
+                "HidDescriptorBuilder.AddStick: all four paired-stick Usage slots " +
+                "(X+Y, Z+Rz, Rx+Ry, Slider+Dial) are already claimed. Microsoft's " +
+                "DIJOYSTATE2 has exactly 8 position-aspect axes; no additional " +
+                "paired-stick allocation is possible. Use AddAxis(HMAxis.*) for " +
+                "extra single-axis controls (rudders, throttles, brake/clutch pedals).");
+        byte usage1 = pair.Value.u1, usage2 = pair.Value.u2;
 
         int logMax = (1 << bits) - 1;
 
@@ -111,11 +172,19 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
-    /// <summary>Add a single trigger axis.</summary>
-    /// <param name="name">"Left" maps to Rx (0x33), "Right" maps to Ry (0x34).
-    /// Paired with AddStick's Z/Rz right-stick convention so a Custom-shape
-    /// gamepad's six analog usages are X, Y, Z, Rx, Ry, Rz — the layout
-    /// vJoy ships by default and that pre-2005 DirectInput titles bind to.</param>
+    /// <summary>Add a single-axis trigger. The Usage is drawn from the four-
+    /// slot trigger pool [Rx, Ry, Slider, Dial] in priority order, cascading
+    /// past any slots already claimed by AddStick. For the common 2-stick +
+    /// 2-trigger gamepad layout this still yields the v1.3.14 Rx/Ry trigger
+    /// pair; when 3 sticks already consumed Rx/Ry as a paired stick, triggers
+    /// fall to Slider/Dial. After 4 sticks the trigger pool is empty and this
+    /// throws — consumers should reduce stick count or combine triggers.</summary>
+    /// <param name="name">"Left" biases the first call to Rx (0x33),
+    /// "Right" to Ry (0x34) — preserves v1.3.14's (LT=Rx, RT=Ry) layout for
+    /// the 2-stick + 2-trigger common case. Beyond the Rx/Ry slots (when
+    /// sticks 3+ consume them, or when both Rx/Ry are already trigger-
+    /// claimed) the allocator cascades onto Slider then Dial regardless of
+    /// name.</param>
     /// <param name="bits">Axis resolution: 8 for [0..255], 16 for [0..65535].
     /// Must be a multiple of 8 to keep the report byte-aligned. 10-bit or
     /// other non-aligned sizes would force a Const pad item that Chromium's
@@ -128,9 +197,15 @@ public sealed class HidDescriptorBuilder
                 "Non-aligned sizes introduce phantom axes in Chromium's Gamepad API.",
                 nameof(bits));
 
-        byte usage = name.Equals("Left", StringComparison.OrdinalIgnoreCase)
-                   || name.Equals("L", StringComparison.OrdinalIgnoreCase)
-            ? (byte)0x33 : (byte)0x34;
+        bool isLeft = name.Equals("Left", StringComparison.OrdinalIgnoreCase)
+                   || name.Equals("L", StringComparison.OrdinalIgnoreCase);
+        var allocated = AllocateTriggerSlot(isLeft);
+        if (allocated == null)
+            throw new InvalidOperationException(
+                "HidDescriptorBuilder.AddTrigger: trigger pool [Rx, Ry, Slider, Dial] " +
+                "is exhausted by prior AddStick/AddTrigger calls. Reduce stick count " +
+                "or combine triggers into a single signed axis.");
+        byte usage = allocated.Value;
 
         int logMax = (1 << bits) - 1;
 
