@@ -431,18 +431,49 @@ internal static class DeviceOrchestrator
     //  any future regression localizes cleanly.
     // ════════════════════════════════════════════════════════════════════
 
+    // Issue #28 (v1.3.16): resolve a HID child's parent instance ID so the
+    // parent's HardwareID can prove ownership. HID children themselves
+    // carry HidClass-level hwids (`HID_DEVICE_SYSTEM_GAME`, etc.) and don't
+    // record "HIDMaestro" — checking IsHidMaestroOwned on the child
+    // directly would always miss. Returns null on lookup failure.
+    private static string? TryResolveHidChildParent(RegistryKey childEnumKey, string instName)
+    {
+        // childEnumKey was opened at SYSTEM\CurrentControlSet\Enum\HID\<sub>.
+        // Reconstruct the HID child path and ask CfgMgr32 for its parent.
+        string deviceName;
+        try { deviceName = System.IO.Path.GetFileName(childEnumKey.Name) ?? string.Empty; }
+        catch { return null; }
+        if (string.IsNullOrEmpty(deviceName)) return null;
+        return DeviceManager.GetRegistryParentId(
+            @"SYSTEM\CurrentControlSet\Enum\HID", deviceName, instName);
+    }
+
     private static void CleanupGhostDevices()
     {
+        // Issue #28 (v1.3.16): every sweep here is gated on
+        // DeviceManager.IsHidMaestroOwned (HardwareID multi-sz contains
+        // "HIDMaestro") for any path that shares its enumerator with
+        // third-party drivers. The HIDMAESTRO* enumerators are exclusive
+        // and skip the guard for speed.
+
         // Remove known non-VID_ enumerators under ROOT (legacy paths)
         string[] fixedPrefixes = { @"ROOT\HID_IG_00", @"ROOT\HIDCLASS", @"ROOT\XnaComposite",
                                    @"ROOT\HIDMAESTRO", @"SWD\HIDMAESTRO" };
         foreach (var prefix in fixedPrefixes)
         {
+            // HIDMAESTRO-prefixed enumerators are exclusively HM-owned by
+            // construction. The other three (HID_IG_00, HIDCLASS,
+            // XnaComposite) are shared — vJoy registers itself as a root
+            // HIDClass device, so an unguarded sweep here disabled coexisting
+            // vJoy instances. Gate the destructive call on HardwareID proof.
+            bool exclusivePrefix =
+                prefix.EndsWith(@"\HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
             for (int idx = 0; idx < 10; idx++)
             {
                 string instId = $@"{prefix}\{idx:D4}";
-                if (CM_Locate_DevNodeW(out _, instId, 0) == 0)
-                    DeviceManager.RemoveDevice(instId, fast: true);
+                if (CM_Locate_DevNodeW(out _, instId, 0) != 0) continue;
+                if (!exclusivePrefix && !DeviceManager.IsHidMaestroOwned(instId)) continue;
+                DeviceManager.RemoveDevice(instId, fast: true);
             }
         }
 
@@ -461,9 +492,13 @@ internal static class DeviceOrchestrator
                 if (!isVidForm && !isSwdForm) continue;
                 using var vidKey = enumKey.OpenSubKey(subName);
                 if (vidKey == null) continue;
+                // VID_* is third-party-shared (any root-enumerated USB-style
+                // device lives here); HIDMAESTRO* is exclusive.
+                bool exclusiveSub = isSwdForm;
                 foreach (var instName in vidKey.GetSubKeyNames())
                 {
                     string instId = $@"{enumRoot}\{subName}\{instName}";
+                    if (!exclusiveSub && !DeviceManager.IsHidMaestroOwned(instId)) continue;
                     DeviceManager.RemoveDevice(instId, fast: true);
                 }
             }
@@ -485,20 +520,39 @@ internal static class DeviceOrchestrator
                 foreach (var subName in classKey.GetSubKeyNames())
                 {
                     // Interface-class keys encode devnode paths with `#` in place
-                    // of `\`. Match our legacy ROOT\ forms and the post-SWD-migration
-                    // SWD\HIDMAESTRO* + SWD\HIDMAESTRO forms.
-                    bool isOurDevice =
+                    // of `\`. Issue #28 (v1.3.16): match exclusively-HM forms
+                    // (ROOT#HIDMAESTRO*, SWD#HIDMAESTRO*) without further
+                    // proof, and for the shared forms (ROOT#VID_*, ROOT#HIDCLASS,
+                    // ROOT#HID_IG_*, ROOT#XNACOMPOSITE, ROOT#SYSTEM*) resolve
+                    // the owning devnode and require IsHidMaestroOwned. The
+                    // prior `ROOT#SYSTEM#(N>=2)` instance-number heuristic
+                    // tagged ViGEmBus / HidHide interface entries as ours; the
+                    // HardwareID guard eliminates the false positive.
+                    bool exclusivelyOurs =
+                        subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                    bool sharedShape =
                         subName.Contains("ROOT#VID_") ||
                         subName.Contains("ROOT#HIDCLASS") ||
                         subName.Contains("ROOT#HID_IG") ||
-                        subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                    if (!isOurDevice && subName.Contains("ROOT#SYSTEM#"))
+                        subName.Contains("ROOT#XNACOMPOSITE", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("ROOT#SYSTEM#");
+
+                    bool isOurDevice = exclusivelyOurs;
+                    if (!isOurDevice && sharedShape)
                     {
-                        var match = System.Text.RegularExpressions.Regex.Match(subName, @"ROOT#SYSTEM#(\d+)");
-                        if (match.Success && int.Parse(match.Groups[1].Value) >= 2)
-                            isOurDevice = true;
+                        // Decode the symbolic-link form back to a devnode
+                        // instance path. The leading `##?#` (or `\??\`) and
+                        // trailing `#{guid}` are interface-link encoding;
+                        // the middle is `Enumerator#Device#Instance`.
+                        string devPath = subName;
+                        int guidStart = devPath.LastIndexOf("#{");
+                        if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
+                        devPath = devPath.Replace("##?#", string.Empty);
+                        devPath = devPath.Replace('#', '\\');
+                        isOurDevice = DeviceManager.IsHidMaestroOwned(devPath);
                     }
+
                     if (isOurDevice)
                     {
                         try { classKey.DeleteSubKeyTree(subName); } catch { }
@@ -543,6 +597,14 @@ internal static class DeviceOrchestrator
                 devPath = devPath.Substring(0, guidStart);
                 devPath = devPath.Replace("##?#", "");
                 devPath = devPath.Replace('#', '\\');
+
+                // Issue #28 (v1.3.16): the "UpperFilters contains xinputhid"
+                // + phantom/problem/not-started criterion still matches
+                // disconnected real Xbox 360 controllers (they carry the
+                // same UpperFilter for the WGI vibration tripwire). Require
+                // HardwareID proof that this is OUR devnode before
+                // disabling it and deleting its DeviceClasses entries.
+                if (!DeviceManager.IsHidMaestroOwned(devPath)) continue;
 
                 bool hasXinputHid = false;
                 try
@@ -1215,6 +1277,11 @@ internal static class DeviceOrchestrator
         // Only the non-VID/non-HIDMAESTRO enumerators (HID_IG_00, HIDClass,
         // XnaComposite) need explicit hardcoded coverage. Cuts 60 redundant
         // CM_Locate calls per setup (3 enumerators × 2 roots × 10 indices).
+        // Issue #28 (v1.3.16): the shared enumerators (HID_IG_00, HIDClass,
+        // XnaComposite) are not exclusively HIDMaestro — vJoy lives at
+        // ROOT\HIDClass. Gate the property write on IsHidMaestroOwned to
+        // avoid stamping our BusType GUID onto a coexisting third-party
+        // device.
         foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
         {
             // Sweep both ROOT and SWD roots for this enumerator.
@@ -1223,21 +1290,22 @@ internal static class DeviceOrchestrator
                 for (int idx = 0; idx < 10; idx++)
                 {
                     string devId = $@"{enumRoot}\{enumer}\{idx:D4}";
-                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
+                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) != 0) continue;
+                    if (!DeviceManager.IsHidMaestroOwned(devId)) continue;
+                    CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
+                        usbBusGuid, (uint)usbBusGuid.Length, 0);
+                    if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
                     {
-                        CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
+                        CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
                             usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                        {
-                            CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
-                                usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        }
                     }
                 }
             }
         }
 
-        // Also scan VID_* enumerators dynamically (under both ROOT and SWD)
+        // Also scan VID_* enumerators dynamically (under both ROOT and SWD).
+        // VID_* is third-party-shared too (any root-enumerated USB-style
+        // device); HIDMAESTRO* is exclusive.
         foreach (var enumRootPath in new[] { @"SYSTEM\CurrentControlSet\Enum\ROOT", @"SYSTEM\CurrentControlSet\Enum\SWD" })
         try
         {
@@ -1248,23 +1316,22 @@ internal static class DeviceOrchestrator
                 foreach (var sub in enumKey.GetSubKeyNames())
                 {
                     bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                               || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                    if (!isVidForm && !isOurs) continue;
+                    bool isExclusiveOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+                                        || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                    if (!isVidForm && !isExclusiveOurs) continue;
                     using var vidKey = enumKey.OpenSubKey(sub);
                     if (vidKey == null) continue;
                     foreach (var inst in vidKey.GetSubKeyNames())
                     {
                         string devId = $@"{enumRootPrefix}\{sub}\{inst}";
-                        if (CM_Locate_DevNodeW(out uint devInst, devId, 0) == 0)
+                        if (CM_Locate_DevNodeW(out uint devInst, devId, 0) != 0) continue;
+                        if (!isExclusiveOurs && !DeviceManager.IsHidMaestroOwned(devId)) continue;
+                        CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
+                            usbBusGuid, (uint)usbBusGuid.Length, 0);
+                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
                         {
-                            CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
+                            CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
                                 usbBusGuid, (uint)usbBusGuid.Length, 0);
-                            if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                            {
-                                CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
-                                    usbBusGuid, (uint)usbBusGuid.Length, 0);
-                            }
                         }
                     }
                 }
@@ -2005,16 +2072,20 @@ internal static class DeviceOrchestrator
 
             foreach (var sub in enumKey.GetSubKeyNames())
             {
-                bool alwaysOurs = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                    || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
-                    || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                    || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
+                // Issue #28 (v1.3.16): HIDMAESTRO* is the only enumerator
+                // we own exclusively. VID_*, XnaComposite, HID_IG_00,
+                // HIDCLASS, SYSTEM are all shared with third-party drivers
+                // — require IsHidMaestroOwned on every instance under those.
+                bool exclusivelyOurs = sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
                     || sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
 
-                bool shared = sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
                     || sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
 
-                if (!alwaysOurs && !shared) continue;
+                if (!exclusivelyOurs && !shared) continue;
 
                 using var subKey = enumKey.OpenSubKey(sub);
                 if (subKey == null) continue;
@@ -2023,21 +2094,15 @@ internal static class DeviceOrchestrator
                 {
                     string instId = $@"{enumRoot}\{sub}\{inst}";
 
-                    if (alwaysOurs)
+                    if (exclusivelyOurs)
                     {
                         DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
                         continue;
                     }
 
                     // Shared: only remove if hardware ID contains "HIDMaestro"
-                    try
-                    {
-                        using var devKey = subKey.OpenSubKey(inst);
-                        var hwIds = devKey?.GetValue("HardwareID") as string[];
-                        if (hwIds?.Any(h => h.Contains("HIDMaestro", StringComparison.OrdinalIgnoreCase)) == true)
-                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
-                    }
-                    catch { }
+                    if (DeviceManager.IsHidMaestroOwned(instId))
+                        DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
                 }
             }
         }
@@ -2051,16 +2116,40 @@ internal static class DeviceOrchestrator
             {
                 foreach (var sub in hidEnum.GetSubKeyNames())
                 {
-                    bool couldBeOurs = sub.StartsWith("VID_045E", StringComparison.OrdinalIgnoreCase)
+                    // Issue #28 (v1.3.16): the shape match
+                    // `HID\VID_045E*` collides with real Xbox 360 controller
+                    // phantom records; `HID\HIDCLASS` and `HID\HID_IG_*`
+                    // collide with vJoy's HID child. HID children carry HID
+                    // class hwids (`HID_DEVICE_SYSTEM_GAME`, etc.) not the
+                    // HM signature, so the child's own HardwareID can't
+                    // prove ownership. The ParentIdPrefix → parent
+                    // instance ID lookup proves ownership via the parent's
+                    // HardwareID instead.
+                    bool shapeMatch = sub.StartsWith("VID_045E", StringComparison.OrdinalIgnoreCase)
                         || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
                         || sub.StartsWith("HID_IG", StringComparison.OrdinalIgnoreCase);
-                    if (!couldBeOurs) continue;
+                    if (!shapeMatch) continue;
 
                     using var childEnum = hidEnum.OpenSubKey(sub);
                     if (childEnum == null) continue;
                     foreach (var inst in childEnum.GetSubKeyNames())
                     {
                         string childId = $@"HID\{sub}\{inst}";
+                        // Prove ownership through the parent HM root /
+                        // companion: read the child's ParentIdPrefix, find
+                        // the parent under the appropriate enumerator,
+                        // require IsHidMaestroOwned. If the parent is
+                        // already gone (phantom-orphan case), fall back to
+                        // accepting it — the only legitimate writer of HID
+                        // children with HM-shape hwid + HM-shape parent
+                        // pattern would have been us, and a phantom whose
+                        // parent has been removed can't be matched to a
+                        // live third-party owner.
+                        string? parentId = TryResolveHidChildParent(childEnum, inst);
+                        bool parentIsOurs = parentId != null && DeviceManager.IsHidMaestroOwned(parentId);
+                        bool parentIsGone = parentId == null
+                            || CM_Locate_DevNodeW(out _, parentId, CM_LOCATE_DEVNODE_PHANTOM) != 0;
+                        if (!parentIsOurs && !parentIsGone) continue;
                         if (CM_Locate_DevNodeW(out uint childInst, childId, 0) == 0)
                         {
                             bool parentGone = CM_Get_Parent(out uint _, childInst, 0) != 0;

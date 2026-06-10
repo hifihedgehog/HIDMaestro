@@ -139,6 +139,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1349,6 +1350,21 @@ function Scenario-Sony-BT-Axis-Role-Check {
     }
 }
 
+# S39: Foreign devnode survival regression (v1.3.16, #28). Creates a foreign
+# root-enumerated HIDClass devnode with HardwareID `root\VID_1234&PID_BEAD&
+# REV_0222` (the vJoy shape), runs a full HM CreateController + Dispose
+# cycle, then asserts the foreign device was not disabled, uninstalled,
+# renamed, or had ControllerIndex injected into its Device Parameters by
+# any of the now-HwId-gated sweep paths in DeviceOrchestrator /
+# DeviceNodeCreator / DeviceProperties / DeviceManager.
+function Scenario-Foreign-Devnode-Survival-Check {
+    $probe = Resolve-ProbeBinary 'foreign_devnode_survival_check' 'ForeignDevnodeSurvivalCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("ForeignDevnodeSurvivalCheck exited " + $p.ExitCode + " - HM sweep mutated a foreign root devnode (issue #28; see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1391,7 +1407,8 @@ $scenarios = @(
     @{ Name = 'S35_Sidewinder_Ffb_Check';         Body = ${function:Scenario-Sidewinder-Ffb-Check} },
     @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} },
     @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} },
-    @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} }
+    @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} },
+    @{ Name = 'S39_Foreign_Devnode_Survival';     Body = ${function:Scenario-Foreign-Devnode-Survival-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

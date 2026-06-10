@@ -323,15 +323,20 @@ public static class DeviceManager
     /// </summary>
     internal static int RemoveAccumulatedHmPhantoms()
     {
-        // Match HM-named instance IDs from every enumerator we use.
-        // Includes the Xbox 360 wired ROOT main HID (VID_045E&PID_028E)
-        // and the PadForge-style custom profile (VID_BEEF&PID_F000).
+        // Issue #28 (v1.3.16): the prior VID_045E&PID_028E /
+        // VID_BEEF&PID_F000 substring checks matched real Xbox 360 wired
+        // controllers and PadForge Custom devices regardless of enumerator
+        // — so a real unplugged Xbox 360's phantom record qualified. The
+        // new test scopes pure-name matches to the HIDMAESTRO* /
+        // HMCOMPANION* enumerator forms (which are HM-exclusive by
+        // construction), and otherwise routes through IsHidMaestroOwned to
+        // prove ownership via the devnode's HardwareID list.
         bool IsHmInstance(string iid)
         {
-            return iid.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0
-                || iid.IndexOf("HMCOMPANION", StringComparison.OrdinalIgnoreCase) >= 0
-                || iid.IndexOf("VID_045E&PID_028E", StringComparison.OrdinalIgnoreCase) >= 0
-                || iid.IndexOf("VID_BEEF&PID_F000", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (iid.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0
+                || iid.IndexOf("HMCOMPANION", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            return IsHidMaestroOwned(iid);
         }
 
         int removed = 0;
@@ -386,6 +391,47 @@ public static class DeviceManager
         if (removed > 0)
             DeviceOrchestrator.LogDiag($"    RemoveAccumulatedHmPhantoms: removed {removed} HIDMaestro phantom(s)");
         return removed;
+    }
+
+    /// <summary>
+    /// Returns true when the PnP devnode at <paramref name="instanceId"/> carries
+    /// a HIDMaestro-signature HardwareID — i.e. one of `root\HIDMaestro`,
+    /// `root\HIDMaestroGamepad`, `root\HIDMaestroXUSB` (or any future
+    /// `*HIDMaestro*` literal). Every HM-created devnode writes one of those
+    /// strings into its HardwareID multi-sz at SetupDi-create time (plain HID
+    /// at DeviceNodeCreator.cs:121, gamepad companion at
+    /// DeviceOrchestrator.cs:889-894, XUSB at DeviceOrchestrator.cs:1019-1020),
+    /// so the presence of "HIDMaestro" in HardwareID is the ownership proof
+    /// every sweep needs before disabling / uninstalling / renaming /
+    /// property-writing a node.
+    ///
+    /// <para>Issue #28 (v1.3.16): without this guard the
+    /// <c>CleanupGhostDevices</c> / <c>SetBusTypeGuidUsb</c> /
+    /// <c>RemoveAllVirtualControllers</c> / <c>DisableGhostXusbInterfaces</c>
+    /// sweeps selected by instance-path pattern alone and ran their
+    /// destructive operations against whatever matched — disabling a
+    /// coexisting vJoy root HIDClass device, mutating ViGEmBus / HidHide
+    /// SYSTEM nodes, or removing third-party root-enumerated VID_ devices
+    /// the user never intended HIDMaestro to touch.</para>
+    ///
+    /// <para>Returns false on missing devnode, missing HardwareID value,
+    /// registry-access exception, or no "HIDMaestro" substring match.
+    /// Conservative-by-default: when in doubt, do NOT claim ownership.</para>
+    /// </summary>
+    internal static bool IsHidMaestroOwned(string instanceId)
+    {
+        if (string.IsNullOrEmpty(instanceId)) return false;
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(
+                $@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
+            if (k == null) return false;
+            var hwIds = k.GetValue("HardwareID") as string[];
+            if (hwIds == null) return false;
+            return Array.Exists(hwIds, id => id != null &&
+                id.IndexOf("HIDMaestro", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -967,7 +1013,7 @@ public static class DeviceManager
     /// Reads the ParentIdPrefix or reconstructs the parent instance ID for a HID child
     /// from the registry.
     /// </summary>
-    static string? GetRegistryParentId(string enumHidPath, string deviceName, string instanceName)
+    internal static string? GetRegistryParentId(string enumHidPath, string deviceName, string instanceName)
     {
         try
         {

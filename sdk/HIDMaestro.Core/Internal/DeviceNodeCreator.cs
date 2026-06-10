@@ -245,6 +245,20 @@ internal static class DeviceNodeCreator
                     {
                         string instId = $@"ROOT\{enumerator}\{inst}";
                         if (CM_Locate_DevNodeW(out uint _, instId, 0) != 0) continue;
+                        // Issue #28 (v1.3.16): "first node in
+                        // ROOT\<enumerator> without ControllerIndex = the
+                        // one we just created" is fragile — a coexisting
+                        // vJoy device sitting at ROOT\HIDClass\0000 with
+                        // no ControllerIndex matches first and gets its
+                        // Device Parameters mutated, then later renamed
+                        // by SetAllNamingProperties. Require the
+                        // HardwareID multi-sz to contain "HIDMaestro"
+                        // before claiming. SetupDi already wrote that
+                        // value via SetupDiSetDeviceRegistryProperty
+                        // (SPDRP_HARDWAREID) earlier in this method, so
+                        // our newly-created node passes; foreign nodes
+                        // are skipped.
+                        if (!DeviceManager.IsHidMaestroOwned(instId)) continue;
                         string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{instId}\Device Parameters";
                         using var dpKey = Registry.LocalMachine.CreateSubKey(dpPath);
                         var existing = dpKey.GetValue("ControllerIndex");
@@ -271,8 +285,12 @@ internal static class DeviceNodeCreator
             // Install our driver against the new device's hardware ID.
             UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwId, infPath, 0, out _);
 
-            // XnaComposite (legacy XInput path) needs an explicit restart to load.
-            if (!profile.UsesUpperFilter)
+            // XnaComposite (legacy XInput path) needs an explicit restart to
+            // load. Issue #28 (v1.3.16): ROOT\XNACOMPOSITE\0000 may belong
+            // to a third-party legacy XInput shim — only restart it when
+            // its HardwareID proves HM ownership.
+            if (!profile.UsesUpperFilter
+                && DeviceManager.IsHidMaestroOwned(@"ROOT\XNACOMPOSITE\0000"))
             {
                 DeviceManager.RestartDevice(@"ROOT\XNACOMPOSITE\0000");
             }

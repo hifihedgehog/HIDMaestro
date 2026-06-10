@@ -252,6 +252,12 @@ internal static class DeviceProperties
 
                     string instId = $@"{enumRoot}\{sub}\{inst}";
                     if (CM_Locate_DevNodeW(out uint devInst, instId, 0) != 0) continue;
+                    // Issue #28 (v1.3.16): a foreign device whose Device
+                    // Parameters were mutated by a prior buggy claim-walk
+                    // would still carry the injected ControllerIndex and
+                    // re-match this filter on every FinalizeNames pass.
+                    // Require HardwareID proof before renaming.
+                    if (!DeviceManager.IsHidMaestroOwned(instId)) continue;
 
                     Apply(devInst);
 
