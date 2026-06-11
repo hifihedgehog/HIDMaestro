@@ -72,14 +72,19 @@ internal sealed class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
 
-        // The split-trigger workaround only fires on profiles whose
-        // descriptors declare the Z + Vx + Vy combo (CombinedTrigger +
-        // separate-LT + separate-RT). xbox-360-wired is the canonical one
-        // shipped today; future Xbox-VID profiles that need WGI separate
-        // triggers AND DI combined Z will share this code path.
+        // Every Xbox 360 gamepad-shape profile MUST present the same
+        // split-trigger workaround: Z + Vx + Vy in the descriptor, with
+        // joy.cpl seeing combined Z and WGI / XInput seeing raw Vx / Vy.
+        // Asymmetry between profiles (wired works, wireless doesn't) is
+        // exactly the user-visible regression class the issue called out.
+        // Specialty controllers (wheel, dance pad, flight stick, guitar)
+        // intentionally don't carry this combo — they're not gamepad-
+        // shaped and don't go through the combined-Z path.
         var profileIds = new[]
         {
             "xbox-360-wired",
+            "xbox-360-wireless",
+            "xbox-360-type2",
         };
 
         foreach (var id in profileIds)
