@@ -15,3 +15,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("LayoutAuditCheck")]
 [assembly: InternalsVisibleTo("AxisAddressingCheck")]
 [assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]
+[assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]

@@ -353,6 +353,46 @@ public sealed class HMController : IDisposable
         }
     }
 
+    // Canonical-first, field-key-fallback trigger resolution. PadForge writes
+    // axes[Z]/axes[Rz] via ResolveAxisByRole canonical defaults; the
+    // HIDMaestroTest / StandardAxes path writes axes[layout.triggers[N].Axis]
+    // (Vx/Vy for the unified xbox-360-* profiles). Both must feed the GIP
+    // buffer that drives the XUSB companion's XInput / WGI dispatch. Same
+    // resolution rule that HidReportBuilder's combined-Z synthesis uses.
+    internal static double ResolveTrigger(
+        Dictionary<HMAxis, float>? axes,
+        Dictionary<string, string>? axisMap,
+        IReadOnlyList<HMSimpleTrigger> triggers,
+        int slot,
+        HMAxis canonicalDefault,
+        string roleName)
+    {
+        HMAxis canonical = canonicalDefault;
+        if (axisMap != null)
+        {
+            foreach (var kvp in axisMap)
+            {
+                if (kvp.Value == null) continue;
+                if (!string.Equals(kvp.Value, roleName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                ushort usage;
+                try { usage = Convert.ToUInt16(kvp.Key, 16); }
+                catch { continue; }
+                if (usage <= 0xFF) usage |= 0x0100;
+                canonical = (HMAxis)usage;
+                break;
+            }
+        }
+        if (axes != null)
+        {
+            if (axes.TryGetValue(canonical, out var vCanon))
+                return Math.Clamp(vCanon, 0f, 1f);
+            if (slot < triggers.Count && axes.TryGetValue(triggers[slot].Axis, out var vField))
+                return Math.Clamp(vField, 0f, 1f);
+        }
+        return 0.0;
+    }
+
     /// <summary>Push the next input frame to the virtual controller.
     /// The SDK encodes <paramref name="state"/> into the active profile's
     /// HID report layout and publishes it via shared memory.</summary>
@@ -378,8 +418,15 @@ public sealed class HMController : IDisposable
         double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
         double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;
         double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5) : 0.5;
-        double mlt = triggers.Count > 0 ? GetAxis(triggers[0].Axis, 0.0) : 0.0;
-        double mrt = triggers.Count > 1 ? GetAxis(triggers[1].Axis, 0.0) : 0.0;
+        // Triggers resolve canonical-first, then fall back to the descriptor's
+        // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
+        // ResolveAxisByRole (canonical defaults when no axisMap); HIDMaestroTest
+        // / StandardAxes writes axes[triggers[N].Axis] directly. Both must feed
+        // the GIP buffer that drives XInput / WGI / RawInput; otherwise the
+        // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
+        // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
+        double mlt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 0, HMAxis.Z, "lefttrigger");
+        double mrt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 1, HMAxis.Rz, "righttrigger");
 
         byte[] report;
         // v1.3.5 — vendor-blob path is gated on the host-side arm flag.

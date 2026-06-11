@@ -141,6 +141,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_gip_trigger_resolver_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1380,6 +1381,20 @@ function Scenario-Xbox-Combined-Trigger-Check {
     }
 }
 
+# Companion to S40. S40 exercises the HID descriptor lane (BuildReportInto's
+# combined-Z synthesis). S41 exercises the GIP-buffer lane that drives every
+# non-DirectInput API via the XUSB companion. The PadForge#130 follow-up
+# (MultipadTester XInput / WGI / RawInput stuck at 0.5 even though joy.cpl
+# was correct) was missed by S40 because S40 doesn't touch SubmitState's
+# mlt / mrt resolution. S41 covers it.
+function Scenario-Xbox-Gip-Trigger-Resolver-Check {
+    $probe = Resolve-ProbeBinary 'xbox_gip_trigger_resolver_check' 'XboxGipTriggerResolverCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("XboxGipTriggerResolverCheck exited " + $p.ExitCode + " - GIP-side trigger resolver regressed (PadForge#130 follow-up; see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1424,7 +1439,8 @@ $scenarios = @(
     @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} },
     @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} },
     @{ Name = 'S39_Foreign_Devnode_Survival';     Body = ${function:Scenario-Foreign-Devnode-Survival-Check} },
-    @{ Name = 'S40_Xbox_Combined_Trigger';        Body = ${function:Scenario-Xbox-Combined-Trigger-Check} }
+    @{ Name = 'S40_Xbox_Combined_Trigger';        Body = ${function:Scenario-Xbox-Combined-Trigger-Check} },
+    @{ Name = 'S41_Xbox_Gip_Trigger_Resolver';    Body = ${function:Scenario-Xbox-Gip-Trigger-Resolver-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
