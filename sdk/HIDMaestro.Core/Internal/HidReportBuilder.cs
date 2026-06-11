@@ -700,17 +700,62 @@ public class HidReportBuilder
 
         // Combined-Z trigger synthesis (Xbox 360 wired with Vx/Vy hidden pair):
         // when CombinedTrigger (Z) is declared alongside Vx/Vy as separate
-        // triggers, the DI-combined Z value is derived from the Vx/Vy values
-        // the consumer wrote. dinput sees combined Z; XInput / WGI see the
-        // separate Vx/Vy.
+        // triggers, dinput sees combined Z; XInput / WGI see the separate
+        // Vx/Vy. PadForge#130 / v1.3.17: the v1.3.9 state.Axes refactor sourced
+        // lt / rt from state.Axes[LeftTrigger.Usage] / state.Axes[RightTrigger.Usage]
+        // — i.e. state.Axes[Vx] / state.Axes[Vy]. Consumers (PadForge's
+        // ResolveAxisByRole, every HMGamepadStateHelpers caller) write
+        // state.Axes[HMAxis.Z] = leftTrigger and state.Axes[HMAxis.Rz] =
+        // rightTrigger when the profile has no axisMap, so Vx / Vy stayed at
+        // their seed values and the synthesis always landed on combined =
+        // 0.5. All Xbox 360 profiles silently lost their split-trigger
+        // workaround. The fix: read trigger values from the CANONICAL
+        // user-facing positions (axisMap-declared or HMAxis.Z / HMAxis.Rz
+        // default), then write both the combined Z byte AND the separate
+        // Vx / Vy bytes so dinput sees the combined value and WGI sees the
+        // raw triggers.
         if (CombinedTrigger != null && LeftTrigger != null && RightTrigger != null)
         {
-            var ltKey = (HMAxis)((LeftTrigger.UsagePage << 8) | LeftTrigger.Usage);
-            var rtKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
-            double lt = GetAxisValue(ltKey, 0.0);
-            double rt = GetAxisValue(rtKey, 0.0);
+            HMAxis canonicalLt = HMAxis.Z;
+            HMAxis canonicalRt = HMAxis.Rz;
+            if (AxisMap != null)
+            {
+                foreach (var kvp in AxisMap)
+                {
+                    if (kvp.Value == null) continue;
+                    ushort usage;
+                    try { usage = Convert.ToUInt16(kvp.Key, 16); }
+                    catch { continue; }
+                    if (usage <= 0xFF) usage |= 0x0100;
+                    string role = kvp.Value.ToLowerInvariant();
+                    if (role == "lefttrigger")  canonicalLt = (HMAxis)usage;
+                    else if (role == "righttrigger") canonicalRt = (HMAxis)usage;
+                }
+            }
+            var leftFieldKey  = (HMAxis)((LeftTrigger.UsagePage  << 8) | LeftTrigger.Usage);
+            var rightFieldKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
+            // Source the trigger values from the canonical (user-facing)
+            // position first — PadForge / HMGamepadStateHelpers write here.
+            // Fall back to the wire field's own Usage so the test-fixture
+            // path (HidReportBuilder.StandardAxes writes to LeftTrigger.Usage
+            // = Vx) keeps working without a canonical entry.
+            double GetTrigger(HMAxis canonical, HMAxis fieldKey, double def)
+            {
+                if (axes != null)
+                {
+                    if (axes.TryGetValue(canonical, out var vCanon))
+                        return Math.Clamp(vCanon, 0f, 1f);
+                    if (axes.TryGetValue(fieldKey, out var vField))
+                        return Math.Clamp(vField, 0f, 1f);
+                }
+                return def;
+            }
+            double lt = GetTrigger(canonicalLt, leftFieldKey,  0.0);
+            double rt = GetTrigger(canonicalRt, rightFieldKey, 0.0);
             double combined = Math.Clamp(0.5 + (rt - lt) * 0.5, 0.0, 1.0);
             WriteField(CombinedTrigger, combined);
+            WriteField(LeftTrigger,  lt);
+            WriteField(RightTrigger, rt);
         }
 
         if (HatSwitch != null)

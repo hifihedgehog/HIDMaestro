@@ -140,6 +140,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
     )
     $stale = @()
     foreach ($p in $probePaths) {
@@ -1365,6 +1366,20 @@ function Scenario-Foreign-Devnode-Survival-Check {
     }
 }
 
+# S40: Xbox 360 combined-Z + split-trigger regression (v1.3.17, PadForge #130).
+# Loads the real xbox-360-wired profile and asserts the v1.3.9 state.Axes
+# refactor's combined-Z synthesis sources trigger values from the canonical
+# user-facing positions (HMAxis.Z / HMAxis.Rz or axisMap-declared), then
+# writes BOTH the combined Z byte AND the separate Vx / Vy bytes so
+# joy.cpl sees the dinput-combined trigger and WGI sees the raw LT / RT.
+function Scenario-Xbox-Combined-Trigger-Check {
+    $probe = Resolve-ProbeBinary 'xbox_combined_trigger_check' 'XboxCombinedTriggerCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("XboxCombinedTriggerCheck exited " + $p.ExitCode + " - Xbox 360 split-trigger workaround regressed (PadForge#130; see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1408,7 +1423,8 @@ $scenarios = @(
     @{ Name = 'S36_Axis_Addressing_Check';        Body = ${function:Scenario-Axis-Addressing-Check} },
     @{ Name = 'S37_Layout_Audit_Check';           Body = ${function:Scenario-Layout-Audit-Check} },
     @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} },
-    @{ Name = 'S39_Foreign_Devnode_Survival';     Body = ${function:Scenario-Foreign-Devnode-Survival-Check} }
+    @{ Name = 'S39_Foreign_Devnode_Survival';     Body = ${function:Scenario-Foreign-Devnode-Survival-Check} },
+    @{ Name = 'S40_Xbox_Combined_Trigger';        Body = ${function:Scenario-Xbox-Combined-Trigger-Check} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
