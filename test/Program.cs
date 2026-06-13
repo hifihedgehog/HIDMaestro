@@ -29,7 +29,7 @@ namespace HIDMaestroTest;
 ///   HIDMaestroTest cleanup                 Remove all HIDMaestro virtual devices
 ///   HIDMaestroTest sdk-demo [id]           Minimal SDK consumer demo (5s)
 /// </summary>
-class Program
+partial class Program
 {
     // ── Elevation plumbing ──
 
@@ -131,6 +131,7 @@ class Program
             Console.WriteLine("  HIDMaestroTest info <id>               Show profile details");
             Console.WriteLine("  HIDMaestroTest cleanup                 Remove all HIDMaestro virtual devices");
             Console.WriteLine("  HIDMaestroTest sdk-demo [id]           Minimal SDK consumer demo (5s)");
+            Console.WriteLine("  HIDMaestroTest latency [id] [iters]    Measure input latency (SubmitState -> XInput)");
             Console.WriteLine("  HIDMaestroTest oem set <vid> <pid> <label>");
             Console.WriteLine("  HIDMaestroTest oem clear <vid> <pid>");
             Console.WriteLine("  HIDMaestroTest oem recover             Restore overrides left by a crashed consumer");
@@ -161,6 +162,7 @@ class Program
             "make-custom-profile" => MakeCustomProfile(args.Skip(1).ToArray()),
             "probe-xusb" => ProbeXusb(),
             "xusb-vibrate" => XusbVibrate(args.Skip(1).ToArray()),
+            "latency"  => LatencyBench(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
     }

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="Input latency, lower is better. HIDMaestro 0.035 ms. VIIPER localhost 0.168 ms. VIIPER over wired LAN 1 to 5 ms. VIIPER over Wi-Fi 10 to 50 ms.">
+  <rect x="1" y="1" width="818" height="298" rx="12" fill="#0d1117" stroke="#30363d"/>
+
+  <!-- HIDMaestro -->
+  <text x="200" y="61" text-anchor="end" fill="#8b949e" font-size="14">HIDMaestro</text>
+  <rect x="210" y="40" width="480" height="32" rx="4" fill="#161b22"/>
+  <rect x="210" y="40" width="4" height="32" rx="2" fill="#10b981"/>
+  <text x="224" y="61" fill="#10b981" font-size="14" font-weight="700">0.035 ms</text>
+
+  <!-- VIIPER localhost -->
+  <text x="200" y="121" text-anchor="end" fill="#8b949e" font-size="14">VIIPER (localhost)</text>
+  <rect x="210" y="100" width="480" height="32" rx="4" fill="#161b22"/>
+  <rect x="210" y="100" width="8" height="32" rx="2" fill="#f59e0b"/>
+  <text x="228" y="121" fill="#f59e0b" font-size="14" font-weight="700">0.168 ms</text>
+
+  <!-- VIIPER + wired LAN -->
+  <text x="200" y="181" text-anchor="end" fill="#8b949e" font-size="14">VIIPER + wired LAN</text>
+  <rect x="210" y="160" width="480" height="32" rx="4" fill="#161b22"/>
+  <rect x="210" y="160" width="55" height="32" rx="4" fill="#f97316"/>
+  <text x="275" y="181" fill="#f97316" font-size="14" font-weight="700">1&#8211;5 ms</text>
+
+  <!-- VIIPER + Wi-Fi -->
+  <text x="200" y="241" text-anchor="end" fill="#8b949e" font-size="14">VIIPER + Wi-Fi</text>
+  <rect x="210" y="220" width="480" height="32" rx="4" fill="#161b22"/>
+  <rect x="210" y="220" width="480" height="32" rx="4" fill="#ef4444"/>
+  <text x="682" y="241" text-anchor="end" fill="#ffffff" font-size="14" font-weight="700">10&#8211;50 ms</text>
+
+  <!-- caption -->
+  <text x="210" y="284" fill="#6e7681" font-size="12">Lower is better. Linear scale, milliseconds. Network bars use the optimistic end of typical LAN latency.</text>
+</svg>
