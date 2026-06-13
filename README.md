@@ -91,7 +91,7 @@ HIDMaestro is Windows optimized and focused on game controllers and HID game dev
 
 ## What it replaces
 
-- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, presents every controller as USB so Bluetooth devices report the wrong bus type, and its sub-millisecond latency is localhost-only. The network it is named for adds 1 to 50 ms.
+- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
 - **vJoy**: kernel driver, no longer actively maintained, shows up as "vJoy Device" instead of real hardware.
 - **ViGEmBus**: kernel driver, retired, new builds need an EV code-signing certificate.
 - **DsHidMini**: user-mode, but translates a physically connected DualShock 3 rather than arbitrary input.
