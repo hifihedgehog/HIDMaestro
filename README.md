@@ -73,18 +73,19 @@ And there is the matter of what USBIP can represent at all. USB/IP transports US
 
 ## How it compares
 
-| | HIDMaestro | VIIPER | ViGEmBus | vJoy |
-|--|--|--|--|--|
-| Kernel driver required | **No** (UMDF2 user mode) | Yes (USBIP) | Yes | Yes |
-| Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No |
-| EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes |
-| Identity per controller | **Exact, 225 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" |
-| Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only |
-| Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A |
-| Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | — | — |
-| Input update rate | Event-driven, no fixed cap | 1000 Hz (1 ms batching) | — | — |
-| License | MIT | GPL-3.0 (clients MIT) | — | — |
-| Status | **Active** | Active | Retired | Stale |
+| | HIDMaestro | VIIPER | ViGEmBus | vJoy | WinUHid |
+|--|--|--|--|--|--|
+| Kernel driver required | **No** (UMDF2 user mode) | Yes (USBIP) | Yes | Yes | No (UMDF2 on VHF) |
+| Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
+| EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
+| Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
+| Identity per controller | **Exact, 225 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
+| Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
+| Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
+| Input update rate | Event-driven, no fixed cap | 1000 Hz (1 ms batching) | N/A | N/A | Event-driven |
+| License | MIT | GPL-3.0 (clients MIT) | N/A | N/A | MIT |
+| Status | **Active** | Active | Retired | Stale | Active |
 
 VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal, not a footnote.
 
