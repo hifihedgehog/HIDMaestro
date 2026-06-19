@@ -38,11 +38,12 @@ ctrl.SubmitState(new HMGamepadState { Buttons = HMButton.A });
 
 ## Why HIDMaestro
 
-- **No kernel driver, ever.** Pure user-mode UMDF2. A bug cannot blue-screen the machine, and a locally trusted self-signed certificate is enough. No EV certificate, no `testsigning`, no reboot.
+- **No kernel driver, no test-signing.** Pure user-mode UMDF2, loaded by a locally trusted self-signed certificate. No test-signing boot mode, no purchased certificate, no reboot, and a bug cannot blue-screen the machine. It installs on an ordinary user's PC, not just a developer box.
 - **No network in the path.** Input travels through shared memory on the same machine. There is no socket, no USBIP stack, and no kernel transport driver between your application and the device.
 - **Exact hardware identity, down to the bus.** VID/PID, product string, descriptor, axis and button layout, and bus type all match the real device. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
-- **New devices are data, not code.** Add a controller by writing a JSON profile or by capturing one you already own. No per-device source, no recompile.
+- **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes.
 - **Every API at once.** DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see one correct device.
+- **Validated across every API and both ends of the spectrum.** A 41-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change, and passes on both a 16-core Windows 11 desktop and a low-power Intel Atom Windows 10 fixture.
 - **Lower latency, measured.** ~35 µs median single-press, more than 4x faster than the closest alternative, with no batching cap on input.
 
 ## Latency
@@ -168,7 +169,7 @@ During emulation you can `remove 2` to dispose one controller, `2 dualsense` to 
 
 ## Validation
 
-Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a self-signed certificate in the machine's Root and TrustedPublisher stores. Each profile is deployed and checked with `scripts/verify.py` plus manual verification in joy.cpl, PadForge/SDL3, the Chrome Gamepad API, and XInput readers. A real Xbox Series X|S Bluetooth controller tested side by side shows byte-identical behavior across the HID class APIs.
+Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT Enterprise LTSC (build 19044), with a self-signed certificate in the machine's Root and TrustedPublisher stores and no test-signing boot mode. Every profile is checked across all the input APIs a game can reach: DirectInput (joy.cpl and DirectInput8), XInput, SDL3/HIDAPI, the Chrome Gamepad API, WGI/GameInput, and HID enumeration order, through `scripts/verify.py` plus manual verification. A real Xbox Series X|S Bluetooth controller tested side by side shows byte-identical behavior across the HID class APIs.
 
 | Profile | DirectInput | XInput | SDL3 | Browser | WGI |
 |--|--|--|--|--|--|
@@ -179,7 +180,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) with a self-signed c
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 41-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, and the Sony vendor-blob encode/decode, verifying no PnP devnodes are left behind. 41/41 PASS on a Ryzen-class dev box and on an Intel Atom Z8350 fixture.
+A 41-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, and the Sony vendor-blob encode/decode, verifying no PnP devnodes are left behind. 41/41 PASS on both a 16-core AMD Ryzen 9 Windows 11 desktop and a 4-core Intel Atom Z8350 Windows 10 fixture, the high and low ends of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
