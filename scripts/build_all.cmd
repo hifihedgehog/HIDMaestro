@@ -16,8 +16,9 @@ setlocal enabledelayedexpansion
 ::   1. scripts\build.cmd           - driver.c -> build\HIDMaestro.dll
 ::                                    (also stamps INFs)
 ::   2. scripts\build_companion.cmd - companion.c -> build\HMXInput.dll
-::   3. dotnet build                - first SDK build populates Resources/
-::   4. dotnet build (again)        - second SDK build embeds fresh bytes
+::   3. scripts\build_openvr.cmd    - OpenVR driver -> build\openvr\hidmaestro\
+::   4. dotnet build                - first SDK build populates Resources/
+::   5. dotnet build (again)        - second SDK build embeds fresh bytes
 ::
 :: After this completes, `dotnet run --project example\SdkDemo` works
 :: and `HIDMaestroTest.exe` in test\bin\... can deploy virtual controllers.
@@ -39,6 +40,13 @@ call "%~dp0build_companion.cmd"
 if errorlevel 1 (
     echo.
     echo ERROR: scripts\build_companion.cmd failed. See output above.
+    exit /b 1
+)
+
+call "%~dp0build_openvr.cmd"
+if errorlevel 1 (
+    echo.
+    echo ERROR: scripts\build_openvr.cmd failed. See output above.
     exit /b 1
 )
 

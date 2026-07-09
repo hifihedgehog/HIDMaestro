@@ -36,6 +36,7 @@ public sealed class HMContext : IDisposable
 {
     private readonly object _lock = new();
     private readonly Dictionary<int, HMController> _controllers = new();
+    private readonly List<HMVRController> _vrControllers = new();
     private readonly List<HMProfile> _profiles = new();
     private readonly Dictionary<string, HMProfile> _profilesById = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
@@ -77,6 +78,15 @@ public sealed class HMContext : IDisposable
         System.Threading.Tasks.Task.Run(() =>
         {
             try { Internal.DeviceOrchestrator.PrewarmGameInputService(); } catch { }
+        });
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            // VR prewarm: vrpathreg discovery walks two registry views +
+            // the filesystem, and the SteamVR-running probe spawns a
+            // process snapshot. Both cache-warm the CreateVRController
+            // path; harmless when SteamVR isn't installed.
+            try { _ = Internal.VrDriverBuilder.LocateVrPathReg(); } catch { }
+            try { _ = Internal.VrDriverBuilder.IsSteamVRRunning(); } catch { }
         });
     }
 
@@ -326,6 +336,39 @@ public sealed class HMContext : IDisposable
         return controller;
     }
 
+    /// <summary>Create a virtual SteamVR controller. This is NOT a HID
+    /// device: no device node, no INF, no slot in the HID index pool. The
+    /// device lives inside SteamVR's vrserver.exe (HIDMaestro's embedded
+    /// OpenVR driver); the returned handle owns the consumer end of the
+    /// IPC channel to it. See <see cref="HMVRController"/> for lifecycle,
+    /// profile-latching, and threading contracts.
+    ///
+    /// <para>Connects immediately: extracts + registers the embedded
+    /// OpenVR driver with SteamVR on first use (idempotent, hash-gated;
+    /// requires elevation), claims the hand, and starts accepting
+    /// <see cref="HMVRController.SubmitState"/> frames. The context
+    /// disposes any VR controllers it created that are still alive when
+    /// the context is disposed.</para></summary>
+    /// <exception cref="InvalidOperationException">Another live process
+    /// owns the VR channel, or the hand is already active.</exception>
+    public HMVRController CreateVRController(HMVRProfile profile, HMVRHand hand,
+                                             int handSelectionPriority = 0)
+    {
+        ThrowIfDisposed();
+        var vr = new HMVRController(profile, hand, handSelectionPriority);
+        try
+        {
+            vr.Connect();
+        }
+        catch
+        {
+            vr.Dispose();
+            throw;
+        }
+        lock (_lock) _vrControllers.Add(vr);
+        return vr;
+    }
+
     /// <summary>Create a controller pinned to a specific index. Used by live
     /// profile-switching workflows where the consumer wants to dispose the
     /// existing controller at index N and replace it with one running a
@@ -460,6 +503,24 @@ public sealed class HMContext : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // VR controllers first: disposal is a shared-memory flag flip plus
+        // a config-seq bump (no PnP), so it never contends with the HID
+        // teardown below.
+        HMVRController[] vrToDispose;
+        lock (_lock)
+        {
+            vrToDispose = _vrControllers.ToArray();
+            _vrControllers.Clear();
+        }
+        foreach (var vc in vrToDispose)
+        {
+            try { vc.Dispose(); } catch { /* swallow during shutdown */ }
+        }
+        // Tear the VR channel down (listener thread, section, events) the
+        // way DeviceOrchestrator's teardown calls SharedMemoryIO.Cleanup
+        // for the HID sections. No-op when VR was never used.
+        try { Internal.VrSharedMemoryIO.Cleanup(); } catch { }
 
         HMController[] toDispose;
         lock (_lock)

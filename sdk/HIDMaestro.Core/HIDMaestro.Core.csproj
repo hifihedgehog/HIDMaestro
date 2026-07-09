@@ -74,6 +74,23 @@
     <Copy SourceFiles="@(_HMDriverFiles)" DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(_HMSigntool)"   DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(_HMInf2cat)"    DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+
+    <!-- OpenVR driver payload: scripts\build_openvr.cmd assembles the
+         complete SteamVR driver-folder layout under build\openvr\hidmaestro\
+         (manifest, bin\win64\driver_hidmaestro.dll, resources\...). Copy it
+         verbatim, subdirectories preserved, so VrDriverBuilder can re-create
+         the folder from the HIDMaestro.VR.* logical names. Conditional so a
+         driver-only workflow without the VR build still compiles; the
+         embedded-resource glob below then emits zero VR items and
+         VrDriverBuilder.EnsureInstalled throws its build_all guidance at
+         runtime (same fresh-clone caveat as the flat Resources glob). -->
+    <ItemGroup>
+      <_HMVrFiles Include="$(HMBuildDir)openvr\hidmaestro\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_HMVrFiles)"
+          DestinationFolder="$(MSBuildThisFileDirectory)Resources\vr\%(RecursiveDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(_HMVrFiles)' != ''" />
   </Target>
 
   <ItemGroup>
@@ -91,8 +108,15 @@
          ONCE to populate Resources/ (which will emit a warning-size DLL),
          then run `dotnet build` AGAIN to embed the fresh bytes. CI and
          the release recipe both do this two-phase build. -->
-    <EmbeddedResource Include="Resources\**\*">
+    <EmbeddedResource Include="Resources\**\*" Exclude="Resources\vr\**\*">
       <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+
+    <!-- OpenVR driver payload. RecursiveDir keeps the SteamVR folder
+         layout inside the logical name (backslash-separated); the name
+         minus the HIDMaestro.VR. prefix IS the extract-relative path. -->
+    <EmbeddedResource Include="Resources\vr\**\*">
+      <LogicalName>HIDMaestro.VR.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
 
     <!-- Profile catalog. Embedded with stable HIDMaestro.Profiles.* logical

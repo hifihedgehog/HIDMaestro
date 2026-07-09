@@ -1,0 +1,8 @@
+{
+	"alwaysActivate": true,
+	"name": "hidmaestro",
+	"directory": "",
+	"resourceOnly": false,
+
+	"hmd_presence": []
+}

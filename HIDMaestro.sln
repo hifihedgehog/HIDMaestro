@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "example", "example", "{1A2B
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SdkDemo", "example\SdkDemo\SdkDemo.csproj", "{2B3C4D5E-6F70-8901-BCDE-F12345678901}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "hidmaestro_openvr", "driver\openvr\hidmaestro_openvr.vcxproj", "{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -61,6 +63,14 @@ Global
 		{2B3C4D5E-6F70-8901-BCDE-F12345678901}.Release|x64.Build.0 = Release|Any CPU
 		{2B3C4D5E-6F70-8901-BCDE-F12345678901}.Release|x86.ActiveCfg = Release|Any CPU
 		{2B3C4D5E-6F70-8901-BCDE-F12345678901}.Release|x86.Build.0 = Release|Any CPU
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Debug|Any CPU.ActiveCfg = Debug|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Debug|x64.ActiveCfg = Debug|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Debug|x64.Build.0 = Debug|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Debug|x86.ActiveCfg = Debug|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Release|Any CPU.ActiveCfg = Release|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Release|x64.ActiveCfg = Release|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Release|x64.Build.0 = Release|x64
+		{7C1B2F9E-3A44-4D1C-9B6A-52E840D10001}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

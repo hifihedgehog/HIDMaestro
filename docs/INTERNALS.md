@@ -98,6 +98,28 @@ Symptoms before the fix: first run after a fresh boot was fast and all APIs pass
 
 Fix: prepend the current process's PID in hex to every SwD instance-id suffix, e.g. `SWD\HIDMAESTRO\A7B4_0002`. Each launch gets a unique tuple, the kernel runs a fresh full install, and the devnode binds correctly. `FindExistingCompanion` matches by `Device Parameters\ControllerIndex` (not by suffix) so cleanup and teardown sweep across instances regardless of which session created them. Verified on this machine: 5 back-to-back same-boot 4-controller runs all complete Phase 1 in 2.2-2.8s with `verify.py` ALL PASS and zero registry-carcass accumulation post-teardown.
 
+### Virtual VR controllers (OpenVR driver, v1)
+
+VR controllers take a different path from everything above: there is no HID
+device, no devnode, and no INF. A SteamVR driver is a folder with a manifest
+and a DLL exporting `HmdDriverFactory`. `vrserver.exe` loads the DLL and the
+DLL **is** the device. HIDMaestro embeds that folder (`HIDMaestro.VR.*`
+resources), extracts it to `%ProgramData%\HIDMaestro\openvr\hidmaestro`, and
+registers it once with `vrpathreg.exe adddriver` (found via SteamVR's
+uninstall key, `Steam App 250820`). The consumer end is `HMVRController`:
+one 4 KiB `Global\HIDMaestroVR` section carrying a seqlock-guarded input
+frame in one direction and a 64-slot haptic ring in the other, both direct
+reuses of the HID sections' concurrency protocols. Devices are added to
+SteamVR lazily, only while a consumer process is connected, so no phantom
+controllers appear when nothing is driving them.
+
+Signing: none needed. The OpenVR driver DLL is a plain user-mode DLL loaded
+by `vrserver.exe`. No kernel attestation, no WHQL, no certificate, and no
+test-signing mode. Valve's own drivers and community drivers (opengloves and
+the rest) run unsigned. Anti-cheat: EAC and BattlEye walk modules inside the
+game process, and this DLL loads into `vrserver.exe`, not the game, so it is
+outside their module scans.
+
 ## Architecture
 
 ```
