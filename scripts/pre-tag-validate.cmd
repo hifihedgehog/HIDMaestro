@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full live-swap regression battery (23 scenarios, ~32 min)
+rem  - Runs the full live-swap regression battery (41 scenarios, ~32 min)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
 rem
@@ -19,7 +19,7 @@ rem      and orphan the regression script's stdin pipe).
 rem    - sudo/gsudo NOT used here (caller is responsible for elevation).
 rem
 rem  Exit codes:
-rem    0  All 23 scenarios PASSED. Safe to tag/push/release.
+rem    0  All 41 scenarios PASSED. Safe to tag/push/release.
 rem    1  At least one scenario FAILED. Do NOT release.
 rem    2  Build failed. Fix before re-running.
 rem ====================================================================
@@ -82,7 +82,7 @@ echo.
 rem 3. Switch Pro protocol responder check (issue #33). Headless and
 rem    self-contained: creates the virtual pad, runs SDL's exact USB init
 rem    + subcommand sequence over raw HID, validates 0x30 streaming,
-rem    input/IMU round-trip, and rumble decode. 42 asserts, ~15 s.
+rem    input/IMU round-trip, and rumble decode. 43 asserts, ~15 s.
 echo [2/4] Running Switch Pro protocol check...
 test\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProCheck.exe
 if errorlevel 1 (
@@ -105,7 +105,7 @@ if errorlevel 1 (
 echo.
 
 rem 4. Run the full regression battery
-echo [3/4] Running live-swap regression battery (23 scenarios, ~32 min)...
+echo [3/4] Running live-swap regression battery (41 scenarios, ~32 min)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -123,7 +123,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [4/4] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] Switch Pro check + 23/23 swap scenarios passed. Safe to:
+echo  [PASS] Switch Pro check + 41/41 swap scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...

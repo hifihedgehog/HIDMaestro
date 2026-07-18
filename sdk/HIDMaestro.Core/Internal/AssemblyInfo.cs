@@ -17,3 +17,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]
 [assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]
 [assembly: InternalsVisibleTo("SwitchProCheck")]
+[assembly: InternalsVisibleTo("SonyFeatureGateCheck")]

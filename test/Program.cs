@@ -141,6 +141,12 @@ partial class Program
             Console.WriteLine("  HIDMaestroTest extract-profile <vid> <pid>");
             Console.WriteLine("                                        Emit HIDMaestro profile JSON for the device");
             Console.WriteLine("  HIDMaestroTest emulate-file <path>    Create a virtual from a profile JSON on disk");
+            Console.WriteLine("  HIDMaestroTest make-custom-profile <out-dir> [id] [vid-hex] [pid-hex]");
+            Console.WriteLine("                                        Write a sample custom profile JSON (read-only)");
+            Console.WriteLine("  HIDMaestroTest probe-xusb             Probe live xinputhid XUSB IOCTL codes (read-only)");
+            Console.WriteLine("  HIDMaestroTest xusb-vibrate <index> [hex9]");
+            Console.WriteLine("                                        Send an XUSB rumble to an XInput slot (read-only)");
+            Console.WriteLine("  HIDMaestroTest issue6-repro           Reproduce the issue #6 PID-FFB coalescing case");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }

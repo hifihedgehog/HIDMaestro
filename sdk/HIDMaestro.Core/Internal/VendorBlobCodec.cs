@@ -323,8 +323,14 @@ internal static class VendorBlobCodec
                 break;
             }
             case "bytes-zero":
-                // Default behavior — explicit form for clarity. No-op since
+                // Default behavior. Explicit form for clarity. No-op since
                 // the buffer is already zeroed.
+                break;
+            default:
+                // Unknown/unhandled input type: leave the field's bytes at
+                // their zeroed default. Every type used by a shipped
+                // extendedReport is handled above; a new or misspelled type
+                // silently emits zeros rather than throwing on the hot path.
                 break;
         }
     }
@@ -490,6 +496,10 @@ internal static class VendorBlobCodec
                 buffer[dst + 3] = (byte)((crc >> 24) & 0xFF);
                 break;
             }
+            default:
+                // Unknown/unhandled output type: leave the field's bytes at
+                // their zeroed default (see EncodeInputField's default arm).
+                break;
         }
     }
 
@@ -602,6 +612,10 @@ internal static class VendorBlobCodec
                     crcValid = observed == expected;
                     break;
                 }
+                default:
+                    // Unknown/unhandled decode type: omit the field from the
+                    // result dict rather than throwing (see EncodeInputField).
+                    break;
             }
         }
         return (result, crcValid);

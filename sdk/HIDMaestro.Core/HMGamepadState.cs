@@ -99,8 +99,12 @@ public struct HMGamepadState
     /// <summary>Finger 1 tracking ID (7 bits).</summary>
     public byte TouchpadFinger1Id;
 
-    /// <summary>Monotonic touchpad packet counter increments per touch event.
-    /// Maps to the <c>touchpadPacketCounter</c> semantic.</summary>
+    /// <summary>Monotonic touchpad packet counter, intended to increment per
+    /// touch event. Reserved: no shipped profile declares a field with a
+    /// <c>touchpadPacketCounter</c> semantic, so <see cref="VendorBlobCodec"/>
+    /// does not currently emit this value on the wire. The
+    /// <c>touchpad-finger</c> encoder writes finger id/x/y/active only. Kept
+    /// for API compatibility and future Sony-report parity.</summary>
     public byte TouchpadPacketCounter;
 
     // ── IMU (raw firmware units) ──────────────────────────────────────────

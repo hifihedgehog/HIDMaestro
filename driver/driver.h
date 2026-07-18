@@ -89,6 +89,12 @@ typedef struct _DEVICE_CONTEXT {
     /* First Input Report ID from descriptor (0 if no Report IDs) */
     UCHAR   FirstInputReportId;
 
+    /* Cached at config-read: TRUE if the descriptor declares a second
+     * collection with Report ID 0x20 (separate-trigger Col2, Xbox 360
+     * family). The descriptor is immutable after init, so ProcessSharedInput
+     * reads this flag instead of rescanning the descriptor per frame. */
+    BOOLEAN HasCol2Report;
+
     /* Latest raw input report for HID READ_REPORT (native descriptor format) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   InputReportSize;

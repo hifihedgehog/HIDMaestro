@@ -213,6 +213,20 @@ ReadConfigFromRegistry(
         ctx->ReportDescriptorSize = (ULONG)binSize;
         ctx->HidDescriptor.DescriptorList[0].wReportLength =
             (USHORT)ctx->ReportDescriptorSize;
+
+        /* Cache whether the descriptor declares a second collection with
+         * Report ID 0x20 (0x85 0x20). The descriptor is fixed after this
+         * point, so scanning it once here avoids a linear byte scan on
+         * every ProcessSharedInput frame (~250 Hz per controller). */
+        ctx->HasCol2Report = FALSE;
+        if (ctx->ReportDescriptorSize > 130) {
+            for (ULONG i = 0; i + 1 < ctx->ReportDescriptorSize; i++) {
+                if (ctx->ReportDescriptor[i] == 0x85 && ctx->ReportDescriptor[i+1] == 0x20) {
+                    ctx->HasCol2Report = TRUE;
+                    break;
+                }
+            }
+        }
     }
 
     /* Read VendorId (REG_DWORD) */
@@ -987,15 +1001,23 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 
     ULONG seqNo = shared.SeqNo;
     if (seqNo == ctx->SharedMemSeqNo) return; /* No new data */
-    ctx->SharedMemSeqNo = seqNo;
+    /* NOTE: SharedMemSeqNo is advanced LATER, under InputLock, together
+     * with the InputReport cache write (see the completion block below).
+     * Publishing it here would let a concurrent IOCTL_HID_READ_REPORT
+     * observe the advanced seqno and complete with the PREVIOUS frame's
+     * cached report tagged as the new one (stale-frame TOCTOU). The
+     * local `seqNo` drives the rest of this call. */
 
     /* Switch Pro mode: the protocol stream owns pacing and completion.
      * SwitchStreamProc serves 0x30 frames at the wire's 15 ms cadence
      * (reading the same shared body via SwitchFillLatestState), and
      * subcommand replies preempt via SwitchQueueReply. Completing reads
      * here as well would serve SDK-cadence duplicates interleaved into
-     * the protocol stream. */
-    if (ctx->SwitchProtocol) return;
+     * the protocol stream. Advance the cached seqno here (the Switch
+     * path has no InputReport-cache TOCTOU: its reader is the stream
+     * thread reading the view directly, never SharedMemSeqNo), so the
+     * worker's stale-wakeup counter still resets on new frames. */
+    if (ctx->SwitchProtocol) { ctx->SharedMemSeqNo = seqNo; return; }
 
     /* Build HID input report from shared file Data (native descriptor format).
      * Report MUST be exactly InputReportByteLength bytes — HidClass rejects
@@ -1054,28 +1076,20 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         inputSize = shared.ExtendedReportSize;
     }
 
-    /* Build Col2 report (Report ID 0x20) with same gamepad data */
+    /* Build Col2 report (Report ID 0x20) with same gamepad data. The
+     * descriptor scan for 0x85 0x20 is cached at config-read into
+     * ctx->HasCol2Report (the descriptor is immutable after init), so
+     * this hot path no longer rescans up to 4 KB every frame. */
     UCHAR col2Report[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG col2Size = 0;
-    /* Build Col2 if descriptor has a second TLC (Report ID 0x20).
-     * Check if Report ID 0x20 exists in the descriptor. */
-    if (ctx->ReportDescriptorSize > 130) {
-        /* Check if descriptor contains Report ID 0x20 (0x85 0x20) */
-        BOOLEAN hasCol2 = FALSE;
-        for (ULONG i = 0; i + 1 < ctx->ReportDescriptorSize; i++) {
-            if (ctx->ReportDescriptor[i] == 0x85 && ctx->ReportDescriptor[i+1] == 0x20) {
-                hasCol2 = TRUE; break;
-            }
-        }
-        if (hasCol2) {
-            col2Report[0] = 0x20; /* Report ID */
-            /* Write separate trigger data: Brake(LT) and Accelerator(RT) as 16-bit values */
-            USHORT lt16 = (USHORT)((*(USHORT*)&shared.GipData[8] & 0x03FF) * 65535 / 1023);
-            USHORT rt16 = (USHORT)((*(USHORT*)&shared.GipData[10] & 0x03FF) * 65535 / 1023);
-            *(USHORT*)&col2Report[1] = lt16;
-            *(USHORT*)&col2Report[3] = rt16;
-            col2Size = 5; /* Report ID + Brake(2) + Accel(2) */
-        }
+    if (ctx->HasCol2Report) {
+        col2Report[0] = 0x20; /* Report ID */
+        /* Write separate trigger data: Brake(LT) and Accelerator(RT) as 16-bit values */
+        USHORT lt16 = (USHORT)((*(USHORT*)&shared.GipData[8] & 0x03FF) * 65535 / 1023);
+        USHORT rt16 = (USHORT)((*(USHORT*)&shared.GipData[10] & 0x03FF) * 65535 / 1023);
+        *(USHORT*)&col2Report[1] = lt16;
+        *(USHORT*)&col2Report[3] = rt16;
+        col2Size = 5; /* Report ID + Brake(2) + Accel(2) */
     }
 
     /* Complete exactly ONE pending READ_REPORT per shared-memory state
@@ -1117,7 +1131,13 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
-        ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
+        /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
+         * takes, so a concurrent read sees either the old seqno (and parks)
+         * or the new seqno paired with the freshly-written InputReport.
+         * Advancing it in ProcessSharedInput's preamble (before this cache
+         * write) was the stale-frame TOCTOU. */
+        ctx->SharedMemSeqNo = seqNo;
+        ctx->LastDeliveredInputSeqNo = seqNo;
         WdfWaitLockRelease(ctx->InputLock);
     }
 }
@@ -1221,13 +1241,27 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         }
 
         if (recycle) {
-            /* Close stale handles — Phase 1 will re-open fresh ones.
+            /* Close stale handles. Phase 1 will re-open fresh ones.
              * Unmapping the view first, then closing handles, keeps the
              * sequence symmetric with TryOpenSharedMapping. */
             CloseHandle(ctx->InputDataEvent);
             ctx->InputDataEvent = NULL;
-            if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
-            if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+
+            /* Switch Pro: the SEPARATE SwitchStreamProc thread reads
+             * SharedMemPtr via SwitchFillLatestState at 15 ms cadence,
+             * so the worker must NOT unmap the view out from under it
+             * (use-after-unmap). For the standard HID path the worker is
+             * the sole reader of the view, so recycling it here is safe.
+             * The named section is a stable kernel object; the driver's
+             * own handle keeps the view valid regardless of SDK restarts,
+             * so keeping it mapped for the device lifetime is correct.
+             * The view is unmapped exclusively in EvtDeviceContextCleanup
+             * after both threads join, mirroring the VR transport's
+             * publish-vs-unmap discipline. */
+            if (!ctx->SwitchProtocol) {
+                if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
+                if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+            }
             /* Also reset cached seqno so the fresh mapping's first read
              * (even if it happens to land on a SeqNo matching our previous
              * cached value by chance) is treated as new data. */
@@ -1812,13 +1846,15 @@ EvtIoDeviceControl(
          * convention and HIDMaestro's pre-v1.1.35 behavior of
          * STATUS_NOT_SUPPORTED across all GetFeature calls.
          *
-         * Block Load gate (v1.1.36, retained as defensive check): even
-         * when PidEnabled=1, GetFeature(0x12) returns STATUS_NOT_SUPPORTED
-         * if BL_LoadStatus is outside the spec-valid 1..3 range. v1.1.37
-         * driver-side EBI allocation populates BL fields synchronously
-         * inside the SetFeature(0x11) handler, so the gate normally only
-         * triggers in the brief window before any Create New Effect
-         * arrives.
+         * Block Load status: when BL_LoadStatus is 0 (unpublished, or
+         * cleared by a DISFFC_RESET / Device Control reset), GetFeature
+         * (0x12) reports LoadStatus = Error(3) in a valid 5-byte report
+         * and returns STATUS_SUCCESS (see the Block Load wire-format block
+         * below). v1.1.37 driver-side EBI allocation populates the BL
+         * fields synchronously inside the SetFeature(0x11) handler, so a
+         * real Create New Effect leaves LoadStatus at Success(1)/Full(2);
+         * the Error clamp only surfaces in the brief window before any
+         * Create New Effect arrives, or immediately after a reset.
          *
          * GetFeature(0x11 Create New Effect) is bidirectional in the
          * canonical PID descriptor. v1.1.37 mirrors vJoy: returns
@@ -1877,9 +1913,19 @@ EvtIoDeviceControl(
          * notification to the SDK so the extendedReport.armOn watcher
          * can flip vendor-blob emission on. Notification is fired ONLY
          * for these arm IDs to keep the Get_Feature hot path cheap for
-         * PID polling consumers (DInput / Steam Input). */
-        if (reportId == 0x05 || reportId == 0x09 || reportId == 0x20
-         || reportId == 0x02 || reportId == 0xA3) {
+         * PID polling consumers (DInput / Steam Input).
+         *
+         * GATED on Sony VID (0x054C): only Sony BT profiles declare
+         * extendedReport.armOn, so only they need these stubs. Without
+         * the gate, feature IDs 0x02 (DS4 calibration) and 0xA3 collide
+         * with unrelated profiles' declared feature reports. The Xbox 360
+         * descriptor declares Feature Report ID 0x02 (driver.h), so a
+         * non-Sony HidD_GetFeature(0x02) was getting a zero-filled DS4
+         * calibration blob instead of falling through to the PID / vJoy
+         * handlers below. */
+        if (ctx->HidDeviceAttributes.VendorID == 0x054C
+         && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20
+          || reportId == 0x02 || reportId == 0xA3)) {
             UCHAR *p = (UCHAR *)outBuf;
             ULONG stubSize = 0;
             if (reportId == 0x05) {

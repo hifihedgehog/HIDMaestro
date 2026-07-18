@@ -137,6 +137,13 @@ public sealed class HMController : IDisposable
     private bool _switchProtocol;
     private byte[]? _switchBodyBuffer;
 
+    // Cached layout projections (audit 1n): Profile.Sticks / Profile.Triggers
+    // allocate on every access, so snapshot them once in the ctor and read
+    // the cached lists on the SubmitState hot path. The profile's layout is
+    // immutable for the controller's lifetime.
+    private readonly System.Collections.Generic.IReadOnlyList<HMSimpleStick> _cachedSticks;
+    private readonly System.Collections.Generic.IReadOnlyList<HMSimpleTrigger> _cachedTriggers;
+
     /// <summary>Optional diagnostic: invoked at the end of every successful
     /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
     /// when investigating per-frame submit latency (e.g. issue #21 USB
@@ -312,6 +319,11 @@ public sealed class HMController : IDisposable
         _reportBuilder = profile.Inner.GetOrBuildReportBuilder();
         _reportBuffer = new byte[_reportBuilder.InputReportByteSize];
 
+        // Snapshot the layout projections once (audit 1n): see the field
+        // declarations. Profile.Sticks/Triggers allocate per access.
+        _cachedSticks = profile.Sticks;
+        _cachedTriggers = profile.Triggers;
+
         // Only profiles with an XUSB companion (HMXInput.dll) read the
         // GIP-format buffer slice on IOCTL_XUSB_GET_STATE. xinputhid-bound
         // Xbox profiles publish XInput through the upper filter, not the
@@ -425,8 +437,14 @@ public sealed class HMController : IDisposable
         double GetAxis(HMAxis ax, double def) =>
             axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
 
-        var sticks = Profile.Sticks;
-        var triggers = Profile.Triggers;
+        // Cached at construction: Profile.Sticks / Profile.Triggers are
+        // uncached computed properties that each allocate a List plus
+        // record elements on every access. Reading them per SubmitState
+        // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
+        // avoidable GC pressure on the hot path (audit 1n). The layout is
+        // immutable for the controller's lifetime, so resolve once.
+        var sticks = _cachedSticks;
+        var triggers = _cachedTriggers;
         double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : 0.5;
         double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
         double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;

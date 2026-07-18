@@ -48,6 +48,15 @@ typedef struct _COMPANION_CTX {
     ULONG OutputWriteCount;    /* Stale-detection: total writes since last re-open */
     ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
     ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
+
+    /* Throttled live-swap VID gate (IOCTL_XUSB_SET_STATE). The registry
+     * VendorId is re-read at most every 500 ms instead of every IOCTL, so
+     * a per-frame XInputSetState no longer forces a per-frame registry
+     * round-trip. A live-swap that re-profiles this index is still caught
+     * within one throttle window (a transient phantom is bounded). */
+    ULONGLONG LastVidCheckTick;
+    BOOLEAN   CachedIsXbox;
+    BOOLEAN   VidCheckValid;
     /* Async XUSB input pump — holds pended IOCTL_XUSB_WAIT_FOR_INPUT
      * requests. WGI's XusbDevice::QueueInputBuffer (Windows.Gaming.Input.dll
      * @ 0x18006af0c) issues this IOCTL async via InputOutputIoctlAsync and
@@ -666,22 +675,33 @@ void CompanionIoControl(
          * DS4 SDK surfaces phantom XInput rumble packets. Fix: re-read the
          * CURRENT registry VendorId for this ControllerIndex every IOCTL.
          * If the index has been re-profiled to a non-Xbox controller, the
-         * current VendorId will not be 0x045E and we silently drop. Cheap
-         * — one small registry read, already done at init so the HKEY is
-         * warm. Safer than sampling at init because live-swap DOES update
-         * the registry before creating the new controller. */
-        BOOLEAN isXboxNow = FALSE;
+         * current VendorId will not be 0x045E and we silently drop. Safer
+         * than sampling ONCE at init because live-swap DOES update the
+         * registry before creating the new controller. Throttled to one
+         * read per 500 ms so a per-frame XInputSetState (many games call
+         * it every frame regardless of rumble change) does not force a
+         * per-frame registry round-trip; a re-profiled index is still
+         * caught within one window. */
+        BOOLEAN isXboxNow;
         {
-            HKEY hKey;
-            DWORD val = 0, sz = sizeof(val);
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
-                              0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-                if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL,
-                                     (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
-                    if ((USHORT)val == 0x045E) isXboxNow = TRUE;
+            ULONGLONG now = GetTickCount64();
+            if (!ctx->VidCheckValid || (now - ctx->LastVidCheckTick) >= 500) {
+                BOOLEAN xbox = FALSE;
+                HKEY hKey;
+                DWORD val = 0, sz = sizeof(val);
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
+                                  0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                    if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL,
+                                         (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
+                        if ((USHORT)val == 0x045E) xbox = TRUE;
+                    }
+                    RegCloseKey(hKey);
                 }
-                RegCloseKey(hKey);
+                ctx->CachedIsXbox = xbox;
+                ctx->VidCheckValid = TRUE;
+                ctx->LastVidCheckTick = now;
             }
+            isXboxNow = ctx->CachedIsXbox;
         }
 
         PVOID rumbleBuf; size_t rumbleSize;

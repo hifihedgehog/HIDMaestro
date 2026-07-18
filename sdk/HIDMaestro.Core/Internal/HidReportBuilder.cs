@@ -727,9 +727,14 @@ public class HidReportBuilder
                     try { usage = Convert.ToUInt16(kvp.Key, 16); }
                     catch { continue; }
                     if (usage <= 0xFF) usage |= 0x0100;
-                    string role = kvp.Value.ToLowerInvariant();
-                    if (role == "lefttrigger")  canonicalLt = (HMAxis)usage;
-                    else if (role == "righttrigger") canonicalRt = (HMAxis)usage;
+                    // Allocation-free compare (audit 1n): the prior
+                    // ToLowerInvariant allocated a string per axisMap entry
+                    // per frame on this combined-trigger hot path. Matches
+                    // the HMController.ResolveTrigger sibling's approach.
+                    if (string.Equals(kvp.Value, "lefttrigger", StringComparison.OrdinalIgnoreCase))
+                        canonicalLt = (HMAxis)usage;
+                    else if (string.Equals(kvp.Value, "righttrigger", StringComparison.OrdinalIgnoreCase))
+                        canonicalRt = (HMAxis)usage;
                 }
             }
             var leftFieldKey  = (HMAxis)((LeftTrigger.UsagePage  << 8) | LeftTrigger.Usage);

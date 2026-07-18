@@ -58,6 +58,60 @@
     "notes": {
       "type": ["string", "null"],
       "description": "Implementation notes, caveats, or special behavior."
+    },
+    "nativeDescriptor": {
+      "type": ["string", "null"],
+      "description": "Record-keeping only: the original captured descriptor hex, preserved verbatim when the shipped 'descriptor' was edited. Not deserialized by the loader."
+    },
+    "layout": {
+      "type": ["object", "null"],
+      "description": "Physical layout for consumer mapping/binding UIs: sticks, triggers, dpad, faceButtons, shoulderButtons, systemButtons, imu, haptics, etc. Bound to HMLayout (camelCase keys, case-insensitive)."
+    },
+    "buttonMap": {
+      "type": ["array", "null"],
+      "items": { "type": "integer" },
+      "description": "Maps declared descriptor button indices to canonical button positions."
+    },
+    "triggerButtons": {
+      "type": ["array", "null"],
+      "items": { "type": "integer" },
+      "description": "Button indices that represent digital trigger clicks (LT/RT as buttons)."
+    },
+    "axisMap": {
+      "type": ["object", "null"],
+      "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles."
+    },
+    "triggerMode": {
+      "type": ["string", "null"],
+      "description": "Descriptor trigger encoding hint (e.g. 'combined', 'separate'). Describes wire encoding, not DirectInput presentation."
+    },
+    "driverMode": {
+      "type": ["string", "null"],
+      "description": "Special driver binding, e.g. 'xinputhid' for Xbox-family kernel-filter profiles."
+    },
+    "driverPid": {
+      "type": ["string", "integer", "null"],
+      "description": "Override PID reported to the driver/companion when it must differ from the HID-attribute PID."
+    },
+    "versionNumber": {
+      "type": ["integer", "null"],
+      "description": "HidD_GetAttributes VersionNumber override. Sony DS4 BT ships 0 so Chromium selects the BT report layout."
+    },
+    "inputDefaults": {
+      "type": ["array", "null"],
+      "description": "Fixed on-wire byte overlays applied after report build (e.g. DS5 Edge activeProfile status byte). Each entry is { byte, value }."
+    },
+    "extendedReport": {
+      "type": ["object", "null"],
+      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11): { reportId, size, armOn, fields[] }. Drives VendorBlobCodec.EncodeInput."
+    },
+    "extendedOutputReport": {
+      "type": ["object", "null"],
+      "description": "Data-driven vendor-blob OUTPUT spec (rumble/lightbar/triggers): { reportId, size, fields[] }. Drives VendorBlobCodec.EncodeOutput/Decode."
+    },
+    "companionOnly": {
+      "type": ["boolean", "null"],
+      "description": "If true, this profile creates only the XUSB companion, no HID child. No shipped profile currently sets it."
     }
   }
 }

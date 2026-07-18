@@ -170,8 +170,7 @@ Console.WriteLine("  PID FFB enabled on ctrl0 (Pool + initial State published)")
 //                         on unsigned. Discovery via Profile.Sticks / .Triggers.
 //   Buttons               HMButton flags (A, B, X, Y, LB, RB, …)
 //   Hat                   HMHat enum + HatDegrees / HatHundredths / HatRaw
-//   Touchpad              TouchpadFinger0Active/X/Y/Id, TouchpadFinger1*,
-//                         TouchpadPacketCounter
+//   Touchpad              TouchpadFinger0Active/X/Y/Id, TouchpadFinger1*
 //   IMU                   GyroPitch/Yaw/Roll, AccelX/Y/Z (int16),
 //                         SensorTimestamp (uint32 µs)
 //   Battery + housekeeping BatteryLevel (0..10), BatteryCharging,
@@ -217,7 +216,6 @@ while (sw.ElapsedMilliseconds < 5_000)
         TouchpadFinger0X      = (ushort)(960 + 800 * Math.Cos(angle)),
         TouchpadFinger0Y      = (ushort)(540 + 400 * Math.Sin(angle)),
         TouchpadFinger0Id     = 1,
-        TouchpadPacketCounter = (byte)((int)(t * 100) & 0xFF),
         GyroPitch             = (short)(2000 * Math.Sin(angle * 0.3)),
         GyroYaw               = (short)(2000 * Math.Cos(angle * 0.3)),
         GyroRoll              = 0,
