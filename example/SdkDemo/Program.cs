@@ -892,5 +892,50 @@ Console.WriteLine("\n  12d. Switch Pro Controller — SubmitRawReport with gyro"
     Thread.Sleep(1500);
 }
 
-Console.WriteLine("\n=== Demo complete — disposing all controllers ===");
+// ── 13. Virtual VR controllers (SteamVR) ─────────────────────────────
+// A different device class entirely: no HID descriptor, no devnode. The
+// device is HIDMaestro's embedded OpenVR driver inside SteamVR's
+// vrserver.exe, and HMVRController is the handle that drives it.
+//
+// The ONE dependency the user needs: SteamVR (free, Steam app 250820).
+// Gate on IsSteamVRInstalled and point the user at the store page when
+// it is false; nothing else on the machine is required.
+//
+// The shapes it can mimic are the HMVRProfile values:
+//   ValveIndexController      "knuckles" (A/B, trigger, grip force,
+//                             thumbstick, trackpad, finger curls, haptic)
+//   MicrosoftMotionController "holographic_controller" (menu, grip,
+//                             trigger, trackpad AND thumbstick, haptic)
+//   KhrSimpleController       generic (system, menu, trigger, grip, haptic)
+if (!HMVRController.IsSteamVRInstalled)
+{
+    Console.WriteLine("\n  VR: SteamVR not installed. Skipping the VR demo.");
+    Console.WriteLine("      Install SteamVR from Steam (steam://install/250820) to enable virtual VR controllers.");
+}
+else
+{
+    Console.WriteLine("\n  VR: SteamVR found. Creating a Valve Index pair...");
+    using var leftHand = ctx.CreateVRController(HMVRProfile.ValveIndexController, HMVRHand.Left);
+    using var rightHand = ctx.CreateVRController(HMVRProfile.ValveIndexController, HMVRHand.Right);
+
+    // Haptics arrive per hand the way rumble arrives on OutputReceived.
+    rightHand.HapticReceived += (c, e) =>
+        Console.WriteLine($"  VR haptic on {c.Hand}: amp={e.Amplitude:F2} dur={e.Duration:F3}s freq={e.Frequency:F0}Hz");
+
+    // Full-state frames at a steady rate, same discipline as SubmitState
+    // on the HID side. Pull the right trigger over ~1.5 s.
+    var vrState = new HMVRState();
+    for (int i = 0; i <= 30; i++)
+    {
+        vrState.SetScalar(HMVRScalar.TriggerValue, i / 30f);
+        vrState.SetButton(HMVRButton.TriggerClick, i == 30);
+        rightHand.SubmitState(vrState);
+        leftHand.SubmitState(default);
+        Thread.Sleep(50);
+    }
+    Console.WriteLine($"  VR controllers driven (SteamVR attached: {rightHand.DriverConnected}).");
+    Console.WriteLine("  They appear in SteamVR while this process runs and report disconnected on dispose.");
+}
+
+Console.WriteLine("\n=== Demo complete. Disposing all controllers ===");
 // using-statements handle cleanup of all controllers and ctx.

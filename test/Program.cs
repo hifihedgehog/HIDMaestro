@@ -74,11 +74,16 @@ partial class Program
         // Read-only introspection commands run fine without admin. Everything
         // else needs SeLoadDriverPrivilege for device create / driver install /
         // registry cleanup.
-        bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is
+        bool readOnlyCmd = args.Length > 0 && (args[0].ToLowerInvariant() is
             "list" or "search" or "info" or
             "build-descriptor" or "extract-profile" or
             "probe-xusb" or "xusb-vibrate" or
-            "make-custom-profile";  // pure file-IO + descriptor synthesis, no PnP
+            "make-custom-profile"   // pure file-IO + descriptor synthesis, no PnP
+            || (args[0].ToLowerInvariant() == "vr" && args.Length == 1));
+            // bare "vr" is the status form: registry + process-list reads
+            // only, so a non-admin user can answer "what do I need to
+            // download and what shapes can it mimic". "vr <shape>" creates
+            // the Global\ section + HKLM gate and needs elevation.
 
         // Single-instance: kill any other HIDMaestroTest processes — but NEVER for
         // read-only probes, which must coexist with a running emulate.
@@ -141,6 +146,8 @@ partial class Program
             Console.WriteLine("  HIDMaestroTest extract-profile <vid> <pid>");
             Console.WriteLine("                                        Emit HIDMaestro profile JSON for the device");
             Console.WriteLine("  HIDMaestroTest emulate-file <path>    Create a virtual from a profile JSON on disk");
+            Console.WriteLine("  HIDMaestroTest vr                      VR status: SteamVR dependency + mimickable shapes");
+            Console.WriteLine("  HIDMaestroTest vr <shape> [hand]       Create virtual SteamVR controller(s) + test pattern");
             Console.WriteLine("\nMust run elevated.");
             return 1;
         }
@@ -163,8 +170,152 @@ partial class Program
             "probe-xusb" => ProbeXusb(),
             "xusb-vibrate" => XusbVibrate(args.Skip(1).ToArray()),
             "latency"  => LatencyBench(args.Skip(1).ToArray()),
+            "vr"       => VrCommand(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
+    }
+
+    // ── vr ──
+    //
+    // Two forms:
+    //   vr                       status: the SteamVR dependency + the shapes
+    //   vr <shape> [hand]        create controller(s) + drive a test pattern
+    //
+    // The status form answers the two questions a consumer's user has:
+    // "what do I need to download" (SteamVR, nothing else) and "what can
+    // it pretend to be" (the HMVRProfile shapes).
+    static readonly (HMVRProfile Profile, string Id, string Name, string Components)[] s_vrShapes =
+    {
+        (HMVRProfile.ValveIndexController, "index",
+         "Valve Index controller (\"knuckles\")",
+         "A/B, system, analog trigger, grip value+force, thumbstick, trackpad+force, finger curls, haptic"),
+        (HMVRProfile.MicrosoftMotionController, "wmr",
+         "Windows Mixed Reality motion controller",
+         "menu, system, grip, analog trigger, clickable trackpad AND thumbstick, haptic"),
+        (HMVRProfile.KhrSimpleController, "simple",
+         "Generic simple controller",
+         "system, menu, trigger, grip, haptic"),
+    };
+
+    static int VrCommand(string[] args)
+    {
+        Console.WriteLine("=== HIDMaestro virtual VR controllers ===\n");
+
+        bool installed = HMVRController.IsSteamVRInstalled;
+        Console.WriteLine($"  Dependency: SteamVR (free, Steam app 250820) ... {(installed ? "INSTALLED" : "NOT FOUND")}");
+        if (!installed)
+        {
+            Console.WriteLine("    -> Install SteamVR from Steam (search \"SteamVR\" or steam://install/250820).");
+            Console.WriteLine("       That is the only download VR output needs; the HID side needs nothing from Steam.");
+        }
+        bool running = System.Diagnostics.Process.GetProcessesByName("vrserver").Length > 0;
+        Console.WriteLine($"  SteamVR running: {(running ? "yes" : "no")}");
+
+        Console.WriteLine("\n  Mimickable shapes:");
+        foreach (var s in s_vrShapes)
+            Console.WriteLine($"    {s.Id,-8} {s.Name}\n             {s.Components}");
+
+        if (args.Length == 0)
+        {
+            Console.WriteLine("\n  Run \"HIDMaestroTest vr <shape> [left|right|both]\" to create and drive one (default both).");
+            return 0;
+        }
+
+        string shapeArg = args[0].ToLowerInvariant();
+        var shape = s_vrShapes.FirstOrDefault(s => s.Id == shapeArg);
+        if (shape.Name == null)
+            return Error($"Unknown shape: {args[0]}  (use: index, wmr, simple)");
+
+        string handArg = args.Length > 1 ? args[1].ToLowerInvariant() : "both";
+        bool wantLeft = handArg is "left" or "both";
+        bool wantRight = handArg is "right" or "both";
+        if (!wantLeft && !wantRight)
+            return Error($"Unknown hand: {args[1]}  (use: left, right, both)");
+
+        if (!installed)
+            return Error("SteamVR is not installed; see above.");
+
+        var controllers = new System.Collections.Generic.List<HMVRController>();
+        try
+        {
+            if (wantLeft)
+            {
+                var c = new HMVRController(shape.Profile, HMVRHand.Left);
+                c.Connect();
+                controllers.Add(c);
+            }
+            if (wantRight)
+            {
+                var c = new HMVRController(shape.Profile, HMVRHand.Right);
+                c.Connect();
+                controllers.Add(c);
+            }
+        }
+        catch (Exception ex)
+        {
+            foreach (var c in controllers) c.Dispose();
+            return Error($"VR connect failed: {ex.Message}");
+        }
+
+        foreach (var c in controllers)
+        {
+            var hand = c.Hand;
+            c.HapticReceived += (_, e) =>
+                Console.WriteLine($"  [haptic {hand}] amp={e.Amplitude:F2} dur={e.Duration:F3}s freq={e.Frequency:F0}Hz");
+        }
+
+        Console.WriteLine($"\n  Created {controllers.Count} controller(s): {shape.Name}");
+        Console.WriteLine("  Driver registered with SteamVR; controllers appear while this app runs.");
+        if (!running)
+            Console.WriteLine("  Start SteamVR to see them (they connect the moment vrserver loads the driver).");
+        Console.WriteLine("\n  Driving test pattern at 90 Hz. Commands: pause / resume / quit");
+
+        bool quit = false, paused = false;
+        var pump = new Thread(() =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var state = new HMVRState();
+            while (!Volatile.Read(ref quit))
+            {
+                if (!Volatile.Read(ref paused))
+                {
+                    double t = sw.Elapsed.TotalSeconds;
+                    // Slow full-range sweep: trigger 0..1, thumbstick circle,
+                    // one button toggling every second.
+                    state.SetScalar(HMVRScalar.TriggerValue, (float)(0.5 + 0.5 * Math.Sin(t)));
+                    state.SetScalar(HMVRScalar.ThumbstickX, (float)Math.Sin(t * 1.7));
+                    state.SetScalar(HMVRScalar.ThumbstickY, (float)Math.Cos(t * 1.7));
+                    state.SetScalar(HMVRScalar.TrackpadX, (float)Math.Sin(t * 0.9));
+                    state.SetScalar(HMVRScalar.TrackpadY, (float)Math.Cos(t * 0.9));
+                    state.SetScalar(HMVRScalar.GripValue, (float)(0.5 + 0.5 * Math.Sin(t * 0.6)));
+                    state.SetButton(HMVRButton.AClick, ((long)t & 1) == 0);
+                    state.SetButton(HMVRButton.BClick, ((long)t & 1) == 1);
+                    state.SetButton(HMVRButton.TriggerClick, Math.Sin(t) > 0.9);
+                    foreach (var c in controllers)
+                        c.SubmitState(state);
+                }
+                Thread.Sleep(11); // ~90 Hz
+            }
+        })
+        { IsBackground = true, Name = "VrTestPattern" };
+        pump.Start();
+
+        while (!quit)
+        {
+            string? line = Console.ReadLine();
+            switch (line?.Trim().ToLowerInvariant())
+            {
+                case "quit" or "exit" or "q": quit = true; break;
+                case "pause": paused = true; Console.WriteLine("  paused"); break;
+                case "resume": paused = false; Console.WriteLine("  resumed"); break;
+                case null: quit = true; break;
+            }
+        }
+
+        pump.Join(1000);
+        foreach (var c in controllers) c.Dispose();
+        Console.WriteLine("  Disconnected. Controllers now report disconnected in SteamVR.");
+        return 0;
     }
 
     // ── emulate ──

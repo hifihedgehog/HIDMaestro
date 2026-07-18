@@ -178,6 +178,14 @@ public sealed class HMVRController : IDisposable
     /// <see cref="HMController.OutputReceived"/>.</summary>
     public event Action<HMVRController, HMVRHapticEventArgs>? HapticReceived;
 
+    /// <summary>The one dependency a user must have for virtual VR
+    /// controllers: SteamVR (free, Steam app 250820). True when SteamVR
+    /// is installed on this machine (its vrpathreg.exe was located).
+    /// Consumers should check this before offering VR output and point
+    /// the user at the SteamVR store page when false. The HID side of
+    /// HIDMaestro needs nothing from Steam; this gate is VR-only.</summary>
+    public static bool IsSteamVRInstalled => VrDriverBuilder.LocateVrPathReg() != null;
+
     /// <summary>True if a SteamVR server process is currently running.</summary>
     public bool SteamVRRunning => VrDriverBuilder.IsSteamVRRunning();
 

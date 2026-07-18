@@ -4,6 +4,8 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
+rem  - Runs the VR controller smoke probe (phased: IPC always; vrpathreg
+rem    and live-SteamVR asserts only where SteamVR exists, SKIP elsewhere)
 rem  - Runs the full live-swap regression battery (23 scenarios, ~32 min)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
@@ -64,11 +66,33 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+dotnet build test\probes\vr_controller_smoke\VrControllerSmoke.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] VrControllerSmoke build failed.
+    popd
+    exit /b 2
+)
 echo       BUILD OK
 echo.
 
-rem 3. Run the full regression battery
-echo [2/3] Running live-swap regression battery (23 scenarios, ~32 min)...
+rem 3. VR controller smoke. Phased by design: the IPC-channel asserts
+rem    always run; the vrpathreg and live-vrserver asserts run only when
+rem    SteamVR is installed/running and SKIP otherwise, so this step is
+rem    meaningful on any box and exhaustive on a SteamVR box. Exit 1 from
+rem    the probe is a real FAIL, never a missing dependency.
+echo [2/4] Running VR controller smoke probe...
+test\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\VrControllerSmoke.exe
+if errorlevel 1 (
+    echo ====================================================================
+    echo  [FAIL] VR smoke probe failed. DO NOT TAG OR RELEASE.
+    echo ====================================================================
+    popd
+    exit /b 1
+)
+echo.
+
+rem 4. Run the full regression battery
+echo [3/4] Running live-swap regression battery (23 scenarios, ~32 min)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -83,10 +107,10 @@ if %BATTERY_EXIT% neq 0 (
     exit /b 1
 )
 
-echo [3/3] Validation complete.
+echo [4/4] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] 23/23 scenarios passed. Safe to:
+echo  [PASS] VR smoke + 23/23 swap scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...

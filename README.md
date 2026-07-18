@@ -134,6 +134,31 @@ using var ctrl = ctx.CreateController(custom);
 
 Adding a controller to HIDMaestro is a data change. Adding one to a code-per-device emulator means writing and compiling a new device implementation. That difference is the whole point of the profile system.
 
+### Virtual VR controllers (SteamVR)
+
+HIDMaestro can also present virtual VR controllers to SteamVR through an embedded OpenVR driver. This is a separate device class from everything above: no HID descriptor, no device node. The driver lives inside SteamVR's `vrserver.exe` and your app drives it through `HMVRController`.
+
+**Dependency: SteamVR, nothing else.** It is free on Steam (app 250820, `steam://install/250820`). Check `HMVRController.IsSteamVRInstalled` before offering VR output and point the user at that install link when it is false. The HID side of HIDMaestro needs nothing from Steam.
+
+**Shapes it can mimic** (`HMVRProfile`):
+
+| Shape | SteamVR identity | Inputs |
+|---|---|---|
+| `ValveIndexController` | `knuckles` | A/B, system, analog trigger, grip value + force, thumbstick, trackpad with force, per-finger curls, haptic |
+| `MicrosoftMotionController` | `holographic_controller` | menu, system, grip, analog trigger, clickable trackpad AND thumbstick, haptic |
+| `KhrSimpleController` | generic | system, menu, trigger, grip, haptic |
+
+```csharp
+using var rightHand = ctx.CreateVRController(HMVRProfile.ValveIndexController, HMVRHand.Right);
+rightHand.HapticReceived += (c, e) => MyRumble(e.Amplitude, e.Duration);
+var vr = new HMVRState();
+vr.SetScalar(HMVRScalar.TriggerValue, 0.8f);
+vr.SetButton(HMVRButton.AClick, true);
+rightHand.SubmitState(vr);   // steady full-state frames, 60-250 Hz
+```
+
+Controllers appear in SteamVR only while your app runs and report disconnected when it exits. v1 is input + haptics with no positional tracking. The controllers are bindable in any SteamVR game, and pose injection is planned. `HIDMaestroTest vr` prints the dependency status and shape list; `HIDMaestroTest vr index` creates a live pair.
+
 ## Getting Started
 
 Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10.
