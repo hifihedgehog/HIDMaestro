@@ -904,24 +904,23 @@ static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
         reply[48] = 0xC8;                    /* nxbt report[49], -1 for RID */
         break;
 
-    case 0x30:  /* Set player lights */
-        if (argLen >= 1) ctx->SwitchPlayerLights = args[0];
-        break;
-
     case 0x40:  /* Enable/disable IMU streaming */
         if (argLen >= 1) ctx->SwitchImuEnabled = (args[0] != 0);
         break;
 
-    case 0x48:  /* Enable vibration (nxbt: ACK 0x82) */
+    case 0x48:  /* Enable vibration (nxbt: ACK 0x82). The arg is not
+                 * tracked driver-side: rumble decode is SDK-side off the
+                 * raw 0x01/0x10 publish, and player lights (0x30 below)
+                 * likewise reach consumers through the raw 0x01 lane. */
         reply[13] = 0x82;
-        if (argLen >= 1) ctx->SwitchVibrationEnabled = (args[0] != 0);
         break;
 
-    case 0x06:  /* Set HCI state    */
-    case 0x08:  /* Set shipment     */
-    case 0x22:  /* Set NFC/IR state */
-    case 0x38:  /* Set HOME light   */
-    case 0x41:  /* IMU sensitivity  */
+    case 0x06:  /* Set HCI state     */
+    case 0x08:  /* Set shipment      */
+    case 0x22:  /* Set NFC/IR state  */
+    case 0x30:  /* Set player lights */
+    case 0x38:  /* Set HOME light    */
+    case 0x41:  /* IMU sensitivity   */
     default:    /* Unknown: generic ACK, keep streaming, never NACK. */
         break;
     }

@@ -839,8 +839,9 @@ Console.WriteLine("\n  12c. DualSense — SubmitState + SubmitRawReport for touc
 // report 0x30 at the wire's 60 Hz, so SDL's HIDAPI driver and Steam
 // complete their handshake against it. Consumers just SubmitState:
 // buttons/sticks map through the profile layout, and the calibrated IMU
-// channel (AccelG* in g, GyroDps* in deg/s, Switch frame: +X toward the
-// player, +Y left, +Z up) rides the same call. Rumble comes back on
+// channel (AccelG* in g, GyroDps* in deg/s, SDL-standard sensor frame:
+// +X right, +Y up, +Z toward the player; the packer owns the wire-frame
+// conversion) rides the same call. Rumble comes back on
 // OutputDecoded as leftMotor/rightMotor bytes.
 Console.WriteLine("\n  12d. Switch Pro Controller: SubmitState with IMU");
 {
@@ -862,8 +863,8 @@ Console.WriteLine("\n  12d. Switch Pro Controller: SubmitState with IMU");
     var swState = new HMGamepadState
     {
         Buttons = (HMButton)(1u << 1),
-        AccelGZ = 1.0f,      // 1 g: flat on the table
-        GyroDpsY = 35.0f,    // gentle tilt around Y
+        AccelGY = 1.0f,      // 1 g: flat on the table (SDL frame: +Y up)
+        GyroDpsY = 35.0f,    // gentle yaw (SDL frame)
     };
     for (int i = 0; i < 60; i++)
     {

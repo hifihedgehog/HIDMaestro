@@ -79,16 +79,27 @@ internal static class SwitchProPacker
         // IMU: three 5 ms frames per report. One SubmitState carries one
         // sample; emit it three times (SDL keys sensor delivery on frame
         // content, and its per-frame timestamps advance regardless).
-        short ax = ImuRaw(state.AccelGX, 4096.0f);
-        short ay = ImuRaw(state.AccelGY, 4096.0f);
-        short az = ImuRaw(state.AccelGZ, 4096.0f);
+        //
+        // The channel is defined in the SDL-standard sensor frame and the
+        // packer owns the conversion to the Switch wire frame (issue #33
+        // spec point 5: "the conversion lives in ONE place, the packer").
+        // SDL's SendSensorUpdate maps wire->SDL for a Pro Controller as
+        //   sdl[0] = -wireY, sdl[1] = +wireZ, sdl[2] = -wireX
+        // (SDL_hidapi_switch.c:3204-3219, both sensors), so the inverse
+        // packed here is
+        //   wireX = -sdlZ, wireY = -sdlX, wireZ = +sdlY
+        // and a consumer-submitted SDL-frame vector round-trips to the
+        // identical SDL-frame vector on the client.
+        short ax = ImuRaw(-state.AccelGZ, 4096.0f);
+        short ay = ImuRaw(-state.AccelGX, 4096.0f);
+        short az = ImuRaw(state.AccelGY, 4096.0f);
         // Gyro raw = deg/s x 13371/936: the exact inverse of SDL's
         // LoadIMUCalibration scale with the coefficients the driver's
         // fabricated SPI image serves (0x343B, zero origin).
         const float gyroScale = 13371.0f / 936.0f;
-        short gx = ImuRaw(state.GyroDpsX, gyroScale);
-        short gy = ImuRaw(state.GyroDpsY, gyroScale);
-        short gz = ImuRaw(state.GyroDpsZ, gyroScale);
+        short gx = ImuRaw(-state.GyroDpsZ, gyroScale);
+        short gy = ImuRaw(-state.GyroDpsX, gyroScale);
+        short gz = ImuRaw(state.GyroDpsY, gyroScale);
         for (int frame = 0; frame < 3; frame++)
         {
             int o = 12 + frame * 12;

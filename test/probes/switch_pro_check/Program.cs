@@ -308,8 +308,8 @@ internal static class Program
                 [HMAxis.X] = 1.0f,   // left stick X full right
                 [HMAxis.Y] = 0.0f,   // left stick Y full up (HID: 0 = up)
             },
-            AccelGZ = 1.0f,          // gravity at rest
-            GyroDpsY = 100.0f,
+            AccelGY = 1.0f,          // gravity at rest (SDL frame: +Y up)
+            GyroDpsY = 100.0f,       // yaw-left (SDL frame)
         };
         ctrl.SubmitState(pressed);
         Thread.Sleep(50);
@@ -324,12 +324,17 @@ internal static class Program
             int ly = (f[7] >> 4) | (f[8] << 4);
             Check("left stick X full right (~0xE00)", Math.Abs(lx - 0xE00) <= 8, $"0x{lx:X3}");
             Check("left stick Y full up (~0xE00, wire up-positive)", Math.Abs(ly - 0xE00) <= 8, $"0x{ly:X3}");
-            // IMU frame 0 at bytes 13..24: az int16 LE = 4096 (1 g),
-            // gy = round(100 * 13371/936) = 1428.
-            short az = (short)(f[17] | (f[18] << 8));
-            short gy = (short)(f[21] | (f[22] << 8));
-            Check("accel Z = 1 g (raw 4096)", az == 4096, $"raw {az}");
-            Check("gyro Y = 100 dps (raw 1428)", Math.Abs(gy - 1428) <= 1, $"raw {gy}");
+            // IMU frame 0 at bytes 13..24. Packer inverse of SDL's
+            // wire->SDL map (sdl = (-Y, +Z, -X)): AccelGY=1 (SDL +Y up)
+            // lands on WIRE Z = +4096; GyroDpsY=100 (SDL yaw) lands on
+            // WIRE Z = +round(100 * 13371/936) = 1429; wire X/Y stay 0.
+            short wax = (short)(f[13] | (f[14] << 8));
+            short way = (short)(f[15] | (f[16] << 8));
+            short waz = (short)(f[17] | (f[18] << 8));
+            short wgz = (short)(f[23] | (f[24] << 8));
+            Check("accel: SDL +Y maps to wire Z = 4096", waz == 4096, $"raw {waz}");
+            Check("accel: wire X/Y stay zero", wax == 0 && way == 0, $"x={wax} y={way}");
+            Check("gyro: SDL yaw maps to wire Z = 1429", Math.Abs(wgz - 1429) <= 1, $"raw {wgz}");
         }
 
         // ── Phase 5: rumble decode ──────────────────────────────────────

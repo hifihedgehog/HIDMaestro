@@ -132,32 +132,43 @@ public struct HMGamepadState
     // Optional motion channel for profiles whose layout declares imu
     // (issue #33: Switch Pro 0x30 streaming). Accel in g, gyro in deg/s.
     //
-    // Frame (Switch convention, dekuNukem imu_sensor_notes.md): with the
-    // controller held flat, sticks up: +X points toward the player (out
-    // the front face), +Y points left, +Z points up. Gyro angular
-    // velocity follows the right-hand rule around the same axes. The
-    // SDK's per-profile packer converts to wire units (Switch: raw =
-    // g x 4096, deg/s x 13371/936); consumers submit physical units and
-    // never touch firmware scaling. Distinct from the RAW shorts above,
-    // which carry Sony-firmware units for the extendedReport codec path.
+    // Frame: the SDL-STANDARD sensor frame, the cross-controller
+    // convention SDL normalizes every pad to ("shuffled to match
+    // PlayStation controllers ... users will want consistent axis
+    // mappings across devices", SDL_hidapi_switch.c SendSensorUpdate).
+    // With the controller held flat, sticks up: +X right, +Y up through
+    // the top face (~+1.0 g at rest), +Z toward the player. Gyro is
+    // angular velocity, right-hand rule around the same axes.
+    //
+    // Consumers that read motion FROM SDL (PadForge's MotionSnapshot)
+    // submit those values verbatim. The per-profile packer owns the
+    // conversion to each wire's native frame and units (Switch:
+    // SwitchProPacker permutes SDL->wire and scales g x 4096,
+    // deg/s x 13371/936), so an SDL-reading consumer's vector
+    // round-trips bit-consistent to SDL on the client side. Distinct
+    // from the RAW shorts above, which carry Sony-firmware units for
+    // the extendedReport codec path.
 
-    /// <summary>Accelerometer X in g (Switch frame: + toward the player).</summary>
+    /// <summary>Accelerometer X in g (SDL sensor frame: + right).</summary>
     public float AccelGX;
 
-    /// <summary>Accelerometer Y in g (Switch frame: + left).</summary>
+    /// <summary>Accelerometer Y in g (SDL sensor frame: + up; ~1.0 at
+    /// rest, flat on a table).</summary>
     public float AccelGY;
 
-    /// <summary>Accelerometer Z in g (Switch frame: + up; ~1.0 at rest,
-    /// flat on a table).</summary>
+    /// <summary>Accelerometer Z in g (SDL sensor frame: + toward the
+    /// player).</summary>
     public float AccelGZ;
 
-    /// <summary>Gyro X in deg/s (right-hand rule around accel X).</summary>
+    /// <summary>Gyro X in deg/s (right-hand rule around accel X:
+    /// pitch-up positive).</summary>
     public float GyroDpsX;
 
-    /// <summary>Gyro Y in deg/s.</summary>
+    /// <summary>Gyro Y in deg/s (yaw-left positive).</summary>
     public float GyroDpsY;
 
-    /// <summary>Gyro Z in deg/s.</summary>
+    /// <summary>Gyro Z in deg/s (roll toward the player's left,
+    /// positive).</summary>
     public float GyroDpsZ;
 
     // ── Battery + housekeeping ────────────────────────────────────────────

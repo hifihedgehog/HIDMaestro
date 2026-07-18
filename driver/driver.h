@@ -180,8 +180,6 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
     UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
     BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
-    BOOLEAN SwitchVibrationEnabled; /* subcommand 0x48 arg */
-    UCHAR   SwitchPlayerLights;     /* subcommand 0x30 arg */
     UCHAR   SwitchTimer;            /* timer byte, ++ per served report */
     UCHAR   SwitchMac[6];           /* fabricated, stable per index */
 #define HIDMAESTRO_SWITCH_REPLY_SLOTS 4

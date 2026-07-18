@@ -47,6 +47,9 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool SetDllDirectoryW(string path);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr LoadLibraryW(string path);
+
     [DllImport(SDL)] static extern bool SDL_SetHint(string name, string value);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     delegate void SdlLogFn(IntPtr userdata, int category, int priority, IntPtr message);
@@ -71,6 +74,9 @@ internal static class Program
     [DllImport(SDL)] static extern bool SDL_SetGamepadSensorEnabled(IntPtr gamepad, int type, bool enabled);
     [DllImport(SDL)] static extern bool SDL_GetGamepadSensorData(IntPtr gamepad, int type, float[] data, int num);
     [DllImport(SDL)] static extern bool SDL_RumbleGamepad(IntPtr gamepad, ushort low, ushort high, uint ms);
+    [DllImport(SDL)] static extern int SDL_hid_init();
+    [DllImport(SDL)] static extern IntPtr SDL_hid_enumerate(ushort vid, ushort pid);
+    [DllImport(SDL)] static extern void SDL_hid_free_enumeration(IntPtr devs);
 
     const uint SDL_INIT_GAMEPAD = 0x00002000;
     const int BUTTON_SOUTH = 0, BUTTON_EAST = 1;
@@ -95,11 +101,16 @@ internal static class Program
         // several candidates; SKIP when none exists.
         string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
             "..", "..", "..", "..", "..", ".."));
-        // Root first: the runnable set keeps SDL3.dll BESIDE
-        // libusb-1.0.dll, which this fork's HIDAPI loads at init.
-        // Pointing at build/Release alone leaves HIDAPI dead
-        // ("Couldn't load libusb") and SDL3 has no other backend for a
-        // non-Xbox HID pad.
+        // IMPORTANT: fork head (build/Release, the DLL PadForge ships)
+        // carries the HIDMaestro virtual-controller filter (SDL fork
+        // commit b318a5bbd1): hid_enumerate deliberately HIDES HIDMaestro
+        // virtuals so PadForge never ingests its own outputs. A full-stack
+        // run therefore needs an UNFILTERED SDL3 build; the SDL3-build
+        // ROOT copy (pre-filter February build) is the one on this box.
+        // Steam ships stock SDL without the filter, so this probe against
+        // an unfiltered build is the faithful Steam-side stand-in.
+        // The fork's HIDAPI loads libusb-1.0.dll at init; pre-load from
+        // the root so either candidate resolves it.
         string?[] candidates =
         {
             Path.Combine(repoRoot, "..", "SDL3-build"),
@@ -115,8 +126,11 @@ internal static class Program
             Console.WriteLine("  [SKIP] SDL3.dll not found beside the repo (SDL3-build checkout absent)");
             return 0;
         }
+        string libusb = Path.GetFullPath(Path.Combine(sdlDir, "..", "..", "libusb-1.0.dll"));
+        if (!File.Exists(libusb)) libusb = Path.Combine(sdlDir, "libusb-1.0.dll");
+        bool libusbLoaded = File.Exists(libusb) && LoadLibraryW(libusb) != IntPtr.Zero;
         SetDllDirectoryW(sdlDir);
-        Console.WriteLine($"  SDL3: {sdlDir}\\SDL3.dll");
+        Console.WriteLine($"  SDL3: {sdlDir}\\SDL3.dll (libusb {(libusbLoaded ? "preloaded" : "MISSING")})");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -179,11 +193,43 @@ internal static class Program
             }
             if (pad == IntPtr.Zero) Thread.Sleep(100);
         }
+        if (pad == IntPtr.Zero && SdlRevisionHasHmFilter())
+        {
+            Console.WriteLine("  [SKIP] this SDL3 build carries the fork's HIDMaestro virtual-controller");
+            Console.WriteLine("         filter (b318a5bbd1): hid_enumerate hides HIDMaestro pads by design.");
+            Console.WriteLine("         Full-stack validation needs an unfiltered (stock/pre-filter) SDL3.dll.");
+            SDL_Quit();
+            Volatile.Write(ref pumpStop, true);
+            pump.Join(1000);
+            return 0;
+        }
         Check("HIDAPI_DriverSwitch opens the virtual pad (init completed)",
             pad != IntPtr.Zero, $"after {sw.ElapsedMilliseconds} ms");
         if (pad == IntPtr.Zero)
         {
-            // Diagnostic: joystick-level view + last SDL error.
+            // Diagnostic: raw HIDAPI enumeration (below the joystick layer).
+            Console.WriteLine($"  [diag] SDL_hid_init = {SDL_hid_init()}");
+            IntPtr devs = SDL_hid_enumerate(0, 0);
+            int hidCount = 0;
+            IntPtr cur = devs;
+            while (cur != IntPtr.Zero)
+            {
+                // struct SDL_hid_device_info: path(ptr), vendor_id(u16), product_id(u16)...
+                string? dpath = Marshal.PtrToStringUTF8(Marshal.ReadIntPtr(cur, 0));
+                ushort dvid = (ushort)Marshal.ReadInt16(cur, IntPtr.Size);
+                ushort dpid = (ushort)Marshal.ReadInt16(cur, IntPtr.Size + 2);
+                if (dvid == 0x057E || hidCount < 6)
+                    Console.WriteLine($"  [diag] hid dev {dvid:X4}:{dpid:X4} {dpath}");
+                hidCount++;
+                // next pointer is the LAST field; walk via known offset: read next at end.
+                // SDL_hid_device_info layout ends with 'next'; use SDL3 struct: locate by scanning is fragile,
+                // so instead re-enumerate filtered:
+                break;
+            }
+            SDL_hid_free_enumeration(devs);
+            IntPtr swDevs = SDL_hid_enumerate(0x057E, 0x2009);
+            Console.WriteLine($"  [diag] hid_enumerate(057E,2009) = {(swDevs != IntPtr.Zero ? "FOUND" : "empty")}");
+            if (swDevs != IntPtr.Zero) SDL_hid_free_enumeration(swDevs);
             IntPtr jlist = SDL_GetJoysticks(out int jn);
             Console.WriteLine($"  [diag] joystick count: {jn}");
             for (int i = 0; i < jn; i++)
@@ -238,9 +284,13 @@ internal static class Program
         Check("enable gyro", SDL_SetGamepadSensorEnabled(pad, SENSOR_GYRO, true));
 
         // Sensor enable flips the driver into IMU streaming (subcommand
-        // 0x40); give a few frames, then read. Assert magnitudes so the
-        // Switch->SDL axis permutation stays out of the contract: 1 g
-        // accel ~= 9.81 m/s^2, 100 deg/s gyro ~= 1.745 rad/s.
+        // 0x40); give a few frames, then read. Gyro is asserted PER-AXIS
+        // (the wire->SDL gyro map is stable across the available builds).
+        // Accel is asserted by MAGNITUDE here: the unfiltered pre-filter
+        // build predates upstream's accel-axis alignment, so its accel
+        // permutation differs from head. The per-axis accel contract is
+        // locked byte-exact against HEAD source at the wire layer by
+        // switch_pro_check ("accel: SDL +Y maps to wire Z").
         float[] accel = new float[3], gyro = new float[3];
         bool sensorRead = Deadline(() =>
         {
@@ -250,9 +300,12 @@ internal static class Program
                 && Magnitude(accel) > 1.0f;
         }, 5000);
         Check("SDL_GetGamepadSensorData returns data", sensorRead);
-        float am = Magnitude(accel), gm = Magnitude(gyro);
-        Check("accel magnitude ~= 1 g (8.8..10.8 m/s^2)", am > 8.8f && am < 10.8f, $"|a|={am:F2}");
-        Check("gyro magnitude ~= 100 dps (1.57..1.92 rad/s)", gm > 1.57f && gm < 1.92f, $"|g|={gm:F3}");
+        float am = Magnitude(accel);
+        Check("accel magnitude ~= 1 g (8.8..10.8 m/s^2)", am > 8.8f && am < 10.8f,
+            $"a=({accel[0]:F2},{accel[1]:F2},{accel[2]:F2})");
+        Check("gyro round-trips on SDL +Y (1.745 +/- 0.05, others ~0)",
+            Math.Abs(gyro[1] - 1.74533f) < 0.05f && Math.Abs(gyro[0]) < 0.05f && Math.Abs(gyro[2]) < 0.05f,
+            $"g=({gyro[0]:F3},{gyro[1]:F3},{gyro[2]:F3})");
 
         // ── rumble round-trip ───────────────────────────────────────────
         int before = decoded10;
@@ -269,6 +322,24 @@ internal static class Program
     }
 
     static float Magnitude(float[] v) => MathF.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+
+    /// <summary>True when the loaded SDL3 is a fork-head build carrying the
+    /// HIDMaestro enumeration filter. Detected by revision string: the
+    /// filter landed after the 3.4.0 release branch point, and every
+    /// filtered build on this machine reports release-3.4.0-NNNN-g*.
+    /// Pre-filter builds report earlier dev revisions.</summary>
+    static bool SdlRevisionHasHmFilter()
+    {
+        try
+        {
+            string rev = Marshal.PtrToStringUTF8(SDL_GetRevision()) ?? "";
+            return rev.Contains("release-3.4.0-", StringComparison.OrdinalIgnoreCase)
+                || rev.Contains("release-3.5", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    [DllImport(SDL)] static extern IntPtr SDL_GetRevision();
 
     static bool Deadline(Func<bool> cond, int ms)
     {
