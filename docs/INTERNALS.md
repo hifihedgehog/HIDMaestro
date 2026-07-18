@@ -46,6 +46,14 @@ The encoder/decoder reaches the public input-state surface too. `HMGamepadState`
 
 DS4 Bluetooth vibration through the browser Gamepad API is fixed in v1.3.5 by setting the device's `HidD_GetAttributes` `VersionNumber` to 0 — the value Chromium's `DualShock4Controller::BusTypeFromVersionNumber` checks for the BT-format report header. Pre-v1.3.5 the SDK hardcoded `0x0100` (USB), Chromium picked the wrong wire layout, and the rumble bytes never reached the device. Profiles can now override `versionNumber` in JSON; `dualshock-4-v2-bt.json` ships with `0`. Steam Input never used this gate so v1.3.5 doesn't change Steam behavior either way.
 
+### Switch Pro Protocol Responder
+
+The Switch Pro Controller is not a passive HID device: hosts (SDL's `HIDAPI_DriverSwitch`, Steam, BetterJoy) drive a Nintendo init and subcommand protocol and stall without a device that answers. The generic report-builder cannot express request-reply, so `driver.c` carries a hardcoded responder keyed on VID 0x057E PID 0x2009 (protocol lives in code, layout in JSON, the same split as the Sony vendor-blob work).
+
+Three pieces. USB init commands (`80 01/02/03`) get their `81 xx` replies, with device type Pro and a stable fabricated MAC. Subcommands (output 0x01) get input-report 0x21 replies per the nxbt responder table, including SPI flash reads served from a fabricated image: factory stick calibration with center 0x800 and range 0x600, and IMU coefficients (0x4000 accel, 0x343B gyro) chosen so SDL's calibration math reduces exactly to its own default scales. Unknown subcommands get a generic ACK rather than nxbt's silent ignore, because SDL retries unanswered subcommands for ~500 ms where the Switch console does not. Input report 0x30 streams from a dedicated driver thread at the wire's ~60 Hz cadence, with the driver stamping timer and battery bytes over the consumer-submitted body.
+
+Consumers submit through the normal `SubmitState`: `SwitchProPacker` converts the layout-mapped buttons, 12-bit packed sticks, and the calibrated IMU channel (`HMGamepadState.AccelG*` in g, `GyroDps*` in deg/s) into the wire body. HD rumble comes back decoded to coarse `leftMotor`/`rightMotor` amplitudes on `OutputDecoded`, the same lane Sony rumble rides. `test/probes/switch_pro_check` replays SDL's exact init sequence over raw HID as the release gate.
+
 ### BTHLEDEVICE Bus Type Spoofing
 
 HIDAPI detects Bluetooth controllers by checking for `BTHLEDEVICE` in the device's CompatibleIDs. HIDMaestro sets this property from user mode during device creation, without Bluetooth hardware and without a kernel bus driver.

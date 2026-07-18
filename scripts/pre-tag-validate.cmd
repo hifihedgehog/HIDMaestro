@@ -45,7 +45,7 @@ if errorlevel 1 (
 )
 
 rem 2. Build SDK + test app + extractor at the current source version
-echo [1/3] Building SDK + driver + test apps...
+echo [1/4] Building SDK + driver + test apps...
 call scripts\build_all.cmd >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] build_all.cmd failed. Run it directly to see the error.
@@ -64,11 +64,32 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+dotnet build test\probes\switch_pro_check\SwitchProCheck.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] SwitchProCheck build failed.
+    popd
+    exit /b 2
+)
 echo       BUILD OK
 echo.
 
-rem 3. Run the full regression battery
-echo [2/3] Running live-swap regression battery (23 scenarios, ~32 min)...
+rem 3. Switch Pro protocol responder check (issue #33). Headless and
+rem    self-contained: creates the virtual pad, runs SDL's exact USB init
+rem    + subcommand sequence over raw HID, validates 0x30 streaming,
+rem    input/IMU round-trip, and rumble decode. 42 asserts, ~15 s.
+echo [2/4] Running Switch Pro protocol check...
+test\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProCheck.exe
+if errorlevel 1 (
+    echo ====================================================================
+    echo  [FAIL] Switch Pro protocol check failed. DO NOT TAG OR RELEASE.
+    echo ====================================================================
+    popd
+    exit /b 1
+)
+echo.
+
+rem 4. Run the full regression battery
+echo [3/4] Running live-swap regression battery (23 scenarios, ~32 min)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -83,10 +104,10 @@ if %BATTERY_EXIT% neq 0 (
     exit /b 1
 )
 
-echo [3/3] Validation complete.
+echo [4/4] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] 23/23 scenarios passed. Safe to:
+echo  [PASS] Switch Pro check + 23/23 swap scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...

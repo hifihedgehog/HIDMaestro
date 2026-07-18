@@ -16,3 +16,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("AxisAddressingCheck")]
 [assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]
 [assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]
+[assembly: InternalsVisibleTo("SwitchProCheck")]

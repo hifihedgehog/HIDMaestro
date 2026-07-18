@@ -154,7 +154,7 @@ typedef struct _DEVICE_CONTEXT {
     ULONG   OutputSeqNoLocal;       /* Last value we wrote (so we always increment) */
     ULONG   OutputWriteCount;       /* Stale-detection: writes since last re-open (#2) */
 
-    /* PID FFB state channel — consumer→driver state for HidD_GetFeature
+    /* PID FFB state channel. Consumer→driver state for HidD_GetFeature
      * responses on the canonical PID Report IDs (0x12 Block Load, 0x13
      * Pool, 0x14 State). Driver reads via seqlock on IOCTL_UMDF_HID_GET_
      * FEATURE; consumer writes via HMController.PublishPid* methods.
@@ -162,6 +162,34 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  PidStateMemHandle;
     PVOID   PidStateMemPtr;
     WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
+
+    /* ── Switch Pro protocol responder (issue #33) ─────────────────────
+     * Keyed on VID 0x057E PID 0x2009 at config-read time. The host
+     * (SDL's HIDAPI_DriverSwitch, Steam, BetterJoy) drives a Nintendo
+     * init + subcommand stream that a generic pass-through cannot
+     * answer; this state machine implements the device side per the
+     * cloned references (nxbt protocol.py, dekuNukem notes, SDL as the
+     * client under test).
+     *
+     * Reply injection: WRITE_REPORT synthesizes 0x81/0x21 input reports
+     * into a small ring; READ_REPORT serves ring entries ahead of the
+     * 0x30 stream. The ring + state bytes are guarded by InputLock
+     * (same lock READ_REPORT already takes). SwitchStreamThread serves
+     * input report 0x30 at ~60 Hz from the latest shared-memory body
+     * once the device is in full-report mode. */
+    BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
+    UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
+    BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
+    BOOLEAN SwitchVibrationEnabled; /* subcommand 0x48 arg */
+    UCHAR   SwitchPlayerLights;     /* subcommand 0x30 arg */
+    UCHAR   SwitchTimer;            /* timer byte, ++ per served report */
+    UCHAR   SwitchMac[6];           /* fabricated, stable per index */
+#define HIDMAESTRO_SWITCH_REPLY_SLOTS 4
+    UCHAR   SwitchReplies[HIDMAESTRO_SWITCH_REPLY_SLOTS][64];
+    ULONG   SwitchReplyCount;       /* pending replies in the ring */
+    ULONG   SwitchReplyRead;        /* next slot to serve */
+    HANDLE  SwitchStreamThread;
+    HANDLE  SwitchStreamStop;       /* unnamed manual-reset event */
 
 } DEVICE_CONTEXT, *PDEVICE_CONTEXT;
 

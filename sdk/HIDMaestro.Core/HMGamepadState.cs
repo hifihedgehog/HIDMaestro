@@ -127,6 +127,39 @@ public struct HMGamepadState
     /// rolls over). Maps to the <c>sensorTimestamp</c> semantic.</summary>
     public uint SensorTimestamp;
 
+    // ── IMU (calibrated physical units) ───────────────────────────────────
+    //
+    // Optional motion channel for profiles whose layout declares imu
+    // (issue #33: Switch Pro 0x30 streaming). Accel in g, gyro in deg/s.
+    //
+    // Frame (Switch convention, dekuNukem imu_sensor_notes.md): with the
+    // controller held flat, sticks up: +X points toward the player (out
+    // the front face), +Y points left, +Z points up. Gyro angular
+    // velocity follows the right-hand rule around the same axes. The
+    // SDK's per-profile packer converts to wire units (Switch: raw =
+    // g x 4096, deg/s x 13371/936); consumers submit physical units and
+    // never touch firmware scaling. Distinct from the RAW shorts above,
+    // which carry Sony-firmware units for the extendedReport codec path.
+
+    /// <summary>Accelerometer X in g (Switch frame: + toward the player).</summary>
+    public float AccelGX;
+
+    /// <summary>Accelerometer Y in g (Switch frame: + left).</summary>
+    public float AccelGY;
+
+    /// <summary>Accelerometer Z in g (Switch frame: + up; ~1.0 at rest,
+    /// flat on a table).</summary>
+    public float AccelGZ;
+
+    /// <summary>Gyro X in deg/s (right-hand rule around accel X).</summary>
+    public float GyroDpsX;
+
+    /// <summary>Gyro Y in deg/s.</summary>
+    public float GyroDpsY;
+
+    /// <summary>Gyro Z in deg/s.</summary>
+    public float GyroDpsZ;
+
     // ── Battery + housekeeping ────────────────────────────────────────────
 
     /// <summary>Battery capacity, 0..10 (Sony firmware convention). Profiles

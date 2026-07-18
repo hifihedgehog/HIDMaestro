@@ -132,6 +132,11 @@ public sealed class HMController : IDisposable
     // the handshake still see legacy Report 1 emission.
     private volatile bool _extendedModeArmed;
 
+    // Switch Pro protocol (issue #33): wire-format packer state. See
+    // SwitchProPacker + the driver-side responder in driver.c.
+    private bool _switchProtocol;
+    private byte[]? _switchBodyBuffer;
+
     /// <summary>Optional diagnostic: invoked at the end of every successful
     /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
     /// when investigating per-frame submit latency (e.g. issue #21 USB
@@ -334,6 +339,14 @@ public sealed class HMController : IDisposable
             _extEncoderState = new VendorBlobCodec.EncoderState();
         }
 
+        // Switch Pro protocol (issue #33): keyed on the Nintendo VID/PID
+        // family, mirroring the driver-side responder's gate. Pre-allocate
+        // the body buffer only for this family, same rationale as the
+        // extended-report buffer above.
+        _switchProtocol = SwitchProPacker.IsSwitchPro(profile.VendorId, profile.ProductId);
+        if (_switchProtocol)
+            _switchBodyBuffer = new byte[SwitchProPacker.BodySize];
+
         // Output passthrough is best-effort. If the section can't be created
         // (rare — only LocalService permission issues) we just don't raise
         // OutputReceived events.
@@ -427,6 +440,29 @@ public sealed class HMController : IDisposable
         // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
         double mlt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 0, HMAxis.Z, "lefttrigger");
         double mrt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+
+        // Switch Pro protocol path (issue #33): pack the wire-format 0x30
+        // body instead of the descriptor-driven build. The descriptor's
+        // report 0x30 is a vendor-opaque byte array, so BuildReportInto's
+        // semantic packing cannot produce the layout SDL casts the bytes
+        // into; SwitchProPacker owns it (buttons/12-bit sticks/IMU). The
+        // driver's 60 Hz streamer serves this body with its own timer +
+        // battery overlay, and no GIP buffer applies (Nintendo VID has no
+        // XUSB companion).
+        if (_switchProtocol)
+        {
+            SwitchProPacker.BuildBody(in state, mlx, mly, mrx, mry, _switchBodyBuffer!);
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo,
+                _switchBodyBuffer!, SwitchProPacker.BodySize, null);
+
+            if (OnSubmitLatencyMicros != null)
+            {
+                long swElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+                OnSubmitLatencyMicros(swElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
+            }
+            return;
+        }
 
         byte[] report;
         // v1.3.5 — vendor-blob path is gated on the host-side arm flag.
@@ -774,6 +810,44 @@ public sealed class HMController : IDisposable
                             // doesn't kill the polling thread. OutputReceived
                             // already fired with the raw bytes; consumers
                             // that need them have them.
+                        }
+                    }
+
+                    // Switch Pro rumble decode (issue #33): output 0x01
+                    // (rumble + subcommand) and 0x10 (rumble only) carry
+                    // one 4-byte HD-rumble block per side at payload
+                    // [1..4] / [5..8]. Surface coarse amplitudes through
+                    // the same OutputDecoded lane the Sony profiles use,
+                    // as leftMotor / rightMotor bytes, so PadForge's
+                    // feedback handler works unchanged (spec point 4).
+                    else if (_switchProtocol
+                        && (reportId == 0x01 || reportId == 0x10)
+                        && dataSize >= 9 && OutputDecoded != null)
+                    {
+                        try
+                        {
+                            byte leftAmp = SwitchProPacker.DecodeRumbleAmplitude(
+                                new ReadOnlySpan<byte>(buf, 1, 4));
+                            byte rightAmp = SwitchProPacker.DecodeRumbleAmplitude(
+                                new ReadOnlySpan<byte>(buf, 5, 4));
+                            var full = new byte[dataSize + 1];
+                            full[0] = reportId;
+                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
+                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            {
+                                ReportId = reportId,
+                                Fields = new Dictionary<string, object>
+                                {
+                                    ["leftMotor"] = leftAmp,
+                                    ["rightMotor"] = rightAmp,
+                                },
+                                RawBytes = full,
+                                CrcValid = true,
+                            });
+                        }
+                        catch
+                        {
+                            // Same containment contract as the codec path.
                         }
                     }
 

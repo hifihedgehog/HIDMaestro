@@ -833,63 +833,44 @@ Console.WriteLine("\n  12c. DualSense — SubmitState + SubmitRawReport for touc
 
 // ── 12d. Nintendo Switch Pro Controller — with gyro via SubmitRawReport
 // Profile: switch-pro | VID 057E PID 2009 | Report ID 0x30 | 64 bytes
-// The Switch Pro uses Nintendo's vendor-specific report format (0x30
-// full input mode). Sticks are 12-bit packed (3 bytes per stick).
-// IMU data (gyro + accel) is at bytes 13-24 (3x16b gyro + 3x16b accel).
-Console.WriteLine("\n  12d. Switch Pro Controller — SubmitRawReport with gyro");
+// The Switch Pro is a FUNCTIONAL protocol device (issue #33): the driver
+// answers the Nintendo init + subcommand stream (0x80 handshake, device
+// info, SPI calibration reads, input-mode switch) and streams input
+// report 0x30 at the wire's 60 Hz, so SDL's HIDAPI driver and Steam
+// complete their handshake against it. Consumers just SubmitState:
+// buttons/sticks map through the profile layout, and the calibrated IMU
+// channel (AccelG* in g, GyroDps* in deg/s, Switch frame: +X toward the
+// player, +Y left, +Z up) rides the same call. Rumble comes back on
+// OutputDecoded as leftMotor/rightMotor bytes.
+Console.WriteLine("\n  12d. Switch Pro Controller: SubmitState with IMU");
 {
     var swProfile = ctx.GetProfile("switch-pro")!;
     Console.Write($"  Creating {swProfile.Name}... ");
     using var sw2 = ctx.CreateController(swProfile);
     Console.WriteLine("OK");
 
-    // 63 bytes data (no Report ID prefix — driver adds 0x30).
-    // Nintendo Switch Pro 0x30 report format:
-    //   0:     timer counter (increments per report)
-    //   1:     battery + connection info
-    //   2-4:   button state (3 bytes: Y/X/B/A, triggers, hat, sticks click, etc.)
-    //   5-7:   left stick (12-bit X in bits 0-11, 12-bit Y in bits 12-23, packed LE)
-    //   8-10:  right stick (same packing)
-    //   11:    vibration report ACK
-    //   12:    sub-command reply ID
-    //   13-24: IMU data (3 frames × 2 samples: gyro XYZ + accel XYZ, 16-bit LE each)
-    //   25-62: sub-command reply data / NFC/IR data
-    byte[] swRaw = new byte[63];
-    swRaw[0] = 0x42; // timer counter
-    swRaw[1] = 0x8E; // battery full, USB connected
+    sw2.OutputDecoded += (_, e) =>
+    {
+        if (e.Fields.TryGetValue("leftMotor", out var l))
+            Console.WriteLine($"  [switch rumble] left={l} right={e.Fields["rightMotor"]}");
+    };
 
-    // Buttons: A pressed (byte 2, bit 3 in Nintendo layout)
-    swRaw[2] = 0x08; // A button
-
-    // Left stick centered: 12-bit X=2048, Y=2048
-    // Packed as: byte5 = X[7:0], byte6 = X[11:8] | Y[3:0], byte7 = Y[11:4]
-    int lsx = 2048, lsy = 2048;
-    swRaw[5] = (byte)(lsx & 0xFF);
-    swRaw[6] = (byte)(((lsx >> 8) & 0x0F) | ((lsy & 0x0F) << 4));
-    swRaw[7] = (byte)(lsy >> 4);
-
-    // Right stick centered
-    int rsx = 2048, rsy = 2048;
-    swRaw[8] = (byte)(rsx & 0xFF);
-    swRaw[9] = (byte)(((rsx >> 8) & 0x0F) | ((rsy & 0x0F) << 4));
-    swRaw[10] = (byte)(rsy >> 4);
-
-    // IMU: gyro X/Y/Z at bytes 13-18 (16-bit LE, signed)
-    // Small rotation around Y axis (simulating a gentle tilt)
-    short gyroX = 0, gyroY = 500, gyroZ = 0;
-    swRaw[13] = (byte)(gyroX & 0xFF); swRaw[14] = (byte)(gyroX >> 8);
-    swRaw[15] = (byte)(gyroY & 0xFF); swRaw[16] = (byte)(gyroY >> 8);
-    swRaw[17] = (byte)(gyroZ & 0xFF); swRaw[18] = (byte)(gyroZ >> 8);
-
-    // Accel X/Y/Z at bytes 19-24 (gravity on Y = -4096 typical)
-    short accelX = 0, accelY = -4096, accelZ = 0;
-    swRaw[19] = (byte)(accelX & 0xFF); swRaw[20] = (byte)((ushort)accelX >> 8);
-    swRaw[21] = (byte)(accelY & 0xFF); swRaw[22] = (byte)((ushort)accelY >> 8);
-    swRaw[23] = (byte)(accelZ & 0xFF); swRaw[24] = (byte)((ushort)accelZ >> 8);
-
-    sw2.SubmitRawReport(swRaw);
-    Console.WriteLine("  Submitted Switch Pro raw report with gyro tilt + A button");
-    Thread.Sleep(1500);
+    // A pressed (layout buttonIndex 1 = face_a), gentle yaw, gravity at
+    // rest. The SDK's SwitchProPacker converts to the 0x30 wire format
+    // (12-bit packed sticks, int16 IMU at Switch scaling) and the
+    // driver's streamer serves it with live timer/battery bytes.
+    var swState = new HMGamepadState
+    {
+        Buttons = (HMButton)(1u << 1),
+        AccelGZ = 1.0f,      // 1 g: flat on the table
+        GyroDpsY = 35.0f,    // gentle tilt around Y
+    };
+    for (int i = 0; i < 60; i++)
+    {
+        sw2.SubmitState(swState);
+        Thread.Sleep(15);
+    }
+    Console.WriteLine("  Streamed Switch Pro input with A + IMU for ~1s");
 }
 
 Console.WriteLine("\n=== Demo complete — disposing all controllers ===");
