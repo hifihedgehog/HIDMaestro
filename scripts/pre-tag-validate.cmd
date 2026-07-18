@@ -70,6 +70,12 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+dotnet build test\probes\switch_pro_sdl3_check\SwitchProSdl3Check.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] SwitchProSdl3Check build failed.
+    popd
+    exit /b 2
+)
 echo       BUILD OK
 echo.
 
@@ -82,6 +88,16 @@ test\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProCh
 if errorlevel 1 (
     echo ====================================================================
     echo  [FAIL] Switch Pro protocol check failed. DO NOT TAG OR RELEASE.
+    echo ====================================================================
+    popd
+    exit /b 1
+)
+rem     Real-SDL3 acceptance (issue #33 acceptance line): SKIPs cleanly
+rem     when the sibling SDL3-build checkout is absent; a FAIL is real.
+test\probes\switch_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProSdl3Check.exe
+if errorlevel 1 (
+    echo ====================================================================
+    echo  [FAIL] Switch Pro SDL3 acceptance failed. DO NOT TAG OR RELEASE.
     echo ====================================================================
     popd
     exit /b 1
