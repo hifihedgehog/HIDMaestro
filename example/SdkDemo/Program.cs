@@ -829,7 +829,7 @@ Console.WriteLine("\n  12c. DualSense — SubmitState + SubmitRawReport for touc
     Thread.Sleep(1500);
 }
 
-// ── 12d. Nintendo Switch Pro Controller — with gyro via SubmitRawReport
+// ── 12d. Nintendo Switch Pro Controller (IMU via SubmitState) ───────
 // Profile: switch-pro | VID 057E PID 2009 | Report ID 0x30 | 64 bytes
 // The Switch Pro is a FUNCTIONAL protocol device (issue #33): the driver
 // answers the Nintendo init + subcommand stream (0x80 handshake, device
