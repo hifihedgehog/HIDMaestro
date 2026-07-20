@@ -297,6 +297,12 @@ public sealed class ControllerProfile
 /// the field list to encode/decode reports in either direction.</summary>
 public sealed class ExtendedReportSpec
 {
+    /// <summary>Compiled-opcode cache (issue #34). Fields are not
+    /// serialized by System.Text.Json, so this never round-trips. Written
+    /// once by <see cref="VendorBlobProgram.Get"/> (benign idempotent
+    /// race); typed as object to keep the DTO layer free of codec types.</summary>
+    internal object? CompiledProgramCache;
+
     /// <summary>Hex string for the report ID, e.g. "0x31".</summary>
     [JsonPropertyName("reportId")]
     public string ReportId { get; set; } = "";

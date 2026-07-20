@@ -18,3 +18,5 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]
 [assembly: InternalsVisibleTo("SwitchProCheck")]
 [assembly: InternalsVisibleTo("SonyFeatureGateCheck")]
+[assembly: InternalsVisibleTo("OutputPerfBench")]
+[assembly: InternalsVisibleTo("VendorBlobGoldenCheck")]

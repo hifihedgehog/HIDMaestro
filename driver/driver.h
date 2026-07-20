@@ -145,6 +145,14 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  WorkerThread;        /* CreateThread handle */
     WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
     WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
+    WCHAR   OutputEventName[64]; /* e.g. L"Global\\HIDMaestroOutputEvent0" */
+
+    /* Output-ring doorbell (issue #34). Auto-reset named event created at
+     * EvtDeviceAdd; PublishOutput signals it after the ring Head is
+     * published so the SDK's reader can block instead of polling every
+     * 8 ms. NULL when creation failed; publish simply skips the signal
+     * and an event-less SDK falls back to its poll cadence. */
+    HANDLE  OutputSignalEvent;
 
     /* Multi-instance: controller index (0, 1, 2, 3) */
     ULONG   ControllerIndex;

@@ -16,10 +16,12 @@ namespace HIDMaestro;
 /// the kernel-side driver reads at ~250 Hz. There is no internal pumping thread;
 /// the consumer drives the cadence.</para>
 ///
-/// <para><b>Output</b> (game → host): the SDK runs a background polling thread that
+/// <para><b>Output</b> (game → host): the SDK runs a background reader thread that
 /// captures rumble / haptics / FFB / LED commands from any host application and
-/// raises <see cref="OutputReceived"/>. Handlers run on the polling thread, not
-/// the consumer's UI thread — implement your handler accordingly.</para>
+/// raises <see cref="OutputReceived"/>. Since issue #34 the thread blocks on a
+/// driver-signaled event (falling back to an 8 ms poll against older drivers).
+/// Handlers run on the reader thread, not the consumer's UI thread. Implement
+/// your handler accordingly.</para>
 /// </summary>
 public sealed class HMController : IDisposable
 {
@@ -80,13 +82,13 @@ public sealed class HMController : IDisposable
     /// application sends a rumble, haptic, FFB, feature, or LED command to
     /// this virtual controller. Subscribers must be thread-safe.
     ///
-    /// <para><b>Cadence and ordering (v1.1.40+):</b> the SDK polls the
-    /// driver's output ring every ~8 ms. On each poll the consumer drains
-    /// every slot the driver has written since the last poll, in
-    /// monotonic SeqNo order. Multiple <c>OutputReceived</c> invocations
-    /// per poll iteration are normal — DirectInput PID FFB writes 3
-    /// packets in 1-3 ms (Set Effect → Set Constant Force → Effect
-    /// Operation Start) and all three surface here.</para>
+    /// <para><b>Cadence and ordering:</b> the reader wakes on the driver's
+    /// per-packet event signal (issue #34; 8 ms poll fallback against
+    /// older drivers) and drains every slot written since the last wake,
+    /// in monotonic SeqNo order. Multiple <c>OutputReceived</c> invocations
+    /// per wake are normal. DirectInput PID FFB writes 3 packets in
+    /// 1-3 ms (Set Effect → Set Constant Force → Effect Operation Start)
+    /// and all three surface here.</para>
     ///
     /// <para><b>Ring depth:</b> 64 slots × 256-byte payload. If the
     /// consumer's handler stalls for &gt; 512 ms while the driver is
@@ -143,6 +145,12 @@ public sealed class HMController : IDisposable
     // immutable for the controller's lifetime.
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleStick> _cachedSticks;
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleTrigger> _cachedTriggers;
+
+    // Canonical trigger positions, resolved once (issue #34). The axisMap
+    // walk (case-insensitive role compare + hex key parse) ran inside
+    // every SubmitState, twice, for values that are constant per profile.
+    private readonly HMAxis _canonicalLt;
+    private readonly HMAxis _canonicalRt;
 
     /// <summary>Optional diagnostic: invoked at the end of every successful
     /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
@@ -324,6 +332,11 @@ public sealed class HMController : IDisposable
         _cachedSticks = profile.Sticks;
         _cachedTriggers = profile.Triggers;
 
+        // Resolve the canonical trigger axes once (issue #34): axisMap-
+        // declared override wins, else the Z/Rz defaults PadForge writes.
+        _canonicalLt = ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z);
+        _canonicalRt = ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz);
+
         // Only profiles with an XUSB companion (HMXInput.dll) read the
         // GIP-format buffer slice on IOCTL_XUSB_GET_STATE. xinputhid-bound
         // Xbox profiles publish XInput through the upper filter, not the
@@ -378,36 +391,44 @@ public sealed class HMController : IDisposable
         }
     }
 
+    // Resolve a canonical trigger axis from a profile's axisMap: the
+    // axisMap-declared role position wins, else the given default. Runs
+    // ONCE per controller at construction (issue #34). The walk's
+    // case-insensitive compares and hex parse used to run inside every
+    // SubmitState, twice, for a per-profile constant.
+    internal static HMAxis ResolveCanonicalAxis(
+        Dictionary<string, string>? axisMap,
+        string roleName,
+        HMAxis canonicalDefault)
+    {
+        if (axisMap == null) return canonicalDefault;
+        foreach (var kvp in axisMap)
+        {
+            if (kvp.Value == null) continue;
+            if (!string.Equals(kvp.Value, roleName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            ushort usage;
+            try { usage = Convert.ToUInt16(kvp.Key, 16); }
+            catch { continue; }
+            if (usage <= 0xFF) usage |= 0x0100;
+            return (HMAxis)usage;
+        }
+        return canonicalDefault;
+    }
+
     // Canonical-first, field-key-fallback trigger resolution. PadForge writes
     // axes[Z]/axes[Rz] via ResolveAxisByRole canonical defaults; the
     // HIDMaestroTest / StandardAxes path writes axes[layout.triggers[N].Axis]
     // (Vx/Vy for the unified xbox-360-* profiles). Both must feed the GIP
     // buffer that drives the XUSB companion's XInput / WGI dispatch. Same
     // resolution rule that HidReportBuilder's combined-Z synthesis uses.
+    // The canonical axis arrives pre-resolved (ctor-cached, issue #34).
     internal static double ResolveTrigger(
         Dictionary<HMAxis, float>? axes,
-        Dictionary<string, string>? axisMap,
         IReadOnlyList<HMSimpleTrigger> triggers,
         int slot,
-        HMAxis canonicalDefault,
-        string roleName)
+        HMAxis canonical)
     {
-        HMAxis canonical = canonicalDefault;
-        if (axisMap != null)
-        {
-            foreach (var kvp in axisMap)
-            {
-                if (kvp.Value == null) continue;
-                if (!string.Equals(kvp.Value, roleName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                ushort usage;
-                try { usage = Convert.ToUInt16(kvp.Key, 16); }
-                catch { continue; }
-                if (usage <= 0xFF) usage |= 0x0100;
-                canonical = (HMAxis)usage;
-                break;
-            }
-        }
         if (axes != null)
         {
             if (axes.TryGetValue(canonical, out var vCanon))
@@ -456,8 +477,8 @@ public sealed class HMController : IDisposable
         // the GIP buffer that drives XInput / WGI / RawInput; otherwise the
         // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
         // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
-        double mlt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 0, HMAxis.Z, "lefttrigger");
-        double mrt = ResolveTrigger(axes, Profile.Inner.AxisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+        double mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
+        double mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
 
         // Switch Pro protocol path (issue #33): pack the wire-format 0x30
         // body instead of the descriptor-driven build. The descriptor's
@@ -763,11 +784,21 @@ public sealed class HMController : IDisposable
         }
     }
 
-    /// <summary>Background polling loop that reads from the per-controller
-    /// output shared section and raises <see cref="OutputReceived"/> for
-    /// each new packet. Sleeps 8 ms between polls (≈125 Hz) which is
-    /// comfortably above the rate at which any host app sends output
-    /// packets and well below the cost threshold for an idle thread.</summary>
+    /// <summary>Background reader for the per-controller output shared
+    /// section, raising <see cref="OutputReceived"/> for each new packet.
+    ///
+    /// Event-driven since issue #34: the driver creates
+    /// <c>Global\HIDMaestroOutputEvent&lt;N&gt;</c> and signals it after every
+    /// published packet, so this thread blocks on the event (500 ms safety
+    /// timeout, ~2 wakes/s idle) instead of polling every 8 ms
+    /// (125 wakes/s idle). Open success doubles as capability detection:
+    /// against an older driver that never created the event, the loop
+    /// keeps the historical 8 ms poll cadence and retries the open every
+    /// 64 cycles (~0.5 s) in case the driver device finishes starting
+    /// after this thread does. Output latency with the event is dispatch
+    /// cost instead of up-to-8-ms poll quantization; the drain-to-Head
+    /// loop below is unchanged, so burst coalescing behaves identically
+    /// in both modes.</summary>
     private void OutputPollLoop()
     {
         if (_outputView == IntPtr.Zero) return;
@@ -777,6 +808,19 @@ public sealed class HMController : IDisposable
         uint lastSeq = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(_outputView, 0);
         byte[] buf = new byte[256];
         var ct = _outputCts.Token;
+
+        IntPtr rawEvt = SharedMemoryIO.TryOpenOutputEvent(Index);
+        AutoResetEvent? doorbell = null;
+        WaitHandle[]? waitPair = null;
+        int openRetryCountdown = 64;
+        if (rawEvt != IntPtr.Zero)
+        {
+            doorbell = new AutoResetEvent(false);
+            doorbell.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(rawEvt, ownsHandle: true);
+            waitPair = new WaitHandle[] { ct.WaitHandle, doorbell };
+        }
+        try
+        {
         while (!ct.IsCancellationRequested)
         {
             try
@@ -909,13 +953,42 @@ public sealed class HMController : IDisposable
                 // Swallow polling errors so a transient kernel-side failure
                 // doesn't kill the reader thread.
             }
-            // T10 — wait on the CTS WaitHandle with an 8 ms timeout instead
-            // of Thread.Sleep(8). Cancel returns nearly immediately (kernel
-            // SetEvent on the cancel handle) instead of waiting up to 8 ms
-            // for the next sleep slice to expire. Net Dispose latency drops
-            // from up-to-8 ms to under 1 ms per controller — small but real
-            // for callers that batch-dispose many controllers in series.
-            try { ct.WaitHandle.WaitOne(8); } catch { break; }
+            // Event mode (issue #34): block on {cancel, doorbell} with a
+            // 500 ms safety timeout. The driver signals after publishing
+            // Head, so waking here always finds the packet; the timeout is
+            // pure missed-signal paranoia, not a data path. Poll fallback
+            // (older driver, no event): the historical 8 ms CTS-handle
+            // wait (T10), plus a throttled re-open attempt every 64 cycles
+            // so a driver device that starts after this thread still
+            // upgrades the loop to event mode.
+            try
+            {
+                if (waitPair != null)
+                {
+                    WaitHandle.WaitAny(waitPair, 500);
+                }
+                else
+                {
+                    ct.WaitHandle.WaitOne(8);
+                    if (--openRetryCountdown <= 0)
+                    {
+                        openRetryCountdown = 64;
+                        IntPtr raw = SharedMemoryIO.TryOpenOutputEvent(Index);
+                        if (raw != IntPtr.Zero)
+                        {
+                            doorbell = new AutoResetEvent(false);
+                            doorbell.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(raw, ownsHandle: true);
+                            waitPair = new WaitHandle[] { ct.WaitHandle, doorbell };
+                        }
+                    }
+                }
+            }
+            catch { break; }
+        }
+        }
+        finally
+        {
+            doorbell?.Dispose();
         }
     }
 

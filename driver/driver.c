@@ -105,6 +105,12 @@ InitInstancePaths(
         AppendUlongDecimal(ctx->InputEventName, index, cap);
     }
     {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroOutputEvent";
+        SIZE_T cap = sizeof(ctx->OutputEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->OutputEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->OutputEventName, index, cap);
+    }
+    {
         static const WCHAR prefix[] = L"Global\\HIDMaestroStopEvent";
         SIZE_T cap = sizeof(ctx->StopEventName) / sizeof(WCHAR);
         RtlCopyMemory(ctx->StopEventName, prefix, sizeof(prefix));
@@ -605,6 +611,13 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     dst->Head = newSeq;
 
     WdfWaitLockRelease(ctx->OutputLock);
+
+    /* Doorbell LAST (issue #34): Head is already published, so a reader
+     * woken by this signal always sees the new packet. Signaling outside
+     * the lock keeps the writer's hold time unchanged. SetEvent on an
+     * already-set auto-reset event is a no-op, which coalesces bursts
+     * exactly like the reader's drain-to-Head loop expects. */
+    if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
 }
 
 /* Read shared input via memory mapping. RAM-only — no disk fallback.
@@ -1299,6 +1312,7 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     if (ctx->SwitchStreamStop) { CloseHandle(ctx->SwitchStreamStop); ctx->SwitchStreamStop = NULL; }
     if (ctx->InputDataEvent) { CloseHandle(ctx->InputDataEvent); ctx->InputDataEvent = NULL; }
     if (ctx->StopEvent)      { CloseHandle(ctx->StopEvent);      ctx->StopEvent = NULL; }
+    if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
 
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
@@ -1531,6 +1545,19 @@ EvtDeviceAdd(
         sa.lpSecurityDescriptor = &sd;
         sa.bInheritHandle = FALSE;
         ctx->StopEvent = CreateEventW(&sa, TRUE /* manual reset */, FALSE, ctx->StopEventName);
+
+        /* Output-ring doorbell (issue #34). Auto-reset, same permissive
+         * NULL DACL. Created here (not SDK-side like the input event) so
+         * the SDK can DETECT support by OpenEvent success: open works on
+         * a new driver (block on the event, zero idle wakes), fails on an
+         * old driver (fall back to the 8 ms poll). The companion creates
+         * or opens the same name for its XUSB rumble publishes; CreateEventW
+         * on an existing name returns the existing object, so creation
+         * order between the two hosts doesn't matter. Non-fatal on
+         * failure: PublishOutput skips the signal and the SDK's safety
+         * timeout still drains the ring. */
+        ctx->OutputSignalEvent = CreateEventW(&sa, FALSE /* auto reset */, FALSE,
+                                              ctx->OutputEventName);
     }
     if (ctx->StopEvent != NULL) {
         /* CRITICAL: reset the StopEvent explicitly before starting the worker.

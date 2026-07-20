@@ -50,3 +50,37 @@ VIIPER's published E2E single-press figures, from its [e2e_latency.md](https://g
 | Steam Deck LCD | 89.1 µs |
 
 VIIPER's figures are localhost-only by its own methodology note. The network path (the project's namesake) is excluded from those numbers because remote USBIP attachment adds network round-trip time and jitter. VIIPER also batches reports every millisecond, capping its update rate at 1000 Hz.
+
+## Output direction: event-driven delivery (issue #34)
+
+Input latency covers `SubmitState` to the game. The output direction
+(game to consumer: rumble, FFB, LED) was poll-quantized until issue #34:
+the SDK reader woke every 8 ms to check the output ring, so a rumble
+packet waited up to a full poll interval before the consumer's
+`OutputReceived` fired, and every idle controller cost 125 kernel waits
+per second.
+
+Since #34 the driver and the XUSB companion signal
+`Global\HIDMaestroOutputEvent<N>` after each published packet and the
+reader blocks on it. Measured with `test/probes/output_perf_bench`
+(HidD_SetOutputReport to `OutputReceived` timestamp delta, 200 paced
+sends; idle CPU via process CPU time over 30 s with 4 idle controllers),
+same host and same day, before and after:
+
+| Metric | 8 ms poll (pre-#34) | Event-driven (#34) |
+|--------|--------------------:|-------------------:|
+| Output RTT median | 9.41 ms | **0.182 ms** |
+| Output RTT p95 | 18.70 ms | **0.244 ms** |
+| Output RTT max | 23.04 ms | 0.630 ms |
+| Idle CPU per controller | 0.651 ms/s (~0.07% core) | **0.000 ms/s** (below measurement resolution) |
+
+Mutation-verified: forcing the reader onto its polling fallback (the
+compatibility path for pre-#34 drivers) regressed the median to 15.5 ms
+in the same harness, confirming the event is the load-bearing mechanism
+and the fallback still delivers every packet.
+
+The same change trimmed the input submit path (construction-time trigger
+resolution, compiled vendor-blob opcodes). Same-day before/after on the
+input harness: median 53.6 to 48.9 µs, p99 98.5 to 85.4 µs, max 215.8 to
+168.8 µs (host state ran warmer than the original three-run session
+above; compare within the same day, not across sessions).

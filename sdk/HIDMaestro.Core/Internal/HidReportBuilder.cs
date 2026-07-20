@@ -27,6 +27,14 @@ public class HidReportBuilder
     /// Rx/Ry for triggers — opposite of the Xbox convention).</summary>
     public Dictionary<string, string>? AxisMap { get; set; }
 
+    // Canonical trigger positions for the combined-Z synthesis, resolved
+    // lazily on first BuildReportInto and constant thereafter (issue #34).
+    // AxisMap is assigned once during builder construction, before any
+    // frame is built, so a one-shot resolve is safe.
+    private bool _canonicalTriggersResolved;
+    private HMAxis _canonicalLtCached;
+    private HMAxis _canonicalRtCached;
+
     /// <summary>Optional button remapping table. Maps HMButton bit positions
     /// (index) to descriptor button indices (value). When set, BuildReport
     /// uses this to place semantic buttons at the correct descriptor positions
@@ -716,27 +724,22 @@ public class HidReportBuilder
         // raw triggers.
         if (CombinedTrigger != null && LeftTrigger != null && RightTrigger != null)
         {
-            HMAxis canonicalLt = HMAxis.Z;
-            HMAxis canonicalRt = HMAxis.Rz;
-            if (AxisMap != null)
+            // Canonical trigger positions, resolved once per builder
+            // (issue #34). The builder instance is per-profile cached
+            // (GetOrBuildReportBuilder) and AxisMap is fixed after
+            // construction, so the axisMap walk (hex parse + role
+            // compares) that used to run per frame is a constant. Shares
+            // HMController.ResolveCanonicalAxis so both lanes resolve
+            // identically (the v1.3.17 lesson: fix all readers in
+            // lockstep).
+            if (!_canonicalTriggersResolved)
             {
-                foreach (var kvp in AxisMap)
-                {
-                    if (kvp.Value == null) continue;
-                    ushort usage;
-                    try { usage = Convert.ToUInt16(kvp.Key, 16); }
-                    catch { continue; }
-                    if (usage <= 0xFF) usage |= 0x0100;
-                    // Allocation-free compare (audit 1n): the prior
-                    // ToLowerInvariant allocated a string per axisMap entry
-                    // per frame on this combined-trigger hot path. Matches
-                    // the HMController.ResolveTrigger sibling's approach.
-                    if (string.Equals(kvp.Value, "lefttrigger", StringComparison.OrdinalIgnoreCase))
-                        canonicalLt = (HMAxis)usage;
-                    else if (string.Equals(kvp.Value, "righttrigger", StringComparison.OrdinalIgnoreCase))
-                        canonicalRt = (HMAxis)usage;
-                }
+                _canonicalLtCached = HMController.ResolveCanonicalAxis(AxisMap, "lefttrigger", HMAxis.Z);
+                _canonicalRtCached = HMController.ResolveCanonicalAxis(AxisMap, "righttrigger", HMAxis.Rz);
+                _canonicalTriggersResolved = true;
             }
+            HMAxis canonicalLt = _canonicalLtCached;
+            HMAxis canonicalRt = _canonicalRtCached;
             var leftFieldKey  = (HMAxis)((LeftTrigger.UsagePage  << 8) | LeftTrigger.Usage);
             var rightFieldKey = (HMAxis)((RightTrigger.UsagePage << 8) | RightTrigger.Usage);
             // Source the trigger values from the canonical (user-facing)

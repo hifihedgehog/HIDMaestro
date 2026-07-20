@@ -191,6 +191,20 @@ internal static class SharedMemoryIO
         }
     }
 
+    /// <summary>Try to open the driver-created output-ring doorbell
+    /// <c>Global\HIDMaestroOutputEvent&lt;N&gt;</c> (issue #34). The DRIVER
+    /// creates this event (companion opens-or-creates the same name), so
+    /// open success doubles as capability detection: success means the
+    /// installed driver signals per published packet and the reader can
+    /// block on it; failure means an older driver and the caller keeps
+    /// the 8 ms poll cadence. Returns IntPtr.Zero when absent. The caller
+    /// owns the returned handle.</summary>
+    public static IntPtr TryOpenOutputEvent(int controllerIndex)
+    {
+        return OpenEventW(SYNCHRONIZE, false,
+            $@"Global\HIDMaestroOutputEvent{controllerIndex}");
+    }
+
     /// <summary>Returns the view pointer for the controller's OUTPUT section,
     /// creating the section on first call. The driver/companion attach to
     /// this section read-write to publish captured rumble/haptics/FFB/LED.</summary>
@@ -738,6 +752,10 @@ internal static class SharedMemoryIO
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName,
         uint dwFlags, uint dwDesiredAccess);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle,
+        string lpName);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetEvent(IntPtr hEvent);

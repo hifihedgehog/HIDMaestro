@@ -92,9 +92,10 @@ Console.WriteLine($"  Overrode joy.cpl label for VID_{x360Vid:X4}&PID_{x360Pid:X
 // the SDK delivers them here. The consumer routes them to physical
 // hardware (e.g. PadForge forwards to the real controller).
 //
-// Cadence (v1.1.40+): the SDK polls the driver's 64-slot output ring
-// every ~8 ms and drains every slot written since the last poll, in
-// monotonic SeqNo order. Multiple OutputReceived invocations per poll
+// Cadence: the SDK's reader wakes on the driver's per-packet event
+// signal (issue #34; 8 ms poll fallback against pre-#34 drivers) and
+// drains every slot written since the last wake, in monotonic SeqNo
+// order. Multiple OutputReceived invocations per poll
 // are normal — DirectInput PID FFB writes Set Effect → Set Constant
 // Force / Set Periodic → Effect Operation Start within 1-3 ms and all
 // three surface here as separate packets (the pre-1.1.40 single-slot

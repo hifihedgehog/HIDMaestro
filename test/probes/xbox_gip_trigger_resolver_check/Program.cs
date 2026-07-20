@@ -80,8 +80,8 @@ internal sealed class Program
                     [HMAxis.Vx] = 0.5f,   // PadForge stale-default
                     [HMAxis.Vy] = 0.5f,   // PadForge stale-default
                 };
-                double mlt = HMController.ResolveTrigger(axes, axisMap, triggers, 0, HMAxis.Z, "lefttrigger");
-                double mrt = HMController.ResolveTrigger(axes, axisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+                double mlt = HMController.ResolveTrigger(axes, triggers, 0, HMController.ResolveCanonicalAxis(axisMap, "lefttrigger", HMAxis.Z));
+                double mrt = HMController.ResolveTrigger(axes, triggers, 1, HMController.ResolveCanonicalAxis(axisMap, "righttrigger", HMAxis.Rz));
                 Check($"{id}: PadForge (Z=1, Rz=0, Vx=Vy=0.5) → mlt=1.0 (canonical Z wins over stale Vx=0.5)",
                       Math.Abs(mlt - 1.0) < 1e-6, $"got mlt={mlt}");
                 Check($"{id}: PadForge (Z=1, Rz=0, Vx=Vy=0.5) → mrt=0.0 (canonical Rz wins over stale Vy=0.5)",
@@ -97,8 +97,8 @@ internal sealed class Program
                     [triggers[0].Axis] = 1.0f, // LT
                     [triggers[1].Axis] = 0.0f, // RT
                 };
-                double mlt = HMController.ResolveTrigger(axes, axisMap, triggers, 0, HMAxis.Z, "lefttrigger");
-                double mrt = HMController.ResolveTrigger(axes, axisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+                double mlt = HMController.ResolveTrigger(axes, triggers, 0, HMController.ResolveCanonicalAxis(axisMap, "lefttrigger", HMAxis.Z));
+                double mrt = HMController.ResolveTrigger(axes, triggers, 1, HMController.ResolveCanonicalAxis(axisMap, "righttrigger", HMAxis.Rz));
                 Check($"{id}: StandardAxes (only triggers[N].Axis set) → mlt=1.0 (field-key fallback)",
                       Math.Abs(mlt - 1.0) < 1e-6, $"got mlt={mlt}");
                 Check($"{id}: StandardAxes (only triggers[N].Axis set) → mrt=0.0 (field-key fallback)",
@@ -115,8 +115,8 @@ internal sealed class Program
                     [triggers[0].Axis] = 0.75f,
                     [triggers[1].Axis] = 0.25f,
                 };
-                double mlt = HMController.ResolveTrigger(axes, axisMap, triggers, 0, HMAxis.Z, "lefttrigger");
-                double mrt = HMController.ResolveTrigger(axes, axisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+                double mlt = HMController.ResolveTrigger(axes, triggers, 0, HMController.ResolveCanonicalAxis(axisMap, "lefttrigger", HMAxis.Z));
+                double mrt = HMController.ResolveTrigger(axes, triggers, 1, HMController.ResolveCanonicalAxis(axisMap, "righttrigger", HMAxis.Rz));
                 Check($"{id}: both writers (Z=0.75) → mlt=0.75",
                       Math.Abs(mlt - 0.75) < 1e-6, $"got mlt={mlt}");
                 Check($"{id}: both writers (Rz=0.25) → mrt=0.25",
@@ -126,8 +126,8 @@ internal sealed class Program
             // Empty axes dict → default 0.0.
             {
                 var axes = new Dictionary<HMAxis, float>();
-                double mlt = HMController.ResolveTrigger(axes, axisMap, triggers, 0, HMAxis.Z, "lefttrigger");
-                double mrt = HMController.ResolveTrigger(axes, axisMap, triggers, 1, HMAxis.Rz, "righttrigger");
+                double mlt = HMController.ResolveTrigger(axes, triggers, 0, HMController.ResolveCanonicalAxis(axisMap, "lefttrigger", HMAxis.Z));
+                double mrt = HMController.ResolveTrigger(axes, triggers, 1, HMController.ResolveCanonicalAxis(axisMap, "righttrigger", HMAxis.Rz));
                 Check($"{id}: empty axes → mlt=0.0",
                       Math.Abs(mlt - 0.0) < 1e-6, $"got mlt={mlt}");
                 Check($"{id}: empty axes → mrt=0.0",

@@ -40,6 +40,8 @@ typedef struct _COMPANION_CTX {
     WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
     WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
     WCHAR OutputMappingName[64]; /* e.g. L"Global\HIDMaestroOutput0" */
+    WCHAR OutputEventName[64];   /* e.g. L"Global\HIDMaestroOutputEvent0" */
+    HANDLE OutputSignalEvent;    /* Output-ring doorbell (issue #34), lazy */
     HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
     PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
     HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
@@ -199,6 +201,7 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
+    if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
 }
 
 /* Open the per-controller output section. The test app pre-creates it with
@@ -231,6 +234,26 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
     ctx->OutputMemHandle = h;
     ctx->OutputMemPtr = v;
     ctx->OutputWriteCount = 0;
+
+    /* Output-ring doorbell (issue #34), lazily acquired alongside the
+     * mapping. CreateEventW creates the auto-reset event if we're first
+     * or opens the HID child driver's existing object otherwise, so
+     * ordering between the two hosts doesn't matter. The event object's
+     * lifetime is the device session (unlike the SDK-recreated section),
+     * so a live handle is kept across the 500-write mapping recycles and
+     * only re-attempted while NULL. Non-fatal: on failure PublishOutput
+     * skips the signal and the SDK's safety timeout drains the ring. */
+    if (ctx->OutputSignalEvent == NULL) {
+        SECURITY_ATTRIBUTES sa;
+        SECURITY_DESCRIPTOR sd;
+        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+        ctx->OutputSignalEvent = CreateEventW(&sa, FALSE /* auto reset */, FALSE,
+                                              ctx->OutputEventName);
+    }
     return TRUE;
 }
 
@@ -265,6 +288,10 @@ static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
     slot->SeqNo = newSeq;
     MemoryBarrier();
     dst->Head = newSeq;
+
+    /* Doorbell LAST (issue #34): Head is published, so a reader woken by
+     * this signal always sees the new packet. Mirrors driver.c. */
+    if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
 }
 
 NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
@@ -328,6 +355,13 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             for (int i = 0; outPrefix[i]; i++) ctx->OutputMappingName[i] = outPrefix[i];
             ctx->OutputMappingName[(sizeof(outPrefix) / sizeof(WCHAR)) - 1] = L'\0';
             AppendUlongDecimal(ctx->OutputMappingName, ctx->ControllerIndex, cap);
+        }
+        {
+            static const WCHAR evPrefix[] = L"Global\\HIDMaestroOutputEvent";
+            SIZE_T cap = sizeof(ctx->OutputEventName) / sizeof(WCHAR);
+            for (int i = 0; evPrefix[i]; i++) ctx->OutputEventName[i] = evPrefix[i];
+            ctx->OutputEventName[(sizeof(evPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->OutputEventName, ctx->ControllerIndex, cap);
         }
 
         /* Read VID/PID from per-instance registry (falls back to global) */
