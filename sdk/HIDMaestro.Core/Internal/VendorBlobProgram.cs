@@ -159,6 +159,16 @@ internal sealed class VendorBlobProgram
             if (op == FieldOp.TouchpadFinger && source != SrcOp.Finger1)
                 source = SrcOp.Finger0;
 
+            // Deliberate compile-time validation (audit of #34): a negative
+            // byte offset is a malformed spec. The string implementation
+            // "caught" this by crashing with IndexOutOfRangeException on
+            // the first frame; failing at compile (first use, controller
+            // creation path) names the field instead.
+            if (f.Byte is int declaredByte && declaredByte < 0)
+                throw new InvalidOperationException(
+                    $"extendedReport field {i} (type '{f.Type}', semantic " +
+                    $"'{f.Semantic}') declares negative byte offset {declaredByte}");
+
             int b = f.Byte ?? -1;
             bool hasBytes = TryParseByteRange(f.Bytes, out int rangeLo, out int rangeHi);
             if (!hasBytes) { rangeLo = -1; rangeHi = -1; }
@@ -166,9 +176,12 @@ internal sealed class VendorBlobProgram
             if (!hasBits) { bitLo = 0; bitHi = 7; }
 
             // crc dest: the string impl resolves Bytes-range start, else
-            // Byte, else buffer.Length - 4 at run time (buffer length is
-            // spec.Size for every caller).
-            int crcDst = hasBytes ? rangeLo : (f.Byte ?? spec.Size - 4);
+            // Byte, else buffer.Length - 4 AT RUN TIME. The runtime
+            // fallback matters (audit of #34): Decode sees the RECEIVED
+            // report's length, which a short host write makes smaller
+            // than spec.Size, and the old code validated the CRC at the
+            // actual buffer end. -1 = resolve from buffer.Length at use.
+            int crcDst = hasBytes ? rangeLo : (f.Byte ?? -1);
 
             string rollKey = f.Semantic ?? "_b" + (b >= 0 ? b : 0);
             // EncodeOutput's rolling key differs when semantic is null

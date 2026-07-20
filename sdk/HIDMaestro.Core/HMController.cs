@@ -402,6 +402,11 @@ public sealed class HMController : IDisposable
         HMAxis canonicalDefault)
     {
         if (axisMap == null) return canonicalDefault;
+        // LAST match wins on duplicate roles (audit of #34): ApplyAxisMap
+        // assigns semantic slots last-wins, so canonical resolution must
+        // agree or a malformed duplicate-role map would read one axis and
+        // write another. Shipped maps declare each role once.
+        HMAxis resolved = canonicalDefault;
         foreach (var kvp in axisMap)
         {
             if (kvp.Value == null) continue;
@@ -411,9 +416,9 @@ public sealed class HMController : IDisposable
             try { usage = Convert.ToUInt16(kvp.Key, 16); }
             catch { continue; }
             if (usage <= 0xFF) usage |= 0x0100;
-            return (HMAxis)usage;
+            resolved = (HMAxis)usage;
         }
-        return canonicalDefault;
+        return resolved;
     }
 
     // Canonical-first, field-key-fallback trigger resolution. PadForge writes
@@ -813,6 +818,19 @@ public sealed class HMController : IDisposable
         AutoResetEvent? doorbell = null;
         WaitHandle[]? waitPair = null;
         int openRetryCountdown = 64;
+        // Adaptive missed-signal healing (#34 audit): in event mode the
+        // 500 ms timeout is supposed to be pure paranoia. If a TIMEOUT
+        // wake (not an event wake) finds ring data, some producer
+        // advanced Head without signaling (version-skewed companion,
+        // event-create failure, a foreign waiter stealing wakes). Drop
+        // to the historical 8 ms cadence so delivery and ring headroom
+        // return to pre-#34 behavior. A drain aborted by a throwing
+        // subscriber also shortens the next wait: the consumed signal
+        // can cover a packet the aborted drain never reached.
+        int eventTimeoutMs = 500;
+        int missedSignalStrikes = 0;
+        bool drainFaulted = false;
+        bool lastWakeWasTimeout = false;
         if (rawEvt != IntPtr.Zero)
         {
             doorbell = new AutoResetEvent(false);
@@ -823,9 +841,10 @@ public sealed class HMController : IDisposable
         {
         while (!ct.IsCancellationRequested)
         {
+            bool drainedAny = false;
             try
             {
-                // v1.1.40 — drain the ring on every poll. pid.dll writes
+                // v1.1.40: drain the ring on every poll. pid.dll writes
                 // Set Effect → Set Constant Force → Effect Operation Start
                 // within 1-3 ms; the pre-1.1.40 single-slot channel was
                 // coalescing those bursts vs the 8 ms poll cadence and
@@ -833,6 +852,7 @@ public sealed class HMController : IDisposable
                 while (SharedMemoryIO.TryReadOutputFrame(_outputView, ref lastSeq,
                         out byte source, out byte reportId, out int dataSize, buf))
                 {
+                    drainedAny = true;
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
@@ -951,12 +971,29 @@ public sealed class HMController : IDisposable
             catch
             {
                 // Swallow polling errors so a transient kernel-side failure
-                // doesn't kill the reader thread.
+                // doesn't kill the reader thread. An aborted drain may have
+                // consumed a coalesced signal that covered a packet it never
+                // reached, so the next wait must be short (see below).
+                drainFaulted = true;
             }
+
+            // Missed-signal evidence (audit of #34): data discovered by a
+            // TIMEOUT wake means a producer published without a signal
+            // reaching us. Two strikes before degrading: a packet landing
+            // in the instant between timeout expiry and the drain leaves
+            // its signal LATCHED (the next wait returns immediately), so a
+            // single occurrence is a benign race, while a producer that
+            // truly never signals accumulates strikes fast. On the second
+            // strike, degrade event mode's timeout to the historical 8 ms
+            // permanently; correctness beats idle savings.
+            if (lastWakeWasTimeout && drainedAny && ++missedSignalStrikes >= 2)
+                eventTimeoutMs = 8;
+
             // Event mode (issue #34): block on {cancel, doorbell} with a
-            // 500 ms safety timeout. The driver signals after publishing
-            // Head, so waking here always finds the packet; the timeout is
-            // pure missed-signal paranoia, not a data path. Poll fallback
+            // safety timeout (500 ms while signals are proving reliable,
+            // 8 ms after any missed-signal evidence, one 8 ms retry after
+            // a faulted drain). The driver signals after publishing Head,
+            // so an event wake always finds the packet. Poll fallback
             // (older driver, no event): the historical 8 ms CTS-handle
             // wait (T10), plus a throttled re-open attempt every 64 cycles
             // so a driver device that starts after this thread still
@@ -965,7 +1002,10 @@ public sealed class HMController : IDisposable
             {
                 if (waitPair != null)
                 {
-                    WaitHandle.WaitAny(waitPair, 500);
+                    int timeout = drainFaulted ? 8 : eventTimeoutMs;
+                    drainFaulted = false;
+                    int woke = WaitHandle.WaitAny(waitPair, timeout);
+                    lastWakeWasTimeout = woke == WaitHandle.WaitTimeout;
                 }
                 else
                 {

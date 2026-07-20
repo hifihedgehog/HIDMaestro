@@ -1,22 +1,25 @@
-# Read a source INF, update its DriverVer line with today's date while
-# preserving the full 4-part version from source, and write the result to
-# the destination path.
+# Read a source INF, update its DriverVer line with today's date and a
+# build-unique 4th version component, and write the result to the
+# destination path.
 #
-# Previous behavior auto-stamped the 4th component with HHmm so every build
-# produced a unique DriverVer. That guarded against `pnputil /add-driver`
-# seeing the same DriverVer twice and silently keeping stale DriverStore
-# bytes. The stale-install risk is now covered elsewhere: `PnputilHelper`
-# calls `/delete-driver /uninstall /force` during cleanup, which purges the
-# old package before reinstall regardless of DriverVer equality. Auto-
-# stamping was causing the deployed INFs' 4-part version to drift from the
-# managed assembly FileVersion (always `<Version>.0`), so every release
-# had native and managed sides reporting different version strings.
+# The 4th component is stamped HHmm (build minute) so every build carries
+# a strictly increasing DriverVer within a day. This guard was removed
+# once, on the theory that the install flow's package purge made same-
+# version reinstalls safe; that purge itself was later removed (a
+# /delete-driver /uninstall /force on an active driver leaves devices in
+# Code 14, per the project's install rules), and the 2026-07-20 audit
+# session then demonstrated the consequence: three same-day driver
+# rebuilds at an identical DriverVer kept binding stale DriverStore
+# bytes through forced reinstalls, defeating driver iteration and
+# mutation testing. A unique 4th component makes pnputil treat every
+# build as an upgrade, deterministically.
 #
-# Now all artifacts in a given release share the exact 4-part version
-# string from source (e.g. `1.1.19.0`). pnputil still accepts reinstall
-# because the cleanup flow uninstalls the prior package first. Date is
-# still refreshed on each build so INFs rebuilt on different days carry
-# a current date.
+# Tradeoff (accepted): deployed INFs report `x.y.z.HHmm` while managed
+# assemblies report `x.y.z.0`. Only the 4th part differs, and release
+# builds cut from pre-tag-validate all stamp within one minute.
+#
+# The committed INF sources keep a stable `x.y.z.0` for review; only the
+# build/ copies are stamped.
 
 param(
     [Parameter(Mandatory=$true)][string]$Source,
@@ -29,13 +32,15 @@ if (!(Test-Path -LiteralPath $Source)) {
 }
 
 $content = Get-Content -Raw -LiteralPath $Source
-$date    = (Get-Date).ToString('MM/dd/yyyy')
+$now   = Get-Date
+$date  = $now.ToString('MM/dd/yyyy')
+$build = [int]$now.ToString('HHmm')   # int-cast drops a leading zero (0930 -> 930)
 
 # Match: DriverVer [ws] = [ws] MM/dd/yyyy,N.N.N.N  (any 4-part version)
-# Refresh the date; preserve the full 4-part version byte-for-byte from source.
-$pattern = '(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*(\d+\.\d+\.\d+\.\d+)\s*$'
+# Refresh the date; keep the source's first three parts; stamp the 4th.
+$pattern = '(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*(\d+\.\d+\.\d+)\.\d+\s*$'
 $replaced = [regex]::Replace($content, $pattern, { param($m)
-    $m.Groups[1].Value + $date + ',' + $m.Groups[2].Value
+    $m.Groups[1].Value + $date + ',' + $m.Groups[2].Value + '.' + $build
 })
 
 if ($replaced -eq $content) {

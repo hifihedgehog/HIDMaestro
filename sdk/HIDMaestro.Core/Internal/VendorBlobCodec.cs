@@ -250,7 +250,9 @@ internal static class VendorBlobCodec
                 {
                     if (f.Src.Scope == null) break;
                     var crc = ComputeCrc32(f.Src.Scope, buffer);
-                    int dst = f.CrcDst;
+                    // -1 sentinel: no declared dest; the old string impl
+                    // resolved buffer.Length - 4 at run time. Preserved.
+                    int dst = f.CrcDst >= 0 ? f.CrcDst : buffer.Length - 4;
                     buffer[dst + 0] = (byte)(crc       & 0xFF);
                     buffer[dst + 1] = (byte)((crc >> 8 ) & 0xFF);
                     buffer[dst + 2] = (byte)((crc >> 16) & 0xFF);
@@ -395,7 +397,8 @@ internal static class VendorBlobCodec
                 {
                     if (field.Scope == null) break;
                     var crc = ComputeCrc32(field.Scope, buffer);
-                    int dst = f.CrcDst;
+                    // -1 sentinel: resolve from the live buffer (see EncodeInput).
+                    int dst = f.CrcDst >= 0 ? f.CrcDst : buffer.Length - 4;
                     buffer[dst + 0] = (byte)(crc       & 0xFF);
                     buffer[dst + 1] = (byte)((crc >> 8 ) & 0xFF);
                     buffer[dst + 2] = (byte)((crc >> 16) & 0xFF);
@@ -514,8 +517,11 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.Crc32:
                 {
                     if (field.Scope == null) continue;
-                    int dst = f.CrcDst;
-                    if (dst + 3 >= buffer.Length) continue;
+                    // -1 sentinel: the RECEIVED report's length rules here.
+                    // A short host write must still get its CRC validated
+                    // at the actual buffer end, exactly like the old impl.
+                    int dst = f.CrcDst >= 0 ? f.CrcDst : buffer.Length - 4;
+                    if (dst < 0 || dst + 3 >= buffer.Length) continue;
                     uint observed = (uint)buffer[dst]
                                   | ((uint)buffer[dst + 1] << 8)
                                   | ((uint)buffer[dst + 2] << 16)

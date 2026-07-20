@@ -525,9 +525,13 @@ internal static class SharedMemoryIO
         int slotIdx = (int)((nextSeq - 1) % (uint)OUTPUT_RING_SLOTS);
         int slotBase = OUTPUT_HEADER_SIZE + slotIdx * OUTPUT_SLOT_SIZE;
 
-        // Per-slot seqlock: read SeqNo, fields, SeqNo again — retry on
-        // mismatch (writer mid-update on the same slot, very rare given
-        // 64 slots and a single-producer driver).
+        // Per-slot seqlock: read SeqNo, fields, then SeqNo again, and
+        // retry on mismatch. Since the audit of #34, producers RESERVE their
+        // sequence via InterlockedIncrement on Head and publish the
+        // slot's SeqNo last, so a mismatch here is either a slot whose
+        // reserving producer hasn't finished writing (retry next wake;
+        // its doorbell signal follows the publish) or a 64-lap overwrite
+        // (handled by the skip-ahead above).
         int retries = 4;
         uint slotSeqAfter = 0;
         do

@@ -596,8 +596,20 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
      * checking slot.SeqNo == expected, copies, re-checks SeqNo for
      * torn-write detection. If LastSeen+N < Head, oldest packets have
      * been overwritten — reader logs and skips ahead to Head-N+1. */
-    ctx->OutputSeqNoLocal++;
-    ULONG newSeq = ctx->OutputSeqNoLocal;
+    /* Multi-producer reservation (audit of #34, pre-existing bug): the
+     * main driver and the XUSB companion BOTH publish to this ring
+     * (DirectInput FFB / HID output here, XInput rumble there), and the
+     * old local-counter scheme let the two producers mint the same
+     * sequence number and silently overwrite each other's slot.
+     * InterlockedIncrement on the shared Head atomically reserves a
+     * unique sequence for every writer in every process. The slot's
+     * SeqNo store (fenced, below) remains the publish gate: the reader
+     * validates slot.SeqNo == expected and simply retries a reserved-
+     * but-unwritten slot on its next wake, so the reservation being
+     * visible before the payload is harmless. This also removes the
+     * stale-local-counter gap after an SDK section re-zero: the next
+     * reservation continues from the live Head, whatever it is. */
+    ULONG newSeq = (ULONG)InterlockedIncrement((volatile LONG *)&dst->Head);
     ULONG slotIdx = (newSeq - 1) % HIDMAESTRO_OUTPUT_RING_SLOTS;
     volatile HIDMAESTRO_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
 
@@ -607,8 +619,6 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
     for (ULONG i = 0; i < DataSize; i++) slot->Data[i] = Data[i];
     MemoryBarrier();
     slot->SeqNo = newSeq;
-    MemoryBarrier();
-    dst->Head = newSeq;
 
     WdfWaitLockRelease(ctx->OutputLock);
 

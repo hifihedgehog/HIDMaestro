@@ -25,15 +25,21 @@ public class HidReportBuilder
     /// ResolveSemantics to correct axis assignments for profiles where the
     /// default heuristic is wrong (e.g. Sony uses Z/Rz for right stick,
     /// Rx/Ry for triggers — opposite of the Xbox convention).</summary>
-    public Dictionary<string, string>? AxisMap { get; set; }
-
     // Canonical trigger positions for the combined-Z synthesis, resolved
-    // lazily on first BuildReportInto and constant thereafter (issue #34).
-    // AxisMap is assigned once during builder construction, before any
-    // frame is built, so a one-shot resolve is safe.
+    // lazily on first BuildReportInto (issue #34). Every repo path assigns
+    // AxisMap during Parse, before any frame is built, but the setter
+    // still invalidates the cache (audit of #34) so a late assignment can
+    // never leave stale canonicals behind.
+    private Dictionary<string, string>? _axisMap;
     private bool _canonicalTriggersResolved;
     private HMAxis _canonicalLtCached;
     private HMAxis _canonicalRtCached;
+
+    public Dictionary<string, string>? AxisMap
+    {
+        get => _axisMap;
+        set { _axisMap = value; _canonicalTriggersResolved = false; }
+    }
 
     /// <summary>Optional button remapping table. Maps HMButton bit positions
     /// (index) to descriptor button indices (value). When set, BuildReport

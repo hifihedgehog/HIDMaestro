@@ -292,9 +292,17 @@ public sealed class ControllerProfile
     }
 }
 
-/// <summary>v1.3.5 — vendor-blob report layout (input or output direction).
+/// <summary>v1.3.5: vendor-blob report layout (input or output direction).
 /// Profile JSON describes the byte layout of a vendor blob; the codec walks
-/// the field list to encode/decode reports in either direction.</summary>
+/// the field list to encode/decode reports in either direction.
+///
+/// <para>IMMUTABLE AFTER FIRST USE (issue #34): the codec compiles this
+/// spec to numeric opcodes on its first encode/decode and reuses the
+/// compiled program for the spec's lifetime, matching
+/// <see cref="HMProfile"/>'s documented immutable-identity contract.
+/// Mutating fields after a controller has used the spec has no effect on
+/// the wire. Build a new profile (HMProfileBuilder or a fresh JSON load)
+/// to change layouts.</para></summary>
 public sealed class ExtendedReportSpec
 {
     /// <summary>Compiled-opcode cache (issue #34). Fields are not

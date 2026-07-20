@@ -46,7 +46,6 @@ typedef struct _COMPANION_CTX {
     PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
     HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
     PVOID OutputMemPtr;        /* MapViewOfFile RW pointer for output */
-    ULONG OutputSeqNoLocal;    /* Last value we wrote (always increment) */
     ULONG OutputWriteCount;    /* Stale-detection: total writes since last re-open */
     ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
     ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
@@ -231,12 +230,12 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
     PVOID v = MapViewOfFile(h, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(SHARED_OUTPUT));
     if (v == NULL) { CloseHandle(h); return FALSE; }
 
-    ctx->OutputMemHandle = h;
-    ctx->OutputMemPtr = v;
-    ctx->OutputWriteCount = 0;
-
-    /* Output-ring doorbell (issue #34), lazily acquired alongside the
-     * mapping. CreateEventW creates the auto-reset event if we're first
+    /* Output-ring doorbell (issue #34), acquired BEFORE the mapping
+     * pointer becomes visible (audit of #34): the XUSB queue dispatches
+     * IOCTLs in parallel, so a sibling callback that fast-paths on
+     * OutputMemPtr must already see the event handle, or its first
+     * publish would skip the signal and wait on the SDK's safety
+     * timeout. CreateEventW creates the auto-reset event if we're first
      * or opens the HID child driver's existing object otherwise, so
      * ordering between the two hosts doesn't matter. The event object's
      * lifetime is the device session (unlike the SDK-recreated section),
@@ -254,6 +253,11 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
         ctx->OutputSignalEvent = CreateEventW(&sa, FALSE /* auto reset */, FALSE,
                                               ctx->OutputEventName);
     }
+
+    ctx->OutputMemHandle = h;
+    MemoryBarrier();
+    ctx->OutputMemPtr = v;
+    ctx->OutputWriteCount = 0;
     return TRUE;
 }
 
@@ -271,12 +275,15 @@ static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
      * the companion-side writer can target different slots concurrently
      * but each slot uses MemoryBarrier-fenced SeqNo for torn-write detection.
      *
-     * Synchronize with the live Head so we never go backwards relative to
-     * any driver writes that may have happened between sessions: read Head,
-     * compute newSeq = max(Head, OutputSeqNoLocal) + 1. */
-    ULONG headNow = dst->Head;
-    ULONG newSeq = (headNow > ctx->OutputSeqNoLocal ? headNow : ctx->OutputSeqNoLocal) + 1;
-    ctx->OutputSeqNoLocal = newSeq;
+     * Multi-producer reservation (audit of #34, pre-existing bug): the
+     * old max(Head, local)+1 read-modify-write could mint the same
+     * sequence as the main HID driver publishing concurrently from its
+     * own process, silently overwriting a slot. InterlockedIncrement on
+     * the shared Head reserves a unique sequence across both producers;
+     * the fenced slot.SeqNo store below remains the publish gate the
+     * reader validates (a reserved-but-unwritten slot is retried on the
+     * reader's next wake). Mirrors driver.c PublishOutput. */
+    ULONG newSeq = (ULONG)InterlockedIncrement((volatile LONG *)&dst->Head);
     ULONG slotIdx = (newSeq - 1) % HM_OUTPUT_RING_SLOTS;
     volatile HM_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
 
@@ -286,8 +293,6 @@ static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
     for (ULONG i = 0; i < dataSize; i++) slot->Data[i] = data[i];
     MemoryBarrier();
     slot->SeqNo = newSeq;
-    MemoryBarrier();
-    dst->Head = newSeq;
 
     /* Doorbell LAST (issue #34): Head is published, so a reader woken by
      * this signal always sees the new packet. Mirrors driver.c. */
