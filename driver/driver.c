@@ -834,6 +834,10 @@ static VOID SwitchHandleProprietary(_In_ PDEVICE_CONTEXT ctx,
     UCHAR reply[64];
     UCHAR cmd = (payloadLen > 0) ? payload[0] : 0;
 
+    /* Issue #35: first Switch-protocol traffic locks the 0x30 stream
+     * into the Nintendo full-mode layout permanently. */
+    ctx->SwitchProtocolSeen = TRUE;
+
     RtlZeroMemory(reply, sizeof(reply));
     reply[0] = 0x81;
     reply[1] = cmd;
@@ -878,6 +882,9 @@ static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
                                    _In_ ULONG payloadLen)
 {
     UCHAR reply[64];
+
+    /* Issue #35: see SwitchHandleProprietary. */
+    ctx->SwitchProtocolSeen = TRUE;
     UCHAR subcmd;
     const UCHAR *args;
     ULONG argLen;
@@ -971,11 +978,114 @@ static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
     SwitchQueueReply(ctx, reply);
 }
 
+/* Issue #35: pre-handshake 0x30 frame packed in the layout the HID
+ * descriptor DECLARES, so descriptor-driven parsers (DirectInput,
+ * joy.cpl) read a correct pad instead of parsing Nintendo full-mode
+ * bytes through the wrong field map. The real Pro's descriptor lies
+ * about its own full-mode report; real hardware hides that by
+ * streaming nothing until the 0x80 handshake. We stream immediately
+ * (so SDL's report-ID sniff locks mode 0x30), which is what exposed
+ * the mismatch.
+ *
+ * Descriptor field map (profiles/nintendo/switch-pro.json, decoded):
+ *   [0]     report ID 0x30
+ *   [1..2]  buttons 1-14 (LSB-first) + 2 const bits
+ *   [3..10] X, Y, Z, Rz as 16-bit LE, logical 0..65535
+ *   [11]    hat (low nibble, 0-7 clockwise from up, 8 = centered)
+ *           + buttons 15-18 (high nibble, never driven)
+ *   [12..63] Input(Cnst) padding
+ *
+ * Button numbering follows the profile layout JSON and the real
+ * simple-mode wire order (SDL_hidapi_switch.c
+ * HandleSimpleControllerState): B A Y X L R ZL ZR - + LS RS Home Cap.
+ * Source bits are the Nintendo full-mode body the SDK submits
+ * (HandleFullControllerState): byte0 Y/X/B/A/../R/ZR, byte1
+ * -/+/RS/LS/Home/Cap, byte2 dpad DURL/../L/ZL. Sticks are 12-bit
+ * packed around center 0x800 +/- 0x600 (the responder's fabricated
+ * SPI calibration); rescaled to the descriptor's full 0..65535 with
+ * Y/Rz mirrored because the packed body is Nintendo up-positive and
+ * HID Y grows downward. */
+static USHORT SwitchScaleStick12(USHORT v12, BOOLEAN invert)
+{
+    LONG defl = (LONG)v12 - 0x800;
+    if (invert) defl = -defl;
+    LONG v = 32768 + defl * 32768 / 0x600;
+    if (v < 0) v = 0;
+    if (v > 65535) v = 65535;
+    return (USHORT)v;
+}
+
+static VOID SwitchBuildDescriptorFrame(_In_ PDEVICE_CONTEXT ctx,
+                                       _Out_writes_(64) UCHAR *frame)
+{
+    UCHAR state[46];
+    SwitchFillLatestState(ctx, state);
+
+    RtlZeroMemory(frame, 64);
+    frame[0] = 0x30;
+
+    {
+        UCHAR n0 = state[0], n1 = state[1], n2 = state[2];
+        UCHAR b1 = 0, b2 = 0;
+        if (n0 & 0x04) b1 |= 0x01;   /* B  -> button 1 */
+        if (n0 & 0x08) b1 |= 0x02;   /* A  -> button 2 */
+        if (n0 & 0x01) b1 |= 0x04;   /* Y  -> button 3 */
+        if (n0 & 0x02) b1 |= 0x08;   /* X  -> button 4 */
+        if (n2 & 0x40) b1 |= 0x10;   /* L  -> button 5 */
+        if (n0 & 0x40) b1 |= 0x20;   /* R  -> button 6 */
+        if (n2 & 0x80) b1 |= 0x40;   /* ZL -> button 7 */
+        if (n0 & 0x80) b1 |= 0x80;   /* ZR -> button 8 */
+        if (n1 & 0x01) b2 |= 0x01;   /* Minus   -> button 9  */
+        if (n1 & 0x02) b2 |= 0x02;   /* Plus    -> button 10 */
+        if (n1 & 0x08) b2 |= 0x04;   /* LStick  -> button 11 */
+        if (n1 & 0x04) b2 |= 0x08;   /* RStick  -> button 12 */
+        if (n1 & 0x10) b2 |= 0x10;   /* Home    -> button 13 */
+        if (n1 & 0x20) b2 |= 0x20;   /* Capture -> button 14 */
+        frame[1] = b1;
+        frame[2] = b2;
+
+        {
+            USHORT lx = (USHORT)(state[3] | ((state[4] & 0x0F) << 8));
+            USHORT ly = (USHORT)((state[4] >> 4) | (state[5] << 4));
+            USHORT rx = (USHORT)(state[6] | ((state[7] & 0x0F) << 8));
+            USHORT ry = (USHORT)((state[7] >> 4) | (state[8] << 4));
+            USHORT ax  = SwitchScaleStick12(lx, FALSE);
+            USHORT ay  = SwitchScaleStick12(ly, TRUE);
+            USHORT az  = SwitchScaleStick12(rx, FALSE);
+            USHORT arz = SwitchScaleStick12(ry, TRUE);
+            frame[3]  = (UCHAR)(ax  & 0xFF); frame[4]  = (UCHAR)(ax  >> 8);
+            frame[5]  = (UCHAR)(ay  & 0xFF); frame[6]  = (UCHAR)(ay  >> 8);
+            frame[7]  = (UCHAR)(az  & 0xFF); frame[8]  = (UCHAR)(az  >> 8);
+            frame[9]  = (UCHAR)(arz & 0xFF); frame[10] = (UCHAR)(arz >> 8);
+        }
+
+        {
+            BOOLEAN dDown  = (n2 & 0x01) != 0;
+            BOOLEAN dUp    = (n2 & 0x02) != 0;
+            BOOLEAN dRight = (n2 & 0x04) != 0;
+            BOOLEAN dLeft  = (n2 & 0x08) != 0;
+            UCHAR hat = 8;                       /* centered/null */
+            if (dUp && dRight)        hat = 1;
+            else if (dRight && dDown) hat = 3;
+            else if (dDown && dLeft)  hat = 5;
+            else if (dLeft && dUp)    hat = 7;
+            else if (dUp)             hat = 0;
+            else if (dRight)          hat = 2;
+            else if (dDown)           hat = 4;
+            else if (dLeft)           hat = 6;
+            frame[11] = hat;                     /* buttons 15-18 = 0 */
+        }
+    }
+}
+
 /* 60 Hz input report 0x30 streamer. Real Pro Controller cadence is
  * 15 ms; WaitForSingleObject's default timer resolution gives ~15.6 ms
  * which SDL treats identically. Serves ONE pending READ_REPORT per tick
  * (the one-report-per-frame discipline ProcessSharedInput documents)
- * and refreshes the GET_INPUT_REPORT cache. Exits on SwitchStreamStop. */
+ * and refreshes the GET_INPUT_REPORT cache. Exits on SwitchStreamStop.
+ * Until the first protocol traffic (issue #35), frames are packed in
+ * the descriptor layout via SwitchBuildDescriptorFrame; after, the
+ * Nintendo full-mode layout SDL expects. */
 static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
 {
     PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
@@ -991,17 +1101,26 @@ static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
             UCHAR frame[64];
             UCHAR state[46];
             WDFREQUEST pendingRead = NULL;
+            BOOLEAN nintendoLayout = ctx->SwitchProtocolSeen;
 
-            RtlZeroMemory(frame, sizeof(frame));
-            SwitchFillLatestState(ctx, state);
-            frame[0] = 0x30;
-            frame[2] = SWITCH_BATTERY_CONN;
-            RtlCopyMemory(frame + 3, state, 9);        /* buttons+sticks */
-            frame[12] = SWITCH_VIBRATOR;
-            RtlCopyMemory(frame + 13, state + 10, 36); /* IMU (zeros when disabled) */
+            if (nintendoLayout) {
+                RtlZeroMemory(frame, sizeof(frame));
+                SwitchFillLatestState(ctx, state);
+                frame[0] = 0x30;
+                frame[2] = SWITCH_BATTERY_CONN;
+                RtlCopyMemory(frame + 3, state, 9);        /* buttons+sticks */
+                frame[12] = SWITCH_VIBRATOR;
+                RtlCopyMemory(frame + 13, state + 10, 36); /* IMU (zeros when disabled) */
+            } else {
+                /* Issue #35: no protocol traffic yet, serve the layout
+                 * the descriptor declares. No timer byte here: bytes
+                 * 1-2 are buttons in this shape. */
+                SwitchBuildDescriptorFrame(ctx, frame);
+            }
 
             WdfWaitLockAcquire(ctx->InputLock, NULL);
-            frame[1] = ctx->SwitchTimer++;
+            if (nintendoLayout)
+                frame[1] = ctx->SwitchTimer++;
             /* Refresh the polled GET_INPUT_REPORT cache with the frame. */
             RtlCopyMemory(ctx->InputReport, frame, sizeof(frame));
             ctx->InputReportSize = sizeof(frame);

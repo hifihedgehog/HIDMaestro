@@ -191,6 +191,14 @@ typedef struct _DEVICE_CONTEXT {
      * input report 0x30 at ~60 Hz from the latest shared-memory body
      * once the device is in full-report mode. */
     BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
+    BOOLEAN SwitchProtocolSeen;     /* issue #35: any 0x80 USB command or
+                                     * 0x01 subcommand arrived. Until then
+                                     * the 0x30 stream is packed in the
+                                     * DESCRIPTOR layout so DirectInput
+                                     * consumers parse correctly; after,
+                                     * permanently Nintendo full-mode.
+                                     * Monotonic FALSE->TRUE; benign
+                                     * cross-thread race (one frame). */
     UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
     BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
     UCHAR   SwitchTimer;            /* timer byte, ++ per served report */

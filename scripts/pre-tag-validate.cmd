@@ -70,6 +70,12 @@ if errorlevel 1 (
     popd
     exit /b 2
 )
+dotnet build test\probes\switch_descriptor_idle_check\switch_descriptor_idle_check.csproj -c Release --nologo -v:minimal >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] SwitchDescriptorIdleCheck build failed.
+    popd
+    exit /b 2
+)
 dotnet build test\probes\switch_pro_sdl3_check\SwitchProSdl3Check.csproj -c Release --nologo -v:minimal >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] SwitchProSdl3Check build failed.
@@ -88,6 +94,18 @@ test\probes\switch_pro_check\bin\Release\net10.0-windows10.0.26100.0\SwitchProCh
 if errorlevel 1 (
     echo ====================================================================
     echo  [FAIL] Switch Pro protocol check failed. DO NOT TAG OR RELEASE.
+    echo ====================================================================
+    popd
+    exit /b 1
+)
+rem     Pre-handshake descriptor conformance (issue #35): the idle 0x30
+rem     stream must parse correctly through the HID descriptor
+rem     (DirectInput/joy.cpl) and flip to the Nintendo layout on the
+rem     first protocol write. 21 asserts, ~10 s.
+test\probes\switch_descriptor_idle_check\bin\Release\net10.0-windows10.0.26100.0\SwitchDescriptorIdleCheck.exe
+if errorlevel 1 (
+    echo ====================================================================
+    echo  [FAIL] Switch descriptor idle check failed. DO NOT TAG OR RELEASE.
     echo ====================================================================
     popd
     exit /b 1
