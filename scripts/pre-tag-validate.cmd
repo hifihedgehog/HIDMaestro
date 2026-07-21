@@ -4,7 +4,8 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full live-swap regression battery (41 scenarios, ~32 min)
+rem  - Runs the full live-swap regression battery (41 scenarios, ~10 min
+rem    on the Ryzen devbox; the Atom fixture takes ~30+ min)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
 rem
@@ -63,6 +64,26 @@ if errorlevel 1 (
     echo [ERROR] HIDMaestroProfileExtractor build failed.
     popd
     exit /b 2
+)
+rem Rebuild every managed probe so the battery's probe scenarios (S24+)
+rem run the SDK built THIS run, not whatever a prior iteration left in
+rem bin\. RID-agnostic (plain dotnet build): the harness consumes that
+rem flavor and its freshness gate (swap_regression.ps1) hash-compares
+rem each probe's HIDMaestro.Core.dll against the SDK project's own
+rem RID-agnostic output, refusing to run stale. This loop is what makes
+rem the gate pass automatically. 2026-07-21 audit: a battery ran a
+rem same-version-but-days-old probe SDK, which the old version-only
+rem gate could not see.
+echo        Rebuilding probe set...
+for /d %%p in (test\probes\*) do (
+    if exist "%%p\*.csproj" (
+        dotnet build "%%p" -c Release --nologo -v:quiet >nul 2>&1
+        if errorlevel 1 (
+            echo [ERROR] probe build failed: %%p
+            popd
+            exit /b 2
+        )
+    )
 )
 dotnet build test\probes\switch_pro_check\SwitchProCheck.csproj -c Release --nologo -v:minimal >nul 2>&1
 if errorlevel 1 (
@@ -123,7 +144,7 @@ if errorlevel 1 (
 echo.
 
 rem 4. Run the full regression battery
-echo [3/4] Running live-swap regression battery (41 scenarios, ~32 min)...
+echo [3/4] Running live-swap regression battery (41 scenarios, ~10 min)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%

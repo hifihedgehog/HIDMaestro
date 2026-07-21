@@ -132,7 +132,24 @@ internal static class Program
 
         var profile = ctx.GetProfile("switch-pro")
             ?? throw new InvalidOperationException("switch-pro profile missing");
-        Console.WriteLine("  Creating switch-pro virtual controller...");
+
+        // Descriptor-idle hold (TTL-gated, see driver.c DeviceAdd): keeps
+        // THIS pad in descriptor mode even when a Chromium browser is
+        // running. Chromium's gamepad service is a legitimate Switch
+        // protocol host and handshakes every new Pro within milliseconds
+        // (2026-07-21 audit: msedge.exe armed the pad before the first
+        // stream tick, exactly as it does real hardware), which would
+        // otherwise make phases 1-2 unobservable. Deleted in the finally
+        // below; the driver additionally ignores values older than 60 s.
+        const string HmKey = @"HKEY_LOCAL_MACHINE\SOFTWARE\HIDMaestro";
+        const string HoldValue = "SwitchDescriptorIdleHold";
+        Microsoft.Win32.Registry.SetValue(HmKey, HoldValue,
+            (long)DateTime.UtcNow.ToFileTimeUtc(),
+            Microsoft.Win32.RegistryValueKind.QWord);
+        try
+        {
+
+        Console.WriteLine("  Creating switch-pro virtual controller (hold armed)...");
         using var ctrl = ctx.CreateController(profile);
 
         // Neutral pump keeps the shared body populated. NO protocol traffic
@@ -241,48 +258,109 @@ internal static class Program
         lock (pumpLock) pumpState = new HMGamepadState();
         Thread.Sleep(40);
 
-        // ── Phase 3: protocol traffic flips to Nintendo layout ──────────
-        Console.WriteLine("\n-- Phase 3: 0x80 handshake locks Nintendo layout --");
+        // ── Phase 3: held pad answers protocol but keeps descriptor mode ──
+        Console.WriteLine("\n-- Phase 3: held pad answers 0x80 but stays descriptor-mode --");
 
         var cmd = new byte[64];
         cmd[0] = 0x80; cmd[1] = 0x02;   // SDL BTrySetupUSB handshake step
         Check("0x80 0x02 handshake write", HidWrite(cmd));
         var ack = ReadUntil(0x81, 1000);
-        Check("0x81 handshake reply", ack != null && ack[1] == 0x02);
-
-        // Nintendo layout: byte1 is the timer and advances per frame.
-        var nf = new System.Collections.Generic.List<byte[]>();
-        deadline.Restart();
-        while (nf.Count < 4 && deadline.ElapsedMilliseconds < 2000)
-        {
-            var r = HidRead(200);
-            if (r != null && r[0] == 0x30) nf.Add(r);
-        }
-        Check("post-handshake 0x30 frames", nf.Count >= 3, $"{nf.Count}");
-        if (nf.Count >= 3)
-        {
-            bool timerAdvances = false;
-            for (int i = 1; i < nf.Count; i++)
-                if (nf[i][1] != nf[0][1]) { timerAdvances = true; break; }
-            Check("byte1 advances (Nintendo timer)", timerAdvances,
-                  string.Join(",", nf.Select(f => f[1].ToString("X2"))));
-            Check("byte2 battery/conn nonzero", nf[^1][2] != 0, $"0x{nf[^1][2]:X2}");
-
-            lock (pumpLock)
-            {
-                pumpState = new HMGamepadState { Buttons = (HMButton)(1u << 1) }; // A
-            }
-            Thread.Sleep(60);
-            var na = ReadUntil(0x30, 800, r => (r[3] & 0x08) != 0);
-            Check("A press at Nintendo byte3 bit3 post-handshake", na != null);
-        }
+        Check("0x81 handshake reply (responder alive under hold)", ack != null && ack[1] == 0x02);
+        var still = ReadUntil(0x30, 800);
+        Check("stream stays descriptor-mode under hold (byte2 == 0)",
+              still != null && still[2] == 0, still != null ? $"0x{still[2]:X2}" : "no frame");
 
         Volatile.Write(ref pumpStop, true);
         pump.Join(1000);
         s_hid.Dispose();
+        ctrl.Dispose();
+
+        // Drop the hold BEFORE the phase-4 create: the TTL window is 60 s
+        // and the driver reads the value at every Switch DeviceAdd, so a
+        // still-present value would hold the second pad too.
+        try
+        {
+            using var hmEarly = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\HIDMaestro", writable: true);
+            hmEarly?.DeleteValue(HoldValue, throwOnMissingValue: false);
+        }
+        catch { }
+
+        // ── Phase 4: unheld pad flips to Nintendo layout on protocol ────
+        // A fresh pad WITHOUT the hold. On a box with a Chromium browser
+        // running, Edge/Chrome arms it within milliseconds; otherwise our
+        // own 0x80 write does. Either way the stream must be Nintendo
+        // full-mode: timer at byte 1, battery/conn at byte 2.
+        Console.WriteLine("\n-- Phase 4: unheld pad locks Nintendo layout on protocol traffic --");
+
+        using (var ctrl2 = ctx.CreateController(profile))
+        {
+            var pump2Stop = false;
+            var pump2 = new Thread(() =>
+            {
+                var st = new HMGamepadState { Buttons = (HMButton)(1u << 1) }; // A held
+                while (!Volatile.Read(ref pump2Stop)) { ctrl2.SubmitState(st); Thread.Sleep(8); }
+            }) { IsBackground = true };
+            pump2.Start();
+
+            string? path2 = null;
+            for (int i = 0; i < 50 && path2 == null; i++)
+            {
+                path2 = HidDeviceEnumerator.Enumerate()
+                    .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009)?.DevicePath;
+                if (path2 == null) Thread.Sleep(100);
+            }
+            Check("second pad enumerates", path2 != null);
+            if (path2 != null)
+            {
+                s_hid = CreateFileW(path2, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
+                                    IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+                Check("second pad opens", !s_hid.IsInvalid);
+                if (!s_hid.IsInvalid)
+                {
+                    // Arm it ourselves; harmless if a browser already did.
+                    HidWrite(cmd);
+
+                    var nf = new System.Collections.Generic.List<byte[]>();
+                    deadline.Restart();
+                    while (nf.Count < 4 && deadline.ElapsedMilliseconds < 2000)
+                    {
+                        var r = HidRead(200);
+                        if (r != null && r[0] == 0x30) nf.Add(r);
+                    }
+                    Check("post-arm 0x30 frames", nf.Count >= 3, $"{nf.Count}");
+                    if (nf.Count >= 3)
+                    {
+                        bool timerAdvances = false;
+                        for (int i = 1; i < nf.Count; i++)
+                            if (nf[i][1] != nf[0][1]) { timerAdvances = true; break; }
+                        Check("byte1 advances (Nintendo timer)", timerAdvances,
+                              string.Join(",", nf.Select(f => f[1].ToString("X2"))));
+                        Check("byte2 battery/conn nonzero", nf[^1][2] != 0, $"0x{nf[^1][2]:X2}");
+                        var na = ReadUntil(0x30, 800, r => (r[3] & 0x08) != 0);
+                        Check("A press at Nintendo byte3 bit3 post-arm", na != null);
+                    }
+                    s_hid.Dispose();
+                }
+            }
+            Volatile.Write(ref pump2Stop, true);
+            pump2.Join(1000);
+        }
+
+        }
+        finally
+        {
+            try
+            {
+                using var hm = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\HIDMaestro", writable: true);
+                hm?.DeleteValue(HoldValue, throwOnMissingValue: false);
+            }
+            catch { }
+        }
 
         Console.WriteLine(s_failures == 0
-            ? "\n=== PASS: idle stream descriptor-conformant, handshake flips to Nintendo ==="
+            ? "\n=== PASS: idle stream descriptor-conformant; protocol locks Nintendo on unheld pad ==="
             : $"\n=== FAIL: {s_failures} check(s) failed ===");
         return s_failures == 0 ? 0 : 1;
     }

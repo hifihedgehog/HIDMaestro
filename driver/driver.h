@@ -199,6 +199,25 @@ typedef struct _DEVICE_CONTEXT {
                                      * permanently Nintendo full-mode.
                                      * Monotonic FALSE->TRUE; benign
                                      * cross-thread race (one frame). */
+    BOOLEAN SwitchProtocolHold;     /* TTL-gated test hook (2026-07-21
+                                     * audit): HKLM\SOFTWARE\HIDMaestro
+                                     * value SwitchDescriptorIdleHold
+                                     * (REG_QWORD FILETIME), read at
+                                     * DeviceAdd and honored only within
+                                     * 60 s of its write. While set,
+                                     * protocol traffic is answered but
+                                     * never flips the stream to the
+                                     * Nintendo layout, so the
+                                     * descriptor-idle probe can verify
+                                     * its idle phases hermetically even
+                                     * when a Chromium browser (a
+                                     * legitimate Switch-protocol host)
+                                     * handshakes every new pad within
+                                     * ms. WUDFHost (LOCAL SERVICE)
+                                     * cannot delete the value; the TTL
+                                     * plus the probe's own delete keep
+                                     * a crashed probe from wedging
+                                     * later creates. */
     UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
     BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
     UCHAR   SwitchTimer;            /* timer byte, ++ per served report */

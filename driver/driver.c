@@ -277,6 +277,37 @@ ReadConfigFromRegistry(
         ctx->SwitchMac[0] = 0x98; ctx->SwitchMac[1] = 0xB6;
         ctx->SwitchMac[2] = 0xE9; ctx->SwitchMac[3] = 0x48;
         ctx->SwitchMac[4] = 0x4D; ctx->SwitchMac[5] = (UCHAR)(0x30 + ctx->ControllerIndex);
+
+        /* Descriptor-idle hold, TTL-gated (2026-07-21 audit): the
+         * switch_descriptor_idle_check probe writes this global value
+         * (REG_QWORD, the probe's current FILETIME) just before creating
+         * its pad so phases 1-2 stay hermetic when a Chromium browser is
+         * running (Chromium legitimately handshakes every new Switch Pro
+         * within milliseconds, exactly as it does real hardware). The
+         * hold is honored only within 60 s of the write: WUDFHost runs
+         * as LOCAL SERVICE and cannot delete the value, so a TTL (plus
+         * the probe's own best-effort delete) keeps a crashed probe from
+         * wedging later creates. See driver.h SwitchProtocolHold. */
+        {
+            HKEY holdKey;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0,
+                              KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+                              &holdKey) == ERROR_SUCCESS) {
+                ULONGLONG holdVal = 0; DWORD holdSize = sizeof(holdVal), holdType = 0;
+                if (RegQueryValueExW(holdKey, L"SwitchDescriptorIdleHold", NULL,
+                                     &holdType, (LPBYTE)&holdVal, &holdSize) == ERROR_SUCCESS
+                    && holdType == REG_QWORD && holdVal != 0) {
+                    FILETIME nowFt;
+                    GetSystemTimeAsFileTime(&nowFt);
+                    ULONGLONG now = ((ULONGLONG)nowFt.dwHighDateTime << 32)
+                                  | nowFt.dwLowDateTime;
+                    /* 60 s in 100 ns units. Reject clock-skewed futures. */
+                    if (now >= holdVal && (now - holdVal) < 600000000ULL)
+                        ctx->SwitchProtocolHold = TRUE;
+                }
+                RegCloseKey(holdKey);
+            }
+        }
     }
 
     /* Read VersionNumber (REG_DWORD) */
@@ -835,8 +866,12 @@ static VOID SwitchHandleProprietary(_In_ PDEVICE_CONTEXT ctx,
     UCHAR cmd = (payloadLen > 0) ? payload[0] : 0;
 
     /* Issue #35: first Switch-protocol traffic locks the 0x30 stream
-     * into the Nintendo full-mode layout permanently. */
-    ctx->SwitchProtocolSeen = TRUE;
+     * into the Nintendo full-mode layout permanently. SwitchProtocolHold
+     * (the TTL-gated test hook, see DeviceAdd) keeps a probe's device
+     * in descriptor mode: protocol replies still work so the prober can
+     * exercise the responder, but the layout stays put. */
+    if (!ctx->SwitchProtocolHold)
+        ctx->SwitchProtocolSeen = TRUE;
 
     RtlZeroMemory(reply, sizeof(reply));
     reply[0] = 0x81;
@@ -884,7 +919,8 @@ static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
     UCHAR reply[64];
 
     /* Issue #35: see SwitchHandleProprietary. */
-    ctx->SwitchProtocolSeen = TRUE;
+    if (!ctx->SwitchProtocolHold)
+        ctx->SwitchProtocolSeen = TRUE;
     UCHAR subcmd;
     const UCHAR *args;
     ULONG argLen;

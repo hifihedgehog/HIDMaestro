@@ -103,13 +103,24 @@ if (-not $KeepLogs) {
 
 # -- Probe DLL freshness gate --------------------------------------------
 # Probes (S24-S26) reference HIDMaestro.Core via ProjectReference. If a
-# probe was last built against an older SDK version, its bin/.../win-x64/
-# carries a stale HIDMaestro.Core.dll and the probe runs against THAT
-# stale managed code -- a false PASS that proves nothing about the SDK
-# version we're shipping. Compare every probe's HIDMaestro.Core.dll
-# against the SDK csproj's <Version> and refuse to start the battery if
-# any are mismatched, naming the offenders so the recipe `dotnet build`
-# command line is obvious.
+# probe was last built against an older SDK version, its bin/ carries a
+# stale HIDMaestro.Core.dll and the probe runs against THAT stale
+# managed code -- a false PASS that proves nothing about the SDK
+# version we're shipping. All probe consumers use the RID-agnostic
+# build output (plain `dotnet build`), the same flavor the SDK project
+# emits, so content hashes are directly comparable. Two checks, and
+# BOTH must pass:
+#   1. AssemblyVersion vs Directory.Build.props <Version> (catches
+#      cross-release staleness, works in release bundles too).
+#   2. Content hash vs the SDK project's current build output (2026-07-21
+#      audit: the version check alone is blind to SAME-version rebuilds,
+#      which is every intra-release iteration. A battery ran a probe
+#      carrying a same-version SDK from before that day's fixes and
+#      silently exercised the old code, including full-deploying the old
+#      embedded driver mid-battery. Deterministic compilation makes
+#      content equality the correct freshness bar; source-tree only).
+# Refuse to start the battery on any mismatch, naming the offenders so
+# the recipe `dotnet build` command line is obvious.
 $repoRoot   = Resolve-Path (Join-Path $scriptDir '..\..') -EA SilentlyContinue
 $buildPropsPath = if ($repoRoot) { Join-Path $repoRoot 'Directory.Build.props' } else { $null }
 # Source-tree-only gate. When the harness is shipped inside a release
@@ -124,25 +135,35 @@ $verMatch   = $verRegex.Match($buildProps)
 if ($verMatch.Success) {
     $expectedVer = [Version]($verMatch.Groups[1].Value + '.0')
     $probePaths = @(
-        Join-Path $scriptDir '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
-        Join-Path $scriptDir '..\probes\xbox_gip_trigger_resolver_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_report31_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_output_decode_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_data_driven_coverage\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\v135_features_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\trigger_classifier_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\trigger_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xbox_gip_trigger_resolver_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
+    # Canonical SDK output for the content-hash check. Source tree only:
+    # a release bundle carries no sdk/ build output, and the version
+    # check above still guards that case.
+    $sdkDllPath = if ($repoRoot) {
+        Join-Path $repoRoot 'sdk\HIDMaestro.Core\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+    } else { $null }
+    $sdkHash = if ($sdkDllPath -and (Test-Path $sdkDllPath)) {
+        (Get-FileHash -LiteralPath $sdkDllPath -Algorithm SHA256).Hash
+    } else { $null }
+
     $stale = @()
     foreach ($p in $probePaths) {
         $resolved = [System.IO.Path]::GetFullPath($p)
@@ -154,7 +175,15 @@ if ($verMatch.Success) {
         }
         $actualVer = [System.Reflection.AssemblyName]::GetAssemblyName($resolved).Version
         if ($actualVer -ne $expectedVer) {
-            $stale += [PSCustomObject]@{ Path = $resolved; Have = $actualVer; Want = $expectedVer }
+            $stale += [PSCustomObject]@{ Path = $resolved; Have = "v$actualVer"; Want = "v$expectedVer" }
+        }
+        elseif ($sdkHash) {
+            $probeHash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
+            if ($probeHash -ne $sdkHash) {
+                $stale += [PSCustomObject]@{ Path = $resolved
+                    Have = "hash $($probeHash.Substring(0,12))..."
+                    Want = "hash $($sdkHash.Substring(0,12))... (current SDK build)" }
+            }
         }
     }
     if ($stale.Count -gt 0) {
@@ -164,10 +193,9 @@ if ($verMatch.Success) {
             Write-Host ("    have $($s.Have), want $($s.Want)") -ForegroundColor Red
         }
         Write-Host ""
-        Write-Host "Rebuild from repo root with:" -ForegroundColor Yellow
-        Write-Host "  dotnet build test\probes\pid_ffb_roundtrip\PidFfbRoundtrip.csproj -c Release -r win-x64" -ForegroundColor Yellow
-        Write-Host "  dotnet build test\probes\pid_ffb_alloc_free\PidFfbAllocFree.csproj -c Release -r win-x64" -ForegroundColor Yellow
-        Write-Host "  dotnet build test\probes\pid_setusages_probe\PidSetUsagesProbe.csproj -c Release -r win-x64" -ForegroundColor Yellow
+        Write-Host "Rebuild each named probe from repo root, e.g.:" -ForegroundColor Yellow
+        Write-Host "  dotnet build test\probes\<probe_dir> -c Release" -ForegroundColor Yellow
+        Write-Host "(scripts\pre-tag-validate.cmd does this for the whole set automatically)" -ForegroundColor Yellow
         exit 2
     }
 }
@@ -1045,10 +1073,10 @@ function Scenario-Multi-CustomInMix {
 #
 # Closes the v1.1.35 test blindspot that issue #16 surfaced.
 function Scenario-PidFfb-RoundTrip {
-    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidFfbRoundtrip.exe'
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_roundtrip\bin\Release\net10.0-windows10.0.26100.0\PidFfbRoundtrip.exe'
     $probe = [System.IO.Path]::GetFullPath($probe)
     if (-not (Test-Path $probe)) {
-        throw "pid_ffb_roundtrip probe not built. Run: dotnet build test/probes/pid_ffb_roundtrip -c Release -r win-x64"
+        throw "pid_ffb_roundtrip probe not built. Run: dotnet build test/probes/pid_ffb_roundtrip -c Release"
     }
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
@@ -1074,10 +1102,10 @@ function Scenario-PidFfb-RoundTrip {
 #     If both rejected (descriptor parse), SKIPs -- PadForge's FfbTest run
 #     remains the dynamic arbiter.
 function Scenario-PidFfb-AllocFree {
-    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidFfbAllocFree.exe'
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_ffb_alloc_free\bin\Release\net10.0-windows10.0.26100.0\PidFfbAllocFree.exe'
     $probe = [System.IO.Path]::GetFullPath($probe)
     if (-not (Test-Path $probe)) {
-        throw "pid_ffb_alloc_free probe not built. Run: dotnet build test/probes/pid_ffb_alloc_free -c Release -r win-x64"
+        throw "pid_ffb_alloc_free probe not built. Run: dotnet build test/probes/pid_ffb_alloc_free -c Release"
     }
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
@@ -1100,10 +1128,10 @@ function Scenario-PidFfb-AllocFree {
 # CreateEffect succeeded with no AV -- which is exactly the regression
 # bar for issue #16.
 function Scenario-PidFfb-FfbTest {
-    $probe = Join-Path $PSScriptRoot '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\win-x64\PidSetUsagesProbe.exe'
+    $probe = Join-Path $PSScriptRoot '..\probes\pid_setusages_probe\bin\Release\net10.0-windows10.0.26100.0\PidSetUsagesProbe.exe'
     $probe = [System.IO.Path]::GetFullPath($probe)
     if (-not (Test-Path $probe)) {
-        throw "pid_setusages_probe not built. Run: dotnet build test/probes/pid_setusages_probe -c Release -r win-x64"
+        throw "pid_setusages_probe not built. Run: dotnet build test/probes/pid_setusages_probe -c Release"
     }
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
@@ -1118,10 +1146,10 @@ function Scenario-PidFfb-FfbTest {
 # never wrote the 4-bit hat into the GIP buffer's btnHigh, so the companion's
 # (btnHigh >> 2) & 0x0F always read zero and wButtons.DPAD_* never fired.
 function Scenario-Xbox360-Dpad-XInput {
-    $probe = Join-Path $PSScriptRoot '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\XboxDpadXInputCheck.exe'
+    $probe = Join-Path $PSScriptRoot '..\probes\xbox_dpad_xinput_check\bin\Release\net10.0-windows10.0.26100.0\XboxDpadXInputCheck.exe'
     $probe = [System.IO.Path]::GetFullPath($probe)
     if (-not (Test-Path $probe)) {
-        throw "xbox_dpad_xinput_check not built. Run: dotnet build test/probes/xbox_dpad_xinput_check -c Release -r win-x64"
+        throw "xbox_dpad_xinput_check not built. Run: dotnet build test/probes/xbox_dpad_xinput_check -c Release"
     }
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
@@ -1137,10 +1165,10 @@ function Scenario-Xbox360-Dpad-XInput {
 # Catches future regressions in the v1.3.4 priority chain or the legacy AddHat
 # LogMax convention.
 function Scenario-Hat-Resolution-Check {
-    $probe = Join-Path $PSScriptRoot '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\win-x64\HatResolutionCheck.exe'
+    $probe = Join-Path $PSScriptRoot '..\probes\hat_resolution_check\bin\Release\net10.0-windows10.0.26100.0\HatResolutionCheck.exe'
     $probe = [System.IO.Path]::GetFullPath($probe)
     if (-not (Test-Path $probe)) {
-        throw "hat_resolution_check not built. Run: dotnet build test/probes/hat_resolution_check -c Release -r win-x64"
+        throw "hat_resolution_check not built. Run: dotnet build test/probes/hat_resolution_check -c Release"
     }
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
@@ -1148,22 +1176,19 @@ function Scenario-Hat-Resolution-Check {
     }
 }
 
-# Resolve a probe binary, tolerating both `dotnet build -r win-x64`
-# (output under .../net*/win-x64/) and `dotnet build` without a runtime
-# identifier (output one level up at .../net*/). Probes csproj declare
-# RuntimeIdentifiers=win-x64 but `dotnet build` without -r still emits
-# the cross-platform output, so the win-x64 subdir only exists when -r
-# is passed. Throw with the exact rebuild command if neither path
-# resolves — saves a re-run cycle when a contributor forgets the flag.
+# Resolve a probe binary. RID-agnostic output ONLY (.../net*/<exe>):
+# the 2026-07-21 audit converged every probe consumer on the plain
+# `dotnet build` output because the freshness gate above hash-verifies
+# exactly that flavor. Falling back to a bin/.../win-x64/ copy here
+# would reopen the stale-flavor hole the gate exists to close (a
+# leftover -r build could shadow the fresh output indefinitely).
 function Resolve-ProbeBinary {
     param([string]$ProbeDir, [string]$Exe)
     $base = Join-Path $PSScriptRoot ('..\probes\' + $ProbeDir + '\bin\Release\net10.0-windows10.0.26100.0')
     $base = [System.IO.Path]::GetFullPath($base)
-    foreach ($sub in @('win-x64\', '')) {
-        $candidate = Join-Path $base ($sub + $Exe)
-        if (Test-Path $candidate) { return $candidate }
-    }
-    throw ("$ProbeDir not built. Run: dotnet build test/probes/$ProbeDir -c Release -r win-x64")
+    $candidate = Join-Path $base $Exe
+    if (Test-Path $candidate) { return $candidate }
+    throw ("$ProbeDir not built. Run: dotnet build test/probes/$ProbeDir -c Release")
 }
 
 # S29: Sony BT Report 0x31 input encoder. Closes #20. Verifies the data-driven
