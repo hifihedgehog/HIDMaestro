@@ -487,6 +487,29 @@ public static class DeviceManager
             DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) SKIPPED (phantom-only registry residue)");
             goneAfterDif = true;
         }
+        else if (isSwdParent && fast && isLive)
+        {
+            // Force-close recovery fix (2026-07-21): fast mode must still
+            // use the SwD lifetime terminator. The CM_Disable/CM_Uninstall
+            // pair below is documented (above) as transient-and-slow for a
+            // SwDeviceLifetimeParentPresent device whose orphaned WUDFHost
+            // is still up: the devnode lingered 6-17 s per device in the
+            // force-close recovery measurements, and the sequential sweep
+            // in RemoveAllVirtualControllers summed to ~40 s for a
+            // 360-wired + series-bt pair. SwdDeviceFactory.Remove is the
+            // empirically-verified terminator (reconnect + lifetime=Handle
+            // + SwDeviceClose, see the !fast branch below): the handle
+            // close starts the SAME kernel cascade a graceful consumer
+            // close does (~1-2 s for all devices, per PadForge's normal
+            // exit). Fast semantics are preserved: no WaitForDeviceRemoval
+            // here; the cascade completes asynchronously and Step 2's CM
+            // sweep below remains as belt-and-braces for survivors.
+            var swFastSw = System.Diagnostics.Stopwatch.StartNew();
+            int hrFast = SwdDeviceFactory.Remove(instanceId);
+            DeviceOrchestrator.LogDiag(
+                $"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hrFast:X8} " +
+                $"(fast mode, no removal wait) in {swFastSw.ElapsedMilliseconds}ms");
+        }
         else if (isSwdParent && !fast)
         {
             // SwDevice teardown via the documented lifetime-downgrade path.
