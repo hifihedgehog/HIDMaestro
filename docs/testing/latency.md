@@ -8,7 +8,7 @@ End-to-end input latency for a HIDMaestro virtual controller, measured from the 
 - A single button (A) is toggled each iteration, for 10,000 iterations.
 - One process, one `Stopwatch` (QPC) clock shared between the writer and the reader, so there is no cross-process clock skew to correct for.
 - The reader busy-polls `XInputGetState` and stops the clock the moment the A-button bit reflects the submitted state.
-- Detection is by button bit, not by `dwPacketNumber`. The XUSB companion increments the packet number on every `GET_STATE` poll (see [driver/companion.c](../../driver/companion.c)), so the packet number is useless as a change detector. The button bit reflects the actual `GipData` the SDK wrote, so it tracks real propagation.
+- Detection is by button bit, not by `dwPacketNumber`. Historically the XUSB companion incremented the packet number on every `GET_STATE` poll, which made it useless as a change detector. Since the 2026-07-21 audit it advances only on a real state change (matching physical xusb22), but the harness keeps detecting by button bit: it reflects the actual `GipData` the SDK wrote, so it tracks real propagation regardless of packet-number policy.
 - Process priority High, reader thread priority Highest.
 
 This matches VIIPER's published methodology closely enough for a like-for-like comparison: a single emulated controller, a single button transition per iteration, a tight reader loop, all on the same host. VIIPER reads via SDL3, which on Windows routes through XInput for an Xbox 360 device, so both numbers measure the same surface.
@@ -78,6 +78,17 @@ Mutation-verified: forcing the reader onto its polling fallback (the
 compatibility path for pre-#34 drivers) regressed the median to 15.5 ms
 in the same harness, confirming the event is the load-bearing mechanism
 and the fallback still delivers every packet.
+
+Re-measured 2026-07-21 on the post-audit binary (adaptive reader,
+multi-producer ring reservation, companion input doorbell, GIP read
+serialization): three 200-send runs delivered 200/200 with medians
+0.145 / 0.146 / 0.158 ms, p95 0.214-0.228 ms, max at or under 1.01 ms,
+and idle CPU still 0.000 ms per controller per second. The same audit
+round cut the launch and crash-recovery path: a same-version
+`InstallDriver()` runs in ~40-60 ms (the full extract-sign-install
+pipeline only runs when the embedded driver payload actually changed),
+and recovery after a force-closed consumer reaches a live first
+controller in ~2.3 s with an Xbox Series BT profile in the mix.
 
 The same change trimmed the input submit path (construction-time trigger
 resolution, compiled vendor-blob opcodes). Same-day before/after on the

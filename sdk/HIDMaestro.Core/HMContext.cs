@@ -129,11 +129,18 @@ public sealed class HMContext : IDisposable
         // the FileRepository subdirectory (which users do not have).
         //
         // Running the sweep here FIRST removes the bound devices via devcon
-        // (returning "Removed on reboot" is sufficient — the INF becomes
+        // (returning "Removed on reboot" is sufficient, as the INF becomes
         // eligible for package deletion immediately), so FullDeploy's
         // /delete-driver call actually succeeds and the fresh extracted
         // binary replaces the DriverStore contents.
-        Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
+        //
+        // preserveInstall: evict devices/orphans only. The 2026-07-21 perf
+        // audit found the full sweep also deleting the installed packages
+        // and the manifest hash, which forced the ~3 s full deploy pipeline
+        // on EVERY launch; the same-version fast path never got to run.
+        // Package replacement still happens inside FullDeploy's full path
+        // when the embedded payload differs.
+        Internal.DeviceOrchestrator.RemoveAllVirtualControllers(preserveInstall: true);
 
         if (!DriverBuilder.FullDeploy())
             throw new InvalidOperationException(
@@ -147,6 +154,21 @@ public sealed class HMContext : IDisposable
     public static void RemoveAllVirtualControllers()
     {
         Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
+    }
+
+    /// <summary>Same device/orphan eviction as
+    /// <see cref="RemoveAllVirtualControllers()"/>, but with
+    /// <paramref name="preserveInstall"/> = true the installed driver
+    /// packages and the SOFTWARE\HIDMaestro configuration (including the
+    /// manifest hash that powers <see cref="InstallDriver"/>'s same-version
+    /// fast path) are kept. Use this from a consumer's own launch or exit
+    /// sweep: a full nuke there forces the next <see cref="InstallDriver"/>
+    /// through the multi-second full deploy pipeline for no benefit when
+    /// the driver version hasn't changed. Pass false (or call the
+    /// parameterless overload) for a true uninstall-grade cleanup.</summary>
+    public static void RemoveAllVirtualControllers(bool preserveInstall)
+    {
+        Internal.DeviceOrchestrator.RemoveAllVirtualControllers(preserveInstall);
     }
 
     /// <summary>Disposes a set of controllers concurrently, suppressing the

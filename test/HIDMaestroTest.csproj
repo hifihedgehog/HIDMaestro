@@ -18,5 +18,7 @@
   <ItemGroup>
     <Compile Remove="probes\**\*.cs" />
     <None Remove="probes\**\*" />
+    <Compile Remove="sandbox\**\*.cs" />
+    <None Remove="sandbox\**\*" />
   </ItemGroup>
 </Project>

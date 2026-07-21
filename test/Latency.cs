@@ -18,11 +18,13 @@ namespace HIDMaestroTest;
 // cross-process clock-skew to correct for. We measure from the SubmitState
 // call to the moment XInputGetState first reports the toggled A button.
 //
-// Detection is by button bit, NOT by dwPacketNumber: the XUSB companion
-// increments PacketCount on every GET_STATE (driver/companion.c), so the
-// packet number advances on every poll regardless of input change and is
-// useless as a change detector here. The A-button bit (0x1000) reflects the
-// actual GipData the SDK wrote, so it tracks real propagation.
+// Detection is by button bit, NOT by dwPacketNumber. Historically the XUSB
+// companion incremented PacketCount on every GET_STATE poll, making the
+// packet number useless as a change detector; since the 2026-07-21 audit it
+// advances only on a real state change (driver/companion.c, matching
+// physical xusb22). The button bit stays the stricter signal either way:
+// the A-button bit (0x1000) reflects the actual GipData the SDK wrote, so
+// it tracks real propagation independent of packet-number policy.
 //
 //   HIDMaestroTest latency [profile-id] [iterations]
 //     profile-id  default xbox-360-wired (XInput-backed, matches VIIPER)

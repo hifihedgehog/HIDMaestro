@@ -111,14 +111,20 @@ partial class Program
         bool quietMode = Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1";
         if (!readOnlyCmd)
         {
+            // preserveInstall: evict devices/orphans but keep the installed
+            // driver package + manifest hash. The 2026-07-21 perf audit found
+            // the full nuke here forced InstallDriver's ~1.6 s full deploy on
+            // EVERY test-app launch; the same-version fast path (~60 ms)
+            // never got to run. The explicit `cleanup` command remains the
+            // uninstall-grade full nuke.
             if (!quietMode)
             {
                 AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                 {
-                    try { HMContext.RemoveAllVirtualControllers(); } catch { }
+                    try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
                 };
             }
-            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+            try { HMContext.RemoveAllVirtualControllers(preserveInstall: true); } catch { }
         }
 
         if (args.Length == 0)

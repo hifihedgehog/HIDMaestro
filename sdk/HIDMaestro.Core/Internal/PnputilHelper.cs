@@ -251,6 +251,11 @@ internal static class PnputilHelper
                      && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,
                                                                              StringComparison.OrdinalIgnoreCase)))
             .ToList();
+        // Perf audit 2026-07-21: nothing enumerated means nothing to
+        // delete and nothing to verify. The unconditional re-enumeration
+        // below cost 200-500 ms per empty cleanup.
+        if (cleanup.Count == 0) return;
+
         var failures = new List<(string Published, string Error)>();
         foreach (var pkg in cleanup)
         {

@@ -4,6 +4,8 @@ test/obj/
 test/publish_out/
 test/probes/*/bin/
 test/probes/*/obj/
+test/sandbox/*/bin/
+test/sandbox/*/obj/
 test/probes/*/*/bin/
 test/probes/*/*/obj/
 test/probes/*/*.exe

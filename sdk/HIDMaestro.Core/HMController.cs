@@ -146,6 +146,12 @@ public sealed class HMController : IDisposable
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleStick> _cachedSticks;
     private readonly System.Collections.Generic.IReadOnlyList<HMSimpleTrigger> _cachedTriggers;
 
+    // Companion input doorbell (perf audit 2026-07-21): signaled per
+    // GIP-carrying frame so the XUSB companion can complete a parked
+    // WAIT_FOR_INPUT at frame arrival instead of its 8 ms timer tick.
+    // IntPtr.Zero for non-Xbox profiles.
+    private readonly IntPtr _companionInputEvent;
+
     // Canonical trigger positions, resolved once (issue #34). The axisMap
     // walk (case-insensitive role compare + hex key parse) ran inside
     // every SubmitState, twice, for values that are constant per profile.
@@ -347,6 +353,8 @@ public sealed class HMController : IDisposable
         _packsGipBuffer = profile.Inner.RequiresXusbCompanion;
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
+        _companionInputEvent = _packsGipBuffer
+            ? SharedMemoryIO.GetCompanionInputEvent(index) : IntPtr.Zero;
 
         // v1.3.5 — pre-allocate vendor-blob buffer + encoder state ONLY when
         // the profile actually arms (Sony BT post-handshake). Profiles with
@@ -672,6 +680,7 @@ public sealed class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0,
                 _packsGipBuffer ? _gipBuf : null,
+                companionEvent: _companionInputEvent,
                 dataOffset: 0,
                 extendedData: report, extendedLen: extLen);
         }
@@ -681,7 +690,8 @@ public sealed class HMController : IDisposable
             int dataLen = Math.Min(report.Length - dataStart, SharedMemoryIO.DATA_CAPACITY);
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo, report, dataLen,
-                _packsGipBuffer ? _gipBuf : null, dataStart);
+                _packsGipBuffer ? _gipBuf : null, dataStart,
+                companionEvent: _companionInputEvent);
         }
 
         if (OnSubmitLatencyMicros != null)
@@ -754,7 +764,8 @@ public sealed class HMController : IDisposable
         // per raw frame on DualSense / Switch Pro / generic gamepad paths.
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length,
-            _packsGipBuffer ? _gipBuf : null);
+            _packsGipBuffer ? _gipBuf : null,
+            companionEvent: _companionInputEvent);
     }
 
     /// <summary>v1.3.5 — instance-level <see cref="HMOutputEncoder.Encode"/>

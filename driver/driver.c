@@ -651,7 +651,13 @@ ReadSharedInput(_In_ PDEVICE_CONTEXT ctx, _Out_ HIDMAESTRO_SHARED_INPUT *out)
         RtlCopyMemory(out, (const void *)src, sizeof(*out));
         MemoryBarrier();
         seq2 = src->SeqNo;
-    } while (seq1 != seq2 && --retries > 0);
+    } while ((seq1 != seq2 || (seq1 & 1)) && --retries > 0);
+    /* Perf audit 2026-07-21 (I6): an odd SeqNo is a write in progress and
+     * an unequal pair is a torn copy; serving either hands a half-written
+     * frame downstream. Skip the frame instead: the SDK's per-frame
+     * SetEvent redelivers within one frame interval. */
+    if (seq1 != seq2 || (seq1 & 1))
+        return FALSE;
     return TRUE;
 }
 
@@ -1133,8 +1139,10 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * Subsequent queued READ_REPORTs stay parked until the SDK
      * SubmitStates the next frame. */
     {
+        BOOLEAN servedOne = FALSE;
         WDFREQUEST pendingRead;
         if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
+            servedOne = TRUE;
             /* Send Col1 (GIP, no Report ID) */
             NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
@@ -1160,7 +1168,16 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * Advancing it in ProcessSharedInput's preamble (before this cache
          * write) was the stale-frame TOCTOU. */
         ctx->SharedMemSeqNo = seqNo;
-        ctx->LastDeliveredInputSeqNo = seqNo;
+        /* Perf audit 2026-07-21 (I5): advance the delivered gate ONLY when
+         * a parked read was actually completed above. The unconditional
+         * advance contradicted this block's own header comment and
+         * disabled the late-read cache: a READ_REPORT arriving with no
+         * request parked saw SharedMemSeqNo == LastDelivered, parked, and
+         * waited a full frame interval for data already sitting in the
+         * cache. The spin-trap the gate exists for stays closed because
+         * the immediate-complete path advances LastDelivered itself. */
+        if (servedOne)
+            ctx->LastDeliveredInputSeqNo = seqNo;
         WdfWaitLockRelease(ctx->InputLock);
     }
 }
@@ -1233,6 +1250,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
          * where the SDK keeps signaling an event object we share by name
          * but writes to a view the driver isn't reading from anymore. */
         ULONG staleWakeups = 0;
+        ULONG idleTimeouts = 0;
         BOOLEAN recycle = FALSE;
         HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
 
@@ -1243,6 +1261,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 return 0; /* StopEvent → the only legitimate exit */
 
             if (rc == WAIT_OBJECT_0 + 1) {
+                idleTimeouts = 0;
                 ULONG prevSeq = ctx->SharedMemSeqNo;
                 ProcessSharedInput(ctx);
                 if (ctx->SharedMemSeqNo == prevSeq) {
@@ -1253,12 +1272,23 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 continue;
             }
 
-            /* WAIT_TIMEOUT (258), WAIT_FAILED (0xFFFFFFFF), or any other
-             * unexpected value. Previously WAIT_FAILED returned 0 and
-             * killed the worker permanently; now we recycle like every
-             * other non-signal path and let Phase 1 re-open fresh handles.
-             * The 2-second thread-join timeout in EvtDeviceContextCleanup
-             * still bounds any teardown race. */
+            /* Perf audit 2026-07-21 (I2): a single 500 ms timeout is the
+             * NORMAL idle state (consumer between frames, game menus),
+             * and recycling handles on every one cost an unmap/reopen
+             * cycle twice a second plus a mapping tax on the first frame
+             * after every pause. Recycle only after 8 consecutive idle
+             * timeouts (~4 s): stale-handle recovery after an SDK restart
+             * still converges within 4 s, and the signaled-but-stale case
+             * keeps its own 250-wakeup counter above. */
+            if (rc == WAIT_TIMEOUT && ++idleTimeouts < 8)
+                continue;
+
+            /* WAIT_TIMEOUT streak exhausted, WAIT_FAILED (0xFFFFFFFF), or
+             * any other unexpected value. Previously WAIT_FAILED returned
+             * 0 and killed the worker permanently; now we recycle like
+             * every other non-signal path and let Phase 1 re-open fresh
+             * handles. The 2-second thread-join timeout in
+             * EvtDeviceContextCleanup still bounds any teardown race. */
             recycle = TRUE;
             break;
         }

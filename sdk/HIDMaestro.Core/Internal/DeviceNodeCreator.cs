@@ -283,7 +283,18 @@ internal static class DeviceNodeCreator
             // versions has not been verified.)
 
             // Install our driver against the new device's hardware ID.
-            UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwId, infPath, 0, out _);
+            // Perf audit 2026-07-21: surface a binding failure immediately
+            // in the diag instead of letting the two downstream readiness
+            // waits burn their full budgets against a device that never
+            // bound. Control flow is unchanged (the waits still run and
+            // still time out) so no working configuration is affected;
+            // the diag line converts a silent 15 s stall into a named one.
+            if (!UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwId, infPath, 0, out _))
+            {
+                int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                DeviceOrchestrator.LogDiag(
+                    $"      UpdateDriverForPlugAndPlayDevicesW FAILED (Win32={err}) for {hwId}; downstream waits will time out");
+            }
 
             // XnaComposite (legacy XInput path) needs an explicit restart to
             // load. Issue #28 (v1.3.16): ROOT\XNACOMPOSITE\0000 may belong

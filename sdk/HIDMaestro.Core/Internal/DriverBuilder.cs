@@ -421,6 +421,23 @@ public static class DriverBuilder
         return true;
     }
 
+    /// <summary>True when the next <see cref="FullDeploy"/> call will take
+    /// the same-version fast path (matching manifest hash + DriverStore
+    /// presence, the exact predicate FullDeploy itself evaluates). Used by
+    /// the launch sweep to decide whether the WUDFHost release-wait/drain
+    /// steps are needed: they protect DriverStore file replacement, which
+    /// only the full pipeline performs.</summary>
+    internal static bool WillTakeFastPath()
+    {
+        try
+        {
+            return string.Equals(EmbeddedManifest.Sha256Hex, ReadInstalledManifestHash(),
+                       StringComparison.OrdinalIgnoreCase)
+                && DriverStoreContainsHidMaestro();
+        }
+        catch { return false; }
+    }
+
     /// <summary>Cheap filesystem-level check that the DriverStore has at
     /// least one HIDMaestro INF directory. Replaces pnputil enum on the
     /// FullDeploy fast path. The driver-store layout is stable across
@@ -493,16 +510,11 @@ public static class DriverBuilder
     /// shortcut applies, e.g. cold start with no prior HKLM hash.</para></summary>
     public static bool IsDriverInstalled()
     {
-        // Filesystem check is locale-stable and fast. If both required
-        // INFs are in the DriverStore, mark the per-process cache and
-        // return true without touching pnputil.
-        if (DriverStoreContainsHidMaestro())
-        {
-            PnputilHelper.MarkInstalledConfirmed();
-            return true;
-        }
-        // Fall through to the full pnputil-backed check (slow path,
-        // typically only hit at cold start before any install).
+        // Perf audit 2026-07-21: PnputilHelper.IsHidMaestroDriverInstalled
+        // already runs the same ladder with a per-process positive cache in
+        // front (cache -> filesystem -> pnputil). The duplicate filesystem
+        // walk here cost a FileRepository enumeration per controller create
+        // after the first.
         return PnputilHelper.IsHidMaestroDriverInstalled();
     }
 

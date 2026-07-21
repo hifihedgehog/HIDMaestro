@@ -1376,7 +1376,12 @@ internal static class DeviceOrchestrator
 
         // Snapshot XInput slot count BEFORE any setup so the post-setup wait
         // can detect the new claim. Sony / generic profiles get -1 (skip).
-        int slotsBefore = (profile.VendorId == 0x045E) ? CountConnectedXInputSlots() : -1;
+        // Perf audit 2026-07-21: gate on the XInput-participating shapes,
+        // not raw Microsoft VID. SideWinder (045E, no companion, no upper
+        // filter) never claims a slot and paid the full 500 ms wait on
+        // every create.
+        int slotsBefore = (profile.UsesUpperFilter || profile.RequiresXusbCompanion)
+            ? CountConnectedXInputSlots() : -1;
         bool xinputFull = slotsBefore >= 4;
 
         // ── Step 0: pre-flight environment ───────────────────────────────
@@ -2045,21 +2050,73 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static void SignalStopEventsAndDrain()
     {
-        for (int i = 0; i < 16; i++)
+        // Index set: 0-15 baseline plus any Controller<N> config key (the
+        // 2026-07-21 perf audit: indexing is unbounded, so controllers >= 16
+        // previously missed the fast-stop signal and paid the slow
+        // query-remove path).
+        var indices = new HashSet<int>(Enumerable.Range(0, 16));
+        try
+        {
+            using var hmKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro");
+            if (hmKey != null)
+                foreach (var name in hmKey.GetSubKeyNames())
+                    if (name.StartsWith("Controller", StringComparison.OrdinalIgnoreCase)
+                        && int.TryParse(name.Substring(10), out int idx))
+                        indices.Add(idx);
+        }
+        catch { }
+
+        bool anySignaled = false;
+        foreach (int i in indices)
         {
             IntPtr ev = OpenEventW(EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroStopEvent{i}");
             if (ev != IntPtr.Zero)
             {
                 SetEvent(ev);
                 CloseHandle(ev);
+                anySignaled = true;
             }
         }
-        Thread.Sleep(TimeoutScale.Apply(500));
+        // Drain only when a live driver worker was actually signaled. The
+        // unconditional 500 ms sleep ran on EVERY launch (twice on the
+        // documented InstallDriver + explicit-cleanup sequence) even with
+        // zero orphans on a clean machine.
+        if (anySignaled)
+            Thread.Sleep(TimeoutScale.Apply(500));
     }
 
     public static void RemoveAllVirtualControllers()
+        => RemoveAllVirtualControllers(preserveInstall: false);
+
+    /// <summary>Core sweep. <paramref name="preserveInstall"/> = true is the
+    /// launch path (HMContext.InstallDriver): evict every device and orphan
+    /// exactly as the full sweep does (the documented prerequisite for a
+    /// driver UPGRADE's package replacement to succeed) but keep the
+    /// installed driver packages and the manifest-hash fast-path intact.
+    /// The 2026-07-21 perf audit found the launch path deleting both on
+    /// every start, which forced FullDeploy's full extract+sign+catalog+
+    /// pnputil pipeline (~3.0-3.2 s measured) on EVERY consumer launch and
+    /// re-introduced package delete/add churn (the FAILED_PRIOR_UNLOAD
+    /// class) for zero benefit in the same-version case. When the embedded
+    /// payload actually differs, FullDeploy's full path still runs and its
+    /// RemoveOldDriverPackages purges the old packages, with devices
+    /// already evicted here so the ordering contract holds. The standalone
+    /// cleanup command keeps preserveInstall=false: full nuke stays its
+    /// documented job.</summary>
+    internal static void RemoveAllVirtualControllers(bool preserveInstall)
     {
+        var sweepSw = System.Diagnostics.Stopwatch.StartNew();
+        long lastMs = 0;
+        // Local phase logger: no-ops unless HIDMAESTRO_DIAG=1 (LogDiag gate).
+        void Phase(string name)
+        {
+            LogDiag($"    sweep phase {name}: {sweepSw.ElapsedMilliseconds - lastMs}ms (total {sweepSw.ElapsedMilliseconds}ms)");
+            lastMs = sweepSw.ElapsedMilliseconds;
+        }
+        LogDiag($">>> SWEEP ENTER preserveInstall={preserveInstall}");
+
         SignalStopEventsAndDrain();
+        Phase("stop-drain");
 
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
         // Enumerators we always own: VID_*, XnaComposite, HIDMAESTRO, HID_IG_00
@@ -2107,6 +2164,8 @@ internal static class DeviceOrchestrator
             }
         }
         catch { }
+
+        Phase("root-swd-evict");
 
         // Remove orphaned HID children (survive parent removal as "Unknown").
         try
@@ -2179,6 +2238,8 @@ internal static class DeviceOrchestrator
         }
         catch { }
 
+        Phase("hid-orphans");
+
         // Clean Device Parameters under our enumerators via reg.exe (PnP ACLs
         // prevent direct writes). Leaves the PnP instance keys themselves intact.
         // Sweeps both ROOT\ and SWD\ subtrees.
@@ -2207,6 +2268,8 @@ internal static class DeviceOrchestrator
             catch { }
         }
 
+        Phase("device-params");
+
         // Clean interface registries (XUSB + WinExInput).
         // Match both ROOT# and SWD# instance-name encodings (backslash → hash in
         // interface-class registry keys).
@@ -2226,6 +2289,8 @@ internal static class DeviceOrchestrator
             }
             catch { }
         }
+
+        Phase("interface-classes");
 
         // Clean joy.cpl joystick OEM cache + slot assignments
         string[] oemPrefixes = { "VID_045E&PID_", "VID_054C&PID_", "VID_0000&PID_" };
@@ -2288,7 +2353,23 @@ internal static class DeviceOrchestrator
         }
         catch { }
 
+        Phase("joycpl");
+
+        // The WUDFHost release-wait and the orphan drain below exist to
+        // protect DriverStore FILE REPLACEMENT: a host that still has the
+        // old DLL mapped can hand stale code to a new device after an
+        // upgrade. When this is a launch sweep (preserveInstall) AND
+        // FullDeploy will take the same-version fast path, no file is
+        // going to change: the winding-down hosts hold bytes identical to
+        // the current DriverStore, and ProcessSharingDisabled means a new
+        // device always gets a fresh host, never a recycled one. Skipping
+        // the wait removes the ~1.7 s the recovery path spent watching
+        // orphaned hosts exit gracefully (2026-07-21 perf audit). Any
+        // version change or full-nuke cleanup keeps the full discipline.
+        bool skipWudfSteps = preserveInstall && DriverBuilder.WillTakeFastPath();
+
         // Wait for WUDFHost processes to release our DLLs.
+        if (!skipWudfSteps)
         try
         {
             string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
@@ -2311,15 +2392,27 @@ internal static class DeviceOrchestrator
         catch { }
 
         // Remove driver packages from store. Strict, retry-aware, verifies
-        // afterward — see PnputilHelper. Catch the verification throw here
+        // afterward (see PnputilHelper). Catch the verification throw here
         // because cleanup is best-effort: leaving a stale package is bad
         // (it'll bite the next install) but it shouldn't kill the cleanup
         // path entirely. The next FullDeploy will try again, and FullDeploy
         // does NOT swallow this exception.
-        try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+        //
+        // preserveInstall (launch path): keep the packages and the
+        // SOFTWARE\HIDMaestro tree (manifest hash + per-controller config)
+        // so FullDeploy's same-version fast path survives. See the
+        // preserving overload's doc for the measured cost of nuking these
+        // every launch.
+        Phase("wudf-release-wait");
 
-        // Clear registry config
-        try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+        if (!preserveInstall)
+        {
+            try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+
+            // Clear registry config
+            try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+        }
+        Phase("package-removal");
 
         // Release shared-memory mappings
         try { SharedMemoryIO.Cleanup(); } catch { }
@@ -2343,7 +2436,10 @@ internal static class DeviceOrchestrator
         // microsoft.bluetooth.profiles.hidovergatt.dll for a real BT Xbox
         // controller) is skipped entirely — that's what the NEVER-kill-
         // WUDFHost rule in feedback-never-kill-wudfhost.md is about.
-        DrainOrphanedWudfHosts();
+        if (!skipWudfSteps)
+            DrainOrphanedWudfHosts();
+        Phase("wudf-drain");
+        LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
     }
 
     /// <summary>Terminate WUDFHost instances that are hosting ONLY our

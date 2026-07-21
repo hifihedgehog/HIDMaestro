@@ -17,6 +17,9 @@ EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
 EVT_WDF_TIMER CompanionPumpTimer;
+static DWORD WINAPI CompanionInputPumpProc(LPVOID param);
+struct _COMPANION_CTX;
+static BOOLEAN ReadGipDataLocked(struct _COMPANION_CTX *ctx, UCHAR gipOut[14]);
 
 static const GUID XUSB_GUID =
     { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
@@ -42,6 +45,17 @@ typedef struct _COMPANION_CTX {
     WCHAR OutputMappingName[64]; /* e.g. L"Global\HIDMaestroOutput0" */
     WCHAR OutputEventName[64];   /* e.g. L"Global\HIDMaestroOutputEvent0" */
     HANDLE OutputSignalEvent;    /* Output-ring doorbell (issue #34), lazy */
+    WCHAR CompanionInputEventName[64]; /* Global\HIDMaestroCompanionInputEvent<N> */
+    HANDLE CompanionInputEvent;  /* input doorbell (perf audit 2026-07-21), lazy */
+    HANDLE PumpStopEvent;        /* stops the input-doorbell thread */
+    HANDLE PumpThread;           /* completes parked WAIT_FOR_INPUT on doorbell */
+    UCHAR  LastGoodGip[14];      /* last valid GIP payload (revalidation serve) */
+    BOOLEAN HaveGoodGip;
+    BOOLEAN GipChanged;          /* payload differed from LastGoodGip this read */
+    CRITICAL_SECTION GipLock;    /* serializes ReadGipData's shared state:
+                                  * timer callback, doorbell thread, and
+                                  * GET_STATE dispatch all read concurrently */
+    BOOLEAN GipLockInit;
     HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
     PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
     HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
@@ -147,7 +161,20 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
 
 static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 {
-    /* Lazy-open named section. RAM-only — no disk fallback. */
+    /* Serialize against the other completers. The timer callback, the
+     * input-doorbell thread, and GET_STATE dispatch all land here; the
+     * mapping handles, LastGoodGip, and the stale counters are shared
+     * ctx state, and interleaved byte-copies into LastGoodGip would blend
+     * two frames into one served payload. Uncontended cost is tens of ns. */
+    EnterCriticalSection(&ctx->GipLock);
+    BOOLEAN ok = ReadGipDataLocked(ctx, gipOut);
+    LeaveCriticalSection(&ctx->GipLock);
+    return ok;
+}
+
+static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
+{
+    /* Lazy-open named section. RAM-only, no disk fallback. */
     if (ctx->SharedMemPtr == NULL) {
         HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
         if (h == NULL) return FALSE;
@@ -170,7 +197,24 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
         for (int i = 0; i < 14; i++) tmp[i] = src->GipData[i];
         MemoryBarrier();
         seq2 = src->SeqNo;
-    } while (seq1 != seq2 && --retries > 0);
+    } while ((seq1 != seq2 || (seq1 & 1)) && --retries > 0);
+
+    /* Perf audit 2026-07-21 (I6): an odd SeqNo is mid-write and an
+     * unequal pair is torn. Serve the last known-good payload instead of
+     * half-written bytes; with no prior good read, report no data. */
+    if (seq1 != seq2 || (seq1 & 1)) {
+        if (!ctx->HaveGoodGip) return FALSE;
+        for (int i = 0; i < 14; i++) gipOut[i] = ctx->LastGoodGip[i];
+        ctx->GipChanged = FALSE;
+        return TRUE;
+    }
+
+    /* (I8) Track payload changes so the XInput packet number can advance
+     * only on real state changes, matching physical xusb behavior. */
+    ctx->GipChanged = !ctx->HaveGoodGip
+        || RtlCompareMemory(tmp, ctx->LastGoodGip, 14) != 14;
+    for (int i = 0; i < 14; i++) ctx->LastGoodGip[i] = tmp[i];
+    ctx->HaveGoodGip = TRUE;
     for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
 
     /* Stale-handle recovery (issue #1): if the SDK tore down and recreated
@@ -183,7 +227,13 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
             UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL;
             CloseHandle(ctx->SharedMemHandle);  ctx->SharedMemHandle = NULL;
             ctx->GipStaleCount = 0;
-            return FALSE; /* next call will lazy-open the fresh section */
+            /* Perf audit 2026-07-21 (I4): gipOut already holds the last
+             * valid payload (unchanged SeqNo means unchanged bytes), so
+             * report it as valid rather than returning FALSE and letting
+             * the state builders emit one NEUTRAL frame per revalidation
+             * cycle (every ~4 s at 125 Hz on an idle-but-held controller).
+             * The next call still lazy-opens the fresh section. */
+            return ctx->HaveGoodGip;
         }
     } else {
         ctx->LastGipSeqNo = seq1;
@@ -195,7 +245,18 @@ static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
 void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
 {
     PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
+    if (ctx->PumpThread) {
+        if (ctx->PumpStopEvent) SetEvent(ctx->PumpStopEvent);
+        WaitForSingleObject(ctx->PumpThread, 2000);
+        CloseHandle(ctx->PumpThread);
+        ctx->PumpThread = NULL;
+    }
+    if (ctx->PumpStopEvent)      { CloseHandle(ctx->PumpStopEvent);      ctx->PumpStopEvent = NULL; }
+    if (ctx->CompanionInputEvent){ CloseHandle(ctx->CompanionInputEvent); ctx->CompanionInputEvent = NULL; }
     if (ctx->PumpTimer) { WdfTimerStop(ctx->PumpTimer, TRUE); ctx->PumpTimer = NULL; }
+    /* After the doorbell thread is joined and the timer is stopped
+     * (synchronously, above): no ReadGipData caller can remain. */
+    if (ctx->GipLockInit) { DeleteCriticalSection(&ctx->GipLock); ctx->GipLockInit = FALSE; }
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
@@ -368,6 +429,13 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
             ctx->OutputEventName[(sizeof(evPrefix) / sizeof(WCHAR)) - 1] = L'\0';
             AppendUlongDecimal(ctx->OutputEventName, ctx->ControllerIndex, cap);
         }
+        {
+            static const WCHAR ciPrefix[] = L"Global\\HIDMaestroCompanionInputEvent";
+            SIZE_T cap = sizeof(ctx->CompanionInputEventName) / sizeof(WCHAR);
+            for (int i = 0; ciPrefix[i]; i++) ctx->CompanionInputEventName[i] = ciPrefix[i];
+            ctx->CompanionInputEventName[(sizeof(ciPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->CompanionInputEventName, ctx->ControllerIndex, cap);
+        }
 
         /* Read VID/PID from per-instance registry (falls back to global) */
         HKEY hKey;
@@ -404,6 +472,11 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
                                   &ctx->WaitForInputQueue);
         if (!NT_SUCCESS(status)) return status;
 
+        /* Must precede WdfTimerStart: the first tick can land 8 ms later
+         * and takes GipLock inside ReadGipData. */
+        InitializeCriticalSection(&ctx->GipLock);
+        ctx->GipLockInit = TRUE;
+
         WDF_TIMER_CONFIG timerCfg;
         WDF_TIMER_CONFIG_INIT_PERIODIC(&timerCfg, CompanionPumpTimer, 8);
         WDF_OBJECT_ATTRIBUTES timerAttrs;
@@ -412,6 +485,19 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
         status = WdfTimerCreate(&timerCfg, &timerAttrs, &ctx->PumpTimer);
         if (!NT_SUCCESS(status)) return status;
         WdfTimerStart(ctx->PumpTimer, WDF_REL_TIMEOUT_IN_MS(8));
+
+        /* Input-doorbell thread (perf audit 2026-07-21): see
+         * CompanionInputPumpProc. Non-fatal on failure; the 8 ms timer
+         * remains the pump. */
+        ctx->PumpStopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
+        if (ctx->PumpStopEvent != NULL) {
+            ctx->PumpThread = CreateThread(NULL, 0, CompanionInputPumpProc,
+                                           (LPVOID)device, 0, NULL);
+            if (ctx->PumpThread == NULL) {
+                CloseHandle(ctx->PumpStopEvent);
+                ctx->PumpStopEvent = NULL;
+            }
+        }
     }
 
     /* HIDMAESTRO publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
@@ -494,11 +580,14 @@ static VOID BuildXusbStateForGetState(PCOMPANION_CTX ctx, UCHAR state[29])
     RtlZeroMemory(state, 29);
     *(USHORT*)&state[0] = 0x0103;
     state[2] = 0x01;
-    ctx->PacketCount++;
-    *(DWORD*)&state[5] = ctx->PacketCount;
 
     USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
     DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    /* Perf audit 2026-07-21 (I8): the packet number advances only when
+     * the state actually changed, matching physical xusb22 behavior so
+     * consumers can skip unchanged-state processing. */
+    if (valid && ctx->GipChanged) ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
     if (!valid) return;
 
     *(USHORT*)&state[0x0B] = buttons;
@@ -531,8 +620,8 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
     RtlZeroMemory(state, 29);
     *(USHORT*)&state[0] = 0x0103;
     state[2] = 0x03;                    /* RESUMED */
-    ctx->PacketCount++;
-    *(DWORD*)&state[5] = ctx->PacketCount;
+    /* (I8) Packet number advances on change only; the decode below
+     * refreshes ctx->GipChanged, and the increment happens after it. */
     /* state[9]  = reportId passed to sink.OnInputReceived (caps non-zero per
      *   dispatch arg at all-xusb.c:9657).
      * state[10] = first byte of the 0x13-byte payload passed to the sink,
@@ -549,6 +638,8 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
 
     USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
     DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    if (valid && ctx->GipChanged) ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
     if (!valid) return;
 
     /* XINPUT_GAMEPAD layout confirmed reading offsets in the XusbInputParser
@@ -576,10 +667,11 @@ static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
  * 8ms period roughly matches a wired Xbox 360's 125Hz USB polling cadence.
  * Only one pending request is completed per tick; if WGI's pump is deep
  * enough it'll re-queue immediately and the next tick picks it up. */
-VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
+/* Complete at most one parked WAIT_FOR_INPUT with the current state. The
+ * manual queue's retrieve-next is the atomic claim, so the 8 ms timer and
+ * the doorbell thread can both call this without double-completion. */
+static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx)
 {
-    WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
-    PCOMPANION_CTX ctx = GetCompanionCtx(device);
     if (ctx->WaitForInputQueue == NULL) return;
 
     WDFREQUEST req;
@@ -589,6 +681,53 @@ VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
     UCHAR state[29];
     BuildXusbStateForWaitInput(ctx, state);
     CopyToRequest(req, state, 29);
+}
+
+VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
+{
+    WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
+    CompanionPumpOnce(GetCompanionCtx(device));
+}
+
+/* Input-doorbell thread (perf audit 2026-07-21). The SDK signals
+ * Global\HIDMaestroCompanionInputEvent<N> per GIP-carrying frame, so a
+ * parked WAIT_FOR_INPUT completes at frame arrival (sub-millisecond)
+ * instead of waiting for the 8 ms timer tick that put a 0-8 ms phase
+ * delay on the WGI/GameInput input path. The timer keeps running as the
+ * unconditional fallback (old SDKs never create the event; a stale event
+ * object after an SDK restart goes quiet), and the manual queue's atomic
+ * retrieve arbitrates between the two completers. The 2 s wait timeout
+ * doubles as the re-open cadence so a fresh SDK session's recreated
+ * event object is picked up within ~2 s; until then the timer serves. */
+static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
+{
+    WDFDEVICE device = (WDFDEVICE)param;
+    PCOMPANION_CTX ctx = GetCompanionCtx(device);
+
+    for (;;) {
+        if (ctx->CompanionInputEvent == NULL) {
+            ctx->CompanionInputEvent = OpenEventW(SYNCHRONIZE, FALSE,
+                                                  ctx->CompanionInputEventName);
+            if (ctx->CompanionInputEvent == NULL) {
+                if (WaitForSingleObject(ctx->PumpStopEvent, 500) == WAIT_OBJECT_0)
+                    return 0;
+                continue;
+            }
+        }
+
+        HANDLE waits[2] = { ctx->PumpStopEvent, ctx->CompanionInputEvent };
+        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 2000);
+        if (rc == WAIT_OBJECT_0)
+            return 0;
+        if (rc == WAIT_OBJECT_0 + 1) {
+            CompanionPumpOnce(ctx);
+            continue;
+        }
+        /* Timeout or failure: drop the handle and re-open so a recreated
+         * event object (new SDK session, same name) gets picked up. */
+        CloseHandle(ctx->CompanionInputEvent);
+        ctx->CompanionInputEvent = NULL;
+    }
 }
 
 void CompanionIoControl(

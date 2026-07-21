@@ -150,6 +150,7 @@ internal static class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputHandles  = new();
     private static readonly Dictionary<int, IntPtr> s_inputViews    = new();
     private static readonly Dictionary<int, IntPtr> s_inputEvents   = new();
+    private static readonly Dictionary<int, IntPtr> s_companionInputEvents = new();
     private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
@@ -184,6 +185,19 @@ internal static class SharedMemoryIO
             string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
             IntPtr ev = CreateNamedEvent(evName);
 
+            // Companion input doorbell (perf audit 2026-07-21). The XUSB
+            // companion's WAIT_FOR_INPUT pump was purely 8 ms
+            // timer-quantized, which put a 0-8 ms (median ~4 ms) phase
+            // delay on the WGI/GameInput input path and 125 idle wakes/s
+            // per Xbox controller. A SECOND named auto-reset event (the
+            // main input event is consumed by the HID driver's worker,
+            // an auto-reset event cannot serve two waiters) lets the
+            // companion complete a parked WAIT_FOR_INPUT at frame
+            // arrival. Old companions never open it: timer fallback.
+            string cevName = $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}";
+            IntPtr cev = CreateNamedEvent(cevName);
+            s_companionInputEvents[controllerIndex] = cev;
+
             s_inputHandles[controllerIndex] = h;
             s_inputViews[controllerIndex] = view;
             s_inputEvents[controllerIndex] = ev;
@@ -203,6 +217,16 @@ internal static class SharedMemoryIO
     {
         return OpenEventW(SYNCHRONIZE, false,
             $@"Global\HIDMaestroOutputEvent{controllerIndex}");
+    }
+
+    /// <summary>Companion input doorbell handle for
+    /// <c>Global\HIDMaestroCompanionInputEvent&lt;N&gt;</c> (created in
+    /// EnsureInputMapping). IntPtr.Zero when the mapping was never
+    /// created in this process.</summary>
+    public static IntPtr GetCompanionInputEvent(int controllerIndex)
+    {
+        lock (s_inputViews)
+            return s_companionInputEvents.TryGetValue(controllerIndex, out var ev) ? ev : IntPtr.Zero;
     }
 
     /// <summary>Returns the view pointer for the controller's OUTPUT section,
@@ -427,7 +451,8 @@ internal static class SharedMemoryIO
     public static void WriteInputFrame(IntPtr view, IntPtr eventHandle, ref uint seqNo,
                                        byte[] data, int dataLen, byte[]? gipData,
                                        int dataOffset = 0,
-                                       byte[]? extendedData = null, int extendedLen = 0)
+                                       byte[]? extendedData = null, int extendedLen = 0,
+                                       IntPtr companionEvent = default)
     {
         // 1. Mark write in progress (odd seqNo)
         uint pending = seqNo + 1;
@@ -491,6 +516,12 @@ internal static class SharedMemoryIO
         // it returns to WaitForMultipleObjects.
         if (eventHandle != IntPtr.Zero)
             SetEvent(eventHandle);
+
+        // 5. Companion doorbell (perf audit 2026-07-21): only frames that
+        // carry GIP bytes feed the XUSB companion's WAIT_FOR_INPUT pump,
+        // so non-Xbox profiles pay nothing here.
+        if (companionEvent != IntPtr.Zero && gipData != null)
+            SetEvent(companionEvent);
     }
 
     /// <summary>v1.1.40 ring read. Reads the next output packet at
@@ -623,6 +654,9 @@ internal static class SharedMemoryIO
             foreach (var ev in s_inputEvents.Values)
                 if (ev != IntPtr.Zero) CloseHandle(ev);
             s_inputEvents.Clear();
+            foreach (var ev in s_companionInputEvents.Values)
+                if (ev != IntPtr.Zero) CloseHandle(ev);
+            s_companionInputEvents.Clear();
         }
         lock (s_outputViews)
         {
