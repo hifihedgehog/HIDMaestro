@@ -260,6 +260,23 @@ internal static class Program
         Check("IMU accel coeff 0x4000", imuCal != null && imuCal[26] == 0x00 && imuCal[27] == 0x40);
         Check("IMU gyro coeff 0x343B", imuCal != null && imuCal[38] == 0x3B && imuCal[39] == 0x34);
 
+        // Issue #36: the analog-stick parameter block at 0x6086 must serve
+        // a ZERO dead zone. Chromium's Nintendo driver (nintendo_controller
+        // .cc UnpackSwitchAnalogStickParameters) unpacks dead_zone and
+        // range_ratio from data bytes 3-5 of this block and radially snaps
+        // both axes to center inside the dead zone; nxbt's captured
+        // hardware bytes carried 0x096 (150 counts, ~10% of the 1536-count
+        // range). Guard so a future parameter-block refresh from real
+        // captures cannot silently reintroduce the browser dead band.
+        var stickParams = Subcommand(0x10, new byte[] { 0x86, 0x60, 0x00, 0x00, 18 });
+        Check("SPI 0x6086 stick parameters reply", stickParams != null && stickParams[13] == 0x90);
+        int deadZone = stickParams != null ? stickParams[23] | ((stickParams[24] & 0x0F) << 8) : -1;
+        Check("stick dead zone is ZERO (issue #36, Chromium applies none)",
+              deadZone == 0, $"0x{deadZone:X3}");
+        int rangeRatio = stickParams != null ? (stickParams[24] >> 4) | (stickParams[25] << 4) : -1;
+        Check("range ratio 0xF33 preserved beside the zeroed nibble",
+              rangeRatio == 0xF33, $"0x{rangeRatio:X3}");
+
         Check("0x48 enable vibration ACK", Subcommand(0x48, new byte[] { 0x01 }) != null);
         Check("0x40 enable IMU ACK", Subcommand(0x40, new byte[] { 0x01 }) != null);
         Check("0x30 player lights ACK", Subcommand(0x30, new byte[] { 0x01 }) != null);

@@ -750,10 +750,23 @@ static UCHAR SwitchSpiByte(_In_ ULONG a)
         0x32,0x32,0x32, 0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,
     };
     /* Six-axis + stick device parameters @0x6080/@0x6098, nxbt's Pro
-     * Controller bytes (spi_read :414-443). */
+     * Controller bytes (spi_read :414-443), with ONE deliberate change
+     * (issue #36): byte 3 is 0x00 instead of nxbt's captured 0x96, which
+     * zeroes the packed 12-bit stick dead zone (was 0x096 = 150 counts,
+     * ~10% of the fabricated 1536-count range). Chromium's Nintendo
+     * driver (nintendo_controller.cc UnpackSwitchAnalogStickParameters)
+     * reads the dead zone from bytes 3-5 of this block and applies it as
+     * a radial snap-to-center before normalization; its only validity
+     * check is against 0xFFF, so zero passes through and ApplyDeadZone
+     * can never fire. Browsers get the full linear range from center.
+     * The neighboring nibble (byte 4 low) carries the range-ratio low
+     * bits, so range ratio 0xF33 survives intact. SDL and Steam's SDL
+     * lineage never read this block (only 0x603D factory and 0x8010
+     * user cal). A real Pro reports ~150 here: deliberate fidelity
+     * departure, guarded by switch_pro_check's zero-dead-zone assert. */
     static const UCHAR sixAxisParams[6] = { 0x50,0xFD,0x00,0x00,0xC6,0x0F };
     static const UCHAR stickParams[18] = {
-        0x0F,0x30,0x61, 0x96,0x30,0xF3, 0xD4,0x14,0x54,
+        0x0F,0x30,0x61, 0x00,0x30,0xF3, 0xD4,0x14,0x54,
         0x41,0x15,0x54, 0xC7,0x79,0x9C, 0x33,0x36,0x63,
     };
 
