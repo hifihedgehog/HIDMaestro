@@ -68,6 +68,8 @@ internal static class Program
     [DllImport(SDL)] static extern IntPtr SDL_OpenGamepad(uint instanceId);
     [DllImport(SDL)] static extern void SDL_CloseGamepad(IntPtr gamepad);
     [DllImport(SDL)] static extern IntPtr SDL_GetGamepadName(IntPtr gamepad);
+    [DllImport(SDL)] static extern IntPtr SDL_GetGamepadSerial(IntPtr gamepad);
+    [DllImport(SDL)] static extern IntPtr SDL_GetGamepadPath(IntPtr gamepad);
     [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gamepad, int button);
     [DllImport(SDL)] static extern short SDL_GetGamepadAxis(IntPtr gamepad, int axis);
     [DllImport(SDL)] static extern bool SDL_GamepadHasSensor(IntPtr gamepad, int type);
@@ -176,7 +178,14 @@ internal static class Program
         // assert: HIDAPI_DriverSwitch rejects the device when the USB
         // handshake or stick-calibration SPI reads fail
         // (SDL_hidapi_switch.c:2410-2418 return false paths).
+        // Select the VIRTUAL pad among SDL's gamepads: a real Pro paired
+        // to the box enumerates identically by VID/PID/name (2026-07-22:
+        // the raw-HID probes opened the live pad by mistake). The virtual
+        // is distinguishable by HID serial (HM-CTL-<index>) or interface
+        // path (hid#hidclass# parent; a real BT pad sits under the
+        // Bluetooth HID service class GUID).
         IntPtr pad = IntPtr.Zero;
+        var logged = new System.Collections.Generic.HashSet<uint>();
         var sw = Stopwatch.StartNew();
         while (pad == IntPtr.Zero && sw.ElapsedMilliseconds < 15000)
         {
@@ -184,10 +193,20 @@ internal static class Program
             IntPtr list = SDL_GetGamepads(out int n);
             if (list != IntPtr.Zero)
             {
-                if (n > 0)
+                for (int i = 0; i < n && pad == IntPtr.Zero; i++)
                 {
-                    uint id = (uint)Marshal.ReadInt32(list, 0);
-                    pad = SDL_OpenGamepad(id);
+                    uint id = (uint)Marshal.ReadInt32(list, i * 4);
+                    IntPtr cand = SDL_OpenGamepad(id);
+                    if (cand == IntPtr.Zero) continue;
+                    string serial = Marshal.PtrToStringUTF8(SDL_GetGamepadSerial(cand)) ?? "";
+                    string cpath = Marshal.PtrToStringUTF8(SDL_GetGamepadPath(cand)) ?? "";
+                    if (logged.Add(id))
+                        Console.WriteLine($"  [cand] id={id} serial='{serial}' path={cpath}");
+                    if (serial.StartsWith("HM-CTL-", StringComparison.OrdinalIgnoreCase)
+                        || cpath.Contains("hid#hidclass#", StringComparison.OrdinalIgnoreCase))
+                        pad = cand;
+                    else
+                        SDL_CloseGamepad(cand);
                 }
                 SDL_free(list);
             }

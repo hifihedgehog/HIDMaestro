@@ -314,9 +314,18 @@ public class HidReportBuilder
         int reportSize = 0, reportCount = 0;
         int logicalMin = 0, logicalMax = 0;
         byte reportId = 0;
-        int bitOffset = 0;
-        bool firstInputReportId = true;
         int collectionDepth = 0;
+
+        // Fields + running bit offset per input report ID, in encounter
+        // order. The parser historically kept only the FIRST input report,
+        // which held for every profile because their gamepad report came
+        // first. The real Switch Pro BT descriptor (issue #37) declares
+        // its vendor-blob inputs (0x21/0x30/0x31-0x33, page 0xFF01)
+        // BEFORE the parseable gamepad report 0x3F, so collect every
+        // input report and select afterward.
+        var fieldsByReport = new Dictionary<byte, List<InputField>>();
+        var bitOffsetByReport = new Dictionary<byte, int>();
+        var reportOrder = new List<byte>();
 
         for (int i = 0; i < desc.Length;)
         {
@@ -346,47 +355,46 @@ public class HidReportBuilder
                     {
                         case 8: // Input
                             bool isConstant = (value & 0x01) != 0;
-                            if (reportId != 0 && firstInputReportId)
+                            if (!fieldsByReport.TryGetValue(reportId, out var fields))
                             {
-                                InputReportId = reportId;
-                                firstInputReportId = false;
+                                fields = new List<InputField>();
+                                fieldsByReport[reportId] = fields;
+                                bitOffsetByReport[reportId] = 0;
+                                reportOrder.Add(reportId);
                             }
-                            // Only process first input report ID
-                            if (reportId == InputReportId || (reportId == 0 && InputReportId == 0))
+                            int bitOffset = bitOffsetByReport[reportId];
+                            if (usageMin != 0 && usageMax != 0)
                             {
-                                if (usageMin != 0 && usageMax != 0)
+                                // Button range
+                                for (int b = 0; b < reportCount; b++)
                                 {
-                                    // Button range
-                                    for (int b = 0; b < reportCount; b++)
-                                    {
-                                        ushort u = (ushort)(usageMin + b);
-                                        if (u > usageMax) u = usageMax;
-                                        InputFields.Add(new InputField(usagePage, u,
-                                            bitOffset + b * reportSize, reportSize,
-                                            logicalMin, logicalMax, isConstant, reportCount));
-                                    }
+                                    ushort u = (ushort)(usageMin + b);
+                                    if (u > usageMax) u = usageMax;
+                                    fields.Add(new InputField(usagePage, u,
+                                        bitOffset + b * reportSize, reportSize,
+                                        logicalMin, logicalMax, isConstant, reportCount));
                                 }
-                                else
-                                {
-                                    for (int c = 0; c < reportCount; c++)
-                                    {
-                                        ushort u = c < usages.Count ? usages[c] : (ushort)0;
-                                        InputFields.Add(new InputField(usagePage, u,
-                                            bitOffset + c * reportSize, reportSize,
-                                            logicalMin, logicalMax, isConstant, reportCount));
-                                    }
-                                }
-                                bitOffset += reportSize * reportCount;
                             }
+                            else
+                            {
+                                for (int c = 0; c < reportCount; c++)
+                                {
+                                    ushort u = c < usages.Count ? usages[c] : (ushort)0;
+                                    fields.Add(new InputField(usagePage, u,
+                                        bitOffset + c * reportSize, reportSize,
+                                        logicalMin, logicalMax, isConstant, reportCount));
+                                }
+                            }
+                            bitOffsetByReport[reportId] = bitOffset + reportSize * reportCount;
                             usages.Clear();
                             usageMin = usageMax = 0;
                             break;
-                        case 9: // Output — skip (different report)
-                        case 11: // Feature — skip
+                        case 9: // Output (different report direction), skip
+                        case 11: // Feature, skip
                             usages.Clear();
                             usageMin = usageMax = 0;
                             break;
-                        case 10: // Collection — usage before collection is the collection's, not input's
+                        case 10: // Collection. A usage before it is the collection's, not the input's.
                             collectionDepth++;
                             usages.Clear();
                             usageMin = usageMax = 0;
@@ -404,14 +412,7 @@ public class HidReportBuilder
                         case 1: logicalMin = signedValue; break;          // Logical Min
                         case 2: logicalMax = (logicalMin >= 0 && signedValue < 0) ? value : signedValue; break; // Logical Max (unsigned if min>=0)
                         case 7: reportSize = value; break;                // Report Size
-                        case 8: // Report ID
-                            reportId = (byte)value;
-                            if (firstInputReportId)
-                            {
-                                // First Report ID we encounter — reset for this report
-                                bitOffset = 0;
-                            }
-                            break;
+                        case 8: reportId = (byte)value; break;            // Report ID
                         case 9: reportCount = value; break;               // Report Count
                     }
                     break;
@@ -440,7 +441,43 @@ public class HidReportBuilder
             i += 1 + bSize;
         }
 
-        InputReportBitSize = bitOffset;
+        // Select the layout report: the first input report carrying a
+        // non-constant field on a gamepad-parseable page (Generic
+        // Desktop 0x01 for axes/hats, Simulation 0x02 for pedals,
+        // Button 0x09). Identical to the old first-report rule for
+        // every descriptor whose first input report is the gamepad
+        // report; picks 0x3F on the Switch-family BT descriptors where
+        // the vendor blobs come first. Falls back to the plain first
+        // input report when no report qualifies (e.g. a vendor channel
+        // plus a Consumer-page media-key report), preserving the old
+        // rule exactly for descriptors with no gamepad report at all.
+        byte chosenId = 0;
+        bool chosen = false;
+        foreach (var id in reportOrder)
+        {
+            foreach (var f in fieldsByReport[id])
+            {
+                if (!f.IsConstant &&
+                    (f.UsagePage == 0x01 || f.UsagePage == 0x02 || f.UsagePage == 0x09))
+                {
+                    chosenId = id;
+                    chosen = true;
+                    break;
+                }
+            }
+            if (chosen) break;
+        }
+        if (!chosen && reportOrder.Count > 0)
+        {
+            chosenId = reportOrder[0];
+            chosen = true;
+        }
+        if (chosen)
+        {
+            InputReportId = chosenId;
+            InputFields.AddRange(fieldsByReport[chosenId]);
+            InputReportBitSize = bitOffsetByReport[chosenId];
+        }
     }
 
     void ResolveSemantics()

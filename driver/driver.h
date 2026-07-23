@@ -186,19 +186,22 @@ typedef struct _DEVICE_CONTEXT {
      *
      * Reply injection: WRITE_REPORT synthesizes 0x81/0x21 input reports
      * into a small ring; READ_REPORT serves ring entries ahead of the
-     * 0x30 stream. The ring + state bytes are guarded by InputLock
-     * (same lock READ_REPORT already takes). SwitchStreamThread serves
-     * input report 0x30 at ~60 Hz from the latest shared-memory body
-     * once the device is in full-report mode. */
+     * stream. The ring + state bytes are guarded by InputLock (same
+     * lock READ_REPORT already takes). SwitchStreamThread streams at
+     * ~60 Hz from the latest shared-memory body: 12-byte 0x3F
+     * simple-mode frames pre-handshake, 49-byte BT full-mode 0x30
+     * after (issue #37 BT wire sizes via SwitchReportLen). */
     BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
-    BOOLEAN SwitchProtocolSeen;     /* issue #35: any 0x80 USB command or
-                                     * 0x01 subcommand arrived. Until then
-                                     * the 0x30 stream is packed in the
-                                     * DESCRIPTOR layout so DirectInput
-                                     * consumers parse correctly; after,
-                                     * permanently Nintendo full-mode.
-                                     * Monotonic FALSE->TRUE; benign
-                                     * cross-thread race (one frame). */
+    BOOLEAN SwitchProtocolSeen;     /* issues #35/#37: any 0x80 USB
+                                     * command or 0x01 subcommand
+                                     * arrived. Until then the stream is
+                                     * genuine 12-byte 0x3F simple-mode
+                                     * (the only report DirectInput can
+                                     * parse under the BT descriptor);
+                                     * after, permanently the 49-byte BT
+                                     * full-mode 0x30. Monotonic
+                                     * FALSE->TRUE; benign cross-thread
+                                     * race (one frame). */
     BOOLEAN SwitchProtocolHold;     /* TTL-gated test hook (2026-07-21
                                      * audit): HKLM\SOFTWARE\HIDMaestro
                                      * value SwitchDescriptorIdleHold
@@ -206,9 +209,9 @@ typedef struct _DEVICE_CONTEXT {
                                      * DeviceAdd and honored only within
                                      * 60 s of its write. While set,
                                      * protocol traffic is answered but
-                                     * never flips the stream to the
-                                     * Nintendo layout, so the
-                                     * descriptor-idle probe can verify
+                                     * never flips the stream to
+                                     * full-mode 0x30, so the 0x3F-idle
+                                     * probe can verify
                                      * its idle phases hermetically even
                                      * when a Chromium browser (a
                                      * legitimate Switch-protocol host)

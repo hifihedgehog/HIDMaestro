@@ -808,6 +808,18 @@ static VOID SwitchFillLatestState(_In_ PDEVICE_CONTEXT ctx, _Out_writes_(46) UCH
     }
 }
 
+/* Per-report completion length under the BLUETOOTH descriptor (issue
+ * #37): report 0x3F is the 12-byte simple-mode gamepad report (ID +
+ * 2 button bytes + hat/pad + four 16-bit axes); everything else in
+ * the input direction (0x21 subcommand replies, 0x30 full-mode
+ * stream, and the undeclared best-effort 0x81) is the 48-byte vendor
+ * blob + ID = 49. Sizes verified against a live Pro Controller's SDP
+ * descriptor (0x21/0x30 declared 75 08 95 30). */
+static ULONG SwitchReportLen(UCHAR reportId)
+{
+    return (reportId == 0x3F) ? 12u : 49u;
+}
+
 /* Queue a synthesized input report (0x81 / 0x21) and complete one
  * pending READ_REPORT with the oldest queued reply if HidClass has a
  * read parked. Ring + indices are guarded by InputLock, the same lock
@@ -838,7 +850,7 @@ static VOID SwitchQueueReply(_In_ PDEVICE_CONTEXT ctx, _In_reads_(64) const UCHA
     WdfWaitLockRelease(ctx->InputLock);
 
     if (haveOut) {
-        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, out, 64);
+        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, out, SwitchReportLen(out[0]));
         WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
     }
 }
@@ -861,7 +873,7 @@ static BOOLEAN SwitchTryServeReply(_In_ PDEVICE_CONTEXT ctx, _In_ WDFREQUEST Req
     WdfWaitLockRelease(ctx->InputLock);
 
     if (haveOut) {
-        NTSTATUS cs = RequestCopyFromBuffer(Request, out, 64);
+        NTSTATUS cs = RequestCopyFromBuffer(Request, out, SwitchReportLen(out[0]));
         WdfRequestComplete(Request, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
         return TRUE;
     }
@@ -870,7 +882,11 @@ static BOOLEAN SwitchTryServeReply(_In_ PDEVICE_CONTEXT ctx, _In_ WDFREQUEST Req
 
 /* USB init commands, output report 0x80 (dekuNukem USB-HID-Notes.md).
  * payload[0] is the proprietary command id (report ID already
- * stripped by the caller). */
+ * stripped by the caller). Unreachable under the shipped BT descriptor
+ * (issue #37: no 0x80 output report declared, HidClass rejects the
+ * write, verified 2026-07-22), but live for custom profiles that
+ * declare the USB family, e.g. cloned from switch-pro's
+ * nativeDescriptor. */
 static VOID SwitchHandleProprietary(_In_ PDEVICE_CONTEXT ctx,
                                     _In_reads_(payloadLen) const UCHAR *payload,
                                     _In_ ULONG payloadLen)
@@ -1027,33 +1043,31 @@ static VOID SwitchHandleSubcommand(_In_ PDEVICE_CONTEXT ctx,
     SwitchQueueReply(ctx, reply);
 }
 
-/* Issue #35: pre-handshake 0x30 frame packed in the layout the HID
- * descriptor DECLARES, so descriptor-driven parsers (DirectInput,
- * joy.cpl) read a correct pad instead of parsing Nintendo full-mode
- * bytes through the wrong field map. The real Pro's descriptor lies
- * about its own full-mode report; real hardware hides that by
- * streaming nothing until the 0x80 handshake. We stream immediately
- * (so SDL's report-ID sniff locks mode 0x30), which is what exposed
- * the mismatch.
+/* Pre-handshake 0x3F simple-mode report (issue #37, superseding the
+ * #35 synthetic 0x30). Under the real BLUETOOTH descriptor (extracted
+ * byte-exact from a live Pro Controller's SDP cache), report 0x3F is
+ * the only report DirectInput can parse: 16 buttons, a null-state hat,
+ * and X/Y/Rx/Ry as 16-bit 0..65535. The full-mode family (0x21/0x30/
+ * 0x31-0x33) is vendor-blob, so once a protocol host arms full mode,
+ * joy.cpl simply sees a calm centered pad forever, exactly like real
+ * Bluetooth hardware. Until then we stream genuine simple-mode frames
+ * from the submitted state.
  *
- * Descriptor field map (profiles/nintendo/switch-pro.json, decoded):
- *   [0]     report ID 0x30
- *   [1..2]  buttons 1-14 (LSB-first) + 2 const bits
- *   [3..10] X, Y, Z, Rz as 16-bit LE, logical 0..65535
- *   [11]    hat (low nibble, 0-7 clockwise from up, 8 = centered)
- *           + buttons 15-18 (high nibble, never driven)
- *   [12..63] Input(Cnst) padding
+ * Wire map (12 bytes, verified against the live descriptor and SDL's
+ * HandleSimpleControllerState / SwitchSimpleStatePacket_t):
+ *   [0]    report ID 0x3F
+ *   [1]    B A Y X L R ZL ZR        (bits 0-7)
+ *   [2]    - + LStick RStick Home Capture  (bits 0-5; 6-7 unused)
+ *   [3]    hat low nibble (0-7 clockwise from up, 8 = null state),
+ *          high nibble = declared 4-bit constant pad
+ *   [4..11] X, Y, Rx, Ry 16-bit LE; HID down-positive Y (the packed
+ *          Nintendo body is up-positive, so Y/Ry mirror), rescaled
+ *          from the packed 12-bit calibration range (0x800 +/- 0x600)
+ *          to the descriptor's full 0..65535.
  *
- * Button numbering follows the profile layout JSON and the real
- * simple-mode wire order (SDL_hidapi_switch.c
- * HandleSimpleControllerState): B A Y X L R ZL ZR - + LS RS Home Cap.
- * Source bits are the Nintendo full-mode body the SDK submits
- * (HandleFullControllerState): byte0 Y/X/B/A/../R/ZR, byte1
- * -/+/RS/LS/Home/Cap, byte2 dpad DURL/../L/ZL. Sticks are 12-bit
- * packed around center 0x800 +/- 0x600 (the responder's fabricated
- * SPI calibration); rescaled to the descriptor's full 0..65535 with
- * Y/Rz mirrored because the packed body is Nintendo up-positive and
- * HID Y grows downward. */
+ * A real Pro sends 0x3F on change only; we stream at the timer cadence,
+ * which descriptor-driven consumers accept and SDL only uses for its
+ * first-read report-ID sniff before arming full mode. */
 static USHORT SwitchScaleStick12(USHORT v12, BOOLEAN invert)
 {
     LONG defl = (LONG)v12 - 0x800;
@@ -1064,14 +1078,14 @@ static USHORT SwitchScaleStick12(USHORT v12, BOOLEAN invert)
     return (USHORT)v;
 }
 
-static VOID SwitchBuildDescriptorFrame(_In_ PDEVICE_CONTEXT ctx,
-                                       _Out_writes_(64) UCHAR *frame)
+static VOID SwitchBuildSimpleFrame(_In_ PDEVICE_CONTEXT ctx,
+                                   _Out_writes_(12) UCHAR *frame)
 {
     UCHAR state[46];
     SwitchFillLatestState(ctx, state);
 
-    RtlZeroMemory(frame, 64);
-    frame[0] = 0x30;
+    RtlZeroMemory(frame, 12);
+    frame[0] = 0x3F;
 
     {
         UCHAR n0 = state[0], n1 = state[1], n2 = state[2];
@@ -1094,26 +1108,11 @@ static VOID SwitchBuildDescriptorFrame(_In_ PDEVICE_CONTEXT ctx,
         frame[2] = b2;
 
         {
-            USHORT lx = (USHORT)(state[3] | ((state[4] & 0x0F) << 8));
-            USHORT ly = (USHORT)((state[4] >> 4) | (state[5] << 4));
-            USHORT rx = (USHORT)(state[6] | ((state[7] & 0x0F) << 8));
-            USHORT ry = (USHORT)((state[7] >> 4) | (state[8] << 4));
-            USHORT ax  = SwitchScaleStick12(lx, FALSE);
-            USHORT ay  = SwitchScaleStick12(ly, TRUE);
-            USHORT az  = SwitchScaleStick12(rx, FALSE);
-            USHORT arz = SwitchScaleStick12(ry, TRUE);
-            frame[3]  = (UCHAR)(ax  & 0xFF); frame[4]  = (UCHAR)(ax  >> 8);
-            frame[5]  = (UCHAR)(ay  & 0xFF); frame[6]  = (UCHAR)(ay  >> 8);
-            frame[7]  = (UCHAR)(az  & 0xFF); frame[8]  = (UCHAR)(az  >> 8);
-            frame[9]  = (UCHAR)(arz & 0xFF); frame[10] = (UCHAR)(arz >> 8);
-        }
-
-        {
             BOOLEAN dDown  = (n2 & 0x01) != 0;
             BOOLEAN dUp    = (n2 & 0x02) != 0;
             BOOLEAN dRight = (n2 & 0x04) != 0;
             BOOLEAN dLeft  = (n2 & 0x08) != 0;
-            UCHAR hat = 8;                       /* centered/null */
+            UCHAR hat = 8;                       /* null state */
             if (dUp && dRight)        hat = 1;
             else if (dRight && dDown) hat = 3;
             else if (dDown && dLeft)  hat = 5;
@@ -1122,7 +1121,22 @@ static VOID SwitchBuildDescriptorFrame(_In_ PDEVICE_CONTEXT ctx,
             else if (dRight)          hat = 2;
             else if (dDown)           hat = 4;
             else if (dLeft)           hat = 6;
-            frame[11] = hat;                     /* buttons 15-18 = 0 */
+            frame[3] = hat;                      /* pad nibble = 0 */
+        }
+
+        {
+            USHORT lx = (USHORT)(state[3] | ((state[4] & 0x0F) << 8));
+            USHORT ly = (USHORT)((state[4] >> 4) | (state[5] << 4));
+            USHORT rx = (USHORT)(state[6] | ((state[7] & 0x0F) << 8));
+            USHORT ry = (USHORT)((state[7] >> 4) | (state[8] << 4));
+            USHORT ax  = SwitchScaleStick12(lx, FALSE);
+            USHORT ay  = SwitchScaleStick12(ly, TRUE);
+            USHORT arx = SwitchScaleStick12(rx, FALSE);
+            USHORT ary = SwitchScaleStick12(ry, TRUE);
+            frame[4]  = (UCHAR)(ax  & 0xFF); frame[5]  = (UCHAR)(ax  >> 8);
+            frame[6]  = (UCHAR)(ay  & 0xFF); frame[7]  = (UCHAR)(ay  >> 8);
+            frame[8]  = (UCHAR)(arx & 0xFF); frame[9]  = (UCHAR)(arx >> 8);
+            frame[10] = (UCHAR)(ary & 0xFF); frame[11] = (UCHAR)(ary >> 8);
         }
     }
 }
@@ -1132,9 +1146,9 @@ static VOID SwitchBuildDescriptorFrame(_In_ PDEVICE_CONTEXT ctx,
  * which SDL treats identically. Serves ONE pending READ_REPORT per tick
  * (the one-report-per-frame discipline ProcessSharedInput documents)
  * and refreshes the GET_INPUT_REPORT cache. Exits on SwitchStreamStop.
- * Until the first protocol traffic (issue #35), frames are packed in
- * the descriptor layout via SwitchBuildDescriptorFrame; after, the
- * Nintendo full-mode layout SDL expects. */
+ * Until the first protocol traffic, frames are genuine 12-byte 0x3F
+ * simple-mode reports via SwitchBuildSimpleFrame (issue #37); after,
+ * the 49-byte BT full-mode 0x30 layout protocol hosts expect. */
 static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
 {
     PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Parameter;
@@ -1153,6 +1167,10 @@ static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
             BOOLEAN nintendoLayout = ctx->SwitchProtocolSeen;
 
             if (nintendoLayout) {
+                /* BT full-mode 0x30: 48 vendor bytes + ID = 49. The
+                 * content layout is unchanged from the USB era (timer,
+                 * battery, buttons+sticks, vibrator, 3 IMU frames);
+                 * 13 + 36 fills the 48-byte payload exactly. */
                 RtlZeroMemory(frame, sizeof(frame));
                 SwitchFillLatestState(ctx, state);
                 frame[0] = 0x30;
@@ -1161,24 +1179,28 @@ static DWORD WINAPI SwitchStreamProc(_In_ LPVOID Parameter)
                 frame[12] = SWITCH_VIBRATOR;
                 RtlCopyMemory(frame + 13, state + 10, 36); /* IMU (zeros when disabled) */
             } else {
-                /* Issue #35: no protocol traffic yet, serve the layout
-                 * the descriptor declares. No timer byte here: bytes
-                 * 1-2 are buttons in this shape. */
-                SwitchBuildDescriptorFrame(ctx, frame);
+                /* Issue #37: no protocol traffic yet, stream genuine
+                 * 0x3F simple-mode frames (the only report DirectInput
+                 * can parse under the BT descriptor). No timer byte in
+                 * this shape. */
+                SwitchBuildSimpleFrame(ctx, frame);
             }
 
+            {
+            ULONG frameLen = SwitchReportLen(frame[0]);
             WdfWaitLockAcquire(ctx->InputLock, NULL);
             if (nintendoLayout)
                 frame[1] = ctx->SwitchTimer++;
             /* Refresh the polled GET_INPUT_REPORT cache with the frame. */
-            RtlCopyMemory(ctx->InputReport, frame, sizeof(frame));
-            ctx->InputReportSize = sizeof(frame);
+            RtlCopyMemory(ctx->InputReport, frame, frameLen);
+            ctx->InputReportSize = frameLen;
             ctx->InputReportReady = TRUE;
             WdfWaitLockRelease(ctx->InputLock);
 
             if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-                NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, sizeof(frame));
+                NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, frameLen);
                 WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            }
             }
         }
     }

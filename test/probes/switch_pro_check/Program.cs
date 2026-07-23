@@ -1,10 +1,15 @@
-// Switch Pro protocol responder check (issue #33).
+// Switch Pro protocol responder check (issues #33/#36/#37).
 //
-// Acceptance surrogate for SDL3's HIDAPI_DriverSwitch: opens the virtual
-// pad over raw HID and performs the SAME init sequence SDL performs
-// (BTrySetupUSB + BReadDeviceInfo + LoadStickCalibration +
-// LoadIMUCalibration + SetVibrationEnabled + SetInputMode), then
-// validates streaming, input round-trip, IMU bytes, and rumble decode.
+// Acceptance surrogate for SDL3's HIDAPI_DriverSwitch under the real
+// BLUETOOTH descriptor (issue #37): opens the virtual pad over raw HID
+// and performs the BT init sequence SDL performs after BTrySetupUSB
+// fails (BReadDeviceInfo + LoadStickCalibration + LoadIMUCalibration +
+// SetVibrationEnabled + SetInputMode), then validates streaming, input
+// round-trip, IMU bytes, and rumble decode. The 0x80 USB-init family is
+// absent from the BT descriptor, so phase 1 asserts it is DEAD, exactly
+// as on real BT hardware. Wire sizes are the BT ones: writes are
+// exactly 49 bytes; reads complete padded to InputReportByteLength 362
+// (HidClass behavior, verified identical on a live BT Pro).
 // Every wire byte asserted here is quoted from SDL_hidapi_switch.c (the
 // client), nxbt protocol.py (the device-side reference), or the
 // dekuNukem notes; file:line cites sit next to each phase.
@@ -67,10 +72,23 @@ internal static class Program
     static SafeFileHandle s_hid = null!;
     static IntPtr s_readEvent, s_writeEvent;
 
-    static bool HidWrite(byte[] report64)
+    static int s_lastReadLen;
+
+    // BT descriptor: OutputReportByteLength is 49 (48 vendor bytes + ID).
+    // Pads like hidapi does; a write of any other length fails at HidClass.
+    static bool HidWrite(byte[] report)
+    {
+        var buf = new byte[49];
+        Array.Copy(report, buf, Math.Min(report.Length, 49));
+        return HidWriteRaw(buf, 49);
+    }
+
+    // Exact-length write for negative tests (the 64-byte SDL USB framing
+    // must FAIL under the BT descriptor).
+    static bool HidWriteRaw(byte[] buf, int len)
     {
         var ov = new NativeOverlapped { EventHandle = s_writeEvent };
-        if (!WriteFile(s_hid, report64, 64, IntPtr.Zero, ref ov)
+        if (!WriteFile(s_hid, buf, (uint)len, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997 /* ERROR_IO_PENDING */)
             return false;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint written, 1000, false))
@@ -78,14 +96,19 @@ internal static class Program
             CancelIoEx(s_hid, IntPtr.Zero);
             return false;
         }
-        return written == 64;
+        return written == (uint)len;
     }
 
+    // BT descriptor: InputReportByteLength is 362 (the 0x31-0x33 family).
+    // HidClass zero-pads every completed read to that length regardless
+    // of the report's wire size (0x3F = 12, 0x21/0x30 = 49); a live BT
+    // Pro reads identically (2026-07-22 capture). Track the completed
+    // length so shape asserts can guard descriptor drift.
     static byte[]? HidRead(int timeoutMs)
     {
-        var buf = new byte[64];
+        var buf = new byte[362];
         var ov = new NativeOverlapped { EventHandle = s_readEvent };
-        if (!ReadFile(s_hid, buf, 64, IntPtr.Zero, ref ov)
+        if (!ReadFile(s_hid, buf, 362, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997)
             return null;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint read, (uint)timeoutMs, false))
@@ -93,6 +116,7 @@ internal static class Program
             CancelIoEx(s_hid, IntPtr.Zero);
             return null;
         }
+        s_lastReadLen = (int)read;
         return read > 0 ? buf : null;
     }
 
@@ -114,12 +138,14 @@ internal static class Program
     }
 
     // SDL ConstructSubcommand (SDL_hidapi_switch.c:486-501): packet type
-    // 0x01, counter, neutral rumble 00 01 40 40 per side, subcommand, args.
+    // 0x01, counter, neutral rumble 00 01 40 40 per side, subcommand,
+    // args. On the BT path SDL writes these at the 49-byte output size
+    // (hidapi pads to OutputReportByteLength); HidWrite does the same.
     static int s_counter;
 
     static byte[]? Subcommand(byte id, byte[] args, int timeoutMs = 500)
     {
-        var pkt = new byte[64];
+        var pkt = new byte[49];
         pkt[0] = 0x01;
         pkt[1] = (byte)(s_counter++ & 0xF);
         pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
@@ -134,7 +160,7 @@ internal static class Program
 
     static int Main()
     {
-        Console.WriteLine("=== Switch Pro protocol responder check (issue #33) ===");
+        Console.WriteLine("=== Switch Pro protocol responder check (issues #33/#36/#37) ===");
 
         using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
         {
@@ -182,16 +208,22 @@ internal static class Program
         { IsBackground = true };
         pump.Start();
 
-        // Locate the HID interface by VID/PID (poll: enumeration follows
-        // device creation by a few hundred ms).
+        // Locate the VIRTUAL pad's HID interface (poll: enumeration
+        // follows device creation by a few hundred ms). VID/PID alone is
+        // ambiguous when a real Pro Controller is paired to the same box
+        // (2026-07-22: the probe opened the live pad and asserted against
+        // its real firmware/calibration). The virtual serves serial
+        // HM-CTL-<index>; a real one serves its MAC.
         string? path = null;
         for (int i = 0; i < 50 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
-                .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009)?.DevicePath;
+                .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
+                    && d.SerialNumberString != null
+                    && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
             if (path == null) Thread.Sleep(100);
         }
-        Check("HID interface enumerates (VID 057E PID 2009)", path != null, path ?? "");
+        Check("virtual HID interface enumerates (VID 057E PID 2009, HM-CTL serial)", path != null, path ?? "");
         if (path == null) return Fail(ref pumpStop, pump);
 
         s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
@@ -201,37 +233,38 @@ internal static class Program
         Check("CreateFile read/write", !s_hid.IsInvalid);
         if (s_hid.IsInvalid) return Fail(ref pumpStop, pump);
 
-        // ── Phase 1: USB init, the BTrySetupUSB sequence ────────────────
-        Console.WriteLine("\n-- Phase 1: 0x80 USB init (SDL BTrySetupUSB :724-746) --");
+        // ── Phase 1: 0x80 USB-init family is DEAD (BT parity) ───────────
+        Console.WriteLine("\n-- Phase 1: 0x80 USB init absent (real-BT parity, issue #37) --");
 
-        var cmd = new byte[64]; cmd[0] = 0x80; cmd[1] = 0x02;
-        Check("80 02 handshake write", HidWrite(cmd));
-        Check("81 02 handshake ack", ReadUntil(0x81, 500, r => r[1] == 0x02) != null);
+        // The BT descriptor carries no 0x80 output / 0x81 input reports.
+        // SDL's BTrySetupUSB writes 0x80 0x02 at the 64-byte USB size
+        // (SDL_hidapi_switch.c:724-746); under this descriptor the write
+        // must fail at HidClass, or at minimum no 0x81 ack can surface
+        // (an input report ID absent from the descriptor is dropped).
+        // Either way SDL concludes Bluetooth and uses subcommand init.
+        var cmd80 = new byte[64]; cmd80[0] = 0x80; cmd80[1] = 0x02;
+        bool wrote80 = HidWriteRaw(cmd80, 64);
+        Check("0x80 handshake dead (write rejected or no 0x81 ack)",
+              !wrote80 || ReadUntil(0x81, 400) == null,
+              wrote80 ? "write accepted, no ack" : "write rejected");
 
-        cmd[1] = 0x03;
-        Check("80 03 high-speed write", HidWrite(cmd));
-        Check("81 03 ack", ReadUntil(0x81, 500, r => r[1] == 0x03) != null);
-
-        cmd[1] = 0x01;
-        Check("80 01 status write", HidWrite(cmd));
-        var status = ReadUntil(0x81, 500, r => r[1] == 0x01);
-        Check("81 01 status reply", status != null);
-        // SwitchProprietaryStatusPacket_t: type at byte 3 (0x03 = Pro),
-        // MAC at 4..9 LSB-first (dekuNukem USB-HID-Notes 80 01 sample).
-        Check("status device type = Pro (0x03)", status != null && status[3] == 0x03);
-        Check("status MAC nonzero", status != null && status.Skip(4).Take(6).Any(b => b != 0));
-
-        cmd[1] = 0x04;
-        Check("80 04 ForceUSB write (no reply expected)", HidWrite(cmd));
-
-        // ── Phase 2: subcommands (SDL init order) ───────────────────────
-        Console.WriteLine("\n-- Phase 2: subcommand request-reply --");
+        // ── Phase 2: subcommands (SDL BT init order) ────────────────────
+        Console.WriteLine("\n-- Phase 2: subcommand request-reply (49-byte BT framing) --");
 
         var info = Subcommand(0x02, Array.Empty<byte>());
         Check("0x02 device info reply", info != null);
+        // HidClass completes every read at InputReportByteLength (362
+        // under the BT descriptor), zero-padded past the report's actual
+        // bytes. Verified byte-identical on a live BT Pro on this stack
+        // (2026-07-22 capture). Guards descriptor drift, not driver-side
+        // completion length (invisible from user mode).
+        Check("reads complete at 362 (InputReportByteLength, real-BT parity)",
+              info != null && s_lastReadLen == 362, $"{s_lastReadLen}");
         Check("device info ACK 0x82 (nxbt :300)", info != null && info[13] == 0x82);
         Check("device info type Pro (payload[2]=0x03)", info != null && info[17] == 0x03);
         Check("device info firmware 03.8B (nxbt :306-307)", info != null && info[15] == 0x03 && info[16] == 0x8B);
+        Check("device info MAC nonzero (payload[4..9])",
+              info != null && info.Skip(19).Take(6).Any(b => b != 0));
 
         // User stick calibration read: must succeed with 0xFF bytes so
         // SDL's magic check (0xB2 0xA1, LoadStickCalibration :1766) fails
@@ -290,6 +323,7 @@ internal static class Program
         // Drain whatever is queued, then time 30 fresh frames.
         while (HidRead(30) != null) { }
         int frames = 0; byte firstTimer = 0, lastTimer = 0;
+        bool allLen362 = true;
         var cadence = Stopwatch.StartNew();
         for (int i = 0; i < 30; i++)
         {
@@ -297,10 +331,12 @@ internal static class Program
             if (r == null) break;
             if (frames == 0) firstTimer = r[1];
             lastTimer = r[1];
+            if (s_lastReadLen != 362) allLen362 = false;
             frames++;
         }
         cadence.Stop();
         Check("30 consecutive 0x30 frames", frames == 30, $"got {frames}");
+        Check("0x30 frames complete at 362 (padded, real-BT parity)", frames > 0 && allLen362);
         double msPerFrame = cadence.Elapsed.TotalMilliseconds / Math.Max(1, frames);
         Check("cadence ~60 Hz (10..25 ms/frame)", msPerFrame >= 10 && msPerFrame <= 25,
             $"{msPerFrame:F1} ms/frame");
@@ -359,8 +395,8 @@ internal static class Program
 
         // Output 0x10: [id, counter, rumbleL 4B, rumbleR 4B]. Left at max
         // HF amplitude (0xC8, EncodeRumbleHighAmplitude table tail), right
-        // neutral (00 01 40 40).
-        var rumble = new byte[64];
+        // neutral (00 01 40 40). 49-byte BT write like every output.
+        var rumble = new byte[49];
         rumble[0] = 0x10; rumble[1] = 0x01;
         rumble[2] = 0x00; rumble[3] = 0xC8; rumble[4] = 0x60; rumble[5] = 0x00;
         rumble[6] = 0x00; rumble[7] = 0x01; rumble[8] = 0x40; rumble[9] = 0x40;
