@@ -18,6 +18,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]
 [assembly: InternalsVisibleTo("SwitchProCheck")]
 [assembly: InternalsVisibleTo("SwitchDescriptorIdleCheck")]
+[assembly: InternalsVisibleTo("StopEventResilienceCheck")]
 [assembly: InternalsVisibleTo("switch_writer_tap")]
 [assembly: InternalsVisibleTo("SonyFeatureGateCheck")]
 [assembly: InternalsVisibleTo("OutputPerfBench")]

@@ -1180,7 +1180,26 @@ internal static class DeviceOrchestrator
                 foreach (var inst in ek.GetSubKeyNames())
                 {
                     string candidate = $@"{root}\{enumerator}\{inst}";
-                    if (CM_Locate_DevNodeW(out _, candidate, 0) != 0) continue;
+                    if (CM_Locate_DevNodeW(out uint devInst, candidate, 0) != 0) continue;
+                    // Issue #38: adopt only a HEALTHY devnode. A candidate
+                    // that is remove-pending, problem-flagged, or not
+                    // started (a predecessor's teardown still in flight,
+                    // or a half-revived reuse ghost) must not be handed
+                    // back as a live companion: the caller would wire a
+                    // controller to a device that is about to vanish or
+                    // never re-ran device start. Skip it; the caller
+                    // creates fresh (per-call-unique SwD suffix, no
+                    // collision) and the ghost stays the sweep's job.
+                    const uint DN_STARTED = 0x00000008;
+                    const uint DN_WILL_BE_REMOVED = 0x00040000;
+                    if (CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0) != 0
+                        || (status & DN_STARTED) == 0
+                        || (status & DN_WILL_BE_REMOVED) != 0
+                        || problem != 0)
+                    {
+                        LogDiag($"    FindExistingCompanion: skipping unhealthy {candidate} (status=0x{status:X8} problem={problem})");
+                        continue;
+                    }
                     using var dp = ek.OpenSubKey($@"{inst}\Device Parameters");
                     if (dp?.GetValue("ControllerIndex") is int ci && ci == controllerIndex)
                         return candidate;
@@ -2039,32 +2058,52 @@ internal static class DeviceOrchestrator
     private const uint EVENT_MODIFY_STATE = 0x0002;
 
     /// <summary>
-    /// Signal every named HIDMaestro StopEvent (slots 0..15), then sleep
-    /// 500ms to give blocked WUDFHost worker threads a chance to exit.
-    /// Without this, after a force-kill the workers stay blocked on
-    /// WaitForMultipleObjects(StopEvent, InputDataEvent) and PnP removal
-    /// blocks ~1s/device waiting for the kernel query-remove to time
-    /// out. With the signal: workers exit, WUDFHost releases, subsequent
-    /// DIF_REMOVE completes in milliseconds. For graceful shutdown the
-    /// signal makes cleanup near-instant.
+    /// Signal the named HIDMaestro StopEvents for the given controller
+    /// indices, then sleep 500ms to give blocked WUDFHost worker threads
+    /// a chance to exit. Without this, after a force-kill the workers
+    /// stay blocked on WaitForMultipleObjects(StopEvent, InputDataEvent)
+    /// and PnP removal blocks ~1s/device waiting for the kernel
+    /// query-remove to time out. With the signal: workers exit, WUDFHost
+    /// releases, subsequent DIF_REMOVE completes in milliseconds. For
+    /// graceful shutdown the signal makes cleanup near-instant.
+    ///
+    /// <para>Issue #38: <paramref name="targets"/> is the index set
+    /// harvested from the devnodes the sweep is actually about to remove
+    /// (<see cref="CollectSweepTargetIndices"/>), not an unconditional
+    /// 0..15 broadcast. The named events are shared machine-wide, so the
+    /// old broadcast signaled every live process's workers on every
+    /// sweep. The driver's TearingDown gate makes a stray signal
+    /// non-lethal now (workers recycle instead of exiting), but the
+    /// sweep still should not make other sessions' workers churn. Pass
+    /// null to fall back to the broadcast set (0..15 plus every
+    /// Controller&lt;N&gt; config key), used when a devnode was found
+    /// whose index could not be read.</para>
     /// </summary>
-    private static void SignalStopEventsAndDrain()
+    private static void SignalStopEventsAndDrain(HashSet<int>? targets)
     {
-        // Index set: 0-15 baseline plus any Controller<N> config key (the
-        // 2026-07-21 perf audit: indexing is unbounded, so controllers >= 16
-        // previously missed the fast-stop signal and paid the slow
-        // query-remove path).
-        var indices = new HashSet<int>(Enumerable.Range(0, 16));
-        try
+        HashSet<int> indices;
+        if (targets != null)
         {
-            using var hmKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro");
-            if (hmKey != null)
-                foreach (var name in hmKey.GetSubKeyNames())
-                    if (name.StartsWith("Controller", StringComparison.OrdinalIgnoreCase)
-                        && int.TryParse(name.Substring(10), out int idx))
-                        indices.Add(idx);
+            indices = targets;
         }
-        catch { }
+        else
+        {
+            // Broadcast fallback: 0-15 baseline plus any Controller<N>
+            // config key (the 2026-07-21 perf audit: indexing is
+            // unbounded, so controllers >= 16 previously missed the
+            // fast-stop signal and paid the slow query-remove path).
+            indices = new HashSet<int>(Enumerable.Range(0, 16));
+            try
+            {
+                using var hmKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro");
+                if (hmKey != null)
+                    foreach (var name in hmKey.GetSubKeyNames())
+                        if (name.StartsWith("Controller", StringComparison.OrdinalIgnoreCase)
+                            && int.TryParse(name.Substring(10), out int idx))
+                            indices.Add(idx);
+            }
+            catch { }
+        }
 
         bool anySignaled = false;
         foreach (int i in indices)
@@ -2083,6 +2122,50 @@ internal static class DeviceOrchestrator
         // zero orphans on a clean machine.
         if (anySignaled)
             Thread.Sleep(TimeoutScale.Apply(500));
+    }
+
+    /// <summary>Read-only pre-pass over the exact enumerator/ownership set
+    /// the sweep below removes, harvesting each owned devnode's
+    /// <c>Device Parameters\ControllerIndex</c>. Returns null when any
+    /// owned devnode's index could not be read, which tells the caller to
+    /// fall back to the broadcast signal so a force-killed session's
+    /// worker is never left blocking PnP removal (issue #38).</summary>
+    private static HashSet<int>? CollectSweepTargetIndices()
+    {
+        var indices = new HashSet<int>();
+        bool unindexed = false;
+        foreach (var enumRoot in new[] { "ROOT", "SWD" })
+        try
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+            if (enumKey == null) continue;
+            foreach (var sub in enumKey.GetSubKeyNames())
+            {
+                bool exclusivelyOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+                    || sub.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+                if (!exclusivelyOurs && !shared) continue;
+
+                using var subKey = enumKey.OpenSubKey(sub);
+                if (subKey == null) continue;
+                foreach (var inst in subKey.GetSubKeyNames())
+                {
+                    if (!exclusivelyOurs
+                        && !DeviceManager.IsHidMaestroOwned($@"{enumRoot}\{sub}\{inst}"))
+                        continue;
+                    using var dp = subKey.OpenSubKey($@"{inst}\Device Parameters");
+                    if (dp?.GetValue("ControllerIndex") is int ci)
+                        indices.Add(ci);
+                    else
+                        unindexed = true;
+                }
+            }
+        }
+        catch { unindexed = true; }
+        return unindexed ? null : indices;
     }
 
     public static void RemoveAllVirtualControllers()
@@ -2115,7 +2198,7 @@ internal static class DeviceOrchestrator
         }
         LogDiag($">>> SWEEP ENTER preserveInstall={preserveInstall}");
 
-        SignalStopEventsAndDrain();
+        SignalStopEventsAndDrain(CollectSweepTargetIndices());
         Phase("stop-drain");
 
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.

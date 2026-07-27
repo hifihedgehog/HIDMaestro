@@ -1373,10 +1373,12 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
 }
 
 /* Event-driven worker thread. Bulletproof design: the ONLY way this
- * function returns is StopEvent being signaled. Every other condition —
- * WAIT_FAILED, WAIT_TIMEOUT, stale-handle detection, invalid-handle,
- * OpenEvent/OpenFileMapping failure — recycles the handles and loops
- * back to Phase 1 to re-discover fresh kernel objects.
+ * function returns is StopEvent signaled WITH ctx->TearingDown set
+ * (issue #38). Every other condition, including a foreign signal on the
+ * shared named StopEvent, plus WAIT_FAILED, WAIT_TIMEOUT, stale-handle
+ * detection, invalid-handle, OpenEvent/OpenFileMapping failure,
+ * recycles the handles and loops back to Phase 1 to re-discover fresh
+ * kernel objects.
  *
  * This is a deliberate departure from the prior "5s timeout OR 250 stale
  * wakeups" logic, which could leave the worker stuck in scenarios where
@@ -1398,14 +1400,26 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
  *     the timeout is a safety net, not a polling interval.
  *
  * StopEvent is signaled from:
- *   (a) EvtDeviceContextCleanup — normal PnP teardown
- *   (b) External SDK RemoveAllVirtualControllers cleanup — opens the
+ *   (a) EvtDeviceContextCleanup: normal PnP teardown. Sets
+ *       ctx->TearingDown FIRST, so the worker returns 0.
+ *   (b) External SDK RemoveAllVirtualControllers cleanup: opens the
  *       named stop event and signals it to unblock worker threads of
  *       force-killed prior processes
- * Both cases result in a clean return 0. The 2-second thread-join in
- * EvtDeviceContextCleanup is the backstop if the worker is somehow stuck
- * outside the wait (e.g., inside ProcessSharedInput's WdfRequestComplete
- * during a concurrent teardown). */
+ *   (c) A same-index sibling context's cleanup: the event is a NAMED
+ *       object, so an orphan device tearing down late signals the same
+ *       kernel object a freshly created device at that index waits on.
+ * Issue #38: (b) and (c) used to return 0 too, permanently freezing a
+ * healthy device's output at its last report (the SDK writer keeps
+ * writing, nobody processes, parked READ_REPORTs never complete) while
+ * everything looks alive from user land. The worker now exits ONLY when
+ * ctx->TearingDown is set; foreign signals are absorbed (ResetEvent on
+ * the manual-reset object, then recycle to Phase 1). The 2-second
+ * thread-join in EvtDeviceContextCleanup is the backstop if the worker
+ * is somehow stuck outside the wait (e.g., inside ProcessSharedInput's
+ * WdfRequestComplete during a concurrent teardown), and also bounds the
+ * benign race where a foreign absorb's ResetEvent eats our own
+ * teardown's signal a beat before the flag re-check would have caught
+ * it. */
 static DWORD WINAPI
 SharedInputWorkerProc(_In_ LPVOID Parameter)
 {
@@ -1415,7 +1429,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
      * Phase 2 processes frames until StopEvent OR until we detect stale
      * handles, at which point we fall back through to Phase 1 with NULL
      * handles to re-open fresh. There is NO return path out of this loop
-     * except StopEvent. */
+     * except StopEvent with TearingDown set (issue #38). */
     for (;;) {
         /* Phase 1: bootstrap — wait for the SDK to create the named event.
          * StopEvent is checked on every 200 ms tick so teardown stays
@@ -1427,8 +1441,28 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 ctx->InputDataEvent = ev;
                 break;
             }
-            if (WaitForSingleObject(ctx->StopEvent, 200) == WAIT_OBJECT_0)
-                return 0;
+            {
+                DWORD rc1 = WaitForSingleObject(ctx->StopEvent, 200);
+                /* Issue #38: the FLAG is the authoritative exit
+                 * condition, checked on EVERY wake including timeouts.
+                 * The signal alone cannot be trusted in either
+                 * direction: a foreign sweep signals without teardown,
+                 * and a same-index sibling's device-start ResetEvent
+                 * (driver.c device start) can EAT our own cleanup's
+                 * SetEvent on the shared named object, leaving teardown
+                 * signal-less. Relying on the signal there left an
+                 * immortal worker competing for the input event with
+                 * the successor device's worker (frame theft, stale
+                 * GET_INPUT_REPORT cache: the S34 regression). */
+                if (ctx->TearingDown)
+                    return 0;
+                if (rc1 == WAIT_OBJECT_0) {
+                    /* Foreign signal during bootstrap: absorb. */
+                    ResetEvent(ctx->StopEvent);
+                    if (ctx->TearingDown)
+                        return 0;
+                }
+            }
         }
 
         /* Phase 2: steady state. The 500 ms timeout + unconditional recycle
@@ -1447,8 +1481,39 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         for (;;) {
             DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 500);
 
-            if (rc == WAIT_OBJECT_0)
-                return 0; /* StopEvent → the only legitimate exit */
+            /* Issue #38: TearingDown is the authoritative exit
+             * condition, checked on EVERY wake including timeouts. The
+             * StopEvent signal cannot be trusted in either direction:
+             * a foreign sweep signals without teardown, and a
+             * same-index sibling's device-start ResetEvent can EAT our
+             * own cleanup's SetEvent on the shared named object,
+             * leaving teardown signal-less. Pre-flag-poll, that eaten
+             * signal left an immortal worker past the cleanup join
+             * competing with the successor device's worker for the
+             * auto-reset input event (frame theft, stale
+             * GET_INPUT_REPORT cache: the S34 regression). Worst-case
+             * exit latency is one 500 ms wait, inside cleanup's 2 s
+             * join. */
+            if (ctx->TearingDown)
+                return 0;
+
+            if (rc == WAIT_OBJECT_0) {
+                /* FOREIGN signal on the shared named event (another
+                 * process's sweep, or a same-index orphan's late
+                 * cleanup). Returning here left a healthy device frozen
+                 * at its last report forever (issue #38). Absorb
+                 * instead: reset the manual-reset object (else this
+                 * loop spins), re-check the flag (our own cleanup may
+                 * set-and-signal between the wait and the reset, and
+                 * the reset eats that signal), then recycle handles
+                 * through Phase 1 exactly like every other non-fatal
+                 * wake. */
+                ResetEvent(ctx->StopEvent);
+                if (ctx->TearingDown)
+                    return 0;
+                recycle = TRUE;
+                break;
+            }
 
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
@@ -1521,8 +1586,12 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
     PDEVICE_CONTEXT ctx = GetDeviceContext((WDFDEVICE)Object);
 
     /* Stop the worker thread first so nothing is touching SharedMemPtr
-     * while we unmap. SetEvent → 2-second join, which should be instant
-     * (the worker wakes on the stop event and returns). */
+     * while we unmap. TearingDown BEFORE SetEvent (issue #38): the named
+     * stop event is shared with sibling contexts and foreign sweeps, and
+     * the flag is what tells OUR worker this wake is its real teardown.
+     * SetEvent → 2-second join, which should be instant (the worker
+     * wakes on the stop event and returns). */
+    InterlockedExchange((volatile LONG *)&ctx->TearingDown, 1);
     if (ctx->StopEvent) SetEvent(ctx->StopEvent);
     if (ctx->WorkerThread) {
         WaitForSingleObject(ctx->WorkerThread, 2000);

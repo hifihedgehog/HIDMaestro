@@ -142,6 +142,16 @@ typedef struct _DEVICE_CONTEXT {
      * Objects keeps things moving if a signal is ever dropped. */
     HANDLE  InputDataEvent;      /* OpenEvent on Global\HIDMaestroInputEvent<N> */
     HANDLE  StopEvent;            /* Named: Global\HIDMaestroStopEvent<N> */
+    volatile LONG TearingDown;   /* issue #38: set by EvtDeviceContextCleanup
+                                  * BEFORE it signals StopEvent. StopEvent is
+                                  * a named object shared with every other
+                                  * context at this index and with foreign
+                                  * processes' sweeps, so a signal alone does
+                                  * not mean THIS device is going away. The
+                                  * worker exits only when this flag is set;
+                                  * any other StopEvent wake is absorbed
+                                  * (reset + recycle), so a live device can
+                                  * never be left worker-less. */
     HANDLE  WorkerThread;        /* CreateThread handle */
     WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
     WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
