@@ -18,6 +18,7 @@
   <a href="https://somsubhra.github.io/github-release-stats/?username=hifihedgehog&repository=HIDMaestro"><img src="https://img.shields.io/github/downloads/hifihedgehog/HIDMaestro/total" alt="Total downloads"></a>
   <a href="https://discord.gg/qawTZHVhNH"><img src="https://img.shields.io/discord/1507059039844962425?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Discord"></a>
   <a href="https://hidmaestro.org/"><img src="https://img.shields.io/badge/website-hidmaestro.org-blue" alt="Website"></a>
+  <a href="https://hidmaestro.org/docs/"><img src="https://img.shields.io/badge/docs-hidmaestro.org%2Fdocs-blue" alt="Documentation"></a>
   <a href="https://github.com/hifihedgehog"><img src="https://img.shields.io/github/followers/hifihedgehog?style=social&label=Follow" alt="GitHub followers"></a>
   <a href="https://x.com/hifihedgehog"><img src="https://img.shields.io/badge/X-@hifihedgehog-black?logo=x&logoColor=white" alt="Follow on X"></a>
 </p>
@@ -29,10 +30,6 @@ HIDMaestro creates virtual controllers that present the exact identity of real h
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
 <p align="center"><b>225</b> device profiles · <b>32</b> vendors · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
-
-<p align="center">
-  <a href="https://hidmaestro.org/"><b>Website</b></a> · <a href="https://hidmaestro.org/docs/"><b>Docs</b></a> · <a href="https://github.com/hifihedgehog/HIDMaestro/releases/latest"><b>Download</b></a> · <a href="https://discord.gg/qawTZHVhNH"><b>Discord</b></a>
-</p>
 
 ```csharp
 using var ctx = new HMContext();
