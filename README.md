@@ -28,6 +28,12 @@ HIDMaestro creates virtual controllers that present the exact identity of real h
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
+<p align="center"><b>225</b> device profiles · <b>32</b> vendors · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+
+<p align="center">
+  <a href="https://hidmaestro.org/"><b>Website</b></a> · <a href="https://hidmaestro.org/docs/"><b>Docs</b></a> · <a href="https://github.com/hifihedgehog/HIDMaestro/releases/latest"><b>Download</b></a> · <a href="https://discord.gg/qawTZHVhNH"><b>Discord</b></a>
+</p>
+
 ```csharp
 using var ctx = new HMContext();
 ctx.LoadDefaultProfiles();
@@ -36,107 +42,9 @@ using var ctrl = ctx.CreateController(ctx.GetProfile("xbox-360-wired")!);
 ctrl.SubmitState(new HMGamepadState { Buttons = HMButton.A });
 ```
 
-## Why HIDMaestro
+---
 
-- **No kernel driver, no test-signing.** Pure user-mode UMDF2, loaded by a locally trusted self-signed certificate. No test-signing boot mode, no purchased certificate, no reboot, and a bug cannot blue-screen the machine. It installs on an ordinary user's PC, not just a developer box.
-- **No network in the path.** Input travels through shared memory on the same machine. There is no socket, no USBIP stack, and no kernel transport driver between your application and the device.
-- **Exact hardware identity, down to the bus.** VID/PID, product string, descriptor, axis and button layout, and bus type all match the real device. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
-- **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes.
-- **Every API at once.** DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see one correct device.
-- **Protocol controllers, not just passive HID.** The Nintendo Switch Pro Controller is not a passive device: hosts drive a Nintendo subcommand handshake and stall without a device that answers. HIDMaestro's driver answers it over the real Bluetooth wire (the shipped descriptor is extracted byte-exact from a live Pro's SDP cache): SPI calibration reads, input-mode switch, 60 Hz full-mode streaming with gyro and accel at the 49-byte Bluetooth report size. SDL3's HIDAPI driver and Steam Input bind it as a real Bluetooth Pro Controller with motion and rumble. Before any protocol host arrives, the pad streams genuine 12-byte 0x3F simple-mode frames, the one report DirectInput can parse, so joy.cpl reads a working controller in exactly the states real hardware allows.
-- **Validated across every API and both ends of the spectrum.** A 41-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change, and passes on both a 16-core Windows 11 desktop and a low-power Intel Atom Windows 10 fixture.
-- **Lower latency, measured.** ~35 µs median single-press, more than 4x faster than the closest alternative, with no batching cap on input. Output (rumble, FFB, LED) is event-driven as of #34: ~0.15 ms median from the game's write to the consumer callback, down from the 9.4 ms poll-quantized path, and idle controllers cost zero measurable CPU.
-- **Fast to start, fast to recover.** When the installed driver already matches, `InstallDriver()` completes in ~40-60 ms and a consumer goes from process start to a live controller in about a second. If the consuming app is force-closed mid-session, the next launch evicts the orphaned devices and has the first controller live again in ~2.3 s, measured with an Xbox Series BT profile in the mix (the deepest teardown stack).
-
-## Latency
-
-Measured input latency from `SubmitState` to the input surfacing through XInput, single button press, 10,000 iterations on the same host:
-
-| | Single-press latency |
-|--|--|
-| **HIDMaestro** (measured) | **~35 µs median, worst case under 1 ms** |
-| VIIPER (their published Windows figure) | 168 µs |
-
-Reproduce it yourself: `HIDMaestroTest.exe latency xbox-360-wired`. The harness shares one clock between the writer and the reader and detects the actual button bit changing, so the number is real propagation, not poll quantization. Full methodology and per-run numbers: [docs/testing/latency.md](docs/testing/latency.md).
-
-HIDMaestro talks to its driver through a shared-memory section on the same machine. There is no socket and no network stack in the path. Both directions are event-driven: each `SubmitState` signals the driver immediately with no fixed batching interval, and the driver signals each captured output packet (rumble, FFB, LED) back to the consumer at ~0.15 ms median instead of the pre-#34 8 ms poll. Idle controllers cost zero measurable CPU. Output methodology and before/after numbers: [docs/testing/latency.md](docs/testing/latency.md).
-
-A note on the comparison. VIIPER is "Virtual Input **over IP**", built on USBIP and driven over a TCP API or an in-process library. Its sub-millisecond figures are measured over **localhost only**. Its own benchmark doc says so plainly: "remote/network USBIP attachment will add network RTT and jitter which is intentionally excluded from these baseline figures." Round-trip time there is how long an input takes to travel to another machine and come back, and jitter is how much that delay varies from moment to moment. The headline latency excludes the network path the project is named for, and VIIPER batches reports every millisecond, capping the update rate at 1000 Hz.
-
-The moment you run it over an actual network, that excluded round-trip time dominates: roughly 1 to 5 ms added over wired LAN, and 10 to 50 ms over Wi-Fi, on top of the localhost figure rather than instead of it. That is one to two orders of magnitude above the sub-millisecond number the docs lead with, and the caveat that explains the gap is a single line buried in a testing doc. Anyone who reads "well below 1 millisecond" and pictures networked play is being pointed at the wrong number.
-
-![Input latency, lower is better: HIDMaestro 0.035 ms versus VIIPER at 0.168 ms localhost, 1-5 ms over wired LAN, and 10-50 ms over Wi-Fi](docs/latency-chart.svg)
-
-The network bars above use the optimistic end of each LAN range. Even granting VIIPER the best case, its Wi-Fi path is hundreds of times longer than HIDMaestro's shared-memory path.
-
-There is also a layering question worth naming. Networking is a transport concern that belongs in the application, not in the virtual-device driver. Building USBIP-over-IP into the emulator puts a kernel USBIP driver and a listening socket in front of every user, including the ones who only ever drive a controller on the same machine. HIDMaestro keeps the device layer local: the SDK writes input to a shared-memory section, and nothing in the driver knows or cares whether that input came from the local process or was relayed by the consumer from another machine. If you want input over a network, that is the application's job to own and secure, without dragging a network stack and a kernel transport driver through every local use of the device. Consumers already do this at the right layer: PadForge, built on HIDMaestro, shares controllers across PCs over a network with its Remote Link feature (added in 3.4.0), both directions with feedback returning to the real device, with zero latency added for anyone playing locally.
-
-And there is the matter of what USBIP can represent at all. USB/IP transports USB, so every device VIIPER creates is a USB device to Windows. The controllers people actually use often are not: an Xbox or DualSense paired over Bluetooth enumerates as a Bluetooth device, and SDL3 and Chromium parse it through different code paths because of that bus type. A USB-only emulation reports the wrong bus for those controllers. HIDMaestro sets bus type per profile, so a Bluetooth controller presents as Bluetooth (HIDAPI reports `bus_type = Bluetooth`), matching the hardware it stands in for.
-
-## How it compares
-
-| | HIDMaestro | VIIPER | ViGEmBus | vJoy | WinUHid |
-|--|--|--|--|--|--|
-| Kernel driver required | **No** (UMDF2 user mode) | Yes (USBIP) | Yes | Yes | No (UMDF2 on VHF) |
-| Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
-| EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
-| Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 225 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
-| Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
-| Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
-| Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
-| Input update rate | Event-driven, no fixed cap | 1000 Hz (1 ms batching) | N/A | N/A | Event-driven |
-| License | MIT | GPL-3.0 (clients MIT) | N/A | N/A | MIT |
-| Status | **Active** | Active | Retired | Stale | Active |
-
-VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal, not a footnote.
-
-HIDMaestro is Windows optimized and focused on game controllers and HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
-
-## What it replaces
-
-- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
-- **vJoy**: kernel driver, no longer actively maintained, shows up as "vJoy Device" instead of real hardware.
-- **ViGEmBus**: kernel driver, retired, new builds need an EV code-signing certificate.
-- **DsHidMini**: user-mode, but translates a physically connected DualShock 3 rather than arbitrary input.
-
-## Features
-
-- **No kernel driver.** UMDF2 runs the driver in a normal user-mode process. A bug cannot blue-screen the machine. Self-signed certificate trusted by the local machine is enough.
-- **Exact hardware identity.** VID/PID, product string, HID descriptor, axis and button counts, trigger behavior, and bus type all come from the profile. SDL3's controller database matches it, Steam recognizes it, Chrome identifies it, joy.cpl shows the right name.
-- **One device, every API.** DirectInput sees correct axes and buttons. XInput sees separate triggers in one slot. SDL3/HIDAPI sees the right identity and bus type. The browser sees a STANDARD GAMEPAD with separate triggers. WGI sees one Gamepad. [How this works](docs/INTERNALS.md#techniques).
-- **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
-- **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
-- **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
-- **Data-driven profiles.** Every controller is a JSON file. Adding support for a new one means writing JSON, not modifying code.
-
-### Custom controllers
-
-The `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs let you build or modify any device:
-
-- **Clone and modify.** Take a DualSense (15 buttons) and ship a 16-button variant. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved.
-- **Build from scratch.** Define a flight stick, racing wheel, or arcade panel with arbitrary VID/PID, axis count, button count, and resolution. No hex editing.
-- **Capture a real device.** `HMDeviceExtractor.Extract` reads the HID descriptor Windows parsed from any device you have plugged in and returns a ready-to-deploy profile. Point it at the controller, get a matching virtual.
-
-```csharp
-// Clone a DualSense and add a button
-var custom = new HMProfileBuilder()
-    .FromProfile(ctx.GetProfile("dualsense")!)
-    .Id("dualsense-16btn")
-    .Descriptor(new HidDescriptorBuilder()
-        .Gamepad()
-        .AddStick("Left", 8).AddStick("Right", 8)
-        .AddTrigger("Left", 8).AddTrigger("Right", 8)
-        .AddButtons(16).AddHat()
-        .Build())
-    .InputReportSize(9)
-    .Build();
-using var ctrl = ctx.CreateController(custom);
-```
-
-Adding a controller to HIDMaestro is a data change. Adding one to a code-per-device emulator means writing and compiling a new device implementation. That difference is the whole point of the profile system.
-
-## Getting Started
+## Quick start
 
 Requirements: Visual Studio 2022+, Windows SDK/WDK 10.0.26100.0, .NET 10.
 
@@ -170,7 +78,58 @@ The test app is self-contained. First run creates a locally trusted certificate,
 
 During emulation you can `remove 2` to dispose one controller, `2 dualsense` to live-swap controller 2, or `quit` to shut down cleanly.
 
-## Validation
+If you want to use HIDMaestro through a UI instead of code, install [PadForge](https://padforge.org/). It wraps this SDK with a full input-mapping app.
+
+---
+
+## Identity: exact hardware, down to the bus.
+
+VID/PID, product string, descriptor, axis and button layout, and bus type all match the real device. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
+
+- **Exact hardware identity.** VID/PID, product string, HID descriptor, axis and button counts, trigger behavior, and bus type all come from the profile. SDL3's controller database matches it, Steam recognizes it, Chrome identifies it, joy.cpl shows the right name. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
+- **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes.
+- **Data-driven profiles.** Every controller is a JSON file. Adding support for a new one means writing JSON, not modifying code.
+- **Protocol controllers, not just passive HID.** The Nintendo Switch Pro Controller is not a passive device: hosts drive a Nintendo subcommand handshake and stall without a device that answers. HIDMaestro's driver answers it over the real Bluetooth wire (the shipped descriptor is extracted byte-exact from a live Pro's SDP cache): SPI calibration reads, input-mode switch, 60 Hz full-mode streaming with gyro and accel at the 49-byte Bluetooth report size. SDL3's HIDAPI driver and Steam Input bind it as a real Bluetooth Pro Controller with motion and rumble. Before any protocol host arrives, the pad streams genuine 12-byte 0x3F simple-mode frames, the one report DirectInput can parse, so joy.cpl reads a working controller in exactly the states real hardware allows.
+
+### Custom controllers
+
+The `HidDescriptorBuilder`, `HMProfileBuilder`, and `HMDeviceExtractor` APIs let you build or modify any device:
+
+- **Clone and modify.** Take a DualSense (15 buttons) and ship a 16-button variant. Windows, Steam, and games still see "DualSense" because the VID/PID and product string are preserved.
+- **Build from scratch.** Define a flight stick, racing wheel, or arcade panel with arbitrary VID/PID, axis count, button count, and resolution. No hex editing.
+- **Capture a real device.** `HMDeviceExtractor.Extract` reads the HID descriptor Windows parsed from any device you have plugged in and returns a ready-to-deploy profile. Point it at the controller, get a matching virtual.
+
+```csharp
+// Clone a DualSense and add a button
+var custom = new HMProfileBuilder()
+    .FromProfile(ctx.GetProfile("dualsense")!)
+    .Id("dualsense-16btn")
+    .Descriptor(new HidDescriptorBuilder()
+        .Gamepad()
+        .AddStick("Left", 8).AddStick("Right", 8)
+        .AddTrigger("Left", 8).AddTrigger("Right", 8)
+        .AddButtons(16).AddHat()
+        .Build())
+    .InputReportSize(9)
+    .Build();
+using var ctrl = ctx.CreateController(custom);
+```
+
+Adding a controller to HIDMaestro is a data change. Adding one to a code-per-device emulator means writing and compiling a new device implementation. That difference is the whole point of the profile system.
+
+---
+
+## Every API at once.
+
+DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see one correct device.
+
+- **One device, every API.** DirectInput sees correct axes and buttons. XInput sees separate triggers in one slot. SDL3/HIDAPI sees the right identity and bus type. The browser sees a STANDARD GAMEPAD with separate triggers. WGI sees one Gamepad. [How this works](docs/INTERNALS.md#techniques).
+- **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
+- **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
+- **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
+- **Validated across every API and both ends of the spectrum.** A 41-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change, and passes on both a 16-core Windows 11 desktop and a low-power Intel Atom Windows 10 fixture.
+
+### Validation
 
 Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT Enterprise LTSC (build 19044), with a self-signed certificate in the machine's Root and TrustedPublisher stores and no test-signing boot mode. Every profile is checked across all the input APIs a game can reach: DirectInput (joy.cpl and DirectInput8), XInput, SDL3/HIDAPI, the Chrome Gamepad API, WGI/GameInput, and HID enumeration order, through `scripts/verify.py` plus manual verification. A real Xbox Series X|S Bluetooth controller tested side by side shows byte-identical behavior across the HID class APIs.
 
@@ -187,17 +146,99 @@ A 41-scenario [live-swap regression battery](test/regression/swap_regression.ps1
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
-**Xbox Series X|S BT, Xbox 360 Wired, and DualSense across Device Manager, joy.cpl, Chrome Gamepad Tester, and PadForge/SDL3:**
+<details>
+<summary><b>Xbox Series X|S BT, Xbox 360 Wired, and DualSense across Device Manager, joy.cpl, Chrome Gamepad Tester, and PadForge/SDL3</b></summary>
 
 ![Xbox Series BT across all tools](docs/screenshot-xbox-series-bt.png)
 ![Xbox 360 Wired across all tools](docs/screenshot-xbox-360-wired.png)
 ![DualSense across all tools](docs/screenshot-dualsense.png)
 
-## How it works
+</details>
+
+---
+
+## Latency: lower, measured.
+
+- **Lower latency, measured.** ~35 µs median single-press, more than 4x faster than the closest alternative, with no batching cap on input. Output (rumble, FFB, LED) is event-driven as of #34: ~0.15 ms median from the game's write to the consumer callback, down from the 9.4 ms poll-quantized path, and idle controllers cost zero measurable CPU.
+- **No network in the path.** Input travels through shared memory on the same machine. There is no socket, no USBIP stack, and no kernel transport driver between your application and the device.
+- **Fast to start, fast to recover.** When the installed driver already matches, `InstallDriver()` completes in ~40-60 ms and a consumer goes from process start to a live controller in about a second. If the consuming app is force-closed mid-session, the next launch evicts the orphaned devices and has the first controller live again in ~2.3 s, measured with an Xbox Series BT profile in the mix (the deepest teardown stack).
+
+Measured input latency from `SubmitState` to the input surfacing through XInput, single button press, 10,000 iterations on the same host:
+
+| | Single-press latency |
+|--|--|
+| **HIDMaestro** (measured) | **~35 µs median, worst case under 1 ms** |
+| VIIPER (their published Windows figure) | 168 µs |
+
+Reproduce it yourself: `HIDMaestroTest.exe latency xbox-360-wired`. The harness shares one clock between the writer and the reader and detects the actual button bit changing, so the number is real propagation, not poll quantization. Full methodology and per-run numbers: [docs/testing/latency.md](docs/testing/latency.md).
+
+HIDMaestro talks to its driver through a shared-memory section on the same machine. There is no socket and no network stack in the path. Both directions are event-driven: each `SubmitState` signals the driver immediately with no fixed batching interval, and the driver signals each captured output packet (rumble, FFB, LED) back to the consumer at ~0.15 ms median instead of the pre-#34 8 ms poll. Idle controllers cost zero measurable CPU. Output methodology and before/after numbers: [docs/testing/latency.md](docs/testing/latency.md).
+
+![Input latency, lower is better: HIDMaestro 0.035 ms versus VIIPER at 0.168 ms localhost, 1-5 ms over wired LAN, and 10-50 ms over Wi-Fi](docs/latency-chart.svg)
+
+The network bars above use the optimistic end of each LAN range. Even granting VIIPER the best case, its Wi-Fi path is hundreds of times longer than HIDMaestro's shared-memory path.
+
+<details>
+<summary><b>A note on the comparison, and the layering question</b></summary>
+
+A note on the comparison. VIIPER is "Virtual Input **over IP**", built on USBIP and driven over a TCP API or an in-process library. Its sub-millisecond figures are measured over **localhost only**. Its own benchmark doc says so plainly: "remote/network USBIP attachment will add network RTT and jitter which is intentionally excluded from these baseline figures." Round-trip time there is how long an input takes to travel to another machine and come back, and jitter is how much that delay varies from moment to moment. The headline latency excludes the network path the project is named for, and VIIPER batches reports every millisecond, capping the update rate at 1000 Hz.
+
+The moment you run it over an actual network, that excluded round-trip time dominates: roughly 1 to 5 ms added over wired LAN, and 10 to 50 ms over Wi-Fi, on top of the localhost figure rather than instead of it. That is one to two orders of magnitude above the sub-millisecond number the docs lead with, and the caveat that explains the gap is a single line buried in a testing doc. Anyone who reads "well below 1 millisecond" and pictures networked play is being pointed at the wrong number.
+
+There is also a layering question worth naming. Networking is a transport concern that belongs in the application, not in the virtual-device driver. Building USBIP-over-IP into the emulator puts a kernel USBIP driver and a listening socket in front of every user, including the ones who only ever drive a controller on the same machine. HIDMaestro keeps the device layer local: the SDK writes input to a shared-memory section, and nothing in the driver knows or cares whether that input came from the local process or was relayed by the consumer from another machine. If you want input over a network, that is the application's job to own and secure, without dragging a network stack and a kernel transport driver through every local use of the device. Consumers already do this at the right layer: PadForge, built on HIDMaestro, shares controllers across PCs over a network with its Remote Link feature (added in 3.4.0), both directions with feedback returning to the real device, with zero latency added for anyone playing locally.
+
+And there is the matter of what USBIP can represent at all. USB/IP transports USB, so every device VIIPER creates is a USB device to Windows. The controllers people actually use often are not: an Xbox or DualSense paired over Bluetooth enumerates as a Bluetooth device, and SDL3 and Chromium parse it through different code paths because of that bus type. A USB-only emulation reports the wrong bus for those controllers. HIDMaestro sets bus type per profile, so a Bluetooth controller presents as Bluetooth (HIDAPI reports `bus_type = Bluetooth`), matching the hardware it stands in for.
+
+</details>
+
+---
+
+## Nothing in the kernel.
+
+- **No kernel driver, no test-signing.** Pure user-mode UMDF2, loaded by a locally trusted self-signed certificate. No test-signing boot mode, no purchased certificate, no reboot, and a bug cannot blue-screen the machine. It installs on an ordinary user's PC, not just a developer box.
+- **No kernel driver.** UMDF2 runs the driver in a normal user-mode process. A bug cannot blue-screen the machine. Self-signed certificate trusted by the local machine is enough.
+
+### How it works
 
 HIDMaestro is a UMDF2 HID minidriver hosted by Windows' own `mshidumdf.sys`, fed input through a per-controller shared-memory section. XInput for Xbox profiles comes from a companion device that registers the XUSB interface. Bluetooth identity, the &IG_ enumerator behavior, the separate-trigger descriptor trick, the WGI admission path, and the XInput slot allocator are all documented in [docs/INTERNALS.md](docs/INTERNALS.md).
 
 Why user mode is enough: the HID class driver already lives in the kernel (`mshidumdf.sys`), XInput discovery uses a device interface a user-mode driver can register, GameInput reads HID reports rather than driver internals, and bus type and VID/PID are settable from user mode. See [Why UMDF2 Is Enough](docs/INTERNALS.md#why-umdf2-is-enough).
+
+---
+
+## How it compares
+
+<details>
+<summary><b>Tool by tool</b></summary>
+
+| | HIDMaestro | VIIPER | ViGEmBus | vJoy | WinUHid |
+|--|--|--|--|--|--|
+| Kernel driver required | **No** (UMDF2 user mode) | Yes (USBIP) | Yes | Yes | No (UMDF2 on VHF) |
+| Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
+| EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
+| Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
+| Identity per controller | **Exact, 225 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
+| Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
+| Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
+| Input update rate | Event-driven, no fixed cap | 1000 Hz (1 ms batching) | N/A | N/A | Event-driven |
+| License | MIT | GPL-3.0 (clients MIT) | N/A | N/A | MIT |
+| Status | **Active** | Active | Retired | Stale | Active |
+
+</details>
+
+VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal, not a footnote.
+
+HIDMaestro is Windows optimized and focused on game controllers and HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
+
+### What it replaces
+
+- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
+- **vJoy**: kernel driver, no longer actively maintained, shows up as "vJoy Device" instead of real hardware.
+- **ViGEmBus**: kernel driver, retired, new builds need an EV code-signing certificate.
+- **DsHidMini**: user-mode, but translates a physically connected DualShock 3 rather than arbitrary input.
+
+---
 
 ## Known Limitations
 
