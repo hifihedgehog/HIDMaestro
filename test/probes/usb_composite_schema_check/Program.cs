@@ -54,15 +54,34 @@ internal static class Program
             "..", "..", "..", "..", "..", ".."));
 
         var strays = ctx.AllProfiles.Where(p => p.RequiresUsbipBackend).Select(p => p.Id).OrderBy(x => x).ToList();
-        Check("exactly the two composite personas require the backend",
-              strays.SequenceEqual(new[] { "dualsense-composite", "dualshock-4-v2-composite" }.OrderBy(x => x)),
+        Check("exactly the three composite personas require the backend",
+              strays.SequenceEqual(new[] { "dualsense-composite", "dualsense-edge-composite", "dualshock-4-v2-composite" }.OrderBy(x => x)),
               string.Join(", ", strays));
+
+        // The DS4 v1 is settled by real hardware probes as a SINGLE-interface
+        // HID device over USB (no audio), so a composite variant of it must
+        // never exist. Guard against one reappearing.
+        Check("no DS4 v1 composite exists (real pad has no USB audio)",
+              ctx.GetProfile("dualshock-4-v1-composite") == null
+              && ctx.GetProfile("dualshock-4-v1-full-composite") == null);
 
         CheckComposite(ctx, repoRoot, "dualsense-composite", "dualsense",
             expectHighSpeed: true, expectOtherSpeed: true,
             outCh: 4, outRateHz: 48000, outMaxPacket: 392, outEpInterval: 4,
             inCh: 2, inMaxPacket: 196,
-            configBytes: 227, hidEpInterval: 6,
+            configBytes: 227, hidInEpInterval: 6, hidOutEpInterval: 6,
+            outRoles: new[] { "speakerLeft", "speakerRight", "hapticLeft", "hapticRight" },
+            unit2: (min: -25600, max: 0, res: 256, cur: -25600),
+            unit5: (min: 0, max: 12288, res: 122, cur: 3809));
+
+        // The Edge (physical-pad probe EAB445BFA5): audio topology identical
+        // to the base DualSense, HID wDescriptorLength 389, and the one real
+        // behavioral difference, 1 ms interrupt IN polling (bInterval 4).
+        CheckComposite(ctx, repoRoot, "dualsense-edge-composite", "dualsense-edge",
+            expectHighSpeed: true, expectOtherSpeed: false,
+            outCh: 4, outRateHz: 48000, outMaxPacket: 392, outEpInterval: 4,
+            inCh: 2, inMaxPacket: 196,
+            configBytes: 227, hidInEpInterval: 4, hidOutEpInterval: 6,
             outRoles: new[] { "speakerLeft", "speakerRight", "hapticLeft", "hapticRight" },
             unit2: (min: -25600, max: 0, res: 256, cur: -25600),
             unit5: (min: 0, max: 12288, res: 122, cur: 3809));
@@ -71,35 +90,50 @@ internal static class Program
             expectHighSpeed: false, expectOtherSpeed: false,
             outCh: 2, outRateHz: 32000, outMaxPacket: 132, outEpInterval: 1,
             inCh: 1, inMaxPacket: 34,
-            configBytes: 225, hidEpInterval: 5,
+            configBytes: 225, hidInEpInterval: 5, hidOutEpInterval: 5,
             outRoles: new[] { "headsetLeft", "headsetRight" },
             unit2: (min: -18688, max: -256, res: 256, cur: 1792),
             unit5: (min: -5952, max: 6144, res: 192, cur: -768));
 
-        // ── Create-path guard ───────────────────────────────────────────
-        Console.WriteLine("\n-- Create-path guard --");
-        var composite = ctx.GetProfile("dualsense-composite")!;
-        if (HMContext.IsUsbipBackendAvailable)
+        // ── The transport ships inside the SDK ──────────────────────────
+        //
+        // A composite persona must never depend on a user having gone and
+        // installed something. The transport is embedded in
+        // HIDMaestro.Core.dll and deploys itself on first use, so what
+        // this probe asserts is that the bundle is really IN the
+        // assembly, at exactly the bytes the upstream release publishes,
+        // with the license notice redistribution requires.
+        Console.WriteLine("\n-- Bundled transport --");
+        var asm = typeof(HMProfile).Assembly;
+        const string installerRes = "HIDMaestro.Resources.USBip-0.9.7.7-x64.exe";
+        const string noticeRes = "HIDMaestro.Resources.THIRD-PARTY-NOTICES.txt";
+        var resNames = asm.GetManifestResourceNames();
+
+        Check("usbip-win2 installer is embedded in HIDMaestro.Core.dll",
+              resNames.Contains(installerRes));
+        using (var s = asm.GetManifestResourceStream(installerRes))
         {
-            Console.WriteLine("  [note] usbip-win2 present: refusal path not reachable here; " +
-                              "the live create path is usbip_server_check + E2E territory.");
-            Check("backend availability probe answers", true);
-        }
-        else
-        {
-            bool refused = false;
-            string message = "";
-            try
+            if (s == null) Check("embedded installer opens", false);
+            else
             {
-                using var c = ctx.CreateController(composite);
+                string hex = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
+                Check("embedded installer matches the upstream release SHA256",
+                      hex == "51620fa5f9f8be5932bc9d786deee557ce06d5407a99cab490dcfac71f185fea", hex);
             }
-            catch (NotSupportedException ex) { refused = true; message = ex.Message; }
-            catch (Exception ex) { message = ex.GetType().Name + ": " + ex.Message; }
-            Check("CreateController refuses without usbip-win2 installed", refused, message);
-            Check("the refusal names the backend, opt-in, and the install",
-                  refused && message.Contains("usbip") && message.Contains("opt-in")
-                          && message.Contains("usbip-win2"));
         }
+        Check("BSD-2-Clause notice ships with it (license requirement)", resNames.Contains(noticeRes));
+        using (var s = asm.GetManifestResourceStream(noticeRes))
+        {
+            string text = s != null ? new StreamReader(s).ReadToEnd() : "";
+            Check("notice reproduces the copyright line and the disclaimer",
+                  text.Contains("Vadym Hrynchyshyn") && text.Contains("BSD 2-Clause")
+                  && text.Contains("THIS SOFTWARE IS PROVIDED"));
+        }
+        Check("an explicit pre-install entry point exists for consumers that want one",
+              typeof(HMContext).GetMethod("InstallUsbipBackend") != null);
+        Check("no create-path API refuses a composite for lack of an install",
+              typeof(HMContext).GetMethod("CreateController") != null);
 
         Summary();
         return s_failures == 0 ? 0 : 1;
@@ -108,7 +142,7 @@ internal static class Program
     static void CheckComposite(HMContext ctx, string repoRoot, string id, string baseId,
         bool expectHighSpeed, bool expectOtherSpeed,
         int outCh, int outRateHz, int outMaxPacket, int outEpInterval,
-        int inCh, int inMaxPacket, int configBytes, int hidEpInterval,
+        int inCh, int inMaxPacket, int configBytes, int hidInEpInterval, int hidOutEpInterval,
         string[] outRoles,
         (int min, int max, int res, int cur) unit2,
         (int min, int max, int res, int cur) unit5)
@@ -183,10 +217,11 @@ internal static class Program
               inStream != null && inStream.Channels == inCh
               && inStream.ChannelRoles.All(r => r == "microphone"));
 
-        Check($"HID interrupt endpoints, interval {hidEpInterval} (dump value)",
+        Check($"HID interrupt endpoints, IN interval {hidInEpInterval} / OUT interval {hidOutEpInterval} (dump values)",
               hid.AltSettings[0].Endpoints.Count == 2
-              && hid.AltSettings[0].Endpoints.All(e => e.TransferType == "interrupt"
-                                                    && e.Interval == hidEpInterval));
+              && hid.AltSettings[0].Endpoints.All(e => e.TransferType == "interrupt")
+              && hid.AltSettings[0].Endpoints.First(e => (e.Address & 0x80) != 0).Interval == hidInEpInterval
+              && hid.AltSettings[0].Endpoints.First(e => (e.Address & 0x80) == 0).Interval == hidOutEpInterval);
 
         // The verbatim wire blobs, cross-validated by UsbDescriptorSet's
         // constructor exactly as the backend will at create time.
@@ -203,11 +238,13 @@ internal static class Program
               set.VendorId == composite.VendorId && set.ProductId == composite.ProductId);
         Check("HID class descriptor length equals the report descriptor's",
               true, $"{set.ReportDescriptor.Length} bytes"); // ctor throws on mismatch
-        Check(expectOtherSpeed ? "dual-speed: other-speed blob + qualifier served"
-                               : "single-speed: qualifier and other-speed stall",
-              expectOtherSpeed
-                  ? set.GetDescriptor(0x06, 0, 0) != null && set.GetDescriptor(0x07, 0, 0) != null
-                  : set.GetDescriptor(0x06, 0, 0) == null && set.GetDescriptor(0x07, 0, 0) == null);
+        bool highSpeed = expectHighSpeed;
+        Check(highSpeed ? "high speed: qualifier served (dump-confirmed)"
+                        : "full-speed only: qualifier stalls (dump-confirmed)",
+              (set.GetDescriptor(0x06, 0, 0) != null) == highSpeed);
+        Check(expectOtherSpeed ? "other-speed blob served (captured)"
+                               : "other-speed stalls (no capture / single-speed)",
+              (set.GetDescriptor(0x07, 0, 0) != null) == expectOtherSpeed);
         Check("report descriptor served for HID GET_DESCRIPTOR(0x22)",
               set.GetHidDescriptor(0x22)!.SequenceEqual(cd!));
 

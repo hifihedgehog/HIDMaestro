@@ -25,11 +25,11 @@
 
 **Virtual game controllers that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 227 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 228 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>227</b> device profiles · <b>32</b> vendors · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>228</b> device profiles · <b>32</b> vendors · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -60,7 +60,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 227 profiles
+# List or search the 228 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -205,14 +205,25 @@ Why user mode is enough: the HID class driver already lives in the kernel (`mshi
 
 ## Controller audio and haptics: composite USB personas
 
-A real USB DualSense is a four-interface composite: USB Audio Class speaker/haptics out, microphone in, and HID. UMDF2 can present exactly one HID interface, so the standard `dualsense` profile stops there. As of v1.4.0 two additional profiles present the full composite:
+A real USB DualSense is a four-interface composite: USB Audio Class speaker/haptics out, microphone in, and HID. UMDF2 can present exactly one HID interface, so the standard `dualsense` profile stops there. As of v1.4.0 three additional profiles present the full composite:
 
 - **`dualsense-composite`**: the real pad's four interfaces, byte-for-byte from a hardware descriptor dump. The OUT stream is 4-channel 48 kHz where channels 1/2 are the speaker and channels 3/4 drive the voice-coil actuators. That stream is the only path on Windows by which a game hands a controller its authored haptic waveforms, and it surfaces on the SDK as `HMController.UsbAudio.Output` with per-channel roles. The microphone is `UsbAudio.Microphone`: feed PCM, Windows records it from a real "Headset Microphone (Wireless Controller)" endpoint.
+- **`dualsense-edge-composite`**: the Edge's four interfaces from a physical Edge's full USB probe. Same speaker/haptics stream and microphone as the base pad, the Edge's own 389-byte HID descriptor, and the Edge's real 1 ms USB input polling.
 - **`dualshock-4-v2-composite`**: the DS4 v2's composite, with headset audio and a mono microphone. The hardware has no haptics lane.
 
-These profiles are **opt-in** and need [usbip-win2](https://github.com/vadimgrn/usbip-win2) 0.9.7.7 installed, a third-party, WHLK-certified, signed kernel driver. HIDMaestro never installs it, never bundles it, and nothing else changes when it is absent: the standard profiles keep working with zero dependencies, `CreateController` on a composite profile fails with install guidance, and consumers gate picker entries on `HMContext.IsUsbipBackendAvailable`. The SDK runs an in-process USB/IP device server on loopback, and every device behavior, including the 1 ms isochronous audio pacing, stays in user space. Version pinned at 0.9.7.7 deliberately: 0.9.7.8 has two open kernel-pool-corruption reports ([usbip-win2#180](https://github.com/vadimgrn/usbip-win2/issues/180), [usbip-win2#181](https://github.com/vadimgrn/usbip-win2/issues/181)).
+The original DS4 v1 (054C:05C4) has no composite variant for a reason worth stating: real hardware probes show it presents a single HID interface over USB with no audio class at all. USB audio arrived with the v2.
 
-Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the driver installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU).
+```csharp
+using var ctrl = ctx.CreateController(ctx.GetProfile("dualsense-composite")!);
+ctrl.UsbAudio!.Output.FramesReceived += (out_, pcm) => { /* speaker + haptic PCM */ };
+ctrl.UsbAudio.Microphone.Submit(micPcm);
+```
+
+That is the whole setup. Composite personas create like any other profile, because the USB transport they need ships **inside `HIDMaestro.Core.dll`** and installs itself the first time one is created, exactly the way the UMDF2 driver already does. No second package, no separate download, nothing for a user to go find. The bundled component is [usbip-win2](https://github.com/vadimgrn/usbip-win2) 0.9.7.7, BSD-2-Clause and WHLK-certified, redistributed unmodified with its notice, and verified against the upstream release's published SHA256 both when the SDK is built and again before it is ever executed. Windows re-enumerates the USB root hubs once during that one-time install, so devices blink for a moment on the very first composite controller a machine ever creates.
+
+Every device behavior stays in HIDMaestro's own user-mode code: the SDK runs an in-process USB/IP device server on loopback, including the 1 ms isochronous audio pacing. The version pin is deliberate, since 0.9.7.8 has two open kernel-pool-corruption reports ([usbip-win2#180](https://github.com/vadimgrn/usbip-win2/issues/180), [usbip-win2#181](https://github.com/vadimgrn/usbip-win2/issues/181)).
+
+Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the transport installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU).
 
 ---
 
@@ -227,7 +238,7 @@ Measured on the Atom Z8350 floor machine: full 4-channel render and live microph
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 227 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 228 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
@@ -237,13 +248,13 @@ Measured on the Atom Z8350 floor machine: full 4-channel render and live microph
 
 </details>
 
-VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do. The one exception is deliberate and opt-in: the composite USB personas above use the same signed usbip-win2 transport VIIPER does, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Skip those two profiles and no kernel-mode component is ever involved.
+VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's own driver is user-mode UMDF2, and it rides the host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do. The composite USB personas are the one deliberate exception, and they use the same signed usbip-win2 transport VIIPER does, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase. Use any other profile and no kernel-mode component is ever installed.
 
 HIDMaestro is Windows optimized and focused on game controllers and HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
 
 ### What it replaces
 
-- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
+- **VIIPER**: needs a kernel-mode USB/IP driver on Windows despite the userspace billing, makes the user install it, and presents every controller as USB so Bluetooth devices report the wrong bus type. Its headline latency is localhost-only and already 4 to 5 times higher than HIDMaestro's even there. The network it is named for adds another 1 to 50 ms on top.
 - **vJoy**: kernel driver, no longer actively maintained, shows up as "vJoy Device" instead of real hardware.
 - **ViGEmBus**: kernel driver, retired, new builds need an EV code-signing certificate.
 - **DsHidMini**: user-mode, but translates a physically connected DualShock 3 rather than arbitrary input.

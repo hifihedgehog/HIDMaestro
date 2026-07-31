@@ -200,7 +200,7 @@
         "umdf2",
         "usbip"
       ],
-      "description": "Issue #39: which instantiation path creates this device. Absent or 'umdf2' is the default UMDF2 HID path every shipping profile uses. 'usbip' marks a composite USB persona that needs the opt-in USB/IP backend; CreateController refuses such profiles when the backend is absent. A property of the device, never a mode toggle on an existing profile."
+      "description": "Issue #39: which instantiation path creates this device. Absent or 'umdf2' is the default UMDF2 HID path most profiles use. 'usbip' marks a composite USB persona, which takes the USB/IP create path so it can present USB Audio Class interfaces alongside HID. That transport is bundled inside HIDMaestro.Core.dll and deploys itself on first use, so a usbip profile needs nothing installed by hand. A property of the device, never a mode toggle on an existing profile."
     },
     "usbConfiguration": {
       "type": "object",

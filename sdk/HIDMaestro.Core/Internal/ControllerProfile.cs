@@ -153,11 +153,10 @@ public sealed class ControllerProfile
     public ExtendedReportSpec? ExtendedOutputReport { get; set; }
 
     /// <summary>Issue #39. Which instantiation path creates this device.
-    /// Absent or <c>"umdf2"</c> is the default and the only path that
-    /// exists today: one HID device via the UMDF2 driver, no dependency
-    /// on anything else. <c>"usbip"</c> marks a composite USB persona
-    /// that needs the opt-in USB/IP backend, which is never installed by
-    /// default (owner ruling, 2026-07-30).
+    /// Absent or <c>"umdf2"</c> is the default: one HID device via the
+    /// UMDF2 driver. <c>"usbip"</c> marks a composite USB persona, which
+    /// rides the USB transport bundled inside HIDMaestro.Core.dll and
+    /// deployed on first use.
     ///
     /// <para>This is a property of the DEVICE the profile describes, not
     /// a mode switch on an existing one. A profile that presented four
@@ -175,10 +174,9 @@ public sealed class ControllerProfile
     [JsonPropertyName("usbConfiguration")]
     public UsbConfigurationSpec? UsbConfiguration { get; set; }
 
-    /// <summary>True when this profile needs the opt-in USB/IP backend.
-    /// Consumers gate their picker entries on this plus backend
-    /// availability, rather than threading a mode concept through the
-    /// SDK.</summary>
+    /// <summary>True when this profile is a composite USB persona and
+    /// therefore takes the USB/IP create path rather than the UMDF2
+    /// one.</summary>
     [JsonIgnore]
     public bool RequiresUsbipBackend =>
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;

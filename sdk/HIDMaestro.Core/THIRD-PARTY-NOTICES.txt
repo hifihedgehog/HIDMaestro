@@ -1,0 +1,47 @@
+HIDMaestro third-party notices
+==============================
+
+HIDMaestro bundles the following third-party component. This notice is
+embedded in HIDMaestro.Core.dll and written to disk alongside the
+component whenever HIDMaestro deploys it.
+
+--------------------------------------------------------------------
+usbip-win2 (version 0.9.7.7)
+https://github.com/vadimgrn/usbip-win2
+--------------------------------------------------------------------
+
+Used as the USB transport for HIDMaestro's composite USB personas
+(profiles that present USB Audio Class interfaces alongside HID). A
+Windows audio endpoint requires a driver-backed USB device, which no
+user-mode API can create, so HIDMaestro speaks the USB/IP protocol to
+usbip-win2's virtual host controller. Every device behavior remains in
+HIDMaestro's own user-mode code.
+
+The redistributed binary is the upstream release asset
+USBip-0.9.7.7-x64.exe, unmodified, SHA256:
+51620fa5f9f8be5932bc9d786deee557ce06d5407a99cab490dcfac71f185fea
+
+BSD 2-Clause License
+
+Copyright (c) 2021-2026, Vadym Hrynchyshyn <vadimgrn@gmail.com>
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

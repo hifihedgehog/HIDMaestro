@@ -1,6 +1,6 @@
 // USB/IP backend end-to-end check (issue #39).
 //
-// The only probe in the suite that requires usbip-win2 0.9.7.7 installed:
+// The only probe in the suite that drives the real kernel path:
 // it creates a live dualsense-composite through the real kernel path
 // (vhci -> UDE -> usbccgp -> usbaudio + hidusb) and proves the whole
 // promise of the backend on real Windows plumbing:
@@ -18,8 +18,10 @@
 //   6. Microphone: the SDK's feed is captured by WASAPI as live audio.
 //   7. Teardown detaches cleanly: the devnode and endpoints disappear.
 //
-// Requires elevation AND usbip-win2 0.9.7.7. Exit 0 PASS / 1 FAIL / 2 SKIP
-// (backend not installed).
+// Requires elevation. The transport is bundled, so no preinstall is
+// needed: a machine without it exercises the self-deploy path.
+// Exit 0 PASS / 1 FAIL.
+
 
 using System;
 using System.Diagnostics;
@@ -47,12 +49,13 @@ internal static class Program
     {
         Console.WriteLine("=== USB/IP backend end-to-end (issue #39) ===");
 
-        if (!HMContext.IsUsbipBackendAvailable)
-        {
-            Console.WriteLine("SKIP: usbip-win2 vhci controller not present.");
-            return 2;
-        }
-        Check("usbip-win2 vhci controller present", true);
+        // The transport is bundled and self-deploying, so an absent
+        // driver is not a skip: it is the first-run path this probe most
+        // wants to exercise. CreateController below installs it.
+        bool preInstalled = HMContext.IsUsbipBackendAvailable;
+        Console.WriteLine(preInstalled
+            ? "  [note] transport already installed; exercising the steady-state path."
+            : "  [note] transport NOT installed; exercising the first-run self-deploy path.");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -61,7 +64,9 @@ internal static class Program
         var sw = Stopwatch.StartNew();
         HMController controller = ctx.CreateController(profile);
         sw.Stop();
-        Check($"CreateController(dualsense-composite) attached via vhci", true, $"{sw.ElapsedMilliseconds} ms");
+        Check("CreateController(dualsense-composite) succeeded with no manual install step",
+              true, $"{sw.ElapsedMilliseconds} ms{(preInstalled ? "" : " (including one-time transport deploy)")}");
+        Check("transport is present after the create", HMContext.IsUsbipBackendAvailable);
         Check("controller exposes the UsbAudio surface", controller.UsbAudio != null);
 
         long outBytes = 0;

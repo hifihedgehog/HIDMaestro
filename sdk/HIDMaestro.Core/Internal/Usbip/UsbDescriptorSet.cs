@@ -203,11 +203,15 @@ internal sealed class UsbDescriptorSet
             case 0x01: return DeviceDescriptor;
             case 0x02: return index == 0 ? ConfigurationDescriptor : null;
             case 0x03: return GetStringDescriptor(index);
-            // A single-speed device stalls Device_Qualifier and
-            // Other_Speed (USB 2.0 ch. 9.6.2); the DualShock 4 dump has
-            // neither. The other-speed blob's presence is the profile's
-            // dual-speed marker.
-            case 0x06: return OtherSpeedConfiguration != null ? DeviceQualifier : null;
+            // A full-speed-only device stalls Device_Qualifier and
+            // Other_Speed (USB 2.0 ch. 9.6.2); the DualShock 4 v2 dump
+            // shows neither. A high-speed device always answers the
+            // qualifier (the DualSense and Edge dumps both show it), but
+            // the other-speed blob is served only when the profile
+            // carries a real capture of it; the Edge has no full-speed
+            // capture yet, so it answers the qualifier and stalls
+            // Other_Speed, a named residual.
+            case 0x06: return Speed >= 3 ? DeviceQualifier : null;
             case 0x07: return index == 0 ? OtherSpeedConfiguration : null;
             default: return null;
         }

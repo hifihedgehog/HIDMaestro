@@ -4,29 +4,34 @@ using System.Threading;
 namespace HIDMaestro.Internal.Usbip;
 
 /// <summary>Orchestrates one usbip-backend controller's lifecycle
-/// (issue #39): start the in-process server, register the emulated
+/// (issue #39): deploy the bundled transport if this machine does not
+/// have it yet, start the in-process server, register the emulated
 /// device, sweep any stale state a crashed prior process left in the
-/// vhci driver, then attach through usbip-win2 and hand back a handle
-/// whose disposal detaches and tears everything down in order.
+/// vhci driver, then attach and hand back a handle whose disposal
+/// detaches and tears everything down in order.
 ///
-/// <para>The backend is opt-in by decree (owner ruling on the issue,
-/// 2026-07-30): nothing here installs usbip-win2, and
-/// <see cref="IsAvailable"/> is a pure presence check consumers can gate
-/// their pickers on. Absent driver, CreateController fails loudly with
-/// install guidance and the UMDF2 profiles are untouched.</para></summary>
+/// <para>Composite personas just work. The usbip-win2 transport ships
+/// inside HIDMaestro.Core.dll and installs itself on the first composite
+/// create, exactly the way the UMDF2 driver does: no separate package,
+/// no second download, nothing for a user to go find. See
+/// <see cref="UsbipDriverInstaller"/>.</para></summary>
 internal static class UsbipBackend
 {
+    /// <summary>True when the transport is already installed and a
+    /// composite create needs no install step. Creating a composite
+    /// controller does NOT require this to be true: it installs on
+    /// demand. Consumers use this only to decide whether to warn about
+    /// the one-time install.</summary>
     public static bool IsAvailable => VhciClient.IsAvailable();
 
     private static int s_staleSweepDone;
 
-    public static UsbipBackendHandle CreateDevice(ControllerProfile profile, int index)
+    public static UsbipBackendHandle CreateDevice(ControllerProfile profile, int index,
+                                                  Action<string>? progress = null)
     {
-        if (!IsAvailable)
-            throw new NotSupportedException(
-                $"Profile '{profile.Id}' declares backend 'usbip', which is opt-in and not installed. " +
-                "Install usbip-win2 0.9.7.7 (vadimgrn/usbip-win2) to enable composite USB personas, " +
-                "or use the profile's UMDF2 sibling, which keeps working with no dependency.");
+        // Deploy on demand. Idempotent, and a no-op on every machine that
+        // already has it.
+        UsbipDriverInstaller.EnsureInstalled(progress);
 
         var server = UsbipServer.GetOrStart();
         SweepStaleOnce(server.Port);

@@ -95,12 +95,31 @@ public sealed class HMContext : IDisposable
         }
     }
 
-    /// <summary>Issue #39: true when the opt-in USB/IP backend
-    /// (usbip-win2's vhci host controller) is present, which is what
-    /// makes profiles with <see cref="HMProfile.RequiresUsbipBackend"/>
-    /// instantiable. Pure presence probe; requires no admin and installs
-    /// nothing. Gate composite-persona picker entries on this.</summary>
+    /// <summary>Issue #39: true when the USB transport that composite
+    /// personas ride (usbip-win2's virtual host controller) is already
+    /// installed on this machine.
+    ///
+    /// <para>This is NOT a gate on creating composite controllers.
+    /// The transport is bundled inside HIDMaestro.Core.dll and installs
+    /// itself on the first composite create, the same way the UMDF2
+    /// driver does, so <see cref="CreateController"/> works either way.
+    /// Read this only when you want to tell the user that the first
+    /// composite controller will trigger a one-time driver install
+    /// (a few seconds, and USB devices blink once as Windows
+    /// re-enumerates the root hubs).</para>
+    ///
+    /// <para>Pure presence probe: requires no admin and installs
+    /// nothing.</para></summary>
     public static bool IsUsbipBackendAvailable => Internal.Usbip.UsbipBackend.IsAvailable;
+
+    /// <summary>Issue #39: install the bundled USB transport now instead
+    /// of on the first composite create. Optional, and only worth calling
+    /// when a consumer wants the one-time install to happen at a moment
+    /// it controls (an onboarding step, a settings toggle) rather than
+    /// mid-session. Idempotent, requires elevation, and reports progress
+    /// through <paramref name="progress"/>.</summary>
+    public static void InstallUsbipBackend(Action<string>? progress = null)
+        => Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
 
     /// <summary>Extract the embedded driver files to %TEMP%, install the
     /// self-signed code-signing certificate to the trusted root and trusted
@@ -331,12 +350,12 @@ public sealed class HMContext : IDisposable
             while (_controllers.ContainsKey(index)) index++;
         }
 
-        // Issue #39: composite USB personas run on the opt-in USB/IP
-        // backend, never on UMDF2, which can only present the single HID
-        // interface and would silently drop the three USB Audio Class
-        // interfaces the profile promises. CreateUsbipController throws
-        // NotSupportedException with install guidance when usbip-win2 is
-        // absent; the UMDF2 path below is untouched either way.
+        // Issue #39: composite USB personas run on the USB/IP backend,
+        // never on UMDF2, which can only present the single HID interface
+        // and would silently drop the three USB Audio Class interfaces
+        // the profile promises. The backend's transport is bundled and
+        // deploys itself on first use, so this path needs no precondition
+        // from the consumer. The UMDF2 path below is untouched.
         if (profile.RequiresUsbipBackend)
             return CreateUsbipController(index, profile);
 

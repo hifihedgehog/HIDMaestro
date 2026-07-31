@@ -30,7 +30,7 @@ public sealed class HMController : IDisposable
     internal string? InstanceId { get; }
     public HMProfile Profile { get; }
 
-    // Issue #39: non-null when this controller runs on the opt-in USB/IP
+    // Issue #39: non-null when this controller runs on the USB/IP
     // backend instead of the UMDF2 driver. The backend's device emulator
     // speaks the SAME shared-memory contract the driver does (it reads the
     // input section this class writes and publishes to the output ring

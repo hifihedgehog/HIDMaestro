@@ -74,6 +74,41 @@
     <Copy SourceFiles="@(_HMDriverFiles)" DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(_HMSigntool)"   DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(_HMInf2cat)"    DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+
+    <!-- usbip-win2 0.9.7.7 installer, bundled (issue #39). Composite USB
+         personas need a driver-backed USB device for their audio
+         endpoints, so the SDK ships the transport rather than asking a
+         user to go install one: HIDMaestro deploys it on demand, the
+         same way it deploys its own UMDF2 driver. BSD-2-Clause permits
+         binary redistribution; the required notice ships beside it as
+         THIRD-PARTY-NOTICES.txt and is written to disk at install time.
+
+         The 33 MB binary is NOT committed. It is fetched once from the
+         upstream release and cached in Resources/ (gitignored), then
+         verified against the SHA256 the GitHub release API publishes for
+         that asset. A hash mismatch FAILS the build rather than
+         embedding an unverified binary. -->
+    <PropertyGroup>
+      <HMUsbipVersion>0.9.7.7</HMUsbipVersion>
+      <HMUsbipSha256>51620fa5f9f8be5932bc9d786deee557ce06d5407a99cab490dcfac71f185fea</HMUsbipSha256>
+      <HMUsbipFile>$(MSBuildThisFileDirectory)Resources\USBip-$(HMUsbipVersion)-x64.exe</HMUsbipFile>
+      <HMUsbipUrl>https://github.com/vadimgrn/usbip-win2/releases/download/v.$(HMUsbipVersion)/USBip-$(HMUsbipVersion)-x64.exe</HMUsbipUrl>
+    </PropertyGroup>
+
+    <DownloadFile SourceUrl="$(HMUsbipUrl)"
+                  DestinationFolder="$(MSBuildThisFileDirectory)Resources"
+                  DestinationFileName="USBip-$(HMUsbipVersion)-x64.exe"
+                  SkipUnchangedFiles="true"
+                  Condition="!Exists('$(HMUsbipFile)')" />
+
+    <GetFileHash Files="$(HMUsbipFile)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="_HMUsbipActualHash" />
+    </GetFileHash>
+    <Error Condition="'$(_HMUsbipActualHash.ToLowerInvariant())' != '$(HMUsbipSha256)'"
+           Text="usbip-win2 installer hash mismatch. Expected $(HMUsbipSha256), got $(_HMUsbipActualHash). Delete $(HMUsbipFile) and rebuild to re-fetch." />
+
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt"
+          DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
   </Target>
 
   <ItemGroup>

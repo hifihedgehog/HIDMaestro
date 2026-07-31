@@ -66,15 +66,20 @@ public sealed class HMProfile
     public string? TriggerMode => Inner.TriggerMode;
 
     /// <summary>Which instantiation path this profile needs: "umdf2" for
-    /// every profile that ships today, or "usbip" for a composite USB
-    /// persona that needs the opt-in backend (issue #39).</summary>
+    /// the single-HID-device path most profiles use, or "usbip" for a
+    /// composite USB persona whose audio interfaces need the bundled USB
+    /// transport (issue #39).</summary>
     public string Backend => Inner.Backend ?? "umdf2";
 
-    /// <summary>True when this profile needs the opt-in USB/IP backend,
-    /// which is never installed by default. A consumer that lists
-    /// profiles in a picker gates such entries on this plus its own check
-    /// that the backend is present, so a user without it sees no entry
-    /// they cannot create (issue #39).</summary>
+    /// <summary>True when this profile is a composite USB persona, which
+    /// rides the USB transport bundled inside HIDMaestro.Core.dll rather
+    /// than the UMDF2 driver.
+    ///
+    /// <para>This is NOT a "can I create it" gate: the transport deploys
+    /// itself on first use, so <see cref="HMContext.CreateController"/>
+    /// works regardless. Read it when a picker wants to mark which
+    /// entries bring controller audio, or to warn that the first such
+    /// controller triggers a one-time driver install (issue #39).</para></summary>
     public bool RequiresUsbipBackend => Inner.RequiresUsbipBackend;
 
     // ── HID descriptor ───────────────────────────────────────────────────

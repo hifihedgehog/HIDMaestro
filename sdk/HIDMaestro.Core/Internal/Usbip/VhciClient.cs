@@ -73,8 +73,9 @@ internal static class VhciClient
     private static SafeHandleWrapper Open()
     {
         string path = TryGetInterfacePath()
-            ?? throw new NotSupportedException(
-                "usbip-win2's vhci host controller is not present. Install usbip-win2 0.9.7.7 to opt in.");
+            ?? throw new InvalidOperationException(
+                "The virtual USB host controller is not present. It ships inside HIDMaestro.Core.dll " +
+                "and installs on first use; see UsbipDriverInstaller.EnsureInstalled.");
         IntPtr h = CreateFileW(path, 0xC0000000 /* GENERIC_READ|WRITE */, 0, IntPtr.Zero,
             3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
         if (h == new IntPtr(-1))
