@@ -360,7 +360,13 @@ internal static class Program
         try
         {
             var buf = new byte[reportLen];
-            // Prime a fresh frame so a parked read completes promptly.
+            // Prime fresh frames so a parked read completes promptly. The
+            // pump must stop before this method returns: letting it outlive
+            // the read means it can still be calling SubmitState while the
+            // controller is being disposed, which throws
+            // ObjectDisposedException on a background thread and takes the
+            // process down after every check has already passed.
+            using var stop = new ManualResetEventSlim(false);
             var pump = new Thread(() =>
             {
                 var s = new HMGamepadState
@@ -369,11 +375,23 @@ internal static class Program
                     Axes = new System.Collections.Generic.Dictionary<HMAxis, float>
                     { [HMAxis.X] = 1.0f, [HMAxis.Y] = 0.0f, [HMAxis.Z] = 0.5f, [HMAxis.Rz] = 0.5f },
                 };
-                for (int i = 0; i < 40; i++) { c.SubmitState(s); Thread.Sleep(20); }
+                try
+                {
+                    while (!stop.IsSet) { c.SubmitState(s); stop.Wait(20); }
+                }
+                catch (ObjectDisposedException) { /* controller went away first */ }
             }) { IsBackground = true };
             pump.Start();
-            bool ok = ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero);
-            return ok && read > 0 ? buf : null;
+            try
+            {
+                bool ok = ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero);
+                return ok && read > 0 ? buf : null;
+            }
+            finally
+            {
+                stop.Set();
+                pump.Join(2000);
+            }
         }
         finally { CloseHandle(fh); }
     }
