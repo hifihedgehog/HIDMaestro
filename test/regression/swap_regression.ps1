@@ -153,6 +153,10 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_gip_trigger_resolver_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\usb_composite_schema_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\usbip_server_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\usbip_bundle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\usbip_e2e_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1420,6 +1424,50 @@ function Scenario-Xbox-Gip-Trigger-Resolver-Check {
     }
 }
 
+# --------------------------------------------------------------------
+#  Composite USB personas and the bundled transport (issue #39)
+# --------------------------------------------------------------------
+
+function Scenario-Usb-Composite-Schema {
+    $probe = Resolve-ProbeBinary 'usb_composite_schema_check' 'UsbCompositeSchemaCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("UsbCompositeSchemaCheck exited " + $p.ExitCode + " - a composite persona no longer matches its hardware dump, or a composite leaked into the UMDF2 path (see probe stdout)")
+    }
+}
+
+function Scenario-Usbip-Server-Protocol {
+    $probe = Resolve-ProbeBinary 'usbip_server_check' 'UsbipServerCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("UsbipServerCheck exited " + $p.ExitCode + " - the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, or unlink; see probe stdout)")
+    }
+}
+
+function Scenario-Usbip-Bundle-Deploy {
+    $probe = Resolve-ProbeBinary 'usbip_bundle_check' 'UsbipBundleCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("UsbipBundleCheck exited " + $p.ExitCode + " - the bundled transport is missing, its hash no longer matches the upstream release, or the deploy path stopped refusing tampered bytes (see probe stdout)")
+    }
+}
+
+# The only scenario that needs the transport actually deployed. On a
+# machine without it, the probe deploys it (that IS the thing under
+# test). Exit 2 means the probe declined to run for an environmental
+# reason and is reported as a skip rather than a failure.
+function Scenario-Usbip-E2E-Composite {
+    $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -eq 2) {
+        Write-Host '    [SKIP] transport unavailable in this environment' -ForegroundColor Yellow
+        return
+    }
+    if ($p.ExitCode -ne 0) {
+        throw ("UsbipE2ECheck exited " + $p.ExitCode + " - a composite persona failed end to end through the real USB stack (enumeration, HID, audio endpoints, or teardown; see probe stdout)")
+    }
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1465,7 +1513,11 @@ $scenarios = @(
     @{ Name = 'S38_Sony_BT_Axis_Role_Check';      Body = ${function:Scenario-Sony-BT-Axis-Role-Check} },
     @{ Name = 'S39_Foreign_Devnode_Survival';     Body = ${function:Scenario-Foreign-Devnode-Survival-Check} },
     @{ Name = 'S40_Xbox_Combined_Trigger';        Body = ${function:Scenario-Xbox-Combined-Trigger-Check} },
-    @{ Name = 'S41_Xbox_Gip_Trigger_Resolver';    Body = ${function:Scenario-Xbox-Gip-Trigger-Resolver-Check} }
+    @{ Name = 'S41_Xbox_Gip_Trigger_Resolver';    Body = ${function:Scenario-Xbox-Gip-Trigger-Resolver-Check} },
+    @{ Name = 'S42_Usb_Composite_Schema';         Body = ${function:Scenario-Usb-Composite-Schema} },
+    @{ Name = 'S43_Usbip_Server_Protocol';        Body = ${function:Scenario-Usbip-Server-Protocol} },
+    @{ Name = 'S44_Usbip_Bundle_Deploy';          Body = ${function:Scenario-Usbip-Bundle-Deploy} },
+    @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -155,16 +155,27 @@ internal static class Program
         Check($"base '{baseId}' still ships", baseProfile != null);
         if (composite == null || baseProfile == null) return;
 
+        // Source-tree only. When this probe runs from a staged bundle
+        // (the Atom fixture, a release ZIP) there is no profiles/
+        // directory to compare against, so skip the on-disk comparison
+        // rather than fail a run that has nothing to do with it. Same
+        // rule the battery's own probe-version gate uses. Everything
+        // below still validates the EMBEDDED profile, which is what
+        // actually ships.
         string diskPath = Path.Combine(repoRoot, "profiles", "sony", id + ".json");
-        Check("authored file exists on disk", File.Exists(diskPath));
         if (File.Exists(diskPath))
         {
             var disk = JsonSerializer.Deserialize<ControllerProfile>(
                 File.ReadAllText(diskPath), HMLayoutJsonOptions.Default)!;
-            Check("embedded copy matches the authored file",
+            Check("embedded copy matches the authored file on disk",
                   disk.Descriptor == composite.Inner.Descriptor
                   && disk.UsbConfiguration?.ConfigurationDescriptorHex
                      == composite.Inner.UsbConfiguration?.ConfigurationDescriptorHex);
+        }
+        else
+        {
+            Console.WriteLine("  [note] no source checkout here; " +
+                              "skipping the authored-file comparison (embedded profile still validated)");
         }
 
         Check("declares the usbip backend", composite.Backend == "usbip" && composite.RequiresUsbipBackend);

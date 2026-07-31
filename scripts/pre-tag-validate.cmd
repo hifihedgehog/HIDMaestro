@@ -4,7 +4,7 @@ rem  pre-tag-validate.cmd
 rem
 rem  Mandatory pre-release validation. Run before `git tag vX.Y.Z`.
 rem  - Builds the SDK + test app
-rem  - Runs the full live-swap regression battery (41 scenarios, ~10 min
+rem  - Runs the full live-swap regression battery (45 scenarios, ~12 min
 rem    on the Ryzen devbox; the Atom fixture takes ~30+ min)
 rem  - Exits non-zero if any scenario FAILed; do NOT tag/push/release in
 rem    that case
@@ -20,7 +20,7 @@ rem      and orphan the regression script's stdin pipe).
 rem    - sudo/gsudo NOT used here (caller is responsible for elevation).
 rem
 rem  Exit codes:
-rem    0  All 41 scenarios PASSED. Safe to tag/push/release.
+rem    0  All 45 scenarios PASSED. Safe to tag/push/release.
 rem    1  At least one scenario FAILED. Do NOT release.
 rem    2  Build failed. Fix before re-running.
 rem ====================================================================
@@ -144,7 +144,7 @@ if errorlevel 1 (
 echo.
 
 rem 4. Run the full regression battery
-echo [3/4] Running live-swap regression battery (41 scenarios, ~10 min)...
+echo [3/4] Running live-swap regression battery (45 scenarios, ~12 min)...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "test\regression\swap_regression.ps1"
 set BATTERY_EXIT=%ERRORLEVEL%
@@ -162,7 +162,7 @@ if %BATTERY_EXIT% neq 0 (
 echo [4/4] Validation complete.
 echo.
 echo ====================================================================
-echo  [PASS] Switch Pro check + 41/41 swap scenarios passed. Safe to:
+echo  [PASS] Switch Pro check + 45/45 swap scenarios passed. Safe to:
 echo         git tag vX.Y.Z
 echo         git push origin master vX.Y.Z
 echo         gh release create vX.Y.Z ...
