@@ -95,6 +95,13 @@ public sealed class HMContext : IDisposable
         }
     }
 
+    /// <summary>Issue #39: true when the opt-in USB/IP backend
+    /// (usbip-win2's vhci host controller) is present, which is what
+    /// makes profiles with <see cref="HMProfile.RequiresUsbipBackend"/>
+    /// instantiable. Pure presence probe; requires no admin and installs
+    /// nothing. Gate composite-persona picker entries on this.</summary>
+    public static bool IsUsbipBackendAvailable => Internal.Usbip.UsbipBackend.IsAvailable;
+
     /// <summary>Extract the embedded driver files to %TEMP%, install the
     /// self-signed code-signing certificate to the trusted root and trusted
     /// publisher stores, sign the driver binaries, and register them with
@@ -311,18 +318,9 @@ public sealed class HMContext : IDisposable
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
-        // Issue #39: a composite USB persona needs the opt-in USB/IP
-        // backend. Instantiating it here would create the single HID
-        // interface UMDF2 can make and silently drop the three USB Audio
-        // Class interfaces the profile promises, which is the fidelity
-        // gap the profile exists to close. Fail loudly instead.
-        if (profile.RequiresUsbipBackend)
-            throw new NotSupportedException(
-                $"Profile '{profile.Id}' declares backend '{profile.Backend}' and needs the USB/IP backend, " +
-                "which is opt-in and not installed. Use the UMDF2 profile for this device, or install the backend.");
         ThrowIfDisposed();
 
-        // Allocate the next free controller index. Linear scan from 0 — no
+        // Allocate the next free controller index. Linear scan from 0, no
         // upper bound on the SDK side. XInput's 4-slot limit only constrains
         // Xbox-family profiles (xbox-360-wired, xbox-series-xs-bt, etc.);
         // non-XInput profiles can run beyond 4 simultaneously.
@@ -332,6 +330,15 @@ public sealed class HMContext : IDisposable
             index = 0;
             while (_controllers.ContainsKey(index)) index++;
         }
+
+        // Issue #39: composite USB personas run on the opt-in USB/IP
+        // backend, never on UMDF2, which can only present the single HID
+        // interface and would silently drop the three USB Audio Class
+        // interfaces the profile promises. CreateUsbipController throws
+        // NotSupportedException with install guidance when usbip-win2 is
+        // absent; the UMDF2 path below is untouched either way.
+        if (profile.RequiresUsbipBackend)
+            return CreateUsbipController(index, profile);
 
         // The driver INF lives next to the driver binaries in the repo's
         // build/ directory. This will move to embedded-resource extraction
@@ -357,6 +364,28 @@ public sealed class HMContext : IDisposable
         return controller;
     }
 
+    // Issue #39: the USB/IP create path. The backend's device emulator
+    // pre-creates the per-index shared sections and events, attaches
+    // through usbip-win2's vhci, and the HMController then binds to the
+    // same sections it always does. No PnP, no INF, no driver install.
+    private HMController CreateUsbipController(int index, HMProfile profile)
+    {
+        Internal.Usbip.UsbipBackendHandle handle =
+            Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index);
+        try
+        {
+            var controller = new HMController(this, index, profile, instanceId: null, handle);
+            lock (_lock) _controllers[index] = controller;
+            return controller;
+        }
+        catch
+        {
+            try { handle.Dispose(); } catch { }
+            try { Internal.SharedMemoryIO.DestroyController(index); } catch { }
+            throw;
+        }
+    }
+
     /// <summary>Create a controller pinned to a specific index. Used by live
     /// profile-switching workflows where the consumer wants to dispose the
     /// existing controller at index N and replace it with one running a
@@ -369,15 +398,6 @@ public sealed class HMContext : IDisposable
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
-        // Issue #39: a composite USB persona needs the opt-in USB/IP
-        // backend. Instantiating it here would create the single HID
-        // interface UMDF2 can make and silently drop the three USB Audio
-        // Class interfaces the profile promises, which is the fidelity
-        // gap the profile exists to close. Fail loudly instead.
-        if (profile.RequiresUsbipBackend)
-            throw new NotSupportedException(
-                $"Profile '{profile.Id}' declares backend '{profile.Backend}' and needs the USB/IP backend, " +
-                "which is opt-in and not installed. Use the UMDF2 profile for this device, or install the backend.");
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
         ThrowIfDisposed();
 
@@ -387,6 +407,12 @@ public sealed class HMContext : IDisposable
                 throw new InvalidOperationException(
                     $"Controller index {index} is already in use. Dispose the existing controller first.");
         }
+
+        // Issue #39: same backend routing as CreateController. Live-swap
+        // consumers can pin a composite persona to an index like any
+        // other profile.
+        if (profile.RequiresUsbipBackend)
+            return CreateUsbipController(index, profile);
 
         string infPath = System.IO.Path.Combine(
             Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
@@ -476,6 +502,18 @@ public sealed class HMContext : IDisposable
     internal void OnControllerDisposing(HMController controller)
     {
         lock (_lock) _controllers.Remove(controller.Index);
+
+        // Issue #39: usbip-backend controllers have no PnP devnode and no
+        // driver binding. Teardown is detach-from-vhci plus the shared
+        // sections; running the UMDF2 PnP teardown would sweep for devices
+        // that never existed.
+        if (controller.UsbipHandle != null)
+        {
+            try { controller.UsbipHandle.Dispose(); } catch { }
+            try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
+            return;
+        }
+
         Internal.DeviceOrchestrator.TeardownController(
             controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
     }

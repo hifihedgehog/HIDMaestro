@@ -204,7 +204,7 @@
     },
     "usbConfiguration": {
       "type": "object",
-      "description": "Issue #39: the USB configuration a composite persona presents (interfaces with alternate settings, isochronous endpoints, audio stream formats and channel roles). Only valid with backend 'usbip'. Shaped after the standard descriptor set so it can be authored from a real device's descriptor dump; see sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs for the field-level contract and profiles/sony/dualsense-composite.json for the authored example."
+      "description": "Issue #39: the USB configuration a composite persona presents (interfaces with alternate settings, isochronous endpoints, audio stream formats and channel roles). Only valid with backend 'usbip'. Shaped after the standard descriptor set so it can be authored from a real device's descriptor dump; see sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs for the field-level contract and profiles/sony/dualsense-composite.json for the authored example. Carries the wire truth verbatim: 'deviceDescriptor' (18-byte hex), 'configurationDescriptor' (full config blob hex, served byte-for-byte and cross-checked against the structured interfaces at create time), 'otherSpeedConfigurationDescriptor' (dual-speed devices only; its absence makes the backend stall Device_Qualifier and Other_Speed exactly as a single-speed real pad does), 'busSpeed' ('high' or 'full', the speed reported in the USB/IP import), and 'audioControls' (per feature unit: unitId, controlInterface, function, muteCur, and volumeMin/Max/Res/CurRaw as UAC1 s16 1/256-dB wire values, captured from a real pad's GET_MIN/MAX/RES/CUR exchanges, never invented)."
     }
   }
 }

@@ -101,17 +101,14 @@
          repo's profiles/ directory is the single source of truth. These
          are linked, not copied.
 
-         dualsense-composite.json is authored and tested but NOT embedded
-         (issue #39). It declares backend "usbip", and that backend does
-         not exist yet. Embedding it would put an entry in every
-         consumer's profile picker that CreateController refuses, which
-         is a regression for consumers shipping today that know nothing
-         about the new HMProfile.RequiresUsbipBackend filter. It joins
-         the catalog in the same change that makes it instantiable. The
-         file stays in profiles/ as the authored ground truth and
-         usb_composite_schema_check reads it from there. -->
+         The composite USB personas (dualsense-composite,
+         dualshock-4-v2-composite) ship in the catalog as of the USB/IP
+         backend landing (issue #39): CreateController instantiates them
+         when usbip-win2 is installed and refuses with install guidance
+         when it is not. Consumers gate picker entries on
+         HMProfile.RequiresUsbipBackend + HMContext.IsUsbipBackendAvailable. -->
     <EmbeddedResource Include="..\..\profiles\**\*.json"
-                      Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json;..\..\profiles\sony\dualsense-composite.json">
+                      Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json">
       <LogicalName>HIDMaestro.Profiles.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
       <Link>Profiles\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </EmbeddedResource>

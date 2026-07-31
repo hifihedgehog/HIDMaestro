@@ -30,6 +30,21 @@ public sealed class HMController : IDisposable
     internal string? InstanceId { get; }
     public HMProfile Profile { get; }
 
+    // Issue #39: non-null when this controller runs on the opt-in USB/IP
+    // backend instead of the UMDF2 driver. The backend's device emulator
+    // speaks the SAME shared-memory contract the driver does (it reads the
+    // input section this class writes and publishes to the output ring
+    // this class's poll loop reads), which is why nothing else in this
+    // class changes per backend. Dispose routing in HMContext keys on it.
+    internal Internal.Usbip.UsbipBackendHandle? UsbipHandle { get; }
+
+    /// <summary>Issue #39: the audio surfaces of a composite USB persona
+    /// (speaker/haptic PCM out, microphone in, volume/mute control
+    /// events). Null on every UMDF2 profile; non-null exactly when
+    /// <see cref="HMProfile.RequiresUsbipBackend"/> and the controller
+    /// was created through the USB/IP backend.</summary>
+    public HMUsbAudio? UsbAudio { get; }
+
     // Encoder built once from the profile descriptor at construction time;
     // SubmitState reuses it for every frame.
     private readonly HidReportBuilder _reportBuilder;
@@ -319,12 +334,16 @@ public sealed class HMController : IDisposable
     // 14-byte Marshal.Copy entirely. ~60-80 instructions saved per frame.
     private readonly bool _packsGipBuffer;
 
-    internal HMController(HMContext context, int index, HMProfile profile, string? instanceId)
+    internal HMController(HMContext context, int index, HMProfile profile, string? instanceId,
+                          Internal.Usbip.UsbipBackendHandle? usbipHandle = null)
     {
         _context = context;
         Index = index;
         InstanceId = instanceId;
         Profile = profile;
+        UsbipHandle = usbipHandle;
+        if (usbipHandle != null)
+            UsbAudio = new HMUsbAudio(profile.Inner, usbipHandle.Device);
 
         // v1.3.0 T10 — cached per-profile builder; same descriptor + same
         // maps produce identical output, so each CreateController for a

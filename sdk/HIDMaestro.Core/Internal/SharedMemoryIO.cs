@@ -153,6 +153,7 @@ internal static class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_companionInputEvents = new();
     private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
+    private static readonly Dictionary<int, IntPtr> s_outputEvents  = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
@@ -227,6 +228,38 @@ internal static class SharedMemoryIO
     {
         lock (s_inputViews)
             return s_companionInputEvents.TryGetValue(controllerIndex, out var ev) ? ev : IntPtr.Zero;
+    }
+
+    /// <summary>Create (or return) the output-ring doorbell
+    /// <c>Global\HIDMaestroOutputEvent&lt;N&gt;</c> from the SDK side. In
+    /// UMDF2 mode the DRIVER creates this event; the USB/IP backend
+    /// (issue #39) has no driver, so its in-process device emulator
+    /// creates it here, with the same SDDL, BEFORE the HMController's
+    /// OutputPollLoop calls <see cref="TryOpenOutputEvent"/>, so the
+    /// reader comes up in event mode exactly as it does against the
+    /// driver. Cached per index and closed by DestroyController.</summary>
+    public static IntPtr EnsureOutputEvent(int controllerIndex)
+    {
+        lock (s_outputViews)
+        {
+            if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr existing))
+                return existing;
+            IntPtr ev = CreateNamedEvent($@"Global\HIDMaestroOutputEvent{controllerIndex}");
+            s_outputEvents[controllerIndex] = ev;
+            return ev;
+        }
+    }
+
+    /// <summary>Open an independent SYNCHRONIZE handle to
+    /// <c>Global\HIDMaestroInputEvent&lt;N&gt;</c> for a waiter. The handle
+    /// EnsureInputMapping caches is the writer's SetEvent handle; the
+    /// USB/IP device emulator's input pump is the auto-reset event's sole
+    /// waiter (the role the UMDF2 driver's worker plays otherwise) and
+    /// owns the returned handle.</summary>
+    public static IntPtr OpenInputEventForWait(int controllerIndex)
+    {
+        return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, false,
+            $@"Global\HIDMaestroInputEvent{controllerIndex}");
     }
 
     /// <summary>Returns the view pointer for the controller's OUTPUT section,
@@ -625,6 +658,10 @@ internal static class SharedMemoryIO
             if (s_outputHandles.TryGetValue(controllerIndex, out IntPtr h) && h != IntPtr.Zero)
                 CloseHandle(h);
             s_outputHandles.Remove(controllerIndex);
+
+            if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr oe) && oe != IntPtr.Zero)
+                CloseHandle(oe);
+            s_outputEvents.Remove(controllerIndex);
         }
         lock (s_pidStateViews)
         {
@@ -666,6 +703,9 @@ internal static class SharedMemoryIO
             foreach (var h in s_outputHandles.Values)
                 if (h != IntPtr.Zero) CloseHandle(h);
             s_outputHandles.Clear();
+            foreach (var ev in s_outputEvents.Values)
+                if (ev != IntPtr.Zero) CloseHandle(ev);
+            s_outputEvents.Clear();
         }
         lock (s_pidStateViews)
         {

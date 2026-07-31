@@ -38,6 +38,92 @@ public sealed class UsbConfigurationSpec
     /// four: Audio Control, two Audio Streaming, and HID.</summary>
     [JsonPropertyName("interfaces")]
     public List<UsbInterfaceSpec> Interfaces { get; set; } = new();
+
+    /// <summary>The bus speed the real device enumerates at:
+    /// <c>"high"</c> (DualSense) or <c>"full"</c> (DualShock 4). Reported
+    /// in the USB/IP import reply; usbip-win2 patches a full-speed
+    /// device's endpoint intervals for its high-speed UDE presentation
+    /// itself, so the blobs stay verbatim either way. A full-speed-only
+    /// device also stalls Device_Qualifier and Other_Speed requests, as
+    /// the real pad does.</summary>
+    [JsonPropertyName("busSpeed")]
+    public string BusSpeed { get; set; } = "high";
+
+    /// <summary>The 18-byte device descriptor, hex, verbatim from a real
+    /// pad. The backend serves this blob for GET_DESCRIPTOR(Device); the
+    /// profile's vid/pid/versionNumber fields never override it, because
+    /// the dump is the ground truth and a divergence between the two is a
+    /// profile-authoring bug the create-path guard rejects.</summary>
+    [JsonPropertyName("deviceDescriptor")]
+    public string? DeviceDescriptorHex { get; set; }
+
+    /// <summary>The full configuration descriptor the device serves at its
+    /// operating speed (config header + every interface, class-specific and
+    /// endpoint descriptor), hex, verbatim from a real pad. This blob IS
+    /// the wire truth; the structured <see cref="Interfaces"/> model above
+    /// describes the same configuration semantically so the backend can
+    /// route without re-deriving meaning from bytes. The backend
+    /// cross-checks the two at create time and refuses on mismatch.</summary>
+    [JsonPropertyName("configurationDescriptor")]
+    public string? ConfigurationDescriptorHex { get; set; }
+
+    /// <summary>GET_DESCRIPTOR(Other_Speed_Configuration) blob, hex,
+    /// for dual-speed devices. The DualSense's full-speed variant differs
+    /// from the high-speed one (isochronous bInterval 1, a 1-channel
+    /// microphone input terminal, a sampling-frequency control bit), so it
+    /// cannot be synthesized from the high-speed blob.</summary>
+    [JsonPropertyName("otherSpeedConfigurationDescriptor")]
+    public string? OtherSpeedConfigurationDescriptorHex { get; set; }
+
+    /// <summary>The UAC1 feature-unit control ranges the device answers on
+    /// EP0, captured from a real pad's wire exchanges rather than invented.
+    /// usbaudio.sys reads these during endpoint creation and maps the
+    /// Windows volume slider across MIN..MAX.</summary>
+    [JsonPropertyName("audioControls")]
+    public List<UsbAudioControlSpec>? AudioControls { get; set; }
+}
+
+/// <summary>One UAC1 feature unit's control state: the mute and volume
+/// controls its bmaControls advertise, with the raw wire values a real pad
+/// returns for GET_MIN / GET_MAX / GET_RES / GET_CUR. Volume values are
+/// UAC1 s16 in 1/256 dB units (-25600 = -100 dB).</summary>
+public sealed class UsbAudioControlSpec
+{
+    /// <summary>bUnitID of the feature unit (wIndex high byte of the
+    /// class request addresses it).</summary>
+    [JsonPropertyName("unitId")]
+    public byte UnitId { get; set; }
+
+    /// <summary>The Audio Control interface number the requests arrive on
+    /// (wIndex low byte).</summary>
+    [JsonPropertyName("controlInterface")]
+    public byte ControlInterface { get; set; }
+
+    /// <summary>What the unit controls, for the SDK surface:
+    /// <c>"speaker"</c> (the render path feature unit) or
+    /// <c>"microphone"</c> (the capture path).</summary>
+    [JsonPropertyName("function")]
+    public string Function { get; set; } = "";
+
+    /// <summary>Boot-state CUR for the Mute control (0 or 1).</summary>
+    [JsonPropertyName("muteCur")]
+    public byte MuteCur { get; set; }
+
+    /// <summary>GET_MIN(Volume) raw s16.</summary>
+    [JsonPropertyName("volumeMinRaw")]
+    public short VolumeMinRaw { get; set; }
+
+    /// <summary>GET_MAX(Volume) raw s16.</summary>
+    [JsonPropertyName("volumeMaxRaw")]
+    public short VolumeMaxRaw { get; set; }
+
+    /// <summary>GET_RES(Volume) raw s16.</summary>
+    [JsonPropertyName("volumeResRaw")]
+    public short VolumeResRaw { get; set; }
+
+    /// <summary>Boot-state GET_CUR(Volume) raw s16.</summary>
+    [JsonPropertyName("volumeCurRaw")]
+    public short VolumeCurRaw { get; set; }
 }
 
 /// <summary>One interface, with every alternate setting it offers. USB

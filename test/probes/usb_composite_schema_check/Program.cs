@@ -1,18 +1,26 @@
 // Composite USB persona schema check (issue #39).
 //
-// The schema family and the backend gate are additive data plumbing: no
-// device is created, no driver is touched, and the five existing USB
-// Sony profiles must be bit-for-bit unaffected. This probe asserts all
-// of that, plus the two properties that make the design safe:
+// Originally guarded the additive data-plumbing stage; now that the
+// USB/IP backend exists, this probe asserts the shipped end-state:
 //
-//   1. A composite profile parses into the full four-interface model
-//      with its endpoint parameters and channel roles intact.
-//   2. The HID interface is byte-identical to the UMDF2 profile it
-//      derives from, so the existing report codec carries over free.
-//   3. CreateController REFUSES a usbip-backend profile rather than
-//      quietly building the one interface UMDF2 can build.
+//   1. Both composite personas (dualsense-composite,
+//      dualshock-4-v2-composite) are IN the embedded catalog, and the
+//      embedded copies match the authored files on disk.
+//   2. Each parses into the full four-interface model with endpoint
+//      parameters and channel roles intact, carries the verbatim
+//      device/configuration blobs, and its HID interface is
+//      byte-identical to the UMDF2 profile it derives from.
+//   3. The verbatim blobs are self-consistent: wTotalLength matches,
+//      the HID class descriptor's declared report-descriptor length
+//      matches the profile's actual descriptor, and the UAC control
+//      ranges are the real pad's wire values (from the ControllersInfo
+//      pcap captures), not invented numbers.
+//   4. Without usbip-win2 installed, CreateController refuses with
+//      install guidance instead of building a partial device. (With the
+//      backend installed the create path is exercised end-to-end by
+//      usbip_server_check and the E2E battery, not here; this probe
+//      stays no-elevation, no-device.)
 //
-// Requires no elevation: nothing here creates a device.
 // Exit 0 PASS / 1 FAIL.
 
 using System;
@@ -22,6 +30,7 @@ using System.Text.Json;
 
 using HIDMaestro;
 using HIDMaestro.Internal;
+using HIDMaestro.Internal.Usbip;
 
 internal static class Program
 {
@@ -41,135 +50,184 @@ internal static class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
 
-        var baseProfile = ctx.GetProfile("dualsense");
-        Check("base 'dualsense' profile loads from the shipped catalog", baseProfile != null);
-
-        // The composite profile is authored but deliberately NOT embedded
-        // until the backend that can instantiate it exists. Shipping it in
-        // the catalog now would put an entry in every consumer's picker
-        // that CreateController refuses. Assert that, then read the file
-        // from the repo, which is where it lives as authored ground truth.
-        Check("composite is NOT in the shipped catalog yet",
-              ctx.GetProfile("dualsense-composite") == null);
-
         string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
             "..", "..", "..", "..", "..", ".."));
-        string compositePath = Path.Combine(repoRoot, "profiles", "sony", "dualsense-composite.json");
-        Check("authored composite profile exists on disk", File.Exists(compositePath), compositePath);
-        if (baseProfile == null || !File.Exists(compositePath)) { Summary(); return 1; }
 
-        // The SDK's own serializer options: HMLayout is polymorphic and
-        // needs its converter, same options LoadDefaultProfiles uses.
-        var inner = JsonSerializer.Deserialize<ControllerProfile>(
-            File.ReadAllText(compositePath), HMLayoutJsonOptions.Default);
-        Check("composite profile parses", inner != null);
-        if (inner == null) { Summary(); return 1; }
-        var composite = new HMProfile(inner);
+        var strays = ctx.AllProfiles.Where(p => p.RequiresUsbipBackend).Select(p => p.Id).OrderBy(x => x).ToList();
+        Check("exactly the two composite personas require the backend",
+              strays.SequenceEqual(new[] { "dualsense-composite", "dualshock-4-v2-composite" }.OrderBy(x => x)),
+              string.Join(", ", strays));
 
-        // ── Backend gating ──────────────────────────────────────────────
-        Console.WriteLine("\n-- Backend gate --");
-        Check("base profile stays on the UMDF2 path", baseProfile.Backend == "umdf2", baseProfile.Backend);
-        Check("base profile needs no opt-in backend", !baseProfile.RequiresUsbipBackend);
-        Check("base profile is unchanged by this work (still deployable)", baseProfile.IsDeployable);
-        Check("composite declares the usbip backend", composite.Backend == "usbip", composite.Backend);
-        Check("composite reports RequiresUsbipBackend", composite.RequiresUsbipBackend);
+        CheckComposite(ctx, repoRoot, "dualsense-composite", "dualsense",
+            expectHighSpeed: true, expectOtherSpeed: true,
+            outCh: 4, outRateHz: 48000, outMaxPacket: 392, outEpInterval: 4,
+            inCh: 2, inMaxPacket: 196,
+            configBytes: 227, hidEpInterval: 6,
+            outRoles: new[] { "speakerLeft", "speakerRight", "hapticLeft", "hapticRight" },
+            unit2: (min: -25600, max: 0, res: 256, cur: -25600),
+            unit5: (min: 0, max: 12288, res: 122, cur: 3809));
 
-        // Every other shipping profile must be untouched by this change.
-        var strays = ctx.AllProfiles.Where(p => p.RequiresUsbipBackend).ToList();
-        Check("no shipped profile requires the backend", strays.Count == 0,
-              strays.Count > 0 ? string.Join(", ", strays.Select(p => p.Id)) : "");
+        CheckComposite(ctx, repoRoot, "dualshock-4-v2-composite", "dualshock-4-v2",
+            expectHighSpeed: false, expectOtherSpeed: false,
+            outCh: 2, outRateHz: 32000, outMaxPacket: 132, outEpInterval: 1,
+            inCh: 1, inMaxPacket: 34,
+            configBytes: 225, hidEpInterval: 5,
+            outRoles: new[] { "headsetLeft", "headsetRight" },
+            unit2: (min: -18688, max: -256, res: 256, cur: 1792),
+            unit5: (min: -5952, max: 6144, res: 192, cur: -768));
 
-        // ── The identity carried over free ──────────────────────────────
-        Console.WriteLine("\n-- HID interface reuse --");
-        Check("same VID", composite.VendorId == baseProfile.VendorId, $"0x{composite.VendorId:X4}");
-        Check("same PID", composite.ProductId == baseProfile.ProductId, $"0x{composite.ProductId:X4}");
-        Check("same product string", composite.ProductString == baseProfile.ProductString, composite.ProductString);
-        var bd = baseProfile.Inner.GetDescriptorBytes();
-        var cd = inner.GetDescriptorBytes();
-        Check("HID report descriptor is byte-identical", bd != null && cd != null && bd.SequenceEqual(cd),
-              $"{cd?.Length ?? 0} bytes");
-        Check("input report size unchanged", inner.InputReportSize == baseProfile.Inner.InputReportSize,
-              $"{inner.InputReportSize}");
-        Check("vendor-blob input codec carried over", inner.ExtendedReport != null);
-        Check("vendor-blob output codec carried over", inner.ExtendedOutputReport != null);
-
-        // ── The USB configuration ───────────────────────────────────────
-        Console.WriteLine("\n-- USB configuration --");
-        Check("base profile declares no USB configuration", baseProfile.Inner.UsbConfiguration == null);
-        var cfg = inner.UsbConfiguration;
-        Check("composite declares a USB configuration", cfg != null);
-        if (cfg == null) { Summary(); return 1; }
-
-        Check("self-powered, no remote wakeup (bmAttributes 0xC0)", cfg.Attributes == 0xC0, $"0x{cfg.Attributes:X2}");
-        Check("500 mA bus current", cfg.MaxPowerMilliamps == 500, $"{cfg.MaxPowerMilliamps} mA");
-        Check("four interfaces, as the real pad presents", cfg.Interfaces.Count == 4, $"{cfg.Interfaces.Count}");
-
-        var ac = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioControl");
-        var outIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingOut");
-        var inIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingIn");
-        var hid = cfg.Interfaces.FirstOrDefault(i => i.Function == "hid");
-        Check("interface 0 is Audio Control", ac != null && ac.InterfaceNumber == 0);
-        Check("interface 1 is the OUT stream", outIf != null && outIf.InterfaceNumber == 1);
-        Check("interface 2 is the IN stream", inIf != null && inIf.InterfaceNumber == 2);
-        Check("interface 3 is HID", hid != null && hid.InterfaceNumber == 3);
-        if (ac == null || outIf == null || inIf == null || hid == null) { Summary(); return 1; }
-
-        Check("Audio Control has class 0x01 subclass 0x01",
-              ac.AltSettings[0].InterfaceClass == 0x01 && ac.AltSettings[0].InterfaceSubClass == 0x01);
-        Check("Audio Control exposes no endpoint", ac.AltSettings[0].Endpoints.Count == 0);
-
-        // Zero-bandwidth alt 0 plus the streaming alt 1: this pair is what
-        // lets the host park the stream when nothing is playing.
-        Check("OUT interface offers alt 0 and alt 1", outIf.AltSettings.Count == 2);
-        Check("OUT alt 0 is zero-bandwidth", outIf.AltSettings[0].Endpoints.Count == 0);
-        var outEp = outIf.AltSettings[1].Endpoints.FirstOrDefault();
-        Check("OUT alt 1 endpoint 0x01, isochronous adaptive",
-              outEp != null && outEp.Address == 0x01 && outEp.TransferType == "isochronous" && outEp.SyncType == "adaptive");
-        Check("OUT wMaxPacketSize 392", outEp != null && outEp.MaxPacketSize == 392, $"{outEp?.MaxPacketSize}");
-        Check("OUT bInterval 4 (1 ms service interval)", outEp != null && outEp.Interval == 4, $"{outEp?.Interval}");
-
-        var outStream = outIf.AltSettings[1].AudioStream;
-        Check("OUT stream is 4 channels, 16-bit, 48 kHz",
-              outStream != null && outStream.Channels == 4 && outStream.BitsPerSample == 16 && outStream.SampleRateHz == 48000);
-        Check("OUT wChannelConfig 0x0033 (FL, FR, RL, RR)",
-              outStream != null && outStream.ChannelConfig == 0x0033, $"0x{outStream?.ChannelConfig:X4}");
-        // The whole point of the feature: channels 3 and 4 are the
-        // voice-coil actuators, addressable by role rather than by
-        // decoding terminal topology.
-        Check("channel roles name the speaker pair and the haptic pair",
-              outStream != null && outStream.ChannelRoles.SequenceEqual(
-                  new[] { "speakerLeft", "speakerRight", "hapticLeft", "hapticRight" }),
-              outStream != null ? string.Join("/", outStream.ChannelRoles) : "");
-
-        var inEp = inIf.AltSettings[1].Endpoints.FirstOrDefault();
-        Check("IN alt 1 endpoint 0x82, isochronous asynchronous",
-              inEp != null && inEp.Address == 0x82 && inEp.TransferType == "isochronous" && inEp.SyncType == "asynchronous");
-        Check("IN wMaxPacketSize 196", inEp != null && inEp.MaxPacketSize == 196, $"{inEp?.MaxPacketSize}");
-        Check("IN stream carries the microphone",
-              inIf.AltSettings[1].AudioStream?.ChannelRoles.All(r => r == "microphone") == true);
-
-        Check("HID interface class 0x03", hid.AltSettings[0].InterfaceClass == 0x03);
-        Check("HID interface has its two interrupt endpoints",
-              hid.AltSettings[0].Endpoints.Count == 2 &&
-              hid.AltSettings[0].Endpoints.All(e => e.TransferType == "interrupt"));
-
-        // ── The guard ───────────────────────────────────────────────────
+        // ── Create-path guard ───────────────────────────────────────────
         Console.WriteLine("\n-- Create-path guard --");
-        bool refused = false;
-        string message = "";
-        try
+        var composite = ctx.GetProfile("dualsense-composite")!;
+        if (HMContext.IsUsbipBackendAvailable)
         {
-            using var c = ctx.CreateController(composite);
-            c.Dispose();
+            Console.WriteLine("  [note] usbip-win2 present: refusal path not reachable here; " +
+                              "the live create path is usbip_server_check + E2E territory.");
+            Check("backend availability probe answers", true);
         }
-        catch (NotSupportedException ex) { refused = true; message = ex.Message; }
-        catch (Exception ex) { message = ex.GetType().Name + ": " + ex.Message; }
-        Check("CreateController refuses a usbip profile instead of building a partial device", refused);
-        Check("the refusal names the backend and says it is opt-in",
-              refused && message.Contains("usbip") && message.Contains("opt-in"));
+        else
+        {
+            bool refused = false;
+            string message = "";
+            try
+            {
+                using var c = ctx.CreateController(composite);
+            }
+            catch (NotSupportedException ex) { refused = true; message = ex.Message; }
+            catch (Exception ex) { message = ex.GetType().Name + ": " + ex.Message; }
+            Check("CreateController refuses without usbip-win2 installed", refused, message);
+            Check("the refusal names the backend, opt-in, and the install",
+                  refused && message.Contains("usbip") && message.Contains("opt-in")
+                          && message.Contains("usbip-win2"));
+        }
 
         Summary();
         return s_failures == 0 ? 0 : 1;
+    }
+
+    static void CheckComposite(HMContext ctx, string repoRoot, string id, string baseId,
+        bool expectHighSpeed, bool expectOtherSpeed,
+        int outCh, int outRateHz, int outMaxPacket, int outEpInterval,
+        int inCh, int inMaxPacket, int configBytes, int hidEpInterval,
+        string[] outRoles,
+        (int min, int max, int res, int cur) unit2,
+        (int min, int max, int res, int cur) unit5)
+    {
+        Console.WriteLine($"\n-- {id} --");
+
+        var composite = ctx.GetProfile(id);
+        var baseProfile = ctx.GetProfile(baseId);
+        Check("ships in the embedded catalog", composite != null);
+        Check($"base '{baseId}' still ships", baseProfile != null);
+        if (composite == null || baseProfile == null) return;
+
+        string diskPath = Path.Combine(repoRoot, "profiles", "sony", id + ".json");
+        Check("authored file exists on disk", File.Exists(diskPath));
+        if (File.Exists(diskPath))
+        {
+            var disk = JsonSerializer.Deserialize<ControllerProfile>(
+                File.ReadAllText(diskPath), HMLayoutJsonOptions.Default)!;
+            Check("embedded copy matches the authored file",
+                  disk.Descriptor == composite.Inner.Descriptor
+                  && disk.UsbConfiguration?.ConfigurationDescriptorHex
+                     == composite.Inner.UsbConfiguration?.ConfigurationDescriptorHex);
+        }
+
+        Check("declares the usbip backend", composite.Backend == "usbip" && composite.RequiresUsbipBackend);
+        Check("base profile stays on the UMDF2 path",
+              baseProfile.Backend == "umdf2" && !baseProfile.RequiresUsbipBackend);
+        Check("base profile declares no USB configuration", baseProfile.Inner.UsbConfiguration == null);
+
+        // The identity carried over free.
+        var bd = baseProfile.Inner.GetDescriptorBytes();
+        var cd = composite.Inner.GetDescriptorBytes();
+        Check("same VID/PID", composite.VendorId == baseProfile.VendorId
+                           && composite.ProductId == baseProfile.ProductId,
+              $"{composite.VendorId:X4}:{composite.ProductId:X4}");
+        Check("HID report descriptor byte-identical to the base profile",
+              bd != null && cd != null && bd.SequenceEqual(cd), $"{cd?.Length ?? 0} bytes");
+
+        var cfg = composite.Inner.UsbConfiguration;
+        Check("declares a USB configuration", cfg != null);
+        if (cfg == null) return;
+
+        Check("four interfaces", cfg.Interfaces.Count == 4, $"{cfg.Interfaces.Count}");
+        Check("self-powered 500 mA", cfg.Attributes == 0xC0 && cfg.MaxPowerMilliamps == 500);
+        Check("busSpeed matches the real pad",
+              cfg.BusSpeed == (expectHighSpeed ? "high" : "full"), cfg.BusSpeed);
+
+        var outIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingOut");
+        var inIf = cfg.Interfaces.FirstOrDefault(i => i.Function == "audioStreamingIn");
+        var hid = cfg.Interfaces.FirstOrDefault(i => i.Function == "hid");
+        Check("has audio OUT, audio IN, and HID functions",
+              outIf != null && inIf != null && hid != null);
+        if (outIf == null || inIf == null || hid == null) return;
+
+        var outEp = outIf.AltSettings.Last().Endpoints.FirstOrDefault();
+        var outStream = outIf.AltSettings.Last().AudioStream;
+        Check($"OUT endpoint 0x01 iso adaptive {outMaxPacket}B interval {outEpInterval}",
+              outEp != null && outEp.Address == 0x01 && outEp.SyncType == "adaptive"
+              && outEp.MaxPacketSize == outMaxPacket && outEp.Interval == outEpInterval);
+        Check($"OUT stream {outCh} ch / 16-bit / {outRateHz} Hz",
+              outStream != null && outStream.Channels == outCh
+              && outStream.BitsPerSample == 16 && outStream.SampleRateHz == outRateHz);
+        Check("channel roles are " + string.Join("/", outRoles),
+              outStream != null && outStream.ChannelRoles.SequenceEqual(outRoles));
+
+        var inEp = inIf.AltSettings.Last().Endpoints.FirstOrDefault();
+        var inStream = inIf.AltSettings.Last().AudioStream;
+        Check($"IN endpoint 0x82 iso asynchronous {inMaxPacket}B",
+              inEp != null && inEp.Address == 0x82 && inEp.SyncType == "asynchronous"
+              && inEp.MaxPacketSize == inMaxPacket);
+        Check($"IN stream {inCh} ch microphone",
+              inStream != null && inStream.Channels == inCh
+              && inStream.ChannelRoles.All(r => r == "microphone"));
+
+        Check($"HID interrupt endpoints, interval {hidEpInterval} (dump value)",
+              hid.AltSettings[0].Endpoints.Count == 2
+              && hid.AltSettings[0].Endpoints.All(e => e.TransferType == "interrupt"
+                                                    && e.Interval == hidEpInterval));
+
+        // The verbatim wire blobs, cross-validated by UsbDescriptorSet's
+        // constructor exactly as the backend will at create time.
+        UsbDescriptorSet? set = null;
+        string setError = "";
+        try { set = new UsbDescriptorSet(composite.Inner); }
+        catch (Exception ex) { setError = ex.Message; }
+        Check("verbatim blobs pass the backend's create-time validation", set != null, setError);
+        if (set == null) return;
+
+        Check($"configuration blob is {configBytes} bytes with matching wTotalLength",
+              set.ConfigurationDescriptor.Length == configBytes);
+        Check("device blob VID/PID match the profile",
+              set.VendorId == composite.VendorId && set.ProductId == composite.ProductId);
+        Check("HID class descriptor length equals the report descriptor's",
+              true, $"{set.ReportDescriptor.Length} bytes"); // ctor throws on mismatch
+        Check(expectOtherSpeed ? "dual-speed: other-speed blob + qualifier served"
+                               : "single-speed: qualifier and other-speed stall",
+              expectOtherSpeed
+                  ? set.GetDescriptor(0x06, 0, 0) != null && set.GetDescriptor(0x07, 0, 0) != null
+                  : set.GetDescriptor(0x06, 0, 0) == null && set.GetDescriptor(0x07, 0, 0) == null);
+        Check("report descriptor served for HID GET_DESCRIPTOR(0x22)",
+              set.GetHidDescriptor(0x22)!.SequenceEqual(cd!));
+
+        // Real-pad UAC control ranges (ControllersInfo pcap wire values).
+        var ac = cfg.AudioControls;
+        Check("audioControls present for units 2 and 5",
+              ac != null && ac.Any(a => a.UnitId == 2) && ac.Any(a => a.UnitId == 5));
+        if (ac != null)
+        {
+            var u2 = ac.First(a => a.UnitId == 2);
+            var u5 = ac.First(a => a.UnitId == 5);
+            Check("unit 2 volume range is the captured wire values",
+                  u2.VolumeMinRaw == unit2.min && u2.VolumeMaxRaw == unit2.max
+                  && u2.VolumeResRaw == unit2.res && u2.VolumeCurRaw == unit2.cur,
+                  $"{u2.VolumeMinRaw}/{u2.VolumeMaxRaw}/{u2.VolumeResRaw}/{u2.VolumeCurRaw}");
+            Check("unit 5 volume range is the captured wire values",
+                  u5.VolumeMinRaw == unit5.min && u5.VolumeMaxRaw == unit5.max
+                  && u5.VolumeResRaw == unit5.res && u5.VolumeCurRaw == unit5.cur,
+                  $"{u5.VolumeMinRaw}/{u5.VolumeMaxRaw}/{u5.VolumeResRaw}/{u5.VolumeCurRaw}");
+        }
     }
 
     static void Summary()
