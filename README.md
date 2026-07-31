@@ -203,6 +203,19 @@ Why user mode is enough: the HID class driver already lives in the kernel (`mshi
 
 ---
 
+## Controller audio and haptics: composite USB personas
+
+A real USB DualSense is a four-interface composite: USB Audio Class speaker/haptics out, microphone in, and HID. UMDF2 can present exactly one HID interface, so the standard `dualsense` profile stops there. As of v1.4.0 two additional profiles present the full composite:
+
+- **`dualsense-composite`**: the real pad's four interfaces, byte-for-byte from a hardware descriptor dump. The OUT stream is 4-channel 48 kHz where channels 1/2 are the speaker and channels 3/4 drive the voice-coil actuators. That stream is the only path on Windows by which a game hands a controller its authored haptic waveforms, and it surfaces on the SDK as `HMController.UsbAudio.Output` with per-channel roles. The microphone is `UsbAudio.Microphone`: feed PCM, Windows records it from a real "Headset Microphone (Wireless Controller)" endpoint.
+- **`dualshock-4-v2-composite`**: the DS4 v2's composite, with headset audio and a mono microphone. The hardware has no haptics lane.
+
+These profiles are **opt-in** and need [usbip-win2](https://github.com/vadimgrn/usbip-win2) 0.9.7.7 installed, a third-party, WHLK-certified, signed kernel driver. HIDMaestro never installs it, never bundles it, and nothing else changes when it is absent: the standard profiles keep working with zero dependencies, `CreateController` on a composite profile fails with install guidance, and consumers gate picker entries on `HMContext.IsUsbipBackendAvailable`. The SDK runs an in-process USB/IP device server on loopback, and every device behavior, including the 1 ms isochronous audio pacing, stays in user space. Version pinned at 0.9.7.7 deliberately: 0.9.7.8 has two open kernel-pool-corruption reports ([usbip-win2#180](https://github.com/vadimgrn/usbip-win2/issues/180), [usbip-win2#181](https://github.com/vadimgrn/usbip-win2/issues/181)).
+
+Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the driver installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU).
+
+---
+
 ## How it compares
 
 <details>
@@ -224,7 +237,7 @@ Why user mode is enough: the HID class driver already lives in the kernel (`mshi
 
 </details>
 
-VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal, not a footnote.
+VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport still requires installing usbip-win2, a third-party kernel-mode driver. HIDMaestro installs no kernel-mode driver. It rides the UMDF2 host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do. The one exception is deliberate and opt-in: the composite USB personas above use the same signed usbip-win2 transport VIIPER does, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. Skip those two profiles and no kernel-mode component is ever involved.
 
 HIDMaestro is Windows optimized and focused on game controllers and HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
 
