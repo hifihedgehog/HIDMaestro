@@ -65,6 +65,18 @@ public sealed class HMProfile
     /// "separate" (independent LT/RT), or null (non-gamepad).</summary>
     public string? TriggerMode => Inner.TriggerMode;
 
+    /// <summary>Which instantiation path this profile needs: "umdf2" for
+    /// every profile that ships today, or "usbip" for a composite USB
+    /// persona that needs the opt-in backend (issue #39).</summary>
+    public string Backend => Inner.Backend ?? "umdf2";
+
+    /// <summary>True when this profile needs the opt-in USB/IP backend,
+    /// which is never installed by default. A consumer that lists
+    /// profiles in a picker gates such entries on this plus its own check
+    /// that the backend is present, so a user without it sees no entry
+    /// they cannot create (issue #39).</summary>
+    public bool RequiresUsbipBackend => Inner.RequiresUsbipBackend;
+
     // ── HID descriptor ───────────────────────────────────────────────────
 
     /// <summary>True if this profile has a HID descriptor and can be deployed

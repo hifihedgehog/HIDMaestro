@@ -3,7 +3,16 @@
   "title": "HIDMaestro Controller Profile",
   "description": "Defines the identity and HID characteristics of a game controller for virtual device emulation.",
   "type": "object",
-  "required": ["id", "name", "vendor", "vid", "pid", "productString", "type", "connection"],
+  "required": [
+    "id",
+    "name",
+    "vendor",
+    "vid",
+    "pid",
+    "productString",
+    "type",
+    "connection"
+  ],
   "properties": {
     "id": {
       "type": "string",
@@ -30,88 +39,172 @@
       "description": "String returned by IOCTL_HID_GET_STRING (iProduct). This is what joy.cpl and games see."
     },
     "manufacturerString": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "String returned for manufacturer query (iManufacturer). Null if unknown."
     },
     "type": {
       "type": "string",
-      "enum": ["gamepad", "wheel", "joystick", "flightstick", "hotas", "arcadestick", "pedals", "other"],
+      "enum": [
+        "gamepad",
+        "wheel",
+        "joystick",
+        "flightstick",
+        "hotas",
+        "arcadestick",
+        "pedals",
+        "other"
+      ],
       "description": "Controller category"
     },
     "connection": {
       "type": "string",
-      "enum": ["usb", "bluetooth", "wireless-adapter"],
+      "enum": [
+        "usb",
+        "bluetooth",
+        "wireless-adapter"
+      ],
       "description": "Connection type this profile represents"
     },
     "descriptor": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "HID report descriptor as a hex string (e.g. '05010905A101...'). Null if not yet captured."
     },
     "inputReportSize": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Size of the input report in bytes (excluding report ID). Null if unknown."
     },
     "deviceDescription": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Device Manager display name (from vendor INF or Windows HID class). Null means use productString. This is what FriendlyName gets set to on the device node."
     },
     "notes": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Implementation notes, caveats, or special behavior."
     },
     "nativeDescriptor": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Record-keeping only: the original captured descriptor hex, preserved verbatim when the shipped 'descriptor' was edited. Not deserialized by the loader."
     },
     "layout": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Physical layout for consumer mapping/binding UIs: sticks, triggers, dpad, faceButtons, shoulderButtons, systemButtons, imu, haptics, etc. Bound to HMLayout (camelCase keys, case-insensitive)."
     },
     "buttonMap": {
-      "type": ["array", "null"],
-      "items": { "type": "integer" },
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "integer"
+      },
       "description": "Maps declared descriptor button indices to canonical button positions."
     },
     "triggerButtons": {
-      "type": ["array", "null"],
-      "items": { "type": "integer" },
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "integer"
+      },
       "description": "Button indices that represent digital trigger clicks (LT/RT as buttons)."
     },
     "axisMap": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles."
     },
     "triggerMode": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Descriptor trigger encoding hint (e.g. 'combined', 'separate'). Describes wire encoding, not DirectInput presentation."
     },
     "driverMode": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Special driver binding, e.g. 'xinputhid' for Xbox-family kernel-filter profiles."
     },
     "driverPid": {
-      "type": ["string", "integer", "null"],
+      "type": [
+        "string",
+        "integer",
+        "null"
+      ],
       "description": "Override PID reported to the driver/companion when it must differ from the HID-attribute PID."
     },
     "versionNumber": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "HidD_GetAttributes VersionNumber override. Sony DS4 BT ships 0 so Chromium selects the BT report layout."
     },
     "inputDefaults": {
-      "type": ["array", "null"],
+      "type": [
+        "array",
+        "null"
+      ],
       "description": "Fixed on-wire byte overlays applied after report build (e.g. DS5 Edge activeProfile status byte). Each entry is { byte, value }."
     },
     "extendedReport": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11): { reportId, size, armOn, fields[] }. Drives VendorBlobCodec.EncodeInput."
     },
     "extendedOutputReport": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Data-driven vendor-blob OUTPUT spec (rumble/lightbar/triggers): { reportId, size, fields[] }. Drives VendorBlobCodec.EncodeOutput/Decode."
     },
     "companionOnly": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "description": "If true, this profile creates only the XUSB companion, no HID child. No shipped profile currently sets it."
+    },
+    "backend": {
+      "type": "string",
+      "enum": [
+        "umdf2",
+        "usbip"
+      ],
+      "description": "Issue #39: which instantiation path creates this device. Absent or 'umdf2' is the default UMDF2 HID path every shipping profile uses. 'usbip' marks a composite USB persona that needs the opt-in USB/IP backend; CreateController refuses such profiles when the backend is absent. A property of the device, never a mode toggle on an existing profile."
+    },
+    "usbConfiguration": {
+      "type": "object",
+      "description": "Issue #39: the USB configuration a composite persona presents (interfaces with alternate settings, isochronous endpoints, audio stream formats and channel roles). Only valid with backend 'usbip'. Shaped after the standard descriptor set so it can be authored from a real device's descriptor dump; see sdk/HIDMaestro.Core/Internal/UsbConfigurationSpec.cs for the field-level contract and profiles/sony/dualsense-composite.json for the authored example."
     }
   }
 }

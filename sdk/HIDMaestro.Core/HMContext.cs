@@ -311,6 +311,15 @@ public sealed class HMContext : IDisposable
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
+        // Issue #39: a composite USB persona needs the opt-in USB/IP
+        // backend. Instantiating it here would create the single HID
+        // interface UMDF2 can make and silently drop the three USB Audio
+        // Class interfaces the profile promises, which is the fidelity
+        // gap the profile exists to close. Fail loudly instead.
+        if (profile.RequiresUsbipBackend)
+            throw new NotSupportedException(
+                $"Profile '{profile.Id}' declares backend '{profile.Backend}' and needs the USB/IP backend, " +
+                "which is opt-in and not installed. Use the UMDF2 profile for this device, or install the backend.");
         ThrowIfDisposed();
 
         // Allocate the next free controller index. Linear scan from 0 — no
@@ -360,6 +369,15 @@ public sealed class HMContext : IDisposable
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
+        // Issue #39: a composite USB persona needs the opt-in USB/IP
+        // backend. Instantiating it here would create the single HID
+        // interface UMDF2 can make and silently drop the three USB Audio
+        // Class interfaces the profile promises, which is the fidelity
+        // gap the profile exists to close. Fail loudly instead.
+        if (profile.RequiresUsbipBackend)
+            throw new NotSupportedException(
+                $"Profile '{profile.Id}' declares backend '{profile.Backend}' and needs the USB/IP backend, " +
+                "which is opt-in and not installed. Use the UMDF2 profile for this device, or install the backend.");
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
         ThrowIfDisposed();
 

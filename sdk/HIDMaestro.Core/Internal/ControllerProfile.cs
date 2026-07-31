@@ -152,6 +152,37 @@ public sealed class ControllerProfile
     [JsonPropertyName("extendedOutputReport")]
     public ExtendedReportSpec? ExtendedOutputReport { get; set; }
 
+    /// <summary>Issue #39. Which instantiation path creates this device.
+    /// Absent or <c>"umdf2"</c> is the default and the only path that
+    /// exists today: one HID device via the UMDF2 driver, no dependency
+    /// on anything else. <c>"usbip"</c> marks a composite USB persona
+    /// that needs the opt-in USB/IP backend, which is never installed by
+    /// default (owner ruling, 2026-07-30).
+    ///
+    /// <para>This is a property of the DEVICE the profile describes, not
+    /// a mode switch on an existing one. A profile that presented four
+    /// interfaces on machines with the backend and one without would
+    /// name a device plus a machine state. Composite personas therefore
+    /// ship as separate profiles, and the five existing USB Sony
+    /// profiles are untouched.</para></summary>
+    [JsonPropertyName("backend")]
+    public string? Backend { get; set; }
+
+    /// <summary>Issue #39. The USB configuration this profile presents
+    /// when <see cref="Backend"/> is <c>"usbip"</c>. Null for every
+    /// UMDF2 profile, where Windows composes the configuration itself
+    /// and only the HID report descriptor is ours to author.</summary>
+    [JsonPropertyName("usbConfiguration")]
+    public UsbConfigurationSpec? UsbConfiguration { get; set; }
+
+    /// <summary>True when this profile needs the opt-in USB/IP backend.
+    /// Consumers gate their picker entries on this plus backend
+    /// availability, rather than threading a mode concept through the
+    /// SDK.</summary>
+    [JsonIgnore]
+    public bool RequiresUsbipBackend =>
+        Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
+
     /// <summary>
     /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
     /// Combined: Z centers at 50%, LT pulls toward 0%, RT pulls toward 100%.

@@ -19,6 +19,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SwitchProCheck")]
 [assembly: InternalsVisibleTo("SwitchDescriptorIdleCheck")]
 [assembly: InternalsVisibleTo("StopEventResilienceCheck")]
+[assembly: InternalsVisibleTo("UsbCompositeSchemaCheck")]
 [assembly: InternalsVisibleTo("switch_writer_tap")]
 [assembly: InternalsVisibleTo("SonyFeatureGateCheck")]
 [assembly: InternalsVisibleTo("OutputPerfBench")]
