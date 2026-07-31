@@ -139,7 +139,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 41-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, and the Sony vendor-blob encode/decode, verifying no PnP devnodes are left behind. 41/41 PASS on both a 16-core AMD Ryzen 9 Windows 11 desktop and a 4-core Intel Atom Z8350 Windows 10 fixture, the high and low ends of the performance and OS spectrum.
+A 45-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, and the composite USB personas end to end through the real USB stack, verifying no PnP devnodes are left behind. 45/45 PASS on both a 16-core AMD Ryzen 9 Windows 11 desktop and a 4-core Intel Atom Z8350 Windows 10 fixture, the high and low ends of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
@@ -223,7 +223,7 @@ That is the whole setup. Composite personas create like any other profile, becau
 
 Every device behavior stays in HIDMaestro's own user-mode code: the SDK runs an in-process USB/IP device server on loopback, including the 1 ms isochronous audio pacing. The version pin is deliberate, since 0.9.7.8 has two open kernel-pool-corruption reports ([usbip-win2#180](https://github.com/vadimgrn/usbip-win2/issues/180), [usbip-win2#181](https://github.com/vadimgrn/usbip-win2/issues/181)).
 
-Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the transport installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU).
+Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the transport installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU). The composite path runs as scenario S45 of the battery, so a broken persona fails the release gate like anything else.
 
 ---
 
