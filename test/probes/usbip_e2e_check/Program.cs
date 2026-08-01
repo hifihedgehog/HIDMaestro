@@ -27,6 +27,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 using HIDMaestro;
@@ -223,6 +224,20 @@ internal static class Program
                   viaInterrupt != null && viaInterrupt[0] == 0x01 && viaInterrupt[1] == 255,
                   viaInterrupt != null ? $"rid={viaInterrupt[0]:X2} lsx={viaInterrupt[1]}" : "read failed");
 
+            // ── Owner identifier in the ancestry (issue #42) ────────────
+            // The persona itself stays byte-for-byte Sony, so a consumer
+            // recognises its own virtual pad by walking up to the node
+            // HIDMaestro owns. This is the walk PadForge's SDL fork does
+            // (hid_internal_is_hidmaestro_device); without the token it
+            // finds nothing, enumerates the persona as a second gamepad,
+            // and SDL lights a lone pad red as player 2.
+            Console.WriteLine("\n-- Owner identifier in ancestry (issue #42) --");
+            int depth = hidPath != null ? HidMaestroAncestorDepth(hidPath) : -1;
+            Check("HIDMAESTRO token reachable from the persona's HID interface",
+                  depth >= 0, depth >= 0 ? $"found at depth {depth}" : "not found in ancestry");
+            Check("token sits within a practical walk limit (<= 6)",
+                  depth >= 0 && depth <= 6, $"depth {depth}");
+
             // ── HID output + feature ────────────────────────────────────
             Console.WriteLine("\n-- HID output + feature --");
             if (hidPath != null)
@@ -391,12 +406,80 @@ internal static class Program
         return null;
     }
 
+    /// <summary>Depth at which a HIDMAESTRO token appears walking up from
+    /// the given device interface, or -1 if it never does. Depth 0 is the
+    /// interface's own devnode. Mirrors what a consumer's filter does:
+    /// read DEVPKEY_Device_HardwareIds at each level and substring-match.</summary>
+    static int HidMaestroAncestorDepth(string interfacePath, int maxDepth = 8)
+    {
+        uint type = 0, len = 0;
+        CM_Get_Device_Interface_PropertyW(interfacePath, ref DEVPKEY_Device_InstanceId, ref type, null, ref len, 0);
+        if (len == 0) return -1;
+        var buf = new byte[len];
+        if (CM_Get_Device_Interface_PropertyW(interfacePath, ref DEVPKEY_Device_InstanceId, ref type, buf, ref len, 0) != 0)
+            return -1;
+        string instanceId = Encoding.Unicode.GetString(buf, 0, (int)len).TrimEnd('\0');
+
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return -1;
+
+        for (int d = 0; d <= maxDepth; d++)
+        {
+            uint t = 0, l = 0;
+            CM_Get_DevNode_Registry_PropertyW(devInst, CM_DRP_HARDWAREID, ref t, null, ref l, 0);
+            if (l > 0)
+            {
+                var hb = new byte[l];
+                if (CM_Get_DevNode_Registry_PropertyW(devInst, CM_DRP_HARDWAREID, ref t, hb, ref l, 0) == 0)
+                {
+                    string ids = Encoding.Unicode.GetString(hb, 0, (int)l);
+                    if (ids.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0) return d;
+                }
+            }
+            if (CM_Get_Parent(out uint parent, devInst, 0) != 0) return -1;
+            devInst = parent;
+        }
+        return -1;
+    }
+
+    private const uint CM_DRP_HARDWAREID = 0x00000002; // cfgmgr32.h numbering, not setupapi's
+    private const uint FILE_MAP_READ = 0x0004;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenFileMappingW(uint dwDesiredAccess, bool bInheritHandle, string lpName);
+
+    // DEVPKEY_Device_InstanceId {78c34fc8-104a-4aca-9ea4-524d52996e57} pid 256
+    static DEVPROPKEY DEVPKEY_Device_InstanceId = new()
+    {
+        fmtid = new Guid("78c34fc8-104a-4aca-9ea4-524d52996e57"),
+        pid = 256,
+    };
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_Interface_PropertyW(string pszDeviceInterface,
+        ref DEVPROPKEY PropertyKey, ref uint PropertyType, byte[]? PropertyBuffer,
+        ref uint PropertyBufferSize, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_DevNode_Registry_PropertyW(uint dnDevInst, uint ulProperty,
+        ref uint pulRegDataType, byte[]? Buffer, ref uint pulLength, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
     /// <summary>Name of another running process that has the SDK loaded, or
     /// null when this probe has the sections to itself. Matching on the
     /// loaded module rather than a process-name list catches any consumer,
     /// not just the ones we thought to enumerate.</summary>
     static string? FindLiveSdkConsumer()
     {
+        // Signal 1: a process with the SDK loaded. Misses a consumer that
+        // has not touched the DLL yet, which is why signal 2 exists.
         int self = Environment.ProcessId;
         foreach (var p in System.Diagnostics.Process.GetProcesses())
         {
@@ -409,8 +492,27 @@ internal static class Program
                         return p.ProcessName;
                 }
             }
-            catch { /* protected or exited between enumeration and open */ }
+            catch { /* protected, wrong bitness, or exited mid-enumeration */ }
             finally { p.Dispose(); }
+        }
+
+        // Signal 2: the contended resource itself. The named input sections
+        // are what a second consumer's controllers write through, so their
+        // existence is the condition that actually breaks this probe. Both
+        // proxies for it are unreliable: module enumeration is
+        // timing-dependent and can be refused outright, and looking for
+        // HIDMAESTRO devnodes cannot see a consumer running a COMPOSITE
+        // persona, which by design carries no such token anywhere (#42).
+        // Opening the section is exact, needs no permissions beyond what
+        // this probe already has, and creates nothing.
+        for (int i = 0; i < 16; i++)
+        {
+            IntPtr h = OpenFileMappingW(FILE_MAP_READ, false, $@"Global\HIDMaestroInput{i}");
+            if (h != IntPtr.Zero)
+            {
+                CloseHandle(h);
+                return $"another SDK consumer (Global\\HIDMaestroInput{i} is already mapped)";
+            }
         }
         return null;
     }

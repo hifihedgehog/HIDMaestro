@@ -185,6 +185,45 @@ internal static class Program
             }
         }
 
+        // ── Owner identifier on the host controller (issue #42) ─────────
+        // A composite persona is a real Sony pad at every level a filter
+        // can inspect, so the only place a host can recognise its own
+        // virtual device is the node HIDMaestro brings to the tree. Without
+        // this the persona enumerates as a second controller: on hardware
+        // that meant SDL assigning player index 1 and lighting a lone pad
+        // red. The token is additive, so upstream's id must stay first or
+        // driver matching moves.
+        Console.WriteLine("\n-- Owner identifier (issue #42) --");
+        if (!VhciClient.IsAvailable())
+        {
+            Console.WriteLine("  [note] transport not present; owner-identifier checks skipped.");
+        }
+        else
+        {
+            bool stamped = UsbipDriverInstaller.StampOwnerHardwareId();
+            Check("stamping the host controller succeeds", stamped);
+
+            string[] ids = ReadHardwareIds();
+            Check("upstream hardware id is still first (driver binding unchanged)",
+                  ids.Length > 0 && ids[0].Equals("ROOT\\USBIP_WIN2\\UDE", StringComparison.OrdinalIgnoreCase),
+                  ids.Length > 0 ? ids[0] : "none");
+            Check("HIDMAESTRO token present in the host controller's hardware ids",
+                  ids.Any(i => i.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0),
+                  string.Join(" | ", ids));
+
+            // A consumer substring-matches "HIDMAESTRO" exactly as it does
+            // for every UMDF2 virtual, so the token has to survive that
+            // test rather than merely exist.
+            Check("token matches the same substring test UMDF2 virtuals use",
+                  ids.Any(i => i.ToUpperInvariant().Contains("HIDMAESTRO")));
+
+            UsbipDriverInstaller.StampOwnerHardwareId();
+            string[] again = ReadHardwareIds();
+            Check("stamping twice does not duplicate the id",
+                  again.Count(i => i.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0) == 1,
+                  $"{again.Length} id(s)");
+        }
+
         Check("HMContext exposes an optional pre-install entry point",
               typeof(HMContext).GetMethod("InstallUsbipBackend") != null);
         Check("availability is a static informational probe, not a create gate",
@@ -195,6 +234,16 @@ internal static class Program
 
         Summary();
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>Hardware ids of the emulated host controller, read straight
+    /// from the enum key so the check is independent of the code that
+    /// wrote them.</summary>
+    static string[] ReadHardwareIds()
+    {
+        using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+            @"SYSTEM\CurrentControlSet\Enum\ROOT\USB\0000");
+        return k?.GetValue("HardwareID") as string[] ?? Array.Empty<string>();
     }
 
     static void Summary()

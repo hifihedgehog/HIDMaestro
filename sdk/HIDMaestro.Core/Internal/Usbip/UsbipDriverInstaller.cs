@@ -64,6 +64,7 @@ internal static class UsbipDriverInstaller
         if (IsInstalled)
         {
             s_verifiedThisProcess = true;
+            StampOwnerHardwareId();
             return true;
         }
 
@@ -109,6 +110,7 @@ internal static class UsbipDriverInstaller
             {
                 if (VhciClient.IsAvailable())
                 {
+                    StampOwnerHardwareId();
                     progress?.Invoke("USB audio transport ready.");
                     return true;
                 }
@@ -220,7 +222,136 @@ internal static class UsbipDriverInstaller
         return false;
     }
 
+    /// <summary>Additional hardware ID stamped onto the emulated host
+    /// controller so a composite persona's devnode ancestry names
+    /// HIDMaestro (issue #42).
+    ///
+    /// <para>A composite persona is byte-for-byte a real Sony pad at every
+    /// level a filter can inspect, which is required for the UAC class
+    /// driver to bind and must not change. That leaves a host with nothing
+    /// of its own to match on: the standard HIDMAESTRO token every UMDF2
+    /// virtual carries in its hardware IDs is absent from the whole chain,
+    /// so a consumer filtering its own virtual pads out of enumeration
+    /// picks the persona up as a second controller. On hardware that
+    /// showed up as SDL assigning player index 1 and lighting a lone pad
+    /// red.</para>
+    ///
+    /// <para>The token goes on the host controller, the one node
+    /// HIDMaestro brings to the tree, and never on the persona. It is
+    /// added to the existing hardware IDs rather than replacing them: the
+    /// upstream ROOT\USBIP_WIN2\UDE id stays first, so driver matching
+    /// resolves exactly as before and the write is additive.</para></summary>
+    private const string OwnerHardwareId = "ROOT\\HIDMAESTRO_UDE";
+
     private const string VhciInstanceId = "ROOT\\USB\\0000";
+
+    /// <summary>Append <see cref="OwnerHardwareId"/> to the host
+    /// controller's hardware IDs if it is not already there. Idempotent,
+    /// cheap enough to run on every composite create (one registry read,
+    /// and a write only on the first call per machine), and best-effort:
+    /// a machine where this cannot be written still creates controllers,
+    /// it just cannot be filtered by the token.</summary>
+    internal static bool StampOwnerHardwareId()
+    {
+        try
+        {
+            if (CM_Locate_DevNodeW(out uint devInst, VhciInstanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+                return false;
+
+            string[] ids = GetMultiSz(devInst, CM_DRP_HARDWAREID);
+            foreach (var id in ids)
+                if (string.Equals(id, OwnerHardwareId, StringComparison.OrdinalIgnoreCase))
+                    return true; // already stamped
+
+            // Upstream's id stays at index 0 so driver matching is unchanged.
+            var merged = new string[ids.Length + 1];
+            Array.Copy(ids, merged, ids.Length);
+            merged[ids.Length] = OwnerHardwareId;
+
+            // SetupDi, not CM_Set_DevNode_Registry_Property. The CfgMgr
+            // setter reports CR_SUCCESS on this devnode and the Enum key is
+            // left untouched, so the stamp silently does nothing. The
+            // SPDRP_HARDWAREID path below is what usbip-win2's own
+            // installer uses to write this exact property
+            // (userspace/devnode/main.cpp, install_devnode_and_driver).
+            byte[] buf = MultiSzToBytes(merged);
+            IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+            if (set == INVALID_HANDLE_VALUE) return false;
+            try
+            {
+                var data = new SP_DEVINFO_DATA { cbSize = Marshal.SizeOf<SP_DEVINFO_DATA>() };
+                if (!SetupDiOpenDeviceInfoW(set, VhciInstanceId, IntPtr.Zero, 0, ref data))
+                    return false;
+                if (!SetupDiSetDeviceRegistryPropertyW(set, ref data, SPDRP_HARDWAREID, buf, (uint)buf.Length))
+                    return false;
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
+
+            DeviceOrchestrator.LogDiag(
+                $"UsbipDriverInstaller: stamped {OwnerHardwareId} onto {VhciInstanceId} " +
+                $"(was {ids.Length} id(s)).");
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Read a REG_MULTI_SZ devnode property, or an empty array.</summary>
+    private static string[] GetMultiSz(uint devInst, uint prop)
+    {
+        uint len = 0, type = 0;
+        CM_Get_DevNode_Registry_PropertyW(devInst, prop, ref type, null, ref len, 0);
+        if (len == 0) return Array.Empty<string>();
+        var buf = new byte[len];
+        if (CM_Get_DevNode_Registry_PropertyW(devInst, prop, ref type, buf, ref len, 0) != CR_SUCCESS)
+            return Array.Empty<string>();
+        return System.Text.Encoding.Unicode.GetString(buf, 0, (int)len)
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    private static byte[] MultiSzToBytes(string[] values)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var v in values) { sb.Append(v); sb.Append('\0'); }
+        sb.Append('\0'); // REG_MULTI_SZ terminator
+        return System.Text.Encoding.Unicode.GetBytes(sb.ToString());
+    }
+
+    // cfgmgr32.h and setupapi.h number these DIFFERENTLY, and the two
+    // sets are one apart on exactly this property: CM_DRP_DEVICEDESC is
+    // 1 and CM_DRP_HARDWAREID is 2, while SPDRP_DEVICEDESC is 0 and
+    // SPDRP_HARDWAREID is 1. Reading with the SetupDi number returns the
+    // device description, which then gets written back as the hardware
+    // id and unbinds the driver.
+    private const uint CM_DRP_HARDWAREID = 0x00000002; // cfgmgr32.h
+    private const uint SPDRP_HARDWAREID = 0x00000001;  // setupapi.h
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SP_DEVINFO_DATA
+    {
+        public int cbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    private static extern int CM_Get_DevNode_Registry_PropertyW(uint dnDevInst, uint ulProperty,
+        ref uint pulRegDataType, byte[]? Buffer, ref uint pulLength, uint ulFlags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
+        IntPtr hwndParent, uint Flags, ref SP_DEVINFO_DATA DeviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet,
+        ref SP_DEVINFO_DATA DeviceInfoData, uint Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
     private const uint CM_LOCATE_DEVNODE_NORMAL = 0;
     private const uint CM_SETUP_DEVNODE_READY = 0;
