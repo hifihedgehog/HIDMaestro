@@ -49,6 +49,21 @@ internal static class Program
     {
         Console.WriteLine("=== USB/IP backend end-to-end (issue #39) ===");
 
+        // Another live SDK consumer shares the same named sections, so its
+        // controllers write neutral frames over the ones this probe submits.
+        // The symptom is not obviously environmental: GET_REPORT and the
+        // interrupt endpoint return a centred stick (lsx=128) while every
+        // other check passes, which reads exactly like an input regression.
+        // Skip instead, and name the process, rather than reporting a
+        // failure the code cannot cause.
+        string? conflict = FindLiveSdkConsumer();
+        if (conflict != null)
+        {
+            Console.WriteLine($"SKIP: {conflict} is running and shares the SDK's memory sections. " +
+                              "Close it and re-run: its controllers overwrite the frames this probe submits.");
+            return 2;
+        }
+
         // The transport is bundled and self-deploying, so an absent
         // driver is not a skip: it is the first-run path this probe most
         // wants to exercise. CreateController below installs it.
@@ -376,6 +391,30 @@ internal static class Program
         return null;
     }
 
+    /// <summary>Name of another running process that has the SDK loaded, or
+    /// null when this probe has the sections to itself. Matching on the
+    /// loaded module rather than a process-name list catches any consumer,
+    /// not just the ones we thought to enumerate.</summary>
+    static string? FindLiveSdkConsumer()
+    {
+        int self = Environment.ProcessId;
+        foreach (var p in System.Diagnostics.Process.GetProcesses())
+        {
+            if (p.Id == self) continue;
+            try
+            {
+                foreach (System.Diagnostics.ProcessModule m in p.Modules)
+                {
+                    if (string.Equals(m.ModuleName, "HIDMaestro.Core.dll", StringComparison.OrdinalIgnoreCase))
+                        return p.ProcessName;
+                }
+            }
+            catch { /* protected or exited between enumeration and open */ }
+            finally { p.Dispose(); }
+        }
+        return null;
+    }
+
     static byte[]? ReadOneInterruptReport(string path, int reportLen, HMController c, in HMGamepadState state)
     {
         IntPtr fh = OpenPath(path);
@@ -407,8 +446,24 @@ internal static class Program
             pump.Start();
             try
             {
-                bool ok = ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero);
-                return ok && read > 0 ? buf : null;
+                // Read until the submitted state shows up rather than
+                // asserting on the first report. The interrupt endpoint is a
+                // stream: a report captured before SubmitState can already be
+                // queued in the HID stack, so the first ReadFile legitimately
+                // returns the previous neutral frame (lsx=128) and the check
+                // fails intermittently on timing alone. A real consumer reads
+                // until it sees the state it expects, which is what this does,
+                // bounded so a genuinely dead endpoint still fails fast.
+                byte[]? last = null;
+                var deadline = DateTime.UtcNow.AddSeconds(3);
+                while (DateTime.UtcNow < deadline)
+                {
+                    if (!ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero) || read <= 0)
+                        break;
+                    last = (byte[])buf.Clone();
+                    if (last[0] == 0x01 && last[1] == 255) return last;
+                }
+                return last; // never matched: hand back the last frame seen so the failure names it
             }
             finally
             {
