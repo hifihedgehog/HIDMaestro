@@ -353,10 +353,170 @@ internal static class Program
               r3.ActualLength == InPkts * InPer
               && r3.Data.Skip(8000 - 3840).All(b => b == 0));
 
+        // ── Microphone ring frame alignment (issue #41) ─────────────────
+        // A submit larger than the free space is truncated. The ring
+        // reserves one byte so full stays distinguishable from empty, so
+        // the free count is 3 (mod 4) whenever the ring is frame-aligned.
+        // Accepting that raw leaves a 3-byte fragment in a stream of
+        // 4-byte frames, and every later sample reaches the host shifted
+        // one byte: the low byte of each sample arrives as its high byte,
+        // which is full-scale noise. The ring never re-aligns on its own,
+        // so one truncating submit corrupts capture for the life of the
+        // device. Reproduced by streaming across the truncation boundary
+        // and checking that frame markers still land on frame boundaries.
+        Console.WriteLine("\n-- Microphone ring alignment (issue #41) --");
+
+        const int Frame = 4;                       // 2ch x 16-bit, per the profile
+        const int MicRingBytes = InPer * 256;      // engine's ring for this persona
+
+        // Drain what the underrun check left so the ring starts empty and
+        // the byte stream below is entirely ours.
+        while (device.Audio.MicBufferedBytes > 0)
+        {
+            uint dq = cl.NextSeq();
+            cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
+            cl.ReadRet(dq);
+        }
+        Check("ring empty before alignment test", device.Audio.MicBufferedBytes == 0);
+
+        // Frame k carries its index in bytes 0-1 and a marker in bytes 2-3,
+        // so any byte shift moves the marker off the frame boundary.
+        static byte[] MarkedFrames(int frames, byte m0, byte m1)
+        {
+            var b = new byte[frames * Frame];
+            for (int f = 0; f < frames; f++)
+            {
+                b[f * Frame] = (byte)f;
+                b[f * Frame + 1] = (byte)(f >> 8);
+                b[f * Frame + 2] = m0;
+                b[f * Frame + 3] = m1;
+            }
+            return b;
+        }
+
+        // Oversized: forces the truncating path on an empty ring.
+        var blockA = MarkedFrames(MicRingBytes / Frame + 1024, 0xA5, 0x5A);
+        int acceptedA = device.Audio.SubmitMicSamples(blockA);
+        Check("truncating submit accepts a whole number of frames",
+              acceptedA % Frame == 0,
+              $"accepted {acceptedA} of {blockA.Length} bytes, remainder {acceptedA % Frame}");
+        Check("buffered count stays frame-aligned after truncation",
+              device.Audio.MicBufferedBytes % Frame == 0,
+              $"{device.Audio.MicBufferedBytes} bytes buffered");
+
+        // Drain exactly what is buffered, in whole packets, so the stream
+        // we validate never contains underrun silence.
+        void DrainReal(MemoryStream sink, int bytes)
+        {
+            while (bytes >= InPer)
+            {
+                int pkts = Math.Min(32, bytes / InPer);
+                uint dq = cl.NextSeq();
+                cl.SendSubmitIsoIn(dq, 2, pkts, InCap);
+                sink.Write(cl.ReadRet(dq).Data);
+                bytes -= pkts * InPer;
+            }
+        }
+        var micStream = new MemoryStream();
+
+        // Leave a margin un-drained so the second block lands behind the
+        // truncation point with the stream still flowing, exactly as a
+        // live capture session does.
+        DrainReal(micStream, device.Audio.MicBufferedBytes - 4096);
+        var blockB = MarkedFrames(1920 / Frame, 0xC3, 0x3C);
+        int acceptedB = device.Audio.SubmitMicSamples(blockB);
+        Check("post-truncation submit is accepted whole",
+              acceptedB == blockB.Length, $"{acceptedB}/{blockB.Length} bytes");
+        DrainReal(micStream, device.Audio.MicBufferedBytes);
+
+        var micGot = micStream.ToArray();
+        int badFrame = -1, firstB = -1, strayA = -1;
+        for (int off = 0; off + Frame <= micGot.Length; off += Frame)
+        {
+            bool isA = micGot[off + 2] == 0xA5 && micGot[off + 3] == 0x5A;
+            bool isB = micGot[off + 2] == 0xC3 && micGot[off + 3] == 0x3C;
+            if (!isA && !isB) { badFrame = off; break; }
+            if (isB && firstB < 0) firstB = off;
+            if (isA && firstB >= 0 && strayA < 0) strayA = off;
+        }
+        Check("no frame boundary shifts across a truncating submit",
+              badFrame < 0,
+              badFrame < 0
+                  ? $"{micGot.Length / Frame} frames verified over {micGot.Length} bytes"
+                  : $"first corrupt frame at byte {badFrame} of {micGot.Length}");
+        Check("second block streams intact after the truncation point",
+              firstB >= 0 && strayA < 0,
+              firstB < 0 ? "second block never arrived" : $"starts at byte {firstB}");
+
+        // The ring is a byte FIFO of one continuous stream, so frames may
+        // legitimately span submits: a consumer feeding odd-sized chunks
+        // is framed correctly by concatenation. Only a submit that drops
+        // may floor, and it has to floor against the ring's fill rather
+        // than its own length, or a mid-frame fill still leaves a
+        // fragment behind.
+        while (device.Audio.MicBufferedBytes > 0)
+        {
+            uint dq = cl.NextSeq();
+            cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
+            cl.ReadRet(dq);
+        }
+
+        var blockC = MarkedFrames(768, 0x99, 0x66);
+        int fed = 0;
+        while (fed < blockC.Length)
+        {
+            int chunk = Math.Min(102, blockC.Length - fed); // deliberately not a frame multiple
+            int got = device.Audio.SubmitMicSamples(blockC.AsSpan(fed, chunk));
+            if (got != chunk) break;
+            fed += got;
+        }
+        Check("odd-sized chunks of a continuous stream are accepted whole",
+              fed == blockC.Length && device.Audio.MicBufferedBytes == blockC.Length,
+              $"fed {fed}/{blockC.Length}, buffered {device.Audio.MicBufferedBytes}");
+
+        var sinkC = new MemoryStream();
+        DrainReal(sinkC, device.Audio.MicBufferedBytes);
+        var gotC = sinkC.ToArray();
+        Check("frames spanning chunk boundaries arrive byte for byte",
+              gotC.Length > 0 && blockC.Take(gotC.Length).SequenceEqual(gotC),
+              $"{gotC.Length} bytes compared");
+
+        // Truncate from a mid-frame fill: the cut has to land the ring on
+        // a frame boundary, which means flooring against fill + free.
+        while (device.Audio.MicBufferedBytes > 0)
+        {
+            uint dq = cl.NextSeq();
+            cl.SendSubmitIsoIn(dq, 2, InPkts, InCap);
+            cl.ReadRet(dq);
+        }
+        var blockD = MarkedFrames(MicRingBytes / Frame + 256, 0x11, 0xEE);
+        device.Audio.SubmitMicSamples(blockD.AsSpan(0, 102)); // fill ends mid-frame
+        device.Audio.SubmitMicSamples(blockD.AsSpan(102));    // truncates
+        Check("truncation from a mid-frame fill lands the ring on a frame boundary",
+              device.Audio.MicBufferedBytes % Frame == 0,
+              $"{device.Audio.MicBufferedBytes} bytes buffered");
+
+        var sinkD = new MemoryStream();
+        DrainReal(sinkD, device.Audio.MicBufferedBytes);
+        var gotD = sinkD.ToArray();
+        Check("mid-frame truncation still delivers the stream prefix byte for byte",
+              gotD.Length > MicRingBytes / 2 && blockD.Take(gotD.Length).SequenceEqual(gotD),
+              $"{gotD.Length} bytes compared");
+
         // ── UNLINK ──────────────────────────────────────────────────────
         Console.WriteLine("\n-- CMD_UNLINK --");
+        // The victim has to still be queued when the unlink lands. Due time
+        // comes from the stream cursor, which only re-anchors to now once it
+        // is more than 50 ms stale, so a short lead is not deterministic: if
+        // the gap since the last submit sits anywhere under that window the
+        // cursor is already behind, the URB is due in the past, and it
+        // completes before the unlink arrives (RET_UNLINK 0, not -ECONNRESET).
+        // A lead past the re-anchor window makes the queued state certain on
+        // any machine. Observed on the Atom, where the checks above spend
+        // tens of ms comparing 50 KB buffers before this runs.
+        const int VictimPkts = 200; // ~200 ms, vs the 50 ms re-anchor window
         uint victim = cl.NextSeq();
-        cl.SendSubmitIsoIn(victim, 2, InPkts, InCap); // due in ~10 ms
+        cl.SendSubmitIsoIn(victim, 2, VictimPkts, InCap);
         uint unlinkSeq = cl.NextSeq();
         cl.SendUnlink(unlinkSeq, victim);
         var ur = cl.ReadRetUnlink(unlinkSeq);

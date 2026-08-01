@@ -438,6 +438,19 @@ internal static class Program
 
     static string? FindHidDevicePath(ushort vid, ushort pid)
     {
+        // HIDD_ATTRIBUTES alone is not enough to identify our interface. A
+        // real Sony pad paired over Bluetooth reports the identical VID and
+        // PID, and enumerates as
+        //   hid#{00001124-0000-1000-8000-00805f9b34fb}_vid&0002054c_pid&0ce6#...
+        // under the Bluetooth HID service UUID. Whichever device Windows
+        // returns first wins, so with a real pad connected this happily
+        // returned the user's controller: GET_REPORT read its idle state,
+        // ReadFile and SetOutputReport failed against a transport that never
+        // carried our reports, and the post-dispose check found it still
+        // present and called that a leak. The composite's interface uses USB
+        // device-interface naming (hid#vid_054c&pid_0ce6&mi_03#...), which
+        // the Bluetooth form never matches.
+        string usbForm = $"vid_{vid:x4}&pid_{pid:x4}";
         HidD_GetHidGuid(out Guid hidGuid);
         IntPtr h = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if (h == INVALID_HANDLE_VALUE) return null;
@@ -454,6 +467,7 @@ internal static class Program
                     Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6);
                     if (!SetupDiGetDeviceInterfaceDetailW(h, ref data, buf, required, IntPtr.Zero, IntPtr.Zero)) continue;
                     string path = Marshal.PtrToStringUni(IntPtr.Add(buf, 4))!;
+                    if (path.IndexOf(usbForm, StringComparison.OrdinalIgnoreCase) < 0) continue;
                     IntPtr fh = OpenPath(path);
                     if (fh == INVALID_HANDLE_VALUE) continue;
                     try

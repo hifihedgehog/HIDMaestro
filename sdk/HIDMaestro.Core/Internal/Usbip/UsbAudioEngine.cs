@@ -66,9 +66,22 @@ internal sealed class UsbAudioEngine : IDisposable
     // Microphone source ring. The consumer feeds PCM via SubmitMicSamples;
     // the pump drains one service interval per packet. Underrun reads
     // silence, which is what a muted real microphone delivers.
+    //
+    // The ring is a byte FIFO carrying one continuous interleaved stream,
+    // so consecutive submits concatenate and a frame may span them. What
+    // it cannot survive is a *partial* frame going missing (issue #41):
+    // drop three bytes of a four-byte frame and every later sample
+    // reaches the host shifted one byte, its low byte arriving as the
+    // high byte, which is full-scale noise. Nothing downstream re-aligns
+    // it, so the corruption is permanent for the life of the device.
+    // Bytes are therefore only ever dropped on a frame boundary, and only
+    // whole frames are handed to the host.
     private readonly byte[] _micRing;
     private int _micHead, _micTail; // byte indices; lock-protected
     private readonly int _micBytesPerInterval;
+    private readonly int _micFrameBytes;
+    private long _micDroppedBytes;  // running total, lock-protected
+    private bool _micDropLogged;
 
     /// <summary>Raised on the pacing thread when a paced OUT URB completes,
     /// with the interleaved PCM the host sent for that window. The memory
@@ -98,6 +111,7 @@ internal sealed class UsbAudioEngine : IDisposable
 
         var cfg = profile.UsbConfiguration!;
         int micBytes = 0;
+        int micFrame = 0;
         foreach (var iface in cfg.Interfaces)
         {
             if (iface.Function != "audioStreamingIn") continue;
@@ -110,9 +124,11 @@ internal sealed class UsbAudioEngine : IDisposable
                 // 16k); a future non-integral rate needs packet-size
                 // dithering here, not a bigger divisor.
                 micBytes = stream.SampleRateHz / 1000 * stream.Channels * (stream.BitsPerSample / 8);
+                micFrame = stream.Channels * (stream.BitsPerSample / 8);
             }
         }
         _micBytesPerInterval = micBytes;                  // DualSense: 48 * 2 * 2 = 192
+        _micFrameBytes = Math.Max(1, micFrame);           // DualSense: 2 * 2 = 4
         _micRing = new byte[Math.Max(1, micBytes) * 256]; // ~256 ms of microphone lead
 
         foreach (var ctl in cfg.AudioControls ?? new List<UsbAudioControlSpec>())
@@ -211,21 +227,60 @@ internal sealed class UsbAudioEngine : IDisposable
     // ── Microphone feed (called from the consumer's thread) ──────────────
 
     /// <summary>Append interleaved PCM to the microphone ring. Returns the
-    /// bytes accepted (the ring holds ~256 ms; excess is dropped so a
-    /// runaway producer cannot grow latency without bound).</summary>
+    /// bytes accepted, always a whole number of frames (the ring holds
+    /// ~256 ms; excess is dropped so a runaway producer cannot grow
+    /// latency without bound).</summary>
     public int SubmitMicSamples(ReadOnlySpan<byte> pcm)
     {
         lock (_lock)
         {
-            int free = _micRing.Length - 1 - ((_micHead - _micTail + _micRing.Length) % _micRing.Length);
-            int n = Math.Min(free, pcm.Length);
+            // One byte stays reserved so a full ring is distinguishable
+            // from an empty one, which makes the free count odd whenever
+            // the frame size is even.
+            int used = (_micHead - _micTail + _micRing.Length) % _micRing.Length;
+            int free = _micRing.Length - 1 - used;
+            int n = pcm.Length;
+            if (n > free)
+            {
+                // Dropping the tail of a submit breaks the stream, so the
+                // cut has to land the ring on a frame boundary. Anything
+                // else leaves a fragment that shifts every later sample.
+                // Only the truncating path floors: a submit that fits is
+                // copied byte for byte, so a consumer feeding a continuous
+                // stream in odd-sized chunks still frames correctly.
+                n = free - ((used + free) % _micFrameBytes);
+                if (n < 0) n = 0;
+            }
             for (int i = 0; i < n; i++)
             {
                 _micRing[_micHead] = pcm[i];
                 _micHead = (_micHead + 1) % _micRing.Length;
             }
+            if (n < pcm.Length) NoteMicDrop(pcm.Length - n);
             return n;
         }
+    }
+
+    /// <summary>Account for a short submit. The caller's return value is
+    /// the contractual signal; this is the breadcrumb for the case where
+    /// a consumer ignores it, since an overrunning producer is otherwise
+    /// invisible from inside the SDK (frames flow, buffers drain, nothing
+    /// errors). Called under _lock.</summary>
+    private void NoteMicDrop(int bytes)
+    {
+        _micDroppedBytes += bytes;
+        if (_micDropLogged) return;
+        _micDropLogged = true;
+        DeviceOrchestrator.LogDiag(
+            $"UsbAudioEngine: microphone submit truncated, dropped {bytes} bytes " +
+            $"(ring {_micRing.Length} B, frame {_micFrameBytes} B). The producer is " +
+            "outrunning the 1 ms service interval; check the Submit return value.");
+    }
+
+    /// <summary>Total microphone bytes refused because the ring was full.</summary>
+    public long MicDroppedBytes
+    {
+        get { lock (_lock) return _micDroppedBytes; }
     }
 
     /// <summary>Bytes of microphone PCM buffered and not yet streamed.</summary>
@@ -365,6 +420,7 @@ internal sealed class UsbAudioEngine : IDisposable
                 int buffered = (_micHead - _micTail + _micRing.Length) % _micRing.Length;
                 int want = data.Length;
                 int take = Math.Min(buffered, want);
+                take -= take % _micFrameBytes; // never hand over a partial frame
                 for (int i = 0; i < take; i++)
                 {
                     data[i] = _micRing[_micTail];
