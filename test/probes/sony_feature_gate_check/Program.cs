@@ -258,6 +258,77 @@ internal static class Program
             }
         }
 
+        // DS4 over USB: 0x12 is the pairing-info read, the DS4's 0x09. Our
+        // USB DS4 descriptors have always declared it and the driver never
+        // served it, so it answered STATUS_NOT_SUPPORTED. That is the one
+        // Sony read whose absence is fatal rather than cosmetic:
+        // hid-playstation's dualshock4_get_mac_address caller returns
+        // ERR_PTR on failure and never instantiates the device. SDL's
+        // ReadWiredSerial additionally rejects an all-zero MAC, so "present
+        // but zeroed" would not have been enough either.
+        var ds4 = ctx.GetProfile("dualshock-4-v2")!;
+        SnapshotPreexistingHid(ds4.VendorId, ds4.ProductId);
+        using (var d4Ctrl = ctx.CreateController(ds4))
+        using (var h = Open(ds4.VendorId, ds4.ProductId))
+        {
+            Check("dualshock-4-v2 HID opens", h != null);
+            if (h != null)
+            {
+                var pair = GetFeature(h, 0x12, 16);
+                Check("DS4 GetFeature(0x12) is served at all (was NOT_SUPPORTED)", pair != null);
+                Check("DS4 0x12 MAC is non-zero (SDL ReadWiredSerial rejects all-zero)",
+                      pair != null && (pair[1] | pair[2] | pair[3] | pair[4] | pair[5] | pair[6]) != 0,
+                      pair == null ? "read failed"
+                          : string.Join(":", pair.Skip(1).Take(6).Select(b => b.ToString("X2"))));
+                Check("DS4 0x12 MAC is locally administered (cannot collide with a real pad)",
+                      pair != null && (pair[1] & 0x02) != 0);
+                // DS4 must NOT answer the DS5-only firmware report.
+                Check("DS4 does not answer DS5's 0x20", GetFeature(h, 0x20, 64) == null);
+            }
+        }
+
+        // DualSense Edge is a different firmware line. Sony's updater data
+        // records the base pad as type 0x0004 and the Edge as type 0x0044,
+        // and our captured base blob carries 0x0004 with version 0x0630,
+        // matching Sony's "DualSense, Type 0004, 0x0630" entry exactly.
+        var edge = ctx.GetProfile("dualsense-edge")!;
+        SnapshotPreexistingHid(edge.VendorId, edge.ProductId);
+        using (var eCtrl = ctx.CreateController(edge))
+        using (var h = Open(edge.VendorId, edge.ProductId))
+        {
+            Check("dualsense-edge HID opens", h != null);
+            if (h != null)
+            {
+                var fw = GetFeature(h, 0x20, 64);
+                if (fw == null) { Check("edge 0x20 readable", false); }
+                else
+                {
+                    int U16(int o) => fw[o] | (fw[o + 1] << 8);
+                    Check("edge 0x20 swSeries is the Edge line 0x0044, not the base pad's 0x0004",
+                          U16(22) == 0x0044, $"0x{U16(22):X4}");
+                    Check("edge 0x20 updateVersion is an Edge firmware 0x0217",
+                          U16(44) == 0x0217, $"0x{U16(44):X4}");
+                    Check("edge 0x20 still satisfies the dualsense-tester render gate",
+                          U16(20) == 2 || U16(20) == 3, $"fwType {U16(20)}");
+                    Check("edge 0x22 is readable (its traceability branch is always on)",
+                          GetFeature(h, 0x22, 64) != null);
+                }
+            }
+        }
+
+        // The base pad must NOT pick up the Edge's firmware line.
+        using (var dsCtrl2 = ctx.CreateController(ds))
+        using (var h = Open(ds.VendorId, ds.ProductId))
+        {
+            var fw = h != null ? GetFeature(h, 0x20, 64) : null;
+            Check("base dualsense keeps swSeries 0x0004 (Edge patch is PID-scoped)",
+                  fw != null && (fw[22] | (fw[23] << 8)) == 0x0004,
+                  fw == null ? "read failed" : $"0x{fw[22] | (fw[23] << 8):X4}");
+            Check("base dualsense keeps updateVersion 0x0630",
+                  fw != null && (fw[44] | (fw[45] << 8)) == 0x0630,
+                  fw == null ? "read failed" : $"0x{fw[44] | (fw[45] << 8):X4}");
+        }
+
         // Non-Sony profile that DECLARES feature 0x02 must NOT get the
         // DS4 0x02 stub (this is the reachable collision D3 fixes).
         var pedals = ctx.GetProfile("heusinkveld-ultimate-pedals")!;

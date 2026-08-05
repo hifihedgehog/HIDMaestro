@@ -355,6 +355,22 @@ internal static class Program
                               : $"status {f22.Status}");
         WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x22 notify
 
+        // 0x12 is the DS4's pairing-info read and this persona is a DS5, so
+        // the composite lane's job here is to prove the ID is wired at all
+        // and returns the right shape. The DS4 lane is covered on the real
+        // UMDF2 path by sony_feature_gate_check, which is where a DS4
+        // profile actually exists.
+        var f12 = cl.ControlIn(0xA1, 0x01, 0x0312, 3, 16);
+        Check("0x12 pairing info: 16 bytes, RID echoed, non-zero MAC",
+              f12.Status == 0 && f12.Data.Length == 16 && f12.Data[0] == 0x12
+              && (f12.Data[1] | f12.Data[2] | f12.Data[3] | f12.Data[4] | f12.Data[5] | f12.Data[6]) != 0,
+              f12.Status == 0
+                  ? string.Join(":", f12.Data.Skip(1).Take(6).Select(b => b.ToString("X2")))
+                  : $"status {f12.Status}");
+        Check("0x12 MAC is locally administered",
+              f12.Status == 0 && (f12.Data[1] & 0x02) != 0);
+        WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x12 notify
+
         var fBad = cl.ControlIn(0xA1, 0x01, 0x03F7, 3, 64);
         Check("unknown feature ID stalls", fBad.Status == -32);
 

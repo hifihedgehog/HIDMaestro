@@ -26,10 +26,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// <c>OutputDecoded</c> fire identically to the UMDF2 path.</item>
 /// <item>Feature reads: the Sony Get_Feature table is driver.c's, byte for
 /// byte (0x05/41 and 0x02/37-41 carrying the neutral calibration, 0x09/20
-/// with the synthetic MAC, 0x20/64 and 0xA3/49 carrying real firmware info,
-/// 0x22/64 answering the Bluetooth-patch read, VID 0x054C gated), including
-/// the HID_FEATURE_READ ring notification that drives the
-/// extendedReport.armOn watcher.</item>
+/// and 0x12/16 with the synthetic MAC for DS5 and DS4 respectively,
+/// 0x20/64 and 0xA3/49 carrying real firmware info, 0x22/64 answering the
+/// Bluetooth-patch read, VID 0x054C gated), including the HID_FEATURE_READ
+/// ring notification that drives the extendedReport.armOn watcher.</item>
 /// </list>
 ///
 /// <para>PID FFB feature serving is deliberately absent here: no usbip
@@ -566,7 +566,34 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 }
             case 0x20:
                 if (wLength < 64) return null;
-                { var p = (byte[])Ds5FirmwareInfo.Clone(); return p; }
+                {
+                    var p = (byte[])Ds5FirmwareInfo.Clone();
+                    // DualSense Edge is a different firmware line: Sony's
+                    // updater data records the base pad as type 0x0004 and
+                    // the Edge as type 0x0044. See driver.c for why those
+                    // two offsets are identified rather than guessed, and
+                    // for what in this blob is still the base pad's.
+                    if (Descriptors.ProductId == 0x0DF2)
+                    {
+                        p[22] = 0x44; p[23] = 0x00;   // swSeries      0x0044
+                        p[44] = 0x17; p[45] = 0x02;   // updateVersion 0x0217
+                    }
+                    return p;
+                }
+            case 0x12:
+                // DS4 pairing info over USB. The DS4's equivalent of 0x09,
+                // and the one Sony read whose absence is fatal rather than
+                // cosmetic: hid-playstation's caller aborts device creation
+                // when it fails. MAC at bytes 1..6, non-zero, locally
+                // administered, matching the 0x09 path exactly.
+                if (wLength < 16) return null;
+                {
+                    var p = new byte[16];
+                    p[0] = reportId;
+                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
+                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
+                    return p;
+                }
             case 0x22:
                 // Bluetooth patch info. Zero past the report ID is the real
                 // answer for a pad carrying no patch, and dualsense-tester

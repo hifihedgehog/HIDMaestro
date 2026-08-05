@@ -2293,7 +2293,8 @@ EvtIoDeviceControl(
          * handlers below. */
         if (ctx->HidDeviceAttributes.VendorID == 0x054C
          && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20
-          || reportId == 0x22 || reportId == 0x02 || reportId == 0xA3)) {
+          || reportId == 0x22 || reportId == 0x02 || reportId == 0xA3
+          || reportId == 0x12)) {
             UCHAR *p = (UCHAR *)outBuf;
             ULONG stubSize = 0;
             if (reportId == 0x05) {
@@ -2373,6 +2374,74 @@ EvtIoDeviceControl(
                 stubSize = 64;
                 RtlCopyMemory(p, ds5FirmwareInfo, stubSize);
                 p[0] = reportId;
+
+                /* DualSense Edge (PID 0x0DF2) is a different firmware line
+                 * and must not claim the base pad's. Two fields are known
+                 * from Sony's own firmware updater data, published in
+                 * Paliverse/DualSense-List-of-Firmwares: the base DualSense
+                 * is type 0x0004 and the Edge is type 0x0044.
+                 *
+                 * That mapping is not inferred from the name. The captured
+                 * base blob carries swSeries 0x0004 at bytes 22..23 and
+                 * updateVersion 0x0630 at bytes 44..45, and Sony's list
+                 * records exactly "DualSense, Type 0004, version 0x0630".
+                 * Both fields agreeing with an independent source is what
+                 * identifies these two offsets as the type and version, and
+                 * is also a second confirmation that the capture is real.
+                 *
+                 * The Edge's corresponding entry is type 0x0044 at version
+                 * 0x0217, so those two are corrected here.
+                 *
+                 * The rest of the blob is still the base pad's and is NOT
+                 * verified for an Edge: no public dump of an Edge's 0x20
+                 * exists, and dualshock-tools does not even map the Edge's
+                 * hwinfo (it skips Board Model when is_edge). Build date,
+                 * hwInfo, mainFwVersion and the three sub-versions are
+                 * therefore inherited rather than known. Nothing observed
+                 * reads them on an Edge: hid-playstation takes
+                 * use_vibration_v2 and is_edge from the PID rather than
+                 * update_version, and dualsense-tester's Edge page hardcodes
+                 * its traceability gate instead of testing hwInfo. Replace
+                 * this table wholesale if a real Edge dump ever turns up. */
+                if (ctx->HidDeviceAttributes.ProductID == 0x0DF2) {
+                    p[22] = 0x44; p[23] = 0x00;   /* swSeries      0x0044 */
+                    p[44] = 0x17; p[45] = 0x02;   /* updateVersion 0x0217 */
+                }
+            } else if (reportId == 0x12) {
+                /* DS4 pairing info over USB: 16 bytes
+                 * (DS4_FEATURE_REPORT_PAIRING_INFO_SIZE). The DS4's
+                 * equivalent of the DS5's 0x09, and every USB DualShock 4
+                 * descriptor we ship already declares it, so leaving it
+                 * unserved meant a declared report that answered
+                 * STATUS_NOT_SUPPORTED.
+                 *
+                 * This is the most severe of the Sony reads to omit.
+                 * hid-playstation.c dualshock4_get_mac_address requests it
+                 * on USB and its caller treats failure as fatal
+                 * (`return ERR_PTR(ret)`), so the canonical Linux driver
+                 * refuses to instantiate the device at all. By contrast the
+                 * 0xA3 firmware read only warns. SDL reads the same report
+                 * as k_ePS4FeatureReportIdSerialNumber in ReadWiredSerial.
+                 *
+                 * MAC lives at bytes 1..6 in both consumers, and both
+                 * reject an all-zero address: the kernel copies it as the
+                 * device's unique id, and SDL's ReadWiredSerial requires at
+                 * least one of bytes 1..6 to be non-zero before it accepts
+                 * the serial. So synthesise the same stable per-controller
+                 * address the 0x09 path uses, in the locally-administered
+                 * range so it cannot collide with a real pad's
+                 * globally-assigned MAC.
+                 *
+                 * Bluetooth does not need this: hid-playstation takes the
+                 * DS4's BT address from HIDP's hdev->uniq instead, which is
+                 * why dualshock-4-v2-bt does not declare 0x12. */
+                if (outSize < 16) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 16;
+                RtlZeroMemory(p, stubSize);
+                p[0] = reportId;
+                p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; /* locally administered, 'H' 'M' */
+                p[4] = 0x00; p[5] = 0x00;
+                p[6] = (UCHAR)ctx->ControllerIndex;
             } else if (reportId == 0x22) {
                 /* DS5 Bluetooth patch info: 64 bytes, which is what our own
                  * DualSense descriptor declares for this report.
