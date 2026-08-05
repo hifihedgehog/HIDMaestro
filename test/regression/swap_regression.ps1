@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Regression battery for HIDMaestro live-swap teardown.
 
@@ -157,6 +157,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\usbip_server_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\usbip_bundle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\usbip_e2e_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_feature_gate_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1456,6 +1457,20 @@ function Scenario-Usbip-Bundle-Deploy {
 # machine without it, the probe deploys it (that IS the thing under
 # test). Exit 2 means the probe declined to run for an environmental
 # reason and is reported as a skip rather than a failure.
+# S46: Sony feature reports through the REAL UMDF2 driver. Two things at
+# once: the calibration payload (#43) must be non-degenerate on the driver
+# lane exactly as it is on the composite lane, and the Sony stub block must
+# stay gated on VID 0x054C so a non-Sony profile declaring feature 0x02
+# still gets its own report. The probe existed since the D3 audit but was
+# never wired in, so neither property was gated before now.
+function Scenario-Sony-Feature-Gate {
+    $probe = Resolve-ProbeBinary 'sony_feature_gate_check' 'SonyFeatureGateCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyFeatureGateCheck exited " + $p.ExitCode + " - Sony calibration is degenerate on the driver lane, or the VID gate regressed (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1517,7 +1532,8 @@ $scenarios = @(
     @{ Name = 'S42_Usb_Composite_Schema';         Body = ${function:Scenario-Usb-Composite-Schema} },
     @{ Name = 'S43_Usbip_Server_Protocol';        Body = ${function:Scenario-Usbip-Server-Protocol} },
     @{ Name = 'S44_Usbip_Bundle_Deploy';          Body = ${function:Scenario-Usbip-Bundle-Deploy} },
-    @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} }
+    @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} },
+    @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -67,16 +67,37 @@ internal static class Program
 
     // A DS4/DS5 stub is exactly N zero bytes with byte[0] == the report ID.
     // Returns true if GetFeature succeeded AND the reply looks like a stub.
-    static bool LooksLikeStub(SafeFileHandle h, byte reportId, int stubLen)
+    /// <summary>The neutral calibration driver.c serves at offset 1 of the
+    /// calibration reports (g_SonyCalibration, issue #43). Kept here as a
+    /// literal so this probe fails if the driver's copy ever drifts.</summary>
+    static readonly byte[] SonyCalibration =
     {
-        var buf = new byte[Math.Max(stubLen, 64)];
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8,
+        0xF4, 0x01, 0xF4, 0x01,
+        0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8,
+    };
+
+    static byte[]? GetFeature(SafeFileHandle h, byte reportId, int len)
+    {
+        var buf = new byte[Math.Max(len, 64)];
         buf[0] = reportId;
-        if (!HidD_GetFeature(h, buf, buf.Length)) return false;
-        if (buf[0] != reportId) return false;
-        // Stub is zero-filled past the report id (0x20 sets byte 20 = 2).
-        int nonZero = 0;
-        for (int i = 1; i < stubLen; i++) if (buf[i] != 0) nonZero++;
-        return nonZero <= 1; // tolerate the 0x20 fwType byte
+        if (!HidD_GetFeature(h, buf, buf.Length)) return null;
+        if (buf[0] != reportId) return null;
+        return buf;
+    }
+
+    /// <summary>True when the report carries the Sony calibration payload.
+    /// This replaced a zero-fill check: the payload used to be all zeros,
+    /// which is exactly the defect #43 fixed, so "looks like our stub" can
+    /// no longer mean "is empty".</summary>
+    static bool IsSonyCalibration(SafeFileHandle h, byte reportId, int len)
+    {
+        var buf = GetFeature(h, reportId, len);
+        if (buf == null) return false;
+        for (int i = 0; i < SonyCalibration.Length; i++)
+            if (buf[1 + i] != SonyCalibration[i]) return false;
+        return true;
     }
 
     static int Main()
@@ -103,8 +124,41 @@ internal static class Program
         {
             Check("dualsense HID opens", h != null);
             if (h != null)
-                Check("dualsense GetFeature(0x05) returns the DS5 stub (Sony path intact)",
-                    LooksLikeStub(h, 0x05, 41));
+            {
+                Check("dualsense GetFeature(0x05) carries the neutral calibration (Sony path intact)",
+                    IsSonyCalibration(h, 0x05, 41));
+
+                // The whole point of #43: a zero denominator makes SDL's
+                // sensitivity NaN and makes hid-playstation.c declare the
+                // calibration invalid, so compute the denominators here the
+                // way those parsers do and require every one to be non-zero.
+                var c = GetFeature(h, 0x05, 41);
+                if (c == null)
+                {
+                    Check("dualsense calibration readable", false);
+                }
+                else
+                {
+                    short LE(int o) => (short)(c[o] | (c[o + 1] << 8));
+                    int gPitch = Math.Abs(LE(7) - LE(1)) + Math.Abs(LE(9) - LE(1));
+                    int gYaw = Math.Abs(LE(11) - LE(3)) + Math.Abs(LE(13) - LE(3));
+                    int gRoll = Math.Abs(LE(15) - LE(5)) + Math.Abs(LE(17) - LE(5));
+                    int speed2x = LE(19) + LE(21);
+                    int rx = LE(23) - LE(25), ry = LE(27) - LE(29), rz = LE(31) - LE(33);
+                    Check("driver-lane gyro denominators non-zero", gPitch != 0 && gYaw != 0 && gRoll != 0,
+                          $"pitch {gPitch}, yaw {gYaw}, roll {gRoll}");
+                    Check("driver-lane accel ranges non-zero", rx != 0 && ry != 0 && rz != 0,
+                          $"x {rx}, y {ry}, z {rz}");
+                    Check("driver-lane speed_2x non-zero", speed2x != 0, $"{speed2x}");
+                }
+
+                var pair = GetFeature(h, 0x09, 20);
+                Check("dualsense GetFeature(0x09) returns a non-zero locally administered MAC",
+                      pair != null && (pair[1] & 0x02) != 0
+                      && (pair[1] | pair[2] | pair[3] | pair[4] | pair[5] | pair[6]) != 0,
+                      pair == null ? "read failed"
+                          : string.Join(":", pair.Skip(1).Take(6).Select(b => b.ToString("X2"))));
+            }
         }
 
         // Non-Sony profile that DECLARES feature 0x02 must NOT get the
@@ -115,8 +169,8 @@ internal static class Program
         {
             Check("ultimate-pedals HID opens", h != null);
             if (h != null)
-                Check("non-Sony GetFeature(0x02) is NOT a 41-byte DS4 stub (collision fixed)",
-                    !LooksLikeStub(h, 0x02, 41));
+                Check("non-Sony GetFeature(0x02) is NOT a DS4 calibration stub (collision fixed)",
+                    !IsSonyCalibration(h, 0x02, 41));
         }
 
         try { HMContext.RemoveAllVirtualControllers(); } catch { }

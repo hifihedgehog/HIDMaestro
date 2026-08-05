@@ -18,6 +18,48 @@
 
 #include "driver.h"
 
+/* Neutral Sony motion calibration, 34 bytes, written at offset 1 of the
+ * calibration feature report (the report id occupies byte 0). Issue #43.
+ *
+ * Calibration is a DIVISOR, not decoration. Every parser builds a
+ * sensitivity from the plus/minus pairs, so the all-zero blob this used to
+ * serve produced a zero denominator: SDL's HIDAPI_DriverPS5_LoadCalibrationData
+ * computes 0.0f/0 and lands on NaN, and hid-playstation.c classifies it as
+ * invalid outright ("Invalid gyro calibration data for axis (%d), disabling
+ * calibration") at four sites. Games with native PlayStation support reject
+ * the pad on it, while consumers that never read calibration never noticed.
+ *
+ * Values are WinUHid's (WinUHidDevs/WinUHidPS5.cpp and WinUHidPS4.cpp, both
+ * crediting inputino), a working virtual PS4/PS5 for Windows. Field offsets
+ * verified against hid-playstation.c: bias at buf[1..6], plus/minus at
+ * buf[7..18], speed at buf[19..22], accel at buf[23..34].
+ *
+ * The payload is deliberately order-agnostic. hid-playstation.c parses a DS4
+ * over USB as pitch+ pitch- yaw+ yaw- roll+ roll-, but over Bluetooth as
+ * pitch+ yaw+ roll+ pitch- yaw- roll-. Because every plus is +10000 and every
+ * minus is -10000, one payload reads correctly under both, so no ordering
+ * branch is needed for the 37-vs-41 split. Gyro and accel denominators come
+ * out at 20000 and speed_2x at 1000: nothing degenerate. */
+static const UCHAR g_SonyCalibration[34] = {
+    0x00, 0x00,  /* gyro_pitch_bias  */
+    0x00, 0x00,  /* gyro_yaw_bias    */
+    0x00, 0x00,  /* gyro_roll_bias   */
+    0x10, 0x27,  /* gyro_pitch_plus   +10000 */
+    0xF0, 0xD8,  /* gyro_pitch_minus  -10000 */
+    0x10, 0x27,  /* gyro_yaw_plus     +10000 */
+    0xF0, 0xD8,  /* gyro_yaw_minus    -10000 */
+    0x10, 0x27,  /* gyro_roll_plus    +10000 */
+    0xF0, 0xD8,  /* gyro_roll_minus   -10000 */
+    0xF4, 0x01,  /* gyro_speed_plus     +500 */
+    0xF4, 0x01,  /* gyro_speed_minus    +500 */
+    0x10, 0x27,  /* acc_x_plus        +10000 */
+    0xF0, 0xD8,  /* acc_x_minus       -10000 */
+    0x10, 0x27,  /* acc_y_plus        +10000 */
+    0xF0, 0xD8,  /* acc_y_minus       -10000 */
+    0x10, 0x27,  /* acc_z_plus        +10000 */
+    0xF0, 0xD8,  /* acc_z_minus       -10000 */
+};
+
 /* Append the decimal representation of a ULONG to a wide-string buffer.
  * Self-contained — no C runtime dependency. The driver doesn't link against
  * MSVCRT, so swprintf/wsprintf aren't available. Buffer must be NUL-terminated. */
@@ -2255,17 +2297,33 @@ EvtIoDeviceControl(
             UCHAR *p = (UCHAR *)outBuf;
             ULONG stubSize = 0;
             if (reportId == 0x05) {
-                /* DS5 calibration: 41 bytes */
+                /* Sony motion calibration. DS5 uses report 0x05 at 41
+                 * bytes; a DS4 over Bluetooth uses the SAME report id and
+                 * size (DS4_FEATURE_REPORT_CALIBRATION_BT), so one branch
+                 * serves both. Both of our descriptors declare 41. */
                 if (outSize < 41) { status = STATUS_BUFFER_TOO_SMALL; break; }
                 stubSize = 41;
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
+                RtlCopyMemory(p + 1, g_SonyCalibration, sizeof(g_SonyCalibration));
             } else if (reportId == 0x09) {
-                /* DS5 pairing/MAC: 17 bytes */
-                if (outSize < 17) { status = STATUS_BUFFER_TOO_SMALL; break; }
-                stubSize = 17;
+                /* DS5 pairing info. 20 bytes, which is what BOTH our own
+                 * descriptor declares for report 0x09 and what
+                 * hid-playstation.c asks for; it requires the transferred
+                 * count to equal the requested size exactly, so the 17 this
+                 * used to serve failed that check outright. MAC lives at
+                 * bytes 1..6 (hid-playstation.c: memcpy(mac, &buf[1], 6)).
+                 * An all-zero MAC is not a valid address, so synthesise a
+                 * stable one per controller in the locally-administered
+                 * range (second bit of the first octet set), which cannot
+                 * collide with a real Sony pad's globally-assigned MAC. */
+                if (outSize < 20) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 20;
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
+                p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; /* locally administered, 'H' 'M' */
+                p[4] = 0x00; p[5] = 0x00;
+                p[6] = (UCHAR)ctx->ControllerIndex;
             } else if (reportId == 0x20) {
                 /* DS5 firmware: 64 bytes. daidr's FactoryInfo.vue gates
                  * render on fwType ∈ {2,3} (byte 20 of the response).
@@ -2294,13 +2352,27 @@ EvtIoDeviceControl(
                 }
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
+                RtlCopyMemory(p + 1, g_SonyCalibration, sizeof(g_SonyCalibration));
             } else /* 0xA3 */ {
                 /* DS4 firmware/HW info: 49 bytes
                  * (DS4_FEATURE_REPORT_FIRMWARE_INFO_SIZE). Same byte
-                 * count on USB and BT. */
+                 * count on USB and BT. Payload verbatim from WinUHid's
+                 * WinUHidPS4.cpp: ASCII build date "Aug  3 2013" and time
+                 * "07:01:12" followed by the hardware and firmware words.
+                 * Zeros here left consumers reading a device with no
+                 * firmware identity at all. */
+                static const UCHAR ds4FirmwareInfo[49] = {
+                    0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
+                    0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
+                    0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
+                    0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
+                    0x00
+                };
                 if (outSize < 49) { status = STATUS_BUFFER_TOO_SMALL; break; }
                 stubSize = 49;
-                RtlZeroMemory(p, stubSize);
+                RtlCopyMemory(p, ds4FirmwareInfo, stubSize);
                 p[0] = reportId;
             }
             WdfRequestSetInformation(Request, stubSize);

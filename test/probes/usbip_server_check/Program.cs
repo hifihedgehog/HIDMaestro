@@ -249,6 +249,57 @@ internal static class Program
         Check("feature read notified to the ring (armOn lane)",
               WaitRing(outView, ref ringSeq, ringBuf, out src, out rid, out rsize)
               && src == 3 && rid == 0x05 && rsize == 0);
+        // Calibration is a DIVISOR, not decoration (issue #43). Compute the
+        // denominators the way hid-playstation.c does and require every one
+        // to be non-zero: the all-zero blob served before made SDL's
+        // sensitivity 0.0f/0 (NaN) and made the Linux driver declare the
+        // calibration invalid, which is what native-PlayStation titles
+        // rejected the pad on.
+        short LE(byte[] b, int o) => (short)(b[o] | (b[o + 1] << 8));
+        {
+            var c = f05.Data;
+            short pitchBias = LE(c, 1), yawBias = LE(c, 3), rollBias = LE(c, 5);
+            short pitchPlus = LE(c, 7), pitchMinus = LE(c, 9);
+            short yawPlus = LE(c, 11), yawMinus = LE(c, 13);
+            short rollPlus = LE(c, 15), rollMinus = LE(c, 17);
+            short speedPlus = LE(c, 19), speedMinus = LE(c, 21);
+            short accXPlus = LE(c, 23), accXMinus = LE(c, 25);
+            short accYPlus = LE(c, 27), accYMinus = LE(c, 29);
+            short accZPlus = LE(c, 31), accZMinus = LE(c, 33);
+
+            int gyroPitch = Math.Abs(pitchPlus - pitchBias) + Math.Abs(pitchMinus - pitchBias);
+            int gyroYaw = Math.Abs(yawPlus - yawBias) + Math.Abs(yawMinus - yawBias);
+            int gyroRoll = Math.Abs(rollPlus - rollBias) + Math.Abs(rollMinus - rollBias);
+            int speed2x = speedPlus + speedMinus;
+            int rangeX = accXPlus - accXMinus, rangeY = accYPlus - accYMinus, rangeZ = accZPlus - accZMinus;
+
+            Check("calibration gyro denominators are non-zero",
+                  gyroPitch != 0 && gyroYaw != 0 && gyroRoll != 0,
+                  $"pitch {gyroPitch}, yaw {gyroYaw}, roll {gyroRoll}");
+            Check("calibration accel ranges are non-zero",
+                  rangeX != 0 && rangeY != 0 && rangeZ != 0,
+                  $"x {rangeX}, y {rangeY}, z {rangeZ}");
+            Check("gyro speed_2x is non-zero (SDL numerator)", speed2x != 0, $"{speed2x}");
+            // Order-agnostic is what lets one payload serve the USB and
+            // Bluetooth field orders, so it is a property worth asserting
+            // rather than a comment: every plus equal, every minus equal.
+            Check("payload is order-agnostic (USB and BT field orders agree)",
+                  pitchPlus == yawPlus && yawPlus == rollPlus
+                  && pitchMinus == yawMinus && yawMinus == rollMinus,
+                  $"+{pitchPlus} -{pitchMinus}");
+        }
+
+        var f09 = cl.ControlIn(0xA1, 0x01, 0x0309, 3, 20);
+        Check("0x09 pairing: 20 bytes as the descriptor declares", f09.Status == 0
+              && f09.Data.Length == 20 && f09.Data[0] == 0x09,
+              f09.Status == 0 ? $"{f09.Data.Length} bytes" : $"status {f09.Status}");
+        Check("0x09 carries a non-zero, locally administered MAC",
+              f09.Status == 0 && (f09.Data[1] != 0 || f09.Data[2] != 0 || f09.Data[3] != 0
+                                  || f09.Data[4] != 0 || f09.Data[5] != 0 || f09.Data[6] != 0)
+              && (f09.Data[1] & 0x02) != 0,
+              f09.Status == 0 ? string.Join(":", f09.Data.Skip(1).Take(6).Select(b => b.ToString("X2"))) : "");
+        WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x09 notify
+
         var f20 = cl.ControlIn(0xA1, 0x01, 0x0320, 3, 64);
         Check("0x20 firmware: 64 bytes with fwType=2 at byte 20",
               f20.Status == 0 && f20.Data.Length == 64 && f20.Data[20] == 0x02);

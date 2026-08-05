@@ -24,10 +24,11 @@ namespace HIDMaestro.Internal.Usbip;
 /// (reserve Head atomically, fill the slot, fence, publish slot.SeqNo,
 /// doorbell last), so <c>HMController.OutputReceived</c> and
 /// <c>OutputDecoded</c> fire identically to the UMDF2 path.</item>
-/// <item>Feature reads: the Sony Get_Feature stub table is driver.c's,
-/// byte for byte (0x05/41, 0x09/17, 0x20/64 with fwType=2, 0x02/37-41,
-/// 0xA3/49, VID 0x054C gated), including the HID_FEATURE_READ ring
-/// notification that drives the extendedReport.armOn watcher.</item>
+/// <item>Feature reads: the Sony Get_Feature table is driver.c's, byte for
+/// byte (0x05/41 and 0x02/37-41 carrying the neutral calibration, 0x09/20
+/// with the synthetic MAC, 0x20/64 with fwType=2, 0xA3/49 firmware info,
+/// VID 0x054C gated), including the HID_FEATURE_READ ring notification
+/// that drives the extendedReport.armOn watcher.</item>
 /// </list>
 ///
 /// <para>PID FFB feature serving is deliberately absent here: no usbip
@@ -43,6 +44,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     public UsbDescriptorSet Descriptors { get; }
     public UsbAudioEngine Audio { get; }
     public string BusId { get; }
+
+    /// <summary>Controller index, kept so the synthetic pairing MAC in
+    /// BuildFeatureStub is stable and unique per controller (#43).</summary>
+    private readonly int _index;
     public uint Devid { get; }
 
     private readonly HidReportBuilder _builder;
@@ -71,6 +76,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     public UsbipEmulatedDevice(ControllerProfile profile, int index)
     {
+        _index = index;
         Descriptors = new UsbDescriptorSet(profile);
         BusId = $"1-{index + 1}";
         Devid = (1u << 16) | (uint)(index + 1);
@@ -547,24 +553,71 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             case 0x05:
                 if (wLength < 41) return null;
-                { var p = new byte[41]; p[0] = reportId; return p; }
+                { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
             case 0x09:
-                if (wLength < 17) return null;
-                { var p = new byte[17]; p[0] = reportId; return p; }
+                if (wLength < 20) return null;
+                {
+                    var p = new byte[20];
+                    p[0] = reportId;
+                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
+                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
+                    return p;
+                }
             case 0x20:
                 if (wLength < 64) return null;
                 { var p = new byte[64]; p[0] = reportId; p[20] = 0x02; return p; }
             case 0x02:
-                if (wLength >= 41) { var p = new byte[41]; p[0] = reportId; return p; }
-                if (wLength >= 37) { var p = new byte[37]; p[0] = reportId; return p; }
+                if (wLength >= 41) { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
+                if (wLength >= 37) { var p = new byte[37]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
                 return null;
             case 0xA3:
                 if (wLength < 49) return null;
-                { var p = new byte[49]; p[0] = reportId; return p; }
+                { var p = (byte[])Ds4FirmwareInfo.Clone(); return p; }
             default:
                 return null;
         }
     }
+
+    /// <summary>Neutral Sony motion calibration, byte-for-byte the same
+    /// payload driver.c serves (g_SonyCalibration, issue #43). Written at
+    /// offset 1, after the report id. The composite lane must not diverge
+    /// from the UMDF2 lane here: a consumer reading calibration from a
+    /// composite persona has to see exactly what it sees from the plain
+    /// profile, or the two backends disagree about the same device.</summary>
+    private static readonly byte[] SonyCalibration =
+    {
+        0x00, 0x00,  // gyro_pitch_bias
+        0x00, 0x00,  // gyro_yaw_bias
+        0x00, 0x00,  // gyro_roll_bias
+        0x10, 0x27,  // gyro_pitch_plus   +10000
+        0xF0, 0xD8,  // gyro_pitch_minus  -10000
+        0x10, 0x27,  // gyro_yaw_plus     +10000
+        0xF0, 0xD8,  // gyro_yaw_minus    -10000
+        0x10, 0x27,  // gyro_roll_plus    +10000
+        0xF0, 0xD8,  // gyro_roll_minus   -10000
+        0xF4, 0x01,  // gyro_speed_plus     +500
+        0xF4, 0x01,  // gyro_speed_minus    +500
+        0x10, 0x27,  // acc_x_plus        +10000
+        0xF0, 0xD8,  // acc_x_minus       -10000
+        0x10, 0x27,  // acc_y_plus        +10000
+        0xF0, 0xD8,  // acc_y_minus       -10000
+        0x10, 0x27,  // acc_z_plus        +10000
+        0xF0, 0xD8,  // acc_z_minus       -10000
+    };
+
+    /// <summary>DS4 firmware / hardware info, verbatim from WinUHid's
+    /// WinUHidPS4.cpp. ASCII build date "Aug  3 2013" and time "07:01:12"
+    /// followed by the hardware and firmware words.</summary>
+    private static readonly byte[] Ds4FirmwareInfo =
+    {
+        0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
+        0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
+        0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
+        0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
+        0x00
+    };
 
     private void ResetDeviceState()
     {

@@ -139,7 +139,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 45-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, and the composite USB personas end to end through the real USB stack, verifying no PnP devnodes are left behind. 45/45 PASS on both a 16-core AMD Ryzen 9 Windows 11 desktop and a 4-core Intel Atom Z8350 Windows 10 fixture, the high and low ends of the performance and OS spectrum.
+A 46-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, and the composite USB personas end to end through the real USB stack, verifying no PnP devnodes are left behind. 46/46 PASS on both a 16-core AMD Ryzen 9 Windows 11 desktop and a 4-core Intel Atom Z8350 Windows 10 fixture, the high and low ends of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
