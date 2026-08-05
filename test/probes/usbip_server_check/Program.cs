@@ -308,10 +308,53 @@ internal static class Program
               f09.Status == 0 ? string.Join(":", f09.Data.Skip(1).Take(6).Select(b => b.ToString("X2"))) : "");
         WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x09 notify
 
+        // 0x20 was zero-filled but for fwType until #43's second round.
+        // F1 22 reads it before it ever asks for calibration and abandons
+        // the pad on zeros, which is why the earlier calibration and
+        // product-string fixes changed nothing for it. The expected bytes
+        // are spelled out here and in sony_feature_gate_check so the two
+        // backends cannot drift apart silently: this probe covers the
+        // composite lane, that one covers the UMDF2 lane, and both must
+        // match this literal.
+        byte[] expect20 = {
+            0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
+            0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
+            0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
+            0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
+            0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
+            0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
+            0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
         var f20 = cl.ControlIn(0xA1, 0x01, 0x0320, 3, 64);
-        Check("0x20 firmware: 64 bytes with fwType=2 at byte 20",
-              f20.Status == 0 && f20.Data.Length == 64 && f20.Data[20] == 0x02);
+        Check("0x20 firmware: 64 bytes", f20.Status == 0 && f20.Data.Length == 64,
+              f20.Status == 0 ? $"{f20.Data.Length} bytes" : $"status {f20.Status}");
+        Check("0x20 matches the driver's table byte for byte",
+              f20.Status == 0 && f20.Data.SequenceEqual(expect20),
+              f20.Status == 0
+                  ? $"{f20.Data.Zip(expect20, (a, b) => a == b).Count(x => x)}/64 bytes equal"
+                  : "read failed");
+        {
+            int fwType = f20.Status == 0 ? f20.Data[20] | (f20.Data[21] << 8) : -1;
+            // dualsense-tester renders Factory Info only for fwType 2 or 3.
+            // WinUHid's own default blob reports 4, which is why it is not
+            // used verbatim even though it is equally real.
+            Check("0x20 fwType satisfies the dualsense-tester render gate",
+                  fwType == 2 || fwType == 3, $"fwType {fwType}");
+        }
         WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x20 notify
+
+        // Real values in 0x20 turn on dualsense-tester's traceability
+        // branch, which opens by reading 0x22. Unserved IDs stall, so
+        // without this the fix for F1 22 would have broken a consumer that
+        // works today.
+        var f22 = cl.ControlIn(0xA1, 0x01, 0x0322, 3, 64);
+        Check("0x22 bt-patch: 64 bytes, RID echoed, does not stall",
+              f22.Status == 0 && f22.Data.Length == 64 && f22.Data[0] == 0x22,
+              f22.Status == 0 ? $"{f22.Data.Length} bytes, RID 0x{f22.Data[0]:X2}"
+                              : $"status {f22.Status}");
+        WaitRing(outView, ref ringSeq, ringBuf, out _, out _, out _); // drain the 0x22 notify
+
         var fBad = cl.ControlIn(0xA1, 0x01, 0x03F7, 3, 64);
         Check("unknown feature ID stalls", fBad.Status == -32);
 

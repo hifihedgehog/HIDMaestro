@@ -2293,7 +2293,7 @@ EvtIoDeviceControl(
          * handlers below. */
         if (ctx->HidDeviceAttributes.VendorID == 0x054C
          && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20
-          || reportId == 0x02 || reportId == 0xA3)) {
+          || reportId == 0x22 || reportId == 0x02 || reportId == 0xA3)) {
             UCHAR *p = (UCHAR *)outBuf;
             ULONG stubSize = 0;
             if (reportId == 0x05) {
@@ -2325,14 +2325,79 @@ EvtIoDeviceControl(
                 p[4] = 0x00; p[5] = 0x00;
                 p[6] = (UCHAR)ctx->ControllerIndex;
             } else if (reportId == 0x20) {
-                /* DS5 firmware: 64 bytes. daidr's FactoryInfo.vue gates
-                 * render on fwType ∈ {2,3} (byte 20 of the response).
-                 * Seed fwType=2 so the panel renders without errors. */
+                /* DS5 firmware info: 64 bytes
+                 * (DS_FEATURE_REPORT_FIRMWARE_INFO_SIZE). Captured from a
+                 * real wired DualSense during an F1 22 startup trace (#43).
+                 *
+                 * This was zero-filled but for fwType, on the theory that
+                 * the only consumer then known needed nothing else. F1 22
+                 * validates the blob: it issues 0x09, the report
+                 * descriptor, then 0x20, and on a zeroed 0x20 it abandons
+                 * the device and retries the whole sequence every 500 ms
+                 * forever. It never reaches the calibration read, which is
+                 * why the v1.4.4 and v1.4.5 fixes changed nothing for it.
+                 *
+                 * Field offsets agree across two independent consumers, so
+                 * the layout is not inferred. Linux hid-playstation.c
+                 * dualsense_get_firmware_info reads hw_version at le32
+                 * buf[24], fw_version at le32 buf[28], update_version at
+                 * le16 buf[44]. dualsense-tester's FactoryInfo.vue reads
+                 * build date at 1..11, build time at 12..19, fwType le16
+                 * at 20, swSeries le16 at 22, hwInfo le32 at 24,
+                 * mainFwVersion le32 at 28, deviceInfo 32..43,
+                 * updateVersion le16 at 44, then three more versions.
+                 *
+                 * Served verbatim rather than field-by-field. Which field
+                 * F1 22 validates is not known, and inventing values for
+                 * the ones it might read is the same mistake at a smaller
+                 * scale. WinUHid's WinUHidPS5.cpp k_DefaultFirmwareInfo is
+                 * the same shape and equally real, but reports fwType=4,
+                 * which fails dualsense-tester's fwType ∈ {2,3} render
+                 * gate; this capture reports 3 and satisfies both.
+                 *
+                 * Consequence worth stating: the build date below belongs
+                 * to the unit that was captured, so every virtual DualSense
+                 * reports it. That matches how WinUHid ships a single fixed
+                 * default for every emulated pad. */
+                static const UCHAR ds5FirmwareInfo[64] = {
+                    0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
+                    0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
+                    0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
+                    0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
+                    0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
+                    0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
+                    0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                };
+                if (outSize < 64) { status = STATUS_BUFFER_TOO_SMALL; break; }
+                stubSize = 64;
+                RtlCopyMemory(p, ds5FirmwareInfo, stubSize);
+                p[0] = reportId;
+            } else if (reportId == 0x22) {
+                /* DS5 Bluetooth patch info: 64 bytes, which is what our own
+                 * DualSense descriptor declares for this report.
+                 *
+                 * Only reachable because 0x20 above now reports real
+                 * values. dualsense-tester runs its traceability branch
+                 * when hwInfo & 0xFFFF >= 777 and mainFwVersion >= 65655,
+                 * both true of the captured blob and both false of the old
+                 * zeros, and that branch opens by reading 0x22. Every
+                 * feature ID outside this gate falls through to
+                 * STATUS_NOT_SUPPORTED, so without this the Factory Info
+                 * panel that renders today would start failing outright:
+                 * the fix for one consumer would have broken another.
+                 *
+                 * The payload is deliberately zero past the report ID, and
+                 * that is a real value here rather than a stub. ds.util.ts
+                 * getBtPatchInfo returns le32 at offset 31 and the caller
+                 * skips the row on a falsy result, so zero reads as "this
+                 * pad carries no Bluetooth patch", which is true of it. The
+                 * report ID must still be present: getBtPatchInfo bails
+                 * when byte 0 is not 0x22. */
                 if (outSize < 64) { status = STATUS_BUFFER_TOO_SMALL; break; }
                 stubSize = 64;
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
-                p[20] = 0x02;
             } else if (reportId == 0x02) {
                 /* DS4 calibration. USB = 37 bytes
                  * (DS4_FEATURE_REPORT_CALIBRATION_SIZE), BT = 41 bytes

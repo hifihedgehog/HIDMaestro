@@ -411,6 +411,10 @@ public sealed class HMController : IDisposable
                 Name = $"HMOutputReader_{index}",
             };
             _outputThread.Start();
+            // Publish the thread so any unmap stops it first. Without this a
+            // sweep that runs while this controller is still alive frees the
+            // view underneath the loop below (issue #45).
+            SharedMemoryIO.RegisterOutputPump(index, _outputCts, _outputThread);
         }
         catch
         {
@@ -1077,6 +1081,11 @@ public sealed class HMController : IDisposable
         _disposed = true;
         try { _outputCts.Cancel(); } catch { }
         try { _outputThread?.Join(Internal.TimeoutScale.Apply(500)); } catch { }
+        // Drop the registration before the CTS is disposed, so a concurrent
+        // unmap can never reach a disposed CTS through the registry (#45).
+        // The thread is already cancelled and joined above, so this only
+        // needs to forget it, not stop it again.
+        try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }
         try { _outputCts.Dispose(); } catch { }
         _context.OnControllerDisposing(this);
     }

@@ -23,6 +23,7 @@
 using System;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 using HIDMaestro;
@@ -50,13 +51,41 @@ internal static class Program
     const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_RW = 0x3, OPEN_EXISTING = 3;
 
+    /// <summary>Device-interface paths matching a VID/PID that already
+    /// existed before this probe created anything.</summary>
+    static readonly System.Collections.Generic.HashSet<string> s_preexistingHid =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Records what is already plugged in, so <see cref="Open"/>
+    /// can ignore it.
+    ///
+    /// <para>Necessary because a real Sony pad reports the identical VID and
+    /// PID. Taking the first VID/PID match opened the user's own hardware on
+    /// any machine with a DualSense attached, and then every assertion
+    /// described that pad rather than the driver: the calibration read came
+    /// back with the pad's real gyro denominators instead of the neutral
+    /// 20000, and 0x09 returned a genuine Sony OUI MAC instead of the
+    /// synthesised locally-administered one. Both were reported as driver
+    /// failures. Bluetooth-form filtering does not help here, because a
+    /// wired pad enumerates under the same USB naming we do.</para>
+    ///
+    /// <para>Whatever is present before the create belongs to the machine;
+    /// whatever appears after belongs to us.</para></summary>
+    static void SnapshotPreexistingHid(ushort vid, ushort pid)
+    {
+        foreach (var d in HidDeviceEnumerator.Enumerate())
+            if (d.VendorId == vid && d.ProductId == pid)
+                s_preexistingHid.Add(d.DevicePath);
+    }
+
     static SafeFileHandle? Open(ushort vid, ushort pid)
     {
         string? path = null;
         for (int i = 0; i < 50 && path == null; i++)
         {
             path = HidDeviceEnumerator.Enumerate()
-                .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid)?.DevicePath;
+                .FirstOrDefault(d => d.VendorId == vid && d.ProductId == pid
+                                     && !s_preexistingHid.Contains(d.DevicePath))?.DevicePath;
             if (path == null) Thread.Sleep(100);
         }
         if (path == null) return null;
@@ -119,6 +148,7 @@ internal static class Program
 
         // Sony path still fires.
         var ds = ctx.GetProfile("dualsense")!;
+        SnapshotPreexistingHid(ds.VendorId, ds.ProductId);
         using (var dsCtrl = ctx.CreateController(ds))
         using (var h = Open(ds.VendorId, ds.ProductId))
         {
@@ -158,12 +188,80 @@ internal static class Program
                       && (pair[1] | pair[2] | pair[3] | pair[4] | pair[5] | pair[6]) != 0,
                       pair == null ? "read failed"
                           : string.Join(":", pair.Skip(1).Take(6).Select(b => b.ToString("X2"))));
+
+                // #43 second round: F1 22 reads 0x20 and abandons the pad on
+                // the zeros this used to serve, before it ever asks for
+                // calibration. Assert the real blob, decoded at the offsets
+                // hid-playstation.c and dualsense-tester agree on, rather
+                // than just "not all zero".
+                var fw = GetFeature(h, 0x20, 64);
+                if (fw == null)
+                {
+                    Check("dualsense GetFeature(0x20) readable", false);
+                }
+                else
+                {
+                    int U16(int o) => fw[o] | (fw[o + 1] << 8);
+                    uint U32(int o) => (uint)(fw[o] | (fw[o + 1] << 8) | (fw[o + 2] << 16) | (fw[o + 3] << 24));
+                    string date = Encoding.ASCII.GetString(fw, 1, 11);
+                    string time = Encoding.ASCII.GetString(fw, 12, 8);
+                    int fwType = U16(20);
+                    uint hwInfo = U32(24);
+                    uint mainFw = U32(28);
+
+                    // Spelled out in usbip_server_check too, against the
+                    // composite lane. Both backends must serve this same
+                    // literal, so drift in either one fails a test rather
+                    // than shipping two different DualSense identities.
+                    byte[] expect20 = {
+                        0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
+                        0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
+                        0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
+                        0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
+                        0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
+                        0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
+                        0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                    };
+                    Check("0x20 matches the composite backend byte for byte",
+                          fw.SequenceEqual(expect20),
+                          $"{fw.Zip(expect20, (a, b) => a == b).Count(x => x)}/64 bytes equal");
+                    Check("0x20 is not the old zero stub",
+                          fw.Skip(1).Any(b => b != 0) && fw.Count(b => b != 0) > 8,
+                          $"{fw.Count(b => b != 0)} non-zero bytes of 64");
+                    Check("0x20 build date is printable ASCII",
+                          date.All(ch => ch >= 0x20 && ch < 0x7F), $"\"{date}\"");
+                    Check("0x20 build time is printable ASCII",
+                          time.All(ch => ch >= 0x20 && ch < 0x7F), $"\"{time}\"");
+                    // dualsense-tester renders Factory Info only for
+                    // fwType 2 or 3. WinUHid's own default blob reports 4,
+                    // which is why it is not used verbatim.
+                    Check("0x20 fwType satisfies the dualsense-tester render gate",
+                          fwType == 2 || fwType == 3, $"fwType {fwType}");
+                    Check("0x20 hwInfo non-zero", hwInfo != 0, $"0x{hwInfo:X8}");
+                    Check("0x20 mainFwVersion non-zero", mainFw != 0, $"0x{mainFw:X8}");
+
+                    // Serving real values above turns on dualsense-tester's
+                    // traceability branch, whose first act is reading 0x22.
+                    // Every ID outside the gate returns STATUS_NOT_SUPPORTED,
+                    // so if that read fails the panel that renders today
+                    // starts failing: fixing F1 22 would have broken it.
+                    bool traceOn = (hwInfo & 0xFFFF) >= 777 && mainFw >= 65655;
+                    var patch = GetFeature(h, 0x22, 64);
+                    Check("0x22 is readable, so the traceability branch cannot fault",
+                          patch != null,
+                          traceOn ? "branch is ON for this blob" : "branch off, still must not error");
+                    // getBtPatchInfo bails unless byte 0 is the report ID.
+                    Check("0x22 carries its report ID", patch != null && patch[0] == 0x22,
+                          patch == null ? "read failed" : $"0x{patch[0]:X2}");
+                }
             }
         }
 
         // Non-Sony profile that DECLARES feature 0x02 must NOT get the
         // DS4 0x02 stub (this is the reachable collision D3 fixes).
         var pedals = ctx.GetProfile("heusinkveld-ultimate-pedals")!;
+        SnapshotPreexistingHid(pedals.VendorId, pedals.ProductId);
         using (var pCtrl = ctx.CreateController(pedals))
         using (var h = Open(pedals.VendorId, pedals.ProductId))
         {

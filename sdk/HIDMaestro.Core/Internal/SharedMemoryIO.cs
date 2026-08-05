@@ -157,6 +157,82 @@ internal static class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
+    /// <summary>Live output-poll threads, keyed by controller index (issue
+    /// #45).
+    ///
+    /// <para>A poll thread dereferences its output view on every iteration
+    /// and is stopped only by its owning <c>HMController.Dispose</c>.
+    /// Unmapping that view while the thread runs is an access violation on a
+    /// background thread, which takes the process down from a call the
+    /// consumer never associated with a controller: the device sweep ends in
+    /// <see cref="Cleanup"/>, and a consumer that swept while still holding a
+    /// controller crashed there reproducibly.</para>
+    ///
+    /// <para>Registering the threads here puts the fix at the point of
+    /// danger rather than at one call site, so every unmap path is covered
+    /// and not just the sweep that happened to expose it.</para></summary>
+    private static readonly Dictionary<int, (CancellationTokenSource Cts, Thread Thread)> s_outputPumps = new();
+
+    /// <summary>Records a controller's output-poll thread so any later unmap
+    /// can stop it first. Called once the thread is running.</summary>
+    public static void RegisterOutputPump(int controllerIndex, CancellationTokenSource cts, Thread thread)
+    {
+        lock (s_outputPumps) s_outputPumps[controllerIndex] = (cts, thread);
+    }
+
+    /// <summary>Drops a controller's poll-thread registration without
+    /// stopping it. For <c>HMController.Dispose</c>, which has already
+    /// cancelled and joined its own thread.</summary>
+    public static void UnregisterOutputPump(int controllerIndex)
+    {
+        lock (s_outputPumps) s_outputPumps.Remove(controllerIndex);
+    }
+
+    /// <summary>Cancels and joins the named controller's poll thread, if one
+    /// is registered. Idempotent, and safe to call on an already-stopped
+    /// thread.</summary>
+    private static void StopOutputPump(int controllerIndex)
+    {
+        (CancellationTokenSource Cts, Thread Thread) pump;
+        lock (s_outputPumps)
+        {
+            if (!s_outputPumps.TryGetValue(controllerIndex, out pump)) return;
+            s_outputPumps.Remove(controllerIndex);
+        }
+        JoinPump(pump);
+    }
+
+    /// <summary>Cancels and joins every registered poll thread.</summary>
+    private static void StopAllOutputPumps()
+    {
+        (CancellationTokenSource Cts, Thread Thread)[] pumps;
+        lock (s_outputPumps)
+        {
+            pumps = new (CancellationTokenSource, Thread)[s_outputPumps.Count];
+            s_outputPumps.Values.CopyTo(pumps, 0);
+            s_outputPumps.Clear();
+        }
+        foreach (var pump in pumps) JoinPump(pump);
+    }
+
+    /// <summary>Cancel then join, outside the registry lock.
+    ///
+    /// <para>The join must not happen under <c>s_outputPumps</c>: the poll
+    /// loop calls back into this class, so holding a lock across the join
+    /// invites a deadlock with a thread that is trying to acquire it. The
+    /// snapshot-then-join shape above is what keeps that impossible.</para>
+    ///
+    /// <para>Joining the current thread would deadlock outright, which is
+    /// reachable if a consumer's OutputReceived handler triggers a sweep, so
+    /// that case cancels and returns rather than waiting on itself.</para></summary>
+    private static void JoinPump((CancellationTokenSource Cts, Thread Thread) pump)
+    {
+        try { pump.Cts?.Cancel(); } catch { /* already disposed */ }
+        if (pump.Thread == null || !pump.Thread.IsAlive) return;
+        if (ReferenceEquals(pump.Thread, Thread.CurrentThread)) return;
+        try { pump.Thread.Join(TimeoutScale.Apply(500)); } catch { }
+    }
+
     /// <summary>Returns the view pointer for the controller's INPUT section,
     /// creating the section on first call. Thread-safe via per-call lock —
     /// callers can issue concurrent EnsureInputMapping requests for distinct
@@ -635,6 +711,10 @@ internal static class SharedMemoryIO
     /// Called when an HMController is disposed. Idempotent.</summary>
     public static void DestroyController(int controllerIndex)
     {
+        // Before any unmap: this controller's poll thread reads the output
+        // view every iteration (issue #45).
+        StopOutputPump(controllerIndex);
+
         lock (s_inputViews)
         {
             if (s_inputViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero)
@@ -680,6 +760,13 @@ internal static class SharedMemoryIO
     /// HMContext.Dispose.</summary>
     public static void Cleanup()
     {
+        // Before any unmap: poll threads for controllers the caller has NOT
+        // disposed are still dereferencing their output views (issue #45).
+        // This is the path the device sweep ends on, so a consumer that
+        // sweeps while holding a live controller reaches here with threads
+        // running.
+        StopAllOutputPumps();
+
         lock (s_inputViews)
         {
             foreach (var v in s_inputViews.Values)

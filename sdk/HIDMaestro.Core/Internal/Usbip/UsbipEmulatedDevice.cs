@@ -26,9 +26,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// <c>OutputDecoded</c> fire identically to the UMDF2 path.</item>
 /// <item>Feature reads: the Sony Get_Feature table is driver.c's, byte for
 /// byte (0x05/41 and 0x02/37-41 carrying the neutral calibration, 0x09/20
-/// with the synthetic MAC, 0x20/64 with fwType=2, 0xA3/49 firmware info,
-/// VID 0x054C gated), including the HID_FEATURE_READ ring notification
-/// that drives the extendedReport.armOn watcher.</item>
+/// with the synthetic MAC, 0x20/64 and 0xA3/49 carrying real firmware info,
+/// 0x22/64 answering the Bluetooth-patch read, VID 0x054C gated), including
+/// the HID_FEATURE_READ ring notification that drives the
+/// extendedReport.armOn watcher.</item>
 /// </list>
 ///
 /// <para>PID FFB feature serving is deliberately absent here: no usbip
@@ -565,7 +566,15 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 }
             case 0x20:
                 if (wLength < 64) return null;
-                { var p = new byte[64]; p[0] = reportId; p[20] = 0x02; return p; }
+                { var p = (byte[])Ds5FirmwareInfo.Clone(); return p; }
+            case 0x22:
+                // Bluetooth patch info. Zero past the report ID is the real
+                // answer for a pad carrying no patch, and dualsense-tester
+                // skips the row on a falsy value. It only has to exist
+                // because the real 0x20 above opens the traceability branch
+                // that reads it; see driver.c for the full reasoning.
+                if (wLength < 64) return null;
+                { var p = new byte[64]; p[0] = reportId; return p; }
             case 0x02:
                 if (wLength >= 41) { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
                 if (wLength >= 37) { var p = new byte[37]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
@@ -603,6 +612,29 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         0xF0, 0xD8,  // acc_y_minus       -10000
         0x10, 0x27,  // acc_z_plus        +10000
         0xF0, 0xD8,  // acc_z_minus       -10000
+    };
+
+    /// <summary>DS5 firmware info, byte-for-byte the same payload driver.c
+    /// serves (ds5FirmwareInfo, issue #43). Captured from a real wired
+    /// DualSense during an F1 22 startup trace. ASCII build date
+    /// "Jul  4 2025" and time "10:10:32", then fwType 3, hwInfo 0x1310 and
+    /// the firmware versions.
+    ///
+    /// <para>Served verbatim. F1 22 validates this blob and abandons the
+    /// device on the zeros it used to get, and which field it validates is
+    /// not known, so no byte here is synthesised. See driver.c for the
+    /// offset agreement between hid-playstation.c and dualsense-tester, and
+    /// for why WinUHid's own default is not used.</para></summary>
+    private static readonly byte[] Ds5FirmwareInfo =
+    {
+        0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
+        0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
+        0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
+        0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
+        0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
+        0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
+        0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
 
     /// <summary>DS4 firmware / hardware info, verbatim from WinUHid's

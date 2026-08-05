@@ -24,6 +24,7 @@
 
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -130,17 +131,46 @@ internal static class Program
                   && FindEndpoint(DataFlow.Capture, "Wireless Controller") == null);
         }
 
-        // NOTE (issue #44): the sweep's eviction of a composite persona is
-        // deliberately NOT exercised here. The only in-process way to reach
-        // it is to call RemoveAllVirtualControllers while still holding a
-        // live controller, and that unmaps the shared output view underneath
-        // HMController.OutputPollLoop, which is stopped only by _outputCts in
-        // Dispose. That is an access violation on a background thread and it
-        // is NOT composite-specific: the same hazard exists for any live
-        // UMDF2 controller, so it predates the usbip backend. Reproducing the
-        // real report (device outliving the creating PROCESS) needs an
-        // out-of-process fixture. Tracked separately rather than left as an
-        // intermittent crash in the release gate.
+        // ── Sweep while still holding a live controller (issues #44, #45) ──
+        // This could not be tested until #45 was fixed. Sweeping unmaps every
+        // shared view the process owns, and a live controller's output poll
+        // thread reads its view on every iteration, so this exact sequence
+        // used to end the process with an access violation on a background
+        // thread (exit -1073741819, reproducible). SharedMemoryIO now stops
+        // and joins the registered poll threads before unmapping, so the
+        // sweep is survivable and its persona eviction is finally reachable
+        // from a test.
+        //
+        // Both halves matter and both are asserted: the process must still be
+        // alive afterwards (#45), and the composite persona must actually be
+        // gone (#44), since a persona carries no HIDMAESTRO token and the
+        // enumerator walk alone can never see one.
+        Console.WriteLine("\n-- Sweep with a live controller (#44, #45) --");
+        {
+            var persona = ctx.GetProfile("dualsense-composite")!;
+            var live = ctx.CreateController(persona);
+            int outputEvents = 0;
+            live.OutputReceived += (_, __) => Interlocked.Increment(ref outputEvents);
+
+            string? path = null;
+            for (int i = 0; i < 100 && path == null; i++) { Thread.Sleep(100); path = FindHidDevicePath(0x054C, 0x0CE6); }
+            Check("persona enumerated before the sweep", path != null, path ?? "not found");
+
+            // Deliberately NOT disposed: holding it is the whole point.
+            HMContext.RemoveAllVirtualControllers();
+
+            Check("process survived a sweep that unmapped a live view", true,
+                  "reaching this line at all is the assertion");
+            Thread.Sleep(2500);
+            Check("composite persona evicted by the sweep",
+                  FindHidDevicePath(0x054C, 0x0CE6) == null);
+
+            // Disposing after the sweep must also not fault: the poll thread
+            // is already stopped and the views are already gone, so this
+            // exercises the idempotent path.
+            try { live.Dispose(); Check("dispose after sweep is clean", true); }
+            catch (Exception ex) { Check("dispose after sweep is clean", false, ex.GetType().Name); }
+        }
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -348,6 +378,9 @@ internal static class Program
             using var en = new MMDeviceEnumerator();
             foreach (var d in en.EnumerateAudioEndPoints(flow, DeviceState.All))
             {
+                // Same exclusion as FindEndpoint: a real wired pad's
+                // endpoints carry the same name as ours.
+                if (s_baselineEndpoints.Contains(d.ID)) { d.Dispose(); continue; }
                 string name = "";
                 try { name = d.FriendlyName; } catch { try { name = d.DeviceFriendlyName; } catch { } }
                 if (name.Contains(nameContains, StringComparison.OrdinalIgnoreCase))
@@ -402,6 +435,45 @@ internal static class Program
                || ex.Message.Contains("host controller", StringComparison.OrdinalIgnoreCase)
                || ex.Message.Contains("installer", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Endpoint IDs that already existed before this probe created
+    /// anything, so they belong to the machine rather than to us.
+    ///
+    /// <para>Endpoints can only be matched by friendly name, and a real
+    /// DualSense on a USB cable publishes endpoints named exactly like the
+    /// persona's. Since v1.4.5 both even report the same product string, so
+    /// the collision is total. Name matching alone therefore reported the
+    /// user's own hardware as a leaked endpoint on every post-teardown
+    /// check, which is how the reporter's wired pad turned an otherwise
+    /// clean run red.</para>
+    ///
+    /// <para>Only endpoints that are ACTIVE at startup count as baseline,
+    /// and the distinction is load-bearing rather than incidental. Windows
+    /// keeps an endpoint registered under a stable ID long after the device
+    /// is gone, so every persona this probe has ever created is still listed
+    /// as NotPresent. Baselining all states therefore excluded the very
+    /// endpoints the run was about to create, and the audio checks reported
+    /// "none" against a persona that had in fact appeared correctly. A real
+    /// pad that is plugged in is Active before the probe creates anything;
+    /// our persona is not Active until we create it.</para></summary>
+    static readonly HashSet<string> s_baselineEndpoints = SnapshotActiveEndpoints();
+
+    static HashSet<string> SnapshotActiveEndpoints()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var en = new MMDeviceEnumerator();
+            foreach (var flow in new[] { DataFlow.Render, DataFlow.Capture })
+                foreach (var d in en.EnumerateAudioEndPoints(flow, DeviceState.Active))
+                {
+                    try { set.Add(d.ID); } catch { }
+                    d.Dispose();
+                }
+        }
+        catch { }
+        return set;
+    }
+
     static MMDevice? FindEndpoint(DataFlow flow, string nameContains)
     {
         try
@@ -409,6 +481,7 @@ internal static class Program
             using var en = new MMDeviceEnumerator();
             foreach (var d in en.EnumerateAudioEndPoints(flow, DeviceState.Active))
             {
+                if (s_baselineEndpoints.Contains(d.ID)) { d.Dispose(); continue; }
                 if (d.FriendlyName.Contains(nameContains, StringComparison.OrdinalIgnoreCase))
                     return d;
                 d.Dispose();
@@ -619,6 +692,22 @@ internal static class Program
         // present and called that a leak. The composite's interface uses USB
         // device-interface naming (hid#vid_054c&pid_0ce6&mi_03#...), which
         // the Bluetooth form never matches.
+        //
+        // Excluding the Bluetooth form is NOT enough. A real DualSense on a
+        // USB cable enumerates under exactly the same usbForm as the
+        // persona, so on a machine with one plugged in this returned the
+        // user's hardware again and every check downstream read as a
+        // failure: the post-dispose and post-sweep checks found "our" device
+        // still present, because it was never ours. The reporter had a pad
+        // wired for the #43 capture, which is precisely when the gate has to
+        // stay honest.
+        //
+        // The discriminator that holds on both transports is ancestry. A
+        // persona sits behind the emulated host controller carrying
+        // ROOT\HIDMAESTRO_UDE (v1.4.3); a real pad, wired or Bluetooth,
+        // hangs off a physical root hub on the PCI xHCI controller and has
+        // no such ancestor at any depth. Match on that rather than on the
+        // name, so no amount of real Sony hardware can be mistaken for ours.
         string usbForm = $"vid_{vid:x4}&pid_{pid:x4}";
         HidD_GetHidGuid(out Guid hidGuid);
         IntPtr h = SetupDiGetClassDevsW(ref hidGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -642,7 +731,8 @@ internal static class Program
                     try
                     {
                         var attr = new HIDD_ATTRIBUTES { Size = Marshal.SizeOf<HIDD_ATTRIBUTES>() };
-                        if (HidD_GetAttributes(fh, ref attr) && attr.VendorID == vid && attr.ProductID == pid)
+                        if (HidD_GetAttributes(fh, ref attr) && attr.VendorID == vid && attr.ProductID == pid
+                            && HidMaestroAncestorDepth(path) >= 0)
                             return path;
                     }
                     finally { CloseHandle(fh); }
