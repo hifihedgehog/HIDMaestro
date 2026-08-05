@@ -158,6 +158,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\usbip_bundle_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\usbip_e2e_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_feature_gate_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch2_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1471,6 +1472,14 @@ function Scenario-Sony-Feature-Gate {
     }
 }
 
+function Scenario-Switch2-Pro {
+    $probe = Resolve-ProbeBinary 'switch2_pro_check' 'Switch2ProCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("Switch2ProCheck exited " + $p.ExitCode + " - the Switch 2 Pro profile drifted from the two references it was reconstructed from (VIIPER ns2pro and SDL_hidapi_switch2), or the 12-bit stick packing / d-pad-as-buttons encoding regressed (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1533,7 +1542,8 @@ $scenarios = @(
     @{ Name = 'S43_Usbip_Server_Protocol';        Body = ${function:Scenario-Usbip-Server-Protocol} },
     @{ Name = 'S44_Usbip_Bundle_Deploy';          Body = ${function:Scenario-Usbip-Bundle-Deploy} },
     @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} },
-    @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} }
+    @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} },
+    @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

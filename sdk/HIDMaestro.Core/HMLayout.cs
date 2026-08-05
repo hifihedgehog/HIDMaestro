@@ -92,6 +92,10 @@ public enum HMButtonRole
     Back, View, Share, Start, Options, Menu, Guide, Home, Capture, Ps, Xbox,
     Mute, ProfileSwitch,
 
+    // Vendor button with no cross-vendor role. Currently the Switch 2
+    // family's C button, which opens GameChat on real hardware.
+    Misc1,
+
     // Elite paddles + extra remappable
     PaddleP1, PaddleP2, PaddleP3, PaddleP4,
     PaddleM1, PaddleM2, PaddleM3, PaddleM4, PaddleM5, PaddleM6,
