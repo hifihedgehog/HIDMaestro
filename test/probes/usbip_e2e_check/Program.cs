@@ -130,6 +130,18 @@ internal static class Program
                   && FindEndpoint(DataFlow.Capture, "Wireless Controller") == null);
         }
 
+        // NOTE (issue #44): the sweep's eviction of a composite persona is
+        // deliberately NOT exercised here. The only in-process way to reach
+        // it is to call RemoveAllVirtualControllers while still holding a
+        // live controller, and that unmaps the shared output view underneath
+        // HMController.OutputPollLoop, which is stopped only by _outputCts in
+        // Dispose. That is an access violation on a background thread and it
+        // is NOT composite-specific: the same hazard exists for any live
+        // UMDF2 controller, so it predates the usbip backend. Reproducing the
+        // real report (device outliving the creating PROCESS) needs an
+        // out-of-process fixture. Tracked separately rather than left as an
+        // intermittent crash in the release gate.
+
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
 

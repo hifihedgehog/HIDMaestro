@@ -2201,6 +2201,15 @@ internal static class DeviceOrchestrator
         SignalStopEventsAndDrain(CollectSweepTargetIndices());
         Phase("stop-drain");
 
+        // Composite personas first (issue #44). They are USB devices behind
+        // the emulated host controller and carry no HIDMAESTRO token of
+        // their own, so the enumerator walk below cannot reach them: a
+        // consumer that created one and exited left it enumerated. Detach
+        // before the walk so the USB devnodes are already gone when PnP
+        // settles the rest.
+        Usbip.UsbipBackend.DetachAllOwned();
+        Phase("usbip-detach");
+
         // Walk ROOT + SWD enumerators and remove HIDMaestro-owned devices.
         // Enumerators we always own: VID_*, XnaComposite, HIDMAESTRO, HID_IG_00
         // Shared enumerators (HIDCLASS, SYSTEM): verify hardware ID contains "HIDMaestro"

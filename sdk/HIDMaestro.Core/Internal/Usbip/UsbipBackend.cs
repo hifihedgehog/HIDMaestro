@@ -77,6 +77,58 @@ internal static class UsbipBackend
         catch { /* best-effort recovery */ }
     }
 
+    /// <summary>Detach every usbip device this SDK owns, including the
+    /// calling session's own (issue #44).
+    ///
+    /// <para>A composite persona is a USB device behind the emulated host
+    /// controller, and by design it carries no HIDMAESTRO token anywhere
+    /// on its own devnode (#42). The device sweep in
+    /// <c>DeviceOrchestrator.RemoveAllVirtualControllers</c> walks the ROOT
+    /// and SWD enumerators looking for exactly that token, so it can never
+    /// see a composite: an SDK consumer that created one and exited left
+    /// the device enumerated behind it.</para>
+    ///
+    /// <para>Distinct from <see cref="SweepStaleOnce"/>, which runs once per
+    /// process at create time and deliberately SKIPS the current session's
+    /// port so it cannot unplug the device it is about to use. Eviction
+    /// wants the opposite, so this takes no such exclusion and is not
+    /// gated to a single call. Best-effort: a machine without the transport
+    /// installed has nothing to detach and must not throw.</para></summary>
+    public static void DetachAllOwned()
+    {
+        try
+        {
+            // Stop this process's emulated devices FIRST. Their input pump
+            // threads map the shared input section directly and read it in a
+            // loop, and they take no part in the stop-event drain the UMDF2
+            // controllers use. The sweep destroys those sections moments
+            // later, so leaving a pump running here is not a leak, it is an
+            // access violation on a background thread that kills the whole
+            // process. Disposing joins the pumps before anything is unmapped.
+            var server = UsbipServer.Current;
+            if (server != null)
+            {
+                foreach (var device in server.SnapshotDevices())
+                {
+                    try { server.Unregister(device); device.Dispose(); } catch { }
+                }
+            }
+
+            if (!VhciClient.IsAvailable()) return;
+            foreach (var row in VhciClient.GetImportedDevices())
+            {
+                if (!IsOurLocation(row.Host, row.Service)) continue;
+                VhciClient.Detach(row.Port);
+            }
+            for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
+            {
+                for (int devnum = 1; devnum <= 8; devnum++)
+                    VhciClient.StopAttachAttempts("127.0.0.1", port, $"1-{devnum}");
+            }
+        }
+        catch { /* best-effort: eviction must never throw out of a sweep */ }
+    }
+
     private static bool IsOurLocation(string host, string service)
     {
         if (host != "127.0.0.1") return false;

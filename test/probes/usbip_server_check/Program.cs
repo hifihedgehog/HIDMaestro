@@ -159,10 +159,18 @@ internal static class Program
         Check("string 0 is the en-US LANGID table",
               lang.Status == 0 && lang.Data.SequenceEqual(new byte[] { 0x04, 0x03, 0x09, 0x04 }));
 
+        // Derived from the profile rather than hard-coded, so a future
+        // product-string change cannot leave this asserting a stale literal.
+        // The string moved to the current hardware's longer form in v1.4.5
+        // (issue #44); the 2020 launch pad reported "Wireless Controller".
+        string expectProduct = profile.ProductString;
+        int expectLen = 2 + expectProduct.Length * 2;
         var prod = cl.ControlIn(0x80, 0x06, 0x0302, 0x0409, 255);
-        Check("product string is 'Wireless Controller' (40-byte descriptor)",
-              prod.Status == 0 && prod.Data.Length == 40 && prod.Data[0] == 40 && prod.Data[1] == 3
-              && System.Text.Encoding.Unicode.GetString(prod.Data, 2, 38) == "Wireless Controller");
+        Check($"product string is '{expectProduct}' ({expectLen}-byte descriptor)",
+              prod.Status == 0 && prod.Data.Length == expectLen
+              && prod.Data[0] == expectLen && prod.Data[1] == 3
+              && System.Text.Encoding.Unicode.GetString(prod.Data, 2, expectLen - 2) == expectProduct,
+              prod.Status == 0 ? $"{prod.Data.Length} bytes" : $"status {prod.Status}");
 
         var msOs = cl.ControlIn(0x80, 0x06, 0x03EE, 0, 255);
         Check("MS OS string 0xEE stalls (real pad has none)", msOs.Status == -32);

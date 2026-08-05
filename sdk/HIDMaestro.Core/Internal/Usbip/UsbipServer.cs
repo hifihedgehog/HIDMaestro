@@ -114,6 +114,10 @@ internal sealed class UsbipServer : IDisposable
         lock (_devices) return _devices.TryGetValue(busid, out var d) ? d : null;
     }
 
+    /// <summary>Live emulated devices, for the eviction path in
+    /// <see cref="UsbipBackend.DetachAllOwned"/> (issue #44).</summary>
+    internal List<UsbipEmulatedDevice> SnapshotDevices() => Snapshot();
+
     private List<UsbipEmulatedDevice> Snapshot()
     {
         lock (_devices) return new List<UsbipEmulatedDevice>(_devices.Values);
