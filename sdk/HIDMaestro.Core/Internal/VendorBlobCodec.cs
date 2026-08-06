@@ -103,6 +103,31 @@ internal static class VendorBlobCodec
                     buffer[f.B] = (byte)Math.Clamp((int)Math.Round(Math.Clamp(v, 0f, 1f) * 255), 0, 255);
                     break;
                 }
+                case VendorBlobProgram.FieldOp.Stick12Pair:
+                {
+                    // Two 12-bit axes sharing three bytes, exactly as
+                    // VIIPER's ns2pro packStick12 lays them out:
+                    //   out[0] = x low 8
+                    //   out[1] = x high 4 in the low nibble,
+                    //            y low 4 in the high nibble
+                    //   out[2] = y high 8
+                    // The middle byte belongs to both axes, which is why
+                    // this is one field and not two: writing either axis
+                    // alone would clobber half of the other.
+                    if (f.B < 0 || f.B + 2 >= buffer.Length) break;
+                    float vx, vy;
+                    if (f.Source == VendorBlobProgram.SrcOp.RightStick) { vx = rightStickX; vy = rightStickY; }
+                    else { vx = leftStickX; vy = leftStickY; }
+                    // 0..1 maps onto the full 12-bit range. VIIPER centres a
+                    // resting stick at 0x0800 (StickCenter), which is what
+                    // 0.5f produces here after rounding.
+                    int x = Math.Clamp((int)Math.Round(Math.Clamp(vx, 0f, 1f) * 4095), 0, 4095);
+                    int y = Math.Clamp((int)Math.Round(Math.Clamp(vy, 0f, 1f) * 4095), 0, 4095);
+                    buffer[f.B]     = (byte)(x & 0xFF);
+                    buffer[f.B + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
+                    buffer[f.B + 2] = (byte)((y >> 4) & 0xFF);
+                    break;
+                }
                 case VendorBlobProgram.FieldOp.U8Rolling:
                 {
                     if (f.B < 0) break;
@@ -233,10 +258,22 @@ internal static class VendorBlobCodec
                         if (bits == 0) continue;
                         // Magic trigger-engaged digital buttons: DS4/DS5
                         // report L2/R2 as both analog axis AND digital button.
+                        // D-pad directions come from state.Hat, not from the
+                        // button mask, so a profile that spells the d-pad as
+                        // four discrete buttons still consumes the same
+                        // HMHat a hat-encoded profile does. Diagonals set
+                        // both of their components, which is what the wire
+                        // format expects and what SDL reconstructs a hat
+                        // from on the other side.
+                        var h = state.Hat;
                         bool on = bits switch
                         {
                             VendorBlobProgram.ButtonLtDigital => leftTrigger > 0f,
                             VendorBlobProgram.ButtonRtDigital => rightTrigger > 0f,
+                            VendorBlobProgram.ButtonDpadUp    => h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
+                            VendorBlobProgram.ButtonDpadDown  => h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
+                            VendorBlobProgram.ButtonDpadLeft  => h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
+                            VendorBlobProgram.ButtonDpadRight => h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
                             _ => (mask & (uint)bits) != 0,
                         };
                         if (on) packed |= (byte)(1 << (f.BitLo + i));
