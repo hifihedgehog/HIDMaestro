@@ -30,6 +30,7 @@ internal sealed class VendorBlobProgram
         U8Axis, U8Trigger, U8Rolling, U8Const,
         I16, U32, TouchpadFinger, Bitfield, Battery, HatOctant,
         ButtonMask, Rgb24, BytesPassthrough, BytesZero, Crc32,
+        Stick12Pair,
     }
 
     /// <summary>Input-direction value source, numeric. Replaces the
@@ -42,6 +43,10 @@ internal sealed class VendorBlobProgram
         GyroPitch, GyroYaw, GyroRoll, AccelX, AccelY, AccelZ,
         SensorTimestamp,
         Finger0, Finger1,
+        // Whole-stick sources. Unlike the per-axis entries above these name
+        // an X/Y pair, because the wire format interleaves the two axes
+        // inside shared bytes and neither can be written alone.
+        LeftStick, RightStick,
     }
 
     // Bitfield flag sources (input direction), numeric. Index-aligned with
@@ -52,6 +57,15 @@ internal sealed class VendorBlobProgram
     // Button-mask sentinels, stored above the 32-bit HMButton mask space.
     public const ulong ButtonLtDigital = 1UL << 32;
     public const ulong ButtonRtDigital = 1UL << 33;
+    // D-pad directions as discrete buttons. Some pads do not declare a hat
+    // at all and instead give each direction its own bit in the button
+    // array: Nintendo's Switch 2 Pro report 0x09 is the shipped example.
+    // Sourced from HMHat rather than from the button mask, so a consumer
+    // still sets the d-pad the one normal way.
+    public const ulong ButtonDpadUp    = 1UL << 34;
+    public const ulong ButtonDpadDown  = 1UL << 35;
+    public const ulong ButtonDpadLeft  = 1UL << 36;
+    public const ulong ButtonDpadRight = 1UL << 37;
 
     public readonly struct CompiledField
     {
@@ -132,6 +146,11 @@ internal sealed class VendorBlobProgram
                 "bytes-passthrough" => FieldOp.BytesPassthrough,
                 "bytes-zero"        => FieldOp.BytesZero,
                 "crc32-le"          => FieldOp.Crc32,
+                // Two 12-bit axes packed into three shared bytes. Nintendo's
+                // Switch 2 controllers use this for both sticks; the middle
+                // byte carries X's high nibble and Y's low nibble, so the
+                // pair has to be written as one field rather than two.
+                "stick12-pair"      => FieldOp.Stick12Pair,
                 _                   => FieldOp.Unknown,
             };
 
@@ -152,6 +171,8 @@ internal sealed class VendorBlobProgram
                 "sensorTimestamp" => SrcOp.SensorTimestamp,
                 "touchpadFinger1" => SrcOp.Finger1,
                 "touchpadFinger0" => SrcOp.Finger0,
+                "leftStick"       => SrcOp.LeftStick,
+                "rightStick"      => SrcOp.RightStick,
                 _                 => SrcOp.None,
             };
             // touchpad-finger defaults to finger0 for ANY other semantic,
@@ -202,6 +223,10 @@ internal sealed class VendorBlobProgram
                         if (string.IsNullOrEmpty(name) || name == "_") continue;
                         if (name == "LT_DIGITAL") { buttonBits[j] = ButtonLtDigital; continue; }
                         if (name == "RT_DIGITAL") { buttonBits[j] = ButtonRtDigital; continue; }
+                        if (name == "DPAD_UP")    { buttonBits[j] = ButtonDpadUp;    continue; }
+                        if (name == "DPAD_DOWN")  { buttonBits[j] = ButtonDpadDown;  continue; }
+                        if (name == "DPAD_LEFT")  { buttonBits[j] = ButtonDpadLeft;  continue; }
+                        if (name == "DPAD_RIGHT") { buttonBits[j] = ButtonDpadRight; continue; }
                         if (Enum.TryParse<HMButton>(name, true, out var btn))
                             buttonBits[j] = (uint)btn;
                     }

@@ -173,6 +173,34 @@ public sealed class HMProfile
     /// Rx/Ry→triggers. Null means default heuristic mapping.</summary>
     public Dictionary<string, string>? AxisMap => Inner.AxisMap;
 
+    /// <summary>SDL gamepad mapping body for this profile, or null when SDL
+    /// already knows the device.
+    ///
+    /// <para>SDL only exposes a joystick through its gamepad API when a
+    /// mapping exists for that device's GUID. Devices SDL's HIDAPI,
+    /// RawInput, WGI or XInput backends claim get one synthesized; a
+    /// device that reaches SDL through DirectInput gets one only from
+    /// SDL's built-in database or from the application. So a pad newer
+    /// than the SDL build in use, or one whose vendor protocol SDL drives
+    /// over a transport a HID profile cannot present, arrives as a
+    /// joystick with axes and buttons but no roles: no A/B/X/Y, no
+    /// triggers, no dpad.</para>
+    ///
+    /// <para>The string is everything after the GUID and name, with a
+    /// trailing comma, so a consumer prepends the two device-specific
+    /// fields:</para>
+    ///
+    /// <code>
+    /// var guid = FormatSdlGuid(SDL_GetJoystickGUIDForID(id));
+    /// if (profile.SdlMapping != null)
+    ///     SDL_AddGamepadMapping($"{guid},{profile.Name},{profile.SdlMapping}");
+    /// </code>
+    ///
+    /// <para>Registering it is idempotent and safe even when SDL already
+    /// has a mapping for the GUID: SDL replaces the entry. Consumers that
+    /// never touch SDL can ignore this property.</para></summary>
+    public string? SdlMapping => Inner.SdlMapping;
+
     /// <summary>v1.3.5 — vendor-blob input-report spec, or null. When set,
     /// HMController.SubmitState emits this report ID via the data-driven
     /// codec instead of the descriptor-based encoder. Profile-level metadata

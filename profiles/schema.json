@@ -137,6 +137,13 @@
       ],
       "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles."
     },
+    "sdlMapping": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SDL gamepad mapping body, everything after the GUID and name, trailing comma included. For pads SDL enumerates through DirectInput and has no database entry for, so it would otherwise expose them as roleless joysticks. Consumers prepend the runtime GUID and the profile name and call SDL_AddGamepadMapping."
+    },
     "triggerMode": {
       "type": [
         "string",
@@ -178,7 +185,7 @@
         "object",
         "null"
       ],
-      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11): { reportId, size, armOn, fields[] }. Drives VendorBlobCodec.EncodeInput."
+      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report; alwaysArmed emits it from the first frame, for firmware that streams it from power-on."
     },
     "extendedOutputReport": {
       "type": [
