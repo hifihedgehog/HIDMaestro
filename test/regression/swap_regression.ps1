@@ -159,6 +159,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\usbip_e2e_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_feature_gate_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch2_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch2_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1480,6 +1481,23 @@ function Scenario-Switch2-Pro {
     }
 }
 
+# S48: the Switch 2 Pro through a real SDL3, which is what v1.5.0 was
+# withdrawn for asserting untested. Gates three separable properties that
+# each broke once: the pad reaches SDL's joystick layer at all (it falls
+# through to the Windows backend after SDL's own switch2 driver declines
+# it), every button and axis carries live input (the profile streams its
+# vendor report from the first frame rather than waiting for a handshake
+# that never comes), and the profile's sdlMapping promotes it to the
+# gamepad layer with the right roles. Skips itself when the sibling
+# SDL3-build checkout is absent, which is the normal state on the Atom.
+function Scenario-Switch2-Pro-Sdl3 {
+    $probe = Resolve-ProbeBinary 'switch2_pro_sdl3_check' 'Switch2ProSdl3Check.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("Switch2ProSdl3Check exited " + $p.ExitCode + " - SDL no longer sees the Switch 2 Pro as a full gamepad: either it stopped reaching the joystick layer, an input stopped arriving, or the profile's sdlMapping drifted from its descriptor's button and axis order (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1543,7 +1561,8 @@ $scenarios = @(
     @{ Name = 'S44_Usbip_Bundle_Deploy';          Body = ${function:Scenario-Usbip-Bundle-Deploy} },
     @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} },
     @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} },
-    @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} }
+    @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} },
+    @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

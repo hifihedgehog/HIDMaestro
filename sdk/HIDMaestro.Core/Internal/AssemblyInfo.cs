@@ -27,3 +27,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SonyFeatureGateCheck")]
 [assembly: InternalsVisibleTo("OutputPerfBench")]
 [assembly: InternalsVisibleTo("VendorBlobGoldenCheck")]
+[assembly: InternalsVisibleTo("Switch2ProSdl3Check")]

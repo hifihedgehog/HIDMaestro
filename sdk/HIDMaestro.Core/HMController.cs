@@ -383,12 +383,20 @@ public sealed class HMController : IDisposable
         // unused extended-write branch. Issue #21 USB jerkiness: keeping
         // this allocation off entirely on USB profiles is the difference
         // between v1.3.4-equivalent hot-path codegen and the regressed path.
+        // alwaysArmed profiles (Switch 2 Pro) skip the handshake entirely:
+        // their real firmware streams the vendor report from power-on, and
+        // their descriptor's FIRST declared input report is an opaque
+        // vendor blob, so the legacy fallback path has no buttons or axes
+        // to fill and every consumer would read a live device that never
+        // moves.
+        bool alwaysArmed = profile.ExtendedReport?.AlwaysArmed == true;
         bool armOnDeclared = profile.ExtendedReport?.ArmOn != null
                           && profile.ExtendedReport.ArmOn.Count > 0;
-        if (profile.ExtendedReport != null && armOnDeclared)
+        if (profile.ExtendedReport != null && (armOnDeclared || alwaysArmed))
         {
             _extendedReportBuffer = new byte[profile.ExtendedReport.Size];
             _extEncoderState = new VendorBlobCodec.EncoderState();
+            _extendedModeArmed = alwaysArmed;
         }
 
         // Switch Pro protocol (issue #33): keyed on the Nintendo VID/PID
@@ -549,9 +557,9 @@ public sealed class HMController : IDisposable
         // arrives via HidFeatureRead. Until then, fall through to the
         // descriptor-driven BuildReportInto path so joy.cpl, RawInput, and
         // generic HID consumers see structured X/Y/Rx/Ry through Report 0x01.
-        // ExtendedReport with a missing armOn list flips this back to "always
-        // extended" — used by output-only profiles or test fixtures where
-        // arming-on-demand is the wrong default.
+        // A profile whose extendedReport sets alwaysArmed starts armed and
+        // never takes the legacy path, for controllers that stream the
+        // vendor report from power-on rather than switching into it.
         // The codec runs only after the host-side arm-handshake has fired.
         // Profiles without an armOn list (every USB Sony profile, every
         // generic profile) never arm, so they always take the legacy

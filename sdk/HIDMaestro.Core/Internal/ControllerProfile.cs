@@ -122,6 +122,30 @@ public sealed class ControllerProfile
     [JsonPropertyName("axisMap")]
     public Dictionary<string, string>? AxisMap { get; set; }
 
+    /// <summary>Optional SDL gamepad mapping body for profiles SDL's own
+    /// database does not cover.
+    ///
+    /// <para>SDL promotes a joystick to its gamepad layer only when a
+    /// mapping exists for the device's GUID. SDL synthesizes one for
+    /// devices its HIDAPI, RawInput, WGI or XInput backends claim, but a
+    /// device that reaches SDL through DirectInput gets a mapping only
+    /// from the database (SDL_gamepad_db.h) or from the application. A
+    /// pad too new to be in that database, or one whose vendor protocol
+    /// SDL drives over a transport a HID profile cannot offer, therefore
+    /// enumerates as a nameless joystick with no button roles.</para>
+    ///
+    /// <para>This field holds everything after the GUID and name in an
+    /// SDL mapping string, ending in a trailing comma, e.g.
+    /// <c>"a:b0,b:b1,...,platform:Windows,"</c>. The GUID is per-device
+    /// and only exists once SDL has enumerated the pad, so consumers
+    /// prepend it themselves: read
+    /// <c>SDL_GetJoystickGUIDForID</c>, format it, and pass
+    /// <c>$"{guid},{profile.Name},{profile.SdlMapping}"</c> to
+    /// <c>SDL_AddGamepadMapping</c>. See
+    /// <see cref="HIDMaestro.HMProfile.SdlMapping"/>.</para></summary>
+    [JsonPropertyName("sdlMapping")]
+    public string? SdlMapping { get; set; }
+
     /// <summary>v1.3.9 — structured per-profile physical-design declaration.
     /// Discriminated by <c>kind</c>; concrete shape depends on the kind
     /// (gamepad / joystick / flight_stick / hotas / wheel / pedals / etc.).
@@ -355,6 +379,22 @@ public sealed class ExtendedReportSpec
     /// stays on the legacy report).</summary>
     [JsonPropertyName("armOn")]
     public List<ArmTrigger>? ArmOn { get; set; }
+
+    /// <summary>Emit this report from the first frame, with no host
+    /// handshake. For controllers whose real firmware powers up already
+    /// streaming the vendor report rather than switching into it: the
+    /// Switch 2 Pro emits report 0x09 from construction and only leaves
+    /// it when a host sends subUSBSelectReport (VIIPER device.go sets
+    /// activeReportID = ReportIDPro at construction).
+    ///
+    /// <para>Mutually exclusive with <see cref="ArmOn"/> in practice. A
+    /// Sony BT profile arms on a Get_Feature because its real firmware
+    /// does; a profile that sets this one has no handshake to wait for,
+    /// and waiting would leave every consumer reading the descriptor's
+    /// first declared report, which for these controllers is an opaque
+    /// vendor blob with no buttons or axes in it.</para></summary>
+    [JsonPropertyName("alwaysArmed")]
+    public bool AlwaysArmed { get; set; }
 
     /// <summary>Ordered field descriptors. See VendorBlobCodec for the type
     /// vocabulary.</summary>
