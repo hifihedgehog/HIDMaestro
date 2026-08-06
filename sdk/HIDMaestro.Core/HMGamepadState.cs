@@ -319,19 +319,6 @@ public enum HMButton : uint
     Touchpad     = 1u << 11,  // PS touchpad click (DualShock 4 / DualSense)
     Share        = 1u << 12,  // Xbox Series Share button (not present on earlier Xbox or Sony)
 
-    // Rear paddles. Named by side rather than by number because the pads
-    // that have them (Switch 2 Pro's GR/GL, DualSense Edge, Xbox Elite)
-    // agree on side and disagree on numbering. SDL uses the same split,
-    // SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1 / LEFT_PADDLE1.
-    RightPaddle  = 1u << 13,
-    LeftPaddle   = 1u << 14,
-
-    // Extra vendor button with no cross-vendor meaning. Currently the
-    // Switch 2 family's C button, which opens GameChat on real hardware.
-    // SDL models it the same way, as a device-specific button rather than
-    // as one of the standard gamepad roles.
-    Misc1        = 1u << 15,
-
     // Aliases for clarity when programming against PlayStation profiles
     Cross    = A,
     Circle   = B,

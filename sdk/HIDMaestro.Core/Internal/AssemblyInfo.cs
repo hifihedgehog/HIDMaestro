@@ -17,7 +17,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SonyBtAxisRoleCheck")]
 [assembly: InternalsVisibleTo("XboxGipTriggerResolverCheck")]
 [assembly: InternalsVisibleTo("SwitchProCheck")]
-[assembly: InternalsVisibleTo("Switch2ProCheck")]
 [assembly: InternalsVisibleTo("SwitchDescriptorIdleCheck")]
 [assembly: InternalsVisibleTo("StopEventResilienceCheck")]
 [assembly: InternalsVisibleTo("UsbCompositeSchemaCheck")]
