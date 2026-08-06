@@ -82,6 +82,22 @@ public class HidReportBuilder
     public InputField? HatSwitch { get; private set; }
     public List<InputField> Buttons { get; } = new();
 
+    /// <summary>Vendor-page 1-bit input fields that directly continue the
+    /// button array on the wire (issue #48). The DualSense family declares
+    /// 15 buttons and then a 13x1-bit vendor field (usage 0xFF00/0x21); the
+    /// Edge's back paddles and Fn buttons live in that field's bits, NOT in
+    /// declared buttons. A real Edge's extras are invisible to DirectInput
+    /// and are read from the raw report by SDL, Steam Input, DS4Windows and
+    /// dualsense-tester. <see cref="ButtonMap"/> values at or above
+    /// <c>Buttons.Count</c> address this run (value N = bit N - Count), so a
+    /// profile can place those buttons exactly where real firmware puts them
+    /// without widening its descriptor away from the real device's shape.
+    /// Only explicit map values reach it: identity mapping and out-of-range
+    /// map indices never spill into vendor bits. Empty when the descriptor
+    /// has no such contiguous run (DS4's 6-bit sequence counter and the Sony
+    /// BT legacy 6-bit pad are single multi-bit fields and do not qualify).</summary>
+    public List<InputField> VendorButtonBits { get; } = new();
+
     /// <summary>System Control / System Main Menu bit. On Xbox Series / Xbox
     /// One controllers the Guide (Xbox) button lives here, not in the regular
     /// gamepad button array. xinputhid parses this bit and exposes it via
@@ -649,6 +665,24 @@ public class HidReportBuilder
                 Buttons.Add(f); // Consumer buttons (e.g., Share/Record)
             }
         }
+
+        // Collect the vendor 1-bit run that continues the button array
+        // (issue #48). Strictly contiguous from the last declared button:
+        // each qualifying bit extends the run by one, anything else ends
+        // it. InputFields is in declaration order, so a single ordered
+        // pass suffices.
+        if (Buttons.Count > 0)
+        {
+            int runEnd = Buttons[^1].BitOffset + Buttons[^1].BitSize;
+            foreach (var f in InputFields)
+            {
+                if (f.UsagePage < 0xFF00 || f.IsConstant || f.BitSize != 1)
+                    continue;
+                if (f.BitOffset != runEnd) continue;
+                VendorButtonBits.Add(f);
+                runEnd += 1;
+            }
+        }
     }
 
     /// <summary>v1.3.9 — single-source axis-dict encoder. Caller writes
@@ -913,11 +947,26 @@ public class HidReportBuilder
         {
             int b = System.Numerics.BitOperations.TrailingZeroCount(mask);
             mask &= mask - 1;  // clear lowest set bit
-            int descBtn = (ButtonMap != null && b < ButtonMap.Length)
-                ? ButtonMap[b] : b;
+            // A -1 map entry is the explicit "this profile does not carry
+            // this button" sentinel (issue #48): it fails both range checks
+            // below and the bit is dropped. Sony maps use it for Share and,
+            // on non-Edge pads, the paddles, so those HMButton bits no
+            // longer alias onto PS / Touchpad / Mute by identity fallback.
+            bool mapped = ButtonMap != null && b < ButtonMap.Length;
+            int descBtn = mapped ? ButtonMap[b] : b;
             if ((uint)descBtn < (uint)Buttons.Count)
                 WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
                           Buttons[descBtn].BitSize, 1);
+            else if (mapped && (uint)(descBtn - Buttons.Count) < (uint)VendorButtonBits.Count)
+            {
+                // Explicit map values past the declared buttons address the
+                // contiguous vendor-bit run (DualSense Edge paddles / Fn,
+                // see VendorButtonBits). Identity-mapped bits never land
+                // here: only a profile that opts in via buttonMap can write
+                // vendor bits.
+                var vb = VendorButtonBits[descBtn - Buttons.Count];
+                WriteBits(report, vb.BitOffset + idOffset, vb.BitSize, 1);
+            }
         }
 
     }

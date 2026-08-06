@@ -320,17 +320,25 @@ public enum HMButton : uint
     Share        = 1u << 12,  // Xbox Series Share button (not present on earlier Xbox or Sony)
 
     // Rear paddles. Named by side rather than by number because the pads
-    // that have them (Switch 2 Pro's GR/GL, DualSense Edge, Xbox Elite)
-    // agree on side and disagree on numbering. SDL uses the same split,
-    // SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1 / LEFT_PADDLE1.
+    // that have them (Switch 2 Pro's GR/GL, DualSense Edge's back
+    // buttons, Xbox Elite) agree on side and disagree on numbering. SDL
+    // uses the same split, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1 /
+    // LEFT_PADDLE1.
     RightPaddle  = 1u << 13,
     LeftPaddle   = 1u << 14,
 
-    // Extra vendor button with no cross-vendor meaning. Currently the
-    // Switch 2 family's C button, which opens GameChat on real hardware.
-    // SDL models it the same way, as a device-specific button rather than
-    // as one of the standard gamepad roles.
+    // Vendor-extra slot with no cross-vendor meaning: the Switch 2
+    // family's C button (opens GameChat), and the DualSense's mic mute.
+    // SDL models both the same way, as SDL_GAMEPAD_BUTTON_MISC1 rather
+    // than as one of the standard gamepad roles.
     Misc1        = 1u << 15,
+
+    // Second paddle pair: the DualSense Edge's front Fn buttons. Same
+    // side-naming rationale as the first pair; SDL folds these into
+    // SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2 / LEFT_PADDLE2 in its PS5 Edge
+    // mapping.
+    RightPaddle2 = 1u << 16,
+    LeftPaddle2  = 1u << 17,
 
     // Aliases for clarity when programming against PlayStation profiles
     Cross    = A,

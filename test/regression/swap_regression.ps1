@@ -160,6 +160,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sony_feature_gate_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch2_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch2_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\sony_extra_buttons_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1490,6 +1491,19 @@ function Scenario-Switch2-Pro {
 # that never comes), and the profile's sdlMapping promotes it to the
 # gamepad layer with the right roles. Skips itself when the sibling
 # SDL3-build checkout is absent, which is the normal state on the Atom.
+# S49: the DualSense mic mute and the Edge's four extras (issue #48).
+# Wire-byte asserts on both encode paths against the layout SDL,
+# DS4Windows, ds5-edge-relay and dualsense-tester agree on, plus the
+# sentinel that stopped HMButton.Share aliasing onto PS. Offline, no
+# device.
+function Scenario-Sony-Extra-Buttons {
+    $probe = Resolve-ProbeBinary 'sony_extra_buttons_check' 'SonyExtraButtonsCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("SonyExtraButtonsCheck exited " + $p.ExitCode + " - the Sony extra-button wire placement drifted: mic mute (0x04), Edge paddles/Fn (0x10-0x80) in the third buttons byte, or the -1 buttonMap sentinel regressed and Share aliases onto PS again (see probe stdout)")
+    }
+}
+
 function Scenario-Switch2-Pro-Sdl3 {
     $probe = Resolve-ProbeBinary 'switch2_pro_sdl3_check' 'Switch2ProSdl3Check.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1562,7 +1576,8 @@ $scenarios = @(
     @{ Name = 'S45_Usbip_E2E_Composite';          Body = ${function:Scenario-Usbip-E2E-Composite} },
     @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} },
     @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} },
-    @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} }
+    @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} },
+    @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

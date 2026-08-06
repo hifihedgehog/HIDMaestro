@@ -118,7 +118,7 @@
       "items": {
         "type": "integer"
       },
-      "description": "Maps declared descriptor button indices to canonical button positions."
+      "description": "Maps HMButton bit positions (array index) to descriptor button indices (value). Null = identity (Xbox layout). Sony profiles remap so A lands on Cross, X on Square, etc. -1 = this profile does not carry that button (the bit is dropped instead of falling through to identity). Values at or past the declared button count address the contiguous 1-bit vendor-page run that continues the button array, when the descriptor has one: the DualSense family declares 15 buttons then a 13x1-bit vendor field, and the Edge back paddles / Fn buttons live in its bits (value 16 = FnL 0x10 ... 19 = RB 0x80), matching where real firmware puts them without widening the descriptor."
     },
     "triggerButtons": {
       "type": [
