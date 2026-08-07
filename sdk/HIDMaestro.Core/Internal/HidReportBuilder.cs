@@ -952,8 +952,8 @@ public class HidReportBuilder
             // below and the bit is dropped. Sony maps use it for Share and,
             // on non-Edge pads, the paddles, so those HMButton bits no
             // longer alias onto PS / Touchpad / Mute by identity fallback.
-            bool mapped = ButtonMap != null && b < ButtonMap.Length;
-            int descBtn = mapped ? ButtonMap[b] : b;
+            bool mapped = ButtonMap is { } map && b < map.Length;
+            int descBtn = mapped ? ButtonMap![b] : b;
             if ((uint)descBtn < (uint)Buttons.Count)
                 WriteBits(report, Buttons[descBtn].BitOffset + idOffset,
                           Buttons[descBtn].BitSize, 1);

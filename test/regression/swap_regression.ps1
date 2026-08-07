@@ -161,6 +161,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\switch2_pro_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch2_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_extra_buttons_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1496,6 +1497,23 @@ function Scenario-Switch2-Pro {
 # DS4Windows, ds5-edge-relay and dualsense-tester agree on, plus the
 # sentinel that stopped HMButton.Share aliasing onto PS. Offline, no
 # device.
+# S50: the virtual VR controller subsystem (issue #32). Phase 1 always
+# runs and pins the C# and C++ halves of the HIDMaestroVR IPC protocol
+# to each other byte-for-byte, with the probe playing the driver's role.
+# Phase 2 runs when a SteamVR install is present (the devbox carries a
+# Steam-free steamcmd install at C:\SteamVR): registers the embedded
+# OpenVR driver, boots the headless null-HMD stack, and asserts both
+# virtual controllers enumerate through Valve's own client API plus a
+# full haptic round trip. On machines without SteamVR (the Atom) phase 2
+# self-reports as skipped WITH the reason printed; phase 1 still gates.
+function Scenario-Vr-Controller-Smoke {
+    $probe = Resolve-ProbeBinary 'vr_controller_smoke' 'VrControllerSmoke.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("VrControllerSmoke exited " + $p.ExitCode + " - the VR IPC protocol drifted between the C# and C++ mirrors, the OpenVR driver failed to register/load in SteamVR, the controllers stopped enumerating, or the haptic round trip broke (see probe stdout)")
+    }
+}
+
 function Scenario-Sony-Extra-Buttons {
     $probe = Resolve-ProbeBinary 'sony_extra_buttons_check' 'SonyExtraButtonsCheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1577,7 +1595,8 @@ $scenarios = @(
     @{ Name = 'S46_Sony_Feature_Gate';            Body = ${function:Scenario-Sony-Feature-Gate} },
     @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} },
     @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} },
-    @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} }
+    @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} },
+    @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

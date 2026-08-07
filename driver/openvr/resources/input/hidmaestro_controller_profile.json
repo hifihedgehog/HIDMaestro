@@ -1,0 +1,46 @@
+{
+	"jsonid": "input_profile",
+	"controller_type": "hidmaestro_controller",
+	"input_bindingui_mode": "controller_handed",
+	"input_source": {
+		"/input/system": {
+			"type": "button",
+			"binding_image_point": [ 30, 30 ],
+			"order": 1
+		},
+		"/input/a": {
+			"type": "button",
+			"touch": true,
+			"binding_image_point": [ 80, 60 ],
+			"order": 2
+		},
+		"/input/b": {
+			"type": "button",
+			"touch": true,
+			"binding_image_point": [ 80, 100 ],
+			"order": 3
+		},
+		"/input/trigger": {
+			"type": "trigger",
+			"binding_image_point": [ 250, 60 ],
+			"order": 4
+		},
+		"/input/grip": {
+			"type": "trigger",
+			"binding_image_point": [ 250, 100 ],
+			"order": 5
+		},
+		"/input/joystick": {
+			"type": "joystick",
+			"click": true,
+			"binding_image_point": [ 150, 140 ],
+			"order": 6
+		},
+		"/output/haptic": {
+			"type": "vibration",
+			"binding_image_point": [ 300, 150 ],
+			"order": 7
+		}
+	},
+	"default_bindings": []
+}

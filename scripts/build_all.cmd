@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal enabledelayedexpansion
 
 :: ==========================================================================
@@ -39,6 +39,13 @@ call "%~dp0build_companion.cmd"
 if errorlevel 1 (
     echo.
     echo ERROR: scripts\build_companion.cmd failed. See output above.
+    exit /b 1
+)
+
+call "%~dp0build_openvr.cmd"
+if errorlevel 1 (
+    echo.
+    echo ERROR: scriptsuild_openvr.cmd failed. See output above.
     exit /b 1
 )
 
