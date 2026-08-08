@@ -183,7 +183,19 @@ internal static class UsbipDriverInstaller
         {
             try
             {
-                if (CM_Locate_DevNodeW(out uint devInst, VhciInstanceId, CM_LOCATE_DEVNODE_NORMAL) != 0)
+                // Same instance-number caveat as StampOwnerHardwareId:
+                // the vhci root is not always 0000. Repair the first
+                // present controller that carries the usbip UDE id.
+                uint devInst = 0;
+                bool located = false;
+                for (int n = 0; n < 16 && !located; n++)
+                {
+                    if (CM_Locate_DevNodeW(out devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+                        continue;
+                    foreach (var hwid in GetMultiSz(devInst, CM_DRP_HARDWAREID))
+                        if (hwid.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { located = true; break; }
+                }
+                if (!located)
                     return;
 
                 // Start it first. The common broken state is a devnode
@@ -243,8 +255,6 @@ internal static class UsbipDriverInstaller
     /// resolves exactly as before and the write is additive.</para></summary>
     private const string OwnerHardwareId = "ROOT\\HIDMAESTRO_UDE";
 
-    private const string VhciInstanceId = "ROOT\\USB\\0000";
-
     /// <summary>Append <see cref="OwnerHardwareId"/> to the host
     /// controller's hardware IDs if it is not already there. Idempotent,
     /// cheap enough to run on every composite create (one registry read,
@@ -253,15 +263,44 @@ internal static class UsbipDriverInstaller
     /// it just cannot be filtered by the token.</summary>
     internal static bool StampOwnerHardwareId()
     {
+        // The vhci host controller is ROOT-enumerated, and its instance
+        // NUMBER is not stable: deleting and reinstalling the transport
+        // (or a second install racing a phantom of the first) makes PnP
+        // allocate ROOT\USB\0001 while a stamped 0000 lingers, and every
+        // attach then rides the unstamped sibling. Found live 2026-08-07:
+        // 0000 present and stamped, 0001 present, unstamped, and carrying
+        // the personas, which broke the #42 ancestry filter downstream.
+        // So: enumerate the instance-number space and stamp EVERY present
+        // controller whose hardware IDs mark it as the usbip UDE root,
+        // rather than assuming instance 0000.
+        bool any = false;
+        for (int n = 0; n < 16; n++)
+        {
+            string instanceId = $"ROOT\\USB\\{n:D4}";
+            if (StampOne(instanceId))
+                any = true;
+        }
+        return any;
+    }
+
+    private static bool StampOne(string instanceId)
+    {
         try
         {
-            if (CM_Locate_DevNodeW(out uint devInst, VhciInstanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+            if (CM_Locate_DevNodeW(out uint devInst, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
                 return false;
 
             string[] ids = GetMultiSz(devInst, CM_DRP_HARDWAREID);
+            bool isUde = false;
             foreach (var id in ids)
+            {
                 if (string.Equals(id, OwnerHardwareId, StringComparison.OrdinalIgnoreCase))
                     return true; // already stamped
+                if (id.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0)
+                    isUde = true;
+            }
+            if (!isUde)
+                return false; // some other root-enumerated USB controller: leave it alone
 
             // Upstream's id stays at index 0 so driver matching is unchanged.
             var merged = new string[ids.Length + 1];
@@ -280,7 +319,7 @@ internal static class UsbipDriverInstaller
             try
             {
                 var data = new SP_DEVINFO_DATA { cbSize = Marshal.SizeOf<SP_DEVINFO_DATA>() };
-                if (!SetupDiOpenDeviceInfoW(set, VhciInstanceId, IntPtr.Zero, 0, ref data))
+                if (!SetupDiOpenDeviceInfoW(set, instanceId, IntPtr.Zero, 0, ref data))
                     return false;
                 if (!SetupDiSetDeviceRegistryPropertyW(set, ref data, SPDRP_HARDWAREID, buf, (uint)buf.Length))
                     return false;
@@ -288,7 +327,7 @@ internal static class UsbipDriverInstaller
             finally { SetupDiDestroyDeviceInfoList(set); }
 
             DeviceOrchestrator.LogDiag(
-                $"UsbipDriverInstaller: stamped {OwnerHardwareId} onto {VhciInstanceId} " +
+                $"UsbipDriverInstaller: stamped {OwnerHardwareId} onto {instanceId} " +
                 $"(was {ids.Length} id(s)).");
             return true;
         }
