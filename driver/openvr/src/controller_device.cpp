@@ -13,6 +13,16 @@
 //   * SetConnected via a re-published pose with deviceIsConnected=false:
 //     VRCHOTAS hotas_controller_device SetDeviceConnected (pattern only,
 //     no code copied; VRCHOTAS is GPL and referenced read-only).
+//   * Prop_ControllerHandSelectionPriority_Int32 at activate (issue #51):
+//     opengloves knuckle_device_driver.cpp:108 and VRCHOTAS
+//     hotas_controller_device.cpp:96, the two reference drivers that have
+//     to win a hand assignment without lighthouse tracking. Valve's
+//     Driver_API_Documentation.md "Controller roles" names this property
+//     as the only lever a driver has over the runtime's hand assignment.
+//   * Reading the value from the driver's own settings section:
+//     opengloves device_configuration.cpp GetDriverConfiguration, which
+//     reads its keys out of the same driver_<name> section that
+//     resources/settings/default.vrsettings seeds.
 
 #include "controller_device.h"
 
@@ -31,6 +41,23 @@ HmVrControllerDevice::HmVrControllerDevice( vr::ETrackedControllerRole role )
     model_number_ = "HIDMaestro Virtual Controller";
 }
 
+int32_t HmVrControllerDevice::HandSelectionPriority( bool *fromSettings )
+{
+    // resources/settings/default.vrsettings seeds the key, so the normal
+    // answer is VRSettingsError_None and the value comes from SteamVR
+    // (default file, or steamvr.vrsettings when a machine overrides it).
+    // VRSettingsError_UnsetSettingHasNoDefault means our default file did
+    // not load, which is worth saying out loud in the log rather than
+    // silently shipping a number nobody can trace.
+    vr::EVRSettingsError err = vr::VRSettingsError_None;
+    const int32_t configured = vr::VRSettings()->GetInt32(
+        HMVR_SETTINGS_SECTION, HMVR_SETTINGS_KEY_HAND_PRIORITY, &err );
+    const bool ok = err == vr::VRSettingsError_None;
+    if ( fromSettings != nullptr )
+        *fromSettings = ok;
+    return ok ? configured : HMVR_DEFAULT_HAND_PRIORITY;
+}
+
 vr::EVRInitError HmVrControllerDevice::Activate( uint32_t unObjectId )
 {
     is_active_ = true;
@@ -42,6 +69,23 @@ vr::EVRInitError HmVrControllerDevice::Activate( uint32_t unObjectId )
     vr::VRProperties()->SetStringProperty( container, vr::Prop_ModelNumber_String, model_number_.c_str() );
     vr::VRProperties()->SetStringProperty( container, vr::Prop_ManufacturerName_String, "HIDMaestro" );
     vr::VRProperties()->SetInt32Property( container, vr::Prop_ControllerRoleHint_Int32, role_ );
+
+    // The role hint is advisory. Hand assignment, which is what
+    // /user/hand/left|right and every role-addressed surface read, is
+    // decided by the runtime, and a driver's only influence over it is
+    // this property. Measured on the rig: left unset it reads back 0,
+    // the same value SteamVR's own Index profile ends up with, so which
+    // device wins is an unstated runtime tiebreak. A positive value makes
+    // the outcome ours to state. 1000 is VRCHOTAS's
+    // kMappedHandSelectionPriority, chosen over opengloves' INT32_MAX so
+    // the value stays adjustable in both directions: a machine whose real
+    // controllers should keep the hands sets hand_selection_priority
+    // negative in steamvr.vrsettings, which is the register Valve's own
+    // oculus touch_profile.json uses with hand_priority -1.
+    bool priorityFromSettings = false;
+    const int32_t handPriority = HandSelectionPriority( &priorityFromSettings );
+    vr::VRProperties()->SetInt32Property( container,
+        vr::Prop_ControllerHandSelectionPriority_Int32, handPriority );
     vr::VRProperties()->SetStringProperty( container, vr::Prop_RegisteredDeviceType_String,
         role_ == vr::TrackedControllerRole_LeftHand ? "hidmaestro/left" : "hidmaestro/right" );
     vr::VRProperties()->SetStringProperty( container, vr::Prop_ControllerType_String, "hidmaestro_controller" );
@@ -76,8 +120,9 @@ vr::EVRInitError HmVrControllerDevice::Activate( uint32_t unObjectId )
 
     pose_thread_ = std::thread( &HmVrControllerDevice::PoseUpdateThread, this );
 
-    DriverLog( "hidmaestro: %s controller activated as device %u",
-        role_ == vr::TrackedControllerRole_LeftHand ? "left" : "right", unObjectId );
+    DriverLog( "hidmaestro: %s controller activated as device %u (hand selection priority %d, %s)",
+        role_ == vr::TrackedControllerRole_LeftHand ? "left" : "right", unObjectId,
+        handPriority, priorityFromSettings ? "from settings" : "built-in fallback" );
     return vr::VRInitError_None;
 }
 

@@ -224,9 +224,38 @@ internal static class Program
         return exit;
     }
 
+    // A consumer plus the neutral-frame pump that keeps it looking live to
+    // the driver. Wrapped so the live phase can drop the channel and
+    // re-attach it, which is what a consumer app restarting looks like.
+    sealed class PumpedConsumer : IDisposable
+    {
+        public readonly HMVRController Vr = new();
+        readonly Thread _pump;
+        volatile bool _stop;
+
+        public PumpedConsumer()
+        {
+            _pump = new Thread(() =>
+            {
+                var st = new HMVRState();
+                while (!_stop) { Vr.SubmitState(in st); Thread.Sleep(8); }
+            })
+            { IsBackground = true };
+            _pump.Start();
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _pump.Join(1000);
+            Vr.Dispose();
+        }
+    }
+
     static int LivePhase(string steamVr)
     {
-        using var vr = new HMVRController();
+        var consumer = new PumpedConsumer();
+        var vr = consumer.Vr;
 
         // The driver's bootstrap poll runs every 200 ms once vrserver is
         // up; give the whole stack a generous window.
@@ -234,23 +263,10 @@ internal static class Program
         Check("C++ driver attached to the IPC channel inside vrserver", driverUp);
         if (!driverUp)
         {
+            consumer.Dispose();
             Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
             return s_failures == 0 ? 0 : 1;
         }
-
-        // Pump neutral frames so the driver sees a live consumer.
-        var pumpStop = false;
-        var pump = new Thread(() =>
-        {
-            var st = new HMVRState();
-            while (!Volatile.Read(ref pumpStop))
-            {
-                vr.SubmitState(in st);
-                Thread.Sleep(8);
-            }
-        })
-        { IsBackground = true };
-        pump.Start();
 
         Check("both controllers registered live in vrserver", SpinWait(() => vr.ControllersLive, 15000));
 
@@ -281,6 +297,31 @@ internal static class Program
                 Check("devices report connected",
                       system.IsTrackedDeviceConnected(leftIdx) && system.IsTrackedDeviceConnected(rightIdx));
 
+                // Hand roles (issue #51). The role hint is advisory; what
+                // decides /user/hand/left|right and everything role-addressed
+                // (SteamVR's own Test Controller included) is the runtime's
+                // hand assignment, which a driver influences only through
+                // Prop_ControllerHandSelectionPriority_Int32. Roles settle
+                // asynchronously after the devices activate, hence the wait.
+                Check("role hint reads back left/right",
+                      Int32Prop(system, leftIdx, ETrackedDeviceProperty.Prop_ControllerRoleHint_Int32) == (int)ETrackedControllerRole.LeftHand &&
+                      Int32Prop(system, rightIdx, ETrackedDeviceProperty.Prop_ControllerRoleHint_Int32) == (int)ETrackedControllerRole.RightHand);
+
+                Console.WriteLine($"    handSelectionPriority: left={Int32Prop(system, leftIdx, ETrackedDeviceProperty.Prop_ControllerHandSelectionPriority_Int32)}" +
+                                  $" right={Int32Prop(system, rightIdx, ETrackedDeviceProperty.Prop_ControllerHandSelectionPriority_Int32)}");
+
+                bool roled = SpinWait(() =>
+                    system.GetControllerRoleForTrackedDeviceIndex(leftIdx) == ETrackedControllerRole.LeftHand &&
+                    system.GetControllerRoleForTrackedDeviceIndex(rightIdx) == ETrackedControllerRole.RightHand, 15000);
+                Check("SteamVR promoted both devices to real hand roles", roled,
+                      $"left={system.GetControllerRoleForTrackedDeviceIndex(leftIdx)} right={system.GetControllerRoleForTrackedDeviceIndex(rightIdx)}");
+
+                uint roleLeft = system.GetTrackedDeviceIndexForControllerRole(ETrackedControllerRole.LeftHand);
+                uint roleRight = system.GetTrackedDeviceIndexForControllerRole(ETrackedControllerRole.RightHand);
+                Check("both hands resolve back to our device indices",
+                      roleLeft == leftIdx && roleRight == rightIdx,
+                      $"left={Idx(roleLeft)} (want {leftIdx}) right={Idx(roleRight)} (want {rightIdx})");
+
                 // Haptic round trip: client -> vrserver -> C++ driver ->
                 // IPC ring -> HMVRController event.
                 var got = new ManualResetEventSlim(false);
@@ -295,17 +336,50 @@ internal static class Program
                 Check("haptic pulse round-trips client->vrserver->driver->consumer", anyHaptic);
                 if (anyHaptic)
                     Check("haptic landed on the right hand", hand == HMVRHand.Right);
+
+                // Consumer restart (issue #51). The driver keeps both devices
+                // across a consumer's lifetime and flips deviceIsConnected
+                // instead of removing them, since OpenVR has no
+                // TrackedDeviceRemoved. SteamVR drops the hand roles while
+                // they are disconnected, so the roles have to come back on
+                // their own when the consumer returns. This is the path a
+                // user actually walks: start the app, close it, start it
+                // again.
+                consumer.Dispose();
+                Check("controllers go disconnected when the consumer leaves",
+                      SpinWait(() => !system.IsTrackedDeviceConnected(leftIdx) &&
+                                     !system.IsTrackedDeviceConnected(rightIdx), 20000));
+
+                consumer = new PumpedConsumer();
+                vr = consumer.Vr;
+                Check("controllers reconnect when a new consumer attaches",
+                      SpinWait(() => system.IsTrackedDeviceConnected(leftIdx) &&
+                                     system.IsTrackedDeviceConnected(rightIdx), 20000));
+
+                bool reRoled = SpinWait(() =>
+                    system.GetControllerRoleForTrackedDeviceIndex(leftIdx) == ETrackedControllerRole.LeftHand &&
+                    system.GetControllerRoleForTrackedDeviceIndex(rightIdx) == ETrackedControllerRole.RightHand, 20000);
+                Check("hand roles survive a consumer restart", reRoled,
+                      $"left={system.GetControllerRoleForTrackedDeviceIndex(leftIdx)} right={system.GetControllerRoleForTrackedDeviceIndex(rightIdx)}");
             }
 
             OpenVR.Shutdown();
         }
 
-        Volatile.Write(ref pumpStop, true);
-        pump.Join(1000);
+        consumer.Dispose();
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
+
+    static int Int32Prop(CVRSystem system, uint idx, ETrackedDeviceProperty prop)
+    {
+        var err = ETrackedPropertyError.TrackedProp_Success;
+        int value = system.GetInt32TrackedDeviceProperty(idx, prop, ref err);
+        return err == ETrackedPropertyError.TrackedProp_Success ? value : int.MinValue;
+    }
+
+    static string Idx(uint i) => i == OpenVR.k_unTrackedDeviceIndexInvalid ? "invalid" : i.ToString();
 
     static uint FindBySerial(CVRSystem system, string serial)
     {

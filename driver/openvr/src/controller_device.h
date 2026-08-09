@@ -17,6 +17,13 @@
 #include "openvr_driver.h"
 #include "vr_protocol.h"
 
+// Driver settings section, seeded by resources/settings/default.vrsettings
+// and overridable per machine in steamvr.vrsettings. Section naming and
+// the read path follow opengloves device_configuration.cpp.
+#define HMVR_SETTINGS_SECTION           "driver_hidmaestro"
+#define HMVR_SETTINGS_KEY_HAND_PRIORITY "hand_selection_priority"
+#define HMVR_DEFAULT_HAND_PRIORITY      1000
+
 enum HmVrComponent
 {
     HmVrComponent_system_click,
@@ -56,6 +63,7 @@ public:
 
 private:
     void PoseUpdateThread();
+    static int32_t HandSelectionPriority( bool *fromSettings );
 
     vr::ETrackedControllerRole role_;
     std::string serial_number_;
