@@ -11,7 +11,7 @@ setlocal enabledelayedexpansion
 ::   build\openvr\hidmaestro\
 ::     driver.vrdrivermanifest
 ::     bin\win64\driver_hidmaestro.dll
-::     resources\input\hidmaestro_controller_profile.json
+::     resources\input\*.json          (input profile + legacy bindings)
 ::     resources\settings\default.vrsettings
 ::
 :: Toolchain discovery mirrors build.cmd. cl.exe is driven directly,
@@ -68,7 +68,10 @@ if errorlevel 1 (
 copy /y "%SRC_DIR%\driver.vrdrivermanifest" "%PKG_DIR%\" >nul
 if not exist "%PKG_DIR%\resources\input" mkdir "%PKG_DIR%\resources\input"
 if not exist "%PKG_DIR%\resources\settings" mkdir "%PKG_DIR%\resources\settings"
-copy /y "%SRC_DIR%\resources\input\hidmaestro_controller_profile.json" "%PKG_DIR%\resources\input\" >nul
+:: Wildcard, not per-file: a resource added to the source tree but missed
+:: here would silently ship a payload without it (the legacy binding is
+:: exactly such a file).
+copy /y "%SRC_DIR%\resources\input\*.json" "%PKG_DIR%\resources\input\" >nul
 copy /y "%SRC_DIR%\resources\settings\default.vrsettings" "%PKG_DIR%\resources\settings\" >nul
 
 echo   OK: %PKG_DIR%

@@ -1497,15 +1497,18 @@ function Scenario-Switch2-Pro {
 # DS4Windows, ds5-edge-relay and dualsense-tester agree on, plus the
 # sentinel that stopped HMButton.Share aliasing onto PS. Offline, no
 # device.
-# S50: the virtual VR controller subsystem (issue #32). Phase 1 always
-# runs and pins the C# and C++ halves of the HIDMaestroVR IPC protocol
-# to each other byte-for-byte, with the probe playing the driver's role.
-# Phase 2 runs when a SteamVR install is present (the devbox carries a
-# Steam-free steamcmd install at C:\SteamVR): registers the embedded
-# OpenVR driver, boots the headless null-HMD stack, and asserts both
-# virtual controllers enumerate through Valve's own client API plus a
-# full haptic round trip. On machines without SteamVR (the Atom) phase 2
-# self-reports as skipped WITH the reason printed; phase 1 still gates.
+# S50: the virtual VR controller subsystem (issues #32, #51, #55).
+# Phase 1 always runs and pins the C# and C++ halves of the HIDMaestroVR
+# IPC protocol to each other byte-for-byte, with the probe playing the
+# driver's role. Phase 2 runs when a SteamVR install is present (BOTH
+# battery machines carry the Steam-free steamcmd install at C:\SteamVR,
+# with the headless null-HMD rig config): registers the embedded OpenVR
+# driver, boots the stack, and asserts controller enumeration, hand
+# roles, legacy axis types, the haptic round trip, the consumer-restart
+# cycle, and the #55 legacy GetControllerState lane via a spawned
+# scene-app reader. A [SKIP] of phase 2 on a battery machine is a rig
+# fault, not a pass: both machines are provisioned with SteamVR, so the
+# skip reason must be read, the rig repaired, and the scenario re-run.
 function Scenario-Vr-Controller-Smoke {
     $probe = Resolve-ProbeBinary 'vr_controller_smoke' 'VrControllerSmoke.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait

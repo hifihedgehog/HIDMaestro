@@ -1,0 +1,188 @@
+{
+  "jsonid": "input_binding",
+  "controller_type": "hidmaestro_controller",
+  "name": "Legacy bindings for HIDMaestro virtual controllers",
+  "description": "Maps the virtual hands onto the legacy input state for apps that read GetControllerState.",
+  "bindings": {
+    "/actions/legacy": {
+      "haptics": [
+        {
+          "output": "/actions/legacy/out/left_haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/legacy/out/right_haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "poses": [
+        {
+          "output": "/actions/legacy/in/Left_Pose",
+          "path": "/user/hand/left/pose/raw"
+        },
+        {
+          "output": "/actions/legacy/in/Right_Pose",
+          "path": "/user/hand/right/pose/raw"
+        }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/left/input/system",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_system_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_a_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_a_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/left_applicationmenu_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/left_axis1_value"
+            },
+            "click": {
+              "output": "/actions/legacy/in/left_axis1_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/left_axis2_value1"
+            },
+            "click": {
+              "output": "/actions/legacy/in/left_axis2_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/left_grip_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/legacy/in/left_axis0_value"
+            },
+            "click": {
+              "output": "/actions/legacy/in/left_axis0_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/system",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_system_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_a_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_a_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_applicationmenu_press"
+            },
+            "touch": {
+              "output": "/actions/legacy/in/right_applicationmenu_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/right_axis1_value"
+            },
+            "click": {
+              "output": "/actions/legacy/in/right_axis1_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/legacy/in/right_axis2_value1"
+            },
+            "click": {
+              "output": "/actions/legacy/in/right_axis2_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/legacy/in/right_grip_press"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/legacy/in/right_axis0_value"
+            },
+            "click": {
+              "output": "/actions/legacy/in/right_axis0_press"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

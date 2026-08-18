@@ -92,6 +92,18 @@ vr::EVRInitError HmVrControllerDevice::Activate( uint32_t unObjectId )
     vr::VRProperties()->SetStringProperty( container, vr::Prop_InputProfilePath_String,
         "{hidmaestro}/input/hidmaestro_controller_profile.json" );
 
+    // Legacy-lane axis classification (issue #55). vrserver's legacy
+    // emulation does not synthesize Prop_AxisNType_Int32 for IVRDriverInput
+    // drivers, so a GetControllerState consumer classifying axes by these
+    // properties reads k_eControllerAxis_None unless the driver states them.
+    // VRCHOTAS hotas_controller_device.cpp:80-84 sets them explicitly for
+    // the same reason and the same input surface. The values mirror the
+    // legacy binding: axis0 = joystick, axis1 = trigger pull, axis2 = grip
+    // pull.
+    vr::VRProperties()->SetInt32Property( container, vr::Prop_Axis0Type_Int32, vr::k_eControllerAxis_Joystick );
+    vr::VRProperties()->SetInt32Property( container, vr::Prop_Axis1Type_Int32, vr::k_eControllerAxis_Trigger );
+    vr::VRProperties()->SetInt32Property( container, vr::Prop_Axis2Type_Int32, vr::k_eControllerAxis_Trigger );
+
     vr::VRDriverInput()->CreateBooleanComponent( container, "/input/system/click", &input_handles_[ HmVrComponent_system_click ] );
     vr::VRDriverInput()->CreateBooleanComponent( container, "/input/a/click", &input_handles_[ HmVrComponent_a_click ] );
     vr::VRDriverInput()->CreateBooleanComponent( container, "/input/a/touch", &input_handles_[ HmVrComponent_a_touch ] );

@@ -1,6 +1,7 @@
 {
 	"jsonid": "input_profile",
 	"controller_type": "hidmaestro_controller",
+	"legacy_binding": "{hidmaestro}/input/legacy_bindings_hidmaestro.json",
 	"input_bindingui_mode": "controller_handed",
 	"input_source": {
 		"/input/system": {

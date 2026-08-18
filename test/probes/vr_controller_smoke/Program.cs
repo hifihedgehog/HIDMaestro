@@ -15,11 +15,24 @@
 //   embedded driver via HMVR.EnsureDriverRegistered, starts the headless
 //   SteamVR stack (null HMD, steamcmd-style install) when not already
 //   running, and asserts through Valve's own openvr_api that BOTH virtual
-//   controllers enumerate with our serials, then round-trips a haptic
-//   pulse from the client through vrserver and our C++ driver back to
-//   HMVRController.HapticReceived. SKIPs (exit 0) with a loud reason when
-//   SteamVR is absent, e.g. the Atom. A same-window positive control is
+//   controllers enumerate with our serials, hold hand roles, declare the
+//   legacy axis types, and round-trip a haptic pulse from the client
+//   through vrserver and our C++ driver back to
+//   HMVRController.HapticReceived. After the consumer-restart cycle it
+//   re-launches THIS exe as "--legacy-reader": a scene app (WaitGetPoses
+//   pumped) that verifies the issue #55 legacy binding end to end through
+//   GetControllerState. The reader must be a scene app because legacy
+//   state follows SteamVR's input focus, and on a headless rig with no
+//   scene app nothing holds it (IsInputAvailable reads false and every
+//   background read is frozen zeros - measured to 120 s; as the scene app
+//   the same read streams in under 10 ms). SKIPs (exit 0) with a loud
+//   reason when SteamVR is absent. A same-window positive control is
 //   inherent: the null HMD driver enumerating proves the client link.
+//
+// The headless rig this runs on needs two config seeds beyond the null
+// HMD driver, both in the recipe: a chaperone_info.vrchap (universe 2) so
+// steamvr_room_setup never launches as a focus-stealing scene app, and
+// the dashboard disabled for the same reason.
 //
 // Requires admin (Global\ section creation + HKLM). Exit 0 PASS/SKIP,
 // 1 FAIL.
@@ -72,8 +85,29 @@ internal static class Program
     static unsafe T Read<T>(IntPtr view, int offset) where T : unmanaged => *(T*)(view + offset);
     static unsafe void Write<T>(IntPtr view, int offset, T value) where T : unmanaged => *(T*)(view + offset) = value;
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--legacy-reader")
+            return LegacyReaderMain(args[1]);
+
+        // Diagnostic: hold a pumping consumer with the known legacy state
+        // for N seconds so a reader can be timed independently.
+        if (args.Length >= 2 && args[0] == "--pump-only")
+        {
+            var pumpState = new HMVRState();
+            pumpState.Left.StickX = -0.5f;
+            pumpState.Left.StickY = 0.25f;
+            pumpState.Left.Trigger = 0.5f;
+            pumpState.Left.Grip = 0.75f;
+            pumpState.Left.Buttons = HMVRButton.A | HMVRButton.TriggerClick | HMVRButton.GripClick;
+            pumpState.Right.Trigger = 1.0f;
+            using var pumpOnly = new PumpedConsumer();
+            pumpOnly.SetState(in pumpState);
+            Console.WriteLine($"pumping for {args[1]}s...");
+            Thread.Sleep(int.Parse(args[1]) * 1000);
+            return 0;
+        }
+
         Console.WriteLine("=== Virtual VR controller smoke (issue #32) ===");
 
         using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -231,17 +265,43 @@ internal static class Program
     {
         public readonly HMVRController Vr = new();
         readonly Thread _pump;
+        readonly object _gate = new();
+        HMVRState _state;
         volatile bool _stop;
 
         public PumpedConsumer()
         {
             _pump = new Thread(() =>
             {
-                var st = new HMVRState();
-                while (!_stop) { Vr.SubmitState(in st); Thread.Sleep(8); }
+                // A real hand never submits a bit-identical state forever,
+                // and vrserver's idle logic treats a constant stream as an
+                // inactive controller (the bench that proved the legacy lane
+                // drove a scripted sweep). Dither every scalar by +/-0.02 -
+                // inside every assertion tolerance (0.05) - so the wire
+                // always carries input edges.
+                int tick = 0;
+                while (!_stop)
+                {
+                    HMVRState st;
+                    lock (_gate) st = _state;
+                    float d = ((tick++ & 1) == 0) ? 0.02f : -0.02f;
+                    st.Left.StickX += d; st.Left.StickY += d;
+                    st.Left.Trigger += d; st.Left.Grip += d;
+                    st.Right.StickX += d; st.Right.StickY += d;
+                    st.Right.Trigger += d; st.Right.Grip += d;
+                    Vr.SubmitState(in st);
+                    Thread.Sleep(8);
+                }
             })
             { IsBackground = true };
             _pump.Start();
+        }
+
+        // The legacy-lane assertions need a non-neutral, known state on the
+        // wire; the pump keeps submitting whatever was set last.
+        public void SetState(in HMVRState state)
+        {
+            lock (_gate) _state = state;
         }
 
         public void Dispose()
@@ -252,10 +312,111 @@ internal static class Program
         }
     }
 
+    // Child-process mode: a fresh legacy app reading the hands through
+    // GetControllerState. See the launch site for why this must be its own
+    // process. Prints its own [PASS]/[FAIL] lines (relayed by the parent)
+    // and reports through its exit code.
+    static int LegacyReaderMain(string steamVr)
+    {
+        SetDllDirectoryW(Path.Combine(steamVr, "bin", "win64"));
+
+        // Legacy GetControllerState follows SteamVR's input focus. On this
+        // rig nothing else takes it (IsInputAvailable reads false for a
+        // plain background client and every read is zeros), so the reader
+        // takes the scene-app role - the shape of the legacy game this lane
+        // exists for - and pumps WaitGetPoses so the compositor treats it
+        // as the live app.
+        EVRInitError initError = EVRInitError.None;
+        CVRSystem? system = OpenVR.Init(ref initError, EVRApplicationType.VRApplication_Scene);
+        Check("[reader] OpenVR client init (Scene)", system != null && initError == EVRInitError.None, initError.ToString());
+        if (system == null) return 1;
+
+        var poseStop = false;
+        var posePump = new Thread(() =>
+        {
+            var render = new TrackedDevicePose_t[OpenVR.k_unMaxTrackedDeviceCount];
+            var game = new TrackedDevicePose_t[OpenVR.k_unMaxTrackedDeviceCount];
+            while (!Volatile.Read(ref poseStop))
+            {
+                var comp = OpenVR.Compositor;
+                if (comp != null) comp.WaitGetPoses(render, game);
+                else Thread.Sleep(11);
+            }
+        })
+        { IsBackground = true };
+        posePump.Start();
+
+        uint leftIdx = uint.MaxValue, rightIdx = uint.MaxValue;
+        bool found = SpinWait(() =>
+        {
+            leftIdx = FindBySerial(system, "HMVR-LEFT-0001");
+            rightIdx = FindBySerial(system, "HMVR-RIGHT-0001");
+            return leftIdx != uint.MaxValue && rightIdx != uint.MaxValue;
+        }, 10000);
+        Check("[reader] both hands visible", found);
+
+        if (found)
+        {
+            // The legacy binding routes by role, so a reader that freezes
+            // with roles unassigned is measuring #51's problem, not #55's.
+            bool readerRoled = SpinWait(() =>
+                system.GetControllerRoleForTrackedDeviceIndex(leftIdx) == ETrackedControllerRole.LeftHand &&
+                system.GetControllerRoleForTrackedDeviceIndex(rightIdx) == ETrackedControllerRole.RightHand, 15000);
+            Check("[reader] both hands hold roles", readerRoled,
+                  $"left={system.GetControllerRoleForTrackedDeviceIndex(leftIdx)} right={system.GetControllerRoleForTrackedDeviceIndex(rightIdx)}");
+
+            Console.WriteLine($"    IsInputAvailable={system.IsInputAvailable()}");
+
+            var st1 = new VRControllerState_t();
+            uint stSize = (uint)Marshal.SizeOf<VRControllerState_t>();
+            var clock = Stopwatch.StartNew();
+            bool legacyLive = SpinWait(() =>
+                system.GetControllerState(leftIdx, ref st1, stSize) &&
+                st1.unPacketNum > 0 &&
+                Math.Abs(st1.rAxis0.x - (-0.5f)) < 0.05f, 30000);
+            Console.WriteLine($"    IsInputAvailable after wait={system.IsInputAvailable()}");
+            Check("[reader] legacy GetControllerState streams (packet>0, axis0 tracks stick)", legacyLive,
+                  $"packet={st1.unPacketNum} axis0.x={st1.rAxis0.x:F3} after {clock.ElapsedMilliseconds}ms");
+
+            if (legacyLive)
+            {
+                Check("[reader] axis0.y tracks stick Y", Math.Abs(st1.rAxis0.y - 0.25f) < 0.05f, $"got {st1.rAxis0.y:F3}");
+                Check("[reader] axis1 tracks trigger pull", Math.Abs(st1.rAxis1.x - 0.5f) < 0.05f, $"got {st1.rAxis1.x:F3}");
+                Check("[reader] axis2 tracks grip pull", Math.Abs(st1.rAxis2.x - 0.75f) < 0.05f, $"got {st1.rAxis2.x:F3}");
+
+                ulong pressed = st1.ulButtonPressed;
+                ulong wantMask = (1UL << (int)EVRButtonId.k_EButton_A)
+                               | (1UL << (int)EVRButtonId.k_EButton_Axis1)
+                               | (1UL << (int)EVRButtonId.k_EButton_Grip);
+                Check("[reader] legacy buttons carry A + trigger + grip presses",
+                      (pressed & wantMask) == wantMask, $"pressed=0x{pressed:X}");
+
+                var stR = new VRControllerState_t();
+                bool rightTracks = SpinWait(() =>
+                    system.GetControllerState(rightIdx, ref stR, stSize) &&
+                    Math.Abs(stR.rAxis1.x - 1.0f) < 0.05f, 5000);
+                Check("[reader] right hand routes independently (trigger=1.0)", rightTracks,
+                      $"right axis1.x={stR.rAxis1.x:F3}");
+
+                var st2 = new VRControllerState_t();
+                Thread.Sleep(150);
+                system.GetControllerState(leftIdx, ref st2, stSize);
+                Check("[reader] legacy packet counter advances", st2.unPacketNum > st1.unPacketNum,
+                      $"{st1.unPacketNum} -> {st2.unPacketNum}");
+            }
+        }
+
+        Volatile.Write(ref poseStop, true);
+        posePump.Join(1000);
+        OpenVR.Shutdown();
+        return s_failures == 0 ? 0 : 1;
+    }
+
     static int LivePhase(string steamVr)
     {
         var consumer = new PumpedConsumer();
         var vr = consumer.Vr;
+        bool handsVerified = false;
 
         // The driver's bootstrap poll runs every 200 ms once vrserver is
         // up; give the whole stack a generous window.
@@ -322,6 +483,15 @@ internal static class Program
                       roleLeft == leftIdx && roleRight == rightIdx,
                       $"left={Idx(roleLeft)} (want {leftIdx}) right={Idx(roleRight)} (want {rightIdx})");
 
+                // Axis classification for legacy consumers (issue #55's
+                // adjacent finding): vrserver does not synthesize these for
+                // IVRDriverInput drivers, so the driver states them, the
+                // VRCHOTAS pattern.
+                Check("axis types declared: joystick/trigger/trigger",
+                      Int32Prop(system, leftIdx, ETrackedDeviceProperty.Prop_Axis0Type_Int32) == (int)EVRControllerAxisType.k_eControllerAxis_Joystick &&
+                      Int32Prop(system, leftIdx, ETrackedDeviceProperty.Prop_Axis1Type_Int32) == (int)EVRControllerAxisType.k_eControllerAxis_Trigger &&
+                      Int32Prop(system, leftIdx, ETrackedDeviceProperty.Prop_Axis2Type_Int32) == (int)EVRControllerAxisType.k_eControllerAxis_Trigger);
+
                 // Haptic round trip: client -> vrserver -> C++ driver ->
                 // IPC ring -> HMVRController event.
                 var got = new ManualResetEventSlim(false);
@@ -361,9 +531,56 @@ internal static class Program
                     system.GetControllerRoleForTrackedDeviceIndex(rightIdx) == ETrackedControllerRole.RightHand, 20000);
                 Check("hand roles survive a consumer restart", reRoled,
                       $"left={system.GetControllerRoleForTrackedDeviceIndex(leftIdx)} right={system.GetControllerRoleForTrackedDeviceIndex(rightIdx)}");
+
+                handsVerified = reRoled;
             }
 
             OpenVR.Shutdown();
+        }
+
+        // Legacy input lane (issue #55). Background clients read the hands
+        // through GetControllerState, which only carries data vrserver
+        // generates through the profile's legacy_binding. Without the
+        // binding the signature is unPacketNum frozen at 0 with all buttons
+        // and axes zero while the pose streams fine. Measured on this rig
+        // (2026-08-18, A/B and T1/T2 discriminations): vrserver builds an
+        // app's legacy state generator ONCE, when that app session first
+        // enables legacy input, and a session whose enable ran before the
+        // hands held roles stays frozen for the life of that process no
+        // matter how long it waits (measured to 120 s; in-process
+        // Shutdown+Init does not shed the record). A fresh process whose
+        // session starts after roles exist streams within ~150 ms. So the
+        // legacy lane is verified the way real legacy apps meet it: a
+        // separate reader process launched against hands that are already
+        // up, this same exe in --legacy-reader mode.
+        if (handsVerified)
+        {
+            var known = new HMVRState();
+            known.Left.StickX = -0.5f;
+            known.Left.StickY = 0.25f;
+            known.Left.Trigger = 0.5f;
+            known.Left.Grip = 0.75f;
+            known.Left.Buttons = HMVRButton.A | HMVRButton.TriggerClick | HMVRButton.GripClick;
+            known.Right.Trigger = 1.0f;
+            consumer.SetState(in known);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = Environment.ProcessPath!,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add("--legacy-reader");
+            psi.ArgumentList.Add(steamVr);
+            using var reader = Process.Start(psi)!;
+            string readerOut = reader.StandardOutput.ReadToEnd();
+            bool readerDone = reader.WaitForExit((int)(90000 * s_scale));
+            if (!readerDone) { try { reader.Kill(); } catch { } }
+            foreach (var line in readerOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                Console.WriteLine("  " + line.TrimEnd());
+            Check("legacy reader app verifies GetControllerState end to end",
+                  readerDone && reader.ExitCode == 0, $"exit={(readerDone ? reader.ExitCode : -1)}");
         }
 
         consumer.Dispose();
@@ -397,10 +614,21 @@ internal static class Program
         return uint.MaxValue;
     }
 
+    // The Atom runs the full live phase at HIDMAESTRO_TIMEOUT_SCALE=2, and
+    // vrserver bring-up there is far slower than the devbox. Same env-var
+    // contract as the battery harness, applied at the single wait choke
+    // point so every phase-2 window stretches together.
+    static readonly double s_scale =
+        double.TryParse(Environment.GetEnvironmentVariable("HIDMAESTRO_TIMEOUT_SCALE"),
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var sc) && sc > 1
+            ? sc : 1.0;
+
     static bool SpinWait(Func<bool> cond, int timeoutMs)
     {
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
+        long budget = (long)(timeoutMs * s_scale);
+        while (sw.ElapsedMilliseconds < budget)
         {
             if (cond()) return true;
             Thread.Sleep(100);

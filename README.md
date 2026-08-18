@@ -231,6 +231,20 @@ Every device behavior stays in HIDMaestro's own user-mode code: the SDK runs an 
 
 Measured on the Atom Z8350 floor machine: full 4-channel render and live microphone capture through `usbaudio.sys` with no frame starvation, attach in ~316 ms, and idle cost with the transport installed but no device attached indistinguishable from baseline (0.35% vs 0.24% CPU). The composite path runs as scenario S45 of the battery, so a broken persona fails the release gate like anything else.
 
+## Virtual VR controllers
+
+A VR controller is not an OS device: games ask the VR runtime "where is the left hand, and what is its trigger doing." So this subsystem is a native OpenVR driver that SteamVR's own vrserver loads, embedded in `HIDMaestro.Core.dll` and registered with one call. One driver covers native OpenVR games and OpenXR games running on SteamVR, which is the default PCVR configuration.
+
+```csharp
+HMVR.EnsureDriverRegistered();          // one-time, content-hash idempotent
+using var vr = new HMVRController();    // both hands appear in SteamVR
+vr.SubmitState(in state);               // buttons, trigger/grip, stick, optional full pose - per frame
+vr.HapticReceived += (_, e) => ...;     // every haptic pulse a VR app plays, with hand attribution
+var head = vr.GetHmdPose();             // the real headset pose, for head-as-input mapping
+```
+
+The hands hold real SteamVR hand roles, serve the modern input system through a full input profile, and serve legacy `GetControllerState` readers through a shipped legacy binding. Controllers exist only while a consumer is live, so an idle machine shows no phantom devices. SteamVR is the one dependency, and it installs Steam-client-free and account-free via Valve's own `steamcmd +login anonymous +app_update 250820`. The whole loop is machine-verified on headless rigs with no headset (battery scenario S50): enumeration, roles, input, haptics, and a 90 Hz legacy state stream read back through Valve's own client API. [Full docs](https://hidmaestro.org/docs/sdk/vr-controllers/).
+
 ---
 
 ## How it compares
