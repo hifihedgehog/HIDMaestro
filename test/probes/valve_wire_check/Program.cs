@@ -341,6 +341,26 @@ static class Program
                 Check("SDL's parser recovers a fully pulled right trigger",
                       sdlRt >= 32000, $"RIGHT_TRIGGER={sdlRt}");
 
+                // Both extremes, so an axis frozen at one value cannot pass.
+                var opposite = new HMGamepadState
+                {
+                    Buttons = 0,
+                    Axes = HMGamepadStateHelpers.StandardAxes(prof, 1.0f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                };
+                var raw2 = ReadFrame(path, inLen, c, opposite);
+                Check("a second frame arrives after the state changes", raw2 != null);
+                if (raw2 != null)
+                {
+                    var f2 = raw2[0] == 0x00 && t.Head[0] != 0x00 ? raw2[1..] : raw2;
+                    var (sdlX2, sdlRt2) = SdlDecode(t.Id, f2);
+                    Check("SDL's parser recovers full-RIGHT on the same axis",
+                          sdlX2 >= 32000, $"LEFTX={sdlX2}");
+                    Check("the stick actually swept rather than sticking",
+                          sdlX2 - sdlX >= 60000, $"span={sdlX2 - sdlX}");
+                    Check("SDL's parser recovers a released right trigger",
+                          sdlRt2 <= -32000 || sdlRt2 <= 100, $"RIGHT_TRIGGER={sdlRt2}");
+                }
+
                 if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
                     Check("Steam claims the device (fresh entry in controller.txt)",
                           SteamClaimed(t.Vid, t.Pid, steamBase));
