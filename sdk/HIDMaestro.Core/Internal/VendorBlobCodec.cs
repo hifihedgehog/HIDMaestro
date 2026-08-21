@@ -192,6 +192,75 @@ internal static class VendorBlobCodec
                     buffer[f.B + 1] = (byte)((sraw >> 8) & 0xFF);
                     break;
                 }
+                case VendorBlobProgram.FieldOp.I16Pad:
+                case VendorBlobProgram.FieldOp.I16PadOrStick:
+                {
+                    // Valve trackpad coordinate. Fingers arrive in Sony's
+                    // native range (0..1919 by 0..1079, HMGamepadState), and
+                    // Valve's pads are full-scale signed with positive Y up:
+                    // SDL_hidapi_steamdeck.c reads them back as
+                    // sLeftPadX / 65536 + 0.5 and -sLeftPadY / 65536 + 0.5,
+                    // so X maps straight across and Y inverts.
+                    //
+                    // I16PadOrStick is the 2015 controller's shared pair. Its
+                    // firmware packs EITHER the pad or the joystick into the
+                    // same two axes and flags which with the finger-down bit,
+                    // and SDL_hidapi_steam.c:UpdateSteamControllerState reads
+                    // it exactly that way. Falling back to the stick when the
+                    // finger is up is the hardware's own behavior, not a
+                    // substitution for missing data.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    bool isLeft = f.Source is VendorBlobProgram.SrcOp.LeftPadX
+                                            or VendorBlobProgram.SrcOp.LeftPadY;
+                    bool isY = f.Source is VendorBlobProgram.SrcOp.LeftPadY
+                                         or VendorBlobProgram.SrcOp.RightPadY;
+                    bool down = isLeft ? state.TouchpadFinger0Active
+                                       : state.TouchpadFinger1Active;
+                    short praw;
+                    if (down)
+                    {
+                        int raw = isLeft
+                            ? (isY ? state.TouchpadFinger0Y : state.TouchpadFinger0X)
+                            : (isY ? state.TouchpadFinger1Y : state.TouchpadFinger1X);
+                        float span = isY ? 1079f : 1919f;
+                        float unit = Math.Clamp(raw / span, 0f, 1f) - 0.5f;
+                        if (isY) unit = -unit;
+                        praw = (short)Math.Clamp(
+                            (int)Math.Round(unit * 2f * 32767f), -32767, 32767);
+                    }
+                    else if (f.Op == VendorBlobProgram.FieldOp.I16PadOrStick)
+                    {
+                        float sv = isLeft ? (isY ? leftStickY : leftStickX)
+                                          : (isY ? rightStickY : rightStickX);
+                        float centred = Math.Clamp(sv, 0f, 1f) - 0.5f;
+                        if (isY) centred = -centred;
+                        praw = (short)Math.Clamp(
+                            (int)Math.Round(centred * 2f * 32767f), -32767, 32767);
+                    }
+                    else
+                    {
+                        praw = 0;
+                    }
+                    buffer[f.B]     = (byte)(praw & 0xFF);
+                    buffer[f.B + 1] = (byte)((praw >> 8) & 0xFF);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U16Pressure:
+                {
+                    // Pad pressure, 0..32768 full scale (SDL divides by
+                    // 32768.0f). HMGamepadState carries no analog pressure,
+                    // so a contact reports full scale and no contact zero,
+                    // which is the same shape a capacitive pad without a
+                    // force sensor reports.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    bool pdown = f.Source == VendorBlobProgram.SrcOp.RightPadPressure
+                        ? state.TouchpadFinger1Active
+                        : state.TouchpadFinger0Active;
+                    ushort pv = pdown ? (ushort)32767 : (ushort)0;
+                    buffer[f.B]     = (byte)(pv & 0xFF);
+                    buffer[f.B + 1] = (byte)((pv >> 8) & 0xFF);
+                    break;
+                }
                 case VendorBlobProgram.FieldOp.U16Trigger:
                 {
                     // Unsigned 16-bit trigger, 0..32767. SDL widens it as
@@ -340,6 +409,8 @@ internal static class VendorBlobCodec
                             VendorBlobProgram.ButtonDpadDown  => h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
                             VendorBlobProgram.ButtonDpadLeft  => h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
                             VendorBlobProgram.ButtonDpadRight => h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
+                            VendorBlobProgram.ButtonPad0Touch => state.TouchpadFinger0Active,
+                            VendorBlobProgram.ButtonPad1Touch => state.TouchpadFinger1Active,
                             _ => (mask & (uint)bits) != 0,
                         };
                         if (on) packed |= 1UL << (f.BitLo + i);

@@ -413,6 +413,20 @@ public sealed class ExtendedReportSpec
     [JsonPropertyName("alwaysArmed")]
     public bool AlwaysArmed { get; set; }
 
+    /// <summary>Frame interval, in milliseconds, at which this device keeps
+    /// streaming while the consumer is quiet. 0 leaves the device
+    /// event-driven, which is the default and what every profile before
+    /// issue #56 wanted.
+    ///
+    /// Valve's own drivers require a stream. SDL_hidapi_steamdeck.c's
+    /// InitDevice reads with a 16 ms timeout to work out which of the three
+    /// same-VID/PID HID interfaces is the controller, and returns false when
+    /// that read comes back empty, so an idle persona is rejected before it
+    /// ever reaches the joystick layer. Real hardware streams at about
+    /// 4 ms whether or not anything is moving.</summary>
+    [JsonPropertyName("idleFrameIntervalMs")]
+    public int IdleFrameIntervalMs { get; set; }
+
     /// <summary>Ordered field descriptors. See VendorBlobCodec for the type
     /// vocabulary.</summary>
     [JsonPropertyName("fields")]

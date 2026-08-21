@@ -176,6 +176,7 @@
     "reportId": "0x00",
     "size": 64,
     "alwaysArmed": true,
+    "idleFrameIntervalMs": 4,
     "comment": "SteamDeckStatePacket_t behind a ValveInReportHeader_t, from SDL3 controller_structs.h and cross-checked against the input frames in a real Steam Deck USB capture. Without this the profile had no field list, so SubmitState packed nothing and Steam decoded a frame of zeros: recognised as a Steam Deck Controller, every axis reading 0. Button bits are SDL_hidapi_steamdeck.c's SteamDeckButtons, LSB-first across the 64-bit ulButtons field. Trackpad coordinates and pad pressures are left zero: HMGamepadState has no trackpad, and a consumer that wants them submits the frame through SubmitRawReport.",
     "fields": [
       {
@@ -234,8 +235,8 @@
           "RightPaddle",
           "Touchpad",
           "_",
-          "_",
-          "_",
+          "LEFTPAD_TOUCH",
+          "RIGHTPAD_TOUCH",
           "_",
           "LeftStick",
           "_",
@@ -280,6 +281,26 @@
           "_",
           "_"
         ]
+      },
+      {
+        "byte": 16,
+        "type": "int16-pad",
+        "semantic": "leftPadX"
+      },
+      {
+        "byte": 18,
+        "type": "int16-pad",
+        "semantic": "leftPadY"
+      },
+      {
+        "byte": 20,
+        "type": "int16-pad",
+        "semantic": "rightPadX"
+      },
+      {
+        "byte": 22,
+        "type": "int16-pad",
+        "semantic": "rightPadY"
       },
       {
         "byte": 24,
@@ -340,6 +361,16 @@
         "byte": 54,
         "type": "int16-axis",
         "semantic": "rightStickY"
+      },
+      {
+        "byte": 56,
+        "type": "uint16-pressure",
+        "semantic": "leftPadPressure"
+      },
+      {
+        "byte": 58,
+        "type": "uint16-pressure",
+        "semantic": "rightPadPressure"
       }
     ]
   },

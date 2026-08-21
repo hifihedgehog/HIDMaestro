@@ -131,6 +131,7 @@
     "reportId": "0x00",
     "size": 64,
     "alwaysArmed": true,
+    "idleFrameIntervalMs": 8,
     "fields": [
       {
         "byte": 0,
@@ -187,8 +188,8 @@
           "RightPaddle",
           "_",
           "Touchpad",
-          "_",
-          "_",
+          "LEFTPAD_TOUCH",
+          "RIGHTPAD_TOUCH",
           "_",
           "LeftStick",
           "_"
@@ -206,23 +207,23 @@
       },
       {
         "byte": 16,
-        "type": "int16-axis",
-        "semantic": "leftStickX"
+        "type": "int16-pad-or-stick",
+        "semantic": "leftPadX"
       },
       {
         "byte": 18,
-        "type": "int16-axis",
-        "semantic": "leftStickY"
+        "type": "int16-pad-or-stick",
+        "semantic": "leftPadY"
       },
       {
         "byte": 20,
-        "type": "int16-axis",
-        "semantic": "rightStickX"
+        "type": "int16-pad-or-stick",
+        "semantic": "rightPadX"
       },
       {
         "byte": 22,
-        "type": "int16-axis",
-        "semantic": "rightStickY"
+        "type": "int16-pad-or-stick",
+        "semantic": "rightPadY"
       },
       {
         "byte": 24,

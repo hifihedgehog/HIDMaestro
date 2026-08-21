@@ -108,6 +108,7 @@
     "reportId": "0x42",
     "size": 54,
     "alwaysArmed": true,
+    "idleFrameIntervalMs": 4,
     "fields": [
       {
         "byte": 0,
@@ -148,11 +149,11 @@
           "LeftPaddle",
           "LeftBumper",
           "_",
-          "_",
+          "RIGHTPAD_TOUCH",
           "Touchpad",
           "RT_DIGITAL",
           "_",
-          "_",
+          "LEFTPAD_TOUCH",
           "_",
           "LT_DIGITAL"
         ]
@@ -186,6 +187,43 @@
         "byte": 16,
         "type": "int16-axis",
         "semantic": "rightStickY"
+      },
+      {
+        "byte": 18,
+        "type": "int16-pad",
+        "semantic": "leftPadX"
+      },
+      {
+        "byte": 20,
+        "type": "int16-pad",
+        "semantic": "leftPadY"
+      },
+      {
+        "byte": 22,
+        "type": "uint16-pressure",
+        "semantic": "leftPadPressure"
+      },
+      {
+        "byte": 24,
+        "type": "int16-pad",
+        "semantic": "rightPadX"
+      },
+      {
+        "byte": 26,
+        "type": "int16-pad",
+        "semantic": "rightPadY"
+      },
+      {
+        "byte": 28,
+        "type": "uint16-pressure",
+        "semantic": "rightPadPressure"
+      },
+      {
+        "byte": 30,
+        "type": "uint32-rolling",
+        "semantic": "sensorTimestamp",
+        "initial": 1,
+        "stride": 4000
       },
       {
         "byte": 34,
