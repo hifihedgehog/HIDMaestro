@@ -167,11 +167,11 @@ static class ValveSteamCheck
         // The config-set name is Steam's own per-model classification, and
         // it is the assertion that separates "some Valve device" from "this
         // Valve device".
-        var cases = new (string Id, string Pid, string Product, string ConfigSet)[]
+        var cases = new (string Id, string Pid, string Product, string ConfigSet, string Model)[]
         {
-            ("steam-deck-composite",       "1205", "Steam Controller", "configset_controller_neptune.vdf"),
-            ("steam-controller-composite", "1102", "Wired Controller", "configset_controller_steamcontroller_gordon.vdf"),
-            ("steam-controller-2",         "1302", "Steam Controller", "configset_controller_triton.vdf"),
+            ("steam-deck-composite",       "1205", "Steam Controller", "configset_controller_neptune.vdf",                "neptune"),
+            ("steam-controller-composite", "1102", "Wired Controller", "configset_controller_steamcontroller_gordon.vdf", "steamcontroller_gordon"),
+            ("steam-controller-2",         "1302", "Steam Controller", "configset_controller_triton.vdf",                 "triton"),
         };
 
         try
@@ -279,6 +279,39 @@ static class ValveSteamCheck
                                         || w.Id == ID_CLEAR_DIGITAL_MAPPINGS
                                         || w.Id == ID_GET_ATTRIBUTES_VALUES),
                           "settings, mappings or attributes");
+
+                    // What Steam's interface for this device is built from.
+                    // The classification above is a name; these are the
+                    // files Steam ships under that name, and they are what
+                    // its layout editor and desktop layout render. Read off
+                    // disk, so nothing opens a window on anybody's screen.
+                    string cbase = Path.Combine(root, "controller_base");
+                    string[] shipped;
+                    try { shipped = Directory.GetFiles(cbase, "*" + t.Model + "*.vdf"); }
+                    catch { shipped = Array.Empty<string>(); }
+                    Check("Steam ships an interface definition for that model",
+                          shipped.Length > 0,
+                          shipped.Length > 0
+                              ? string.Join(", ", Array.ConvertAll(shipped, Path.GetFileName))
+                              : cbase);
+
+                    // Trackpad and stick groups in that definition are the
+                    // surfaces its configuration UI exposes. A pad-less
+                    // gamepad template carries neither.
+                    bool surfaces = false;
+                    foreach (var f in shipped)
+                    {
+                        string body;
+                        try { body = File.ReadAllText(f); } catch { continue; }
+                        if (body.Contains("absolute_mouse", StringComparison.Ordinal)
+                            || body.Contains("joystick_move", StringComparison.Ordinal))
+                        {
+                            surfaces = true;
+                            break;
+                        }
+                    }
+                    Check("that definition exposes trackpad and stick surfaces",
+                          surfaces, "absolute_mouse / joystick_move groups");
                 }
                 catch (Exception ex) { Check("persona ran without throwing", false, ex.Message); }
                 finally { c?.Dispose(); Thread.Sleep(3000); }
