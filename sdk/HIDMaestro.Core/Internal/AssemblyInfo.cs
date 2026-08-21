@@ -21,6 +21,7 @@
 [assembly: InternalsVisibleTo("SwitchDescriptorIdleCheck")]
 [assembly: InternalsVisibleTo("StopEventResilienceCheck")]
 [assembly: InternalsVisibleTo("UsbCompositeSchemaCheck")]
+[assembly: InternalsVisibleTo("ValvePersonaCheck")]
 [assembly: InternalsVisibleTo("UsbipServerCheck")]
 [assembly: InternalsVisibleTo("UsbipBundleCheck")]
 [assembly: InternalsVisibleTo("switch_writer_tap")]

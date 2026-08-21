@@ -3,7 +3,7 @@
 // Originally guarded the additive data-plumbing stage; now that the
 // USB/IP backend exists, this probe asserts the shipped end-state:
 //
-//   1. Both composite personas (dualsense-composite,
+//   1. Every composite persona (dualsense-composite,
 //      dualshock-4-v2-composite) are IN the embedded catalog, and the
 //      embedded copies match the authored files on disk.
 //   2. Each parses into the full four-interface model with endpoint
@@ -54,8 +54,14 @@ internal static class Program
             "..", "..", "..", "..", "..", ".."));
 
         var strays = ctx.AllProfiles.Where(p => p.RequiresUsbipBackend).Select(p => p.Id).OrderBy(x => x).ToList();
-        Check("exactly the three composite personas require the backend",
-              strays.SequenceEqual(new[] { "dualsense-composite", "dualsense-edge-composite", "dualshock-4-v2-composite" }.OrderBy(x => x)),
+        // The three Valve personas (issue #56) ride the same backend and are
+        // pinned by their own probe; this list is the guard against a profile
+        // acquiring the backend by accident.
+        Check("exactly the six personas require the backend",
+              strays.SequenceEqual(new[] { "dualsense-composite", "dualsense-edge-composite",
+                                           "dualshock-4-v2-composite", "steam-controller-2",
+                                           "steam-controller-composite", "steam-deck-composite"
+                                         }.OrderBy(x => x)),
               string.Join(", ", strays));
 
         // The DS4 v1 is settled by real hardware probes as a SINGLE-interface
@@ -257,7 +263,7 @@ internal static class Program
                                : "other-speed stalls (no capture / single-speed)",
               (set.GetDescriptor(0x07, 0, 0) != null) == expectOtherSpeed);
         Check("report descriptor served for HID GET_DESCRIPTOR(0x22)",
-              set.GetHidDescriptor(0x22)!.SequenceEqual(cd!));
+              set.GetHidDescriptor(0x22, set.HidInterfaceNumber)!.SequenceEqual(cd!));
 
         // Real-pad UAC control ranges (ControllersInfo pcap wire values).
         var ac = cfg.AudioControls;

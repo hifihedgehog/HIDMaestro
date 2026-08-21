@@ -66,7 +66,14 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     private readonly object _hidLock = new();
     private readonly Queue<byte[]> _frameQueue = new();          // built wire reports awaiting a read
-    private readonly Queue<uint> _pendingInterruptIn = new();    // seqnums of parked interrupt IN URBs
+    // Parked interrupt-IN URBs, keyed by endpoint address (issue #56). A
+    // composite with more than one interrupt-IN endpoint must never answer
+    // one endpoint's read with another endpoint's data: the Steam Deck
+    // persona's keyboard and mouse interfaces poll their own endpoints
+    // forever while only the controller endpoint has frames, and a single
+    // shared queue would have handed a 64-byte controller report to the
+    // 8-byte keyboard pipe.
+    private readonly Dictionary<byte, Queue<uint>> _pendingInterruptIn = new();
     private byte[] _lastInputReport;
     private uint _lastSharedSeqNo;
 
@@ -75,10 +82,45 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     private const int MaxFrameQueue = 8;
 
+    /// <summary>The interrupt-IN endpoint on the primary HID interface: the
+    /// one the input pump feeds. Any other interrupt-IN endpoint belongs to
+    /// a secondary HID interface and simply parks its reads.</summary>
+    private readonly byte _primaryInEndpoint;
+
+    /// <summary>Profile-declared feature-report answers (issue #56), and the
+    /// state one needs. Sony's stubs are keyed by report id; the Steam
+    /// Deck's protocol has no report ids and instead answers GET_REPORT
+    /// according to the message id of the SET_REPORT that preceded it, which
+    /// is what <c>match: "lastMessage"</c> selects.</summary>
+    private readonly FeatureStubTable? _stubs;
+    private byte _lastFeatureMessage;
+    private int _lastFeatureParam = -1;
+
+    private Queue<uint> PendingFor(byte epAddr)
+    {
+        if (!_pendingInterruptIn.TryGetValue(epAddr, out var q))
+        {
+            q = new Queue<uint>();
+            _pendingInterruptIn[epAddr] = q;
+        }
+        return q;
+    }
+
     public UsbipEmulatedDevice(ControllerProfile profile, int index)
     {
         _index = index;
         Descriptors = new UsbDescriptorSet(profile);
+        _stubs = FeatureStubTable.From(profile);
+        _primaryInEndpoint = 0;
+        foreach (var kv in Descriptors.Endpoints)
+        {
+            var ep = kv.Value;
+            if (ep.TransferType == 3 && ep.IsIn && ep.InterfaceNumber == Descriptors.HidInterfaceNumber)
+            {
+                _primaryInEndpoint = ep.Address;
+                break;
+            }
+        }
         BusId = $"1-{index + 1}";
         Devid = (1u << 16) | (uint)(index + 1);
 
@@ -116,7 +158,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         Audio.Clear();
         lock (_hidLock)
         {
-            _pendingInterruptIn.Clear();
+            foreach (var q in _pendingInterruptIn.Values) q.Clear();
             _frameQueue.Clear();
         }
     }
@@ -141,9 +183,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 lock (_hidLock)
                 {
                     _lastInputReport = report;
-                    if (_pendingInterruptIn.Count > 0)
+                    var pending = PendingFor(_primaryInEndpoint);
+                    if (pending.Count > 0)
                     {
-                        seq = _pendingInterruptIn.Dequeue();
+                        seq = pending.Dequeue();
                     }
                     else
                     {
@@ -297,8 +340,15 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 byte[]? frame = null;
                 lock (_hidLock)
                 {
-                    if (_frameQueue.Count > 0) frame = _frameQueue.Dequeue();
-                    else _pendingInterruptIn.Enqueue(cmd.Seqnum);
+                    // Only the primary HID interface's endpoint has frames.
+                    // A secondary interface (the Deck's keyboard and mouse)
+                    // parks its reads and never completes them, which is
+                    // exactly what the real device does once lizard mode is
+                    // off: those pipes go quiet rather than reporting.
+                    if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
+                        frame = _frameQueue.Dequeue();
+                    else
+                        PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
                 if (frame != null) SendInterruptInReply(cmd.Seqnum, frame);
                 return;
@@ -325,16 +375,19 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             lock (_hidLock)
             {
                 // Queue<T> has no random removal; rebuild without the victim.
-                if (_pendingInterruptIn.Contains(victimSeqnum))
+                Queue<uint>? holder = null;
+                foreach (var q in _pendingInterruptIn.Values)
+                    if (q.Contains(victimSeqnum)) { holder = q; break; }
+                if (holder != null)
                 {
-                    var keep = new List<uint>(_pendingInterruptIn.Count);
-                    while (_pendingInterruptIn.Count > 0)
+                    var keep = new List<uint>(holder.Count);
+                    while (holder.Count > 0)
                     {
-                        uint s = _pendingInterruptIn.Dequeue();
+                        uint s = holder.Dequeue();
                         if (s != victimSeqnum) keep.Add(s);
                         else removed = true;
                     }
-                    foreach (var s in keep) _pendingInterruptIn.Enqueue(s);
+                    foreach (var s in keep) holder.Enqueue(s);
                 }
             }
         }
@@ -380,7 +433,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     byte descType = (byte)(wValue >> 8);
                     byte descIndex = (byte)(wValue & 0xFF);
                     byte[]? d = recipient == 1
-                        ? Descriptors.GetHidDescriptor(descType)
+                        ? Descriptors.GetHidDescriptor(descType, (byte)(wIndex & 0xFF))
                         : Descriptors.GetDescriptor(descType, descIndex, wIndex);
                     if (d == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
                     int n = Math.Min(d.Length, wLength);
@@ -435,9 +488,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (type == 1 && recipient == 1) // class, interface recipient
         {
             byte ifaceNum = (byte)(wIndex & 0xFF);
-            if (ifaceNum == Descriptors.HidInterfaceNumber)
+            if (Descriptors.IsHidInterface(ifaceNum))
             {
-                HandleHidClassRequest(cmd, bRequest, wValue, wLength, deviceToHost, outPayload);
+                HandleHidClassRequest(cmd, bRequest, wValue, wLength, deviceToHost, outPayload,
+                                      ifaceNum == Descriptors.HidInterfaceNumber);
                 return;
             }
 
@@ -494,10 +548,34 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     }
 
     private void HandleHidClassRequest(in UsbipProtocol.CommandHeader cmd, byte bRequest,
-        ushort wValue, ushort wLength, bool deviceToHost, byte[]? outPayload)
+        ushort wValue, ushort wLength, bool deviceToHost, byte[]? outPayload,
+        bool primaryInterface = true)
     {
         byte reportType = (byte)(wValue >> 8); // 1 input, 2 output, 3 feature
         byte reportId = (byte)(wValue & 0xFF);
+
+        // A secondary HID interface (the Deck's keyboard and mouse) carries
+        // no reports of its own here. SET_IDLE and friends still succeed,
+        // because a host that cannot configure the interface treats the
+        // device as broken; report traffic stalls, as it does on the real
+        // pad with lizard mode off.
+        if (!primaryInterface)
+        {
+            switch (bRequest)
+            {
+                case 0x0A: // SET_IDLE
+                case 0x0B: // SET_PROTOCOL
+                    SendRetSubmit(cmd.Seqnum, 0, 0, null);
+                    return;
+                case 0x02 when deviceToHost: // GET_IDLE
+                    SendRetSubmit(cmd.Seqnum, 0, Math.Min(1, (int)wLength),
+                        wLength > 0 ? new byte[] { 0 } : null);
+                    return;
+                default:
+                    SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+                    return;
+            }
+        }
 
         switch (bRequest)
         {
@@ -527,6 +605,23 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 var payload = outPayload ?? Array.Empty<byte>();
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
                 var data = payload.Length > 0 ? payload.AsSpan(1) : ReadOnlySpan<byte>.Empty;
+                // A protocol whose feature reports carry no report id (the
+                // Steam Deck's) answers the NEXT GET_REPORT according to
+                // the message this write opened. MessageByte says where
+                // that message id sits: byte 0 when the descriptor declares
+                // no report ids at all, byte 1 when one precedes it.
+                if (reportType == 0x03 && _stubs != null && _stubs.MatchesLastMessage
+                    && payload.Length > _stubs.MessageByte)
+                {
+                    _lastFeatureMessage = payload[_stubs.MessageByte];
+                    // Valve frames a command-channel write as
+                    // [message][length][parameters...], so the message's
+                    // first parameter is two bytes on. It selects the
+                    // answer for a message carrying several, which
+                    // ID_GET_STRING_ATTRIBUTE does.
+                    int paramAt = _stubs.MessageByte + 2;
+                    _lastFeatureParam = payload.Length > paramAt ? payload[paramAt] : -1;
+                }
                 PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
@@ -549,6 +644,26 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     /// the driver sizes against the IOCTL output buffer.</summary>
     private byte[]? BuildFeatureStub(byte reportId, ushort wLength)
     {
+        // Profile-declared stubs win (issue #56): a persona whose feature
+        // protocol is its own carries the answers as data rather than as a
+        // branch in here. The Sony table below stays code because it
+        // synthesizes per-controller values (the pairing MAC) rather than
+        // serving constants.
+        if (_stubs != null)
+        {
+            byte key = _stubs.MatchesLastMessage ? _lastFeatureMessage : reportId;
+            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength);
+            if (declared != null)
+            {
+                // A protocol riding report ids answers with the id it was
+                // asked on in byte 0, the shape the Sony table below builds
+                // by hand. MessageByte is that prefix's width, and is zero
+                // for a protocol declaring no report ids at all.
+                if (_stubs.MessageByte > 0 && declared.Length > 0) declared[0] = reportId;
+                return declared;
+            }
+        }
+
         if (Descriptors.VendorId != 0x054C) return null;
         switch (reportId)
         {
@@ -685,7 +800,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         Audio.Clear();
         lock (_hidLock)
         {
-            _pendingInterruptIn.Clear();
+            foreach (var q in _pendingInterruptIn.Values) q.Clear();
             _frameQueue.Clear();
         }
     }

@@ -1,0 +1,109 @@
+{
+  "id": "steam-deck-composite",
+  "name": "Steam Deck Controller (Composite)",
+  "vendor": "Valve",
+  "vid": "0x28DE",
+  "pid": "0x1205",
+  "productString": "Steam Deck Controller",
+  "manufacturerString": "Valve Software",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "descriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
+  "inputReportSize": 64,
+  "notes": "Issue #56, from PadForge discussion #337. The Valve-recognized Steam Deck persona: the real controller's vendor-page HID interface (06 FF FF, 64-byte input and feature reports) alongside the keyboard and mouse interfaces its lizard mode drives, at Valve's own 28DE:1205. Steam and SDL key Valve-device treatment on that identity plus this interface, which is why the plain steam-deck profile (a standard gamepad descriptor wearing the same ids) files under Generic DirectInput instead. Consumers drive the 64-byte Neptune report 0x09 frame through SubmitRawReport; Steam's haptic and rumble writes (0xEB, 0xEA, 0x8F) arrive as HID feature output on OutputReceived. The three report descriptors are verbatim from one physical Deck (hhd-dev/hwinfo steamdeck_lcd_v2, the same unit as its sd.pcapng USB capture); interface order, endpoint addresses, packet sizes and bIntervals are the real device's, from its lsusb -v dump. The real device also exposes a CDC ACM debug serial pair (interfaces 3 and 4) which this persona omits: it carries no controller data, and nothing in the input stack reads it.",
+  "featureStubs": {
+    "match": "lastMessage",
+    "reports": [
+      {
+        "id": "0x83",
+        "size": 64,
+        "comment": "ID_GET_ATTRIBUTES_VALUES. Verbatim from the real Deck's reply in the hhd-dev/hwinfo sd.pcapng capture, with the per-unit board/firmware identifiers kept as captured and ATTRIB_CONNECTION_INTERVAL_IN_US (0x0B) = 4000 us matching this persona's own 4 ms input cadence.",
+        "data": "832d010512000002000000000a2b12a962048f09446509290000000ba00f00000d000000000c0000000e00000000"
+      },
+      {
+        "id": "0xAE",
+        "size": 64,
+        "comment": "ID_GET_STRING_ATTRIBUTE, board serial. The real reply's framing with a HIDMaestro serial in place of the captured unit's.",
+        "data": "ae14004849444d41455354524f2d534400000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "layout": {
+    "kind": "unspecified",
+    "note": "The persona's controller interface is an opaque 64-byte vendor blob, exactly as the real Steam Deck's is, so it declares no axes or buttons for a layout to reference. The Neptune report 0x09 frame the consumer submits through SubmitRawReport carries the full shape: two sticks, two trackpads, analog triggers, four back grips, and the 6-axis IMU. Same convention as the steam-controller profile, whose descriptor is also vendor-only.",
+    "source": "https://en.wikipedia.org/wiki/Steam_Deck"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 128,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "1201000200000040de280512000201020001",
+    "configurationDescriptor": "0902540003010080fa090400000103010100092111012101222700070582030800010904010001030002000921110100012241000705810308000109040200010300000009211101000122260007058303400001",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "hidKeyboard",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 1,
+            "interfaceProtocol": 1,
+            "reportDescriptor": "05010906a101050719e029e71500250175019508810281011900296515002565750895068100c0",
+            "endpoints": [
+              {
+                "address": 130,
+                "transferType": "interrupt",
+                "maxPacketSize": 8,
+                "interval": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 1,
+        "function": "hidMouse",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 2,
+            "reportDescriptor": "05010902a1010901a100050919012902150025017501950281027506950181010501093009311581257f750895028106950109388106050c0a380295018106c0c0",
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 8,
+                "interval": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 2,
+        "function": "hid",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 0,
+            "endpoints": [
+              {
+                "address": 131,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 1
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -162,6 +162,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\switch2_pro_sdl3_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_extra_buttons_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1533,6 +1534,22 @@ function Scenario-Switch2-Pro-Sdl3 {
     }
 }
 
+# S51: the three Valve composite personas (issue #56, from PadForge
+# discussion #337) - the Steam Deck, the 2015 Steam Controller and the
+# 2026 one SDL calls Triton. Pins their wire truth with no device and no
+# elevation: the multi-HID-interface descriptor sets (each controller
+# interface plus the keyboard and mouse its lizard mode drives), endpoint
+# addresses and intervals against the real units' lsusb dumps, the report
+# ids Triton's single interface carries, and the feature-stub tables that
+# answer Steam's GET_REPORT interrogation.
+function Scenario-Valve-Personas {
+    $probe = Resolve-ProbeBinary 'valve_persona_check' 'ValvePersonaCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("ValvePersonaCheck exited " + $p.ExitCode + " - a Valve persona drifted: a descriptor set, an endpoint, a declared report id, the feature-stub answers Steam reads, or the 64-byte Neptune input frame (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1599,7 +1616,8 @@ $scenarios = @(
     @{ Name = 'S47_Switch2_Pro_Profile';          Body = ${function:Scenario-Switch2-Pro} },
     @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} },
     @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} },
-    @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} }
+    @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
+    @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

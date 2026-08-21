@@ -192,6 +192,18 @@ public sealed class UsbAltSettingSpec
     /// Null on HID and Audio Control interfaces.</summary>
     [JsonPropertyName("audioStream")]
     public UsbAudioStreamSpec? AudioStream { get; set; }
+
+    /// <summary>Issue #56. The HID report descriptor this interface serves,
+    /// hex, for a SECONDARY HID interface. The primary HID interface (the
+    /// one whose <see cref="UsbInterfaceSpec.Function"/> is <c>"hid"</c>)
+    /// leaves this null and serves the profile's own
+    /// <c>descriptor</c>, which is what every consumer and the whole codec
+    /// path already reads. A composite that presents more than one HID
+    /// interface carries the others' descriptors here, verbatim from the
+    /// real device: the Steam Deck's keyboard and mouse interfaces (the
+    /// pair its lizard mode drives) are the shipped example.</summary>
+    [JsonPropertyName("reportDescriptor")]
+    public string? ReportDescriptor { get; set; }
 }
 
 /// <summary>One endpoint descriptor.</summary>

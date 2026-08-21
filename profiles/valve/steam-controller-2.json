@@ -1,0 +1,101 @@
+{
+  "id": "steam-controller-2",
+  "name": "Steam Controller (2026)",
+  "vendor": "Valve",
+  "vid": "0x28DE",
+  "pid": "0x1302",
+  "productString": "Steam Controller",
+  "manufacturerString": "Valve Software",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "descriptor": "05010902a10185400901a100050919012902150025017501950281027506950181010501093009311581257f750895028106950109388106050c0a380295018106c0c005010906a1018541050719e029e71500250175019508810281011900296515002565750895068100c00600ff0901a1018542150026ff0075089535094281028544150026ff0075089505094481028579150026ff0075089501097981028543150026ff007508950e09438102857b150026ff007508950c097b81028545150026ff007508952d094581028580150026ff0075089509098091028581150026ff0075089507098191028582150026ff0075089503098291028583150026ff0075089509098391028584150026ff0075089508098491028585150026ff0075089503098591028586150026ff0075089503098691028587150026ff007508953f098791028589150026ff007508953f098991028588150026ff007508953f098891028501953f0901b1028502953f0901b102c0",
+  "inputReportSize": 54,
+  "notes": "Issue #56, from PadForge discussion #337. Valve's 2026 Steam Controller, the one SDL calls Triton (k_eControllerType_SteamControllerTriton, controller_list.h: 28DE:1302 wired, 0x1303 BLE, 0x1304 and 0x1305 the Proteus and Nereid dongles). SDL_hidapi_steam_triton.c binds it on any interface of a wired unit and names it 'Steam Controller'. Unlike the Deck and the 2015 controller, Triton presents ONE HID interface carrying everything by report id: 0x40 mouse and 0x41 keyboard (its lizard reports live in the same descriptor rather than on their own interfaces), 0x42 the 53-byte controller state SDL reads as ID_TRITON_CONTROLLER_STATE, 0x45 the 45-byte BLE state, 0x43 battery, 0x79 wireless status, the 0x80..0x89 haptic and rumble output reports, and a 63-byte command channel on feature reports 1 and 2. The descriptor is verbatim from OpenPuck's ReversePuckFirmware (ctrl_usb.cpp CTRL_HID_DESC), an emulation of this controller that a live Steam client already accepts, and every report id in it matches SDL's own ID_TRITON_* constants. The feature answers are grounded on two independent reads of real hardware that agree record for record: OpenPuck's identity.cpp ATTR83 (read with 'scmd 1302 --up 1 83') and CouchTurtle/sc2-research docs/FIRMWARE_PROTOCOL.md, which logs the same five tags in the same order off a live controller and matches Steam's own update JSON on two of the values. The firmware build timestamp shipped here is the newer of the two real builds (0x6A18D057, 2026-05-28) so Steam sees a current unit. Consumers drive report 0x42 through SubmitRawReport; Steam's haptic writes arrive on OutputReceived as output reports 0x80 and up.",
+  "featureStubs": {
+    "match": "lastMessage",
+    "messageByte": 1,
+    "reports": [
+      {
+        "id": "0x83",
+        "size": 64,
+        "comment": "ID_GET_ATTRIBUTES_VALUES. The 25-byte attribute blob verbatim from a real 28DE:1302 (OpenPuck ReversePuckFirmware/identity.cpp, read with 'scmd 1302 --up 1 83'). As (tag, u32-LE) records: 01 product 0x1302, 02 capabilities, 0A bootloader build 0x68D2F92E, 04 firmware build 0x6A18D057, 09 board revision 0x48. Steam validates these byte for byte - two wrong bytes and it re-asks forever - so none of them is invented, and all of them are firmware and model values shared across units rather than per-device ones.",
+        "data": "018319010213000002000000000a2ef9d2680457d0186a0948000000"
+      },
+      {
+        "id": "0xAE",
+        "param": 0,
+        "size": 64,
+        "comment": "ID_GET_STRING_ATTRIBUTE index 0, the board serial, in Valve's own format.",
+        "data": "01ae14004d584139393630323030303031"
+      },
+      {
+        "id": "0xAE",
+        "param": 1,
+        "size": 64,
+        "comment": "Index 1, the unit serial. Constant, as every serial this catalog ships is.",
+        "data": "01ae140146584139393630323030303031"
+      },
+      {
+        "id": "0xAE",
+        "param": 3,
+        "size": 64,
+        "comment": "Index 3 is the one Steam actually checks: the Valve constant 7054257d2da7, the same on every real unit.",
+        "data": "01ae1403373035343235376432646137"
+      },
+      {
+        "id": "0xAE",
+        "size": 64,
+        "comment": "Any other index reads back 0xFF where the index would be, which is how a real unit says the string is not provisioned: Steam's own hardwareupdater tests that byte for 0xFF (CouchTurtle/sc2-research tools/attr_query.py, read out of the shipped updater bundle).",
+        "data": "01ae14ff"
+      },
+      {
+        "id": "0xB4",
+        "size": 64,
+        "comment": "Wireless transport state. 0x01 = wired, no radio link up.",
+        "data": "01b40101"
+      }
+    ]
+  },
+  "layout": {
+    "kind": "unspecified",
+    "note": "The controller interface is an opaque vendor blob addressed by report id, as the real device's is, so it declares no axes or buttons for a layout to reference. Report 0x42 carries the full shape. Same convention as the steam-controller and steam-deck-composite profiles.",
+    "source": "https://github.com/safijari/openpuck, https://github.com/CouchTurtle/sc2-research"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "1201000200000040de280213000101020001",
+    "configurationDescriptor": "09022900010100a0fa0904000002030000000921110100012274010705810340000107050103400001",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "hid",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 0,
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 1
+              },
+              {
+                "address": 1,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 1
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

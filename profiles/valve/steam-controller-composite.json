@@ -1,0 +1,110 @@
+{
+  "id": "steam-controller-composite",
+  "name": "Steam Controller (Composite)",
+  "vendor": "Valve",
+  "vid": "0x28DE",
+  "pid": "0x1102",
+  "productString": "Wired Controller",
+  "manufacturerString": "Valve Software",
+  "type": "gamepad",
+  "connection": "usb",
+  "backend": "usbip",
+  "descriptor": "0600ff0901a101150026ff00750895400901810295400901910295400901b102c0",
+  "inputReportSize": 64,
+  "notes": "Issue #56, from PadForge discussion #337. The 2015 Steam Controller (D0G), wired, as a Valve-recognized persona. Like the Steam Deck, the plain steam-controller profile carries Valve's ids over a descriptor no Valve-aware software binds; this one presents the device SDL's own driver looks for. SDL_hidapi_steam.c requires the controller to be INTERFACE 2 on a wired unit (HIDAPI_DriverSteam_IsSupportedDevice: 'This is the controller interface (not mouse or keyboard)'), which is why all three interfaces are present rather than the controller alone. The controller interface's 33-byte vendor descriptor (usage page 0xFF00) is real: it is the descriptor the plain steam-controller profile already carried, and the hhd-dev/hwinfo hid-recorder trace of a physical unit reports the same 33 bytes. Interface classes, endpoint addresses, packet sizes and bIntervals are the real wired unit's, from its lsusb -v dump (linuxhw/LsUSB), whose wTotalLength 0x54 this configuration reproduces exactly. The keyboard and mouse descriptors on interfaces 0 and 1 are standard boot-protocol descriptors, NOT Valve's verbatim bytes: no public capture of the wired unit's lizard descriptors exists (lsusb prints their lengths and marks the descriptors themselves UNAVAILABLE). They exist so the controller lands on interface 2, and each declares its own true length. Every byte a consumer of this persona actually reads is the real device's.",
+  "featureStubs": {
+    "match": "lastMessage",
+    "messageByte": 0,
+    "reports": [
+      {
+        "id": "0x83",
+        "size": 64,
+        "comment": "ID_GET_ATTRIBUTES_VALUES, the read SDL performs before it will use the pad (SDL_hidapi_steam.c ResetSteamController). Three (tag, u32-LE) records in the order two real Valve captures use - a Steam Deck's and a 2026 controller's both run 01, 02, then the rest: ATTRIB_PRODUCT_ID 0x1102, ATTRIB_CAPABILITIES 0 (zero on both of those real devices too), and ATTRIB_CONNECTION_INTERVAL_IN_US 9000, the value SDL falls back to for this family and the one it turns into the gyro and accel sample rate. ATTRIB_FIRMWARE_BUILD_TIME, ATTRIB_BOOTLOADER_BUILD_TIME and ATTRIB_BOARD_REVISION are absent rather than invented: no public capture of a 2015 unit's block exists, SDL ignores all three, and a wrong firmware timestamp is what makes Steam re-ask forever.",
+        "data": "830f010211000002000000000b28230000"
+      },
+      {
+        "id": "0xAE",
+        "size": 64,
+        "comment": "ID_GET_STRING_ATTRIBUTE. Framed [0xAE][0x14][index][string], the same shape the Steam Deck persona answers with, and the serial follows that persona's convention rather than a real unit's: no capture of a 2015 unit's serial format exists to copy, and a device that answers is closer to the real one than a device that stalls.",
+        "data": "ae14004849444d41455354524f2d5343"
+      }
+    ]
+  },
+  "layout": {
+    "kind": "unspecified",
+    "note": "Steam Controller descriptor in HM catalog declares 0 axes + 0 buttons (placeholder). Real device: 1 left analog stick + 2 clickable haptic trackpads + Hall-effect analog triggers + ~16 buttons + 6-axis IMU + dual linear-resonant haptics. Authoring deferred until descriptor surfaces full shape.",
+    "source": "https://en.wikipedia.org/wiki/Steam_Controller"
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 160,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "deviceDescriptor": "1201000200000040de280211000101020001",
+    "configurationDescriptor": "09025400030100a0fa090400000103010100092111010001223f000705810308000a0904010001030002000921110100012238000705820304000609040200010300000009211101000122210007058303400006",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "hidKeyboard",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 1,
+            "interfaceProtocol": 1,
+            "reportDescriptor": "05010906a101050719e029e71500250175019508810295017508810195057501050819012905910295017503910195067508150025650507190029658100c0",
+            "endpoints": [
+              {
+                "address": 129,
+                "transferType": "interrupt",
+                "maxPacketSize": 8,
+                "interval": 10
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 1,
+        "function": "hidMouse",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 2,
+            "reportDescriptor": "05010902a1010901a100050919012903150025019503750181029501750581010501093009311581257f750895028106093895018106c0c0",
+            "endpoints": [
+              {
+                "address": 130,
+                "transferType": "interrupt",
+                "maxPacketSize": 4,
+                "interval": 6
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 2,
+        "function": "hid",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 0,
+            "endpoints": [
+              {
+                "address": 131,
+                "transferType": "interrupt",
+                "maxPacketSize": 64,
+                "interval": 6
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
