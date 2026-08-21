@@ -34,6 +34,7 @@
 // Exit 0 PASS, 1 FAIL, 2 SKIP (no Steam install, or it would not start).
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -82,6 +83,28 @@ static class ValveSteamCheck
     }
 
     static bool SteamRunning() => Process.GetProcessesByName("steam").Length > 0;
+
+    // Valve's feature-message ids, from SDL's controller_constants.h. These
+    // are what Steam writes back down to a device it has claimed, and they
+    // are the only autonomous view of what Steam does with the thing after
+    // it decides what it is.
+    const byte ID_CLEAR_DIGITAL_MAPPINGS = 0x81;
+    const byte ID_GET_ATTRIBUTES_VALUES  = 0x83;
+    const byte ID_SET_SETTINGS_VALUES    = 0x87;
+    const byte ID_TRIGGER_HAPTIC_PULSE   = 0x8F;
+    const byte ID_TRIGGER_HAPTIC_CMD     = 0xEA;
+    const byte ID_TRIGGER_RUMBLE_CMD     = 0xEB;
+
+    static string NameMessage(byte id) => id switch
+    {
+        ID_CLEAR_DIGITAL_MAPPINGS => "CLEAR_DIGITAL_MAPPINGS",
+        ID_GET_ATTRIBUTES_VALUES  => "GET_ATTRIBUTES_VALUES",
+        ID_SET_SETTINGS_VALUES    => "SET_SETTINGS_VALUES",
+        ID_TRIGGER_HAPTIC_PULSE   => "TRIGGER_HAPTIC_PULSE",
+        ID_TRIGGER_HAPTIC_CMD     => "TRIGGER_HAPTIC_CMD",
+        ID_TRIGGER_RUMBLE_CMD     => "TRIGGER_RUMBLE_CMD",
+        _                         => $"0x{id:X2}",
+    };
 
     static int Main()
     {
@@ -163,9 +186,29 @@ static class ValveSteamCheck
 
                 long baseline = LogLength(log);
                 HMController? c = null;
+                var written = new List<(byte Id, int Len)>();
                 try
                 {
                     c = ctx.CreateController(prof);
+                    // Every command Steam writes down to this device, in
+                    // arrival order. Valve frames a command-channel write as
+                    // [message][length][parameters], so byte 0 of the
+                    // payload is the message id.
+                    c.OutputReceived += (_, pkt) =>
+                    {
+                        // Where the message id sits depends on whether the
+                        // device's feature channel carries report ids at
+                        // all, the same split FeatureStubTable.MessageByte
+                        // encodes. The Deck and the 2015 controller declare
+                        // none, so the transfer's first byte IS the message
+                        // and the SDK surfaces it as ReportId. Triton rides
+                        // report id 0x42, so its message is the first
+                        // payload byte. Valve's ids are all 0x80 and up,
+                        // which tells the two apart without guessing.
+                        var span = pkt.Data.Span;
+                        byte msg = span.Length > 0 && span[0] >= 0x80 ? span[0] : pkt.ReportId;
+                        lock (written) written.Add((msg, span.Length));
+                    };
 
                     string want = $"type: 28de {t.Pid}";
                     string fresh = string.Empty;
@@ -216,6 +259,26 @@ static class ValveSteamCheck
                           !tail.Contains("closed after hid_read failure", StringComparison.Ordinal));
                     Check("the device is still open twelve seconds later",
                           !tail.Contains("PollState Changed from 2 to 0", StringComparison.Ordinal));
+
+                    // What Steam DOES with the device once it has decided
+                    // what it is. Steam configures a Valve controller over
+                    // Valve's own command channel, which is the same channel
+                    // its haptics ride, so a persona that never receives one
+                    // of these is one Steam claimed and then ignored.
+                    List<(byte Id, int Len)> cmds;
+                    lock (written) cmds = new List<(byte, int)>(written);
+                    var kinds = new SortedSet<string>();
+                    foreach (var w in cmds) kinds.Add(NameMessage(w.Id));
+                    Console.WriteLine($"     Steam wrote {cmds.Count} command(s): "
+                                      + (kinds.Count > 0 ? string.Join(", ", kinds) : "none"));
+
+                    Check("Steam drives the device over Valve's command channel",
+                          cmds.Count > 0, $"{cmds.Count} writes");
+                    Check("Steam configures it rather than only opening it",
+                          cmds.Exists(w => w.Id == ID_SET_SETTINGS_VALUES
+                                        || w.Id == ID_CLEAR_DIGITAL_MAPPINGS
+                                        || w.Id == ID_GET_ATTRIBUTES_VALUES),
+                          "settings, mappings or attributes");
                 }
                 catch (Exception ex) { Check("persona ran without throwing", false, ex.Message); }
                 finally { c?.Dispose(); Thread.Sleep(3000); }
