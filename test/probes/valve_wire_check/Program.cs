@@ -111,6 +111,45 @@ static class Program
     }
 
     static short S16(byte[] f, int o) => (short)(f[o] | (f[o + 1] << 8));
+    static ushort U16(byte[] f, int o) => (ushort)(f[o] | (f[o + 1] << 8));
+
+    static float RemapClamped(float v, float lo, float hi, float olo, float ohi)
+    {
+        if (v < lo) v = lo;
+        if (v > hi) v = hi;
+        return olo + (ohi - olo) * (v - lo) / (hi - lo);
+    }
+
+    /// <summary>Decode a frame the way SDL does, so the check is against the
+    /// reference consumer's arithmetic rather than against our own encoder.
+    ///   Deck   SDL_hidapi_steamdeck.c:  LEFTX = sLeftStickX,
+    ///          trigger = raw * 2 - 32768.
+    ///   2015   SDL_hidapi_steam.c FormatStatePacketUntilGyro: with
+    ///          STEAM_LEFTPAD_FINGERDOWN clear, sLeftStickX = sLeftPadX;
+    ///          trigger = Remap((n &lt;&lt; 7) | n, 0, 26000, 0, 32767).
+    ///   Triton SDL_hidapi_steam_triton.c: LEFTX = sLeftStickX,
+    ///          trigger = raw * 2 - 32768.</summary>
+    static (int leftX, int rightTrigger) SdlDecode(string id, byte[] f)
+    {
+        switch (id)
+        {
+            case "steam-deck-composite":
+                return (S16(f, 48), (int)U16(f, 46) * 2 - 32768);
+            case "steam-controller-2":
+                return (S16(f, 10), (int)U16(f, 8) * 2 - 32768);
+            default:
+            {
+                ulong buttons = 0;
+                for (int i = 0; i < 8; i++) buttons |= (ulong)f[8 + i] << (8 * i);
+                const ulong LEFTPAD_FINGERDOWN = 1UL << 19;
+                // Finger-down clear means sLeftPad IS the joystick.
+                int lx = (buttons & LEFTPAD_FINGERDOWN) != 0 ? 0 : S16(f, 16);
+                int n = f[12];                      // nRight, the 8-bit trigger
+                int rt = (int)RemapClamped((n << 7) | n, 0, 26000, 0, 32767);
+                return (lx, rt);
+            }
+        }
+    }
 
     const string SteamLog = "C:/Program Files (x86)/Steam/logs/controller.txt";
 
@@ -212,6 +251,14 @@ static class Program
 
                 // Non-disruptive end-to-end: does Steam claim it? Reads
                 // Steam's own log; touches nothing on the desktop.
+                // Decode through SDL's own arithmetic: this is what any
+                // consumer built on the reference implementation recovers.
+                var (sdlX, sdlRt) = SdlDecode(t.Id, f);
+                Check("SDL's parser recovers full-left on the left stick",
+                      sdlX <= -32000, $"LEFTX={sdlX}");
+                Check("SDL's parser recovers a fully pulled right trigger",
+                      sdlRt >= 32000, $"RIGHT_TRIGGER={sdlRt}");
+
                 if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
                     Check("Steam claims the device (fresh entry in controller.txt)",
                           SteamClaimed(t.Vid, t.Pid, steamBase));
