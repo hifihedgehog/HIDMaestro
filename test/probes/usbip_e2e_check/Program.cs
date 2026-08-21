@@ -24,6 +24,7 @@
 
 
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -49,6 +50,14 @@ internal static class Program
 
     static int Main()
     {
+        // --dump-wire: what a Valve persona actually puts on the interrupt
+        // endpoint. Submits sticks only, never a button, so a Steam desktop
+        // layout claiming the device cannot type or click while it runs.
+        if (Environment.GetCommandLineArgs().Contains("--dump-wire"))
+            return DumpWire();
+        if (Environment.GetCommandLineArgs().Contains("--hid-caps"))
+            return HidCaps();
+
         Console.WriteLine("=== USB/IP backend end-to-end (issue #39) ===");
 
         // Another live SDK consumer shares the same named sections, so its
@@ -602,6 +611,190 @@ internal static class Program
         return null;
     }
 
+
+    /// <summary>Ground truth for the input path: create the Deck persona,
+    /// submit a known stick deflection with no buttons, and read the frame
+    /// back off the real HID stack.</summary>
+    static int DumpWire()
+    {
+        Console.WriteLine("=== Valve persona wire dump (sticks only, no buttons) ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var prof = ctx.GetProfile("steam-deck-composite");
+        if (prof == null) { Console.WriteLine("FAIL: profile missing"); return 1; }
+
+        using var c = ctx.CreateController(prof);
+        string? hidPath = null;
+        for (int i = 0; i < 100 && hidPath == null; i++)
+        {
+            Thread.Sleep(100);
+            hidPath = FindHidDevicePath(0x28DE, 0x1205);
+        }
+        Console.WriteLine($"  hid path: {(hidPath ?? "NOT FOUND")}");
+        if (hidPath == null) return 1;
+
+        // Left stick hard left, right stick hard up. No buttons at all.
+        var state = new HMGamepadState
+        {
+            Buttons = 0,
+            Axes = new System.Collections.Generic.Dictionary<HMAxis, float>
+            {
+                [HMAxis.X] = 0.0f, [HMAxis.Y] = 0.5f,
+                [HMAxis.Z] = 0.5f, [HMAxis.Rz] = 0.0f,
+            },
+        };
+        for (int i = 0; i < 5; i++) { c.SubmitState(state); Thread.Sleep(40); }
+
+        // No report id in this descriptor, so Windows reports
+        // InputReportByteLength = 64 data + 1 leading zero byte. Reading 64
+        // makes ReadFile fail with a short-buffer error and look like silence.
+        // Exactly what HIDMaestroTest's park path builds. If this centres,
+        // the harness never sends sticks no matter what the SDK does.
+        var parkAxes = HMGamepadStateHelpers.StandardAxes(
+            c.Profile, leftStickX: 0.0f, leftStickY: 0.5f);
+        Console.WriteLine($"  StandardAxes entries: {parkAxes.Count} -> "
+            + string.Join(", ", parkAxes.Select(kv => $"{kv.Key}={kv.Value:0.##}")));
+        var parkState = new HMGamepadState { Axes = parkAxes };
+        for (int i = 0; i < 6; i++) { c.SubmitState(parkState); Thread.Sleep(30); }
+        var pf = ReadOneInterruptReport(hidPath, 65, c, parkState);
+        if (pf != null)
+        {
+            var f2 = pf[0] == 0 ? pf[1..] : pf;
+            short plx = (short)(f2[48] | (f2[49] << 8));
+            Console.WriteLine($"  park-path lsx = {plx}  (want -32767)");
+            Console.WriteLine(plx <= -32000 ? "  PARK PATH OK" : "  PARK PATH CENTRED");
+        }
+
+        // Steam reads in a loop. One frame followed by silence looks
+        // identical to a live device that never moves, so count how many
+        // distinct frames actually arrive over a window.
+        StreamCheck(hidPath, c);
+
+        var raw = ReadOneInterruptReport(hidPath, 65, c, state);
+        if (raw == null) { Console.WriteLine("FAIL: no interrupt report"); return 1; }
+        Console.WriteLine("  raw(65): " + BitConverter.ToString(raw).Replace("-", " ").ToLowerInvariant());
+        // Strip the leading report-id byte the HID stack prepends.
+        var frame = raw[0] == 0x00 ? raw[1..] : raw;
+
+        Console.WriteLine("  frame: " + BitConverter.ToString(frame).Replace("-", " ").ToLowerInvariant());
+        short lsx = (short)(frame[48] | (frame[49] << 8));
+        short lsy = (short)(frame[50] | (frame[51] << 8));
+        short rsx = (short)(frame[52] | (frame[53] << 8));
+        short rsy = (short)(frame[54] | (frame[55] << 8));
+        Console.WriteLine($"  header      : {frame[0]:X2} {frame[1]:X2} {frame[2]:X2} {frame[3]:X2}  (want 01 00 09 40)");
+        Console.WriteLine($"  packetNum   : {BitConverter.ToUInt32(frame, 4)}");
+        Console.WriteLine($"  buttons@8   : 0x{BitConverter.ToUInt64(frame, 8):X16}  (want 0)");
+        Console.WriteLine($"  sticks      : lsx={lsx} lsy={lsy} rsx={rsx} rsy={rsy}  (want lsx=-32767, rsy=+32767)");
+        bool ok = frame[0] == 0x01 && frame[2] == 0x09 && lsx <= -32000 && rsy >= 32000;
+        Console.WriteLine(ok ? "\n  WIRE OK: sticks are on the wire"
+                             : "\n  WIRE BAD: sticks are not reaching the wire");
+        return ok ? 0 : 1;
+    }
+
+
+    /// <summary>How many interrupt reports arrive over a second, and do
+    /// their packet numbers advance? A single frame then silence is the
+    /// failure that reads as "recognised but never moves".</summary>
+    static void StreamCheck(string hidPath, HMController c)
+    {
+        IntPtr fh = OpenPath(hidPath);
+        if (fh == INVALID_HANDLE_VALUE) { Console.WriteLine("  stream: cannot open"); return; }
+        using var stop = new ManualResetEventSlim(false);
+        int n = 0;
+        var pump = new Thread(() =>
+        {
+            float t = 0f;
+            try
+            {
+                while (!stop.IsSet)
+                {
+                    t += 0.02f; if (t > 1f) t = 0f;
+                    c.SubmitState(new HMGamepadState
+                    {
+                        Buttons = 0,
+                        Axes = new System.Collections.Generic.Dictionary<HMAxis, float>
+                        { [HMAxis.X] = t, [HMAxis.Y] = 0.5f, [HMAxis.Z] = 0.5f, [HMAxis.Rz] = 0.5f },
+                    });
+                    stop.Wait(4);
+                }
+            }
+            catch (ObjectDisposedException) { }
+        }) { IsBackground = true };
+        pump.Start();
+        try
+        {
+            var buf = new byte[65];
+            uint first = 0, last = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 1000)
+            {
+                if (!ReadFile(fh, buf, buf.Length, out int read, IntPtr.Zero) || read <= 0) break;
+                uint pn = BitConverter.ToUInt32(buf, 5);   // +1 for the stripped report id
+                if (n == 0) first = pn;
+                last = pn; n++;
+            }
+            Console.WriteLine($"  stream: {n} reports in 1 s, packetNum {first} -> {last}");
+            Console.WriteLine(n > 50 ? "  STREAM OK: continuous" : "  STREAM STALLED: not a live stream");
+        }
+        finally { stop.Set(); Thread.Sleep(50); CloseHandle(fh); }
+    }
+
+
+    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] static extern int  HidP_GetCaps(IntPtr pp, byte[] caps);
+    [DllImport("hid.dll")] static extern bool HidD_GetManufacturerString(IntPtr h, byte[] b, int len);
+    [DllImport("hid.dll")] static extern bool HidD_GetProductString(IntPtr h, byte[] b, int len);
+    [DllImport("hid.dll")] static extern bool HidD_GetSerialNumberString(IntPtr h, byte[] b, int len);
+
+    /// <summary>Exactly the calls hidapi makes while enumerating, in order.
+    /// hidapi skips a device the moment one of them fails, and a skipped
+    /// device is invisible to every consumer built on it.</summary>
+    static int HidCaps()
+    {
+        Console.WriteLine("=== HID capability probe (the hidapi enumeration path) ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var prof = ctx.GetProfile("steam-deck-composite");
+        if (prof == null) { Console.WriteLine("FAIL: no profile"); return 1; }
+        using var c = ctx.CreateController(prof);
+
+        string? path = null;
+        for (int i = 0; i < 150 && path == null; i++) { Thread.Sleep(100); path = FindHidDevicePath(0x28DE, 0x1205); }
+        Console.WriteLine("  path: " + (path ?? "NOT FOUND"));
+        if (path == null) return 1;
+
+        IntPtr h = OpenPath(path);
+        Console.WriteLine($"  CreateFile(rw)          : {(h != INVALID_HANDLE_VALUE ? "OK" : "FAIL " + Marshal.GetLastWin32Error())}");
+        if (h == INVALID_HANDLE_VALUE) return 1;
+        try
+        {
+            var buf = new byte[512];
+            Console.WriteLine($"  HidD_GetManufacturerString: {HidD_GetManufacturerString(h, buf, buf.Length)}");
+            Console.WriteLine($"  HidD_GetProductString     : {HidD_GetProductString(h, buf, buf.Length)}");
+            Console.WriteLine($"  HidD_GetSerialNumberString: {HidD_GetSerialNumberString(h, buf, buf.Length)}");
+
+            bool gotPp = HidD_GetPreparsedData(h, out IntPtr pp);
+            Console.WriteLine($"  HidD_GetPreparsedData     : {gotPp}" + (gotPp ? "" : $" (err {Marshal.GetLastWin32Error()})"));
+            if (!gotPp) { Console.WriteLine("  ROOT CAUSE: hidapi skips this device here."); return 1; }
+            var caps = new byte[64];
+            int st = HidP_GetCaps(pp, caps);
+            ushort usage = BitConverter.ToUInt16(caps, 0);
+            ushort usagePage = BitConverter.ToUInt16(caps, 2);
+            ushort inLen = BitConverter.ToUInt16(caps, 4);
+            ushort outLen = BitConverter.ToUInt16(caps, 6);
+            ushort featLen = BitConverter.ToUInt16(caps, 8);
+            Console.WriteLine($"  HidP_GetCaps              : 0x{st:X8} {(st == 0x00110000 ? "(HIDP_STATUS_SUCCESS)" : "")}");
+            Console.WriteLine($"    usage 0x{usage:X4} usagePage 0x{usagePage:X4}");
+            Console.WriteLine($"    InputReportByteLength   {inLen}   (want 65)");
+            Console.WriteLine($"    OutputReportByteLength  {outLen}");
+            Console.WriteLine($"    FeatureReportByteLength {featLen}  (want 65)");
+            HidD_FreePreparsedData(pp);
+            return st == 0x00110000 ? 0 : 1;
+        }
+        finally { CloseHandle(h); }
+    }
+
     static byte[]? ReadOneInterruptReport(string path, int reportLen, HMController c, in HMGamepadState state)
     {
         IntPtr fh = OpenPath(path);
@@ -616,14 +809,13 @@ internal static class Program
             // ObjectDisposedException on a background thread and takes the
             // process down after every check has already passed.
             using var stop = new ManualResetEventSlim(false);
+            // Pump the state the CALLER asked for. This used to build its
+            // own and silently ignore the parameter, so any caller checking
+            // a different state was reading someone else's frame.
+            var pumped = state;
             var pump = new Thread(() =>
             {
-                var s = new HMGamepadState
-                {
-                    Buttons = HMButton.A | HMButton.LeftBumper,
-                    Axes = new System.Collections.Generic.Dictionary<HMAxis, float>
-                    { [HMAxis.X] = 1.0f, [HMAxis.Y] = 0.0f, [HMAxis.Z] = 0.5f, [HMAxis.Rz] = 0.5f },
-                };
+                var s = pumped;
                 try
                 {
                     while (!stop.IsSet) { c.SubmitState(s); stop.Wait(20); }

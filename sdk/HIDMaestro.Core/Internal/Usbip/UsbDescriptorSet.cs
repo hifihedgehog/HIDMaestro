@@ -42,6 +42,9 @@ internal sealed class UsbDescriptorSet
     private readonly byte _iManufacturer;
     private readonly byte _iProduct;
     private readonly byte _iSerial;
+    private readonly byte _iConfiguration;
+    private readonly string? _serial;
+    private readonly string? _configurationName;
 
     /// <summary>Endpoint table parsed from the configuration blob. Keyed
     /// by bEndpointAddress (direction bit included).</summary>
@@ -106,6 +109,9 @@ internal sealed class UsbDescriptorSet
         _iManufacturer = DeviceDescriptor[14];
         _iProduct = DeviceDescriptor[15];
         _iSerial = DeviceDescriptor[16];
+        _iConfiguration = ConfigurationDescriptor.Length > 6 ? ConfigurationDescriptor[6] : (byte)0;
+        _serial = profile.SerialString;
+        _configurationName = profile.ConfigurationString;
         _manufacturer = profile.ManufacturerString;
         _product = profile.ProductString;
 
@@ -234,6 +240,7 @@ internal sealed class UsbDescriptorSet
                     bool typeOk = ep.TransferType switch
                     {
                         "isochronous" => found.TransferType == 1,
+                        "bulk" => found.TransferType == 2,
                         "interrupt" => found.TransferType == 3,
                         _ => false,
                     };
@@ -293,9 +300,14 @@ internal sealed class UsbDescriptorSet
     {
         if (index == 0)
             return new byte[] { 0x04, 0x03, 0x09, 0x04 }; // one LANGID: en-US
+        // A device that declares a string index has to serve it. Sony's pads
+        // declare iSerial 0 and get null below, unchanged; Valve's declare a
+        // real serial at index 3 and a configuration name at 4, and Steam
+        // logs the serial it reads here (issue #56).
         string? s = index == _iManufacturer && _iManufacturer != 0 ? _manufacturer
                   : index == _iProduct && _iProduct != 0 ? _product
-                  : index == _iSerial && _iSerial != 0 ? null // real pad has no serial string
+                  : index == _iSerial && _iSerial != 0 ? _serial
+                  : index == _iConfiguration && _iConfiguration != 0 ? _configurationName
                   : null;
         if (s == null) return null;
         var bytes = Encoding.Unicode.GetBytes(s);

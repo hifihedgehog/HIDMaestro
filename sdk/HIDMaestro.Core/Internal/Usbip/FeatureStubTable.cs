@@ -35,7 +35,7 @@ internal sealed class FeatureStubTable
 
     // Keyed by (message id, parameter). A parameter of -1 is the entry that
     // answers the message whatever parameter it carried.
-    private readonly Dictionary<(byte Key, int Param), (byte[] Data, int Size)> _reports = new();
+    private readonly Dictionary<(byte Key, int Param), (byte[] Data, int Size, bool Echo)> _reports = new();
 
     private FeatureStubTable(bool matchesLastMessage, int messageByte)
     {
@@ -55,8 +55,9 @@ internal sealed class FeatureStubTable
             spec.MessageByte);
         foreach (var r in spec.Reports)
         {
-            if (string.IsNullOrEmpty(r.Data)) continue;
-            var bytes = Convert.FromHexString(r.Data);
+            if (string.IsNullOrEmpty(r.Data) && !r.Echo) continue;
+            var bytes = string.IsNullOrEmpty(r.Data)
+                ? Array.Empty<byte>() : Convert.FromHexString(r.Data);
             // The declared size is the report's wire length; the data is
             // usually shorter because the tail is zeros, exactly as the
             // real device pads its 64-byte feature reports.
@@ -65,7 +66,7 @@ internal sealed class FeatureStubTable
                 throw new InvalidOperationException(
                     $"Profile '{profile.Id}' featureStub {r.Id}: {bytes.Length} bytes of data " +
                     $"exceed the declared {size}-byte report size.");
-            table._reports[(r.IdByte, r.Param ?? -1)] = (bytes, size);
+            table._reports[(r.IdByte, r.Param ?? -1)] = (bytes, size, r.Echo);
         }
         return table._reports.Count > 0 ? table : null;
     }
@@ -74,18 +75,23 @@ internal sealed class FeatureStubTable
     /// truncated to what the host asked for. Null when the table has no
     /// entry, which stalls, as a real device does for a message it does not
     /// implement.</summary>
-    public byte[]? Lookup(byte key, ushort wLength) => Lookup(key, -1, wLength);
+    public byte[]? Lookup(byte key, ushort wLength) => Lookup(key, -1, wLength, null);
+
+    public byte[]? Lookup(byte key, int param, ushort wLength) => Lookup(key, param, wLength, null);
 
     /// <summary>The answer for a message and the parameter it carried. An
     /// entry declared for that exact parameter wins; otherwise the entry
     /// declared for the message alone answers, as it does for every message
     /// that takes no parameter.</summary>
-    public byte[]? Lookup(byte key, int param, ushort wLength)
+    /// <param name="written">The message the host wrote, for an entry that
+    /// answers by echoing it.</param>
+    public byte[]? Lookup(byte key, int param, ushort wLength, byte[]? written)
     {
         if (!_reports.TryGetValue((key, param), out var entry)
             && !_reports.TryGetValue((key, -1), out entry)) return null;
         var full = new byte[entry.Size];
-        entry.Data.CopyTo(full, 0);
+        var body = entry.Echo && written != null && written.Length > 0 ? written : entry.Data;
+        Array.Copy(body, full, Math.Min(body.Length, full.Length));
         if (wLength >= full.Length) return full;
         var cut = new byte[wLength];
         Array.Copy(full, cut, wLength);

@@ -54,6 +54,12 @@
         "size": 64,
         "comment": "Wireless transport state. 0x01 = wired, no radio link up.",
         "data": "01b40101"
+      },
+      {
+        "id": "0x87",
+        "size": 64,
+        "echo": true,
+        "comment": "ID_SET_SETTINGS_VALUES reads back as the settings block the host just wrote. Verified on a real Steam Deck answering a real Steam client: five SET/GET pairs in that capture, every reply byte-identical to its write. Steam performs this read during the claim, and a device that stalls it never finishes being claimed. Triton's channel rides feature report 1, so the echo carries that report id back too."
       }
     ]
   },
@@ -95,6 +101,121 @@
             ]
           }
         ]
+      }
+    ]
+  },
+  "extendedReport": {
+    "reportId": "0x42",
+    "size": 54,
+    "alwaysArmed": true,
+    "fields": [
+      {
+        "byte": 0,
+        "type": "uint8",
+        "semantic": "reportId",
+        "initial": 66
+      },
+      {
+        "byte": 1,
+        "type": "uint8-rolling",
+        "semantic": "seqNum",
+        "initial": 1,
+        "stride": 1
+      },
+      {
+        "byte": 2,
+        "bits": "0-27",
+        "type": "button-mask",
+        "buttons": [
+          "A",
+          "B",
+          "X",
+          "Y",
+          "Misc1",
+          "RightStick",
+          "Back",
+          "_",
+          "RightPaddle",
+          "RightBumper",
+          "DPAD_DOWN",
+          "DPAD_RIGHT",
+          "DPAD_LEFT",
+          "DPAD_UP",
+          "Start",
+          "LeftStick",
+          "Guide",
+          "_",
+          "LeftPaddle",
+          "LeftBumper",
+          "_",
+          "_",
+          "Touchpad",
+          "RT_DIGITAL",
+          "_",
+          "_",
+          "_",
+          "LT_DIGITAL"
+        ]
+      },
+      {
+        "byte": 6,
+        "type": "uint16-trigger",
+        "semantic": "leftTrigger"
+      },
+      {
+        "byte": 8,
+        "type": "uint16-trigger",
+        "semantic": "rightTrigger"
+      },
+      {
+        "byte": 10,
+        "type": "int16-axis",
+        "semantic": "leftStickX"
+      },
+      {
+        "byte": 12,
+        "type": "int16-axis",
+        "semantic": "leftStickY"
+      },
+      {
+        "byte": 14,
+        "type": "int16-axis",
+        "semantic": "rightStickX"
+      },
+      {
+        "byte": 16,
+        "type": "int16-axis",
+        "semantic": "rightStickY"
+      },
+      {
+        "byte": 34,
+        "type": "int16-le",
+        "semantic": "accelX"
+      },
+      {
+        "byte": 36,
+        "type": "int16-le",
+        "semantic": "accelY"
+      },
+      {
+        "byte": 38,
+        "type": "int16-le",
+        "semantic": "accelZ"
+      },
+      {
+        "byte": 40,
+        "type": "int16-le",
+        "semantic": "gyroPitch"
+      },
+      {
+        "byte": 42,
+        "type": "int16-le",
+        "semantic": "gyroYaw"
+      },
+      {
+        "byte": 44,
+        "type": "int16-le",
+        "semantic": "gyroRoll"
       }
     ]
   }

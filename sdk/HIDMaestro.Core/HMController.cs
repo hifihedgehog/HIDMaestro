@@ -479,6 +479,11 @@ public sealed class HMController : IDisposable
                 return Math.Clamp(vCanon, 0f, 1f);
             if (slot < triggers.Count && axes.TryGetValue(triggers[slot].Axis, out var vField))
                 return Math.Clamp(vField, 0f, 1f);
+            // Opaque vendor descriptor: no declared triggers to look up, so
+            // accept the canonical Z / Rz the helper writes in that case.
+            if (triggers.Count == 0
+                && axes.TryGetValue(slot == 0 ? HMAxis.Z : HMAxis.Rz, out var vCanon2))
+                return Math.Clamp(vCanon2, 0f, 1f);
         }
         return 0.0;
     }
@@ -510,10 +515,22 @@ public sealed class HMController : IDisposable
         // immutable for the controller's lifetime, so resolve once.
         var sticks = _cachedSticks;
         var triggers = _cachedTriggers;
-        double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : 0.5;
-        double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : 0.5;
-        double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5) : 0.5;
-        double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5) : 0.5;
+        // Sticks resolve canonical-first when the descriptor declares none,
+        // mirroring ResolveTrigger below (issue #56). Profile.Sticks derives
+        // from the descriptor-built report builder, so a profile whose
+        // descriptor is an opaque vendor blob - every Valve state packet -
+        // has no declared sticks at all. Hard-defaulting those to 0.5 put a
+        // live device on the wire whose sticks never left centre, while its
+        // triggers worked, because only triggers had a fallback. The right
+        // stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
+        double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : GetAxis(HMAxis.X, 0.5);
+        double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : GetAxis(HMAxis.Y, 0.5);
+        double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5)
+                   : axes != null && axes.ContainsKey(HMAxis.Rx) ? GetAxis(HMAxis.Rx, 0.5)
+                                                                 : GetAxis(HMAxis.Z, 0.5);
+        double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5)
+                   : axes != null && axes.ContainsKey(HMAxis.Ry) ? GetAxis(HMAxis.Ry, 0.5)
+                                                                 : GetAxis(HMAxis.Rz, 0.5);
         // Triggers resolve canonical-first, then fall back to the descriptor's
         // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
         // ResolveAxisByRole (canonical defaults when no axisMap); HIDMaestroTest

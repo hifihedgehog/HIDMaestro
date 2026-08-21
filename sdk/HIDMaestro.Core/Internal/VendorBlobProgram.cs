@@ -31,6 +31,11 @@ internal sealed class VendorBlobProgram
         I16, U32, TouchpadFinger, Bitfield, Battery, HatOctant,
         ButtonMask, Rgb24, BytesPassthrough, BytesZero, Crc32,
         Stick12Pair,
+        // Valve's 16-bit state packets (issue #56). The Steam Deck and both
+        // Steam Controllers carry sticks as signed 16-bit, triggers as
+        // unsigned 16-bit, and a 32-bit packet counter, none of which the
+        // 8-bit ops above can express.
+        I16Axis, U16Trigger, U32Rolling,
     }
 
     /// <summary>Input-direction value source, numeric. Replaces the
@@ -136,7 +141,10 @@ internal sealed class VendorBlobProgram
                 "uint8-rolling"     => FieldOp.U8Rolling,
                 "uint8"             => FieldOp.U8Const,
                 "int16-le"          => FieldOp.I16,
+                "int16-axis"        => FieldOp.I16Axis,
+                "uint16-trigger"    => FieldOp.U16Trigger,
                 "uint32-le"         => FieldOp.U32,
+                "uint32-rolling"    => FieldOp.U32Rolling,
                 "touchpad-finger"   => FieldOp.TouchpadFinger,
                 "bitfield"          => FieldOp.Bitfield,
                 "uint8-battery"     => FieldOp.Battery,

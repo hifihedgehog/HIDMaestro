@@ -231,6 +231,22 @@ public static class HMGamepadStateHelpers
         }
         if (triggers.Count > 0) axes[triggers[0].Axis] = leftTrigger;
         if (triggers.Count > 1) axes[triggers[1].Axis] = rightTrigger;
+        // A profile whose descriptor is an opaque vendor blob declares no
+        // sticks or triggers at all (every Valve state packet), so the loops
+        // above write nothing and the caller submits an empty dict. The
+        // controller then centres all six analog inputs and the device looks
+        // alive but frozen. Fall back to the canonical usages, which is what
+        // SubmitState resolves against in the same situation.
+        if (sticks.Count == 0)
+        {
+            axes[HMAxis.X]  = leftStickX;  axes[HMAxis.Y]  = leftStickY;
+            axes[HMAxis.Rx] = rightStickX; axes[HMAxis.Ry] = rightStickY;
+        }
+        if (triggers.Count == 0)
+        {
+            axes[HMAxis.Z]  = leftTrigger;
+            axes[HMAxis.Rz] = rightTrigger;
+        }
         return axes;
     }
 }

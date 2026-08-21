@@ -28,6 +28,16 @@ public sealed class ControllerProfile
     [JsonPropertyName("pid")]
     public string Pid { get; set; } = "";
 
+    /// <summary>USB iSerialNumber string, when the device declares one.
+    /// Valve's pads do; Sony's do not. Steam reads and logs it.</summary>
+    [JsonPropertyName("serialString")]
+    public string? SerialString { get; set; }
+
+    /// <summary>USB iConfiguration string, when the configuration
+    /// descriptor names one (the Deck calls its "Full-Speed").</summary>
+    [JsonPropertyName("configurationString")]
+    public string? ConfigurationString { get; set; }
+
     [JsonPropertyName("productString")]
     public string ProductString { get; set; } = "";
 
@@ -466,6 +476,14 @@ public sealed class FeatureStubReport
     /// for a message that takes none.</summary>
     [JsonPropertyName("param")]
     public int? Param { get; set; }
+
+    /// <summary>Answer by echoing the message that was written, padded to
+    /// <see cref="Size"/>, rather than with a fixed <see cref="Data"/>.
+    /// Valve's ID_SET_SETTINGS_VALUES (0x87) reads back as the settings
+    /// block the host just wrote, so no constant can serve it. Observed on
+    /// a real Steam Deck answering a real Steam client.</summary>
+    [JsonPropertyName("echo")]
+    public bool Echo { get; set; }
 
     /// <summary>Why this answer is what it is. Documentation only.</summary>
     [JsonPropertyName("comment")]

@@ -11,7 +11,7 @@
   "backend": "usbip",
   "descriptor": "0600ff0901a101150026ff00750895400901810295400901910295400901b102c0",
   "inputReportSize": 64,
-  "notes": "Issue #56, from PadForge discussion #337. The 2015 Steam Controller (D0G), wired, as a Valve-recognized persona. Like the Steam Deck, the plain steam-controller profile carries Valve's ids over a descriptor no Valve-aware software binds; this one presents the device SDL's own driver looks for. SDL_hidapi_steam.c requires the controller to be INTERFACE 2 on a wired unit (HIDAPI_DriverSteam_IsSupportedDevice: 'This is the controller interface (not mouse or keyboard)'), which is why all three interfaces are present rather than the controller alone. The controller interface's 33-byte vendor descriptor (usage page 0xFF00) is real: it is the descriptor the plain steam-controller profile already carried, and the hhd-dev/hwinfo hid-recorder trace of a physical unit reports the same 33 bytes. Interface classes, endpoint addresses, packet sizes and bIntervals are the real wired unit's, from its lsusb -v dump (linuxhw/LsUSB), whose wTotalLength 0x54 this configuration reproduces exactly. The keyboard and mouse descriptors on interfaces 0 and 1 are standard boot-protocol descriptors, NOT Valve's verbatim bytes: no public capture of the wired unit's lizard descriptors exists (lsusb prints their lengths and marks the descriptors themselves UNAVAILABLE). They exist so the controller lands on interface 2, and each declares its own true length. Every byte a consumer of this persona actually reads is the real device's.",
+  "notes": "Issue #56, from PadForge discussion #337. The wired 2015 Steam Controller at 28DE:1102. Every USB descriptor here is verbatim from a real unit's dump (deckdumps/sc_blobs.json): the device and configuration blobs, the 63-byte keyboard and 56-byte mouse report descriptors its lizard mode drives, and the 33-byte vendor-page controller descriptor. Three interfaces, because SDL_hidapi_steam.c binds the pad only on interface 2. extendedReport packs ValveInReport_t + ValveControllerStatePacket_t: header 01 00 01 3C, then an advancing unPacketNum, which UpdateSteamControllerState requires or it treats the frame as a repeat. The pad has one stick and the wire has no separate stick field: with STEAM_LEFTPAD_FINGERDOWN clear, FormatStatePacketUntilGyro reads sLeftPadX/Y as the joystick, so that is where the stick is written and the finger-down bits stay clear.",
   "featureStubs": {
     "match": "lastMessage",
     "messageByte": 0,
@@ -24,9 +24,29 @@
       },
       {
         "id": "0xAE",
+        "param": 0,
         "size": 64,
-        "comment": "ID_GET_STRING_ATTRIBUTE. Framed [0xAE][0x14][index][string], the same shape the Steam Deck persona answers with, and the serial follows that persona's convention rather than a real unit's: no capture of a 2015 unit's serial format exists to copy, and a device that answers is closer to the real one than a device that stalls.",
-        "data": "ae14004849444d41455354524f2d5343"
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Same command channel as the Deck's, so the same per-index rule applies. No capture of a 2015 unit's serial format exists, so the framing is the Deck's verified one and the string itself is this project's, not a real unit's.",
+        "data": "ae1400484d424f415244303030303031"
+      },
+      {
+        "id": "0xAE",
+        "param": 1,
+        "size": 64,
+        "comment": "ATTRIB_STR_UNIT_SERIAL, and distinct from index 0 as on real hardware.",
+        "data": "ae1401484d554e495430303030303031"
+      },
+      {
+        "id": "0xAE",
+        "size": 64,
+        "comment": "Any other index reads back the 0xFF not-provisioned marker.",
+        "data": "ae14ff"
+      },
+      {
+        "id": "0x87",
+        "size": 64,
+        "echo": true,
+        "comment": "ID_SET_SETTINGS_VALUES reads back as the settings block the host just wrote. Verified on a real Steam Deck answering a real Steam client: five SET/GET pairs in that capture, every reply byte-identical to its write. Steam performs this read during the claim, and a device that stalls it never finishes being claimed. The 2015 pad speaks the same command channel."
       }
     ]
   },
@@ -104,6 +124,145 @@
             ]
           }
         ]
+      }
+    ]
+  },
+  "extendedReport": {
+    "reportId": "0x00",
+    "size": 64,
+    "alwaysArmed": true,
+    "fields": [
+      {
+        "byte": 0,
+        "type": "uint8",
+        "semantic": "reportVersionLo",
+        "initial": 1
+      },
+      {
+        "byte": 1,
+        "type": "uint8",
+        "semantic": "reportVersionHi",
+        "initial": 0
+      },
+      {
+        "byte": 2,
+        "type": "uint8",
+        "semantic": "reportType",
+        "initial": 1
+      },
+      {
+        "byte": 3,
+        "type": "uint8",
+        "semantic": "reportLength",
+        "initial": 60
+      },
+      {
+        "byte": 4,
+        "type": "uint32-rolling",
+        "semantic": "packetNum",
+        "initial": 1,
+        "stride": 1
+      },
+      {
+        "byte": 8,
+        "bits": "0-23",
+        "type": "button-mask",
+        "buttons": [
+          "RT_DIGITAL",
+          "LT_DIGITAL",
+          "RightBumper",
+          "LeftBumper",
+          "Y",
+          "B",
+          "X",
+          "A",
+          "DPAD_UP",
+          "DPAD_RIGHT",
+          "DPAD_LEFT",
+          "DPAD_DOWN",
+          "Back",
+          "Guide",
+          "Start",
+          "LeftPaddle",
+          "RightPaddle",
+          "_",
+          "Touchpad",
+          "_",
+          "_",
+          "_",
+          "LeftStick",
+          "_"
+        ]
+      },
+      {
+        "byte": 11,
+        "type": "uint8-trigger",
+        "semantic": "leftTrigger"
+      },
+      {
+        "byte": 12,
+        "type": "uint8-trigger",
+        "semantic": "rightTrigger"
+      },
+      {
+        "byte": 16,
+        "type": "int16-axis",
+        "semantic": "leftStickX"
+      },
+      {
+        "byte": 18,
+        "type": "int16-axis",
+        "semantic": "leftStickY"
+      },
+      {
+        "byte": 20,
+        "type": "int16-axis",
+        "semantic": "rightStickX"
+      },
+      {
+        "byte": 22,
+        "type": "int16-axis",
+        "semantic": "rightStickY"
+      },
+      {
+        "byte": 24,
+        "type": "uint16-trigger",
+        "semantic": "leftTrigger"
+      },
+      {
+        "byte": 26,
+        "type": "uint16-trigger",
+        "semantic": "rightTrigger"
+      },
+      {
+        "byte": 28,
+        "type": "int16-le",
+        "semantic": "accelX"
+      },
+      {
+        "byte": 30,
+        "type": "int16-le",
+        "semantic": "accelY"
+      },
+      {
+        "byte": 32,
+        "type": "int16-le",
+        "semantic": "accelZ"
+      },
+      {
+        "byte": 34,
+        "type": "int16-le",
+        "semantic": "gyroPitch"
+      },
+      {
+        "byte": 36,
+        "type": "int16-le",
+        "semantic": "gyroYaw"
+      },
+      {
+        "byte": 38,
+        "type": "int16-le",
+        "semantic": "gyroRoll"
       }
     ]
   }

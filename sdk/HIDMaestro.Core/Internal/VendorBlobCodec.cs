@@ -35,6 +35,10 @@ internal static class VendorBlobCodec
         // report (Sony: framingTag at byte 1, reportCounter at byte 8)
         // each advance independently.
         public Dictionary<string, byte> RollingCounters { get; } = new();
+
+        /// <summary>Wider counters, for a format whose packet number is 32
+        /// bits (Valve's state packets).</summary>
+        public Dictionary<string, uint> RollingCounters32 { get; } = new();
     }
 
     // ── Input encoder: HMGamepadState → bytes ─────────────────────────────
@@ -160,6 +164,68 @@ internal static class VendorBlobCodec
                     buffer[f.B + 1] = (byte)((v >> 8) & 0xFF);
                     break;
                 }
+                case VendorBlobProgram.FieldOp.I16Axis:
+                {
+                    // Signed 16-bit stick axis. Sticks arrive as [0..1] with
+                    // 0.5 centred (v1.3.9); Valve's packets carry them
+                    // full-scale signed, which SDL reads straight through.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    float sv = f.Source switch
+                    {
+                        VendorBlobProgram.SrcOp.LeftStickX  => leftStickX,
+                        VendorBlobProgram.SrcOp.LeftStickY  => leftStickY,
+                        VendorBlobProgram.SrcOp.RightStickX => rightStickX,
+                        VendorBlobProgram.SrcOp.RightStickY => rightStickY,
+                        _ => 0.5f,
+                    };
+                    // Valve's packets are positive-up on Y, the opposite of
+                    // the byte-oriented pads: SDL applies a unary minus to
+                    // sLeftStickY and sRightStickY on the way in. Y is
+                    // therefore negated here so up reads as up.
+                    bool yAxis = f.Source is VendorBlobProgram.SrcOp.LeftStickY
+                                           or VendorBlobProgram.SrcOp.RightStickY;
+                    float centred = Math.Clamp(sv, 0f, 1f) - 0.5f;
+                    if (yAxis) centred = -centred;
+                    short sraw = (short)Math.Clamp(
+                        (int)Math.Round(centred * 2f * 32767f), -32767, 32767);
+                    buffer[f.B]     = (byte)(sraw & 0xFF);
+                    buffer[f.B + 1] = (byte)((sraw >> 8) & 0xFF);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U16Trigger:
+                {
+                    // Unsigned 16-bit trigger, 0..32767. SDL widens it as
+                    // (raw * 2 - 32768) to reach its own full range, so a
+                    // full pull is 32767 rather than 65535.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    float tv = f.Source switch
+                    {
+                        VendorBlobProgram.SrcOp.LeftTrigger  => leftTrigger,
+                        VendorBlobProgram.SrcOp.RightTrigger => rightTrigger,
+                        _ => 0f,
+                    };
+                    int traw = (int)Math.Round(Math.Clamp(tv, 0f, 1f) * 32767f);
+                    buffer[f.B]     = (byte)(traw & 0xFF);
+                    buffer[f.B + 1] = (byte)((traw >> 8) & 0xFF);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U32Rolling:
+                {
+                    // Valve's unPacketNum. A consumer that sees the same
+                    // number twice may skip the frame, so this has to
+                    // advance on every encode or the stream reads as one
+                    // frame repeated forever.
+                    if (f.B < 0 || f.B + 3 >= buffer.Length) break;
+                    if (!encState.RollingCounters32.TryGetValue(f.RollKey, out var c32))
+                        c32 = f.Initial;
+                    buffer[f.B]     = (byte)(c32         & 0xFF);
+                    buffer[f.B + 1] = (byte)((c32 >>  8) & 0xFF);
+                    buffer[f.B + 2] = (byte)((c32 >> 16) & 0xFF);
+                    buffer[f.B + 3] = (byte)((c32 >> 24) & 0xFF);
+                    encState.RollingCounters32[f.RollKey] =
+                        unchecked(c32 + (uint)Math.Max(1, (int)f.Stride));
+                    break;
+                }
                 case VendorBlobProgram.FieldOp.U32:
                 {
                     if (f.B < 0 || f.B + 3 >= buffer.Length) break;
@@ -251,7 +317,7 @@ internal static class VendorBlobCodec
                 {
                     if (f.B < 0 || f.ButtonBits == null) break;
                     uint mask = (uint)state.Buttons;
-                    byte packed = 0;
+                    ulong packed = 0;
                     for (int i = 0; i < f.ButtonBits.Length && (f.BitLo + i) <= f.BitHi; i++)
                     {
                         ulong bits = f.ButtonBits[i];
@@ -276,11 +342,23 @@ internal static class VendorBlobCodec
                             VendorBlobProgram.ButtonDpadRight => h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
                             _ => (mask & (uint)bits) != 0,
                         };
-                        if (on) packed |= (byte)(1 << (f.BitLo + i));
+                        if (on) packed |= 1UL << (f.BitLo + i);
                     }
-                    // OR into existing byte (preserves bits at other positions)
-                    byte preserveMask = (byte)~(((1 << (f.BitHi - f.BitLo + 1)) - 1) << f.BitLo);
-                    buffer[f.B] = (byte)((buffer[f.B] & preserveMask) | packed);
+                    // OR into the existing bytes, preserving bits outside the
+                    // declared range. The range may span more than one byte:
+                    // Valve's state packets carry a 64-bit button field, and
+                    // a single-byte write would drop every button above 7.
+                    int nBytes = (f.BitHi / 8) + 1;
+                    for (int by = 0; by < nBytes; by++)
+                    {
+                        if ((uint)(f.B + by) >= (uint)buffer.Length) break;
+                        int lo = by * 8;
+                        int rlo = Math.Max(lo, f.BitLo), rhi = Math.Min(lo + 7, f.BitHi);
+                        if (rlo > rhi) continue;
+                        byte span = (byte)((((1 << (rhi - rlo + 1)) - 1) << (rlo - lo)) & 0xFF);
+                        byte val = (byte)((packed >> lo) & 0xFF);
+                        buffer[f.B + by] = (byte)((buffer[f.B + by] & (byte)~span) | (val & span));
+                    }
                     break;
                 }
                 case VendorBlobProgram.FieldOp.Crc32:

@@ -95,6 +95,17 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private readonly FeatureStubTable? _stubs;
     private byte _lastFeatureMessage;
     private int _lastFeatureParam = -1;
+    private byte[]? _lastFeaturePayload;
+
+    // Diagnostic (HIDMAESTRO_DIAG_READS=<path>): who actually reads us.
+    // A consumer that claims the device but never submits an interrupt-IN
+    // URB on the controller endpoint cannot see input no matter what the
+    // send side does, and nothing else in the stack reveals that.
+    private static readonly string? DiagPath =
+        Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG_READS");
+    private readonly Dictionary<byte, long> _readsPerEp = new();
+    private readonly Dictionary<byte, long> _completionsPerEp = new();
+    private long _diagLastDump;
 
     private Queue<uint> PendingFor(byte epAddr)
     {
@@ -177,6 +188,30 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     Thread.Sleep(4);
                 if (_stop) break;
 
+                if (DiagPath != null)
+                {
+                    long now = Environment.TickCount64;
+                    if (now - _diagLastDump > 2000)
+                    {
+                        _diagLastDump = now;
+                        try
+                        {
+                            lock (_hidLock)
+                            {
+                                var sb = new System.Text.StringBuilder();
+                                sb.Append($"[{DateTime.Now:HH:mm:ss}] primaryEp=0x{_primaryInEndpoint:X2} reads:");
+                                foreach (var kv in _readsPerEp) sb.Append($" 0x{kv.Key:X2}={kv.Value}");
+                                sb.Append("  completions:");
+                                foreach (var kv in _completionsPerEp) sb.Append($" 0x{kv.Key:X2}={kv.Value}");
+                                sb.Append($"  queued={_frameQueue.Count}");
+                                foreach (var kv in _pendingInterruptIn)
+                                    sb.Append($" parked[0x{kv.Key:X2}]={kv.Value.Count}");
+                                System.IO.File.AppendAllText(DiagPath, sb.ToString() + Environment.NewLine);
+                            }
+                        }
+                        catch { }
+                    }
+                }
                 if (!TryReadInputFrame(out var report)) continue;
 
                 uint seq;
@@ -187,6 +222,9 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     if (pending.Count > 0)
                     {
                         seq = pending.Dequeue();
+                        if (DiagPath != null)
+                            _completionsPerEp[_primaryInEndpoint] =
+                                _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
                     }
                     else
                     {
@@ -345,6 +383,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     // parks its reads and never completes them, which is
                     // exactly what the real device does once lizard mode is
                     // off: those pipes go quiet rather than reporting.
+                    if (DiagPath != null)
+                        _readsPerEp[epAddr] = _readsPerEp.TryGetValue(epAddr, out var rc) ? rc + 1 : 1;
                     if (epAddr == _primaryInEndpoint && _frameQueue.Count > 0)
                         frame = _frameQueue.Dequeue();
                     else
@@ -621,6 +661,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     // ID_GET_STRING_ATTRIBUTE does.
                     int paramAt = _stubs.MessageByte + 2;
                     _lastFeatureParam = payload.Length > paramAt ? payload[paramAt] : -1;
+                    _lastFeaturePayload = payload;
                 }
                 PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
@@ -652,7 +693,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         if (_stubs != null)
         {
             byte key = _stubs.MatchesLastMessage ? _lastFeatureMessage : reportId;
-            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength);
+            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength, _lastFeaturePayload);
             if (declared != null)
             {
                 // A protocol riding report ids answers with the id it was

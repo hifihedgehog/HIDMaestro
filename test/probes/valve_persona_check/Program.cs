@@ -51,7 +51,9 @@ internal static class Program
     // The real Deck's interface layout, from the lsusb -v dump of a Valve
     // Jupiter (linuxhw/LsUSB): keyboard on 0 with EP 0x82, mouse on 1 with
     // EP 0x81, the controller on 2 with EP 0x83.
-    const byte KbdIface = 0, MouseIface = 1, CtrlIface = 2;
+    // Interface order is the real unit's: mouse 0, keyboard 1,
+    // controller 2, CDC ACM comm 3 and data 4.
+    const byte MouseIface = 0, KbdIface = 1, CtrlIface = 2;
 
     static int Main()
     {
@@ -113,8 +115,16 @@ internal static class Program
               && set.SecondaryHidInterfaces.Contains(KbdIface)
               && set.SecondaryHidInterfaces.Contains(MouseIface),
               string.Join(",", set.SecondaryHidInterfaces.OrderBy(x => x)));
-        Check("configuration declares three interfaces", set.NumInterfaces == 3,
-              set.NumInterfaces.ToString());
+        Check("configuration declares five interfaces, as the real unit does",
+              set.NumInterfaces == 5, set.NumInterfaces.ToString());
+        Check("wTotalLength is the real unit's 150",
+              set.ConfigurationDescriptor.Length == 150,
+              set.ConfigurationDescriptor.Length.ToString());
+        Check("bcdDevice is the real unit's 3.00",
+              set.DeviceDescriptor[13] == 0x03 && set.DeviceDescriptor[12] == 0x00,
+              $"{set.DeviceDescriptor[13]:X2}.{set.DeviceDescriptor[12]:02X}");
+        Check("declares a serial string, as the real unit does (iSerial 3)",
+              set.DeviceDescriptor[16] == 3, set.DeviceDescriptor[16].ToString());
 
         var ctrlRd = set.GetHidDescriptor(0x22, CtrlIface);
         var kbdRd = set.GetHidDescriptor(0x22, KbdIface);
@@ -142,10 +152,14 @@ internal static class Program
         CheckEndpoint(set, 0x83, CtrlIface, 64, 1, "controller");
         CheckEndpoint(set, 0x82, KbdIface, 8, 1, "keyboard");
         CheckEndpoint(set, 0x81, MouseIface, 8, 1, "mouse");
-        Check("exactly three endpoints, all interrupt IN",
-              set.Endpoints.Count == 3
-              && set.Endpoints.Values.All(e => e.TransferType == 3 && e.IsIn),
-              set.Endpoints.Count.ToString());
+        Check("six endpoints: three HID interrupt IN plus the CDC pair",
+              set.Endpoints.Count == 6, set.Endpoints.Count.ToString());
+        Check("the three HID endpoints are interrupt IN",
+              new byte[] { 0x81, 0x82, 0x83 }.All(a =>
+                  set.Endpoints.TryGetValue(a, out var e) && e.TransferType == 3 && e.IsIn));
+        Check("the CDC data pair is bulk, one each way",
+              set.Endpoints.TryGetValue(0x84, out var cdcIn) && cdcIn.TransferType == 2 && cdcIn.IsIn
+              && set.Endpoints.TryGetValue(0x05, out var cdcOut) && cdcOut.TransferType == 2 && !cdcOut.IsIn);
 
         // A full-speed device stalls Device_Qualifier and Other_Speed, as the
         // real Deck's own bulk endpoints prove it to be (64-byte bulk is a
@@ -240,6 +254,9 @@ internal static class Program
         // 7. The two Steam Controllers.
         CheckSteamController(ctx);
         CheckTriton(ctx);
+
+        // 8. The input path: a submitted state has to reach the wire.
+        CheckDeckInputFrame(ctx);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -419,6 +436,84 @@ internal static class Program
         int end = off;
         while (end < b.Length && b[end] != 0) end++;
         return System.Text.Encoding.ASCII.GetString(b, off, end - off);
+    }
+
+    /// <summary>The packed input frame (issue #56 follow-up). The personas
+    /// present opaque vendor descriptors, so nothing about their wire frame
+    /// is derivable from the descriptor: without an extendedReport the
+    /// encoder has no field list and emits zeros, which Steam decodes as a
+    /// recognised controller whose every axis reads centred. That shipped
+    /// once. This pins the frame against SteamDeckStatePacket_t.</summary>
+    static void CheckDeckInputFrame(HMContext ctx)
+    {
+        Console.WriteLine();
+        Console.WriteLine("-- Steam Deck input frame (SteamDeckStatePacket_t) --");
+        var persona = ctx.GetProfile("steam-deck-composite");
+        Check("the Deck persona is loadable at all", persona != null);
+        if (persona == null) return;
+
+        var spec = persona.Inner.ExtendedReport;
+        Check("declares an extendedReport, so SubmitState has a field list",
+              spec != null);
+        if (spec == null) return;
+        Check("frame is the 64-byte Neptune report", spec.Size == 64, spec.Size.ToString());
+        // Without this the encoder is built but never armed, so SubmitState
+        // falls back to the descriptor-driven builder. That builder has
+        // nothing to fill for an opaque vendor descriptor, so the wire
+        // carries 64 zero bytes and every consumer reads a live device
+        // that never moves. Same reason the Switch 2 Pro sets it.
+        Check("extendedReport is alwaysArmed, or SubmitState silently emits zeros",
+              spec.AlwaysArmed);
+
+        // Left stick hard left and full up, right stick centred, right
+        // trigger fully pulled, A held.
+        var state = new HMGamepadState { Buttons = HMButton.A };
+        var enc = new VendorBlobCodec.EncoderState();
+        var buf = new byte[spec.Size];
+        VendorBlobCodec.EncodeInput(spec, in state,
+            0f, 0f, 0.5f, 0.5f,   // lx, ly, rx, ry
+            0f, 1f,               // left trigger, right trigger
+            buf, enc);
+
+        Check("header is the capture's 01 00 09 40",
+              buf[0] == 0x01 && buf[1] == 0x00 && buf[2] == 0x09 && buf[3] == 0x40,
+              $"{buf[0]:X2} {buf[1]:X2} {buf[2]:X2} {buf[3]:X2}");
+
+        Check("the frame is not all zeros, which is what a missing field list emits",
+              buf.Any(b => b != 0));
+
+        short LeftStickXv  = (short)(buf[48] | (buf[49] << 8));
+        short LeftStickYv  = (short)(buf[50] | (buf[51] << 8));
+        short RightStickXv = (short)(buf[52] | (buf[53] << 8));
+        ushort RightTrig   = (ushort)(buf[46] | (buf[47] << 8));
+
+        Check("left stick X full left is negative full-scale",
+              LeftStickXv <= -32000, LeftStickXv.ToString());
+        Check("left stick Y full up is POSITIVE, as Valve reads it (SDL negates)",
+              LeftStickYv >= 32000, LeftStickYv.ToString());
+        Check("a centred axis is zero, not offset",
+              Math.Abs(RightStickXv) <= 1, RightStickXv.ToString());
+        Check("right trigger full pull is 32767, the range SDL widens from",
+              RightTrig == 32767, RightTrig.ToString());
+
+        // A is bit 7 of ulButtonsL.
+        Check("button A lands on bit 7 of the 64-bit ulButtons field",
+              (buf[8] & 0x80) != 0, $"byte8=0x{buf[8]:X2}");
+
+        // A button above bit 7 has to survive: the mask used to be one byte.
+        var guided = new HMGamepadState { Buttons = HMButton.Guide };
+        var buf2 = new byte[spec.Size];
+        VendorBlobCodec.EncodeInput(spec, in guided, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f,
+                                    buf2, new VendorBlobCodec.EncoderState());
+        Check("Guide (STEAM) lands on bit 13, proving the mask spans bytes",
+              (buf2[9] & 0x20) != 0, $"byte9=0x{buf2[9]:X2}");
+
+        // unPacketNum must advance or Steam treats the stream as one frame.
+        uint p1 = (uint)(buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24));
+        VendorBlobCodec.EncodeInput(spec, in state, 0f, 0f, 0.5f, 0.5f, 0f, 1f, buf, enc);
+        uint p2 = (uint)(buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24));
+        Check("unPacketNum advances between frames, so Steam does not skip them",
+              p2 == p1 + 1, $"{p1} -> {p2}");
     }
 
     static void CheckEndpoint(UsbDescriptorSet set, byte addr, byte iface, int mps, int interval, string what)

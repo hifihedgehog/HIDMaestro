@@ -4,67 +4,66 @@
   "vendor": "Valve",
   "vid": "0x28DE",
   "pid": "0x1205",
-  "productString": "Steam Deck Controller",
+  "productString": "Steam Controller",
   "manufacturerString": "Valve Software",
   "type": "gamepad",
   "connection": "usb",
   "backend": "usbip",
   "descriptor": "06ffff0901a10109020903150026ff0075089540810209060907150026ff0075089540b102c0",
   "inputReportSize": 64,
-  "notes": "Issue #56, from PadForge discussion #337. The Valve-recognized Steam Deck persona: the real controller's vendor-page HID interface (06 FF FF, 64-byte input and feature reports) alongside the keyboard and mouse interfaces its lizard mode drives, at Valve's own 28DE:1205. Steam and SDL key Valve-device treatment on that identity plus this interface, which is why the plain steam-deck profile (a standard gamepad descriptor wearing the same ids) files under Generic DirectInput instead. Consumers drive the 64-byte Neptune report 0x09 frame through SubmitRawReport; Steam's haptic and rumble writes (0xEB, 0xEA, 0x8F) arrive as HID feature output on OutputReceived. The three report descriptors are verbatim from one physical Deck (hhd-dev/hwinfo steamdeck_lcd_v2, the same unit as its sd.pcapng USB capture); interface order, endpoint addresses, packet sizes and bIntervals are the real device's, from its lsusb -v dump. The real device also exposes a CDC ACM debug serial pair (interfaces 3 and 4) which this persona omits: it carries no controller data, and nothing in the input stack reads it.",
+  "notes": "Issue #56, from PadForge discussion #337. The Steam Deck's controller at 28DE:1205 on the usbip backend, reproduced from a real unit's lsusb dump rather than assembled: bcdDevice 3.00, iProduct 'Steam Controller', a serial string at index 3, bmAttributes 0x80 bus-powered, iConfiguration 4, wTotalLength 150 and FIVE interfaces. Mouse on 0 (EP 0x81), keyboard on 1 (EP 0x82, boot protocol), the vendor-page controller on 2 (EP 0x83, 64-byte reports), then an Interface Association Descriptor and the CDC ACM pair on 3 and 4. An earlier revision of this profile carried three interfaces, bcdDevice 2.00 and the product string 'Steam Deck Controller', taken from a different unit's dump with the CDC pair dropped as 'carrying no controller data'. Steam claimed that device, read its attributes and named it, then decoded every input as zero, because the identity it inspects is the whole configuration and not just the controller interface. The 64-byte Neptune frame (ID_CONTROLLER_DECK_STATE, header 01 00 09 40) is packed by extendedReport from SteamDeckStatePacket_t and cross-checked against a real Deck capture; featureStubs answer the GET_REPORT interrogation Steam performs before it claims the device.",
   "featureStubs": {
     "match": "lastMessage",
     "reports": [
       {
         "id": "0x83",
         "size": 64,
-        "comment": "ID_GET_ATTRIBUTES_VALUES. Verbatim from the real Deck's reply in the hhd-dev/hwinfo sd.pcapng capture, with the per-unit board/firmware identifiers kept as captured and ATTRIB_CONNECTION_INTERVAL_IN_US (0x0B) = 4000 us matching this persona's own 4 ms input cadence.",
-        "data": "832d010512000002000000000a2b12a962048f09446509290000000ba00f00000d000000000c0000000e00000000"
+        "comment": "ID_GET_ATTRIBUTES_VALUES. Nine (tag, u32-LE) records, verbatim from hhd's virtual Steam Deck (hhd_virtual_sd.py), which current Steam accepts on non-Deck handhelds. A real Deck capture from 2023 was used here first; it carries the same nine tags but an older firmware build time and board revision, and Steam reads both back (Controller Info: HWID, FWTimestamp in controller.txt). Matching the reference implementation's values removes firmware vintage as a variable.",
+        "data": "832d010512000002000000000a2b12a96204b7617c67092e0000000ba00f00000d000000000c000000000e00000000"
+      },
+      {
+        "id": "0xAE",
+        "param": 0,
+        "size": 64,
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Steam asks for this index by name during the claim, so it needs its own answer: a real Deck returns [0xAE][0x14][index][12-char serial], zero-padded. The 4-char model prefix is the real one; the 8-char tail that identifies an individual unit is not, because a captured serial is device-unique and does not belong in a shipped profile.",
+        "data": "ae14004d4844413030303030303031"
+      },
+      {
+        "id": "0xAE",
+        "param": 1,
+        "size": 64,
+        "comment": "ATTRIB_STR_UNIT_SERIAL, index 1. Steam reads index 1 and index 0 back to back, and the two must differ and each echo the index asked for. Answering both from one entry, as this profile did before, is what left Steam re-asking.",
+        "data": "ae1401465831413030303030303031"
       },
       {
         "id": "0xAE",
         "size": 64,
-        "comment": "ID_GET_STRING_ATTRIBUTE, board serial. The real reply's framing with a HIDMaestro serial in place of the captured unit's.",
-        "data": "ae14004849444d41455354524f2d534400000000000000000000000000000000000000000000000000"
+        "comment": "SDL declares only ATTRIB_STR_BOARD_SERIAL (0) and ATTRIB_STR_UNIT_SERIAL (1). Any other index reads back 0xFF where the index would be, the not-provisioned marker.",
+        "data": "ae14ff"
+      },
+      {
+        "id": "0x87",
+        "size": 64,
+        "echo": true,
+        "comment": "ID_SET_SETTINGS_VALUES reads back as the settings block the host just wrote. Verified on a real Steam Deck answering a real Steam client: five SET/GET pairs in that capture, every reply byte-identical to its write. Steam performs this read during the claim, and a device that stalls it never finishes being claimed."
       }
     ]
   },
   "layout": {
     "kind": "unspecified",
-    "note": "The persona's controller interface is an opaque 64-byte vendor blob, exactly as the real Steam Deck's is, so it declares no axes or buttons for a layout to reference. The Neptune report 0x09 frame the consumer submits through SubmitRawReport carries the full shape: two sticks, two trackpads, analog triggers, four back grips, and the 6-axis IMU. Same convention as the steam-controller profile, whose descriptor is also vendor-only.",
-    "source": "https://en.wikipedia.org/wiki/Steam_Deck"
+    "note": "The controller interface is an opaque vendor blob, as the real device's is, so it declares no axes or buttons for a layout to reference. The 64-byte Neptune frame's shape lives in extendedReport instead, and SubmitState resolves its sticks and triggers canonically.",
+    "source": "SDL3 controller_structs.h SteamDeckStatePacket_t"
   },
   "usbConfiguration": {
     "configurationValue": 1,
     "attributes": 128,
     "maxPowerMilliamps": 500,
     "busSpeed": "full",
-    "deviceDescriptor": "1201000200000040de280512000201020001",
-    "configurationDescriptor": "0902540003010080fa090400000103010100092111012101222700070582030800010904010001030002000921110100012241000705810308000109040200010300000009211101000122260007058303400001",
+    "deviceDescriptor": "1201000200000040de280512000301020301",
+    "configurationDescriptor": "0902960005010480fa090400000103000200092111010001224100070581030800010904010001030101000921110100012227000705820308000109040200010300000009211101000122260007058303400001080b030202020100090403000102020100052400100105240103010424020205240603040705860310001009040400020a0000000705840240000007050502400000",
     "interfaces": [
       {
         "interfaceNumber": 0,
-        "function": "hidKeyboard",
-        "altSettings": [
-          {
-            "altSetting": 0,
-            "interfaceClass": 3,
-            "interfaceSubClass": 1,
-            "interfaceProtocol": 1,
-            "reportDescriptor": "05010906a101050719e029e71500250175019508810281011900296515002565750895068100c0",
-            "endpoints": [
-              {
-                "address": 130,
-                "transferType": "interrupt",
-                "maxPacketSize": 8,
-                "interval": 1
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "interfaceNumber": 1,
         "function": "hidMouse",
         "altSettings": [
           {
@@ -72,7 +71,6 @@
             "interfaceClass": 3,
             "interfaceSubClass": 0,
             "interfaceProtocol": 2,
-            "reportDescriptor": "05010902a1010901a100050919012902150025017501950281027506950181010501093009311581257f750895028106950109388106050c0a380295018106c0c0",
             "endpoints": [
               {
                 "address": 129,
@@ -80,7 +78,29 @@
                 "maxPacketSize": 8,
                 "interval": 1
               }
-            ]
+            ],
+            "reportDescriptor": "05010902a1010901a100050919012902150025017501950281027506950181010501093009311581257f750895028106950109388106050c0a380295018106c0c0"
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 1,
+        "function": "hidKeyboard",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 1,
+            "interfaceProtocol": 1,
+            "endpoints": [
+              {
+                "address": 130,
+                "transferType": "interrupt",
+                "maxPacketSize": 8,
+                "interval": 1
+              }
+            ],
+            "reportDescriptor": "05010906a101050719e029e71500250175019508810281011900296515002565750895068100c0"
           }
         ]
       },
@@ -103,7 +123,226 @@
             ]
           }
         ]
+      },
+      {
+        "interfaceNumber": 3,
+        "function": "cdcComm",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 2,
+            "interfaceSubClass": 2,
+            "interfaceProtocol": 1,
+            "endpoints": [
+              {
+                "address": 134,
+                "transferType": "interrupt",
+                "maxPacketSize": 16,
+                "interval": 16
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "interfaceNumber": 4,
+        "function": "cdcData",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 10,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 0,
+            "endpoints": [
+              {
+                "address": 132,
+                "transferType": "bulk",
+                "maxPacketSize": 64,
+                "interval": 0
+              },
+              {
+                "address": 5,
+                "transferType": "bulk",
+                "maxPacketSize": 64,
+                "interval": 0
+              }
+            ]
+          }
+        ]
       }
     ]
-  }
+  },
+  "extendedReport": {
+    "reportId": "0x00",
+    "size": 64,
+    "alwaysArmed": true,
+    "comment": "SteamDeckStatePacket_t behind a ValveInReportHeader_t, from SDL3 controller_structs.h and cross-checked against the input frames in a real Steam Deck USB capture. Without this the profile had no field list, so SubmitState packed nothing and Steam decoded a frame of zeros: recognised as a Steam Deck Controller, every axis reading 0. Button bits are SDL_hidapi_steamdeck.c's SteamDeckButtons, LSB-first across the 64-bit ulButtons field. Trackpad coordinates and pad pressures are left zero: HMGamepadState has no trackpad, and a consumer that wants them submits the frame through SubmitRawReport.",
+    "fields": [
+      {
+        "byte": 0,
+        "type": "uint8",
+        "semantic": "hdrVersionLo",
+        "initial": 1
+      },
+      {
+        "byte": 1,
+        "type": "uint8",
+        "semantic": "hdrVersionHi",
+        "initial": 0
+      },
+      {
+        "byte": 2,
+        "type": "uint8",
+        "semantic": "reportType",
+        "initial": 9
+      },
+      {
+        "byte": 3,
+        "type": "uint8",
+        "semantic": "reportLength",
+        "initial": 64
+      },
+      {
+        "byte": 4,
+        "type": "uint32-rolling",
+        "semantic": "packetNum",
+        "initial": 1,
+        "stride": 1
+      },
+      {
+        "byte": 8,
+        "bits": "0-63",
+        "type": "button-mask",
+        "semantic": "buttons",
+        "buttons": [
+          "RT_DIGITAL",
+          "LT_DIGITAL",
+          "RightBumper",
+          "LeftBumper",
+          "Y",
+          "B",
+          "X",
+          "A",
+          "DPAD_UP",
+          "DPAD_RIGHT",
+          "DPAD_LEFT",
+          "DPAD_DOWN",
+          "Back",
+          "Guide",
+          "Start",
+          "LeftPaddle",
+          "RightPaddle",
+          "Touchpad",
+          "_",
+          "_",
+          "_",
+          "_",
+          "LeftStick",
+          "_",
+          "_",
+          "_",
+          "RightStick",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "Misc1",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_",
+          "_"
+        ]
+      },
+      {
+        "byte": 24,
+        "type": "int16-le",
+        "semantic": "accelX"
+      },
+      {
+        "byte": 26,
+        "type": "int16-le",
+        "semantic": "accelY"
+      },
+      {
+        "byte": 28,
+        "type": "int16-le",
+        "semantic": "accelZ"
+      },
+      {
+        "byte": 30,
+        "type": "int16-le",
+        "semantic": "gyroPitch"
+      },
+      {
+        "byte": 32,
+        "type": "int16-le",
+        "semantic": "gyroYaw"
+      },
+      {
+        "byte": 34,
+        "type": "int16-le",
+        "semantic": "gyroRoll"
+      },
+      {
+        "byte": 44,
+        "type": "uint16-trigger",
+        "semantic": "leftTrigger"
+      },
+      {
+        "byte": 46,
+        "type": "uint16-trigger",
+        "semantic": "rightTrigger"
+      },
+      {
+        "byte": 48,
+        "type": "int16-axis",
+        "semantic": "leftStickX"
+      },
+      {
+        "byte": 50,
+        "type": "int16-axis",
+        "semantic": "leftStickY"
+      },
+      {
+        "byte": 52,
+        "type": "int16-axis",
+        "semantic": "rightStickX"
+      },
+      {
+        "byte": 54,
+        "type": "int16-axis",
+        "semantic": "rightStickY"
+      }
+    ]
+  },
+  "serialString": "FX1A00000001",
+  "configurationString": "Full-Speed"
 }

@@ -163,6 +163,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sony_extra_buttons_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1550,6 +1551,22 @@ function Scenario-Valve-Personas {
     }
 }
 
+# S52: the three Valve personas on the wire. Each is created for real,
+# driven through SubmitState - the same call any consumer makes - and the
+# frame is read back off the HID stack and checked against that device's
+# own wire format (SteamDeckStatePacket_t, ValveControllerStatePacket_t,
+# TritonMTUFull_t). S51 pins the descriptors and feature answers with no
+# device; this pins that input actually reaches a consumer, which is the
+# half that shipped broken. Submits no buttons, so nothing reaches the
+# desktop even with a Steam desktop layout bound to the device.
+function Scenario-Valve-Wire {
+    $probe = Resolve-ProbeBinary 'valve_wire_check' 'ValveWireCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("ValveWireCheck exited " + $p.ExitCode + " - a Valve persona stopped emitting correct input frames (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1617,7 +1634,8 @@ $scenarios = @(
     @{ Name = 'S48_Switch2_Pro_Sdl3';             Body = ${function:Scenario-Switch2-Pro-Sdl3} },
     @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} },
     @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
-    @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} }
+    @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
+    @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
