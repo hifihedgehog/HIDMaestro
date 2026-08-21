@@ -165,6 +165,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_steam_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1587,6 +1588,28 @@ function Scenario-Valve-Sdl {
     }
 }
 
+# S54: the three Valve personas against the REAL Steam client. S53 proves
+# SDL's Steam drivers read them, and those drivers are what Steam Input is
+# built on, but that is an argument rather than a measurement. This one
+# measures it: each persona is handed to a running Steam client and Steam's
+# own controller log is read back for the claim, the protocol it picked and
+# the per-model config set it loaded (neptune, steamcontroller_gordon,
+# triton), plus the absence of the hid_read-failure close an idle device
+# used to produce. Starts Steam with -silent and shuts it back down when it
+# started it. Submits nothing, so nothing can reach the desktop through a
+# Steam desktop layout. SKIPs when no Steam client is installed.
+function Scenario-Valve-Steam {
+    $probe = Resolve-ProbeBinary 'valve_steam_check' 'ValveSteamCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -eq 2) {
+        Write-Host '    [SKIP] no Steam client on this machine' -ForegroundColor Yellow
+        return
+    }
+    if ($p.ExitCode -ne 0) {
+        throw ("ValveSteamCheck exited " + $p.ExitCode + " - Steam stopped claiming a Valve persona, stopped classifying it as that model, or dropped it after opening it (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1656,7 +1679,8 @@ $scenarios = @(
     @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
     @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
     @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
-    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} }
+    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
+    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
