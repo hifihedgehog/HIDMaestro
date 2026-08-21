@@ -182,8 +182,90 @@ static class Program
         return false;
     }
 
+    /// <summary>Live monitor: create one persona, sweep it, and print what
+    /// SDL's own driver would decode. Steam is never consulted, and the
+    /// personas never emit keyboard or mouse reports, so this is the pads
+    /// working with no Steam and no lizard mode.</summary>
+    static int Monitor(string id)
+    {
+        var map = new System.Collections.Generic.Dictionary<string,(ushort v,ushort p,int len)>
+        {
+            ["steam-deck-composite"]       = (0x28DE, 0x1205, 65),
+            ["steam-controller-composite"] = (0x28DE, 0x1102, 65),
+            ["steam-controller-2"]         = (0x28DE, 0x1302, 54),
+        };
+        if (!map.TryGetValue(id, out var t)) { Console.WriteLine("unknown persona"); return 1; }
+
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var prof = ctx.GetProfile(id);
+        if (prof == null) { Console.WriteLine("no profile"); return 1; }
+        bool steam = System.Diagnostics.Process.GetProcessesByName("steam").Length > 0;
+        Console.WriteLine($"=== {id} live monitor (SDL decode; Steam running: {steam}) ===");
+
+        using var c = ctx.CreateController(prof);
+        string? path = null; int inLen = 0;
+        for (int i = 0; i < 120 && path == null; i++) { Thread.Sleep(100); (path, inLen) = FindController(t.v, t.p, t.len); }
+        if (path == null) { Console.WriteLine("device never enumerated"); return 1; }
+        Console.WriteLine($"  {path}");
+        Console.WriteLine("  sweeping the left stick; values are what an SDL app reads");
+        Console.WriteLine();
+
+        IntPtr h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
+                               IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (h == INVALID) { Console.WriteLine("cannot open"); return 1; }
+        using var stop = new ManualResetEventSlim(false);
+        var pump = new Thread(() =>
+        {
+            float x = 0f; int dir = 1;
+            try
+            {
+                while (!stop.IsSet)
+                {
+                    x += dir * 0.02f;
+                    if (x >= 1f) { x = 1f; dir = -1; }
+                    if (x <= 0f) { x = 0f; dir = 1; }
+                    c.SubmitState(new HMGamepadState {
+                        Buttons = 0,
+                        Axes = HMGamepadStateHelpers.StandardAxes(prof, x, 0.5f, 0.5f, 0.5f, 0f, 1f) });
+                    stop.Wait(8);
+                }
+            }
+            catch (ObjectDisposedException) { }
+        }) { IsBackground = true };
+        pump.Start();
+        try
+        {
+            var buf = new byte[inLen];
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            int frames = 0; int lo = int.MaxValue, hi = int.MinValue;
+            while (sw.Elapsed.TotalSeconds < 12)
+            {
+                if (!ReadFile(h, buf, buf.Length, out int n, IntPtr.Zero) || n <= 0) continue;
+                var f = buf[0] == 0x00 && id != "steam-controller-2" ? buf[1..] : buf;
+                var (lx, rt) = SdlDecode(id, f);
+                frames++;
+                if (lx < lo) lo = lx;
+                if (lx > hi) hi = lx;
+                if (frames % 40 == 0) Console.WriteLine($"    LEFTX {lx,7}   RIGHT_TRIGGER {rt,7}");
+            }
+            Console.WriteLine();
+            Console.WriteLine($"  {frames} frames read; LEFTX swept {lo} .. {hi}");
+            bool ok = frames > 100 && lo <= -30000 && hi >= 30000;
+            Console.WriteLine(ok
+                ? "  WORKS WITHOUT STEAM: an SDL app reads a full-scale stick sweep"
+                : "  FAILED: the sweep did not come through");
+            return ok ? 0 : 1;
+        }
+        finally { stop.Set(); Thread.Sleep(50); CloseHandle(h); }
+    }
+
     static int Main()
     {
+        var argv = Environment.GetCommandLineArgs();
+        int mi = Array.IndexOf(argv, "--monitor");
+        if (mi >= 0 && mi + 1 < argv.Length) return Monitor(argv[mi + 1]);
+
         Console.WriteLine("=== Valve persona wire check (SubmitState -> real HID stack) ===");
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
