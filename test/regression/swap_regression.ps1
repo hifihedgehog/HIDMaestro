@@ -164,6 +164,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\vr_controller_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1567,6 +1568,25 @@ function Scenario-Valve-Wire {
     }
 }
 
+# S53: the three Valve personas through STOCK upstream SDL3. S52 decodes
+# each frame with arithmetic copied out of SDL's drivers; this one hands the
+# device to a real SDL3.dll built from libsdl-org/SDL and asks SDL what it
+# sees. Those Steam drivers are the decoders Steam Input is built on, so a
+# persona SDL binds, names and reads is one a Valve-aware consumer reads.
+# SKIPs when the sibling SDL3-build/build-stock checkout is absent; the fork
+# beside it deliberately skips HIDMaestro devices and is never used here.
+function Scenario-Valve-Sdl {
+    $probe = Resolve-ProbeBinary 'valve_sdl_check' 'ValveSdlCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -eq 2) {
+        Write-Host '    [SKIP] no stock SDL3 build beside the repo' -ForegroundColor Yellow
+        return
+    }
+    if ($p.ExitCode -ne 0) {
+        throw ("ValveSdlCheck exited " + $p.ExitCode + " - stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, trackpads or motion (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1635,7 +1655,8 @@ $scenarios = @(
     @{ Name = 'S49_Sony_Extra_Buttons';           Body = ${function:Scenario-Sony-Extra-Buttons} },
     @{ Name = 'S50_Vr_Controller_Smoke';          Body = ${function:Scenario-Vr-Controller-Smoke} },
     @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
-    @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} }
+    @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
+    @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -279,11 +279,21 @@ static class Program
         };
 
         // id, vid, pid, wire length, header check, stick offset, trigger offset
-        var cases = new (string Id, ushort Vid, ushort Pid, int Len, byte[] Head, int Lsx, int TrigR)[]
+        // Pad, pressure, touch-bit and IMU offsets come from the same
+        // structs SDL parses: SteamDeckStatePacket_t at report byte 4,
+        // ValveControllerStatePacket_t likewise, TritonMTUFull_t at byte 1.
+        // PressL of -1 means the device carries no pressure field (the 2015
+        // controller derives it from the finger-down and click bits).
+        var cases = new (string Id, ushort Vid, ushort Pid, int Len, byte[] Head, int Lsx, int TrigR,
+                         int Btn, int BtnBytes, int TouchL, int TouchR,
+                         int LPad, int RPad, int PressL, int PressR, int Accel, int Gyro)[]
         {
-            ("steam-deck-composite",       0x28DE, 0x1205, 65, new byte[]{0x01,0x00,0x09,0x40}, 48, 46),
-            ("steam-controller-composite", 0x28DE, 0x1102, 65, new byte[]{0x01,0x00,0x01,0x3C}, 16, 26),
-            ("steam-controller-2",         0x28DE, 0x1302, 54, new byte[]{0x42},                10,  8),
+            ("steam-deck-composite",       0x28DE, 0x1205, 65, new byte[]{0x01,0x00,0x09,0x40}, 48, 46,
+             8, 8, 19, 20, 16, 20, 56, 58, 24, 30),
+            ("steam-controller-composite", 0x28DE, 0x1102, 65, new byte[]{0x01,0x00,0x01,0x3C}, 16, 26,
+             8, 8, 19, 20, 16, 20, -1, -1, 28, 34),
+            ("steam-controller-2",         0x28DE, 0x1302, 54, new byte[]{0x42},                10,  8,
+             2, 4, 25, 21, 18, 24, 22, 28, 34, 40),
         };
 
         foreach (var t in cases)
@@ -359,6 +369,81 @@ static class Program
                           sdlX2 - sdlX >= 60000, $"span={sdlX2 - sdlX}");
                     Check("SDL's parser recovers a released right trigger",
                           sdlRt2 <= -32000 || sdlRt2 <= 100, $"RIGHT_TRIGGER={sdlRt2}");
+                }
+
+                // ── trackpads and IMU ────────────────────────────────
+                // One contact on each pad, at opposite corners so an
+                // encoder that wrote a constant cannot pass, plus six
+                // distinct IMU values. Read back through SDL's own
+                // arithmetic: pads are x = padX / 65536 + 0.5 and
+                // y = -padY / 65536 + 0.5 in every one of the three
+                // drivers, and the whole pad lane is gated on the
+                // finger-down bit, so the bit is asserted too.
+                var touch = new HMGamepadState
+                {
+                    Buttons = 0,
+                    Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                    TouchpadFinger0Active = true,
+                    TouchpadFinger0X = 1919, TouchpadFinger0Y = 0,      // right edge, top
+                    TouchpadFinger1Active = true,
+                    TouchpadFinger1X = 0, TouchpadFinger1Y = 1079,      // left edge, bottom
+                    AccelX = 1000, AccelY = -2000, AccelZ = 3000,
+                    GyroPitch = -4000, GyroYaw = 5000, GyroRoll = -6000,
+                };
+                var raw3 = ReadFrame(path, inLen, c, touch);
+                Check("a frame arrives with both pads touched", raw3 != null);
+                if (raw3 != null)
+                {
+                    var f3 = raw3[0] == 0x00 && t.Head[0] != 0x00 ? raw3[1..] : raw3;
+
+                    ulong bits = 0;
+                    for (int i = 0; i < t.BtnBytes; i++) bits |= (ulong)f3[t.Btn + i] << (8 * i);
+                    Check("left pad reports finger down where SDL gates the lane",
+                          (bits & (1UL << t.TouchL)) != 0, $"bit {t.TouchL}");
+                    Check("right pad reports finger down",
+                          (bits & (1UL << t.TouchR)) != 0, $"bit {t.TouchR}");
+
+                    float lx = S16(f3, t.LPad)     / 65536.0f + 0.5f;
+                    float ly = -S16(f3, t.LPad + 2) / 65536.0f + 0.5f;
+                    float rx = S16(f3, t.RPad)     / 65536.0f + 0.5f;
+                    float ry = -S16(f3, t.RPad + 2) / 65536.0f + 0.5f;
+                    Check("SDL reads the left contact at the pad's right edge, top",
+                          lx > 0.95f && ly < 0.05f, $"({lx:F3}, {ly:F3})");
+                    Check("SDL reads the right contact at the opposite corner",
+                          rx < 0.05f && ry > 0.95f, $"({rx:F3}, {ry:F3})");
+
+                    if (t.PressL >= 0)
+                    {
+                        Check("both pads report pressure while touched",
+                              U16(f3, t.PressL) >= 32000 && U16(f3, t.PressR) >= 32000,
+                              $"L={U16(f3, t.PressL)} R={U16(f3, t.PressR)}");
+                    }
+
+                    Check("the accelerometer triple reaches the wire",
+                          S16(f3, t.Accel) == 1000 && S16(f3, t.Accel + 2) == -2000
+                                                   && S16(f3, t.Accel + 4) == 3000,
+                          $"{S16(f3, t.Accel)},{S16(f3, t.Accel + 2)},{S16(f3, t.Accel + 4)}");
+                    Check("the gyroscope triple reaches the wire",
+                          S16(f3, t.Gyro) == -4000 && S16(f3, t.Gyro + 2) == 5000
+                                                   && S16(f3, t.Gyro + 4) == -6000,
+                          $"{S16(f3, t.Gyro)},{S16(f3, t.Gyro + 2)},{S16(f3, t.Gyro + 4)}");
+
+                    // Lifting has to clear the gate, or a consumer sees a
+                    // contact stuck on the pad forever.
+                    var lift = new HMGamepadState
+                    {
+                        Buttons = 0,
+                        Axes = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f),
+                    };
+                    var raw4 = ReadFrame(path, inLen, c, lift);
+                    if (raw4 != null)
+                    {
+                        var f4 = raw4[0] == 0x00 && t.Head[0] != 0x00 ? raw4[1..] : raw4;
+                        ulong b4 = 0;
+                        for (int i = 0; i < t.BtnBytes; i++) b4 |= (ulong)f4[t.Btn + i] << (8 * i);
+                        Check("both finger-down bits clear when the contacts lift",
+                              (b4 & (1UL << t.TouchL)) == 0 && (b4 & (1UL << t.TouchR)) == 0);
+                    }
                 }
 
                 if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
