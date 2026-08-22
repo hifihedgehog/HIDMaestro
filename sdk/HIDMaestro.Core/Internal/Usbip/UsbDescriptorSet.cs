@@ -88,7 +88,38 @@ internal sealed class UsbDescriptorSet
         public int TransferType => Attributes & 0x03; // 1 iso, 3 interrupt
     }
 
-    public UsbDescriptorSet(ControllerProfile profile)
+    /// <summary>Vary a captured serial per controller instance.
+    ///
+    /// Real units have unique serials and Steam keys its per-controller
+    /// config off the string it reads: the client writes
+    /// <c>configset_&lt;serial&gt;.vdf</c>. Two virtual Decks sharing one
+    /// serial therefore share one configuration, which is wrong the moment
+    /// somebody runs a pair of them.
+    ///
+    /// Instance 0 keeps the captured serial byte for byte, so a single
+    /// controller stays identical to the unit it was dumped from and the
+    /// golden descriptor hashes do not move. Later instances add the index
+    /// into the trailing digit run, which is where a real serial varies and
+    /// which preserves both the length and the character classes the
+    /// manufacturer's format uses.</summary>
+    internal static string? InstanceSerial(string? captured, int index)
+    {
+        if (index <= 0 || string.IsNullOrEmpty(captured)) return captured;
+        var chars = captured.ToCharArray();
+        int at = chars.Length - 1;
+        int carry = index;
+        while (at >= 0 && carry > 0 && char.IsDigit(chars[at]))
+        {
+            int v = (chars[at] - '0') + (carry % 10);
+            carry /= 10;
+            if (v > 9) { v -= 10; carry++; }
+            chars[at] = (char)('0' + v);
+            at--;
+        }
+        return new string(chars);
+    }
+
+    public UsbDescriptorSet(ControllerProfile profile, int index = 0)
     {
         var cfg = profile.UsbConfiguration
             ?? throw new InvalidOperationException($"Profile '{profile.Id}' has no usbConfiguration.");
@@ -110,7 +141,7 @@ internal sealed class UsbDescriptorSet
         _iProduct = DeviceDescriptor[15];
         _iSerial = DeviceDescriptor[16];
         _iConfiguration = ConfigurationDescriptor.Length > 6 ? ConfigurationDescriptor[6] : (byte)0;
-        _serial = profile.SerialString;
+        _serial = InstanceSerial(profile.SerialString, index);
         _configurationName = profile.ConfigurationString;
         _manufacturer = profile.ManufacturerString;
         _product = profile.ProductString;

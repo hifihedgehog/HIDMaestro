@@ -166,6 +166,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_steam_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_multi_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1610,6 +1611,24 @@ function Scenario-Valve-Steam {
     }
 }
 
+# S55: several Valve personas at once. S51-S54 each drive one device, so
+# neither the three-different case nor the two-of-the-same case is covered
+# by them. The second is the one that was broken: the Deck's serial comes
+# from a real unit and Steam keys per-controller config off it, so a pair
+# of Decks reporting one serial shared one configuration. Verified through
+# stock SDL. SKIPs without a stock SDL3 build beside the repo.
+function Scenario-Valve-Multi {
+    $probe = Resolve-ProbeBinary 'valve_multi_check' 'ValveMultiCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -eq 2) {
+        Write-Host '    [SKIP] no stock SDL3 build beside the repo' -ForegroundColor Yellow
+        return
+    }
+    if ($p.ExitCode -ne 0) {
+        throw ("ValveMultiCheck exited " + $p.ExitCode + " - Valve personas stopped coexisting: three models at once, two of one model, or the per-instance serial collapsed back to one value (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1680,7 +1699,8 @@ $scenarios = @(
     @{ Name = 'S51_Valve_Personas';               Body = ${function:Scenario-Valve-Personas} },
     @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
     @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
-    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} }
+    @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} },
+    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
