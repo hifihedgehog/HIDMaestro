@@ -614,6 +614,49 @@ function Test-Scenario {
 # ====================================================================
 
 # S1: Basic single-controller swap cycle (the regression v1.1.31 fixed).
+# ────────────────────────────────────────────────────────────────────
+#  Invoke-Probe
+# ────────────────────────────────────────────────────────────────────
+
+# Run a probe with its stdout captured, and on failure print the tail so
+# the log says WHICH assertion went red rather than only an exit code.
+# S53 failed once in a full run and passed every isolated reproduction;
+# with no captured output there was nothing to diagnose it from, which is
+# how a one-off becomes a guess. The transcript is kept next to the probe
+# so a passing run leaves the evidence too.
+function Invoke-Probe {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string]$Message,
+        [int[]]$SkipCodes = @()
+    )
+    $probe = Resolve-ProbeBinary $Dir $Exe
+    $out = Join-Path $env:TEMP ("HIDMaestro_probe_" + [IO.Path]::GetFileNameWithoutExtension($Exe) + ".log")
+    $err = "$out.err"
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait `
+                       -RedirectStandardOutput $out -RedirectStandardError $err
+    if ($SkipCodes -contains $p.ExitCode) {
+        Write-Host ('    [SKIP] probe reported exit ' + $p.ExitCode) -ForegroundColor Yellow
+        return
+    }
+    if ($p.ExitCode -ne 0) {
+        if (Test-Path $out) {
+            $lines = @(Get-Content $out -ErrorAction SilentlyContinue)
+            $failed = @($lines | Where-Object { $_ -match '\[FAIL\]' })
+            if ($failed.Count -gt 0) {
+                Write-Host '    probe failures:' -ForegroundColor Red
+                foreach ($l in $failed) { Write-Host ('      ' + $l.Trim()) -ForegroundColor Red }
+            } else {
+                Write-Host '    probe tail:' -ForegroundColor Red
+                foreach ($l in ($lines | Select-Object -Last 15)) { Write-Host ('      ' + $l.Trim()) -ForegroundColor Red }
+            }
+            Write-Host ('    full transcript: ' + $out) -ForegroundColor Yellow
+        }
+        throw ($Exe + ' exited ' + $p.ExitCode + ' - ' + $Message)
+    }
+}
+
 function Scenario-Single-360-BT-360 {
     $proc = Start-HMTestProcess -ProfileIds @($Profiles.Xbox360)
     try {
@@ -1212,11 +1255,8 @@ function Resolve-ProbeBinary {
 # (prefix [0xA1, 0x31] over bytes 1..73). Pre-v1.3.5 the SDK locked to Report 1
 # and Steam Input / dualsense-tester saw a broken DualSense BT.
 function Scenario-Sony-BT-Report31-Check {
-    $probe = Resolve-ProbeBinary 'sony_bt_report31_check' 'SonyBtReport31Check.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyBtReport31Check exited " + $p.ExitCode + " - extended input encoder produced unexpected bytes for dualsense-bt-full")
-    }
+    Invoke-Probe -Dir 'sony_bt_report31_check' -Exe 'SonyBtReport31Check.exe' `
+                 -Message 'extended input encoder produced unexpected bytes for dualsense-bt-full'
 }
 
 # S30: Sony BT extendedOutputReport round-trip. Validates the inverse direction
@@ -1225,11 +1265,8 @@ function Scenario-Sony-BT-Report31-Check {
 # matches an independent computation with prefix [0xA2, 0x31], and decode(encode(x))
 # preserves every declared field's value byte-for-byte.
 function Scenario-Sony-BT-Output-Decode-Check {
-    $probe = Resolve-ProbeBinary 'sony_bt_output_decode_check' 'SonyBtOutputDecodeCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyBtOutputDecodeCheck exited " + $p.ExitCode + " - output codec did not round-trip cleanly")
-    }
+    Invoke-Probe -Dir 'sony_bt_output_decode_check' -Exe 'SonyBtOutputDecodeCheck.exe' `
+                 -Message 'output codec did not round-trip cleanly'
 }
 
 # S31: full Sony data-driven coverage. Validates the v1.3.5 vendor-blob blocks
@@ -1239,11 +1276,8 @@ function Scenario-Sony-BT-Output-Decode-Check {
 # variant the SDK ships - DS5 BT, DS5 BT (full), DS5 Edge BT, DS4 v2 BT, DS5
 # USB, DS5 Edge USB, DS4 v1 USB, DS4 v1 USB (full), DS4 v2 USB.
 function Scenario-Sony-Data-Driven-Coverage {
-    $probe = Resolve-ProbeBinary 'sony_data_driven_coverage' 'SonyDataDrivenCoverage.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyDataDrivenCoverage exited " + $p.ExitCode + " - DS4 BT / USB output codec did not round-trip cleanly")
-    }
+    Invoke-Probe -Dir 'sony_data_driven_coverage' -Exe 'SonyDataDrivenCoverage.exe' `
+                 -Message 'DS4 BT / USB output codec did not round-trip cleanly'
 }
 
 # S32: v1.3.5 features + regression check. Combined probe covering every
@@ -1281,11 +1315,8 @@ function Scenario-Sony-Data-Driven-Coverage {
 #               then wraps; per-controller HMController.EncodeOutput
 #               threads the auto-advancing counter)
 function Scenario-V135-Features-Check {
-    $probe = Resolve-ProbeBinary 'v135_features_check' 'V135FeaturesCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("V135FeaturesCheck exited " + $p.ExitCode + " - one or more v1.3.5 fix invariants regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'v135_features_check' -Exe 'V135FeaturesCheck.exe' `
+                 -Message 'one or more v1.3.5 fix invariants regressed (see probe stdout)'
 }
 
 # S33: Trigger axis classifier regression (issue #22). Pure encoder unit test
@@ -1299,11 +1330,8 @@ function Scenario-V135-Features-Check {
 # wire value (75% rest -> 25% full press). Catches future regressions in the
 # Z/Rz classifier or the lone-LeftTrigger encoder branch.
 function Scenario-Trigger-Classifier-Check {
-    $probe = Resolve-ProbeBinary 'trigger_classifier_check' 'TriggerClassifierCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("TriggerClassifierCheck exited " + $p.ExitCode + " - one or more trigger-classifier invariants regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'trigger_classifier_check' -Exe 'TriggerClassifierCheck.exe' `
+                 -Message 'one or more trigger-classifier invariants regressed (see probe stdout)'
 }
 
 # S34: end-to-end trigger-axis live wire check. Creates real virtual
@@ -1317,11 +1345,8 @@ function Scenario-Trigger-Classifier-Check {
 # it would. The unit-only check passing while the live wire was broken is
 # exactly the failure shape that hit the v1.3.6 release before catch.
 function Scenario-Trigger-Live-Check {
-    $probe = Resolve-ProbeBinary 'trigger_live_check' 'TriggerLiveCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("TriggerLiveCheck exited " + $p.ExitCode + " - end-to-end trigger wire fidelity regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'trigger_live_check' -Exe 'TriggerLiveCheck.exe' `
+                 -Message 'end-to-end trigger wire fidelity regressed (see probe stdout)'
 }
 
 # S35: SideWinder Force Feedback 2 PID FFB end-to-end (v1.3.7).
@@ -1341,11 +1366,8 @@ function Scenario-Trigger-Live-Check {
 # and GetFeature(0x03 Pool) handshake. Both must succeed for dinput8/
 # pid.dll to enumerate FFB on a SideWinder virtual end-to-end.
 function Scenario-Sidewinder-Ffb-Check {
-    $probe = Resolve-ProbeBinary 'sidewinder_ffb_check' 'SideWinderFfbCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SideWinderFfbCheck exited " + $p.ExitCode + " - SideWinder PID FFB end-to-end regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'sidewinder_ffb_check' -Exe 'SideWinderFfbCheck.exe' `
+                 -Message 'SideWinder PID FFB end-to-end regressed (see probe stdout)'
 }
 
 # S36: arbitrary-axis addressing — HMAxis enum / ExtraAxes / AvailableAxes /
@@ -1359,11 +1381,8 @@ function Scenario-Sidewinder-Ffb-Check {
 # (4) explicit-beats-implicit ordering when ExtraAxes and a semantic slot target
 # the same field. No driver install, no virtual device.
 function Scenario-Axis-Addressing-Check {
-    $probe = Resolve-ProbeBinary 'axis_addressing_check' 'AxisAddressingCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("AxisAddressingCheck exited " + $p.ExitCode + " - HMAxis / ExtraAxes / AvailableAxes / AddAxis fidelity regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'axis_addressing_check' -Exe 'AxisAddressingCheck.exe' `
+                 -Message 'HMAxis / ExtraAxes / AvailableAxes / AddAxis fidelity regressed (see probe stdout)'
 }
 
 # S37: layout audit (v1.3.9). For every catalog profile, verifies the
@@ -1372,11 +1391,8 @@ function Scenario-Axis-Addressing-Check {
 # block, asserts the classifier-fallback Sticks/Triggers lists are
 # coherent. No driver install, no virtual device.
 function Scenario-Layout-Audit-Check {
-    $probe = Resolve-ProbeBinary 'layout_audit_check' 'LayoutAuditCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("LayoutAuditCheck exited " + $p.ExitCode + " - layout schema/descriptor mismatch (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'layout_audit_check' -Exe 'LayoutAuditCheck.exe' `
+                 -Message 'layout schema/descriptor mismatch (see probe stdout)'
 }
 
 # S38: Sony BT axis-role regression (v1.3.13, #23). Asserts the Sony
@@ -1385,11 +1401,8 @@ function Scenario-Layout-Audit-Check {
 # state.Axes fill encodes through VendorBlobCodec with no right-stick/trigger
 # swap. No driver install, no virtual device.
 function Scenario-Sony-BT-Axis-Role-Check {
-    $probe = Resolve-ProbeBinary 'sony_bt_axis_role_check' 'SonyBtAxisRoleCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyBtAxisRoleCheck exited " + $p.ExitCode + " - Sony BT axis roles swapped or mis-resolved (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'sony_bt_axis_role_check' -Exe 'SonyBtAxisRoleCheck.exe' `
+                 -Message 'Sony BT axis roles swapped or mis-resolved (see probe stdout)'
 }
 
 # S39: Foreign devnode survival regression (v1.3.16, #28). Creates a foreign
@@ -1400,11 +1413,8 @@ function Scenario-Sony-BT-Axis-Role-Check {
 # any of the now-HwId-gated sweep paths in DeviceOrchestrator /
 # DeviceNodeCreator / DeviceProperties / DeviceManager.
 function Scenario-Foreign-Devnode-Survival-Check {
-    $probe = Resolve-ProbeBinary 'foreign_devnode_survival_check' 'ForeignDevnodeSurvivalCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("ForeignDevnodeSurvivalCheck exited " + $p.ExitCode + " - HM sweep mutated a foreign root devnode (issue #28; see probe stdout)")
-    }
+    Invoke-Probe -Dir 'foreign_devnode_survival_check' -Exe 'ForeignDevnodeSurvivalCheck.exe' `
+                 -Message 'HM sweep mutated a foreign root devnode (issue #28; see probe stdout)'
 }
 
 # S40: Xbox 360 combined-Z + split-trigger regression (v1.3.17, PadForge #130).
@@ -1414,11 +1424,8 @@ function Scenario-Foreign-Devnode-Survival-Check {
 # writes BOTH the combined Z byte AND the separate Vx / Vy bytes so
 # joy.cpl sees the dinput-combined trigger and WGI sees the raw LT / RT.
 function Scenario-Xbox-Combined-Trigger-Check {
-    $probe = Resolve-ProbeBinary 'xbox_combined_trigger_check' 'XboxCombinedTriggerCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("XboxCombinedTriggerCheck exited " + $p.ExitCode + " - Xbox 360 split-trigger workaround regressed (PadForge#130; see probe stdout)")
-    }
+    Invoke-Probe -Dir 'xbox_combined_trigger_check' -Exe 'XboxCombinedTriggerCheck.exe' `
+                 -Message 'Xbox 360 split-trigger workaround regressed (PadForge#130; see probe stdout)'
 }
 
 # Companion to S40. S40 exercises the HID descriptor lane (BuildReportInto's
@@ -1428,11 +1435,8 @@ function Scenario-Xbox-Combined-Trigger-Check {
 # was correct) was missed by S40 because S40 doesn't touch SubmitState's
 # mlt / mrt resolution. S41 covers it.
 function Scenario-Xbox-Gip-Trigger-Resolver-Check {
-    $probe = Resolve-ProbeBinary 'xbox_gip_trigger_resolver_check' 'XboxGipTriggerResolverCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("XboxGipTriggerResolverCheck exited " + $p.ExitCode + " - GIP-side trigger resolver regressed (PadForge#130 follow-up; see probe stdout)")
-    }
+    Invoke-Probe -Dir 'xbox_gip_trigger_resolver_check' -Exe 'XboxGipTriggerResolverCheck.exe' `
+                 -Message 'GIP-side trigger resolver regressed (PadForge#130 follow-up; see probe stdout)'
 }
 
 # --------------------------------------------------------------------
@@ -1440,27 +1444,18 @@ function Scenario-Xbox-Gip-Trigger-Resolver-Check {
 # --------------------------------------------------------------------
 
 function Scenario-Usb-Composite-Schema {
-    $probe = Resolve-ProbeBinary 'usb_composite_schema_check' 'UsbCompositeSchemaCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("UsbCompositeSchemaCheck exited " + $p.ExitCode + " - a composite persona no longer matches its hardware dump, or a composite leaked into the UMDF2 path (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'usb_composite_schema_check' -Exe 'UsbCompositeSchemaCheck.exe' `
+                 -Message 'a composite persona no longer matches its hardware dump, or a composite leaked into the UMDF2 path (see probe stdout)'
 }
 
 function Scenario-Usbip-Server-Protocol {
-    $probe = Resolve-ProbeBinary 'usbip_server_check' 'UsbipServerCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("UsbipServerCheck exited " + $p.ExitCode + " - the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, or unlink; see probe stdout)")
-    }
+    Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
+                 -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, or unlink; see probe stdout)'
 }
 
 function Scenario-Usbip-Bundle-Deploy {
-    $probe = Resolve-ProbeBinary 'usbip_bundle_check' 'UsbipBundleCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("UsbipBundleCheck exited " + $p.ExitCode + " - the bundled transport is missing, its hash no longer matches the upstream release, or the deploy path stopped refusing tampered bytes (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'usbip_bundle_check' -Exe 'UsbipBundleCheck.exe' `
+                 -Message 'the bundled transport is missing, its hash no longer matches the upstream release, or the deploy path stopped refusing tampered bytes (see probe stdout)'
 }
 
 # The only scenario that needs the transport actually deployed. On a
@@ -1474,19 +1469,13 @@ function Scenario-Usbip-Bundle-Deploy {
 # still gets its own report. The probe existed since the D3 audit but was
 # never wired in, so neither property was gated before now.
 function Scenario-Sony-Feature-Gate {
-    $probe = Resolve-ProbeBinary 'sony_feature_gate_check' 'SonyFeatureGateCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyFeatureGateCheck exited " + $p.ExitCode + " - Sony calibration is degenerate on the driver lane, or the VID gate regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'sony_feature_gate_check' -Exe 'SonyFeatureGateCheck.exe' `
+                 -Message 'Sony calibration is degenerate on the driver lane, or the VID gate regressed (see probe stdout)'
 }
 
 function Scenario-Switch2-Pro {
-    $probe = Resolve-ProbeBinary 'switch2_pro_check' 'Switch2ProCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("Switch2ProCheck exited " + $p.ExitCode + " - the Switch 2 Pro profile drifted from the two references it was reconstructed from (VIIPER ns2pro and SDL_hidapi_switch2), or the 12-bit stick packing / d-pad-as-buttons encoding regressed (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'switch2_pro_check' -Exe 'Switch2ProCheck.exe' `
+                 -Message 'the Switch 2 Pro profile drifted from the two references it was reconstructed from (VIIPER ns2pro and SDL_hidapi_switch2), or the 12-bit stick packing / d-pad-as-buttons encoding regressed (see probe stdout)'
 }
 
 # S48: the Switch 2 Pro through a real SDL3, which is what v1.5.0 was
@@ -1516,27 +1505,18 @@ function Scenario-Switch2-Pro {
 # fault, not a pass: both machines are provisioned with SteamVR, so the
 # skip reason must be read, the rig repaired, and the scenario re-run.
 function Scenario-Vr-Controller-Smoke {
-    $probe = Resolve-ProbeBinary 'vr_controller_smoke' 'VrControllerSmoke.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("VrControllerSmoke exited " + $p.ExitCode + " - the VR IPC protocol drifted between the C# and C++ mirrors, the OpenVR driver failed to register/load in SteamVR, the controllers stopped enumerating, or the haptic round trip broke (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'vr_controller_smoke' -Exe 'VrControllerSmoke.exe' `
+                 -Message 'the VR IPC protocol drifted between the C# and C++ mirrors, the OpenVR driver failed to register/load in SteamVR, the controllers stopped enumerating, or the haptic round trip broke (see probe stdout)'
 }
 
 function Scenario-Sony-Extra-Buttons {
-    $probe = Resolve-ProbeBinary 'sony_extra_buttons_check' 'SonyExtraButtonsCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("SonyExtraButtonsCheck exited " + $p.ExitCode + " - the Sony extra-button wire placement drifted: mic mute (0x04), Edge paddles/Fn (0x10-0x80) in the third buttons byte, or the -1 buttonMap sentinel regressed and Share aliases onto PS again (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'sony_extra_buttons_check' -Exe 'SonyExtraButtonsCheck.exe' `
+                 -Message 'the Sony extra-button wire placement drifted: mic mute (0x04), Edge paddles/Fn (0x10-0x80) in the third buttons byte, or the -1 buttonMap sentinel regressed and Share aliases onto PS again (see probe stdout)'
 }
 
 function Scenario-Switch2-Pro-Sdl3 {
-    $probe = Resolve-ProbeBinary 'switch2_pro_sdl3_check' 'Switch2ProSdl3Check.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("Switch2ProSdl3Check exited " + $p.ExitCode + " - SDL no longer sees the Switch 2 Pro as a full gamepad: either it stopped reaching the joystick layer, an input stopped arriving, or the profile's sdlMapping drifted from its descriptor's button and axis order (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'switch2_pro_sdl3_check' -Exe 'Switch2ProSdl3Check.exe' `
+                 -Message 'SDL no longer sees the Switch 2 Pro as a full gamepad: either it stopped reaching the joystick layer, an input stopped arriving, or the profile''s sdlMapping drifted from its descriptor''s button and axis order (see probe stdout)'
 }
 
 # S51: the three Valve composite personas (issue #56, from PadForge
@@ -1548,11 +1528,8 @@ function Scenario-Switch2-Pro-Sdl3 {
 # ids Triton's single interface carries, and the feature-stub tables that
 # answer Steam's GET_REPORT interrogation.
 function Scenario-Valve-Personas {
-    $probe = Resolve-ProbeBinary 'valve_persona_check' 'ValvePersonaCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("ValvePersonaCheck exited " + $p.ExitCode + " - a Valve persona drifted: a descriptor set, an endpoint, a declared report id, the feature-stub answers Steam reads, or the 64-byte Neptune input frame (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_persona_check' -Exe 'ValvePersonaCheck.exe' `
+                 -Message 'a Valve persona drifted: a descriptor set, an endpoint, a declared report id, the feature-stub answers Steam reads, or the 64-byte Neptune input frame (see probe stdout)'
 }
 
 # S52: the three Valve personas on the wire. Each is created for real,
@@ -1564,11 +1541,8 @@ function Scenario-Valve-Personas {
 # half that shipped broken. Submits no buttons, so nothing reaches the
 # desktop even with a Steam desktop layout bound to the device.
 function Scenario-Valve-Wire {
-    $probe = Resolve-ProbeBinary 'valve_wire_check' 'ValveWireCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("ValveWireCheck exited " + $p.ExitCode + " - a Valve persona stopped emitting correct input frames (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_wire_check' -Exe 'ValveWireCheck.exe' `
+                 -Message 'a Valve persona stopped emitting correct input frames (see probe stdout)'
 }
 
 # S53: the three Valve personas through STOCK upstream SDL3. S52 decodes
@@ -1579,15 +1553,8 @@ function Scenario-Valve-Wire {
 # SKIPs when the sibling SDL3-build/build-stock checkout is absent; the fork
 # beside it deliberately skips HIDMaestro devices and is never used here.
 function Scenario-Valve-Sdl {
-    $probe = Resolve-ProbeBinary 'valve_sdl_check' 'ValveSdlCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -eq 2) {
-        Write-Host '    [SKIP] no stock SDL3 build beside the repo' -ForegroundColor Yellow
-        return
-    }
-    if ($p.ExitCode -ne 0) {
-        throw ("ValveSdlCheck exited " + $p.ExitCode + " - stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, trackpads or motion (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_sdl_check' -Exe 'ValveSdlCheck.exe' `
+                 -Message 'stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, trackpads or motion (see probe stdout)' -SkipCodes 2
 }
 
 # S54: the three Valve personas against the REAL Steam client. S53 proves
@@ -1601,15 +1568,8 @@ function Scenario-Valve-Sdl {
 # started it. Submits nothing, so nothing can reach the desktop through a
 # Steam desktop layout. SKIPs when no Steam client is installed.
 function Scenario-Valve-Steam {
-    $probe = Resolve-ProbeBinary 'valve_steam_check' 'ValveSteamCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -eq 2) {
-        Write-Host '    [SKIP] no Steam client on this machine' -ForegroundColor Yellow
-        return
-    }
-    if ($p.ExitCode -ne 0) {
-        throw ("ValveSteamCheck exited " + $p.ExitCode + " - Steam stopped claiming a Valve persona, stopped classifying it as that model, or dropped it after opening it (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_steam_check' -Exe 'ValveSteamCheck.exe' `
+                 -Message 'Steam stopped claiming a Valve persona, stopped classifying it as that model, or dropped it after opening it (see probe stdout)' -SkipCodes 2
 }
 
 # S55: several Valve personas at once. S51-S54 each drive one device, so
@@ -1619,15 +1579,8 @@ function Scenario-Valve-Steam {
 # of Decks reporting one serial shared one configuration. Verified through
 # stock SDL. SKIPs without a stock SDL3 build beside the repo.
 function Scenario-Valve-Multi {
-    $probe = Resolve-ProbeBinary 'valve_multi_check' 'ValveMultiCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -eq 2) {
-        Write-Host '    [SKIP] no stock SDL3 build beside the repo' -ForegroundColor Yellow
-        return
-    }
-    if ($p.ExitCode -ne 0) {
-        throw ("ValveMultiCheck exited " + $p.ExitCode + " - Valve personas stopped coexisting: three models at once, two of one model, or the per-instance serial collapsed back to one value (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_multi_check' -Exe 'ValveMultiCheck.exe' `
+                 -Message 'Valve personas stopped coexisting: three models at once, two of one model, or the per-instance serial collapsed back to one value (see probe stdout)' -SkipCodes 2
 }
 
 # S56: the Triton raw path lands on the controller report (issue #58).
@@ -1639,23 +1592,13 @@ function Scenario-Valve-Multi {
 # and asserts the report id on all three submit forms, with a device-free
 # negative control proving the old position rule still picks the mouse.
 function Scenario-Valve-Raw-Path {
-    $probe = Resolve-ProbeBinary 'valve_raw_path_check' 'ValveRawPathCheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -ne 0) {
-        throw ("ValveRawPathCheck exited " + $p.ExitCode + " - the Triton raw path stopped landing on its declared report id, or a frame went out as the lizard mouse again (see probe stdout)")
-    }
+    Invoke-Probe -Dir 'valve_raw_path_check' -Exe 'ValveRawPathCheck.exe' `
+                 -Message 'the Triton raw path stopped landing on its declared report id, or a frame went out as the lizard mouse again (see probe stdout)'
 }
 
 function Scenario-Usbip-E2E-Composite {
-    $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
-    if ($p.ExitCode -eq 2) {
-        Write-Host '    [SKIP] transport unavailable in this environment' -ForegroundColor Yellow
-        return
-    }
-    if ($p.ExitCode -ne 0) {
-        throw ("UsbipE2ECheck exited " + $p.ExitCode + " - a composite persona failed end to end through the real USB stack (enumeration, HID, audio endpoints, or teardown; see probe stdout)")
-    }
+    Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
+                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, HID, audio endpoints, or teardown; see probe stdout)' -SkipCodes 2
 }
 
 # ====================================================================
