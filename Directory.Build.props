@@ -1,4 +1,4 @@
-﻿<Project>
+<Project>
   <!-- Repo-wide build settings. Applies to every .csproj under this root
        (sdk/, test/, example/, test/probes/). -->
 
@@ -18,7 +18,7 @@
          major.minor.patch (see driver/*.inf). Bump this plus the INFs
          together â€” see memory:feedback-bump-versions-on-release.md for
          the full checklist. -->
-    <Version>1.7.0</Version>
+    <Version>1.7.1</Version>
   </PropertyGroup>
 
   <!-- Hard-fail any Debug build at MSBuild evaluation time. MSBuild accepts
