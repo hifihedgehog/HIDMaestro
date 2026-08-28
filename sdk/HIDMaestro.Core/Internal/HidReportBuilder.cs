@@ -17,6 +17,13 @@ public class HidReportBuilder
         int ReportCount = 1);
 
     public byte InputReportId { get; private set; }
+
+    // Issue #58. The layout report is chosen by position, which is right
+    // for every descriptor whose gamepad report comes first and wrong for
+    // the one that puts a lizard-mode mouse ahead of its controller
+    // state. A profile that declares which report carries its input is
+    // the authority on that question; this is how it says so.
+    private byte _preferredReportId;
     public int InputReportBitSize { get; private set; }
     public int InputReportByteSize => (InputReportBitSize + 7) / 8 + (InputReportId != 0 ? 1 : 0);
     public List<InputField> InputFields { get; } = new();
@@ -119,9 +126,16 @@ public class HidReportBuilder
     /// classifier.</summary>
     public Dictionary<HMAxis, InputField> AxisFields { get; } = new();
 
-    public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null)
+    /// <param name="preferredReportId">The report the profile itself
+    /// declares as its input report, or 0 to select by position. Only a
+    /// report the descriptor actually carries an Input item for is
+    /// honored, so a stale declaration falls back rather than naming a
+    /// report that does not exist (issue #58).</param>
+    public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null,
+                                         byte preferredReportId = 0)
     {
         var builder = new HidReportBuilder();
+        builder._preferredReportId = preferredReportId;
         builder.ParseDescriptor(descriptor);
         builder.ResolveSemantics();
         if (axisMap != null)
@@ -469,7 +483,14 @@ public class HidReportBuilder
         // rule exactly for descriptors with no gamepad report at all.
         byte chosenId = 0;
         bool chosen = false;
-        foreach (var id in reportOrder)
+        // The profile's own declaration outranks position, but only for a
+        // report the descriptor really declares Input items for.
+        if (_preferredReportId != 0 && reportOrder.Contains(_preferredReportId))
+        {
+            chosenId = _preferredReportId;
+            chosen = true;
+        }
+        foreach (var id in chosen ? Array.Empty<byte>() : (IEnumerable<byte>)reportOrder)
         {
             foreach (var f in fieldsByReport[id])
             {

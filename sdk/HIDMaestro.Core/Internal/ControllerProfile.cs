@@ -345,7 +345,15 @@ public sealed class ControllerProfile
     internal HidReportBuilder GetOrBuildReportBuilder()
     {
         if (_cachedReportBuilder != null) return _cachedReportBuilder;
-        var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap);
+        // Issue #58. An alwaysArmed profile never emits through the
+        // legacy path, so the report it declares in extendedReport IS its
+        // input report and every prepend site should agree. A profile that
+        // arms on demand keeps position-based selection, because its
+        // pre-arm report is a different, real report that joy.cpl and
+        // RawInput read (every Sony BT profile depends on that).
+        byte preferredRid = ExtendedReport is { AlwaysArmed: true }
+            ? ExtendedReport.ReportIdByte : (byte)0;
+        var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap, preferredRid);
         b.ButtonMap = ButtonMap;
         b.TriggerButtons = TriggerButtons;
         // v1.3.9 — when the profile authors a layout block, its role-tagged

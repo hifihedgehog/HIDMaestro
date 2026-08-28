@@ -165,6 +165,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\valve_persona_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\valve_raw_path_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_steam_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_multi_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
@@ -1629,6 +1630,22 @@ function Scenario-Valve-Multi {
     }
 }
 
+# S56: the Triton raw path lands on the controller report (issue #58).
+# The steam-controller-2 descriptor carries a lizard-mode mouse (0x40) and
+# keyboard (0x41) ahead of its controller state (0x42), reproduced from the
+# real hardware. SubmitRawReport prepended the FIRST report id, so every
+# frame a consumer submitted arrived as a mouse report and tore the host's
+# cursor across the screen. This reads the frames back off the HID stack
+# and asserts the report id on all three submit forms, with a device-free
+# negative control proving the old position rule still picks the mouse.
+function Scenario-Valve-Raw-Path {
+    $probe = Resolve-ProbeBinary 'valve_raw_path_check' 'ValveRawPathCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("ValveRawPathCheck exited " + $p.ExitCode + " - the Triton raw path stopped landing on its declared report id, or a frame went out as the lizard mouse again (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     $probe = Resolve-ProbeBinary 'usbip_e2e_check' 'UsbipE2ECheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
@@ -1700,7 +1717,8 @@ $scenarios = @(
     @{ Name = 'S52_Valve_Wire';                   Body = ${function:Scenario-Valve-Wire} },
     @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
     @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} },
-    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} }
+    @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} },
+    @{ Name = 'S56_Valve_Raw_Path';               Body = ${function:Scenario-Valve-Raw-Path} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

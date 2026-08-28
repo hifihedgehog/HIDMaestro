@@ -264,7 +264,24 @@ internal sealed class VendorBlobProgram
                         if (name == "LEFTPAD_TOUCH")  { buttonBits[j] = ButtonPad0Touch; continue; }
                         if (name == "RIGHTPAD_TOUCH") { buttonBits[j] = ButtonPad1Touch; continue; }
                         if (Enum.TryParse<HMButton>(name, true, out var btn))
+                        {
                             buttonBits[j] = (uint)btn;
+                            continue;
+                        }
+                        // Issue #58. A name that resolves to nothing used to
+                        // leave buttonBits[j] = 0, which the encoder skips, so
+                        // a typo or a control the SDK cannot express became a
+                        // button that silently never fires. A profile that
+                        // drops a control is worse than one that refuses to
+                        // load. Deliberately unused slots are spelled "_" and
+                        // are already handled above.
+                        throw new InvalidOperationException(
+                            $"Button name '{name}' at index {j} of the button mask at byte " +
+                            $"{f.Byte} resolves to no HMButton and is not one of the " +
+                            "recognized special names (LT_DIGITAL, RT_DIGITAL, DPAD_UP, " +
+                            "DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, LEFTPAD_TOUCH, " +
+                            "RIGHTPAD_TOUCH). Use \"_\" for a slot that is " +
+                            "deliberately unused.");
                     }
                 }
                 else if (op == FieldOp.Bitfield)

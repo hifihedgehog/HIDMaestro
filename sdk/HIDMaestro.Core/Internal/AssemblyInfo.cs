@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 
 // HIDMaestroTest is the in-tree CLI test client for the SDK. It's allowed to
 // reach into the library's internal helpers (SharedMemoryIO, DeviceOrchestrator,
@@ -31,3 +31,4 @@
 [assembly: InternalsVisibleTo("Switch2ProSdl3Check")]
 [assembly: InternalsVisibleTo("SonyExtraButtonsCheck")]
 [assembly: InternalsVisibleTo("VrControllerSmoke")]
+[assembly: InternalsVisibleTo("ValveRawPathCheck")]

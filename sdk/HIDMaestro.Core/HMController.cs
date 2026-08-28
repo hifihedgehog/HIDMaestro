@@ -149,6 +149,12 @@ public sealed class HMController : IDisposable
     // the handshake still see legacy Report 1 emission.
     private volatile bool _extendedModeArmed;
 
+    // Issue #58. Resolved once: whether SubmitRawReport must emit verbatim
+    // rather than letting a report id be prepended by position, and which id
+    // a data-only frame should carry.
+    private readonly bool _rawEmitsVerbatim;
+    private readonly byte _rawVerbatimReportId;
+
     // Idle streaming (issue #56). A device that only writes on change is
     // invisible to any consumer that probes it before touching it, and
     // Valve's drivers do exactly that. These hold the last state so the
@@ -399,6 +405,8 @@ public sealed class HMController : IDisposable
         // to fill and every consumer would read a live device that never
         // moves.
         bool alwaysArmed = profile.ExtendedReport?.AlwaysArmed == true;
+        _rawVerbatimReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
+        _rawEmitsVerbatim = alwaysArmed && _rawVerbatimReportId != 0;
         bool armOnDeclared = profile.ExtendedReport?.ArmOn != null
                           && profile.ExtendedReport.ArmOn.Count > 0;
         if (profile.ExtendedReport != null && (armOnDeclared || alwaysArmed))
@@ -791,6 +799,16 @@ public sealed class HMController : IDisposable
     /// <see cref="SubmitState"/>). For a DualSense with Report ID 0x01 and
     /// 64-byte InputReportByteLength, pass 63 bytes of data.</para>
     ///
+    /// <para>A profile whose <c>extendedReport</c> is <c>alwaysArmed</c> is
+    /// the exception: it is never in legacy mode, so the frame is emitted
+    /// verbatim on the report that profile declares rather than on whichever
+    /// report the descriptor happens to list first. Data-only still works and
+    /// gets the declared id prepended; a frame already carrying its own id is
+    /// passed through untouched. Both are accepted, discriminated by length.
+    /// <see cref="SubmitRawExtendedReport"/> is the explicit form. This
+    /// matters for the Steam Controller 2, whose descriptor puts a
+    /// lizard-mode mouse ahead of its controller state (issue #58).</para>
+    ///
     /// <para>For profiles with no Report ID (e.g. Xbox Series BT), pass the
     /// full report as-is.</para>
     ///
@@ -842,10 +860,85 @@ public sealed class HMController : IDisposable
         // T30-2 — pass null for gipData on non-Xbox profiles, same logic as
         // SubmitState's Xbox-only GIP packing. Saves the 14-byte Marshal.Copy
         // per raw frame on DualSense / Switch Pro / generic gamepad paths.
+        // Issue #58. A profile that is always in extended mode has no legacy
+        // report to fall back to: whatever the descriptor happens to declare
+        // first is not where its input belongs. The Steam Controller 2 puts
+        // its lizard-mode mouse (0x40) and keyboard (0x41) ahead of its
+        // controller state (0x42) on one interface, exactly as the hardware
+        // does, so a prepend by position re-heads every frame as a mouse
+        // report and the rolling sequence number lands on relative X.
+        //
+        // For these profiles the frame goes out verbatim through the same
+        // extended path SubmitState uses. Both caller conventions are
+        // accepted, discriminated by length rather than by guessing at byte
+        // 0: a frame the size of the declared report already carries its own
+        // report id, and a data-only frame one byte shorter gets the
+        // declared id prepended. Anything else is the caller's own layout
+        // and is passed through untouched.
+        if (_rawEmitsVerbatim)
+        {
+            EmitExtendedFrame(_rawReportBuffer, report.Length);
+            return;
+        }
+
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo, _rawReportBuffer, report.Length,
             _packsGipBuffer ? _gipBuf : null,
             companionEvent: _companionInputEvent);
+    }
+
+    /// <summary>Submit a complete extended report, emitted verbatim with no
+    /// report-id prepend, whatever the profile declares.
+    ///
+    /// <para>This is the explicit form of what <see cref="SubmitRawReport"/>
+    /// does automatically for an <c>alwaysArmed</c> profile. Use it when the
+    /// caller owns the whole frame including its report id and wants that
+    /// guaranteed regardless of profile (issue #58).</para>
+    /// </summary>
+    /// <param name="report">The complete frame, report id included.</param>
+    public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
+    {
+        ThrowIfDisposed();
+        if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
+        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
+            throw new ArgumentException(
+                $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
+                nameof(report));
+        report.CopyTo(_rawReportBuffer.AsSpan());
+        SharedMemoryIO.WriteInputFrame(
+            _inputView, _inputEvent, ref _inputSeqNo,
+            Array.Empty<byte>(), 0,
+            _packsGipBuffer ? _gipBuf : null,
+            companionEvent: _companionInputEvent,
+            dataOffset: 0,
+            extendedData: _rawReportBuffer, extendedLen: report.Length);
+    }
+
+    /// <summary>Emit through the extended path, prepending the declared
+    /// report id when the caller passed a data-only frame. Shared by the raw
+    /// path so both conventions land on the same wire bytes.</summary>
+    private void EmitExtendedFrame(byte[] buffer, int length)
+    {
+        int declaredSize = Profile.ExtendedReport!.Size;
+        byte rid = _rawVerbatimReportId;
+        int emitLen = length;
+
+        if (length == declaredSize - 1 && length + 1 <= buffer.Length)
+        {
+            // Data-only, the contract SubmitRawReport documents. Shift up one
+            // byte and head the frame with the id the profile declares.
+            Array.Copy(buffer, 0, buffer, 1, length);
+            buffer[0] = rid;
+            emitLen = length + 1;
+        }
+
+        SharedMemoryIO.WriteInputFrame(
+            _inputView, _inputEvent, ref _inputSeqNo,
+            Array.Empty<byte>(), 0,
+            _packsGipBuffer ? _gipBuf : null,
+            companionEvent: _companionInputEvent,
+            dataOffset: 0,
+            extendedData: buffer, extendedLen: emitLen);
     }
 
     /// <summary>v1.3.5 — instance-level <see cref="HMOutputEncoder.Encode"/>
