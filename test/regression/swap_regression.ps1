@@ -166,6 +166,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\valve_wire_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_sdl_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_raw_path_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\xusb_wgi_single_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_steam_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_multi_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
@@ -1596,6 +1597,22 @@ function Scenario-Valve-Raw-Path {
                  -Message 'the Triton raw path stopped landing on its declared report id, or a frame went out as the lizard mouse again (see probe stdout)'
 }
 
+# S57: XUSB-companion virtuals are ONE WGI gamepad (issue #59, from
+# PadForge discussion #378). A virtual Xbox 360 registered twice in
+# Windows.Gaming.Input, so shell surfaces read every press twice. WGI
+# only honors the xinputhid tripwire on a re-arrival, so creation now
+# stamps it into the pre-registration property state AND restarts the
+# main devnode once in step 5. Three fresh cycles assert one Gamepad,
+# one RawGameController, one XUSB interface, XInput intact, and the
+# 10-button descriptor unchanged (the xinputhid synthesis trap).
+function Scenario-Xusb-Wgi-Single {
+    $probe = Resolve-ProbeBinary 'xusb_wgi_single_check' 'XusbWgiSingleCheck.exe'
+    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
+    if ($p.ExitCode -ne 0) {
+        throw ("XusbWgiSingleCheck exited " + $p.ExitCode + " - a 360-family virtual doubled in WGI again, lost its tripwire, lost XInput, or its HID child stopped reporting 10 buttons (see probe stdout)")
+    }
+}
+
 function Scenario-Usbip-E2E-Composite {
     Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
                  -Message 'a composite persona failed end to end through the real USB stack (enumeration, HID, audio endpoints, or teardown; see probe stdout)' -SkipCodes 2
@@ -1661,7 +1678,8 @@ $scenarios = @(
     @{ Name = 'S53_Valve_Sdl';                    Body = ${function:Scenario-Valve-Sdl} },
     @{ Name = 'S54_Valve_Steam';                  Body = ${function:Scenario-Valve-Steam} },
     @{ Name = 'S55_Valve_Multi';                  Body = ${function:Scenario-Valve-Multi} },
-    @{ Name = 'S56_Valve_Raw_Path';               Body = ${function:Scenario-Valve-Raw-Path} }
+    @{ Name = 'S56_Valve_Raw_Path';               Body = ${function:Scenario-Valve-Raw-Path} },
+    @{ Name = 'S57_Xusb_Wgi_Single';              Body = ${function:Scenario-Xusb-Wgi-Single} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

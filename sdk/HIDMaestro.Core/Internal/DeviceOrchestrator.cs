@@ -1621,6 +1621,41 @@ internal static class DeviceOrchestrator
             // entities for them.
             using (var _ts2 = new TimingScope(controllerIndex, profile.Id, "5.hidparent_upperfilter_xinputhid"))
                 SetHidParentUpperFilterXinputhid(controllerIndex);
+
+            // Issue #59. The tripwire only gates WGI on a RE-arrival. At the
+            // HID child's first arrival the classifier admits it no matter
+            // when the value was written - measured on 26200 with the value
+            // stamped after registration, and again with it in the SetupDi
+            // property state before the devnode ever existed: 2 Gamepads in
+            // 3 of 3 fresh creates both ways, while a disable/enable of the
+            // HID child collapsed to 1 every time, matching the reporter's
+            // clear/restore/restart toggle. So the main devnode gets one
+            // deliberate restart here, after the companion exists and with
+            // the tripwire guaranteed present from birth by the
+            // SPDRP_UPPERFILTERS write in DeviceNodeCreator. WGI re-evaluates
+            // the child on the way back up, routes it away from
+            // HidClient::CreateProvider, and the companion's XUSB Gamepad is
+            // the one WGI entity. The re-waits below keep the restart
+            // invisible to the consumer: the controller is not handed over
+            // until the HID child is back and started.
+            if (mainInstanceId != null)
+            {
+                using var _ts3 = new TimingScope(controllerIndex, profile.Id, "5.restart_main_for_wgi");
+                var rsSw = Stopwatch.StartNew();
+                bool restarted = DeviceManager.RestartDevice(mainInstanceId);
+                bool childBack = false;
+                if (restarted)
+                {
+                    childBack = WaitForHidChild(mainInstanceId, timeoutMs: 10000);
+                    if (childBack)
+                    {
+                        string? hidChildId2 = DeviceManager.GetHidChildId(mainInstanceId);
+                        if (hidChildId2 != null)
+                            WaitForDeviceStarted(hidChildId2, timeoutMs: 5000);
+                    }
+                }
+                LogDiag($"    restart_main_for_wgi restarted={restarted} childBack={childBack} in {rsSw.ElapsedMilliseconds}ms");
+            }
         }
 
         // ── Step 6: final friendly name ──────────────────────────────────

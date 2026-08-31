@@ -143,6 +143,31 @@ internal static class DeviceNodeCreator
                         1 /*SPDRP_HARDWAREID*/, hwBytes, (uint)hwBytes.Length))
                     return new Result(false, null);
 
+                // Issue #59. XUSB-companion profiles carry the xinputhid
+                // tripwire on this HID parent so WGI's OnPnpDeviceAdded
+                // routes the HID child away from HidClient::CreateProvider,
+                // leaving the companion's XUSB Gamepad as the only WGI
+                // entity. WHERE this is written decides whether it works:
+                // the value must be part of the device's property state
+                // when the devnode is REGISTERED. A plain registry write
+                // to Enum\<id>\UpperFilters after DIF_REGISTERDEVICE is
+                // invisible to the check at the HID child's first arrival
+                // and only honored on a later re-arrival - measured both
+                // ways on 26200: post-registration write doubled WGI in
+                // 3 of 3 fresh creates, while a disable/enable of the HID
+                // child (a re-arrival) was gated correctly every time. So
+                // it goes through SetupDi on the devinfo element, exactly
+                // like the hardware id above, before registration exists.
+                if (profile.RequiresXusbCompanion)
+                {
+                    byte[] ufBytes = Encoding.Unicode.GetBytes("xinputhid\0\0");
+                    if (!SetupDiSetDeviceRegistryPropertyW(dis, devInfoHandle.AddrOfPinnedObject(),
+                            17 /*SPDRP_UPPERFILTERS*/, ufBytes, (uint)ufBytes.Length))
+                        DeviceOrchestrator.LogDiag(
+                            "      SPDRP_UPPERFILTERS pre-registration write failed; " +
+                            "WGI may double this controller (issue #59)");
+                }
+
                 // Compatible IDs serve two purposes:
                 //   1. WGI / GameInputSvc identifies Xbox controllers via
                 //      USB\MS_COMP_XUSB10. Only set for non-xinputhid Xbox.
@@ -266,6 +291,7 @@ internal static class DeviceNodeCreator
                         {
                             dpKey.SetValue("ControllerIndex", controllerIndex, RegistryValueKind.DWord);
                             newlyCreatedInstId = instId;
+
                             break;
                         }
                     }

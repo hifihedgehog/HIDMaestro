@@ -96,7 +96,7 @@ Ghidra decomp of `xinput1_4.dll` on Win11 26200 traced the consequence. `FUN_180
 
 The fix is a one-line API switch: use `SwDeviceCreate(pContainerId = real-per-controller-GUID, ...)` instead of `SetupDiCreateDeviceInfoW`. The SwDevice API takes an explicit container GUID; we pass `{48494430-4D41-4553-5452-4F000000<idx:X4>}` (ASCII "HIDMAESTRO" + 16-bit controller index) so each virtual gets a deterministic non-sentinel container shared by its main + companion devnodes. `de2c` returns 0, bit 2 stays clear, slot allocator fills 0..3 contiguously.
 
-The xinputhid-path profiles (Xbox Series BT etc.) moved fully to `SWD\HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00\` because the SwDevice path is the only reliable way to inject a real ContainerID. The non-xinputhid Xbox path keeps its main HID device on `ROOT\VID_*&PID_*&IG_00\` (existing INF binding) and moves only the XUSB companion to `SWD\HIDMAESTRO\`. Both companion paths share the same per-controller container GUID with the main HID, which is what xinput1_4 dedups against.
+The xinputhid-path profiles (Xbox Series BT etc.) moved fully to `SWD\HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00\` because the SwDevice path is the only reliable way to inject a real ContainerID. The non-xinputhid Xbox path keeps its main HID device on `ROOT\VID_*&PID_*&IG_00\` (existing INF binding) and moves only the XUSB companion to `SWD\HIDMAESTRO\`. On the xinputhid path, main and companion share the per-controller container GUID. On the non-xinputhid path they do not: the ROOT-enumerated main keeps the null-sentinel container `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}` because SetupAPI provides no override, while its companion carries the per-controller HIDMAESTRO container (measured on 26200, issue #59). No consumer that dedups on container can relate that pair; keeping the 360 family to one WGI entity rests on the xinputhid tripwire instead.
 
 The underscore between VID and PID in the gamepad-companion enumerator (`HIDMAESTRO_VID_045E_PID_0B13&IG_00`, not `...VID_045E&PID_0B13...`) avoids a Windows PnP edge case in which any SWD enumerator name matching the substring `VID_*&PID_*&IG_*` registers in the registry but never enumerates as a live devnode. The `&IG_00` suffix is preserved because the HID child inherits its parent's enumerator name as the first segment of its instance path, and HIDAPI/SDL3/Chromium all blocklist `&IG_` substrings to avoid duplicating XInput-claimed devices.
 
@@ -237,6 +237,12 @@ Xbox-VID profiles (`0x045E`) where xinputhid is not in the path. XInput is deliv
 ```
 ROOT\VID_045E&PID_028E&IG_00\NNNN    ← our UMDF2 driver (main HID device)
   │                                    UpperFilters += "xinputhid" per-instance
+  │                                    (in the SetupDi property state BEFORE
+  │                                    DIF_REGISTERDEVICE, plus one deliberate
+  │                                    devnode restart after the companion
+  │                                    exists: WGI only honors the tripwire on
+  │                                    a RE-arrival, never at first arrival,
+  │                                    measured both ways on 26200 - issue #59)
   │                                    (SDK-written; blocks WGI from building
   │                                    a second HID-backed Gamepad for this
   │                                    logical controller)
