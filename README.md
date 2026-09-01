@@ -10,7 +10,9 @@
 
 *"And we talk of Christ, we rejoice in Christ, we preach of Christ, we prophesy of Christ, and we write according to our prophecies, that our children may know to what source they may look for a remission of their sins."* — 2 Nephi 25:26
 
-*Glory, honor, and praise to the Lord Jesus Christ, the source of all truth, forever and ever.*
+*Glory, honor, and praise to the Lord Jesus Christ, the source of all truth and salvation, forever and ever.*
+
+*You are warmly invited to visit [ComeUntoChrist.org](https://www.comeuntochrist.org) and learn more about Him and The Church of Jesus Christ of Latter-day Saints.*
 
 ---
 
@@ -313,7 +315,9 @@ HIDMaestro replicates the public-facing identity and input/output behavior of ga
 
 ## Donations
 
-Knowing HIDMaestro is useful is reward enough. If you truly insist on donating, please donate to your charity of choice and bless humanity. If you can't think of one, consider [Humanitarian Services of The Church of Jesus Christ of Latter-day Saints](https://philanthropies.churchofjesuschrist.org/humanitarian-services). Also consider donating directly to the upstream projects listed above. They made all of this possible.
+**There is no tip jar.** Knowing HIDMaestro is useful is reward enough. If you insist on giving something, give it to a charity instead and bless humanity. Short of one you already trust, [Humanitarian Services of The Church of Jesus Christ of Latter-day Saints](https://philanthropies.churchofjesuschrist.org/humanitarian-services) puts it to work directly, and [give.org](https://give.org) grades charities against twenty standards if you would rather choose your own. The upstream projects listed above have earned it as much as anyone. They made all of this possible.
+
+Anonymously, preferably. Not at all is fine too, and nothing here changes either way.
 
 **My promise:** HIDMaestro will never become paid, freemium, or Patreon early-access paywalled. Free means free.
 
