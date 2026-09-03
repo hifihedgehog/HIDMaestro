@@ -102,6 +102,18 @@ static class ValveMultiCheck
         SDL_SetHint("SDL_JOYSTICK_THREAD", "1");
         if (!SDL_Init(0x00002000u)) { Console.WriteLine("SDL_Init failed"); return 1; }
 
+        // Steam claims Valve devices exclusively, so a Steam left running
+        // by an earlier scenario takes a persona away from this one and the
+        // failure reads as a device that never enumerated. Name it instead
+        // of leaving it to be diagnosed. S54 shuts Steam fully down before
+        // handing over; this is the check that says so.
+        foreach (var n in new[] { "steam", "steamwebhelper", "steamservice" })
+        {
+            if (System.Diagnostics.Process.GetProcessesByName(n).Length == 0) continue;
+            Console.WriteLine($"  [WARN] {n}.exe is running. Steam claims Valve devices "
+                              + "exclusively, so a persona may be invisible to SDL here.");
+        }
+
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
 

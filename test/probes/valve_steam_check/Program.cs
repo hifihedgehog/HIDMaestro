@@ -84,6 +84,23 @@ static class ValveSteamCheck
 
     static bool SteamRunning() => Process.GetProcessesByName("steam").Length > 0;
 
+    /// <summary>Steam, and the helper processes that outlive it.
+    ///
+    /// Waiting on steam.exe alone is not enough to call the machine
+    /// clean. steamwebhelper survives the parent by seconds, and while
+    /// any of it is alive Steam Input still holds its claim on a Valve
+    /// device, which makes that device invisible to a separate SDL
+    /// process. That is what took the Deck away from S55 when it ran
+    /// straight after this scenario: three personas created, two
+    /// enumerated, and the missing one was the model Steam grabs
+    /// hardest.</summary>
+    static bool AnySteamRunning()
+    {
+        foreach (var n in new[] { "steam", "steamwebhelper", "steamservice" })
+            if (Process.GetProcessesByName(n).Length > 0) return true;
+        return false;
+    }
+
     // Valve's feature-message ids, from SDL's controller_constants.h. These
     // are what Steam writes back down to a device it has claimed, and they
     // are the only autonomous view of what Steam does with the thing after
@@ -332,7 +349,15 @@ static class ValveSteamCheck
                         UseShellExecute = false,
                         CreateNoWindow = true,
                     });
-                    for (int i = 0; i < 40 && SteamRunning(); i++) Thread.Sleep(500);
+                    // Wait for the whole tree, not just steam.exe, then let
+                    // the device claims actually drop. The next scenario
+                    // creates Valve personas and reads them through stock
+                    // SDL, and it cannot see one Steam still owns.
+                    for (int i = 0; i < 120 && AnySteamRunning(); i++) Thread.Sleep(500);
+                    Thread.Sleep(3000);
+                    Console.WriteLine(AnySteamRunning()
+                        ? "  WARNING: Steam processes still present after shutdown"
+                        : "  Steam is fully down");
                 }
                 catch { }
             }
