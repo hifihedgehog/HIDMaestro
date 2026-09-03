@@ -13,6 +13,12 @@ for /d %%A in ("C:\Program Files\Microsoft Visual Studio\*") do (
 )
 call "%VCVARS%" amd64 >nul 2>&1
 
+:: Same version resource as the driver (see scripts/build.cmd).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gen_version.ps1" ^
+    -PropsPath "%~dp0..\Directory.Build.props" -OutPath "%OUT_DIR%\version_gen.h"
+if errorlevel 1 (echo VERSION HEADER GENERATION FAILED & exit /b 1)
+set "RC=%WDK%\bin\%WDK_VER%\x64\rc.exe"
+
 echo Compiling HIDMaestroCompanion.dll ...
 cl.exe /nologo /W4 /GS /Gz /wd4324 ^
     /D _AMD64_ /D _WIN64 /D UNICODE /D _UNICODE ^
@@ -22,9 +28,14 @@ cl.exe /nologo /W4 /GS /Gz /wd4324 ^
     "/Fo%OUT_DIR%\\" /c "%DRIVER_DIR%\companion.c"
 if errorlevel 1 (echo COMPILE FAILED & exit /b 1)
 
+"%RC%" /nologo /fo "%OUT_DIR%\res_companion.res" ^
+    "/I%OUT_DIR%" "/I%WDK%\Include\%WDK_VER%\um" "/I%WDK%\Include\%WDK_VER%\shared" ^
+    "%DRIVER_DIR%\res_companion.rc"
+if errorlevel 1 (echo RESOURCE COMPILE FAILED & exit /b 1)
+
 link.exe /nologo /DLL "/OUT:%OUT_DIR%\HIDMaestroCompanion.dll" ^
     "/LIBPATH:%WDK%\Lib\%WDK_VER%\um\x64" "/LIBPATH:%WDK%\Lib\wdf\umdf\x64\%UMDF_VER%" ^
-    "%OUT_DIR%\companion.obj" WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib
+    "%OUT_DIR%\companion.obj" "%OUT_DIR%\res_companion.res" WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib
 if errorlevel 1 (echo LINK FAILED & exit /b 1)
 
 copy /y "%OUT_DIR%\HIDMaestroCompanion.dll" "%OUT_DIR%\HMXInput.dll" >nul

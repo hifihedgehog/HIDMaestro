@@ -35,6 +35,20 @@ call "%VCVARS%" amd64 >nul 2>&1
 
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 
+:: Generate build\version_gen.h from Directory.Build.props so the
+:: VERSIONINFO in every native binary matches the released version.
+:: Binaries with no version resource read as anonymous to antivirus
+:: machine-learning models, which is what got HIDMaestro.dll flagged
+:: as Trojan:Win32/Bearfoos.A!ml on 2026-09-02.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gen_version.ps1" ^
+    -PropsPath "%~dp0..\Directory.Build.props" -OutPath "%OUT_DIR%\version_gen.h"
+if errorlevel 1 (
+    echo VERSION HEADER GENERATION FAILED
+    exit /b 1
+)
+
+set "RC=%WDK%\bin\%WDK_VER%\x64\rc.exe"
+
 echo Compiling %DRIVER_NAME%.dll ...
 
 set "UM_INC=%WDK%\Include\%WDK_VER%\um"
@@ -58,6 +72,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+"%RC%" /nologo /fo "%OUT_DIR%\res_hidmaestro.res" ^
+    "/I%OUT_DIR%" "/I%UM_INC%" "/I%SHARED_INC%" ^
+    "%DRIVER_DIR%\res_hidmaestro.rc"
+if errorlevel 1 (
+    echo RESOURCE COMPILE FAILED
+    exit /b 1
+)
+
 echo Linking %DRIVER_NAME%.dll ...
 
 set "UM_LIB=%WDK%\Lib\%WDK_VER%\um\x64"
@@ -68,6 +90,7 @@ link.exe /nologo /DLL ^
     "/LIBPATH:%UM_LIB%" ^
     "/LIBPATH:%WDF_LIB%" ^
     "%OUT_DIR%\driver.obj" ^
+    "%OUT_DIR%\res_hidmaestro.res" ^
     WdfDriverStubUm.lib ^
     ntdll.lib ^
     OneCoreUAP.lib ^
@@ -96,10 +119,18 @@ if exist "%DRIVER_DIR%\hmswd\hmswd.c" (
         echo HMSWD COMPILE FAILED
         exit /b 1
     )
+    "%RC%" /nologo /fo "%OUT_DIR%\res_hmswd.res" ^
+        "/I%OUT_DIR%" "/I%UM_INC%" "/I%SHARED_INC%" ^
+        "%DRIVER_DIR%\hmswd\res_hmswd.rc"
+    if errorlevel 1 (
+        echo HMSWD RESOURCE COMPILE FAILED
+        exit /b 1
+    )
     link.exe /nologo ^
         "/OUT:%OUT_DIR%\hmswd.exe" ^
         "/LIBPATH:%UM_LIB%" ^
         "%OUT_DIR%\hmswd.obj" ^
+        "%OUT_DIR%\res_hmswd.res" ^
         swdevice.lib cfgmgr32.lib ole32.lib
     if errorlevel 1 (
         echo HMSWD LINK FAILED

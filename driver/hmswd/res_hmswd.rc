@@ -1,0 +1,7 @@
+/* Version resource for hmswd.exe, the SWD device-creation helper.
+   An executable, not a driver, so it declares VFT_APP. */
+#define HM_DESC        "HIDMaestro SWD Device Helper"
+#define HM_ORIGINAL    "hmswd.exe"
+#define HM_FILETYPE    VFT_APP
+#define HM_FILESUBTYPE VFT2_UNKNOWN
+#include "../version.rc"

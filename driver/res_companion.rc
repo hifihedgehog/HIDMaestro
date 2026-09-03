@@ -1,0 +1,5 @@
+/* Version resource for HIDMaestroCompanion.dll, copied to HMXInput.dll.
+   One binary, two filenames, so OriginalFilename names the build output. */
+#define HM_DESC     "HIDMaestro XUSB Companion"
+#define HM_ORIGINAL "HIDMaestroCompanion.dll"
+#include "version.rc"

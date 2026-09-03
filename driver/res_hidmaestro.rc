@@ -1,0 +1,4 @@
+/* Version resource for HIDMaestro.dll, the UMDF2 HID minidriver. */
+#define HM_DESC     "HIDMaestro Virtual HID Driver"
+#define HM_ORIGINAL "HIDMaestro.dll"
+#include "version.rc"
