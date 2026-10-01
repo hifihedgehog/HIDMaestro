@@ -366,6 +366,8 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 TransferBufferLength = cmd.TransferBufferLength,
                 Packets = isoPackets ?? Array.Empty<(uint, uint)>(),
                 OutPayload = outPayload,
+                InterfaceNumber = ep.InterfaceNumber,
+                AltSetting = ep.AltSetting,
             };
             Audio.SubmitIso(urb);
             return;
@@ -888,7 +890,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         foreach (var kv in Descriptors.Endpoints)
         {
             if (kv.Value.TransferType == 1)
-                Audio.SetAltSetting(kv.Value.InterfaceNumber, 0);
+                Audio.ResetAltSetting(kv.Value.InterfaceNumber);
         }
     }
 

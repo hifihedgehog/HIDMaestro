@@ -98,8 +98,11 @@ public sealed class HMAudioOutput
     /// passthrough.</summary>
     public IReadOnlyList<string> ChannelRoles { get; }
 
-    /// <summary>True while the host has the stream's alternate setting
-    /// selected (audio session open).</summary>
+    /// <summary>True while the host has the stream open: from its
+    /// SET_INTERFACE to a streaming alternate setting until the one that
+    /// parks it. On a transport that never forwards SET_INTERFACE
+    /// (usbip-win2 0.9.8.1 beside an older filter driver), true from the
+    /// first isochronous transfer until the transfers stop.</summary>
     public bool IsStreaming { get; private set; }
 
     /// <summary>Interleaved 16-bit little-endian PCM for one paced
@@ -107,7 +110,9 @@ public sealed class HMAudioOutput
     /// for the duration of the callback; copy to retain.</summary>
     public event Action<HMAudioOutput, ReadOnlyMemory<byte>>? FramesReceived;
 
-    /// <summary>Raised when the host opens or parks the stream.</summary>
+    /// <summary>Raised when the host opens or parks the stream. Where the
+    /// transport never forwards SET_INTERFACE, the close is raised within
+    /// about half a second of the last isochronous transfer.</summary>
     public event Action<HMAudioOutput, bool>? StreamingChanged;
 
     internal HMAudioOutput(UsbAudioStreamSpec? stream, byte interfaceNumber)
@@ -139,9 +144,12 @@ public sealed class HMMicrophoneInput
     public int SampleRateHz { get; }
     public int BitsPerSample { get; }
 
-    /// <summary>True while the host has the capture stream open.</summary>
+    /// <summary>True while the host has the capture stream open, by the
+    /// same rule as <see cref="HMAudioOutput.IsStreaming"/>.</summary>
     public bool IsStreaming { get; private set; }
 
+    /// <summary>Raised when the host opens or parks the capture stream,
+    /// by the same rule as <see cref="HMAudioOutput.StreamingChanged"/>.</summary>
     public event Action<HMMicrophoneInput, bool>? StreamingChanged;
 
     private readonly UsbAudioEngine _engine;

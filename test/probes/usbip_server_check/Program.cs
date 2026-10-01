@@ -13,6 +13,9 @@
 //     submit, actual_length == sum of per-packet actuals
 //   - isochronous OUT: descriptors only, paced at 1 ms per packet
 //   - RET_UNLINK: -ECONNRESET while queued, 0 after completion
+//   - stream state with no SET_INTERFACE (usbip-win2 0.9.8.1 beside an
+//     older filter): traffic opens each stream and its end closes it, and
+//     an interface that has seen SET_INTERFACE follows SET_INTERFACE alone
 //
 // Bridges to the SDK's shared-memory contract are exercised end to end:
 // the probe writes input frames exactly as HMController.SubmitState does
@@ -411,6 +414,44 @@ internal static class Program
         var badUnit = cl.ControlIn(0xA1, 0x81, 0x0200, 0x0900, 2);
         Check("unknown unit stalls", badUnit.Status == -32);
 
+        // ── Stream state without SET_INTERFACE ──────────────────────────
+        // A 0.9.8.1 host controller driver beside an older usbip-win2
+        // filter forwards the filter's SELECT_INTERFACE marker as an
+        // ordinary request, so SET_INTERFACE never arrives while the audio
+        // flows. The engine then reads stream state from the traffic: open
+        // at the endpoint's alternate setting on the first transfer, closed
+        // once the transfers stop. Nothing has sent SET_INTERFACE yet.
+        Console.WriteLine("\n-- Stream state without SET_INTERFACE --");
+        var altEvents = new List<(byte Iface, byte Alt)>();
+        device.Audio.AltSettingChanged += (i, a) => { lock (altEvents) altEvents.Add((i, a)); };
+        {
+            const int P = 10, B = 392;
+            uint o1 = cl.NextSeq(), o2 = cl.NextSeq();
+            cl.SendSubmitIsoOut(o1, 1, new byte[P * B], P, B);
+            cl.SendSubmitIsoOut(o2, 1, new byte[P * B], P, B);
+            cl.ReadRet(o1);
+            cl.ReadRet(o2);
+            Check("speaker traffic with no SET_INTERFACE opens interface 1",
+                  device.Audio.GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
+                  $"alt {device.Audio.GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
+
+            uint i1 = cl.NextSeq();
+            cl.SendSubmitIsoIn(i1, 2, 10, 196);
+            cl.ReadRet(i1);
+            Check("microphone traffic with no SET_INTERFACE opens interface 2",
+                  device.Audio.GetAltSetting(2) == 1 && LastAlt(altEvents, 2) == 1,
+                  $"alt {device.Audio.GetAltSetting(2)}, last event {LastAlt(altEvents, 2)}");
+
+            Thread.Sleep(700);
+            Check("both streams close once their traffic stops",
+                  device.Audio.GetAltSetting(1) == 0 && device.Audio.GetAltSetting(2) == 0
+                  && LastAlt(altEvents, 1) == 0 && LastAlt(altEvents, 2) == 0,
+                  $"alts {device.Audio.GetAltSetting(1)}/{device.Audio.GetAltSetting(2)}, " +
+                  $"last events {LastAlt(altEvents, 1)}/{LastAlt(altEvents, 2)}");
+        }
+        // The PCM above is not part of the delivery check below.
+        lock (outFrames) outFrames.SetLength(0);
+
         // ── Isochronous OUT: pacing + delivery ──────────────────────────
         Console.WriteLine("\n-- Isochronous OUT --");
         var setIf1 = cl.ControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());
@@ -448,6 +489,13 @@ internal static class Program
                   outFrames.Length == sent.Length
                   && outFrames.ToArray().SequenceEqual(sent.ToArray()),
                   $"{outFrames.Length}/{sent.Length} bytes");
+
+        // Interface 1 has now received a SET_INTERFACE, so idle time no
+        // longer closes it. Only SET_INTERFACE does.
+        Thread.Sleep(400);
+        Check("after SET_INTERFACE, idle time leaves interface 1 open",
+              device.Audio.GetAltSetting(1) == 1 && LastAlt(altEvents, 1) == 1,
+              $"alt {device.Audio.GetAltSetting(1)}, last event {LastAlt(altEvents, 1)}");
 
         // ── Isochronous IN: microphone ──────────────────────────────────
         Console.WriteLine("\n-- Isochronous IN --");
@@ -684,6 +732,18 @@ internal static class Program
     }
 
     static short S16(byte[] d) => d.Length >= 2 ? (short)(d[0] | (d[1] << 8)) : (short)0;
+
+    /// <summary>The last alternate setting raised for an interface, or
+    /// 0xFF when none was.</summary>
+    static byte LastAlt(List<(byte Iface, byte Alt)> events, byte iface)
+    {
+        lock (events)
+        {
+            for (int i = events.Count - 1; i >= 0; i--)
+                if (events[i].Iface == iface) return events[i].Alt;
+        }
+        return 0xFF;
+    }
 
     static string ReadStr(byte[] b, int off, int max)
     {

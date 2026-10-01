@@ -41,6 +41,8 @@ internal sealed class UsbAudioEngine : IDisposable
         public byte[]? OutPayload;      // OUT only: the PCM the host sent
         public long DueTick;            // Stopwatch timestamp when the last packet's window closes
         public int FrameAtCompletion;   // virtual frame counter value to report
+        public byte InterfaceNumber;    // the streaming interface the endpoint belongs to
+        public byte AltSetting;         // the alternate setting that declares the endpoint
     }
 
     private readonly object _lock = new();
@@ -106,6 +108,34 @@ internal sealed class UsbAudioEngine : IDisposable
     // Alternate-setting state per interface number.
     private readonly Dictionary<byte, byte> _altSetting = new();
 
+    // Stream state inferred from isochronous traffic, for a transport that
+    // never forwards SET_INTERFACE. usbip-win2's filter driver tells its
+    // host controller driver about each SELECT_INTERFACE with a marker
+    // request, and the 0.9.8.1 host controller driver recognizes it only
+    // with bmRequestType 0x80. Every earlier filter sends 0x00: the 0.9.7.x
+    // and 0.9.8.0 headers initialize the union's bitfield member, which
+    // truncates 0x80 to 0, and 0.9.8.1 initializes the byte member. With an
+    // older filter still bound beside a 0.9.8.1 host controller driver, the
+    // marker reaches this device as an ordinary request and SET_INTERFACE
+    // never does, while the audio itself flows. So an interface that has
+    // never received a SET_INTERFACE is open while its endpoint carries
+    // traffic, and closes StopAfterTicks after the traffic stops. Once the
+    // host delivers a SET_INTERFACE for an interface, only SET_INTERFACE
+    // decides it.
+    private readonly HashSet<byte> _explicitAlt = new();
+    private readonly HashSet<byte> _inferredOpen = new();
+    private readonly Dictionary<byte, long> _lastIsoTick = new();
+    private static readonly long StopAfterTicks = 200 * TicksPerMs;
+    private static readonly long InferCheckTicks = 50 * TicksPerMs;
+    private long _nextInferCheck;                       // pump thread only
+    private readonly List<byte> _inferClosing = new(4); // pump thread only
+
+    // AltSettingChanged reports the current setting, never a stale one:
+    // the raise re-reads the state under its own lock, and a value equal to
+    // the last one raised is not raised again.
+    private readonly object _altEventLock = new();
+    private readonly Dictionary<byte, byte> _altRaised = new();
+
     public UsbAudioEngine(ControllerProfile profile, Action<PendingIso, byte[]?, int> complete)
     {
         _complete = complete;
@@ -165,6 +195,7 @@ internal sealed class UsbAudioEngine : IDisposable
     public void SubmitIso(PendingIso urb)
     {
         long now = Stopwatch.GetTimestamp();
+        bool opened = false;
         lock (_lock)
         {
             ref long cursor = ref urb.IsIn ? ref _inCursor : ref _outCursor;
@@ -172,8 +203,21 @@ internal sealed class UsbAudioEngine : IDisposable
             cursor += urb.Packets.Length * TicksPerMs;
             urb.DueTick = cursor;
             _pending.Add(urb);
+
+            byte iface = urb.InterfaceNumber;
+            if (urb.AltSetting != 0 && !_explicitAlt.Contains(iface))
+            {
+                _lastIsoTick[iface] = now;
+                if (!_altSetting.TryGetValue(iface, out var cur) || cur == 0)
+                {
+                    _altSetting[iface] = urb.AltSetting;
+                    _inferredOpen.Add(iface);
+                    opened = true;
+                }
+            }
         }
         _wake.Set();
+        if (opened) RaiseAltChanged(urb.InterfaceNumber);
     }
 
     /// <summary>Remove a pending URB by seqnum (CMD_UNLINK). Returns true
@@ -204,11 +248,25 @@ internal sealed class UsbAudioEngine : IDisposable
 
     // ── Alternate settings ───────────────────────────────────────────────
 
+    /// <summary>The host's SET_INTERFACE. From the first one on, this
+    /// interface's stream state follows SET_INTERFACE alone.</summary>
     public void SetAltSetting(byte interfaceNumber, byte altSetting)
+    {
+        lock (_lock) _explicitAlt.Add(interfaceNumber);
+        ApplyAltSetting(interfaceNumber, altSetting);
+    }
+
+    /// <summary>A reset (SET_CONFIGURATION, port reset) parks the stream
+    /// and says nothing about whether the transport forwards
+    /// SET_INTERFACE.</summary>
+    public void ResetAltSetting(byte interfaceNumber) => ApplyAltSetting(interfaceNumber, 0);
+
+    private void ApplyAltSetting(byte interfaceNumber, byte altSetting)
     {
         lock (_lock)
         {
             _altSetting[interfaceNumber] = altSetting;
+            _inferredOpen.Remove(interfaceNumber);
             if (altSetting == 0)
             {
                 // Parking a stream resets its cursor so the next start
@@ -217,7 +275,47 @@ internal sealed class UsbAudioEngine : IDisposable
                 _inCursor = 0;
             }
         }
-        AltSettingChanged?.Invoke(interfaceNumber, altSetting);
+        RaiseAltChanged(interfaceNumber);
+    }
+
+    private void RaiseAltChanged(byte interfaceNumber)
+    {
+        if (_stop) return;
+        lock (_altEventLock)
+        {
+            byte alt;
+            lock (_lock) alt = _altSetting.TryGetValue(interfaceNumber, out var a) ? a : (byte)0;
+            if (_altRaised.TryGetValue(interfaceNumber, out var last) && last == alt) return;
+            _altRaised[interfaceNumber] = alt;
+            AltSettingChanged?.Invoke(interfaceNumber, alt);
+        }
+    }
+
+    /// <summary>Close each inferred stream whose traffic stopped. Runs on
+    /// the pump thread, which must not wait on a consumer's handler, so
+    /// the closes are raised from the thread pool.</summary>
+    private void CloseIdleInferredStreams(long now)
+    {
+        _inferClosing.Clear();
+        lock (_lock)
+        {
+            if (_inferredOpen.Count == 0) return;
+            foreach (var iface in _inferredOpen)
+            {
+                if (!_lastIsoTick.TryGetValue(iface, out var last) || now - last > StopAfterTicks)
+                    _inferClosing.Add(iface);
+            }
+            foreach (var iface in _inferClosing)
+            {
+                _inferredOpen.Remove(iface);
+                _altSetting[iface] = 0;
+            }
+        }
+        foreach (var iface in _inferClosing)
+        {
+            byte closed = iface;
+            ThreadPool.QueueUserWorkItem(_ => RaiseAltChanged(closed));
+        }
     }
 
     public byte GetAltSetting(byte interfaceNumber)
@@ -346,6 +444,12 @@ internal sealed class UsbAudioEngine : IDisposable
             long nextDue = long.MaxValue;
             completedThisTick.Clear();
             long now = Stopwatch.GetTimestamp();
+
+            if (now >= _nextInferCheck)
+            {
+                _nextInferCheck = now + InferCheckTicks;
+                CloseIdleInferredStreams(now);
+            }
 
             lock (_lock)
             {
