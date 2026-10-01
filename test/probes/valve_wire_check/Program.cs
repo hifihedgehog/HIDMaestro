@@ -270,7 +270,7 @@ static class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
 
-        // Left stick hard left, right stick centred, right trigger fully
+        // Left stick hard left, right stick centered, right trigger fully
         // pulled. No buttons: nothing can reach the desktop.
         HMGamepadState State(HMProfile pr) => new()
         {

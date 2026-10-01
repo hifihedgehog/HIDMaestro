@@ -153,7 +153,7 @@ internal static class Program
                 Right = new HMVRHandState { Buttons = HMVRButton.System, Trigger = 1.0f },
             };
             vr.SubmitState(in state);
-            Check("input event signalled per frame", WaitForSingleObject(inputEv, 1000) == 0);
+            Check("input event signaled per frame", WaitForSingleObject(inputEv, 1000) == 0);
 
             uint seq = Read<uint>(view, VrSharedMemory.InputSeqNoOffset);
             Check("input seqlock is even (stable) after write", (seq & 1) == 0 && seq != 0, $"seq={seq}");

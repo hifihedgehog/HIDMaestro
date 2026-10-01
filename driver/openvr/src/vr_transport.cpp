@@ -7,7 +7,7 @@
 //     deliberate simplification vs driver.c: the stop event here is a
 //     PRIVATE unnamed auto-reset event that only this driver's Cleanup
 //     ever sets, so the shared-named-event pathologies driver.c defends
-//     against (foreign sweeps signalling it, a sibling's ResetEvent
+//     against (foreign sweeps signaling it, a sibling's ResetEvent
 //     eating the teardown signal, issue #38) cannot occur, and the
 //     signal alone is a trustworthy exit condition.
 //   * 4-retry seqlock read with the odd/torn frame skipped: driver.c

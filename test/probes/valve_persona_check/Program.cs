@@ -481,7 +481,7 @@ internal static class Program
     /// present opaque vendor descriptors, so nothing about their wire frame
     /// is derivable from the descriptor: without an extendedReport the
     /// encoder has no field list and emits zeros, which Steam decodes as a
-    /// recognised controller whose every axis reads centred. That shipped
+    /// recognized controller whose every axis reads centered. That shipped
     /// once. This pins the frame against SteamDeckStatePacket_t.</summary>
     static void CheckDeckInputFrame(HMContext ctx)
     {
@@ -504,7 +504,7 @@ internal static class Program
         Check("extendedReport is alwaysArmed, or SubmitState silently emits zeros",
               spec.AlwaysArmed);
 
-        // Left stick hard left and full up, right stick centred, right
+        // Left stick hard left and full up, right stick centered, right
         // trigger fully pulled, A held.
         var state = new HMGamepadState { Buttons = HMButton.A };
         var enc = new VendorBlobCodec.EncoderState();
@@ -530,7 +530,7 @@ internal static class Program
               LeftStickXv <= -32000, LeftStickXv.ToString());
         Check("left stick Y full up is POSITIVE, as Valve reads it (SDL negates)",
               LeftStickYv >= 32000, LeftStickYv.ToString());
-        Check("a centred axis is zero, not offset",
+        Check("a centered axis is zero, not offset",
               Math.Abs(RightStickXv) <= 1, RightStickXv.ToString());
         Check("right trigger full pull is 32767, the range SDL widens from",
               RightTrig == 32767, RightTrig.ToString());

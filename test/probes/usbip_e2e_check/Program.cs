@@ -63,7 +63,7 @@ internal static class Program
         // Another live SDK consumer shares the same named sections, so its
         // controllers write neutral frames over the ones this probe submits.
         // The symptom is not obviously environmental: GET_REPORT and the
-        // interrupt endpoint return a centred stick (lsx=128) while every
+        // interrupt endpoint return a centered stick (lsx=128) while every
         // other check passes, which reads exactly like an input regression.
         // Skip instead, and name the process, rather than reporting a
         // failure the code cannot cause.
@@ -277,7 +277,7 @@ internal static class Program
 
             // ── Owner identifier in the ancestry (issue #42) ────────────
             // The persona itself stays byte-for-byte Sony, so a consumer
-            // recognises its own virtual pad by walking up to the node
+            // recognizes its own virtual pad by walking up to the node
             // HIDMaestro owns. This is the walk PadForge's SDL fork does
             // (hid_internal_is_hidmaestro_device); without the token it
             // finds nothing, enumerates the persona as a second gamepad,
@@ -648,7 +648,7 @@ internal static class Program
         // No report id in this descriptor, so Windows reports
         // InputReportByteLength = 64 data + 1 leading zero byte. Reading 64
         // makes ReadFile fail with a short-buffer error and look like silence.
-        // Exactly what HIDMaestroTest's park path builds. If this centres,
+        // Exactly what HIDMaestroTest's park path builds. If this centers,
         // the harness never sends sticks no matter what the SDK does.
         var parkAxes = HMGamepadStateHelpers.StandardAxes(
             c.Profile, leftStickX: 0.0f, leftStickY: 0.5f);
@@ -662,7 +662,7 @@ internal static class Program
             var f2 = pf[0] == 0 ? pf[1..] : pf;
             short plx = (short)(f2[48] | (f2[49] << 8));
             Console.WriteLine($"  park-path lsx = {plx}  (want -32767)");
-            Console.WriteLine(plx <= -32000 ? "  PARK PATH OK" : "  PARK PATH CENTRED");
+            Console.WriteLine(plx <= -32000 ? "  PARK PATH OK" : "  PARK PATH CENTERED");
         }
 
         // Steam reads in a loop. One frame followed by silence looks
@@ -694,7 +694,7 @@ internal static class Program
 
     /// <summary>How many interrupt reports arrive over a second, and do
     /// their packet numbers advance? A single frame then silence is the
-    /// failure that reads as "recognised but never moves".</summary>
+    /// failure that reads as "recognized but never moves".</summary>
     static void StreamCheck(string hidPath, HMController c)
     {
         IntPtr fh = OpenPath(hidPath);

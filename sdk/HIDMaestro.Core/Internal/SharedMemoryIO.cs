@@ -182,7 +182,7 @@ internal static class SharedMemoryIO
 
     /// <summary>Drops a controller's poll-thread registration without
     /// stopping it. For <c>HMController.Dispose</c>, which has already
-    /// cancelled and joined its own thread.</summary>
+    /// canceled and joined its own thread.</summary>
     public static void UnregisterOutputPump(int controllerIndex)
     {
         lock (s_outputPumps) s_outputPumps.Remove(controllerIndex);

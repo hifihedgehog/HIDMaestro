@@ -280,7 +280,7 @@ public static class HMGamepadStateHelpers
         // A profile whose descriptor is an opaque vendor blob declares no
         // sticks or triggers at all (every Valve state packet), so the loops
         // above write nothing and the caller submits an empty dict. The
-        // controller then centres all six analog inputs and the device looks
+        // controller then centers all six analog inputs and the device looks
         // alive but frozen. Fall back to the canonical usages, which is what
         // SubmitState resolves against in the same situation.
         if (sticks.Count == 0)

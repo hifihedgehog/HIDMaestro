@@ -142,7 +142,7 @@ internal static class VendorBlobCodec
                     float vx, vy;
                     if (f.Source == VendorBlobProgram.SrcOp.RightStick) { vx = rightStickX; vy = rightStickY; }
                     else { vx = leftStickX; vy = leftStickY; }
-                    // 0..1 maps onto the full 12-bit range. VIIPER centres a
+                    // 0..1 maps onto the full 12-bit range. VIIPER centers a
                     // resting stick at 0x0800 (StickCenter), which is what
                     // 0.5f produces here after rounding.
                     int x = Math.Clamp((int)Math.Round(Math.Clamp(vx, 0f, 1f) * 4095), 0, 4095);
@@ -247,7 +247,7 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.I16Axis:
                 {
                     // Signed 16-bit stick axis. Sticks arrive as [0..1] with
-                    // 0.5 centred (v1.3.9); Valve's packets carry them
+                    // 0.5 centered (v1.3.9); Valve's packets carry them
                     // full-scale signed, which SDL reads straight through.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
                     float sv = f.Source switch
@@ -264,10 +264,10 @@ internal static class VendorBlobCodec
                     // therefore negated here so up reads as up.
                     bool yAxis = f.Source is VendorBlobProgram.SrcOp.LeftStickY
                                            or VendorBlobProgram.SrcOp.RightStickY;
-                    float centred = Math.Clamp(sv, 0f, 1f) - 0.5f;
-                    if (yAxis) centred = -centred;
+                    float centered = Math.Clamp(sv, 0f, 1f) - 0.5f;
+                    if (yAxis) centered = -centered;
                     short sraw = (short)Math.Clamp(
-                        (int)Math.Round(centred * 2f * 32767f), -32767, 32767);
+                        (int)Math.Round(centered * 2f * 32767f), -32767, 32767);
                     buffer[f.B]     = (byte)(sraw & 0xFF);
                     buffer[f.B + 1] = (byte)((sraw >> 8) & 0xFF);
                     break;
@@ -312,10 +312,10 @@ internal static class VendorBlobCodec
                     {
                         float sv = isLeft ? (isY ? leftStickY : leftStickX)
                                           : (isY ? rightStickY : rightStickX);
-                        float centred = Math.Clamp(sv, 0f, 1f) - 0.5f;
-                        if (isY) centred = -centred;
+                        float centered = Math.Clamp(sv, 0f, 1f) - 0.5f;
+                        if (isY) centered = -centered;
                         praw = (short)Math.Clamp(
-                            (int)Math.Round(centred * 2f * 32767f), -32767, 32767);
+                            (int)Math.Round(centered * 2f * 32767f), -32767, 32767);
                     }
                     else
                     {

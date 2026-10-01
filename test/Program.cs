@@ -594,7 +594,7 @@ partial class Program
         // everywhere before we begin kernel-side teardown.
         for (int i = 0; i < slots.Count; i++)
             try { slots[i].Cts.Cancel(); } catch { }
-        TestDebugLog($"  CTS cancelled for {slots.Count} slot(s)");
+        TestDebugLog($"  CTS canceled for {slots.Count} slot(s)");
         for (int i = 0; i < slots.Count; i++)
         {
             var joinSw = Stopwatch.StartNew();

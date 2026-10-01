@@ -570,7 +570,7 @@ public sealed class HMController : IDisposable
         // from the descriptor-built report builder, so a profile whose
         // descriptor is an opaque vendor blob - every Valve state packet -
         // has no declared sticks at all. Hard-defaulting those to 0.5 put a
-        // live device on the wire whose sticks never left centre, while its
+        // live device on the wire whose sticks never left center, while its
         // triggers worked, because only triggers had a fallback. The right
         // stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
         double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : GetAxis(HMAxis.X, 0.5);
@@ -1279,7 +1279,7 @@ public sealed class HMController : IDisposable
         try { _outputThread?.Join(Internal.TimeoutScale.Apply(500)); } catch { }
         // Drop the registration before the CTS is disposed, so a concurrent
         // unmap can never reach a disposed CTS through the registry (#45).
-        // The thread is already cancelled and joined above, so this only
+        // The thread is already canceled and joined above, so this only
         // needs to forget it, not stop it again.
         try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }
         try { _outputCts.Dispose(); } catch { }

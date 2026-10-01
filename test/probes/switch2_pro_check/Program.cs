@@ -48,7 +48,7 @@ internal static class Program
         {
             // The catalog loader deliberately swallows per-file parse
             // exceptions so one bad profile cannot take down every
-            // consumer. That is the right behaviour in production and a
+            // consumer. That is the right behavior in production and a
             // terrible one to debug against, because a rejected profile is
             // indistinguishable from an absent one. Re-parse the file here
             // with the exception left in, so the reason is on screen.
@@ -214,12 +214,12 @@ internal static class Program
         //   out[0] = x low 8
         //   out[1] = x high 4 (low nibble) | y low 4 (high nibble)
         //   out[2] = y high 8
-        // Centre is 0x800 per VIIPER StickCenter, full scale 0x0FFF.
+        // Center is 0x800 per VIIPER StickCenter, full scale 0x0FFF.
         Console.WriteLine("\n-- 12-bit stick packing --");
         Encode(new HMGamepadState(), lx: 0.5f, ly: 0.5f);
         int lxc = buf[6] | ((buf[7] & 0x0F) << 8);
         int lyc = (buf[7] >> 4) | (buf[8] << 4);
-        Check("centred left stick reads 0x800 on both axes (VIIPER StickCenter)",
+        Check("centered left stick reads 0x800 on both axes (VIIPER StickCenter)",
               lxc == 0x800 && lyc == 0x800, $"x=0x{lxc:X3} y=0x{lyc:X3}");
 
         Encode(new HMGamepadState(), lx: 1.0f, ly: 0.0f);

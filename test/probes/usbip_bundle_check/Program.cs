@@ -195,7 +195,7 @@ internal static class Program
 
         // ── Owner identifier on the host controller (issue #42) ─────────
         // A composite persona is a real Sony pad at every level a filter
-        // can inspect, so the only place a host can recognise its own
+        // can inspect, so the only place a host can recognize its own
         // virtual device is the node HIDMaestro brings to the tree. Without
         // this the persona enumerates as a second controller: on hardware
         // that meant SDL assigning player index 1 and lighting a lone pad

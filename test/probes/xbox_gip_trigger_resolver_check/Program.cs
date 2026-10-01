@@ -70,7 +70,7 @@ internal sealed class Program
 
             // PadForge pattern: canonical Z/Rz writes, possibly with Vx/Vy
             // filled to centered 0.5 from PadForge's "every axis defaults
-            // to 0.5" initialiser (the original symptom: non-DirectInput
+            // to 0.5" initializer (the original symptom: non-DirectInput
             // APIs showed 0.5 stuck because the resolver picked up Vx=0.5).
             {
                 var axes = new Dictionary<HMAxis, float>

@@ -40,7 +40,7 @@ public:
     // nullptr until the section is open.
     HMVR_Section *Section() { return section_; }
 
-    // Consumer-created haptic event, signalled after each ring publish;
+    // Consumer-created haptic event, signaled after each ring publish;
     // nullptr until opened.
     HANDLE HapticEvent() { return haptic_event_; }
 
