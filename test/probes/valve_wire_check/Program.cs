@@ -33,6 +33,7 @@ static class Program
     [DllImport("hid.dll")] static extern bool HidD_GetAttributes(IntPtr h, byte[] a);
     [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
     [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] static extern bool HidD_FlushQueue(IntPtr h);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
 
     static Guid HidGuid = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
@@ -101,6 +102,14 @@ static class Program
         pump.Start();
         try
         {
+            // The first frame after a change can still carry the previous
+            // state: idle streaming re-published it while the probe was
+            // quiet, and the device holds up to eight frames for a host
+            // that polls slower than the pump. Submit the new state long
+            // enough for both to drain, drop what this handle queued in the
+            // meantime, and read the next frame.
+            Thread.Sleep(200);
+            HidD_FlushQueue(h);
             var buf = new byte[inLen];
             for (int i = 0; i < 6; i++)
                 if (ReadFile(h, buf, buf.Length, out int n, IntPtr.Zero) && n > 0)
