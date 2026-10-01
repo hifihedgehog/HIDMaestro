@@ -27,11 +27,11 @@
 
 **Virtual game controllers that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 231 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 232 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>231</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>232</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -62,7 +62,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 231 profiles
+# List or search the 232 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -117,7 +117,7 @@ VID/PID, product string, descriptor, axis and button layout, and bus type all ma
 - **Exact hardware identity.** VID/PID, product string, HID descriptor, axis and button counts, trigger behavior, and bus type all come from the profile. SDL3's controller database matches it, Steam recognizes it, Chrome identifies it, joy.cpl shows the right name. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
 - **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes.
 - **Data-driven profiles.** Every controller is a JSON file. Adding support for a new one means writing JSON, not modifying code.
-- **Sony pads answer the whole startup interrogation, not just the input reports.** A game with native PlayStation support interrogates a DualSense before it will use it: firmware info, pairing info, then motion calibration. Serve a plausible-looking blob of zeros to any of them and the pad is refused, which is why a virtual controller can work in Steam Input and still be invisible to the game. Calibration is a divisor, so zeros make the consumer's sensitivity NaN. Firmware info is validated on content, and a real title abandons the device and retries every 500 ms on a zeroed reply, before it ever asks for calibration. HIDMaestro serves real payloads for all of them on both the UMDF2 and composite backends, byte-identical between them, with every field offset checked against the Linux `hid-playstation` driver and a second independent consumer.
+- **Sony pads answer the whole startup interrogation.** A game with native PlayStation support interrogates a DualSense before it will use it: firmware info, pairing info, then motion calibration. Serve a plausible-looking blob of zeros to any of them and the pad is refused, which is why a virtual controller can work in Steam Input and still be invisible to the game. Calibration is a divisor, so zeros make the consumer's sensitivity NaN. Firmware info is validated on content, and a real title abandons the device and retries every 500 ms on a zeroed reply, before it ever asks for calibration. HIDMaestro serves real payloads for all of them on both the UMDF2 and composite backends, byte-identical between them, with every field offset checked against the Linux `hid-playstation` driver and a second independent consumer. The calibration is the identity for the pads' own units, so a submitted 1 g reads as 1 g in SDL and Linux, and the Bluetooth profiles end those replies with the CRC-32 a real pad sends over Bluetooth, which Linux and RPCS3 check.
 - **Where hardware revisions disagree, the current one wins.** A DualSense made in 2020 reports the product string `Wireless Controller`. A DualSense made today reports `DualSense Wireless Controller`. Both report `bcdDevice` 0x0100, so nothing on the wire distinguishes them and a profile can only serve one. As of v1.4.5 `dualsense` and `dualsense-composite` serve the current string, because a consumer keyed to the launch string is already broken against real modern hardware. The launch string stays reachable on `dualsense-bt`, whose `dualsense-bt-full` sibling carries the current one.
 - **The same device on every life.** A virtual controller keeps its device paths, container id and USB serial across a dispose and recreate, a process restart, a reboot and a driver upgrade, so a program that stored a binding against the path or the serial keeps it. Pass an identity key that means something to you, or pass none and the controller index is the key:
 
@@ -127,6 +127,7 @@ VID/PID, product string, descriptor, axis and button layout, and bus type all ma
 
   Every family is covered: plain HID parents take an explicit instance id with the child's `ParentIdPrefix` written before registration, the Xbox families take a fixed software-device tuple, and the composite personas serve a serial derived from the key. A different profile at the same key keeps the identity and refreshes the descriptor. Verified by a battery that measures parent, child, interface path, DirectInput GUID, SDL3 path and USB serial across nine lives per family. [How this works](docs/INTERNALS.md#stable-device-identity-across-lives).
 - **Protocol controllers, not just passive HID.** The Nintendo Switch Pro Controller is not a passive device: hosts drive a Nintendo subcommand handshake and stall without a device that answers. HIDMaestro's driver answers it over the real Bluetooth wire (the shipped descriptor is extracted byte-exact from a live Pro's SDP cache): SPI calibration reads, input-mode switch, 60 Hz full-mode streaming with gyro and accel at the 49-byte Bluetooth report size. SDL3's HIDAPI driver and Steam Input bind it as a real Bluetooth Pro Controller with motion and rumble. Before any protocol host arrives, the pad streams genuine 12-byte 0x3F simple-mode frames, the one report DirectInput can parse, so joy.cpl reads a working controller in exactly the states real hardware allows.
+- **Pressure-sensitive buttons for PS3 emulators.** The `dualshock-3-full` persona is a DualShock 3 in the form Sony's sixaxis.sys driver and DsHidMini's SXS mode present on Windows, which is where PCSX2 and RPCS3 read button pressure. The face buttons, shoulder buttons and d-pad directions each take a pressure from 0 to 255 (`HMGamepadState.PressureA` through `PressureDpadLeft`), and L2 and R2 take theirs from the triggers. A pressed button left at pressure 0 reads fully pressed, so code that only knows digital state still works. Motion and battery ride the same report, and rumble and the player LEDs come back on `OutputDecoded`. Stock SDL, configured the way PCSX2 configures it, reads every axis and pressure back, and RPCS3's reads and writes replayed against the persona decode correctly. Neither emulator has been run against it yet.
 
 ### Custom controllers
 
@@ -308,7 +309,7 @@ The hands hold real SteamVR hand roles, serve the modern input system through a 
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 231 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 232 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
@@ -345,7 +346,7 @@ HIDMaestro replicates the public-facing identity and input/output behavior of ga
 
 ## Credits
 
-- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by [Nefarius Software Solutions](https://nefarius.at/). HIDMaestro builds on the UMDF2 + xinputhid approach Nefarius pioneered in DsHidMini, which demonstrated that a user-mode driver framework can replace kernel-mode drivers for controller emulation on Windows. The `mshidumdf` HID proxy, `WUDFRd` reflector, and xinputhid XInput bridge are the foundation of HIDMaestro's stack.
+- **[DsHidMini](https://github.com/nefarius/DsHidMini)** by [Nefarius Software Solutions](https://nefarius.at/). HIDMaestro builds on the UMDF2 + xinputhid approach Nefarius pioneered in DsHidMini, which demonstrated that a user-mode driver framework can replace kernel-mode drivers for controller emulation on Windows. The `mshidumdf` HID proxy, `WUDFRd` reflector, and xinputhid XInput bridge are the foundation of HIDMaestro's stack. The `dualshock-3-full` persona reproduces the report descriptor DsHidMini presents in its SXS mode and derives that mode's reports the way DsHidMini does, under its BSD 3-Clause license ([notice](sdk/HIDMaestro.Core/THIRD-PARTY-NOTICES.txt)).
 - **[HIDAPI](https://github.com/libusb/hidapi)**: bus-type detection behavior informed the BTHLEDEVICE spoofing technique.
 - **[SDL3](https://github.com/libsdl-org/SDL)**: multi-backend fallback behavior informed the &IG_ enumerator trick. SDL3 is not a dependency. HIDMaestro is validated against it.
 

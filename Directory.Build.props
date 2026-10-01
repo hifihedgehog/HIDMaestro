@@ -18,7 +18,7 @@
          major.minor.patch (see driver/*.inf). Bump this plus the INFs
          together. See memory:feedback-bump-versions-on-release.md for
          the full checklist. -->
-    <Version>1.9.2</Version>
+    <Version>1.10.0</Version>
 
     <!-- The architecture a native-dependent project builds for. The probe
          projects under test/probes pin their PlatformTarget to it. The SDK

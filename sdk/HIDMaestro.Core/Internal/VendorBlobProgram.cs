@@ -15,8 +15,8 @@ namespace HIDMaestro.Internal;
 /// opcodes over this program instead.
 ///
 /// Byte-for-byte parity with the pre-compiled string-switch implementation
-/// is locked by <c>test/probes/vendor_blob_golden_check</c> (63 golden
-/// hashes across all 9 shipped Sony specs, all three directions). Change
+/// is locked by <c>test/probes/vendor_blob_golden_check</c> (70 golden
+/// hashes across 10 shipped Sony specs, all three directions). Change
 /// behavior here only together with a deliberate golden regeneration.</summary>
 internal sealed class VendorBlobProgram
 {
@@ -41,6 +41,13 @@ internal sealed class VendorBlobProgram
         // the left pair is shared with the joystick, which is why the
         // pad-or-stick op exists rather than two independent fields.
         I16Pad, I16PadOrStick, U16Pressure,
+        // Unsigned 16-bit little-endian. Issue #64: the DualShock 4's
+        // sensor timestamp, which counts in 16/3 µs and wraps at 16 bits.
+        U16,
+        // The DualShock 3 (PadForge discussion 476): a pressure-sensitive
+        // button's 0..255 byte, a 10-bit motion sensor in a big-endian
+        // 16-bit field, and its battery status byte.
+        U8Pressure, U10BE, Ds3Battery,
     }
 
     /// <summary>Input-direction value source, numeric. Replaces the
@@ -63,12 +70,20 @@ internal sealed class VendorBlobProgram
         // surfaces, unlike Sony's one two-finger pad.
         LeftPadX, LeftPadY, RightPadX, RightPadY,
         LeftPadPressure, RightPadPressure,
+        // HMGamepadState.TouchpadPacketCounter, which the DualShock 4
+        // carries in each touch report's packet-counter byte (issue #64).
+        TouchpadPacketCounter,
+        // The pressure-sensitive buttons, HMGamepadState.Pressure*.
+        PressureA, PressureB, PressureX, PressureY,
+        PressureLeftBumper, PressureRightBumper,
+        PressureDpadUp, PressureDpadRight, PressureDpadDown, PressureDpadLeft,
     }
 
     // Bitfield flag sources (input direction), numeric. Index-aligned with
-    // the compiled FlagKinds array.
+    // the compiled FlagKinds array. FlagCable is the DualShock 4's cable
+    // bit, set while the pad charges or sits charged on its cable.
     public const byte FlagNone = 0, FlagCharging = 1, FlagFull = 2,
-                      FlagMic = 3, FlagHeadphones = 4;
+                      FlagMic = 3, FlagHeadphones = 4, FlagCable = 5;
 
     // Button-mask sentinels, stored above the 32-bit HMButton mask space.
     public const ulong ButtonLtDigital = 1UL << 32;
@@ -108,16 +123,25 @@ internal sealed class VendorBlobProgram
         public readonly string RollKey;     // rolling-counter dict key, precomputed
         public readonly ulong[]? ButtonBits;// per position: HMButton mask | sentinel, 0 = skip
         public readonly byte[]? FlagKinds;  // bitfield: Flag* per position
+        public readonly uint Divisor;       // uint16-le sensor timestamp, >= 1
+        public readonly int FullValue;      // uint8-battery while full, -1 when absent
+        public readonly int Resolution;     // uint10-be wire counts per unit, >= 1
+        public readonly int SourceResolution; // uint10-be source counts per unit, >= 1
+        public readonly bool Invert;        // uint10-be wire axis opposite the SDK's
 
         public CompiledField(FieldSpec src, FieldOp op, SrcOp source, int b,
                              int rangeLo, int rangeHi, int bitLo, int bitHi, bool hasBits,
                              int center, int neutral, byte initial, int stride,
-                             int crcDst, string rollKey, ulong[]? buttonBits, byte[]? flagKinds)
+                             int crcDst, string rollKey, ulong[]? buttonBits, byte[]? flagKinds,
+                             uint divisor, int fullValue,
+                             int resolution, int sourceResolution, bool invert)
         {
             Src = src; Op = op; Source = source; B = b;
             RangeLo = rangeLo; RangeHi = rangeHi; BitLo = bitLo; BitHi = bitHi; HasBits = hasBits;
             Center = center; Neutral = neutral; Initial = initial; Stride = stride;
             CrcDst = crcDst; RollKey = rollKey; ButtonBits = buttonBits; FlagKinds = flagKinds;
+            Divisor = divisor; FullValue = fullValue;
+            Resolution = resolution; SourceResolution = sourceResolution; Invert = invert;
         }
     }
 
@@ -163,6 +187,10 @@ internal sealed class VendorBlobProgram
                 "int16-pad-or-stick"=> FieldOp.I16PadOrStick,
                 "uint16-pressure"   => FieldOp.U16Pressure,
                 "uint16-trigger"    => FieldOp.U16Trigger,
+                "uint16-le"         => FieldOp.U16,
+                "uint8-pressure"    => FieldOp.U8Pressure,
+                "uint10-be"         => FieldOp.U10BE,
+                "ds3-battery"       => FieldOp.Ds3Battery,
                 "uint32-le"         => FieldOp.U32,
                 "uint32-rolling"    => FieldOp.U32Rolling,
                 "touchpad-finger"   => FieldOp.TouchpadFinger,
@@ -207,6 +235,17 @@ internal sealed class VendorBlobProgram
                 "rightPadY"       => SrcOp.RightPadY,
                 "leftPadPressure" => SrcOp.LeftPadPressure,
                 "rightPadPressure"=> SrcOp.RightPadPressure,
+                "touchpadPacketCounter" => SrcOp.TouchpadPacketCounter,
+                "pressureA"           => SrcOp.PressureA,
+                "pressureB"           => SrcOp.PressureB,
+                "pressureX"           => SrcOp.PressureX,
+                "pressureY"           => SrcOp.PressureY,
+                "pressureLeftBumper"  => SrcOp.PressureLeftBumper,
+                "pressureRightBumper" => SrcOp.PressureRightBumper,
+                "pressureDpadUp"      => SrcOp.PressureDpadUp,
+                "pressureDpadRight"   => SrcOp.PressureDpadRight,
+                "pressureDpadDown"    => SrcOp.PressureDpadDown,
+                "pressureDpadLeft"    => SrcOp.PressureDpadLeft,
                 _                 => SrcOp.None,
             };
             // touchpad-finger defaults to finger0 for ANY other semantic,
@@ -295,17 +334,46 @@ internal sealed class VendorBlobProgram
                             "batteryFull"         => FlagFull,
                             "micMuted"            => FlagMic,
                             "headphonesConnected" => FlagHeadphones,
+                            "cableConnected"      => FlagCable,
                             _                     => FlagNone,
                         };
                     }
                 }
             }
 
+            // Issue #64. Both are malformed-spec errors, named at compile
+            // like the negative byte offset above rather than producing a
+            // wrong wire value per frame: a divisor below 1 would divide by
+            // zero or count backwards, and a full value the bit range cannot
+            // hold would be silently masked into a different level.
+            int divisor = f.Divisor ?? 1;
+            if (divisor < 1)
+                throw new InvalidOperationException(
+                    $"extendedReport field {i} (type '{f.Type}') declares divisor {divisor}, below the minimum of 1");
+            int fullValue = f.FullValue ?? -1;
+            if (f.FullValue is int fv && (fv < 0 || fv >= (1 << (bitHi - bitLo + 1))))
+                throw new InvalidOperationException(
+                    $"extendedReport field {i} (type '{f.Type}') declares fullValue {fv}, " +
+                    $"which bits {bitLo}-{bitHi} cannot hold");
+
+            // A 10-bit sensor needs both resolutions, or the scale is
+            // undefined. Neither has a meaningful default, unlike the 1:1
+            // divisor above.
+            int resolution = f.Resolution ?? 0, sourceResolution = f.SourceResolution ?? 0;
+            if (op == FieldOp.U10BE && (resolution < 1 || sourceResolution < 1))
+                throw new InvalidOperationException(
+                    $"extendedReport field {i} (type '{f.Type}') needs resolution and sourceResolution of 1 or more");
+            if (op == FieldOp.U8Pressure && (source < SrcOp.PressureA || source > SrcOp.PressureDpadLeft))
+                throw new InvalidOperationException(
+                    $"extendedReport field {i} (type '{f.Type}') names no pressure-sensitive button ('{f.Semantic}')");
+
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
-                f.Center ?? 128, f.NeutralValue ?? 8,
+                f.Center ?? (op == FieldOp.U10BE ? 512 : 128), f.NeutralValue ?? 8,
                 (byte)(f.Initial ?? 0), f.Stride ?? 1,
-                crcDst, rollKey, buttonBits, flagKinds);
+                crcDst, rollKey, buttonBits, flagKinds,
+                (uint)divisor, fullValue,
+                resolution, sourceResolution, f.Invert == true);
 
             // Mirror of Decode's per-type "produces a dict entry" predicate,
             // used only for dictionary pre-sizing (over-count is harmless).

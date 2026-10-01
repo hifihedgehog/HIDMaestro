@@ -710,7 +710,17 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             case 0x05:
                 if (wLength < 41) return null;
-                { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
+                {
+                    // A DS4 orders this report's gyro pairs differently from
+                    // the DualSense, exactly as driver.c serves it. Every
+                    // composite persona is USB, so no Bluetooth CRC.
+                    ushort pid = Descriptors.ProductId;
+                    bool ds4 = pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0;
+                    var p = new byte[41];
+                    p[0] = reportId;
+                    (ds4 ? SonyCalibrationDs4Bt : SonyCalibration).CopyTo(p, 1);
+                    return p;
+                }
             case 0x09:
                 if (wLength < 20) return null;
                 {
@@ -770,31 +780,58 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         }
     }
 
-    /// <summary>Neutral Sony motion calibration, byte-for-byte the same
-    /// payload driver.c serves (g_SonyCalibration, issue #43). Written at
-    /// offset 1, after the report id. The composite lane must not diverge
-    /// from the UMDF2 lane here: a consumer reading calibration from a
-    /// composite persona has to see exactly what it sees from the plain
-    /// profile, or the two backends disagree about the same device.</summary>
+    /// <summary>Sony motion calibration, byte-for-byte the same payload
+    /// driver.c serves (g_SonyCalibration, issues #43 and #64). Written at
+    /// offset 1, after the report id. It is the identity calibration for
+    /// the pad's nominal units, 8192 per g and 16 per degree/second.
+    /// driver.c shows the arithmetic in each reader. The composite lane must
+    /// not diverge from the UMDF2 lane here: a consumer reading calibration
+    /// from a composite persona has to see exactly what it sees from the
+    /// plain profile, or the two backends disagree about the same
+    /// device.</summary>
     private static readonly byte[] SonyCalibration =
     {
         0x00, 0x00,  // gyro_pitch_bias
         0x00, 0x00,  // gyro_yaw_bias
         0x00, 0x00,  // gyro_roll_bias
-        0x10, 0x27,  // gyro_pitch_plus   +10000
-        0xF0, 0xD8,  // gyro_pitch_minus  -10000
-        0x10, 0x27,  // gyro_yaw_plus     +10000
-        0xF0, 0xD8,  // gyro_yaw_minus    -10000
-        0x10, 0x27,  // gyro_roll_plus    +10000
-        0xF0, 0xD8,  // gyro_roll_minus   -10000
+        0x40, 0x1F,  // gyro_pitch_plus    +8000
+        0xC0, 0xE0,  // gyro_pitch_minus   -8000
+        0x40, 0x1F,  // gyro_yaw_plus      +8000
+        0xC0, 0xE0,  // gyro_yaw_minus     -8000
+        0x40, 0x1F,  // gyro_roll_plus     +8000
+        0xC0, 0xE0,  // gyro_roll_minus    -8000
         0xF4, 0x01,  // gyro_speed_plus     +500
         0xF4, 0x01,  // gyro_speed_minus    +500
-        0x10, 0x27,  // acc_x_plus        +10000
-        0xF0, 0xD8,  // acc_x_minus       -10000
-        0x10, 0x27,  // acc_y_plus        +10000
-        0xF0, 0xD8,  // acc_y_minus       -10000
-        0x10, 0x27,  // acc_z_plus        +10000
-        0xF0, 0xD8,  // acc_z_minus       -10000
+        0x00, 0x20,  // acc_x_plus         +8192
+        0x00, 0xE0,  // acc_x_minus        -8192
+        0x00, 0x20,  // acc_y_plus         +8192
+        0x00, 0xE0,  // acc_y_minus        -8192
+        0x00, 0x20,  // acc_z_plus         +8192
+        0x00, 0xE0,  // acc_z_minus        -8192
+    };
+
+    /// <summary>The same calibration in a DualShock 4's report 0x05 order,
+    /// pitch+ yaw+ roll+ then pitch- yaw- roll-, byte-for-byte driver.c's
+    /// g_SonyCalibrationDs4Bt (issue #64).</summary>
+    private static readonly byte[] SonyCalibrationDs4Bt =
+    {
+        0x00, 0x00,  // gyro_pitch_bias
+        0x00, 0x00,  // gyro_yaw_bias
+        0x00, 0x00,  // gyro_roll_bias
+        0x40, 0x1F,  // gyro_pitch_plus    +8000
+        0x40, 0x1F,  // gyro_yaw_plus      +8000
+        0x40, 0x1F,  // gyro_roll_plus     +8000
+        0xC0, 0xE0,  // gyro_pitch_minus   -8000
+        0xC0, 0xE0,  // gyro_yaw_minus     -8000
+        0xC0, 0xE0,  // gyro_roll_minus    -8000
+        0xF4, 0x01,  // gyro_speed_plus     +500
+        0xF4, 0x01,  // gyro_speed_minus    +500
+        0x00, 0x20,  // acc_x_plus         +8192
+        0x00, 0xE0,  // acc_x_minus        -8192
+        0x00, 0x20,  // acc_y_plus         +8192
+        0x00, 0xE0,  // acc_y_minus        -8192
+        0x00, 0x20,  // acc_z_plus         +8192
+        0x00, 0xE0,  // acc_z_minus        -8192
     };
 
     /// <summary>DS5 firmware info, byte-for-byte the same payload driver.c
@@ -805,7 +842,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     ///
     /// <para>Served verbatim. F1 22 validates this blob and abandons the
     /// device on the zeros it used to get, and which field it validates is
-    /// not known, so no byte here is synthesised. See driver.c for the
+    /// not known, so no byte here is synthesized. See driver.c for the
     /// offset agreement between hid-playstation.c and dualsense-tester, and
     /// for why WinUHid's own default is not used.</para></summary>
     private static readonly byte[] Ds5FirmwareInfo =

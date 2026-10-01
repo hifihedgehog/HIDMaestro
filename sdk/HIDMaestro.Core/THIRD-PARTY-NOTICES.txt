@@ -1,9 +1,9 @@
 HIDMaestro third-party notices
 ==============================
 
-HIDMaestro bundles the following third-party component. This notice is
-embedded in HIDMaestro.Core.dll and written to disk alongside the
-component whenever HIDMaestro deploys it.
+HIDMaestro includes the following third-party material. This notice is
+embedded in HIDMaestro.Core.dll and written to disk alongside usbip-win2
+whenever HIDMaestro deploys it.
 
 --------------------------------------------------------------------
 usbip-win2 (version 0.9.8.1)
@@ -43,6 +43,46 @@ modification, are permitted provided that the following conditions are met:
 2. Redistributions in binary form must reproduce the above copyright notice,
    this list of conditions and the following disclaimer in the documentation
    and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+--------------------------------------------------------------------
+DsHidMini
+https://github.com/nefarius/DsHidMini
+--------------------------------------------------------------------
+
+The dualshock-3-full profile reproduces the HID report descriptor that
+DsHidMini presents in its SXS mode (driver/HID/03_SXS_Col1_Joystick.h),
+and HIDMaestro's driver derives that mode's input and feature reports
+from the native DualShock 3 report the way DsHidMini does.
+
+BSD 3-Clause License
+
+Copyright (c) 2020-2025, Benjamin Höglinger-Stelzer
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE

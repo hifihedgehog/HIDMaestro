@@ -173,6 +173,13 @@
       ],
       "description": "HidD_GetAttributes VersionNumber override. Sony DS4 BT ships 0 so Chromium selects the BT report layout."
     },
+    "sixaxisCompatible": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "v1.10.0: if true, the persona is a DualShock 3 presented the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which is what PCSX2 and RPCS3 read on Windows. The profile's extendedReport is the native 49-byte report 0x01 with alwaysArmed set. The driver serves it as the report 0 feature reply, derives the 12-byte joystick input report from it, and folds report 0 output commands into the native output report that extendedOutputReport decodes. See profiles/sony/dualshock-3-full.json."
+    },
     "inputDefaults": {
       "type": [
         "array",
@@ -185,7 +192,7 @@
         "object",
         "null"
       ],
-      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report; alwaysArmed emits it from the first frame, for firmware that streams it from power-on."
+      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09, DualShock 3 Report 0x01): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report. With alwaysArmed set the report goes out from the first frame, for firmware that streams it from power-on."
     },
     "extendedOutputReport": {
       "type": [

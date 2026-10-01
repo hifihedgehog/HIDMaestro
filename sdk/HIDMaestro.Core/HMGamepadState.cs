@@ -100,11 +100,10 @@ public struct HMGamepadState
     public byte TouchpadFinger1Id;
 
     /// <summary>Monotonic touchpad packet counter, intended to increment per
-    /// touch event. Reserved: no shipped profile declares a field with a
-    /// <c>touchpadPacketCounter</c> semantic, so <see cref="VendorBlobCodec"/>
-    /// does not currently emit this value on the wire. The
-    /// <c>touchpad-finger</c> encoder writes finger id/x/y/active only. Kept
-    /// for API compatibility and future Sony-report parity.</summary>
+    /// touch event. The DualShock 4 profiles send it in the touch report's
+    /// packet-counter byte (USB byte 34, Bluetooth byte 36), the
+    /// <c>touchpadPacketCounter</c> semantic. SDL and Linux ignore that
+    /// byte, so 0 is harmless.</summary>
     public byte TouchpadPacketCounter;
 
     // ── IMU (raw firmware units) ──────────────────────────────────────────
@@ -127,8 +126,14 @@ public struct HMGamepadState
     /// <summary>Accelerometer Z, signed 16-bit.</summary>
     public short AccelZ;
 
-    /// <summary>Sensor packet timestamp in firmware microseconds (32-bit,
-    /// rolls over). Maps to the <c>sensorTimestamp</c> semantic.</summary>
+    /// <summary>Sensor packet timestamp in 1/3 µs ticks, so microseconds
+    /// times 3. That is the DualSense's own unit (SDL_hidapi_ps5.c "Sensor
+    /// timestamp is in 0.33us units"). It is 32 bits wide and rolls over.
+    /// Maps to the <c>sensorTimestamp</c>
+    /// semantic. The DualSense profiles send it as is. The DualShock 4
+    /// profiles divide it by 16 into that pad's 16/3 µs ticks, and while it
+    /// is 0 they stamp each report with the time since the controller's
+    /// first report instead, so their timestamp always advances.</summary>
     public uint SensorTimestamp;
 
     // ── IMU (calibrated physical units) ───────────────────────────────────
@@ -174,6 +179,47 @@ public struct HMGamepadState
     /// <summary>Gyro Z in deg/s (roll toward the player's left,
     /// positive).</summary>
     public float GyroDpsZ;
+
+    // ── Pressure-sensitive buttons ────────────────────────────────────────
+    //
+    // A DualShock 3 measures how hard ten of its buttons are pressed, 0
+    // (released) to 255 (fully pressed). Its L2 and R2 pressures are the
+    // trigger axes. Profiles that carry pressure (the dualshock-3-full
+    // persona) send these. A pressure of 0 on a button that Buttons or Hat
+    // marks as pressed is sent as 255, so a consumer that only knows
+    // digital state still presses the button fully. A nonzero pressure is
+    // sent as given, whether or not the button is pressed.
+
+    /// <summary>Cross (<see cref="HMButton.A"/>) pressure, 0..255.</summary>
+    public byte PressureA;
+
+    /// <summary>Circle (<see cref="HMButton.B"/>) pressure, 0..255.</summary>
+    public byte PressureB;
+
+    /// <summary>Square (<see cref="HMButton.X"/>) pressure, 0..255.</summary>
+    public byte PressureX;
+
+    /// <summary>Triangle (<see cref="HMButton.Y"/>) pressure, 0..255.</summary>
+    public byte PressureY;
+
+    /// <summary>L1 (<see cref="HMButton.LeftBumper"/>) pressure, 0..255.</summary>
+    public byte PressureLeftBumper;
+
+    /// <summary>R1 (<see cref="HMButton.RightBumper"/>) pressure, 0..255.</summary>
+    public byte PressureRightBumper;
+
+    /// <summary>D-pad up pressure, 0..255. Pressed means <see cref="Hat"/>
+    /// includes up.</summary>
+    public byte PressureDpadUp;
+
+    /// <summary>D-pad right pressure, 0..255.</summary>
+    public byte PressureDpadRight;
+
+    /// <summary>D-pad down pressure, 0..255.</summary>
+    public byte PressureDpadDown;
+
+    /// <summary>D-pad left pressure, 0..255.</summary>
+    public byte PressureDpadLeft;
 
     // ── Battery + housekeeping ────────────────────────────────────────────
 

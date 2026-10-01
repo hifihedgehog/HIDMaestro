@@ -107,7 +107,7 @@ internal static class Program
         // installed something. The transport is embedded in
         // HIDMaestro.Core.dll and deploys itself on first use, so what
         // this probe asserts is that the bundle is really IN the
-        // assembly, at exactly the bytes the upstream release publishes,
+        // assembly, at exactly the pinned bytes,
         // with the license notice redistribution requires.
         Console.WriteLine("\n-- Bundled transport --");
         var asm = typeof(HMProfile).Assembly;
@@ -127,7 +127,7 @@ internal static class Program
             {
                 string hex = Convert.ToHexString(
                     System.Security.Cryptography.SHA256.HashData(s)).ToLowerInvariant();
-                Check("embedded installer matches the upstream release SHA256",
+                Check("embedded installer matches the pinned SHA-256",
                       hex == UsbipDriverInstaller.InstallerSha256, hex);
             }
         }

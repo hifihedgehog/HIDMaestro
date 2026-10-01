@@ -18,8 +18,9 @@
 
 #include "driver.h"
 
-/* Neutral Sony motion calibration, 34 bytes, written at offset 1 of the
- * calibration feature report (the report id occupies byte 0). Issue #43.
+/* Sony motion calibration, 34 bytes, written at offset 1 of the
+ * calibration feature report (the report id occupies byte 0). Issue #43
+ * made it non-degenerate and issue #64 set its scale.
  *
  * Calibration is a DIVISOR, not decoration. Every parser builds a
  * sensitivity from the plus/minus pairs, so the all-zero blob this used to
@@ -29,36 +30,186 @@
  * calibration") at four sites. Games with native PlayStation support reject
  * the pad on it, while consumers that never read calibration never noticed.
  *
- * Values are WinUHid's (WinUHidDevs/WinUHidPS5.cpp and WinUHidPS4.cpp, both
- * crediting inputino), a working virtual PS4/PS5 for Windows. Field offsets
- * verified against hid-playstation.c: bias at buf[1..6], plus/minus at
- * buf[7..18], speed at buf[19..22], accel at buf[23..34].
+ * The values are the identity calibration for the pad's nominal units: 8192
+ * per g and 16 per degree/second. Those are the units a host assumes when a
+ * pad has no usable calibration (hid-playstation.c DS4_ACC_RANGE and
+ * DS4_GYRO_RANGE over S16_MAX, SDL_hidapi_ps4.c accel_denominator 8192 and
+ * gyro_denominator 16, SDL_hidapi_ps5.c's uncalibrated value * 64 / 1024),
+ * and the units consumers submit (PadForge scales g by 8192 and deg/s by
+ * 16). Accel plus and minus are +-8192, so range_2g is 16384 and the
+ * sensitivity 2 * 8192 / 16384 = 1. Gyro speed is 500 each way, so speed_2x
+ * is 1000, and plus and minus are +-8000, so the denominator 16000 is
+ * 16 * speed_2x: raw / 16 degree/second in every reader. v1.4.4 to v1.9.2
+ * served WinUHid's +-10000 (WinUHidDevs/WinUHidPS4.cpp), which is identity
+ * only for WinUHid's own encoder at 10000 per g and 20 per degree/second,
+ * so hosts read nominal-unit motion at 0.82 and 0.8 of its size.
  *
- * The payload is deliberately order-agnostic. hid-playstation.c parses a DS4
- * over USB as pitch+ pitch- yaw+ yaw- roll+ roll-, but over Bluetooth as
- * pitch+ yaw+ roll+ pitch- yaw- roll-. Because every plus is +10000 and every
- * minus is -10000, one payload reads correctly under both, so no ordering
- * branch is needed for the 37-vs-41 split. Gyro and accel denominators come
- * out at 20000 and speed_2x at 1000: nothing degenerate. */
+ * Field offsets verified against hid-playstation.c: bias at buf[1..6],
+ * plus/minus at buf[7..18], speed at buf[19..22], accel at buf[23..34].
+ * The gyro pairs here are in the order pitch+ pitch- yaw+ yaw- roll+
+ * roll-, which is the DualSense's report 0x05 and the DS4's USB report
+ * 0x02. A DS4's Bluetooth report 0x05 uses another order, in
+ * g_SonyCalibrationDs4Bt. */
 static const UCHAR g_SonyCalibration[34] = {
     0x00, 0x00,  /* gyro_pitch_bias  */
     0x00, 0x00,  /* gyro_yaw_bias    */
     0x00, 0x00,  /* gyro_roll_bias   */
-    0x10, 0x27,  /* gyro_pitch_plus   +10000 */
-    0xF0, 0xD8,  /* gyro_pitch_minus  -10000 */
-    0x10, 0x27,  /* gyro_yaw_plus     +10000 */
-    0xF0, 0xD8,  /* gyro_yaw_minus    -10000 */
-    0x10, 0x27,  /* gyro_roll_plus    +10000 */
-    0xF0, 0xD8,  /* gyro_roll_minus   -10000 */
+    0x40, 0x1F,  /* gyro_pitch_plus    +8000 */
+    0xC0, 0xE0,  /* gyro_pitch_minus   -8000 */
+    0x40, 0x1F,  /* gyro_yaw_plus      +8000 */
+    0xC0, 0xE0,  /* gyro_yaw_minus     -8000 */
+    0x40, 0x1F,  /* gyro_roll_plus     +8000 */
+    0xC0, 0xE0,  /* gyro_roll_minus    -8000 */
     0xF4, 0x01,  /* gyro_speed_plus     +500 */
     0xF4, 0x01,  /* gyro_speed_minus    +500 */
-    0x10, 0x27,  /* acc_x_plus        +10000 */
-    0xF0, 0xD8,  /* acc_x_minus       -10000 */
-    0x10, 0x27,  /* acc_y_plus        +10000 */
-    0xF0, 0xD8,  /* acc_y_minus       -10000 */
-    0x10, 0x27,  /* acc_z_plus        +10000 */
-    0xF0, 0xD8,  /* acc_z_minus       -10000 */
+    0x00, 0x20,  /* acc_x_plus         +8192 */
+    0x00, 0xE0,  /* acc_x_minus        -8192 */
+    0x00, 0x20,  /* acc_y_plus         +8192 */
+    0x00, 0xE0,  /* acc_y_minus        -8192 */
+    0x00, 0x20,  /* acc_z_plus         +8192 */
+    0x00, 0xE0,  /* acc_z_minus        -8192 */
 };
+
+/* The same calibration in the order a DualShock 4's Bluetooth report 0x05
+ * carries it: pitch+ yaw+ roll+, then pitch- yaw- roll-. hid-playstation.c
+ * (dualshock4_get_calibration_data, the "BT + Dongle" branch), DS4Windows
+ * (DS4SixAxis.setCalibrationData with useAltGyroCalib false) and RPCS3
+ * (ds4_pad_handler.cpp GetCalibrationData) all read it that way. DS4Windows
+ * subtracts minus from plus without taking the absolute value, so serving
+ * the order above here read yaw plus as -8000 and yaw minus as +8000, and
+ * DS4Windows turned yaw backwards (issue #64). */
+static const UCHAR g_SonyCalibrationDs4Bt[34] = {
+    0x00, 0x00,  /* gyro_pitch_bias  */
+    0x00, 0x00,  /* gyro_yaw_bias    */
+    0x00, 0x00,  /* gyro_roll_bias   */
+    0x40, 0x1F,  /* gyro_pitch_plus    +8000 */
+    0x40, 0x1F,  /* gyro_yaw_plus      +8000 */
+    0x40, 0x1F,  /* gyro_roll_plus     +8000 */
+    0xC0, 0xE0,  /* gyro_pitch_minus   -8000 */
+    0xC0, 0xE0,  /* gyro_yaw_minus     -8000 */
+    0xC0, 0xE0,  /* gyro_roll_minus    -8000 */
+    0xF4, 0x01,  /* gyro_speed_plus     +500 */
+    0xF4, 0x01,  /* gyro_speed_minus    +500 */
+    0x00, 0x20,  /* acc_x_plus         +8192 */
+    0x00, 0xE0,  /* acc_x_minus        -8192 */
+    0x00, 0x20,  /* acc_y_plus         +8192 */
+    0x00, 0xE0,  /* acc_y_minus        -8192 */
+    0x00, 0x20,  /* acc_z_plus         +8192 */
+    0x00, 0xE0,  /* acc_z_minus        -8192 */
+};
+
+/* One byte of CRC-32 (reflected polynomial 0xEDB88320). */
+static ULONG
+SonyCrc32Byte(_In_ ULONG crc, _In_ UCHAR b)
+{
+    int bit;
+    crc ^= b;
+    for (bit = 0; bit < 8; bit++)
+        crc = (crc & 1) ? ((crc >> 1) ^ 0xEDB88320) : (crc >> 1);
+    return crc;
+}
+
+/* The CRC-32 a Sony pad appends to a feature report over Bluetooth: the
+ * seed byte 0xA3 followed by the report from its id onward
+ * (hid-playstation.c PS_FEATURE_CRC32_SEED and ps_check_crc32, RPCS3
+ * GetCalibrationData's btHdr 0xA3). */
+static ULONG
+SonyFeatureCrc32(_In_reads_bytes_(len) const UCHAR *data, _In_ ULONG len)
+{
+    ULONG crc = SonyCrc32Byte(0xFFFFFFFF, 0xA3);
+    ULONG i;
+    for (i = 0; i < len; i++)
+        crc = SonyCrc32Byte(crc, data[i]);
+    return ~crc;
+}
+
+/* ---- DualShock 3 in sixaxis.sys form (PadForge discussion 476) -------- *
+ *
+ * The SDK sends the native 49-byte DS3 input report: report id 0x01, a
+ * reserved byte, buttons at 2-4, sticks at 6-9, the twelve pressure bytes at
+ * 14-25, battery at 30 and big-endian 10-bit motion at 41-48 (DsHidMini
+ * Ds3Types.h DS3_RAW_INPUT_REPORT, SDL_hidapi_ps3.c HandleStatePacket,
+ * hid-sony.c sixaxis_raw_event, RPCS3 ds3_pad_handler.h ds3_input_report).
+ * The two views below are the ones DsHidMini's SXS mode serves, which is the
+ * mode PCSX2's docs prescribe for pressure on Windows. */
+
+#define DS3_RAW_REPORT_SIZE     49
+#define DS3_SXS_INPUT_SIZE      12
+#define DS3_OUT_BODY_SIZE       48
+
+static USHORT Ds3Be16(_In_reads_bytes_(2) const UCHAR *p)
+{
+    return (USHORT)((p[0] << 8) | p[1]);
+}
+
+static VOID Ds3PutLe16(_Out_writes_bytes_(2) UCHAR *p, _In_ USHORT v)
+{
+    p[0] = (UCHAR)(v & 0xFF);
+    p[1] = (UCHAR)((v >> 8) & 0xFF);
+}
+
+/* The 12-byte joystick input report the SXS descriptor declares, derived as
+ * DsHidMini's DS3_RAW_TO_SIXAXIS_HID_INPUT_REPORT derives it (DsHid.c):
+ * byte 0 triangle, circle, cross, square, L2, R2, L1, R1; byte 1 start,
+ * select, L3, R3, PS; byte 3 the hat (8 released); 4-7 the sticks; 8-11
+ * circle and cross pressure and L2 and R2, each inverted. DsHidMini also
+ * applies its own dead zone setting to the sticks. The consumer has already
+ * applied one, so the sticks pass through. */
+static VOID
+Ds3BuildSixaxisInput(_In_reads_bytes_(DS3_RAW_REPORT_SIZE) const UCHAR *raw,
+                     _Out_writes_bytes_(DS3_SXS_INPUT_SIZE) UCHAR *out)
+{
+    const UCHAR b0 = raw[2], b1 = raw[3], b2 = raw[4];
+    UCHAR hat;
+
+    RtlZeroMemory(out, DS3_SXS_INPUT_SIZE);
+    out[0] = (UCHAR)(((b1 & 0xF0) >> 4) | ((b1 & 0x0F) << 4));
+    out[1] = (UCHAR)(((b0 & 0x08) >> 3)     /* start  */
+                   | ((b0 & 0x01) << 1)     /* select */
+                   | ((b0 & 0x02) << 1)     /* L3     */
+                   | ((b0 & 0x04) << 1)     /* R3     */
+                   | ((b2 & 0x01) << 4));   /* PS     */
+    switch (b0 & 0xF0) {
+    case 0x10: hat = 0; break;  /* up         */
+    case 0x30: hat = 1; break;  /* up right   */
+    case 0x20: hat = 2; break;  /* right      */
+    case 0x60: hat = 3; break;  /* down right */
+    case 0x40: hat = 4; break;  /* down       */
+    case 0xC0: hat = 5; break;  /* down left  */
+    case 0x80: hat = 6; break;  /* left       */
+    case 0x90: hat = 7; break;  /* up left    */
+    default:   hat = 8; break;  /* released   */
+    }
+    out[3]  = hat;
+    out[4]  = raw[6];
+    out[5]  = raw[7];
+    out[6]  = raw[8];
+    out[7]  = raw[9];
+    out[8]  = (UCHAR)(0xFF - raw[23]);  /* circle pressure */
+    out[9]  = (UCHAR)(0xFF - raw[24]);  /* cross pressure  */
+    out[10] = (UCHAR)(0xFF - raw[18]);  /* L2              */
+    out[11] = (UCHAR)(0xFF - raw[19]);  /* R2              */
+}
+
+/* The report 0 feature reply, as DsHidMini builds it: the native report
+ * with its first two bytes set to 0x00 and 0x3F (HID.FeatureReport.c) and
+ * the motion words turned little-endian, accelerometer X mirrored as
+ * 0x3FF - x (DsHidMiniDrv.c). RPCS3 reads that X as is on Windows, where
+ * "the official Sony Windows DS3 driver seems to do the same modification"
+ * (ds3_pad_handler.cpp get_extended_info). The caller's buffer holds the
+ * report without an id byte, since a descriptor with no report ids gets
+ * none (vhidmini2 vhidmini.c GetFeature). The byte the reader sees in front
+ * of it is the id the reader wrote. */
+static VOID
+Ds3BuildSixaxisFeature(_Inout_updates_bytes_(DS3_RAW_REPORT_SIZE) UCHAR *f)
+{
+    f[0] = 0x00;
+    f[1] = 0x3F;
+    Ds3PutLe16(&f[41], (USHORT)(0x03FF - Ds3Be16(&f[41])));
+    Ds3PutLe16(&f[43], Ds3Be16(&f[43]));
+    Ds3PutLe16(&f[45], Ds3Be16(&f[45]));
+    Ds3PutLe16(&f[47], Ds3Be16(&f[47]));
+}
 
 /* Append the decimal representation of a ULONG to a wide-string buffer.
  * Self-contained: no C runtime dependency. The driver doesn't link against
@@ -359,6 +510,19 @@ ReadConfigFromRegistry(
     if (result == ERROR_SUCCESS && regType == REG_DWORD) {
         ctx->HidDeviceAttributes.VersionNumber = (USHORT)dwordVal;
     }
+
+    /* Read Bluetooth (REG_DWORD). Absent reads as USB, which is what every
+     * driver before v1.10.0 assumed. */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"Bluetooth", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    ctx->Bluetooth = (result == ERROR_SUCCESS && regType == REG_DWORD && dwordVal != 0);
+
+    /* Read Ds3Sixaxis (REG_DWORD). Absent reads as off. */
+    dwordSize = sizeof(dwordVal);
+    result = RegQueryValueExW(hKey, L"Ds3Sixaxis", NULL,
+                              &regType, (LPBYTE)&dwordVal, &dwordSize);
+    ctx->Ds3Sixaxis = (result == ERROR_SUCCESS && regType == REG_DWORD && dwordVal != 0);
 
     /* Read ProductString (REG_SZ) */
     {
@@ -701,6 +865,59 @@ PublishOutput(_In_ PDEVICE_CONTEXT ctx,
      * already-set auto-reset event is a no-op, which coalesces bursts
      * exactly like the reader's drain-to-Head loop expects. */
     if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
+}
+
+/* DualShock 3 in sixaxis.sys form: an output report 0, which carries a
+ * sixaxis.sys command in its first data byte (SDL_hidapi_ps3.c
+ * EPS3SixaxisDriverCommands). The command is folded into the native output
+ * report body and the native report 0x01 is published, so the SDK decodes
+ * one format whichever form the reader wrote.
+ *
+ *  2, set motors: everything from data byte 3 is the native body, which is
+ *     how DsHidMini applies it (HID.Reports.c, &Packet->reportBuffer[3]).
+ *     SDL's motor command and RPCS3's Windows output report
+ *     (ds3_pad_handler.h, 0x02 0x00 0x00 ahead of the rumble block) both
+ *     line up with the body that way.
+ *  1, set LEDs: data bytes 4-7 are LED 4, 3, 2 and 1 (0 off, 1 on, 2
+ *     flashing). DsHidMini copies this one as a body too, which lands the
+ *     LED modes on the motor bytes, so it is applied as the LED bitmap the
+ *     native report carries at byte 10 instead (hid-sony.c, LED_1 = 0x02).
+ *
+ * Other commands (3 block LEDs, 9 refresh settings, 10 clear pairing) change
+ * nothing a consumer drives. The data arrives without a report id byte for a
+ * descriptor that declares none. A 49-byte buffer led by 0x00 is the same
+ * report with the id kept, and is accepted too. */
+static VOID
+Ds3HandleSixaxisOutput(_In_ PDEVICE_CONTEXT ctx,
+                       _In_reads_bytes_(len) const UCHAR *buf,
+                       _In_ ULONG len)
+{
+    UCHAR body[DS3_OUT_BODY_SIZE];
+    const UCHAR *data = buf;
+
+    if (len == DS3_OUT_BODY_SIZE + 1 && buf[0] == 0x00) {
+        data = buf + 1;
+        len -= 1;
+    }
+    if (len < 1) return;
+
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    if (data[0] == 2 && len > 3) {
+        ULONG n = len - 3;
+        if (n > DS3_OUT_BODY_SIZE) n = DS3_OUT_BODY_SIZE;
+        RtlCopyMemory(ctx->Ds3OutBody, data + 3, n);
+    } else if (data[0] == 1 && len >= 8) {
+        UCHAR bits = 0;
+        if (data[7]) bits |= 0x02;  /* LED 1 */
+        if (data[6]) bits |= 0x04;  /* LED 2 */
+        if (data[5]) bits |= 0x08;  /* LED 3 */
+        if (data[4]) bits |= 0x10;  /* LED 4 */
+        ctx->Ds3OutBody[9] = bits;  /* native byte 10 */
+    }
+    RtlCopyMemory(body, ctx->Ds3OutBody, DS3_OUT_BODY_SIZE);
+    WdfWaitLockRelease(ctx->InputLock);
+
+    PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT, 0x01, body, DS3_OUT_BODY_SIZE);
 }
 
 /* Read shared input via memory mapping. RAM-only: no disk fallback.
@@ -1337,6 +1554,22 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         inputSize = shared.ExtendedReportSize;
     }
 
+    /* DualShock 3 in sixaxis.sys form: the extended report is the native
+     * DS3 report. Keep it for the report 0 feature reply, stored below
+     * under InputLock with the input cache, and send the joystick report
+     * derived from it. */
+    UCHAR ds3Raw[DS3_RAW_REPORT_SIZE] = { 0 };
+    BOOLEAN ds3Fresh = FALSE;
+    if (ctx->Ds3Sixaxis
+        && shared.ExtendedReportSize >= DS3_RAW_REPORT_SIZE
+        && shared.ExtendedReportSize <= sizeof(shared.ExtendedReportData))
+    {
+        RtlCopyMemory(ds3Raw, shared.ExtendedReportData, DS3_RAW_REPORT_SIZE);
+        Ds3BuildSixaxisInput(ds3Raw, inputReport);
+        inputSize = DS3_SXS_INPUT_SIZE;
+        ds3Fresh = TRUE;
+    }
+
     /* Build Col2 report (Report ID 0x20) with same gamepad data. The
      * descriptor scan for 0x85 0x20 is cached at config-read into
      * ctx->HasCol2Report (the descriptor is immutable after init), so
@@ -1394,6 +1627,8 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
         ctx->InputReportReady = TRUE;
+        if (ds3Fresh)
+            RtlCopyMemory(ctx->Ds3Raw, ds3Raw, DS3_RAW_REPORT_SIZE);
         /* Publish the seqno LAST, under the same lock IOCTL_HID_READ_REPORT
          * takes, so a concurrent read sees either the old seqno (and parks)
          * or the new seqno paired with the freshly-written InputReport.
@@ -2079,6 +2314,12 @@ EvtIoDeviceControl(
         status = WdfRequestRetrieveInputBuffer(Request, 1, &wrBuf, &wrSize);
         if (!NT_SUCCESS(status)) break;
 
+        if (ctx->Ds3Sixaxis) {
+            Ds3HandleSixaxisOutput(ctx, (const UCHAR *)wrBuf, (ULONG)wrSize);
+            status = STATUS_SUCCESS;
+            break;
+        }
+
         {
             const UCHAR *p = (const UCHAR *)wrBuf;
             UCHAR  reportId = (wrSize > 0) ? p[0] : 0;
@@ -2267,6 +2508,29 @@ EvtIoDeviceControl(
             reportId = ((UCHAR *)outBuf)[0];
         }
 
+        /* DualShock 3 in sixaxis.sys form: report 0 is the whole native
+         * report, the read SDL's sixaxis driver and RPCS3 poll for state
+         * (SDL_hidapi_ps3.c HIDAPI_DriverPS3SonySixaxis_UpdateDevice, RPCS3
+         * ds3_pad_handler.cpp get_data). The descriptor declares no report
+         * ids, so the HID class delivers every feature read here as report
+         * 0, whatever id the caller put in its buffer, and leaves that byte
+         * as the caller wrote it. Both readers try 0xF2 first: it answers
+         * with this report behind their 0xF2, exactly as it does on
+         * DsHidMini, SDL then polls 0 and RPCS3 keeps polling 0xF2, and both
+         * read the same bytes. */
+        if (ctx->Ds3Sixaxis) {
+            UCHAR feat[DS3_RAW_REPORT_SIZE];
+            ULONG n = (ULONG)(outSize < DS3_RAW_REPORT_SIZE ? outSize : DS3_RAW_REPORT_SIZE);
+            WdfWaitLockAcquire(ctx->InputLock, NULL);
+            RtlCopyMemory(feat, ctx->Ds3Raw, DS3_RAW_REPORT_SIZE);
+            WdfWaitLockRelease(ctx->InputLock);
+            Ds3BuildSixaxisFeature(feat);
+            RtlCopyMemory(outBuf, feat, n);
+            WdfRequestSetInformation(Request, n);
+            status = STATUS_SUCCESS;
+            break;
+        }
+
         /* Sony BT extended-mode handshake. Real DualSense / DualShock 4
          * firmware switches from emitting Report 0x01 (basic) to Report
          * 0x31 / 0x11 (vendor blob with CRC32) once the host issues
@@ -2301,12 +2565,18 @@ EvtIoDeviceControl(
                 /* Sony motion calibration. DS5 uses report 0x05 at 41
                  * bytes; a DS4 over Bluetooth uses the SAME report id and
                  * size (DS4_FEATURE_REPORT_CALIBRATION_BT), so one branch
-                 * serves both. Both of our descriptors declare 41. */
+                 * serves both. Both of our descriptors declare 41. The
+                 * DS4's field order differs from the DualSense's. The DS4
+                 * product ids are the v1 pad 0x05C4, the v2 pad 0x09CC and
+                 * the wireless adapter 0x0BA0. */
+                USHORT pid = ctx->HidDeviceAttributes.ProductID;
+                BOOLEAN ds4 = (pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0);
                 if (outSize < 41) { status = STATUS_BUFFER_TOO_SMALL; break; }
                 stubSize = 41;
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
-                RtlCopyMemory(p + 1, g_SonyCalibration, sizeof(g_SonyCalibration));
+                RtlCopyMemory(p + 1, ds4 ? g_SonyCalibrationDs4Bt : g_SonyCalibration,
+                              sizeof(g_SonyCalibration));
             } else if (reportId == 0x09) {
                 /* DS5 pairing info. 20 bytes, which is what BOTH our own
                  * descriptor declares for report 0x09 and what
@@ -2314,7 +2584,7 @@ EvtIoDeviceControl(
                  * count to equal the requested size exactly, so the 17 this
                  * used to serve failed that check outright. MAC lives at
                  * bytes 1..6 (hid-playstation.c: memcpy(mac, &buf[1], 6)).
-                 * An all-zero MAC is not a valid address, so synthesise a
+                 * An all-zero MAC is not a valid address, so synthesize a
                  * stable one per controller in the locally-administered
                  * range (second bit of the first octet set), which cannot
                  * collide with a real Sony pad's globally-assigned MAC. */
@@ -2427,7 +2697,7 @@ EvtIoDeviceControl(
                  * reject an all-zero address: the kernel copies it as the
                  * device's unique id, and SDL's ReadWiredSerial requires at
                  * least one of bytes 1..6 to be non-zero before it accepts
-                 * the serial. So synthesise the same stable per-controller
+                 * the serial. So synthesize the same stable per-controller
                  * address the 0x09 path uses, in the locally-administered
                  * range so it cannot collide with a real pad's
                  * globally-assigned MAC.
@@ -2468,14 +2738,15 @@ EvtIoDeviceControl(
                 RtlZeroMemory(p, stubSize);
                 p[0] = reportId;
             } else if (reportId == 0x02) {
-                /* DS4 calibration. USB = 37 bytes
-                 * (DS4_FEATURE_REPORT_CALIBRATION_SIZE), BT = 41 bytes
-                 * (DS4_FEATURE_REPORT_CALIBRATION_BLUETOOTH_SIZE: the
-                 * extra 4 are CRC32; we don't compute a real CRC, the
-                 * known DS4 consumers tolerate zeros the same way the
-                 * existing DS5 stubs leak past CRC validation). The
-                 * outSize parameter from the caller's BufferSize lets
-                 * us serve whichever variant they asked for. */
+                /* DS4 calibration, 37 bytes
+                 * (DS4_FEATURE_REPORT_CALIBRATION_SIZE), or 41 for a caller
+                 * whose buffer holds that much. Only USB hosts parse this
+                 * report: over Bluetooth, hid-playstation.c, DS4Windows and
+                 * RPCS3 read calibration from 0x05, and SDL reads 0x02 only
+                 * to switch the pad to report 0x11 before it parses 0x05
+                 * (HIDAPI_DriverPS4_LoadOfficialCalibrationData). The
+                 * outSize parameter from the caller's BufferSize lets us
+                 * serve whichever variant they asked for. */
                 if (outSize >= 41) {
                     stubSize = 41;
                 } else if (outSize >= 37) {
@@ -2508,6 +2779,22 @@ EvtIoDeviceControl(
                 stubSize = 49;
                 RtlCopyMemory(p, ds4FirmwareInfo, stubSize);
                 p[0] = reportId;
+            }
+            /* Over Bluetooth these reports end in a CRC-32 that USB forms do
+             * not carry (issue #64). hid-playstation.c ps_get_report checks it
+             * on 0x05 for both pads and on 0x09 and 0x20 for the DualSense.
+             * RPCS3 checks it on 0x05 and drops the pad after three failures
+             * (ds4_pad_handler.cpp and dualsense_pad_handler.cpp,
+             * GetCalibrationData). The last four bytes of each stub are free:
+             * calibration ends at byte 34, the pairing MAC at byte 6, and the
+             * firmware capture is zero from byte 60. */
+            if (ctx->Bluetooth && stubSize > 4
+             && (reportId == 0x05 || reportId == 0x09 || reportId == 0x20)) {
+                ULONG crc = SonyFeatureCrc32(p, stubSize - 4);
+                p[stubSize - 4] = (UCHAR)(crc & 0xFF);
+                p[stubSize - 3] = (UCHAR)((crc >> 8) & 0xFF);
+                p[stubSize - 2] = (UCHAR)((crc >> 16) & 0xFF);
+                p[stubSize - 1] = (UCHAR)((crc >> 24) & 0xFF);
             }
             WdfRequestSetInformation(Request, stubSize);
             PublishOutput(ctx, HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE_READ,
@@ -2632,6 +2919,12 @@ EvtIoDeviceControl(
 
         status = WdfRequestRetrieveInputBuffer(Request, 1, &outBuf, &outBufSize);
         if (!NT_SUCCESS(status)) break;
+
+        if (ctx->Ds3Sixaxis) {
+            Ds3HandleSixaxisOutput(ctx, (const UCHAR *)outBuf, (ULONG)outBufSize);
+            status = STATUS_SUCCESS;
+            break;
+        }
 
         {
             const UCHAR *p = (const UCHAR *)outBuf;

@@ -822,6 +822,17 @@ internal static class DeviceOrchestrator
         // override via the JSON `versionNumber` field.
         key.SetValue("VersionNumber", (int)(profile.VersionNumber ?? 0x0100),
                      RegistryValueKind.DWord);
+        // v1.10.0: a Sony pad ends its Bluetooth feature reports with a
+        // CRC-32 the USB forms lack, and the driver appends one only for a
+        // Bluetooth profile. Written as 0 as well, so an index a USB
+        // profile reuses never inherits the flag.
+        key.SetValue("Bluetooth",
+                     string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
+                     RegistryValueKind.DWord);
+        // PadForge discussion 476: a DualShock 3 in the form sixaxis.sys and
+        // DsHidMini's SXS mode present. The driver derives that form's
+        // input, feature and output handling from the native report.
+        key.SetValue("Ds3Sixaxis", profile.SixaxisCompatible == true ? 1 : 0, RegistryValueKind.DWord);
         if (profile.ProductString != null)
             key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
         if (inputReportLen > 0)

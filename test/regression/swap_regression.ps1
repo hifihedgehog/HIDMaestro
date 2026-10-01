@@ -174,6 +174,8 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\xusb_battery_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\driver_catalog_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\valve_firmware_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\ds4_report_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\ds3_sixaxis_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1461,7 +1463,7 @@ function Scenario-Usbip-Server-Protocol {
 
 function Scenario-Usbip-Bundle-Deploy {
     Invoke-Probe -Dir 'usbip_bundle_check' -Exe 'UsbipBundleCheck.exe' `
-                 -Message 'the bundled transport is missing, its hash no longer matches the upstream release, or the deploy path stopped refusing tampered bytes (see probe stdout)'
+                 -Message 'the bundled transport is missing, its hash no longer matches the pinned SHA-256, or the deploy path stopped refusing tampered bytes (see probe stdout)'
 }
 
 # The only scenario that needs the transport actually deployed. On a
@@ -1681,6 +1683,34 @@ function Scenario-Valve-Firmware {
                  -Message 'Steam''s firmware updater offers the 2026 Steam Controller persona an update (see probe stdout)' -SkipCodes 2
 }
 
+# S63: DualShock 4 input reports against SDL and Linux (issue #64). Each
+# of the five DS4 maps is encoded and read back at the offsets SDL's
+# PS4StatePacket_t and Linux's dualshock4_input_report_common use, with the
+# Bluetooth CRC, battery, touch and sensor timestamp. The live Bluetooth
+# persona is armed with a feature read of 0x02 and its report 0x11 read off
+# the HID stack, then handed to stock SDL3, which must keep reading input
+# after it arms the persona, read 1 g and no rotation at rest, and read a
+# near-zero trigger as released. SKIPs only the SDL part when the sibling
+# SDL3-build/build-stock checkout is absent.
+function Scenario-Ds4-Report {
+    Invoke-Probe -Dir 'ds4_report_check' -Exe 'Ds4ReportCheck.exe' `
+                 -Message 'a DualShock 4 report no longer matches what SDL and Linux read (see probe stdout)' -SkipCodes 2
+}
+
+# S64: the DualShock 3 with pressure-sensitive buttons (PadForge discussion
+# 476). dualshock-3-full presents the form sixaxis.sys and DsHidMini's SXS
+# mode present, which PCSX2 and RPCS3 read pressure from on Windows. The
+# native report is checked against SDL, Linux and RPCS3 offsets; the live
+# persona's joystick report and report 0 feature reply against DsHidMini's
+# conversions; RPCS3's read sequence and output reports; and stock SDL3
+# with PCSX2's sixaxis hint, which must see a PS3 controller with 16 axes
+# and 11 buttons and read every pressure axis. SKIPs only the SDL part when
+# the sibling SDL3-build/build-stock checkout is absent.
+function Scenario-Ds3-Sixaxis {
+    Invoke-Probe -Dir 'ds3_sixaxis_check' -Exe 'Ds3SixaxisCheck.exe' `
+                 -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1747,7 +1777,9 @@ $scenarios = @(
     @{ Name = 'S59_Identity_Battery';            Body = ${function:Scenario-Identity-Battery} },
     @{ Name = 'S60_Xusb_Battery';                Body = ${function:Scenario-Xusb-Battery} },
     @{ Name = 'S61_Driver_Catalog';              Body = ${function:Scenario-Driver-Catalog} },
-    @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} }
+    @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} },
+    @{ Name = 'S63_Ds4_Report';                  Body = ${function:Scenario-Ds4-Report} },
+    @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

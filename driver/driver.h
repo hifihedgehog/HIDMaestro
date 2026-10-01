@@ -95,6 +95,25 @@ typedef struct _DEVICE_CONTEXT {
      * reads this flag instead of rescanning the descriptor per frame. */
     BOOLEAN HasCol2Report;
 
+    /* The profile's connection is Bluetooth (registry value Bluetooth,
+     * written by the SDK from the profile's "connection"). Sony pads end
+     * their Bluetooth feature reports with a CRC-32 that USB forms do not
+     * carry, so the feature stubs append one only when this is set
+     * (issue #64). */
+    BOOLEAN Bluetooth;
+
+    /* A DualShock 3 in the form Sony's sixaxis.sys and DsHidMini's SXS mode
+     * present (registry value Ds3Sixaxis, from the profile's
+     * "sixaxisCompatible"). The SDK sends the native 49-byte DS3 report as
+     * the extended report. The driver keeps the latest one for the report 0
+     * feature reply PCSX2 (through SDL) and RPCS3 poll, derives the 12-byte
+     * joystick input report from it, and folds report 0 output commands into
+     * a native output report body. Ds3Raw and Ds3OutBody are guarded by
+     * InputLock. */
+    BOOLEAN Ds3Sixaxis;
+    UCHAR   Ds3Raw[49];
+    UCHAR   Ds3OutBody[48];
+
     /* Latest raw input report for HID READ_REPORT (native descriptor format) */
     UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
     ULONG   InputReportSize;

@@ -288,13 +288,22 @@ internal static class Program
                   rangeX != 0 && rangeY != 0 && rangeZ != 0,
                   $"x {rangeX}, y {rangeY}, z {rangeZ}");
             Check("gyro speed_2x is non-zero (SDL numerator)", speed2x != 0, $"{speed2x}");
-            // Order-agnostic is what lets one payload serve the USB and
-            // Bluetooth field orders, so it is a property worth asserting
-            // rather than a comment: every plus equal, every minus equal.
-            Check("payload is order-agnostic (USB and BT field orders agree)",
-                  pitchPlus == yawPlus && yawPlus == rollPlus
-                  && pitchMinus == yawMinus && yawMinus == rollMinus,
-                  $"+{pitchPlus} -{pitchMinus}");
+            // SDL_hidapi_ps5.c divides by (plus - minus) with no absolute
+            // value, in this one DualSense order, so every plus must be
+            // positive and every minus negative or that axis turns
+            // backwards. Issue #64 also set the scale to the identity for
+            // 16 per degree/second and 8192 per g, the units consumers
+            // submit: denominator 16 * speed_2x, range_2g 16384.
+            Check("every gyro plus is positive and every minus negative in DualSense order",
+                  pitchPlus > 0 && yawPlus > 0 && rollPlus > 0
+                  && pitchMinus < 0 && yawMinus < 0 && rollMinus < 0,
+                  $"+{pitchPlus}/{yawPlus}/{rollPlus} {pitchMinus}/{yawMinus}/{rollMinus}");
+            Check("gyro denominators equal 16 * speed_2x (16 per degree/second)",
+                  gyroPitch == 16 * speed2x && gyroYaw == 16 * speed2x && gyroRoll == 16 * speed2x,
+                  $"16 * {speed2x} vs {gyroPitch}/{gyroYaw}/{gyroRoll}");
+            Check("accel ranges equal 16384 (8192 per g)",
+                  rangeX == 16384 && rangeY == 16384 && rangeZ == 16384,
+                  $"x {rangeX}, y {rangeY}, z {rangeZ}");
         }
 
         var f09 = cl.ControlIn(0xA1, 0x01, 0x0309, 3, 20);

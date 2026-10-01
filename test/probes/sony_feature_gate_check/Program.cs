@@ -10,7 +10,13 @@
 //
 // Asserts:
 //   - dualsense (VID 054C): GetFeature(0x05) returns the 41-byte DS5
-//     calibration stub (Sony path still fires, no regression).
+//     calibration stub (Sony path still fires, no regression), at the
+//     identity scale for 16 per degree/second and 8192 per g, with no
+//     CRC over USB (issue #64).
+//   - dualsense-bt and dualshock-4-v2-bt: the Bluetooth reports end in the
+//     CRC-32 hid-playstation.c and RPCS3 check (seed 0xA3), and the DS4's
+//     0x05 is in its Bluetooth field order, which DS4Windows reads without
+//     absolute values (issue #64).
 //   - heusinkveld-ultimate-pedals (VID 30B7): a NON-Sony profile whose
 //     descriptor declares Feature report 0x02 (HidClass only forwards a
 //     GetFeature for a report ID the descriptor declares, so the profile
@@ -63,9 +69,9 @@ internal static class Program
     /// PID. Taking the first VID/PID match opened the user's own hardware on
     /// any machine with a DualSense attached, and then every assertion
     /// described that pad rather than the driver: the calibration read came
-    /// back with the pad's real gyro denominators instead of the neutral
-    /// 20000, and 0x09 returned a genuine Sony OUI MAC instead of the
-    /// synthesised locally-administered one. Both were reported as driver
+    /// back with the pad's real gyro denominators instead of the driver's
+    /// 16000, and 0x09 returned a genuine Sony OUI MAC instead of the
+    /// synthesized locally-administered one. Both were reported as driver
     /// failures. Bluetooth-form filtering does not help here, because a
     /// wired pad enumerates under the same USB naming we do.</para>
     ///
@@ -96,15 +102,17 @@ internal static class Program
 
     // A DS4/DS5 stub is exactly N zero bytes with byte[0] == the report ID.
     // Returns true if GetFeature succeeded AND the reply looks like a stub.
-    /// <summary>The neutral calibration driver.c serves at offset 1 of the
-    /// calibration reports (g_SonyCalibration, issue #43). Kept here as a
-    /// literal so this probe fails if the driver's copy ever drifts.</summary>
+    /// <summary>The calibration driver.c serves at offset 1 of the
+    /// calibration reports (g_SonyCalibration, issues #43 and #64): gyro
+    /// +-8000 with speed 500, accel +-8192, the identity for 16 per
+    /// degree/second and 8192 per g. Kept here as a literal so this probe
+    /// fails if the driver's copy ever drifts.</summary>
     static readonly byte[] SonyCalibration =
     {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8,
+        0x40, 0x1F, 0xC0, 0xE0, 0x40, 0x1F, 0xC0, 0xE0, 0x40, 0x1F, 0xC0, 0xE0,
         0xF4, 0x01, 0xF4, 0x01,
-        0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8, 0x10, 0x27, 0xF0, 0xD8,
+        0x00, 0x20, 0x00, 0xE0, 0x00, 0x20, 0x00, 0xE0, 0x00, 0x20, 0x00, 0xE0,
     };
 
     static byte[]? GetFeature(SafeFileHandle h, byte reportId, int len)
@@ -116,17 +124,64 @@ internal static class Program
         return buf;
     }
 
+    /// <summary>The same calibration in a DualShock 4's Bluetooth report
+    /// 0x05 order, pitch+ yaw+ roll+ then pitch- yaw- roll-
+    /// (g_SonyCalibrationDs4Bt, issue #64).</summary>
+    static readonly byte[] SonyCalibrationDs4Bt =
+    {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x40, 0x1F, 0x40, 0x1F, 0x40, 0x1F, 0xC0, 0xE0, 0xC0, 0xE0, 0xC0, 0xE0,
+        0xF4, 0x01, 0xF4, 0x01,
+        0x00, 0x20, 0x00, 0xE0, 0x00, 0x20, 0x00, 0xE0, 0x00, 0x20, 0x00, 0xE0,
+    };
+
     /// <summary>True when the report carries the Sony calibration payload.
     /// This replaced a zero-fill check: the payload used to be all zeros,
     /// which is exactly the defect #43 fixed, so "looks like our stub" can
     /// no longer mean "is empty".</summary>
     static bool IsSonyCalibration(SafeFileHandle h, byte reportId, int len)
+        => Carries(GetFeature(h, reportId, len), SonyCalibration);
+
+    static bool Carries(byte[]? buf, byte[] payload)
     {
-        var buf = GetFeature(h, reportId, len);
         if (buf == null) return false;
-        for (int i = 0; i < SonyCalibration.Length; i++)
-            if (buf[1 + i] != SonyCalibration[i]) return false;
+        for (int i = 0; i < payload.Length; i++)
+            if (buf[1 + i] != payload[i]) return false;
         return true;
+    }
+
+    // CRC-32, reflected polynomial 0xEDB88320, written out here rather than
+    // shared with the driver so a wrong driver table cannot agree with
+    // itself.
+    static readonly uint[] s_crcTable = BuildCrcTable();
+    static uint[] BuildCrcTable()
+    {
+        var t = new uint[256];
+        for (uint n = 0; n < 256; n++)
+        {
+            uint c = n;
+            for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[n] = c;
+        }
+        return t;
+    }
+
+    /// <summary>True when the last four bytes of a <paramref name="size"/>
+    /// byte feature report hold the CRC-32 of 0xA3 followed by the bytes
+    /// before them: the check hid-playstation.c ps_get_report applies over
+    /// Bluetooth (PS_FEATURE_CRC32_SEED) and RPCS3's GetCalibrationData
+    /// applies (btHdr 0xA3).</summary>
+    static bool FeatureCrcValid(byte[]? buf, int size, out string detail)
+    {
+        detail = "read failed";
+        if (buf == null || buf.Length < size) return false;
+        uint c = 0xFFFFFFFFu;
+        c = s_crcTable[(c ^ 0xA3) & 0xFF] ^ (c >> 8);
+        for (int i = 0; i < size - 4; i++) c = s_crcTable[(c ^ buf[i]) & 0xFF] ^ (c >> 8);
+        c = ~c;
+        uint got = (uint)(buf[size - 4] | (buf[size - 3] << 8) | (buf[size - 2] << 16) | (buf[size - 1] << 24));
+        detail = $"computed 0x{c:X8}, report 0x{got:X8}";
+        return c == got;
     }
 
     static int Main()
@@ -155,7 +210,7 @@ internal static class Program
             Check("dualsense HID opens", h != null);
             if (h != null)
             {
-                Check("dualsense GetFeature(0x05) carries the neutral calibration (Sony path intact)",
+                Check("dualsense GetFeature(0x05) carries the identity calibration (Sony path intact)",
                     IsSonyCalibration(h, 0x05, 41));
 
                 // The whole point of #43: a zero denominator makes SDL's
@@ -180,6 +235,22 @@ internal static class Program
                     Check("driver-lane accel ranges non-zero", rx != 0 && ry != 0 && rz != 0,
                           $"x {rx}, y {ry}, z {rz}");
                     Check("driver-lane speed_2x non-zero", speed2x != 0, $"{speed2x}");
+
+                    // Issue #64: identity for the units consumers submit,
+                    // 16 per degree/second and 8192 per g. SDL and
+                    // hid-playstation.c scale a gyro axis by
+                    // speed_2x * 16 / denominator and an accel axis by
+                    // 16384 / range_2g, so both ratios must be exactly 1.
+                    Check("gyro denominators equal 16 * speed_2x (16 per degree/second)",
+                          gPitch == 16 * speed2x && gYaw == 16 * speed2x && gRoll == 16 * speed2x,
+                          $"16 * {speed2x} vs {gPitch}/{gYaw}/{gRoll}");
+                    Check("accel ranges equal 16384 (8192 per g)",
+                          rx == 16384 && ry == 16384 && rz == 16384, $"x {rx}, y {ry}, z {rz}");
+                    // A USB report carries no CRC, so nothing may be
+                    // written past the payload.
+                    Check("USB 0x05 carries no Bluetooth CRC (bytes 35..40 zero)",
+                          c.Skip(35).Take(6).All(b => b == 0),
+                          string.Join(" ", c.Skip(35).Take(6).Select(b => b.ToString("X2"))));
                 }
 
                 var pair = GetFeature(h, 0x09, 20);
@@ -327,6 +398,70 @@ internal static class Program
             Check("base dualsense keeps updateVersion 0x0630",
                   fw != null && (fw[44] | (fw[45] << 8)) == 0x0630,
                   fw == null ? "read failed" : $"0x{fw[44] | (fw[45] << 8):X4}");
+        }
+
+        // Bluetooth personas (issue #64). Over Bluetooth a Sony pad ends
+        // its feature reports with a CRC-32 seeded with 0xA3, and
+        // hid-playstation.c checks it on 0x05 for both pads and on 0x09 and
+        // 0x20 for the DualSense. RPCS3 closes a pad whose calibration
+        // fails it. A DS4 lays out its Bluetooth calibration as pitch+ yaw+
+        // roll+ pitch- yaw- roll-, and DS4Windows reads it in that order
+        // without absolute values.
+        var dsBt = ctx.GetProfile("dualsense-bt")!;
+        SnapshotPreexistingHid(dsBt.VendorId, dsBt.ProductId);
+        using (var btCtrl = ctx.CreateController(dsBt))
+        using (var h = Open(dsBt.VendorId, dsBt.ProductId))
+        {
+            Check("dualsense-bt HID opens", h != null);
+            if (h != null)
+            {
+                var c05 = GetFeature(h, 0x05, 41);
+                Check("dualsense-bt 0x05 carries the DualSense-order calibration",
+                      Carries(c05, SonyCalibration));
+                Check("dualsense-bt 0x05 ends in a valid Bluetooth CRC",
+                      FeatureCrcValid(c05, 41, out string d05), d05);
+                var c09 = GetFeature(h, 0x09, 20);
+                Check("dualsense-bt 0x09 ends in a valid Bluetooth CRC",
+                      FeatureCrcValid(c09, 20, out string d09), d09);
+                Check("dualsense-bt 0x09 still carries the locally administered MAC",
+                      c09 != null && (c09[1] & 0x02) != 0 && c09[2] == 0x48 && c09[3] == 0x4D);
+                var c20 = GetFeature(h, 0x20, 64);
+                Check("dualsense-bt 0x20 ends in a valid Bluetooth CRC",
+                      FeatureCrcValid(c20, 64, out string d20), d20);
+                Check("dualsense-bt 0x20 keeps the firmware fields (version 0x0630 at 44)",
+                      c20 != null && (c20[44] | (c20[45] << 8)) == 0x0630 && (c20[20] | (c20[21] << 8)) == 3);
+            }
+        }
+
+        var ds4Bt = ctx.GetProfile("dualshock-4-v2-bt")!;
+        SnapshotPreexistingHid(ds4Bt.VendorId, ds4Bt.ProductId);
+        using (var d4BtCtrl = ctx.CreateController(ds4Bt))
+        using (var h = Open(ds4Bt.VendorId, ds4Bt.ProductId))
+        {
+            Check("dualshock-4-v2-bt HID opens", h != null);
+            if (h != null)
+            {
+                var c05 = GetFeature(h, 0x05, 41);
+                Check("dualshock-4-v2-bt 0x05 carries the DS4 Bluetooth-order calibration",
+                      Carries(c05, SonyCalibrationDs4Bt));
+                Check("dualshock-4-v2-bt 0x05 ends in a valid Bluetooth CRC",
+                      FeatureCrcValid(c05, 41, out string d05), d05);
+                if (c05 != null)
+                {
+                    // DS4SixAxis.setCalibrationData, useAltGyroCalib false:
+                    // plus at 7/9/11, minus at 13/15/17, denominator
+                    // plus - minus with no absolute value. Each must be
+                    // positive or that axis turns backwards.
+                    short LE(int o) => (short)(c05[o] | (c05[o + 1] << 8));
+                    int pitch = LE(7) - LE(13), yaw = LE(9) - LE(15), roll = LE(11) - LE(17);
+                    Check("DS4Windows' Bluetooth read gives positive denominators on every gyro axis",
+                          pitch > 0 && yaw > 0 && roll > 0, $"pitch {pitch}, yaw {yaw}, roll {roll}");
+                }
+                // SDL reads 0x02 first to switch the pad to report 0x11 and
+                // needs at least 35 bytes. The payload stays in the USB order.
+                Check("dualshock-4-v2-bt 0x02 still answers with the USB-order calibration",
+                      IsSonyCalibration(h, 0x02, 41));
+            }
         }
 
         // Non-Sony profile that DECLARES feature 0x02 must NOT get the

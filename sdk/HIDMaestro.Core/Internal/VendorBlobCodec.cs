@@ -39,6 +39,26 @@ internal static class VendorBlobCodec
         /// <summary>Wider counters, for a format whose packet number is 32
         /// bits (Valve's state packets).</summary>
         public Dictionary<string, uint> RollingCounters32 { get; } = new();
+
+        private long _clockOrigin;
+
+        /// <summary>Issue #64. The sensor time for this report in 1/3 µs
+        /// ticks: the consumer's own <see cref="HMGamepadState.SensorTimestamp"/>
+        /// when it sets one, otherwise the time since this controller's
+        /// first report. A real pad stamps every report, and SDL, Linux and
+        /// DS4Windows all take the motion interval from the difference
+        /// between stamps, so a stamp that never moves reads as no time
+        /// passing.</summary>
+        public uint SensorTicks(uint consumerTicks)
+        {
+            if (consumerTicks != 0) return consumerTicks;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_clockOrigin == 0) _clockOrigin = now;
+            // 3 ticks per microsecond, wrapping at 32 bits like the
+            // consumer's value does.
+            double us = (now - _clockOrigin) * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+            return unchecked((uint)(ulong)(us * 3.0));
+        }
     }
 
     // ── Input encoder: HMGamepadState → bytes ─────────────────────────────
@@ -144,7 +164,67 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.U8Const:
                 {
                     if (f.B < 0) break;
-                    buffer[f.B] = f.Initial;
+                    buffer[f.B] = f.Source == VendorBlobProgram.SrcOp.TouchpadPacketCounter
+                        ? state.TouchpadPacketCounter : f.Initial;
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U16:
+                {
+                    // Issue #64: the DualShock 4 sensor timestamp, little
+                    // endian in 16/3 µs ticks (SDL_hidapi_ps4.c "Sensor
+                    // timestamp is in 5.33us units", hid-playstation.c
+                    // dualshock4_input_report_common.sensor_timestamp).
+                    // Divisor 16 turns the SDK's 1/3 µs ticks into those, and
+                    // because 2^32 / 16 is a multiple of 2^16 the 16-bit
+                    // value still wraps cleanly when the 32-bit source does.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    uint u16 = f.Source == VendorBlobProgram.SrcOp.SensorTimestamp
+                        ? encState.SensorTicks(state.SensorTimestamp) / f.Divisor : 0u;
+                    buffer[f.B]     = (byte)(u16 & 0xFF);
+                    buffer[f.B + 1] = (byte)((u16 >> 8) & 0xFF);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U8Pressure:
+                {
+                    if (f.B < 0 || (uint)f.B >= (uint)buffer.Length) break;
+                    buffer[f.B] = Pressure(f.Source, in state);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.U10BE:
+                {
+                    // A DualShock 3 motion sensor: 10 bits around a center,
+                    // most significant byte first (hid-sony.c sixaxis_raw_event
+                    // "MSByte first", SDL_hidapi_ps3.c ScaleAccel's
+                    // SDL_Swap16BE). The SDK's fields are rescaled from their
+                    // own resolution to the wire's and clamped to 0..1023.
+                    if (f.B < 0 || f.B + 1 >= buffer.Length) break;
+                    int src = f.Source switch
+                    {
+                        VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
+                        VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
+                        VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
+                        VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
+                        VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
+                        VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
+                        _ => 0,
+                    };
+                    int delta = (int)Math.Round((double)src * f.Resolution / f.SourceResolution,
+                                                MidpointRounding.AwayFromZero);
+                    int v10 = Math.Clamp(f.Invert ? f.Center - delta : f.Center + delta, 0, 1023);
+                    buffer[f.B]     = (byte)((v10 >> 8) & 0xFF);
+                    buffer[f.B + 1] = (byte)(v10 & 0xFF);
+                    break;
+                }
+                case VendorBlobProgram.FieldOp.Ds3Battery:
+                {
+                    // 0xEE charging and 0xEF charged on the cable, otherwise a
+                    // level 0..5 that hid-sony.c reads as 0, 1, 25, 50, 75 and
+                    // 100% (sixaxis_battery_capacity) and RPCS3 reads the same
+                    // way (ds3_pad_handler.cpp get_data).
+                    if (f.B < 0 || (uint)f.B >= (uint)buffer.Length) break;
+                    buffer[f.B] = state.BatteryFull ? (byte)0xEF
+                                : state.BatteryCharging ? (byte)0xEE
+                                : Ds3BatteryLevel[Math.Min((int)state.BatteryLevel, 10)];
                     break;
                 }
                 case VendorBlobProgram.FieldOp.I16:
@@ -345,6 +425,7 @@ internal static class VendorBlobCodec
                             VendorBlobProgram.FlagFull       => state.BatteryFull,
                             VendorBlobProgram.FlagMic        => state.MicMuted,
                             VendorBlobProgram.FlagHeadphones => state.HeadphonesConnected,
+                            VendorBlobProgram.FlagCable      => state.BatteryCharging || state.BatteryFull,
                             _ => false,
                         };
                         if (bit) packed |= (byte)(1 << (f.BitLo + i));
@@ -360,7 +441,8 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || (uint)f.B >= (uint)buffer.Length) break;
                     int width = f.BitHi - f.BitLo + 1;
                     byte mask = (byte)(((1 << width) - 1) << f.BitLo);
-                    byte v = (byte)(state.BatteryLevel & ((1 << width) - 1));
+                    int level = f.FullValue >= 0 && state.BatteryFull ? f.FullValue : state.BatteryLevel;
+                    byte v = (byte)(level & ((1 << width) - 1));
                     buffer[f.B] = (byte)((buffer[f.B] & ~mask) | ((v << f.BitLo) & mask));
                     break;
                 }
@@ -400,11 +482,19 @@ internal static class VendorBlobCodec
                         // both of their components, which is what the wire
                         // format expects and what SDL reconstructs a hat
                         // from on the other side.
+                        // The trigger bits follow the 8-bit analog value
+                        // (issue #64): set exactly when it is nonzero, the
+                        // rule DS4Windows applies to its own virtual DS4
+                        // (ControlService.cs "cState.L2Btn = cState.L2 > 0").
+                        // SDL's PS4 and PS5 drivers read a set bit over a
+                        // zero trigger byte as a full pull, which a bare
+                        // "above zero" test produced for any value under
+                        // half of the first step.
                         var h = state.Hat;
                         bool on = bits switch
                         {
-                            VendorBlobProgram.ButtonLtDigital => leftTrigger > 0f,
-                            VendorBlobProgram.ButtonRtDigital => rightTrigger > 0f,
+                            VendorBlobProgram.ButtonLtDigital => TriggerByte(leftTrigger) > 0,
+                            VendorBlobProgram.ButtonRtDigital => TriggerByte(rightTrigger) > 0,
                             VendorBlobProgram.ButtonDpadUp    => h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
                             VendorBlobProgram.ButtonDpadDown  => h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
                             VendorBlobProgram.ButtonDpadLeft  => h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
@@ -729,6 +819,38 @@ internal static class VendorBlobCodec
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>The 8-bit value a <c>uint8-trigger</c> field writes for
+    /// <paramref name="v"/>, by the same arithmetic.</summary>
+    private static int TriggerByte(float v) => (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
+
+    /// <summary>A pressure-sensitive button's byte: the consumer's pressure
+    /// when it sets one, otherwise 255 while the button is pressed and 0
+    /// while it is not, so digital-only state still presses fully.</summary>
+    private static byte Pressure(VendorBlobProgram.SrcOp source, in HMGamepadState s)
+    {
+        var h = s.Hat;
+        (byte p, bool down) = source switch
+        {
+            VendorBlobProgram.SrcOp.PressureA           => (s.PressureA, (s.Buttons & HMButton.A) != 0),
+            VendorBlobProgram.SrcOp.PressureB           => (s.PressureB, (s.Buttons & HMButton.B) != 0),
+            VendorBlobProgram.SrcOp.PressureX           => (s.PressureX, (s.Buttons & HMButton.X) != 0),
+            VendorBlobProgram.SrcOp.PressureY           => (s.PressureY, (s.Buttons & HMButton.Y) != 0),
+            VendorBlobProgram.SrcOp.PressureLeftBumper  => (s.PressureLeftBumper, (s.Buttons & HMButton.LeftBumper) != 0),
+            VendorBlobProgram.SrcOp.PressureRightBumper => (s.PressureRightBumper, (s.Buttons & HMButton.RightBumper) != 0),
+            VendorBlobProgram.SrcOp.PressureDpadUp      => (s.PressureDpadUp, h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest),
+            VendorBlobProgram.SrcOp.PressureDpadRight   => (s.PressureDpadRight, h is HMHat.East or HMHat.NorthEast or HMHat.SouthEast),
+            VendorBlobProgram.SrcOp.PressureDpadDown    => (s.PressureDpadDown, h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest),
+            VendorBlobProgram.SrcOp.PressureDpadLeft    => (s.PressureDpadLeft, h is HMHat.West or HMHat.NorthWest or HMHat.SouthWest),
+            _ => ((byte)0, false),
+        };
+        return p != 0 ? p : down ? (byte)255 : (byte)0;
+    }
+
+    /// <summary>DualShock 3 battery level for each 0..10 level: the level
+    /// whose hid-sony.c capacity (0, 1, 25, 50, 75, 100%) is nearest the
+    /// level's midpoint, 10 x level + 5%.</summary>
+    private static readonly byte[] Ds3BatteryLevel = { 1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 5 };
 
     // CRC-32/ISO-HDLC, polynomial 0xEDB88320 (matches Sony BT, dualsense-tester,
     // ds4drv, hidapi, OpenRGB SonyDualSenseController, PadForge Ds5RawHidWriter).

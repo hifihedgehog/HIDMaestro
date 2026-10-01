@@ -69,6 +69,17 @@ public sealed class ControllerProfile
     [JsonPropertyName("versionNumber")]
     public ushort? VersionNumber { get; set; }
 
+    /// <summary>v1.10.0 (PadForge discussion 476): a DualShock 3 presented
+    /// the way Sony's sixaxis.sys and DsHidMini's SXS mode present one, which
+    /// is what PCSX2 (SDL_HINT_JOYSTICK_HIDAPI_PS3_SIXAXIS_DRIVER) and RPCS3
+    /// read on Windows. The profile's extendedReport is the native 49-byte
+    /// DualShock 3 report. The driver serves it as the report 0 feature
+    /// reply, derives the 12-byte joystick input report from it, and folds
+    /// report 0 output commands into the native output report it hands the
+    /// SDK.</summary>
+    [JsonPropertyName("sixaxisCompatible")]
+    public bool? SixaxisCompatible { get; set; }
+
     /// <summary>v1.3.5: fixed bytes the SDK overlays into the legacy input
     /// report after the descriptor-driven encoder fills it. Each entry is
     /// <c>{ "byte": N, "value": V }</c> and writes byte V at on-wire offset N.
@@ -606,6 +617,40 @@ public sealed class FieldSpec
     /// doesn't match that pattern, hence the explicit setting.</summary>
     [JsonPropertyName("stride")]
     public int? Stride { get; set; }
+
+    /// <summary>Issue #64: for a <c>uint16-le</c> sensor timestamp, how many
+    /// <see cref="HMGamepadState.SensorTimestamp"/> ticks (1/3 µs) make one
+    /// wire tick. A DualShock 4 counts in 16/3 µs, so its profiles set 16.
+    /// Default 1.</summary>
+    [JsonPropertyName("divisor")]
+    public int? Divisor { get; set; }
+
+    /// <summary>Issue #64: for a <c>uint8-battery</c> field, the value the
+    /// level bits carry while <see cref="HMGamepadState.BatteryFull"/> is
+    /// set, in place of the 0..10 level. A DualShock 4 on a cable reports
+    /// 11 when charged (Linux hid-playstation DS4_BATTERY_STATUS_FULL, SDL's
+    /// SDL_POWERSTATE_CHARGED branch). Unset leaves the level as is.</summary>
+    [JsonPropertyName("fullValue")]
+    public int? FullValue { get; set; }
+
+    /// <summary>v1.10.0: for a <c>uint10-be</c> sensor field, the wire
+    /// counts per unit. A DualShock 3 reads 113 per g (hid-sony.c
+    /// SIXAXIS_ACC_RES_PER_G) and 123 per 90 degrees/second (RPCS3
+    /// ds4_pad_handler.cpp, "The ds3 resolution is 123/90°/sec").</summary>
+    [JsonPropertyName("resolution")]
+    public int? Resolution { get; set; }
+
+    /// <summary>v1.10.0: for a <c>uint10-be</c> sensor field, the source's
+    /// counts per the same unit: 8192 per g for the SDK's accelerometer
+    /// fields and 1440 per 90 degrees/second for its gyro fields, which
+    /// carry 16 per degree/second.</summary>
+    [JsonPropertyName("sourceResolution")]
+    public int? SourceResolution { get; set; }
+
+    /// <summary>v1.10.0: for a <c>uint10-be</c> sensor field, true when the
+    /// wire axis points opposite to the SDK's.</summary>
+    [JsonPropertyName("invert")]
+    public bool? Invert { get; set; }
 }
 
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is
