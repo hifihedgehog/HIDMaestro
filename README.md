@@ -280,7 +280,7 @@ The same machinery answers a different problem. The plain `steam-deck` and `stea
 
 `steam-controller-2` (28DE:1302) is the 2026 controller, the one SDL calls Triton. One HID interface addressing everything by report id, with the 372-byte descriptor and the attribute values Steam validates taken from two independent reads of real hardware. The one exception is the firmware build: with Steam installed it reports the build Steam's own updater ships, as a real unit does once it takes that update, so Steam never offers the persona an update it cannot install. Its frame is the 54-byte `TritonMTUFull_t` on report `0x42`.
 
-All three answer the `GET_REPORT` interrogation Steam performs before it will claim a device, and all three are verified end to end by battery scenarios S51 and S52: S51 pins descriptors, endpoints and feature answers with no device; S52 creates each persona, drives it through `SubmitState`, and reads the frame back off the real HID stack to confirm input reaches a consumer.
+All three answer the `GET_REPORT` interrogation Steam performs before it will claim a device. Like the hardware, each reports on its own clock whether or not the consumer has anything new to send: every 4 ms for the Deck and the 2026 controller, every 8 ms for the 2015 one. While the consumer is quiet, the persona repeats the consumer's last frame. All three are verified end to end by battery scenarios S51 and S52: S51 pins descriptors, endpoints and feature answers with no device; S52 creates each persona, drives it through `SubmitState` and through raw reports, reads the frames back off the real HID stack, and measures that clock.
 
 ## Virtual VR controllers
 

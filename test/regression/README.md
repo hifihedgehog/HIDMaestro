@@ -102,7 +102,7 @@ not run elevated.
 | `S49_Sony_Extra_Buttons`          | Sony extra-button wire placement | Mic mute (0x04) and the Edge paddles and Fn buttons (0x10-0x80) stay where they belong. |
 | `S50_Vr_Controller_Smoke`         | The OpenVR controller subsystem, live SteamVR | IPC protocol parity between the C# and C++ mirrors, driver registration, enumeration, hand roles, haptics. |
 | `S51_Valve_Personas`              | Valve persona descriptors, no device | Descriptor sets, endpoints, declared report ids and the feature stubs Steam interrogates. |
-| `S52_Valve_Wire`                  | Valve personas emitting input | Each persona still puts correct frames on the wire. |
+| `S52_Valve_Wire`                  | Valve personas emitting input | Each persona still puts correct frames on the wire, reports at its declared idle cadence, and carries only a raw consumer's own frames. |
 | `S53_Valve_Sdl`                   | Stock SDL reading a Valve persona | Enumeration, the Valve driver binding, sticks, triggers and buttons. |
 | `S54_Valve_Steam`                 | The Steam client claiming a Valve persona | Steam claims it, classifies it as the right model, and keeps it. |
 | `S55_Valve_Multi`                 | Three Valve models at once, and two of one | Personas coexist, and the per-instance identity holds. |

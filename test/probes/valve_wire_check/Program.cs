@@ -5,6 +5,10 @@
 // frame back off the real HID stack and assert the bytes land where that
 // device's wire format says they do.
 //
+// Then the idle stream: with no consumer submitting, the persona must keep
+// reporting at the interval its profile declares, and a consumer that feeds
+// raw frames, as PadForge does, must be the only source on the wire.
+//
 // This touches nothing outside the device: no window, no cursor, no keys.
 //
 // Exit 0 when every persona's frame is correct.
@@ -117,6 +121,41 @@ static class Program
             return null;
         }
         finally { stop.Set(); Thread.Sleep(40); CloseHandle(h); }
+    }
+
+    /// <summary>Every report the interface delivers for <paramref name="ms"/>
+    /// milliseconds, with its arrival time, read by a blocking reader the way
+    /// SDL's HIDAPI thread reads. Closing the handle ends the reader.</summary>
+    static List<(double T, byte[] F)> Collect(string path, int inLen, int ms)
+    {
+        var got = new List<(double T, byte[] F)>();
+        IntPtr h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
+                               IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (h == INVALID) return got;
+        HidD_FlushQueue(h);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var reader = new Thread(() =>
+        {
+            var buf = new byte[inLen];
+            while (ReadFile(h, buf, buf.Length, out int n, IntPtr.Zero) && n > 0)
+                lock (got) got.Add((sw.Elapsed.TotalMilliseconds, (byte[])buf.Clone()));
+        }) { IsBackground = true };
+        reader.Start();
+        Thread.Sleep(ms);
+        CloseHandle(h);
+        reader.Join(500);
+        lock (got) return got.FindAll(r => r.T <= ms);
+    }
+
+    /// <summary>Reports per second, and the 90th-percentile gap between
+    /// consecutive reports in milliseconds.</summary>
+    static (double PerSec, double P90) Cadence(List<(double T, byte[] F)> r, int ms)
+    {
+        var gaps = new List<double>();
+        for (int i = 1; i < r.Count; i++) gaps.Add(r[i].T - r[i - 1].T);
+        gaps.Sort();
+        double p90 = gaps.Count == 0 ? double.MaxValue : gaps[(int)(0.9 * (gaps.Count - 1))];
+        return (r.Count * 1000.0 / ms, p90);
     }
 
     static short S16(byte[] f, int o) => (short)(f[o] | (f[o + 1] << 8));
@@ -293,16 +332,20 @@ static class Program
         // ValveControllerStatePacket_t likewise, TritonMTUFull_t at byte 1.
         // PressL of -1 means the device carries no pressure field (the 2015
         // controller derives it from the finger-down and click bits).
+        // IdleMs is each profile's extendedReport.idleFrameIntervalMs. OwnId
+        // marks the frame that carries its own report id, which a raw
+        // consumer sends through SubmitRawExtendedReport.
         var cases = new (string Id, ushort Vid, ushort Pid, int Len, byte[] Head, int Lsx, int TrigR,
                          int Btn, int BtnBytes, int TouchL, int TouchR,
-                         int LPad, int RPad, int PressL, int PressR, int Accel, int Gyro)[]
+                         int LPad, int RPad, int PressL, int PressR, int Accel, int Gyro,
+                         int IdleMs, bool OwnId)[]
         {
             ("steam-deck-composite",       0x28DE, 0x1205, 65, new byte[]{0x01,0x00,0x09,0x40}, 48, 46,
-             8, 8, 19, 20, 16, 20, 56, 58, 24, 30),
+             8, 8, 19, 20, 16, 20, 56, 58, 24, 30, 4, false),
             ("steam-controller-composite", 0x28DE, 0x1102, 65, new byte[]{0x01,0x00,0x01,0x3C}, 16, 26,
-             8, 8, 19, 20, 16, 20, -1, -1, 28, 34),
+             8, 8, 19, 20, 16, 20, -1, -1, 28, 34, 8, false),
             ("steam-controller-2",         0x28DE, 0x1302, 54, new byte[]{0x42},                10,  8,
-             2, 4, 25, 21, 18, 24, 22, 28, 34, 40),
+             2, 4, 25, 21, 18, 24, 22, 28, 34, 40, 4, true),
         };
 
         foreach (var t in cases)
@@ -454,6 +497,70 @@ static class Program
                               (b4 & (1UL << t.TouchL)) == 0 && (b4 & (1UL << t.TouchR)) == 0);
                     }
                 }
+
+                // Idle streaming (issue #56). With no consumer submitting, the
+                // persona keeps reporting at the interval its profile
+                // declares, the real device's own rate. SDL's Deck driver
+                // reads once with a 16 ms timeout before it accepts a Deck
+                // (SDL_hidapi_steamdeck.c, HIDAPI_DriverSteamDeck_InitDevice),
+                // so a persona held to the 15.6 ms system tick can be passed
+                // over.
+                double want = 1000.0 / t.IdleMs;
+                Thread.Sleep(300);
+                var (idleRate, idleP90) = Cadence(Collect(path, inLen, 1000), 1000);
+                Check($"idle frames keep the declared {t.IdleMs} ms cadence",
+                      idleRate >= 0.8 * want && idleP90 <= 2.0 * t.IdleMs,
+                      $"{idleRate:F0}/s, p90 gap {idleP90:F1} ms, declared {want:F0}/s");
+
+                // A raw consumer is the only source on the wire. PadForge
+                // feeds Valve personas only through SubmitRawReport, so an
+                // idle repeat of any state of the SDK's own would put a
+                // released pad between the consumer's frames.
+                int frameLen = t.OwnId ? t.Len : t.Len - 1;
+                var rawFrame = new byte[frameLen];
+                Array.Copy(t.Head, rawFrame, t.Head.Length);
+                int mark = frameLen - 4;
+                rawFrame[mark] = 0xA5; rawFrame[mark + 1] = 0x5A;
+                rawFrame[mark + 2] = 0xC3; rawFrame[mark + 3] = 0x3C;
+                bool Ours(byte[] r)
+                {
+                    int o = t.OwnId ? mark : mark + 1;
+                    return r[o] == 0xA5 && r[o + 1] == 0x5A && r[o + 2] == 0xC3 && r[o + 3] == 0x3C;
+                }
+                using (var feedStop = new ManualResetEventSlim(false))
+                {
+                    var feeder = new Thread(() =>
+                    {
+                        try
+                        {
+                            while (!feedStop.IsSet)
+                            {
+                                if (t.OwnId) c.SubmitRawExtendedReport(rawFrame);
+                                else c.SubmitRawReport(rawFrame);
+                                feedStop.Wait(4);
+                            }
+                        }
+                        catch (ObjectDisposedException) { }
+                    }) { IsBackground = true };
+                    feeder.Start();
+                    Thread.Sleep(200);
+                    var fed = Collect(path, inLen, 1000);
+                    int foreign = fed.FindAll(r => !Ours(r.F)).Count;
+                    Check("a raw consumer's frames are the only frames on the wire",
+                          fed.Count > 0 && foreign == 0, $"{fed.Count - foreign} ours, {foreign} not");
+                    feedStop.Set();
+                    feeder.Join(500);
+                }
+
+                // Once the raw consumer goes quiet, its own last frame keeps
+                // the stream up at the declared cadence.
+                Thread.Sleep(100);
+                var quiet = Collect(path, inLen, 500);
+                var (quietRate, _) = Cadence(quiet, 500);
+                int quietForeign = quiet.FindAll(r => !Ours(r.F)).Count;
+                Check("a quiet raw consumer's own frame repeats at the declared cadence",
+                      quietRate >= 0.8 * want && quietForeign == 0,
+                      $"{quietRate:F0}/s, {quietForeign} foreign");
 
                 if (System.Diagnostics.Process.GetProcessesByName("steam").Length > 0)
                     Check("Steam claims the device (fresh entry in controller.txt)",

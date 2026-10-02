@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading;
 using HIDMaestro.Internal;
 
@@ -165,10 +166,22 @@ public sealed class HMController : IDisposable
 
     // Idle streaming (issue #56). A device that only writes on change is
     // invisible to any consumer that probes it before touching it, and
-    // Valve's drivers do exactly that. These hold the last state so the
-    // pump can re-publish it at the profile's declared cadence.
+    // Valve's drivers do exactly that. These hold the consumer's last frame
+    // so the pump can re-publish it at the profile's declared cadence.
+    //
+    // Every submit path records its frame under _submitLock, and the pump
+    // repeats under the same lock. A raw consumer's frame is repeated as
+    // its own bytes, never as a default state, and a repeat can never
+    // interleave its shared-section write with a consumer's.
+    // _lastSubmitTimestamp is Stopwatch ticks: Environment.TickCount64
+    // moves in 15.6 ms steps, too coarse for a 4 ms cadence.
+    private readonly object _submitLock = new();
     private HMGamepadState _lastSubmitted;
-    private long _lastSubmitTicks;
+    private long _lastSubmitTimestamp;
+    private bool _lastSubmitWasRaw;
+    private bool _lastRawWasExtended;
+    private byte[]? _lastRawFrame;
+    private int _lastRawLength;
     private Thread? _idleThread;
     private readonly CancellationTokenSource _idleCts = new();
 
@@ -448,6 +461,9 @@ public sealed class HMController : IDisposable
             {
                 IsBackground = true,
                 Name = $"HMIdleFrames_{index}",
+                // The same priority as the USB/IP input pump that carries
+                // these frames to the wire.
+                Priority = ThreadPriority.AboveNormal,
             };
             _idleThread.Start();
         }
@@ -537,15 +553,29 @@ public sealed class HMController : IDisposable
     {
         ThrowIfDisposed();
 
-        // Remembered for the idle pump, and the timestamp is what
-        // keeps the pump from competing with a live consumer.
-        if (_idleThread != null)
+        if (_idleThread == null)
         {
-            _lastSubmitted = state;
-            Interlocked.Exchange(ref _lastSubmitTicks, Environment.TickCount64);
+            SubmitStateCore(in state);
+            return;
         }
 
-        long startTicks = OnSubmitLatencyMicros != null
+        // Remembered for the idle pump, and the timestamp is what
+        // keeps the pump from competing with a live consumer.
+        lock (_submitLock)
+        {
+            SubmitStateCore(in state);
+            _lastSubmitted = state;
+            _lastSubmitWasRaw = false;
+            Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+    }
+
+    private void SubmitStateCore(in HMGamepadState state, bool consumerCall = true)
+    {
+        // The latency hook times the caller's own submits, so an idle repeat
+        // leaves it alone and never runs consumer code under _submitLock.
+        var latency = consumerCall ? OnSubmitLatencyMicros : null;
+        long startTicks = latency != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
         // v1.3.9: single unified state.Axes dict drives every analog input.
@@ -606,10 +636,10 @@ public sealed class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo,
                 _switchBodyBuffer!, SwitchProPacker.BodySize, null);
 
-            if (OnSubmitLatencyMicros != null)
+            if (latency != null)
             {
                 long swElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-                OnSubmitLatencyMicros(swElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
+                latency(swElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
             }
             return;
         }
@@ -792,11 +822,11 @@ public sealed class HMController : IDisposable
                 companionEvent: _companionInputEvent);
         }
 
-        if (OnSubmitLatencyMicros != null)
+        if (latency != null)
         {
             long elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
             long micros = elapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
-            OnSubmitLatencyMicros(micros);
+            latency(micros);
         }
     }
 
@@ -836,6 +866,20 @@ public sealed class HMController : IDisposable
                 $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
                 nameof(report));
 
+        if (_idleThread == null)
+        {
+            SubmitRawReportCore(report);
+            return;
+        }
+        lock (_submitLock)
+        {
+            SubmitRawReportCore(report);
+            RememberRawFrame(report, extended: false);
+        }
+    }
+
+    private void SubmitRawReportCore(ReadOnlySpan<byte> report)
+    {
         // v1.3.0: copy into the per-controller reusable buffer instead of
         // report.ToArray()'ing per call. Vendor-protocol consumers (PadForge
         // DualSense path, etc.) hit this path at the same rate as
@@ -914,6 +958,34 @@ public sealed class HMController : IDisposable
             throw new ArgumentException(
                 $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
                 nameof(report));
+
+        if (_idleThread == null)
+        {
+            SubmitRawExtendedReportCore(report);
+            return;
+        }
+        lock (_submitLock)
+        {
+            SubmitRawExtendedReportCore(report);
+            RememberRawFrame(report, extended: true);
+        }
+    }
+
+    /// <summary>Keep a raw consumer's frame for the idle pump, which repeats
+    /// it through the same path, byte for byte. Called under
+    /// <see cref="_submitLock"/> once the frame has gone out.</summary>
+    private void RememberRawFrame(ReadOnlySpan<byte> report, bool extended)
+    {
+        _lastRawFrame ??= new byte[SharedMemoryIO.DATA_CAPACITY];
+        report.CopyTo(_lastRawFrame);
+        _lastRawLength = report.Length;
+        _lastRawWasExtended = extended;
+        _lastSubmitWasRaw = true;
+        Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+    }
+
+    private void SubmitRawExtendedReportCore(ReadOnlySpan<byte> report)
+    {
         report.CopyTo(_rawReportBuffer.AsSpan());
         SharedMemoryIO.WriteInputFrame(
             _inputView, _inputEvent, ref _inputSeqNo,
@@ -983,6 +1055,100 @@ public sealed class HMController : IDisposable
         }
     }
 
+    /// <summary>Re-publish the consumer's last frame at the profile's
+    /// declared interval whenever the consumer has gone quiet for longer
+    /// than that. A <see cref="SubmitState"/> frame is encoded again for
+    /// each repeat rather than copied, so rolling counters advance the way
+    /// a real device's do: SDL_hidapi_steam.c treats a repeated unPacketNum
+    /// as no new data at all. A raw frame is the consumer's own bytes and is
+    /// repeated as they are.
+    ///
+    /// <para>The cadence is a deadline in Stopwatch ticks, waited out on a
+    /// high-resolution waitable timer, the way UsbAudioEngine paces audio.
+    /// A plain wait rounds up to the 15.6 ms system tick, which held a 4 ms
+    /// Steam Deck to about 62 frames a second. SDL's Deck driver reads once
+    /// with a 16 ms timeout before it accepts the device, and at that rate
+    /// the read could come back empty.</para></summary>
+    private void IdleFrameLoop(int intervalMs)
+    {
+        var token = _idleCts.Token;
+        long interval = Math.Max(1, intervalMs * System.Diagnostics.Stopwatch.Frequency / 1000);
+        IntPtr timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        var waits = new[] { timer, token.WaitHandle.SafeWaitHandle.DangerousGetHandle() };
+        long due = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                // A consumer's own frame puts the next repeat one interval
+                // after it, so a live consumer's cadence always wins.
+                long afterConsumer = Volatile.Read(ref _lastSubmitTimestamp) + interval;
+                if (afterConsumer > due) due = afterConsumer;
+
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (now >= due)
+                {
+                    try { RepeatLastFrame(); }
+                    catch
+                    {
+                        // Same containment contract as OutputPollLoop: a
+                        // transient failure must not kill the pump, and
+                        // disposal races here are ordinary rather than
+                        // exceptional.
+                    }
+                    // Fixed rate, the way a device clock runs. A pump that
+                    // fell a whole interval behind starts again from now
+                    // rather than sending a burst.
+                    due += interval;
+                    if (due <= now) due = now + interval;
+                    continue;
+                }
+
+                long wait = due - now;
+                if (timer != IntPtr.Zero)
+                {
+                    long rel = -Math.Max(1, wait * 10_000_000L / System.Diagnostics.Stopwatch.Frequency); // relative, 100 ns units
+                    if (SetWaitableTimer(timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false))
+                    {
+                        uint woke = WaitForMultipleObjects(2, waits, false, (uint)(intervalMs * 4 + 16));
+                        if (woke == 1) break;
+                        if (woke != WAIT_FAILED) continue;
+                    }
+                }
+                // No high-resolution timer (Windows 10 before 1803) or a
+                // failed wait: the plain wait, coarser but still running.
+                int ms = (int)Math.Max(1, wait * 1000 / System.Diagnostics.Stopwatch.Frequency);
+                if (token.WaitHandle.WaitOne(ms)) break;
+            }
+        }
+        finally
+        {
+            if (timer != IntPtr.Zero) CloseHandle(timer);
+        }
+    }
+
+    /// <summary>One idle repeat of the consumer's last frame, under the same
+    /// lock every submit path takes.</summary>
+    private void RepeatLastFrame()
+    {
+        lock (_submitLock)
+        {
+            if (_disposed) return;
+            if (_lastSubmitWasRaw && _lastRawFrame != null)
+            {
+                var frame = new ReadOnlySpan<byte>(_lastRawFrame, 0, _lastRawLength);
+                if (_lastRawWasExtended) SubmitRawExtendedReportCore(frame);
+                else SubmitRawReportCore(frame);
+            }
+            else
+            {
+                var st = _lastSubmitted;
+                SubmitStateCore(in st, consumerCall: false);
+            }
+        }
+    }
+
     /// <summary>Background reader for the per-controller output shared
     /// section, raising <see cref="OutputReceived"/> for each new packet.
     ///
@@ -998,38 +1164,6 @@ public sealed class HMController : IDisposable
     /// cost instead of up-to-8-ms poll quantization; the drain-to-Head
     /// loop below is unchanged, so burst coalescing behaves identically
     /// in both modes.</summary>
-    /// <summary>Re-publish the last state at the profile's declared
-    /// interval whenever the consumer has gone quiet for longer than that.
-    /// The encoder runs again for each repeat rather than the bytes being
-    /// copied, so rolling counters advance the way a real device's do -
-    /// SDL_hidapi_steam.c treats a repeated unPacketNum as no new data at
-    /// all.</summary>
-    private void IdleFrameLoop(int intervalMs)
-    {
-        var token = _idleCts.Token;
-        while (!token.IsCancellationRequested)
-        {
-            try
-            {
-                long quiet = Environment.TickCount64 - Interlocked.Read(ref _lastSubmitTicks);
-                if (quiet >= intervalMs)
-                {
-                    var st = _lastSubmitted;
-                    SubmitState(in st);
-                    // SubmitState stamps _lastSubmitTicks, so a live
-                    // consumer's own cadence always wins over this one.
-                }
-            }
-            catch
-            {
-                // Same containment contract as OutputPollLoop: a transient
-                // failure must not kill the pump, and disposal races here
-                // are ordinary rather than exceptional.
-            }
-            if (token.WaitHandle.WaitOne(intervalMs)) break;
-        }
-    }
-
     private void OutputPollLoop()
     {
         if (_outputView == IntPtr.Zero) return;
@@ -1285,4 +1419,21 @@ public sealed class HMController : IDisposable
         try { _outputCts.Dispose(); } catch { }
         _context.OnControllerDisposing(this);
     }
+
+    private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
+    private const uint TIMER_ALL_ACCESS = 0x1F0003;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period,
+        IntPtr completionRoutine, IntPtr arg, bool resume);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr h);
 }
