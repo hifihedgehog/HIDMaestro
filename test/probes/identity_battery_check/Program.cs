@@ -324,7 +324,11 @@ internal static class Program
         finally
         {
             try { c?.Dispose(); } catch { }
-            if (fam.Xbox) SettleWgi(vid, pid, wgiBefore);
+            if (fam.Xbox)
+            {
+                SettleWgi(vid, pid, wgiBefore);
+                SettleXInput(slotsBefore);
+            }
         }
     }
 
@@ -567,6 +571,18 @@ internal static class Program
         {
             var now = WgiCounts(vid, pid);
             if (now.Item1 <= before.Gamepads && now.Item2 <= before.Raw) break;
+            Thread.Sleep(500);
+        }
+    }
+
+    /// <summary>XInput drops a removed pad's slot after WGI drops the pad.
+    /// The next life samples its bench from XInput, so wait for the slot to
+    /// go too, or that bench counts the previous life's pad.</summary>
+    static void SettleXInput(int before)
+    {
+        for (int i = 0; i < 30; i++)
+        {
+            if (XInputSlots().Count <= before) break;
             Thread.Sleep(500);
         }
     }
