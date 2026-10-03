@@ -21,8 +21,13 @@
 //    SDL opens it as a PS3 controller with 16 axes and 11 buttons, the shape
 //    PCSX2's IsControllerSixaxis requires, reads every pressure axis, and
 //    its rumble and LED commands reach the SDK.
+// D. Live, the native-descriptor dualshock-3 persona (issue #65). A host
+//    writes the native output report 0x01 directly, the report hid-sony.c
+//    and SDL_hidapi_ps3.c send. Through WriteFile and HidD_SetOutputReport
+//    it reaches OutputDecoded with the motors and LEDs at hid-sony's
+//    offsets, the decode PadForge's DualShock 3 motor handler reads.
 //
-// B and C need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
+// B, C and D need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
 // passed and C was skipped for want of a stock SDL3.dll.
 
 using System;
@@ -258,6 +263,8 @@ internal static class Program
                                        out int returned, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool WriteFile(SafeFileHandle h, byte[] buf, int len, out int written, IntPtr overlapped);
+    [DllImport("hid.dll", SetLastError = true)]
+    static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buf, int len);
     [DllImport("hid.dll", SetLastError = true)]
     static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
     [DllImport("hid.dll")]
@@ -688,6 +695,137 @@ internal static class Program
         return true;
     }
 
+    // ── D. The native-descriptor DualShock 3 (issue #65) ────────────────
+
+    /// <summary>The native output report 0x01 as hid-sony.c's
+    /// sixaxis_send_output_report builds it (its default_report, then
+    /// rumble.right_motor_on, rumble.left_motor_force and leds_bitmap), padded
+    /// to the 49 bytes a Windows host writes. SDL_hidapi_ps3.c's
+    /// HIDAPI_DriverPS3_UpdateEffects writes the same bytes behind report id
+    /// 0x01 (k_EPS3ReportIdEffects).</summary>
+    static byte[] NativeOutput(byte smallOn, byte largeForce, byte leds)
+    {
+        var r = new byte[49];
+        byte[] head =
+        {
+            0x01,
+            0x01, 0xff, 0x00, 0xff, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+            0xff, 0x27, 0x10, 0x00, 0x32,
+            0xff, 0x27, 0x10, 0x00, 0x32,
+            0xff, 0x27, 0x10, 0x00, 0x32,
+            0xff, 0x27, 0x10, 0x00, 0x32,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        };
+        Array.Copy(head, r, head.Length);
+        r[3] = smallOn;     // rumble.right_motor_on
+        r[5] = largeForce;  // rumble.left_motor_force
+        r[10] = leds;       // leds_bitmap, LED 1 = 0x02
+        return r;
+    }
+
+    static bool SetOutput(string path, byte[] report49)
+    {
+        using var h = Open(path);
+        return !h.IsInvalid && HidD_SetOutputReport(h, report49, report49.Length);
+    }
+
+    static void PartD(HMContext ctx)
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- D. The native-descriptor dualshock-3 decodes its output report (issue #65) ---");
+        var prof = ctx.GetProfile("dualshock-3")!;
+        var spec = prof.ExtendedOutputReport;
+        Check("dualshock-3 declares an output decode for report 0x01, 49 bytes",
+              spec != null && spec.ReportIdByte == 0x01 && spec.Size == 49,
+              spec == null ? "none" : $"0x{spec.ReportIdByte:X2}/{spec.Size}");
+
+        var before = Present();
+        HMController? c = null;
+        try
+        {
+            c = ctx.CreateController(prof);
+            var decoded = new OutputLog();
+            var raws = new List<byte[]>();
+            var wholes = new List<byte[]>();
+            c.OutputDecoded += (s, e) =>
+            {
+                lock (wholes) wholes.Add(e.RawBytes.ToArray());
+                decoded.Add(new Dictionary<string, object>(e.Fields));
+            };
+            // The positive control: the raw packet, in the same window as
+            // the decode it should produce.
+            c.OutputReceived += (s, pkt) =>
+            {
+                if (pkt.ReportId != 0x01) return;
+                var whole = new byte[pkt.Data.Length + 1];
+                whole[0] = pkt.ReportId;
+                pkt.Data.Span.CopyTo(whole.AsSpan(1));
+                lock (raws) raws.Add(whole);
+            };
+            var dev = WaitForNew(before, 15000);
+            Check("the persona's HID interface appears", dev != null, dev?.DevicePath ?? "");
+            if (dev == null) return;
+            string path = dev.DevicePath;
+
+            var (inLen, outLen, featLen) = Caps(path);
+            Check("the HID class sees input, output and feature at 49 bytes with the report id",
+                  inLen == 49 && outLen == 49 && featLen == 49, $"{inLen}/{outLen}/{featLen}");
+
+            bool SawRaw(byte[] want)
+            {
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 2000)
+                {
+                    lock (raws) if (raws.Any(r => r.SequenceEqual(want))) return true;
+                    Thread.Sleep(20);
+                }
+                return false;
+            }
+            bool SawWhole(byte[] want)
+            {
+                lock (wholes) return wholes.Any(r => r.SequenceEqual(want));
+            }
+
+            // SDL's player 1 rumble: the small motor on, the large at 0x80.
+            var w1 = NativeOutput(1, 0x80, 0x02);
+            Check("WriteFile delivers the native report", Write(path, w1));
+            Check("OutputReceived carries it whole as report 0x01", SawRaw(w1));
+            var d1 = decoded.WaitFor(f => F(f, "leftMotorForce") == 0x80, 2000);
+            Check("OutputDecoded reads the small motor on and the large motor at 0x80",
+                  d1 != null && F(d1, "rightMotorOn") == 1,
+                  d1 == null ? "nothing decoded" : $"on {F(d1, "rightMotorOn")}, force {F(d1, "leftMotorForce")}");
+            Check("and both durations at 0xFF and LED 1",
+                  d1 != null && F(d1, "rightMotorDuration") == 0xFF && F(d1, "leftMotorDuration") == 0xFF
+                  && F(d1, "ledBitmap") == 0x02,
+                  d1 == null ? "" : $"{F(d1, "rightMotorDuration"):X2} {F(d1, "leftMotorDuration"):X2} leds 0x{F(d1, "ledBitmap"):X2}");
+            Check("its raw bytes are the 49 the host wrote, the length PadForge requires", SawWhole(w1));
+
+            var w2 = NativeOutput(0, 0x10, 0x04);
+            Check("HidD_SetOutputReport delivers the native report", SetOutput(path, w2));
+            Check("OutputReceived carries that one whole as well", SawRaw(w2));
+            var d2 = decoded.WaitFor(f => F(f, "leftMotorForce") == 0x10, 2000);
+            Check("OutputDecoded reads the small motor off, the large at 0x10 and LED 2",
+                  d2 != null && F(d2, "rightMotorOn") == 0 && F(d2, "ledBitmap") == 0x04,
+                  d2 == null ? "nothing decoded" : $"on {F(d2, "rightMotorOn")}, leds 0x{F(d2, "ledBitmap"):X2}");
+
+            // A stop is a frame with both motors off.
+            decoded.Clear();
+            var w3 = NativeOutput(0, 0x00, 0x02);
+            Check("a stop writes", Write(path, w3));
+            var d3 = decoded.WaitFor(f => F(f, "ledBitmap") == 0x02, 2000);
+            Check("OutputDecoded reads both motors off",
+                  d3 != null && F(d3, "rightMotorOn") == 0 && F(d3, "leftMotorForce") == 0,
+                  d3 == null ? "nothing decoded" : $"on {F(d3, "rightMotorOn")}, force {F(d3, "leftMotorForce")}");
+        }
+        catch (Exception ex) { Check("part D ran without throwing", false, ex.Message); }
+        finally
+        {
+            c?.Dispose();
+            Thread.Sleep(500);
+        }
+    }
+
     static int Main()
     {
         Console.WriteLine("=== DualShock 3 with pressure-sensitive buttons (PadForge discussion 476) ===");
@@ -704,13 +842,14 @@ internal static class Program
         if (!elevated)
         {
             Console.WriteLine();
-            Console.WriteLine("  [SKIP] parts B and C create a controller and need elevation");
+            Console.WriteLine("  [SKIP] parts B, C and D create a controller and need elevation");
         }
         else
         {
             ctx.InstallDriver();
             PartB(ctx);
             sdlRan = PartC(ctx);
+            PartD(ctx);
             try { HMContext.RemoveAllVirtualControllers(); } catch { }
         }
 

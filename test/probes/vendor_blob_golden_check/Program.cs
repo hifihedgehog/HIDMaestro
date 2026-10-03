@@ -40,6 +40,10 @@ internal static class Program
         "dualshock-4-v2", "dualshock-4-v2-bt",
         // v1.10.0 (PadForge discussion 476).
         "dualshock-3-full",
+        // v1.10.1 (issue #65): the native-descriptor DualShock 3 decodes the
+        // same output report with the same spec, so its output and decode
+        // goldens equal dualshock-3-full's.
+        "dualshock-3",
     };
 
     // Golden table captured from the pre-opcode string-switch codec at
@@ -122,6 +126,10 @@ internal static class Program
         "golden dualshock-3-full out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
         "golden dualshock-3-full out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",
         "golden dualshock-3-full dec 0 C317D8EC38CC58B36E3AFA5C53AF37BF02C90C18CE30EF18E257E45874E08F09",
+        "golden dualshock-3 out 0 07FCEF7A57C97780DC992A36E93E835A7436DE9186DF30881AD49BD300CED7A5",
+        "golden dualshock-3 out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
+        "golden dualshock-3 out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",
+        "golden dualshock-3 dec 0 C317D8EC38CC58B36E3AFA5C53AF37BF02C90C18CE30EF18E257E45874E08F09",
     };
 
     static int Main(string[] args)

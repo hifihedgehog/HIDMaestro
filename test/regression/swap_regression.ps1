@@ -1708,7 +1708,7 @@ function Scenario-Ds4-Report {
 # the sibling SDL3-build/build-stock checkout is absent.
 function Scenario-Ds3-Sixaxis {
     Invoke-Probe -Dir 'ds3_sixaxis_check' -Exe 'Ds3SixaxisCheck.exe' `
-                 -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure (see probe stdout)' -SkipCodes 2
+                 -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure, or the native one stopped decoding its output report (see probe stdout)' -SkipCodes 2
 }
 
 # ====================================================================
