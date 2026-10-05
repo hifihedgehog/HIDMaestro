@@ -123,9 +123,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
 
     // The persona's report clock. The pad sends one report every 4.000 ms
     // once a host has started it and nothing before: 50,899 reports in the
-    // capture this persona is modeled on, none off that step. SDL counts
-    // 100 of them to choose its sensor constants, so the step belongs to
-    // the device and never follows the consumer's submit rate.
+    // capture this persona is modeled on, none off that step. Each report's
+    // motion timestamp advances 4000 microseconds and SDL hands it on as
+    // the sample's time, so the step belongs to the device and never
+    // follows the consumer's submit rate.
     private const int Switch2ReportIntervalMs = 4;
     private readonly Thread? _streamThread;
     private readonly AutoResetEvent? _streamWake;
