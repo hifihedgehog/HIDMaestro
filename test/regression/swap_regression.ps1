@@ -176,6 +176,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\valve_firmware_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\ds4_report_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\ds3_sixaxis_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\switch2_composite_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1711,6 +1712,26 @@ function Scenario-Ds3-Sixaxis {
                  -Message 'the DualShock 3 persona no longer reads as a sixaxis.sys DS3 with pressure, or the native one stopped decoding its output report (see probe stdout)' -SkipCodes 2
 }
 
+# S65: the Switch 2 Pro Controller composite persona (issue #66). The pad
+# as a two-interface USB device: HID on interface 0 and a vendor bulk pair
+# on interface 1, where a host sends the command protocol that starts it.
+# The probe first plays the driver's side of the wire against a capture of
+# a real pad: both descriptors, the Microsoft OS 1.0 requests, silence until
+# command 03/0D, the command table, the flash image, one report every 4 ms,
+# reports 0x09 and 0x05 and the motion gate. The live persona must then
+# come up with HidUsb on interface 0 and WinUSB on interface 1 from its own
+# descriptors, answer over WinUSB and decode rumble. The PadForge fork's
+# SDL3 with libusb must open it as a Nintendo Switch Pro Controller and read
+# 1 g and 100 deg/s back within 1 percent. Two personas must each answer
+# their own handle. Steam must open it and keep reading it. SKIPs the SDL
+# parts without the sibling SDL3-build/build-unfiltered build, which is that
+# fork with its HIDMaestro filter off, and the Steam part without a Steam
+# client.
+function Scenario-Switch2-Composite {
+    Invoke-Probe -Dir 'switch2_composite_check' -Exe 'Switch2CompositeCheck.exe' `
+                 -Message 'the Switch 2 Pro composite persona no longer matches a real pad on the wire, lost its WinUSB binding, or stopped satisfying SDL or Steam (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1779,7 +1800,8 @@ $scenarios = @(
     @{ Name = 'S61_Driver_Catalog';              Body = ${function:Scenario-Driver-Catalog} },
     @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} },
     @{ Name = 'S63_Ds4_Report';                  Body = ${function:Scenario-Ds4-Report} },
-    @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} }
+    @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} },
+    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -1,6 +1,6 @@
 ﻿# swap_regression.ps1: live-swap teardown regression battery
 
-Drives `HIDMaestroTest.exe` through 60 single- and multi-controller
+Drives `HIDMaestroTest.exe` through 65 single- and multi-controller
 create/swap/remove/force-kill sequences and verifies every scenario
 leaves zero HIDMaestro PnP devnodes in the `PRESENT` state. Catches
 the symptom that v1.1.31 fixed (`SwDeviceLifetimeParentPresent`
@@ -33,7 +33,7 @@ custom profile (BEEF:F000) authored via the SDK's `HMProfileBuilder`
 
 Exit code: `0` if every scenario passed, `1` if any failed.
 
-Total wall time: about 16 minutes for the full 62-scenario battery on a
+Total wall time: about 16 minutes for the full 65-scenario battery on a
 16-core desktop. Most of it is deliberate cascade-settle waits (Series BT teardown takes about 10s
 of xinputhid filter unbinding regardless of code path). Slow machines
 with profile-extraction or PnP-quiesce overhead may push this longer.
@@ -115,6 +115,7 @@ not run elevated.
 | `S62_Valve_Firmware`              | steam-controller-2 against Steam's firmware updater (issue #62) | Steam's own `hardwareupdater.exe` enumerates the persona with the build its config names and does not offer it an update. The same persona answering with the v1.9.0 capture is offered one, in the same run. Skips without a Steam install. |
 | `S63_Ds4_Report`                  | DualShock 4 reports against SDL and Linux (issue #64) | All five DS4 maps put every field where SDL's `PS4StatePacket_t` and Linux's `dualshock4_input_report_common` read it, with the Bluetooth flag and CRC, battery and cable bits, the touch report and an advancing sensor timestamp. The live Bluetooth persona sends report 0x11 once armed, and stock SDL3 keeps reading it after arming the persona itself, with 1 g and no rotation at rest and a near-zero trigger read as released. Skips the SDL part without the stock SDL3 build. |
 | `S64_Ds3_Sixaxis`                 | The DualShock 3 with pressure-sensitive buttons (PadForge discussion 476) | `dualshock-3-full` presents the form sixaxis.sys and DsHidMini's SXS mode present. Its native report matches the offsets SDL, Linux and RPCS3 read, including the twelve pressure bytes and the motion RPCS3 derives from a DS4. The live persona's joystick report and report 0 feature reply match DsHidMini's conversions, RPCS3's read sequence and output reports work, and stock SDL3 with PCSX2's sixaxis hint opens a PS3 controller with 16 axes and 11 buttons and reads every pressure axis. The native-descriptor `dualshock-3` decodes the output report 0x01 a host writes through `WriteFile` and `HidD_SetOutputReport` onto `OutputDecoded` (issue #65). Skips the SDL part without the stock SDL3 build. |
+| `S65_Switch2_Composite`           | The Switch 2 Pro Controller with motion (issue #66) | `switch2-pro-controller-composite` against a link-layer capture of a console driving a real pad: both descriptors, the Microsoft OS 1.0 requests, silence until command 03/0D, the command table, the flash image, one report every 4 ms, reports 0x09 and 0x05 and the motion gate, with the probe in the driver's place. The live persona comes up with HidUsb on interface 0 and WinUSB on interface 1 from its own descriptors, answers over WinUSB and decodes rumble. SDL3 with libusb opens it as a Nintendo Switch Pro Controller and reads 1 g and 100 deg/s back within 1 percent on every axis. Two personas each answer their own handle. Steam adds it and keeps reading its 250 reports a second. The SDL parts need the sibling `SDL3-build/build-unfiltered` build, which is PadForge's SDL fork compiled with libusb and with its HIDMaestro device filter off, and the Steam part needs a Steam install. Each skips without its dependency. |
 
 ## What "PASS" means
 

@@ -27,11 +27,11 @@
 
 **Virtual game controllers that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 232 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 233 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>232</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>233</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -62,7 +62,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 232 profiles
+# List or search the 233 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -165,7 +165,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
 - **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
-- **Validated across every API and both ends of the spectrum.** A 64-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change. It passes on a 16-core Windows 11 laptop, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
+- **Validated across every API and both ends of the spectrum.** A 65-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change. It passes on a 16-core Windows 11 laptop, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
 
 ### Validation
 
@@ -180,7 +180,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 64-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, and the DualShock 3 and 4 reports against SDL, Linux and RPCS3, verifying no PnP devnodes are left behind. 64/64 PASS on a 16-core AMD Ryzen 9 Windows 11 laptop. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
+A 65-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, and the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, verifying no PnP devnodes are left behind. 65/65 PASS on a 16-core AMD Ryzen 9 Windows 11 laptop. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
@@ -282,6 +282,24 @@ The same machinery answers a different problem. The plain `steam-deck` and `stea
 
 All three answer the `GET_REPORT` interrogation Steam performs before it will claim a device. Like the hardware, each reports on its own clock whether or not the consumer has anything new to send: every 4 ms for the Deck and the 2026 controller, every 8 ms for the 2015 one. While the consumer is quiet, the persona repeats the consumer's last frame. All three are verified end to end by battery scenarios S51 and S52: S51 pins descriptors, endpoints and feature answers with no device; S52 creates each persona, drives it through `SubmitState` and through raw reports, reads the frames back off the real HID stack, and measures that clock.
 
+### Nintendo Switch 2 Pro Controller with motion
+
+`switch2-pro-controller-composite` (057E:2069) is the Pro Controller 2 as it appears over USB on firmware 1.1.5: HID on interface 0 and a vendor bulk pair on interface 1. Its device and configuration descriptors are a real pad's, byte for byte, from a link-layer capture of a console driving one. The plain `switch2-pro-controller` profile has the HID interface alone and streams report `0x09`, whose motion block no public source decodes. SDL's Switch 2 driver and Steam start the pad with commands on the second interface, then read report `0x05`, which carries the accelerometer and the gyro.
+
+Windows binds WinUSB to interface 1 from the persona's own Microsoft OS 1.0 descriptors, so there is no INF to install and no Zadig step. Behind that interface the persona answers the pad's command protocol: the flash reads that return its serial and calibration, the feature mask, the report selection, the player LEDs. Like the pad, it sends nothing on its interrupt endpoint until a host sends the start command. From then on it sends one report every 4 ms on its own clock, whatever rate the consumer submits at.
+
+`SubmitState` is this persona's whole input path. `AccelGX/GY/GZ` in g and `GyroDpsX/Y/Z` in degrees per second leave as the pad's raw counts in report `0x05`. SDL reads 1 g back as 9.807 m/s² and 100 deg/s as 1.745 rad/s, on the axis submitted and with its sign. The raw submit methods throw `NotSupportedException`, because the report that goes out and its counters belong to the device. A host's rumble arrives on `OutputDecoded` as `leftMotor` and `rightMotor`.
+
+```csharp
+using var pad = ctx.CreateController(ctx.GetProfile("switch2-pro-controller-composite")!);
+pad.OutputDecoded += (_, e) => { /* e.Fields["leftMotor"], e.Fields["rightMotor"] */ };
+pad.SubmitState(new HMGamepadState { AccelGY = 1.0f, GyroDpsX = 100f });
+```
+
+Only a host that speaks the command protocol gets input. On Windows that is Steam, and SDL where libusb is present. DirectInput, RawInput, WGI and browsers see a gamepad that never reports, as they do with a real pad, and `switch2-pro-controller` stays the profile for them. A bulk read that a host abandons comes back as success with stale bytes, and so do the reads after it, because usbip-win2 0.9.8.1 completes a canceled transfer without resetting its length. SDL and Steam read only after they send a command, so neither meets it. Headset audio, NFC, pairing, firmware update and the magnetometer are not emulated.
+
+Battery scenario S65 checks the persona on the wire against the capture, through HidUsb and WinUSB, through PadForge's SDL3 fork with libusb, as two pads at once, and through the Steam client, which adds it as a Nintendo Switch Pro Controller and takes its 250 reports a second.
+
 ## Virtual VR controllers
 
 A VR controller is not an OS device: games ask the VR runtime "where is the left hand, and what is its trigger doing." So this subsystem is a native OpenVR driver that SteamVR's own vrserver loads, embedded in `HIDMaestro.Core.dll` and registered with one call. One driver covers native OpenVR games and OpenXR games running on SteamVR, which is the default PCVR configuration.
@@ -309,7 +327,7 @@ The hands hold real SteamVR hand roles, serve the modern input system through a 
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 232 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 233 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |

@@ -288,10 +288,15 @@ public static class HMGamepadStateHelpers
             axes[HMAxis.X]  = leftStickX;  axes[HMAxis.Y]  = leftStickY;
             axes[HMAxis.Rx] = rightStickX; axes[HMAxis.Ry] = rightStickY;
         }
+        // The trigger axes are the ones SubmitState reads: the profile's
+        // axisMap roles when it names them, else Z and Rz. The Switch 2 Pro
+        // profiles put their right stick on Rx and Rz and map the right
+        // trigger to Ry, so writing Rz here would overwrite the stick's Y
+        // (issue #66).
         if (triggers.Count == 0)
         {
-            axes[HMAxis.Z]  = leftTrigger;
-            axes[HMAxis.Rz] = rightTrigger;
+            axes[HMController.ResolveCanonicalAxis(profile.AxisMap, "lefttrigger", HMAxis.Z)]  = leftTrigger;
+            axes[HMController.ResolveCanonicalAxis(profile.AxisMap, "righttrigger", HMAxis.Rz)] = rightTrigger;
         }
         return axes;
     }

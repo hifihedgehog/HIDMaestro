@@ -46,6 +46,19 @@ internal sealed class UsbDescriptorSet
     private readonly string? _serial;
     private readonly string? _configurationName;
 
+    /// <summary>The serial this device serves at its iSerial index: the
+    /// profile's captured one or the identity's. The Switch 2 Pro persona
+    /// also writes it into its flash image, where SDL reads it (issue
+    /// #66).</summary>
+    public string? SerialString => _serial;
+
+    // Issue #66. Microsoft OS 1.0 descriptors, null unless the profile
+    // declares them. A device without them stalls string 0xEE and every
+    // vendor request, as the Sony and Valve pads do.
+    private readonly byte[]? _msOsString;
+    private readonly byte[]? _msOsCompatId;
+    private readonly byte[]? _msOsProperties;
+
     /// <summary>Endpoint table parsed from the configuration blob. Keyed
     /// by bEndpointAddress (direction bit included).</summary>
     public IReadOnlyDictionary<byte, EndpointInfo> Endpoints => _endpoints;
@@ -313,11 +326,57 @@ internal sealed class UsbDescriptorSet
                 }
             }
         }
+
+        // Microsoft OS 1.0 descriptors (issue #66). All three or none: a
+        // device that answers the string and then stalls a feature request
+        // leaves its interface with no driver. Each blob states its own
+        // length, so a mis-authored one is refused here.
+        var os = cfg.MicrosoftOs;
+        if (os != null)
+        {
+            _msOsString = FromHex(os.StringHex, "microsoftOs.string");
+            _msOsCompatId = FromHex(os.ExtendedCompatIdHex, "microsoftOs.extendedCompatId");
+            _msOsProperties = FromHex(os.ExtendedPropertiesHex, "microsoftOs.extendedProperties");
+
+            bool signature = _msOsString.Length == 18 && _msOsString[0] == 18 && _msOsString[1] == 0x03
+                && Encoding.Unicode.GetString(_msOsString, 2, 14) == "MSFT100";
+            if (!signature)
+                throw new InvalidOperationException(
+                    "microsoftOs.string is not the 18-byte MSFT100 string descriptor.");
+            CheckMicrosoftOsFeature(_msOsCompatId, 4, 16, "extendedCompatId");
+            CheckMicrosoftOsFeature(_msOsProperties, 5, 10, "extendedProperties");
+        }
     }
 
+    /// <summary>A Microsoft OS 1.0 feature descriptor opens with its total
+    /// length (u32), bcdVersion 1.00 and its feature index.</summary>
+    private static void CheckMicrosoftOsFeature(byte[] blob, int index, int headerSize, string field)
+    {
+        if (blob.Length < headerSize)
+            throw new InvalidOperationException($"microsoftOs.{field} is shorter than its {headerSize}-byte header.");
+        uint declared = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(blob);
+        int featureIndex = blob[6] | (blob[7] << 8);
+        if (declared != blob.Length || featureIndex != index)
+            throw new InvalidOperationException(
+                $"microsoftOs.{field} declares length {declared} and index {featureIndex}, " +
+                $"but is {blob.Length} bytes and must carry index {index}.");
+    }
+
+    /// <summary>The Microsoft OS 1.0 feature descriptor a vendor request
+    /// asks for, by its wIndex: 4 is the extended compatible ID and 5 the
+    /// extended properties. Null stalls, which is every index on a persona
+    /// that declares none (issue #66).</summary>
+    public byte[]? GetMicrosoftOsFeature(ushort featureIndex) => featureIndex switch
+    {
+        0x0004 => _msOsCompatId,
+        0x0005 => _msOsProperties,
+        _ => null,
+    };
+
     /// <summary>Answer a standard GET_DESCRIPTOR. Returns null to stall
-    /// (unknown descriptor), matching the real pad, which stalls the
-    /// Microsoft OS string (0xEE) and everything else it lacks.</summary>
+    /// (unknown descriptor), matching the real pad. A Sony or Valve pad
+    /// stalls the Microsoft OS string (0xEE) with everything else it lacks.
+    /// A persona that declares the string serves it (issue #66).</summary>
     public byte[]? GetDescriptor(byte type, byte index, ushort langId)
     {
         switch (type)
@@ -360,6 +419,11 @@ internal sealed class UsbDescriptorSet
     {
         if (index == 0)
             return new byte[] { 0x04, 0x03, 0x09, 0x04 }; // one LANGID: en-US
+        // The Microsoft OS string, for a persona that declares one (issue
+        // #66). Windows asks for it once per VID, PID and revision and
+        // remembers a stall, so it is answered from the first enumeration.
+        if (index == 0xEE && _msOsString != null)
+            return _msOsString;
         // A device that declares a string index has to serve it. Sony's pads
         // declare iSerial 0 and get null below, unchanged; Valve's declare a
         // real serial at index 3 and a configuration name at 4, and Steam

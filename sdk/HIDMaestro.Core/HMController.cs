@@ -190,6 +190,13 @@ public sealed class HMController : IDisposable
     private bool _switchProtocol;
     private byte[]? _switchBodyBuffer;
 
+    // Switch 2 Pro protocol (issue #66): the composite persona, 057E:2069
+    // on the USB/IP backend. SubmitState packs a state body and the
+    // backend's Switch2ProDevice builds every report from it on its own
+    // 4 ms clock. See Switch2ProPacker.
+    private readonly bool _switch2Protocol;
+    private readonly byte[]? _switch2BodyBuffer;
+
     // Cached layout projections (audit 1n): Profile.Sticks / Profile.Triggers
     // allocate on every access, so snapshot them once in the ctor and read
     // the cached lists on the SubmitState hot path. The profile's layout is
@@ -447,6 +454,15 @@ public sealed class HMController : IDisposable
         if (_switchProtocol)
             _switchBodyBuffer = new byte[SwitchProPacker.BodySize];
 
+        // Switch 2 Pro protocol (issue #66): the same hardcoding, for the
+        // persona on the USB/IP backend alone. The UMDF2
+        // switch2-pro-controller profile shares the VID/PID and keeps its
+        // codec-built report 0x09.
+        _switch2Protocol = usbipHandle != null
+            && Switch2ProPacker.IsSwitch2Pro(profile.VendorId, profile.ProductId);
+        if (_switch2Protocol)
+            _switch2BodyBuffer = new byte[Switch2ProPacker.BodySize];
+
         // Output passthrough is best-effort. If the section can't be created
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
@@ -537,11 +553,12 @@ public sealed class HMController : IDisposable
                 return Math.Clamp(vCanon, 0f, 1f);
             if (slot < triggers.Count && axes.TryGetValue(triggers[slot].Axis, out var vField))
                 return Math.Clamp(vField, 0f, 1f);
-            // Opaque vendor descriptor: no declared triggers to look up, so
-            // accept the canonical Z / Rz the helper writes in that case.
-            if (triggers.Count == 0
-                && axes.TryGetValue(slot == 0 ? HMAxis.Z : HMAxis.Rz, out var vCanon2))
-                return Math.Clamp(vCanon2, 0f, 1f);
+            // A descriptor with no declared triggers (every Valve state
+            // packet, both Switch 2 Pro profiles) has no field to fall back
+            // to. The canonical axis above is the whole answer, and it is
+            // what StandardAxes writes. Reading Z and Rz here regardless of
+            // the axisMap took the Switch 2 Pro's right stick Y, which is
+            // Rz, for its right trigger (issue #66).
         }
         return 0.0;
     }
@@ -640,6 +657,29 @@ public sealed class HMController : IDisposable
             {
                 long swElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
                 latency(swElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
+            }
+            return;
+        }
+
+        // Switch 2 Pro protocol path (issue #66): pack the state body. The
+        // device side picks report 0x09 or 0x05, stamps the counters and
+        // sends one report every 4 ms whatever rate this is called at, so a
+        // submit only replaces what the next report is built from. The body
+        // travels in the section's extended lane, which the backend reads
+        // back byte for byte.
+        if (_switch2Protocol)
+        {
+            Switch2ProPacker.BuildBody(in state, mlx, mly, mrx, mry, mlt, mrt, _switch2BodyBuffer!);
+            SharedMemoryIO.WriteInputFrame(
+                _inputView, _inputEvent, ref _inputSeqNo,
+                Array.Empty<byte>(), 0, null,
+                dataOffset: 0,
+                extendedData: _switch2BodyBuffer!, extendedLen: Switch2ProPacker.BodySize);
+
+            if (latency != null)
+            {
+                long s2Elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+                latency(s2Elapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
             }
             return;
         }
@@ -856,10 +896,16 @@ public sealed class HMController : IDisposable
     /// <see cref="HMProfile.GetDescriptorBytes"/> to determine the expected
     /// data layout. The test app's <c>info</c> command shows every field's
     /// bit offset.</para>
+    ///
+    /// <para>The Switch 2 Pro Controller composite persona takes no raw
+    /// reports and throws <see cref="NotSupportedException"/>. Which report
+    /// it sends, and when, belongs to the device, as it does on the real
+    /// pad, so its input comes from <see cref="SubmitState"/> alone.</para>
     /// </summary>
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         if (report.Length > SharedMemoryIO.DATA_CAPACITY)
             throw new ArgumentException(
@@ -948,11 +994,16 @@ public sealed class HMController : IDisposable
     /// does automatically for an <c>alwaysArmed</c> profile. Use it when the
     /// caller owns the whole frame including its report id and wants that
     /// guaranteed regardless of profile (issue #58).</para>
+    ///
+    /// <para>Throws <see cref="NotSupportedException"/> on the Switch 2 Pro
+    /// Controller composite persona, as <see cref="SubmitRawReport"/>
+    /// does.</para>
     /// </summary>
     /// <param name="report">The complete frame, report id included.</param>
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         if (report.Length > SharedMemoryIO.DATA_CAPACITY)
             throw new ArgumentException(
@@ -1293,6 +1344,41 @@ public sealed class HMController : IDisposable
                         }
                     }
 
+                    // Switch 2 Pro rumble decode (issue #66): output report
+                    // 0x02 carries one 16-byte block per actuator. The
+                    // levels surface as leftMotor and rightMotor on the lane
+                    // the first Pro uses. A report of another ID, or one
+                    // too short to hold both blocks, is skipped: a console
+                    // also sends empty packets on this endpoint.
+                    else if (_switch2Protocol
+                        && source == (byte)HMOutputSource.HidOutput && reportId == 0x02
+                        && dataSize >= Switch2ProPacker.RumbleDataSize && OutputDecoded != null)
+                    {
+                        try
+                        {
+                            Switch2ProPacker.DecodeRumble(new ReadOnlySpan<byte>(buf, 0, dataSize),
+                                out byte leftMotor, out byte rightMotor);
+                            var full = new byte[dataSize + 1];
+                            full[0] = reportId;
+                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
+                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            {
+                                ReportId = reportId,
+                                Fields = new Dictionary<string, object>
+                                {
+                                    ["leftMotor"] = leftMotor,
+                                    ["rightMotor"] = rightMotor,
+                                },
+                                RawBytes = full,
+                                CrcValid = true,
+                            });
+                        }
+                        catch
+                        {
+                            // Same containment contract as the codec path.
+                        }
+                    }
+
                     // v1.3.5: arm-handshake watcher. When the profile
                     // declares armOn triggers and a matching host action
                     // arrives, flip the armed flag: SubmitState then
@@ -1396,6 +1482,16 @@ public sealed class HMController : IDisposable
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(HMController));
+    }
+
+    /// <summary>The Switch 2 Pro composite persona builds each report on the
+    /// device side, from the report its host selected and its own counters,
+    /// so a caller's finished report has nowhere to go (issue #66).</summary>
+    private void ThrowIfDeviceBuildsReports()
+    {
+        if (_switch2Protocol)
+            throw new NotSupportedException(
+                $"Profile '{Profile.Id}' builds its own input reports. Use SubmitState.");
     }
 
     /// <summary>Removes the virtual device from PnP and frees the per-controller

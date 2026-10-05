@@ -81,6 +81,36 @@ public sealed class UsbConfigurationSpec
     /// Windows volume slider across MIN..MAX.</summary>
     [JsonPropertyName("audioControls")]
     public List<UsbAudioControlSpec>? AudioControls { get; set; }
+
+    /// <summary>Issue #66. The Microsoft OS 1.0 descriptors a device that
+    /// asks Windows for a driver itself serves. Null for every persona whose
+    /// real pad stalls string 0xEE, which is all the Sony and Valve ones.</summary>
+    [JsonPropertyName("microsoftOs")]
+    public UsbMicrosoftOsSpec? MicrosoftOs { get; set; }
+}
+
+/// <summary>Issue #66. Microsoft OS 1.0 descriptors, each a hex string of the
+/// exact bytes the device returns. Windows reads the string once per VID, PID
+/// and revision, then asks for the two feature descriptors with a vendor
+/// request carrying the code the string named.</summary>
+public sealed class UsbMicrosoftOsSpec
+{
+    /// <summary>String descriptor 0xEE: 18 bytes, <c>MSFT100</c> in UTF-16
+    /// then the vendor code and a pad byte.</summary>
+    [JsonPropertyName("string")]
+    public string? StringHex { get; set; }
+
+    /// <summary>The extended compatible ID descriptor, feature index 4. It
+    /// names the driver Windows binds to an interface, <c>WINUSB</c> for the
+    /// Switch 2 Pro Controller's vendor interface.</summary>
+    [JsonPropertyName("extendedCompatId")]
+    public string? ExtendedCompatIdHex { get; set; }
+
+    /// <summary>The extended properties descriptor, feature index 5. It
+    /// carries registry values for the interface's device key, such as the
+    /// <c>DeviceInterfaceGUID</c> WinUSB registers.</summary>
+    [JsonPropertyName("extendedProperties")]
+    public string? ExtendedPropertiesHex { get; set; }
 }
 
 /// <summary>One UAC1 feature unit's control state: the mute and volume
@@ -138,7 +168,9 @@ public sealed class UsbInterfaceSpec
 
     /// <summary>What this interface is, for the backend's routing rather
     /// than for the wire: <c>"hid"</c>, <c>"audioControl"</c>,
-    /// <c>"audioStreamingOut"</c>, <c>"audioStreamingIn"</c>. The wire
+    /// <c>"audioStreamingOut"</c>, <c>"audioStreamingIn"</c>, or
+    /// <c>"vendor"</c> for a class 0xFF interface whose protocol the backend
+    /// answers itself (issue #66). The wire
     /// values live in <see cref="UsbAltSettingSpec"/>. The HID interface
     /// keeps serving the profile's existing report descriptor and codec
     /// unchanged, which is why a composite persona reuses everything the
@@ -214,8 +246,8 @@ public sealed class UsbEndpointSpec
     [JsonPropertyName("address")]
     public byte Address { get; set; }
 
-    /// <summary>Transfer type: <c>"isochronous"</c> or
-    /// <c>"interrupt"</c>.</summary>
+    /// <summary>Transfer type: <c>"isochronous"</c>, <c>"interrupt"</c> or
+    /// <c>"bulk"</c>.</summary>
     [JsonPropertyName("transferType")]
     public string TransferType { get; set; } = "";
 

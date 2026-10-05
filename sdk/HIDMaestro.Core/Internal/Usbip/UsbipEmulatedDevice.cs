@@ -97,6 +97,47 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private int _lastFeatureParam = -1;
     private byte[]? _lastFeaturePayload;
 
+    // Switch 2 Pro Controller persona (issue #66). Non-null exactly for
+    // 057E:2069: the command responder behind the vendor interface's bulk
+    // pair, and the state each input report is built from. A device with
+    // no responder stalls bulk transfers, as every persona before it did.
+    private readonly Switch2ProDevice? _switch2;
+
+    /// <summary>The Switch 2 Pro persona's protocol state and its log of
+    /// every bulk OUT payload, or null on any other persona.</summary>
+    internal Switch2ProDevice? Switch2 => _switch2;
+
+    private readonly byte _bulkInEndpoint;
+    // Buffer lengths of parked bulk IN reads, by seqnum. The seqnums park
+    // in _pendingInterruptIn beside the interrupt reads, which is where
+    // HandleUnlink looks.
+    private readonly Dictionary<uint, int> _parkedBulkLength = new();
+    private int _bulkReadsCanceled;
+
+    /// <summary>Bulk IN reads a host gave up on before a reply came. Under
+    /// usbip-win2 such a read is trouble for the host, not for this device:
+    /// the driver completes a canceled transfer with its length untouched,
+    /// and WinUSB then hands the host stale bytes. A host that only reads
+    /// after a command, as SDL does, never adds to this.</summary>
+    internal int BulkReadsCanceled => Volatile.Read(ref _bulkReadsCanceled);
+
+    // The persona's report clock. The pad sends one report every 4.000 ms
+    // once a host has started it and nothing before: 50,899 reports in the
+    // capture this persona is modeled on, none off that step. SDL counts
+    // 100 of them to choose its sensor constants, so the step belongs to
+    // the device and never follows the consumer's submit rate.
+    private const int Switch2ReportIntervalMs = 4;
+    private readonly Thread? _streamThread;
+    private readonly AutoResetEvent? _streamWake;
+    private readonly IntPtr _streamTimer;
+    // A tick that found no read parked leaves one report owed, and the next
+    // read is answered as it arrives: the pad had its report ready and the
+    // host polled late. Guarded by _hidLock.
+    private bool _reportOwed;
+    // Held from building a report to sending it, by the clock and by a late
+    // read alike, so two reports can never reach the wire out of order.
+    private readonly object _streamSendLock = new();
+
     // Diagnostic (HIDMAESTRO_DIAG_READS=<path>): who actually reads us.
     // A consumer that claims the device but never submits an interrupt-IN
     // URB on the controller endpoint cannot see input no matter what the
@@ -135,6 +176,19 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         BusId = $"1-{index + 1}";
         Devid = (1u << 16) | (uint)(index + 1);
 
+        if (Switch2ProPacker.IsSwitch2Pro(Descriptors.VendorId, Descriptors.ProductId))
+        {
+            foreach (var kv in Descriptors.Endpoints)
+            {
+                if (kv.Value.TransferType == 2 && kv.Value.IsIn)
+                {
+                    _bulkInEndpoint = kv.Key;
+                    break;
+                }
+            }
+            _switch2 = new Switch2ProDevice(Descriptors.SerialString, BusId);
+        }
+
         _builder = profile.GetOrBuildReportBuilder();
         _lastInputReport = new byte[Math.Max(1, _builder.InputReportByteSize)];
         if (_builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
@@ -155,12 +209,32 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             Priority = ThreadPriority.AboveNormal,
         };
         _inputThread.Start();
+
+        if (_switch2 != null)
+        {
+            _streamWake = new AutoResetEvent(false);
+            _streamTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            _streamThread = new Thread(Switch2StreamLoop)
+            {
+                IsBackground = true,
+                Name = $"HMUsbipSwitch2Stream_{index}",
+                Priority = ThreadPriority.AboveNormal,
+            };
+            _streamThread.Start();
+        }
     }
 
     /// <summary>Claim this device for one connection. A second import
     /// while attached is refused ST_DEV_BUSY by the server.</summary>
     public bool TryClaimConnection(UsbipServer.Connection connection)
-        => Interlocked.CompareExchange(ref _connection, connection, null) == null;
+    {
+        if (Interlocked.CompareExchange(ref _connection, connection, null) != null)
+            return false;
+        // Attach is power-on for the Switch 2 Pro persona's protocol state.
+        ResetSwitch2State();
+        return true;
+    }
 
     public void DetachConnection(UsbipServer.Connection connection)
     {
@@ -172,6 +246,21 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
             _frameQueue.Clear();
         }
+        ResetSwitch2State();
+    }
+
+    /// <summary>The Switch 2 Pro persona as it is at attach and after a
+    /// port reset: reports off, report 0x09 selected, no features, no reply
+    /// waiting, no read owed (issue #66). Nothing for any other persona.</summary>
+    private void ResetSwitch2State()
+    {
+        if (_switch2 == null) return;
+        lock (_hidLock)
+        {
+            _parkedBulkLength.Clear();
+            _reportOwed = false;
+        }
+        _switch2.Reset();
     }
 
     // ── Input pump: shared section → interrupt IN ────────────────────────
@@ -213,6 +302,15 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     }
                 }
                 if (!TryReadInputFrame(out var report)) continue;
+
+                // The Switch 2 Pro persona sends nothing from here. The
+                // frame is the state its own clock builds the next report
+                // from (issue #66).
+                if (_switch2 != null)
+                {
+                    _switch2.SetBody(report);
+                    continue;
+                }
 
                 uint seq;
                 lock (_hidLock)
@@ -377,6 +475,12 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         {
             if (cmd.IsIn)
             {
+                if (_switch2 != null && epAddr == _primaryInEndpoint)
+                {
+                    SubmitSwitch2Read(cmd.Seqnum);
+                    return;
+                }
+
                 byte[]? frame = null;
                 lock (_hidLock)
                 {
@@ -406,7 +510,201 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             return;
         }
 
+        if (ep.TransferType == 2 && _switch2 != null) // bulk: the Switch 2 command channel
+        {
+            if (cmd.IsIn)
+            {
+                // Park first, then serve in arrival order. A read that finds
+                // no reply stays parked until a command produces one or the
+                // host unlinks it.
+                lock (_hidLock)
+                {
+                    PendingFor(epAddr).Enqueue(cmd.Seqnum);
+                    _parkedBulkLength[cmd.Seqnum] = Math.Max(0, cmd.TransferBufferLength);
+                }
+                if (DeviceOrchestrator.DiagEnabled)
+                    DeviceOrchestrator.LogDiag($"switch2 bulk in {BusId}: read {cmd.Seqnum} for {cmd.TransferBufferLength} bytes");
+                CompleteBulkIn();
+                return;
+            }
+
+            var command = outPayload ?? Array.Empty<byte>();
+            bool started;
+            // Under the report lock, so a report built before this command
+            // is on the wire before the command's own answer. A host that
+            // selects report 0x05 then never sees a 0x09 behind the reply.
+            lock (_streamSendLock)
+            {
+                started = _switch2.HandleBulkOut(command, System.Diagnostics.Stopwatch.GetTimestamp());
+                // A start owes nothing from before it. Its first report is
+                // the clock's, one interval after this command.
+                if (started) lock (_hidLock) _reportOwed = false;
+            }
+            SendRetSubmit(cmd.Seqnum, 0, command.Length, null);
+            CompleteBulkIn();
+            if (started) _streamWake!.Set();
+            return;
+        }
+
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+    }
+
+    // ── Switch 2 Pro Controller: bulk replies and the report clock ───────
+
+    /// <summary>Hand waiting replies to parked bulk IN reads, oldest of each
+    /// first. A read gets at most its buffer length of one reply and the
+    /// rest stays at the head of the queue, so the pad's 80-byte flash reply
+    /// goes out as 64 bytes and then 16 to a host that reads in 64s, which
+    /// is how SDL reads it. Only the connection's reader thread calls
+    /// this.</summary>
+    private void CompleteBulkIn()
+    {
+        while (true)
+        {
+            uint seq;
+            byte[] chunk;
+            lock (_hidLock)
+            {
+                var pending = PendingFor(_bulkInEndpoint);
+                if (pending.Count == 0 || !_switch2!.HasReply) return;
+                seq = pending.Dequeue();
+                _parkedBulkLength.Remove(seq, out int capacity);
+                chunk = _switch2.TakeReply(capacity) ?? Array.Empty<byte>();
+            }
+            if (DeviceOrchestrator.DiagEnabled)
+                DeviceOrchestrator.LogDiag($"switch2 bulk in {BusId}: read {seq} gets {chunk.Length} bytes {Convert.ToHexString(chunk)}");
+            SendRetSubmit(seq, 0, chunk.Length, chunk);
+        }
+    }
+
+    /// <summary>An interrupt IN read on the persona's HID endpoint. It parks
+    /// until the clock's next tick, unless a tick already passed with no
+    /// read to answer. With reports off it parks and stays parked: the pad
+    /// answers every poll with NAK until a host sends 03/0D.</summary>
+    private void SubmitSwitch2Read(uint seqnum)
+    {
+        lock (_streamSendLock)
+        {
+            byte[] report;
+            lock (_hidLock)
+            {
+                if (DiagPath != null)
+                    _readsPerEp[_primaryInEndpoint] =
+                        _readsPerEp.TryGetValue(_primaryInEndpoint, out var rc) ? rc + 1 : 1;
+                if (!_reportOwed || !_switch2!.ReportsOn)
+                {
+                    PendingFor(_primaryInEndpoint).Enqueue(seqnum);
+                    return;
+                }
+                _reportOwed = false;
+                report = NextSwitch2Report();
+            }
+            SendInterruptInReply(seqnum, report);
+        }
+    }
+
+    /// <summary>One tick of the report clock: answer the oldest parked read
+    /// with a report built now, or leave one owed.
+    /// <paramref name="startedAt"/> names the run the tick belongs to, by
+    /// the time of the command that started it. A tick of a run that has
+    /// ended, or that a later start has replaced, sends nothing.</summary>
+    private void SendSwitch2Report(long startedAt)
+    {
+        lock (_streamSendLock)
+        {
+            uint seq;
+            byte[] report;
+            lock (_hidLock)
+            {
+                if (!_switch2!.ReportsOnSince(out long since) || since != startedAt) return;
+                var pending = PendingFor(_primaryInEndpoint);
+                if (pending.Count == 0)
+                {
+                    _reportOwed = true;
+                    return;
+                }
+                seq = pending.Dequeue();
+                report = NextSwitch2Report();
+            }
+            SendInterruptInReply(seq, report);
+        }
+    }
+
+    /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
+    private byte[] NextSwitch2Report()
+    {
+        var report = _switch2!.BuildNextReport();
+        if (DiagPath != null)
+            _completionsPerEp[_primaryInEndpoint] =
+                _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
+        return report;
+    }
+
+    /// <summary>The report clock. Parked while reports are off. Once a
+    /// command turns them on, the first report is due one interval after
+    /// that command (3.7 ms on the pad) and one every interval from then on,
+    /// at a fixed rate from a high-resolution timer. A clock that was held
+    /// up skips the ticks it missed and sends no burst. SubmitState only
+    /// replaces the state a report is built from: this loop is the one
+    /// thing that sends a report.</summary>
+    private void Switch2StreamLoop()
+    {
+        long interval = System.Diagnostics.Stopwatch.Frequency * Switch2ReportIntervalMs / 1000;
+        var waits = new[] { _streamTimer, _streamWake!.SafeWaitHandle.DangerousGetHandle() };
+        bool running = false;
+        long startedAt = 0, due = 0;
+        while (!_stop)
+        {
+            try
+            {
+                if (!_switch2!.ReportsOnSince(out long since))
+                {
+                    if (running)
+                    {
+                        running = false;
+                        lock (_hidLock) _reportOwed = false;
+                    }
+                    _streamWake.WaitOne(500);
+                    continue;
+                }
+
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (!running || since != startedAt)
+                {
+                    // A new run. It may follow a stop this loop never saw,
+                    // so the command's time tells the runs apart.
+                    running = true;
+                    startedAt = since;
+                    due = since + interval;
+                }
+                if (now >= due)
+                {
+                    SendSwitch2Report(startedAt);
+                    // The next tick of the same grid. A clock that was held
+                    // up past one or more ticks skips them.
+                    due += interval;
+                    if (due <= now) due += ((now - due) / interval + 1) * interval;
+                    continue;
+                }
+
+                long wait = due - now;
+                if (_streamTimer != IntPtr.Zero)
+                {
+                    long rel = -Math.Max(1, wait * 10_000_000L / System.Diagnostics.Stopwatch.Frequency); // relative, 100 ns units
+                    if (SetWaitableTimer(_streamTimer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false)
+                        && WaitForMultipleObjects(2, waits, false, 100) != WAIT_FAILED)
+                        continue;
+                }
+                // No high-resolution timer (Windows 10 before 1803) or a
+                // failed wait: the plain wait, coarser but still running.
+                _streamWake.WaitOne((int)Math.Max(1, wait * 1000 / System.Diagnostics.Stopwatch.Frequency));
+            }
+            catch
+            {
+                // The input pump's containment contract: a transient
+                // failure must not end the clock.
+            }
+        }
     }
 
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
@@ -431,10 +729,13 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                     }
                     foreach (var s in keep) holder.Enqueue(s);
                 }
+                if (_parkedBulkLength.Remove(victimSeqnum)) _bulkReadsCanceled++;
             }
         }
         // Protocol rule (usbip-win2 wsk_receive.cpp cites usbip_protocol.rst):
         // -ECONNRESET when the URB was still queued, 0 when already answered.
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip unlink {BusId}: {victimSeqnum} {(removed ? "was parked" : "had already been answered")}");
         var conn = _connection;
         if (conn == null) return;
         try { conn.SendRetUnlink(seqnum, removed ? -UsbipProtocol.EConnReset : 0); } catch { }
@@ -586,6 +887,25 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             return;
         }
 
+        // Microsoft OS 1.0 feature descriptors (issue #66), for a persona
+        // that declares them. Windows asks with a vendor request whose
+        // wIndex names the feature: 4 the extended compatible ID, 5 the
+        // extended properties. Only wIndex is read. bRequest is the vendor
+        // code Windows stored for this VID, PID and revision, which a real
+        // pad of the same revision may have set before this persona was ever
+        // attached, so every code is answered. Windows reads each header
+        // before the whole descriptor, hence the cut to wLength.
+        if (type == 2 && deviceToHost)
+        {
+            var feature = Descriptors.GetMicrosoftOsFeature(wIndex);
+            if (feature != null)
+            {
+                int n = Math.Min(feature.Length, wLength);
+                SendRetSubmit(cmd.Seqnum, 0, n, feature.AsSpan(0, n).ToArray());
+                return;
+            }
+        }
+
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
     }
 
@@ -626,7 +946,11 @@ internal sealed class UsbipEmulatedDevice : IDisposable
                 if (reportType == 0x01)
                 {
                     byte[] snapshot;
-                    lock (_hidLock) snapshot = _lastInputReport;
+                    // The Switch 2 Pro persona answers with the report it
+                    // would send next, in the layout asked for, and does
+                    // not count it.
+                    if (_switch2 != null) snapshot = _switch2.PeekReport(reportId);
+                    else lock (_hidLock) snapshot = _lastInputReport;
                     int n = Math.Min(snapshot.Length, wLength);
                     SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
                     return;
@@ -883,6 +1207,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
             _frameQueue.Clear();
         }
+        ResetSwitch2State();
     }
 
     private void ResetAltSettings()
@@ -935,7 +1260,30 @@ internal sealed class UsbipEmulatedDevice : IDisposable
             CloseHandle(_inputWaitEvent);
             _inputWaitEvent = IntPtr.Zero;
         }
+        if (_streamThread != null)
+        {
+            // _stop is set above. Wake the clock and wait for it before the
+            // handles it waits on go away.
+            try { _streamWake!.Set(); } catch { }
+            try { _streamThread.Join(600); } catch { }
+            if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
+            _streamWake!.Dispose();
+        }
     }
+
+    private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
+    private const uint TIMER_ALL_ACCESS = 0x1F0003;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period,
+        IntPtr completionRoutine, IntPtr arg, bool resume);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(IntPtr handle, uint ms);

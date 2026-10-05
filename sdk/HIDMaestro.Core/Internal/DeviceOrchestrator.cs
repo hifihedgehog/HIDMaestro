@@ -51,6 +51,9 @@ internal static class DeviceOrchestrator
     private static readonly bool s_diagEnabled =
         Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") == "1";
     private static readonly object s_diagLock = new();
+    /// <summary>True when HIDMAESTRO_DIAG=1, so a caller can skip building
+    /// a line nobody will read.</summary>
+    internal static bool DiagEnabled => s_diagEnabled;
     private static StreamWriter? s_diagWriter;
 
     internal static void LogDiag(string message)
