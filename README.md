@@ -157,7 +157,7 @@ Adding a controller to HIDMaestro is a data change. Adding one to a code-per-dev
 
 ## Keyboards and mice.
 
-As of v1.12.0 a profile can be a keyboard or a mouse. The catalog has 51 keyboards and 52 mice from 32 vendors, each the report descriptor of a real device's keyboard or mouse interface, taken from public dumps. Windows treats them as it treats the hardware: Raw Input lists each one, the keyboard types into the focused window, and the mouse moves the cursor.
+As of v1.12.0 a profile can be a keyboard or a mouse. The catalog has 51 keyboards and 52 mice from 32 vendors, each the report descriptor of a real device's keyboard or mouse interface, taken from public dumps. Windows treats them as it treats the hardware: Raw Input lists each one as its kind, a Scroll Lock pressed on a virtual keyboard turns Scroll Lock on, and the mouse moves the cursor.
 
 ```csharp
 using var mouse = ctx.CreateController(ctx.GetProfile("logitech-g502-hero")!, "mouse-1");
@@ -175,7 +175,7 @@ keyboard.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
 - **Absolute pointers.** `HidDescriptorBuilder.Mouse(absolute: true)` builds a pointer that takes 0 to 32767 and reaches Raw Input flagged `MOUSE_MOVE_ABSOLUTE`.
 - **Keyboard LEDs.** Windows sends a keyboard its Num Lock, Caps Lock and Scroll Lock state when it arrives and on every change. `KeyboardLedsChanged` reports each change and `KeyboardLeds` holds the latest, including the state sent while `CreateController` was still running.
 - **Stable paths.** Four mice with one VID and PID are four Raw Input devices, and each identity key gets the same device path back on every life.
-- **Nothing stays held.** If the consuming process ends with a key or button down, however it ends, the driver lets go of it. Without that, Windows would repeat a held key until the device was removed. `Dispose` sends the same release first.
+- **Nothing stays held.** If the consuming process ends with a key or button down, however it ends, the driver lets go of it. Without that, Windows would repeat a held key until the device was removed. `Dispose` sends the same release first, and the next session's cleanup removes the devices a dead consumer left, keyboards included.
 
 `HidDescriptorBuilder` builds them from scratch with the `Mouse`, `Keyboard`, `KeyboardNkro`, `ConsumerControl` and `VendorButtons` starters. Battery scenarios S69 and S70 check the descriptors and packers, then every catalog keyboard and mouse through Raw Input. [How this works](docs/INTERNALS.md#keyboards-and-mice).
 
@@ -189,7 +189,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
 - **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
-- **Validated across every API and both ends of the spectrum.** A 70-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It passes on a 16-core Windows 11 laptop, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
+- **Validated across every API and both ends of the spectrum.** A 70-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on a 16-core Windows 11 laptop, with the latest results under the battery below, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
 
 ### Validation
 
@@ -204,7 +204,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 70-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, the registry keys a virtual shares with real devices, what WGI reads from a virtual pad, and every keyboard and mouse through Raw Input, verifying no PnP devnodes are left behind. 70/70 PASS on a 16-core AMD Ryzen 9 Windows 11 laptop. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
+A 70-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, the registry keys a virtual shares with real devices, what WGI reads from a virtual pad, and every keyboard and mouse through Raw Input, verifying no PnP devnodes are left behind. On a 16-core AMD Ryzen 9 Windows 11 laptop the v1.12.0 release build passed 68 of 70 scenarios, in a run made while the machine was in use, and the build before its keyboard cleanup fix passed 70/70. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
