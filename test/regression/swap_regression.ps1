@@ -1788,8 +1788,10 @@ function Scenario-Kbm-Descriptors {
 # S70: keyboards and mice through Raw Input (issue #67). Four mice with one
 # VID and PID get four stable paths, bursts and four threads at 250 Hz lose
 # no counts, absolute and extra-button mice, a keyboard's keys and LEDs, a
-# consumer usage, and every catalog keyboard and mouse starts as its kind.
-# Moves the cursor and puts it back, and presses Scroll Lock twice.
+# consumer usage, every catalog keyboard and mouse starts as its kind, and a
+# killed consumer's keys come up and its devices, keyboard included, go in
+# the cleanup. Moves the cursor and puts it back, and presses Scroll Lock
+# twice.
 function Scenario-Kbm-Raw-Input {
     Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
                  -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)'

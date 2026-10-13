@@ -54,6 +54,7 @@ public static class DeviceManager
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED = 9;
 
     const uint CR_SUCCESS = 0;
+    const uint CR_NOT_DISABLEABLE = 0x00000028;
     const uint DN_STARTED = 0x00000008;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -626,13 +627,12 @@ public static class DeviceManager
                 // Fast mode: CM_Disable + CM_Uninstall directly. Avoids the
                 // SetupDiRemoveDevice → IRP_MN_QUERY_REMOVE → kernel-veto
                 // timeout (~1s per device) that dominates cleanup time when
-                // the UMDF host still holds handles after a force-kill.
+                // the UMDF host still holds handles after a force-kill. A
+                // keyboard refuses the disable and takes SetupDiRemoveDevice
+                // instead (DisableAndUninstall), before its parent is tried.
                 if (CM_Locate_DevNodeW(out uint ci, childId, 0) == CR_SUCCESS
                  || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
-                {
-                    CM_Disable_DevNode(ci, 0);
-                    CM_Uninstall_DevNode(ci, 0);
-                }
+                    DisableAndUninstall(ci, childId, waitMs: 2000);
             }
             else
             {
@@ -644,8 +644,7 @@ public static class DeviceManager
         // Step 2: Remove the parent (for non-SWD; SWD already done above)
         if (fast)
         {
-            CM_Disable_DevNode(devInst, 0);
-            CM_Uninstall_DevNode(devInst, 0);
+            DisableAndUninstall(devInst, instanceId, waitMs: 0);
             goneAfterDif = false; // don't wait, don't confirm
         }
         else if (isSwdParent)
@@ -851,6 +850,36 @@ public static class DeviceManager
         if (CM_Get_Device_IDW(devInst, buffer, (uint)buffer.Length, 0) != CR_SUCCESS)
             return null;
         return new string(buffer, 0, (int)idLen);
+    }
+
+    /// <summary>
+    /// Fast-mode removal of one devnode: CM_Disable_DevNode, then
+    /// CM_Uninstall_DevNode. Windows will not disable a keyboard, and while
+    /// one is up it will not disable the device above it either, so pnputil
+    /// and devcon fail on that root too (ERROR_NOT_DISABLEABLE).
+    /// SetupDiRemoveDevice still removes the keyboard itself, and the root
+    /// can be disabled once the keyboard is gone, so a devnode that refuses
+    /// the disable is removed that way. RemoveDevice takes the children
+    /// before the parent, so a keyboard child goes first, and
+    /// <paramref name="waitMs"/> waits it out before the parent is tried.
+    ///
+    /// Measured 2026-10-13 on the root of a keyboard whose consumer had
+    /// been killed: CM_Disable_DevNode returned CR_NOT_DISABLEABLE and
+    /// SetupDiRemoveDevice failed with ERROR_NOT_DISABLEABLE. The same call
+    /// on its keyboard child succeeded, the root then reported disableable,
+    /// and SetupDiRemoveDevice removed it. The two mice the same consumer
+    /// held reported disableable throughout.
+    /// </summary>
+    static void DisableAndUninstall(uint devInst, string instanceId, int waitMs)
+    {
+        if (CM_Disable_DevNode(devInst, 0) != CR_NOT_DISABLEABLE)
+        {
+            CM_Uninstall_DevNode(devInst, 0);
+            return;
+        }
+        DifRemoveDevice(instanceId);
+        if (waitMs > 0)
+            WaitForDeviceRemoval(instanceId, waitMs);
     }
 
     /// <summary>

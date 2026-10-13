@@ -23,7 +23,9 @@
 //      while holding F24, mouse button 6 and an absolute pointer leaves
 //      F24 and button 6 up and the pointer where it was, through the
 //      release frames the driver sends when the consumer's owner pipe
-//      closes. A child process of this probe is the consumer.
+//      closes. A child process of this probe is the consumer. The cleanup
+//      that follows removes all three of its devices, the keyboard
+//      included, which Windows will not disable.
 //
 // The burst moves the cursor 300 counts and back, and D puts it at the
 // center of the screen. The probe puts the cursor back at the end. No
@@ -39,8 +41,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using HIDMaestro;
+using Microsoft.Win32;
 
 internal static class Program
 {
@@ -77,6 +81,31 @@ internal static class Program
             .Type(type).Connection("usb").FromDescriptorBuilder(d).Build();
 
     static string Tag(ushort vid, ushort pid) => $"VID_{vid:X4}&PID_{pid:X4}";
+
+    [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
+
+    /// <summary>Root devices under ROOT\HIDCLASS whose hardware IDs carry
+    /// this VID and PID, live or phantom.</summary>
+    static List<string> RootDevices(string tag)
+    {
+        var ids = new List<string>();
+        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\ROOT\HIDCLASS");
+        if (key == null) return ids;
+        foreach (var inst in key.GetSubKeyNames())
+        {
+            using var sub = key.OpenSubKey(inst);
+            if (sub?.GetValue("HardwareID") is string[] hw
+                && hw.Any(h => h.Contains(tag, StringComparison.OrdinalIgnoreCase)))
+                ids.Add($@"ROOT\HIDCLASS\{inst}");
+        }
+        return ids;
+    }
+
+    /// <summary>The device is neither live nor phantom, the test
+    /// DeviceManager.RemoveDevice ends with.</summary>
+    static bool DeviceGone(string instanceId) =>
+        CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
 
     /// <summary>A Raw Input device of this VID and PID. Plain HID profiles
     /// sit under the HIDClass enumerator, so the path does not carry them.</summary>
@@ -780,6 +809,8 @@ internal static class Program
             return;
         }
         Check("the driver watches the consumer's exit", line.EndsWith(" on"), line);
+        var held = new[] { 0xF0B6, 0xF0B8, 0xF0B9 }.SelectMany(p => RootDevices(Tag(0xBEEF, (ushort)p)))
+                                                   .Where(id => CM_Locate_DevNodeW(out _, id, 0) == 0).ToList();
         var devs = RawInputSink.Devices();
         IntPtr Find(uint type, ushort pid) => devs.FirstOrDefault(d => d.Type == type && Is(d.Name, Tag(0xBEEF, pid))).Handle;
         IntPtr hk = Find(RawInputSink.RIM_TYPEKEYBOARD, 0xF0B6), hv = Find(RawInputSink.RIM_TYPEHID, 0xF0B8),
@@ -803,7 +834,21 @@ internal static class Program
               moves.All(x => Math.Abs(x.X - 32768) < 64 && Math.Abs(x.Y - 32768) < 64),
               moves.Count == 0 ? "no report" : string.Join(", ", moves.Select(x => $"{x.X},{x.Y}")));
 
+        // The cleanup removes every device the dead consumer left. Windows
+        // will not disable a keyboard, so the keyboard's root refuses the
+        // plain disable and has to go the way Dispose removes it.
+        var cleanup = Stopwatch.StartNew();
         HMContext.RemoveAllVirtualControllers();
+        long cleanupMs = cleanup.ElapsedMilliseconds;
+        var left = held.Where(id => !DeviceGone(id)).ToList();
+        while (left.Count > 0 && cleanup.ElapsedMilliseconds < cleanupMs + 5000)
+        {
+            Thread.Sleep(100);
+            left = held.Where(id => !DeviceGone(id)).ToList();
+        }
+        Check("the cleanup removes the dead consumer's keyboard and both mice",
+              held.Count == 3 && left.Count == 0,
+              left.Count > 0 ? "left: " + string.Join(", ", left) : $"{held.Count} devices, {cleanupMs} ms");
         WaitGone(Tag(0xBEEF, 0xF0B6), 10000);
     }
 
