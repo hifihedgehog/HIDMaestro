@@ -151,9 +151,40 @@ internal static class SharedMemoryIO
     private static readonly Dictionary<int, IntPtr> s_inputViews    = new();
     private static readonly Dictionary<int, IntPtr> s_inputEvents   = new();
     private static readonly Dictionary<int, IntPtr> s_companionInputEvents = new();
+    // Issue #67: delivery acknowledgement, guarded by the s_inputViews lock.
+    private static readonly Dictionary<int, IntPtr> s_inputAckHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_inputAckViews   = new();
+    private static readonly Dictionary<int, IntPtr> s_inputAckEvents  = new();
+    // Issue #67: the server ends of each controller's owner pipe, guarded by
+    // the s_inputViews lock.
+    private static readonly Dictionary<int, List<IntPtr>> s_ownerPipes = new();
+
+    // HIDMAESTRO_INPUT_ACK (driver/driver.h): DeliveredSeqNo at 0, the
+    // driver's capability bits at 4, then the release frames: a seqlock
+    // word, a count, and HIDMAESTRO_RELEASE_SLOTS frames of a 4-byte size
+    // and 80 bytes of report.
+    public const int INPUT_ACK_OFFSET_DELIVERED = 0;
+    public const int INPUT_ACK_OFFSET_CAPS = 4;
+    public const int INPUT_ACK_OFFSET_RELEASE_SEQ = 8;
+    public const int INPUT_ACK_OFFSET_RELEASE_COUNT = 12;
+    public const int INPUT_ACK_OFFSET_RELEASE = 16;
+    public const int RELEASE_SLOTS = 8;
+    public const int RELEASE_FRAME_CAP = 80;
+    public const int RELEASE_SLOT_SIZE = 4 + RELEASE_FRAME_CAP;
+    public const int INPUT_ACK_SIZE = INPUT_ACK_OFFSET_RELEASE + RELEASE_SLOTS * RELEASE_SLOT_SIZE;
+    public const int INPUT_ACK_CAP_DELIVERED = 0x1;
+    /// <summary>The driver watches this controller's owner pipe and sends
+    /// the release frames when it closes.</summary>
+    public const int INPUT_ACK_CAP_RELEASE = 0x2;
+    // Two instances, so a driver that restarts under a live controller can
+    // connect again: the SDK never re-arms an instance a client left.
+    private const int OWNER_PIPE_INSTANCES = 2;
     private static readonly Dictionary<int, IntPtr> s_outputHandles = new();
     private static readonly Dictionary<int, IntPtr> s_outputViews   = new();
     private static readonly Dictionary<int, IntPtr> s_outputEvents  = new();
+    // Issue #67: where each controller's output reader starts, guarded by
+    // the s_outputViews lock. See MarkOutputStart.
+    private static readonly Dictionary<int, uint> s_outputStartSeq = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateHandles = new();
     private static readonly Dictionary<int, IntPtr> s_pidStateViews   = new();
 
@@ -255,13 +286,6 @@ internal static class SharedMemoryIO
             // P/Invoke; the prior per-byte loop was 278 P/Invokes per setup.
             Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
 
-            // Companion signaling event. Auto-reset (manual_reset=FALSE), not
-            // initially set. The driver's per-device worker thread waits on
-            // this with a 50ms safety timeout to replace the old 1ms busy poll.
-            // SDDL matches the section so WUDFHost (LocalService) can open it.
-            string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
-            IntPtr ev = CreateNamedEvent(evName);
-
             // Companion input doorbell (perf audit 2026-07-21). The XUSB
             // companion's WAIT_FOR_INPUT pump was purely 8 ms
             // timer-quantized, which put a 0-8 ms (median ~4 ms) phase
@@ -274,6 +298,43 @@ internal static class SharedMemoryIO
             string cevName = $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}";
             IntPtr cev = CreateNamedEvent(cevName);
             s_companionInputEvents[controllerIndex] = cev;
+
+            // Issue #67: the driver stores each delivered frame's SeqNo here
+            // and signals the event, so keyboard and mouse writers can send
+            // every frame instead of the latest one. A separate section, so
+            // the input layout native writers depend on is unchanged. The
+            // driver opens both alongside the input section, since it
+            // cannot create Global\ objects itself, and sets the capability
+            // word. An older driver leaves the word zero and nobody waits.
+            (IntPtr ah, IntPtr av) = CreateSection($@"Global\HIDMaestroInputAck{controllerIndex}", INPUT_ACK_SIZE);
+            Marshal.Copy(new byte[INPUT_ACK_SIZE], 0, av, INPUT_ACK_SIZE);
+            s_inputAckHandles[controllerIndex] = ah;
+            s_inputAckViews[controllerIndex] = av;
+            s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
+
+            // Issue #67: the owner pipe. The driver connects and keeps a
+            // read pending that never gets data. Windows closes these ends
+            // when this process ends, however it ends, and the read
+            // completes, which is how the driver learns to let go of the
+            // keys and buttons this process held. Best effort: without it
+            // the device keeps its last report until it is removed.
+            var pipes = new List<IntPtr>();
+            for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
+            {
+                IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}");
+                if (ph != INVALID_HANDLE_VALUE) pipes.Add(ph);
+            }
+            s_ownerPipes[controllerIndex] = pipes;
+
+            // Driver signaling event. Auto-reset (manual_reset=FALSE), not
+            // initially set. The driver's per-device worker thread waits on
+            // this with a 50ms safety timeout to replace the old 1ms busy poll.
+            // SDDL matches the section so WUDFHost (LocalService) can open it.
+            // Created last: the worker maps the input section and the
+            // acknowledgement once, when this event first opens, so both
+            // must exist by then.
+            string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
+            IntPtr ev = CreateNamedEvent(evName);
 
             s_inputHandles[controllerIndex] = h;
             s_inputViews[controllerIndex] = view;
@@ -367,6 +428,32 @@ internal static class SharedMemoryIO
             s_outputViews[controllerIndex] = view;
             return view;
         }
+    }
+
+    /// <summary>Record the output ring's Head as the point this controller's
+    /// reader starts from. Called once per create, after the section exists
+    /// and before the device does (issue #67). A host writes to a device as
+    /// soon as it starts, which is before the controller object and its
+    /// reader exist: Windows sends a new keyboard its LED state then, and a
+    /// Sony Bluetooth host reads the feature reports that arm the extended
+    /// report. A reader that started at the Head it found skipped those.
+    /// Anything an earlier controller at this index left stays behind the
+    /// mark.</summary>
+    public static void MarkOutputStart(int controllerIndex)
+    {
+        lock (s_outputViews)
+        {
+            if (s_outputViews.TryGetValue(controllerIndex, out IntPtr view) && view != IntPtr.Zero)
+                s_outputStartSeq[controllerIndex] = (uint)Marshal.ReadInt32(view, 0);
+        }
+    }
+
+    /// <summary>The mark <see cref="MarkOutputStart"/> left for this index,
+    /// removed as it is read, or null when there is none.</summary>
+    public static uint? TakeOutputStart(int controllerIndex)
+    {
+        lock (s_outputViews)
+            return s_outputStartSeq.Remove(controllerIndex, out uint seq) ? seq : null;
     }
 
     /// <summary>Returns the view pointer for the controller's PID FFB
@@ -540,6 +627,81 @@ internal static class SharedMemoryIO
         lock (s_inputViews)
         {
             return s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) ? ev : IntPtr.Zero;
+        }
+    }
+
+    /// <summary>True once the driver serving this controller has opened the
+    /// acknowledgement and announced it stores delivered sequence numbers
+    /// (issue #67).</summary>
+    public static bool InputAckSupported(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            return s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero
+                && (Marshal.ReadInt32(v, INPUT_ACK_OFFSET_CAPS) & INPUT_ACK_CAP_DELIVERED) != 0;
+        }
+    }
+
+    /// <summary>Whether the driver watches this controller's owner pipe and
+    /// will send the release frames when this process lets go of it.</summary>
+    public static bool ReleaseOnExitSupported(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            return s_inputAckViews.TryGetValue(controllerIndex, out IntPtr v) && v != IntPtr.Zero
+                && (Marshal.ReadInt32(v, INPUT_ACK_OFFSET_CAPS) & INPUT_ACK_CAP_RELEASE) != 0;
+        }
+    }
+
+    /// <summary>Store the frames the driver sends if this process goes
+    /// away with input held: one per input report, each the report that
+    /// lets go of everything. A seqlock write. The caller is the
+    /// controller's only writer (it holds its submit lock).</summary>
+    public static void WriteReleaseFrames(int controllerIndex, IReadOnlyList<byte[]> frames)
+    {
+        IntPtr view;
+        lock (s_inputViews)
+        {
+            if (!s_inputAckViews.TryGetValue(controllerIndex, out view) || view == IntPtr.Zero) return;
+        }
+        int seq = Marshal.ReadInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ);
+        if ((seq & 1) == 0) seq++;
+        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq);
+        Thread.MemoryBarrier();
+        int count = Math.Min(frames.Count, RELEASE_SLOTS);
+        for (int i = 0; i < count; i++)
+        {
+            byte[] f = frames[i];
+            int size = Math.Min(f.Length, RELEASE_FRAME_CAP);
+            int at = INPUT_ACK_OFFSET_RELEASE + i * RELEASE_SLOT_SIZE;
+            Marshal.WriteInt32(view, at, size);
+            Marshal.Copy(f, 0, view + at + 4, size);
+        }
+        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_COUNT, count);
+        Thread.MemoryBarrier();
+        Marshal.WriteInt32(view, INPUT_ACK_OFFSET_RELEASE_SEQ, seq + 1);
+    }
+
+    /// <summary>Wait until a READ_REPORT has carried the frame written with
+    /// <paramref name="seqNo"/> (or a later one). False on timeout, or when
+    /// the controller has no acknowledgement.</summary>
+    public static bool WaitInputDelivered(int controllerIndex, uint seqNo, int timeoutMs)
+    {
+        IntPtr view, ev;
+        lock (s_inputViews)
+        {
+            if (!s_inputAckViews.TryGetValue(controllerIndex, out view) || view == IntPtr.Zero) return false;
+            s_inputAckEvents.TryGetValue(controllerIndex, out ev);
+        }
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            uint delivered = (uint)Marshal.ReadInt32(view, INPUT_ACK_OFFSET_DELIVERED);
+            if ((int)(delivered - seqNo) >= 0) return true;
+            long left = deadline - Environment.TickCount64;
+            if (left <= 0) return false;
+            if (ev == IntPtr.Zero) { Thread.Sleep(1); continue; }
+            WaitForSingleObject(ev, (uint)Math.Min(left, 50));
         }
     }
 
@@ -728,6 +890,25 @@ internal static class SharedMemoryIO
             if (s_inputEvents.TryGetValue(controllerIndex, out IntPtr ev) && ev != IntPtr.Zero)
                 CloseHandle(ev);
             s_inputEvents.Remove(controllerIndex);
+
+            // The companion doorbell is created per input mapping too, and
+            // a recreate of this index makes a new one.
+            if (s_companionInputEvents.TryGetValue(controllerIndex, out IntPtr cev) && cev != IntPtr.Zero)
+                CloseHandle(cev);
+            s_companionInputEvents.Remove(controllerIndex);
+
+            if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
+                UnmapViewOfFile(av);
+            s_inputAckViews.Remove(controllerIndex);
+            if (s_inputAckHandles.TryGetValue(controllerIndex, out IntPtr ah) && ah != IntPtr.Zero)
+                CloseHandle(ah);
+            s_inputAckHandles.Remove(controllerIndex);
+            if (s_inputAckEvents.TryGetValue(controllerIndex, out IntPtr aev) && aev != IntPtr.Zero)
+                CloseHandle(aev);
+            s_inputAckEvents.Remove(controllerIndex);
+            if (s_ownerPipes.TryGetValue(controllerIndex, out var pipes))
+                foreach (var ph in pipes) CloseHandle(ph);
+            s_ownerPipes.Remove(controllerIndex);
         }
         lock (s_outputViews)
         {
@@ -742,6 +923,7 @@ internal static class SharedMemoryIO
             if (s_outputEvents.TryGetValue(controllerIndex, out IntPtr oe) && oe != IntPtr.Zero)
                 CloseHandle(oe);
             s_outputEvents.Remove(controllerIndex);
+            s_outputStartSeq.Remove(controllerIndex);
         }
         lock (s_pidStateViews)
         {
@@ -781,6 +963,18 @@ internal static class SharedMemoryIO
             foreach (var ev in s_companionInputEvents.Values)
                 if (ev != IntPtr.Zero) CloseHandle(ev);
             s_companionInputEvents.Clear();
+            foreach (var v in s_inputAckViews.Values)
+                if (v != IntPtr.Zero) UnmapViewOfFile(v);
+            s_inputAckViews.Clear();
+            foreach (var h in s_inputAckHandles.Values)
+                if (h != IntPtr.Zero) CloseHandle(h);
+            s_inputAckHandles.Clear();
+            foreach (var ev in s_inputAckEvents.Values)
+                if (ev != IntPtr.Zero) CloseHandle(ev);
+            s_inputAckEvents.Clear();
+            foreach (var pipes in s_ownerPipes.Values)
+                foreach (var ph in pipes) CloseHandle(ph);
+            s_ownerPipes.Clear();
         }
         lock (s_outputViews)
         {
@@ -793,6 +987,7 @@ internal static class SharedMemoryIO
             foreach (var ev in s_outputEvents.Values)
                 if (ev != IntPtr.Zero) CloseHandle(ev);
             s_outputEvents.Clear();
+            s_outputStartSeq.Clear();
         }
         lock (s_pidStateViews)
         {
@@ -852,6 +1047,46 @@ internal static class SharedMemoryIO
     /// for the sections so WUDFHost (LocalService) can OpenEvent it. Auto
     /// reset so a single Wait consumes the signal; manual_reset=FALSE means
     /// the dwFlags argument to CreateEventExW is 0 (not MANUAL_RESET).</summary>
+    // The owner pipe admits the system, administrators and LocalService,
+    // which WUDFHost runs as. No read access for everyone: one stray client
+    // would take the instance the driver needs.
+    private const string OwnerPipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
+    private const uint PIPE_ACCESS_OUTBOUND = 0x00000002;
+    private const uint PIPE_TYPE_BYTE = 0x00000000;
+    private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    /// <summary>One instance of the owner pipe. The SDK never writes to it
+    /// and never reads from it: its only job is to close when this process
+    /// does.</summary>
+    private static IntPtr CreateOwnerPipe(string name)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(OwnerPipeSddl, 1, out IntPtr sd, IntPtr.Zero))
+            return INVALID_HANDLE_VALUE;
+        var sa = new SECURITY_ATTRIBUTES
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = sd,
+            bInheritHandle = 0,
+        };
+        IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        try
+        {
+            Marshal.StructureToPtr(sa, saPtr, false);
+            return CreateNamedPipeW(name, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                                    (uint)OWNER_PIPE_INSTANCES, 0, 0, 0, saPtr);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(saPtr);
+            LocalFree(sd);
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateNamedPipeW(string name, uint openMode, uint pipeMode, uint maxInstances,
+                                                  uint outBuffer, uint inBuffer, uint defaultTimeout, IntPtr securityAttributes);
+
     private static IntPtr CreateNamedEvent(string name)
     {
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -924,4 +1159,7 @@ internal static class SharedMemoryIO
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetEvent(IntPtr hEvent);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 }

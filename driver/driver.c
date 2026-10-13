@@ -309,6 +309,24 @@ InitInstancePaths(
         RtlCopyMemory(ctx->StopEventName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->StopEventName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroInputAck";
+        SIZE_T cap = sizeof(ctx->InputAckMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->InputAckMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->InputAckMappingName, index, cap);
+    }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroInputAckEvent";
+        SIZE_T cap = sizeof(ctx->InputAckEventName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->InputAckEventName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->InputAckEventName, index, cap);
+    }
+    {
+        static const WCHAR prefix[] = L"\\\\.\\pipe\\HIDMaestroOwner";
+        SIZE_T cap = sizeof(ctx->OwnerPipeName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->OwnerPipeName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->OwnerPipeName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -413,19 +431,6 @@ ReadConfigFromRegistry(
         ctx->HidDescriptor.DescriptorList[0].wReportLength =
             (USHORT)ctx->ReportDescriptorSize;
 
-        /* Cache whether the descriptor declares a second collection with
-         * Report ID 0x20 (0x85 0x20). The descriptor is fixed after this
-         * point, so scanning it once here avoids a linear byte scan on
-         * every ProcessSharedInput frame (~250 Hz per controller). */
-        ctx->HasCol2Report = FALSE;
-        if (ctx->ReportDescriptorSize > 130) {
-            for (ULONG i = 0; i + 1 < ctx->ReportDescriptorSize; i++) {
-                if (ctx->ReportDescriptor[i] == 0x85 && ctx->ReportDescriptor[i+1] == 0x20) {
-                    ctx->HasCol2Report = TRUE;
-                    break;
-                }
-            }
-        }
     }
 
     /* Read VendorId (REG_DWORD) */
@@ -554,6 +559,14 @@ ReadConfigFromRegistry(
 /*  Shared Memory Poll Timer                                           */
 /* ================================================================== */
 
+static VOID TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx);
+static VOID CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx);
+static VOID AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo);
+static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
+static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
+static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
+static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
+
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
 static BOOLEAN
@@ -567,7 +580,190 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
 
     ctx->SharedMemHandle = h;
     ctx->SharedMemPtr = view;
+    TryOpenInputAck(ctx);
+    TryOpenOwnerWatch(ctx);
     return TRUE;
+}
+
+/* Issue #67: open the delivery acknowledgement the SDK creates beside the
+ * input section, and announce the capability in it. Best effort: an SDK
+ * that predates it creates neither object. Takes InputLock because the
+ * read path writes through the pointer under it. */
+static VOID
+TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
+{
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, ctx->InputAckMappingName);
+    if (h == NULL) return;
+    PVOID view = MapViewOfFile(h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_INPUT_ACK));
+    if (view == NULL) { CloseHandle(h); return; }
+    HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, ctx->InputAckEventName);
+
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    CloseInputAckLocked(ctx);
+    ctx->InputAckMemHandle = h;
+    ctx->InputAckMemPtr = (volatile LONG *)view;
+    ctx->InputAckEvent = ev;
+    InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)view)->Capabilities,
+                        (LONG)HIDMAESTRO_INPUT_ACK_CAP_DELIVERED);
+    WdfWaitLockRelease(ctx->InputLock);
+}
+
+/* Caller holds InputLock (or is the only thread left, at cleanup). */
+static VOID
+CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->InputAckMemPtr) { UnmapViewOfFile((PVOID)ctx->InputAckMemPtr); ctx->InputAckMemPtr = NULL; }
+    if (ctx->InputAckMemHandle) { CloseHandle(ctx->InputAckMemHandle); ctx->InputAckMemHandle = NULL; }
+    if (ctx->InputAckEvent) { CloseHandle(ctx->InputAckEvent); ctx->InputAckEvent = NULL; }
+}
+
+/* A READ_REPORT just carried the frame with this SeqNo. Caller holds
+ * InputLock. */
+static VOID
+AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
+{
+    if (ctx->InputAckMemPtr == NULL) return;
+    InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->DeliveredSeqNo, (LONG)seqNo);
+    if (ctx->InputAckEvent) SetEvent(ctx->InputAckEvent);
+}
+
+/* Issue #67: connect to the SDK's owner pipe and leave one read pending.
+ * The SDK never writes to it, so the read completes only when the SDK's end
+ * closes, which Windows does when the consumer's process ends however it
+ * ends. Worker thread only. The pipe stays open across handle recycles: it
+ * is a single connection the SDK does not reopen. */
+static VOID
+TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->OwnerPipe != NULL) return;
+    HANDLE p = CreateFileW(ctx->OwnerPipeName, GENERIC_READ, 0, NULL,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    if (p == INVALID_HANDLE_VALUE) return;
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (ev == NULL) { CloseHandle(p); return; }
+
+    RtlZeroMemory(&ctx->OwnerOverlapped, sizeof(ctx->OwnerOverlapped));
+    ctx->OwnerOverlapped.hEvent = ev;
+    ctx->OwnerPipe = p;
+    ctx->OwnerReadEvent = ev;
+    if (!ReadFile(p, &ctx->OwnerReadByte, 1, NULL, &ctx->OwnerOverlapped)
+        && GetLastError() != ERROR_IO_PENDING) {
+        /* The SDK's end closed between the open and the read. */
+        SetEvent(ev);
+    }
+
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    if (ctx->InputAckMemPtr)
+        InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
+                      (LONG)HIDMAESTRO_INPUT_ACK_CAP_RELEASE);
+    WdfWaitLockRelease(ctx->InputLock);
+}
+
+/* Cancel the pending read and wait for it to finish before the OVERLAPPED
+ * and its event go away. Worker thread, or cleanup after the worker has
+ * been joined. */
+static VOID
+CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->OwnerPipe != NULL) {
+        DWORD n = 0;
+        CancelIoEx(ctx->OwnerPipe, &ctx->OwnerOverlapped);
+        GetOverlappedResult(ctx->OwnerPipe, &ctx->OwnerOverlapped, &n, TRUE);
+        CloseHandle(ctx->OwnerPipe);
+        ctx->OwnerPipe = NULL;
+    }
+    if (ctx->OwnerReadEvent != NULL) {
+        CloseHandle(ctx->OwnerReadEvent);
+        ctx->OwnerReadEvent = NULL;
+    }
+}
+
+/* The consumer's end of the owner pipe closed. Queue the release frames the
+ * SDK left in the acknowledgement section and send them, so whatever key or
+ * button the consumer held when it went is let go instead of repeating
+ * until the device is removed. A gamepad's SDK leaves no frames, and
+ * nothing is sent. Worker thread only. */
+static VOID
+OwnerGone(_In_ PDEVICE_CONTEXT ctx)
+{
+    CloseOwnerWatch(ctx);
+
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
+    ULONG count = 0;
+    if (ack != NULL) {
+        /* Seqlock read. Every version the SDK writes is a set of release
+         * frames, so after four torn reads the last copy is still safe to
+         * send: at worst an absolute pointer keeps a slightly older
+         * position. */
+        for (int attempt = 0; attempt < 4; attempt++) {
+            LONG s1 = ack->ReleaseSeq;
+            MemoryBarrier();
+            count = (ULONG)ack->ReleaseCount;
+            if (count > HIDMAESTRO_RELEASE_SLOTS) count = HIDMAESTRO_RELEASE_SLOTS;
+            for (ULONG i = 0; i < count; i++) {
+                ULONG size = ack->Release[i].Size;
+                if (size > HIDMAESTRO_RELEASE_FRAME_CAP) size = HIDMAESTRO_RELEASE_FRAME_CAP;
+                ctx->ReleaseSizes[i] = size;
+                for (ULONG b = 0; b < size; b++)
+                    ctx->ReleaseFrames[i][b] = ack->Release[i].Data[b];
+            }
+            MemoryBarrier();
+            if ((s1 & 1) == 0 && s1 == ack->ReleaseSeq) break;
+        }
+    }
+    ctx->ReleaseCount = count;
+    ctx->ReleaseNext = 0;
+    /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
+     * state too: the frame for the cached report's ID replaces it. */
+    for (ULONG i = 0; i < count; i++) {
+        if (ctx->ReleaseSizes[i] == ctx->InputReportSize
+            && (ctx->FirstInputReportId == 0 || ctx->ReleaseFrames[i][0] == ctx->InputReport[0])) {
+            RtlCopyMemory(ctx->InputReport, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
+            break;
+        }
+    }
+    WdfWaitLockRelease(ctx->InputLock);
+
+    DeliverReleaseFrames(ctx);
+}
+
+/* Hand queued release frames to the READ_REPORTs HID class has parked, one
+ * frame per read. Frames left over go to the next READ_REPORTs as they
+ * arrive (IOCTL_HID_READ_REPORT). */
+static VOID
+DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx)
+{
+    for (;;) {
+        UCHAR frame[HIDMAESTRO_RELEASE_FRAME_CAP];
+        ULONG size;
+        BOOLEAN more;
+        WDFREQUEST pendingRead;
+
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        more = ctx->ReleaseNext < ctx->ReleaseCount;
+        WdfWaitLockRelease(ctx->InputLock);
+        if (!more) return;
+
+        /* The queue is taken outside InputLock, as ProcessSharedInput
+         * takes it. A READ_REPORT can take the last frame meanwhile, and
+         * then the read goes back where it was. */
+        if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead)))
+            return;
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        if (ctx->ReleaseNext >= ctx->ReleaseCount) {
+            WdfWaitLockRelease(ctx->InputLock);
+            WdfRequestRequeue(pendingRead);
+            return;
+        }
+        size = ctx->ReleaseSizes[ctx->ReleaseNext];
+        RtlCopyMemory(frame, ctx->ReleaseFrames[ctx->ReleaseNext], size);
+        ctx->ReleaseNext++;
+        WdfWaitLockRelease(ctx->InputLock);
+
+        NTSTATUS cs = RequestCopyFromBuffer(pendingRead, frame, size);
+        WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+    }
 }
 
 /* Open the OUTPUT section. The test app pre-creates the named section with
@@ -1570,22 +1766,6 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         ds3Fresh = TRUE;
     }
 
-    /* Build Col2 report (Report ID 0x20) with same gamepad data. The
-     * descriptor scan for 0x85 0x20 is cached at config-read into
-     * ctx->HasCol2Report (the descriptor is immutable after init), so
-     * this hot path no longer rescans up to 4 KB every frame. */
-    UCHAR col2Report[HIDMAESTRO_MAX_REPORT_SIZE];
-    ULONG col2Size = 0;
-    if (ctx->HasCol2Report) {
-        col2Report[0] = 0x20; /* Report ID */
-        /* Write separate trigger data: Brake(LT) and Accelerator(RT) as 16-bit values */
-        USHORT lt16 = (USHORT)((*(USHORT*)&shared.GipData[8] & 0x03FF) * 65535 / 1023);
-        USHORT rt16 = (USHORT)((*(USHORT*)&shared.GipData[10] & 0x03FF) * 65535 / 1023);
-        *(USHORT*)&col2Report[1] = lt16;
-        *(USHORT*)&col2Report[3] = rt16;
-        col2Size = 5; /* Report ID + Brake(2) + Accel(2) */
-    }
-
     /* Complete exactly ONE pending READ_REPORT per shared-memory state
      * change: not ALL queued requests. HidClass pre-queues READ_REPORTs
      * for performance; draining the entire queue with the same cached
@@ -1608,17 +1788,8 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
         WDFREQUEST pendingRead;
         if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
             servedOne = TRUE;
-            /* Send Col1 (GIP, no Report ID) */
             NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
             WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-
-            /* Send Col2 (Report ID 0x20) if available: one Col2 read
-             * paired with one Col1 read, still one logical "frame." */
-            if (col2Size > 0 &&
-                NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
-                cs = RequestCopyFromBuffer(pendingRead, col2Report, col2Size);
-                WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
-            }
         }
         /* Store for polled GET_INPUT_REPORT, and bump the seqno gate
          * so the next IOCTL_HID_READ_REPORT for this seqno completes
@@ -1643,8 +1814,10 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * waited a full frame interval for data already sitting in the
          * cache. The spin-trap the gate exists for stays closed because
          * the immediate-complete path advances LastDelivered itself. */
-        if (servedOne)
+        if (servedOne) {
             ctx->LastDeliveredInputSeqNo = seqNo;
+            AckInputDeliveredLocked(ctx, seqNo);
+        }
         WdfWaitLockRelease(ctx->InputLock);
     }
 }
@@ -1716,6 +1889,14 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                                    ctx->InputEventName);
             if (ev != NULL) {
                 ctx->InputDataEvent = ev;
+                /* The SDK creates the input section (and the delivery
+                 * acknowledgement beside it, issue #67) before the event,
+                 * so map both now rather than on the first frame: a writer
+                 * that waits on delivery sees the capability before it
+                 * sends anything. The worker owns this open, as it does
+                 * the lazy one in ReadSharedInput. */
+                if (ctx->SharedMemPtr == NULL)
+                    TryOpenSharedMapping(ctx);
                 break;
             }
             {
@@ -1753,10 +1934,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
         ULONG staleWakeups = 0;
         ULONG idleTimeouts = 0;
         BOOLEAN recycle = FALSE;
-        HANDLE waits[2] = { ctx->StopEvent, ctx->InputDataEvent };
 
         for (;;) {
-            DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 500);
+            /* The owner watch (issue #67) joins the wait while it is open.
+             * After it fires it is closed and the wait is back to two. */
+            HANDLE waits[3] = { ctx->StopEvent, ctx->InputDataEvent, ctx->OwnerReadEvent };
+            DWORD rc = WaitForMultipleObjects(ctx->OwnerReadEvent ? 3 : 2, waits, FALSE, 500);
 
             /* Issue #38: TearingDown is the authoritative exit
              * condition, checked on EVERY wake including timeouts. The
@@ -1804,6 +1987,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 continue;
             }
 
+            if (rc == WAIT_OBJECT_0 + 2) {
+                /* The consumer's end of the owner pipe closed. */
+                OwnerGone(ctx);
+                continue;
+            }
+
             /* Perf audit 2026-07-21 (I2): a single 500 ms timeout is the
              * NORMAL idle state (consumer between frames, game menus),
              * and recycling handles on every one cost an unmap/reopen
@@ -1846,6 +2035,11 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (!ctx->SwitchProtocol) {
                 if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
                 if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
+                /* The acknowledgement follows the input section: reopened
+                 * with it by TryOpenSharedMapping. */
+                WdfWaitLockAcquire(ctx->InputLock, NULL);
+                CloseInputAckLocked(ctx);
+                WdfWaitLockRelease(ctx->InputLock);
             }
             /* Also reset cached seqno so the fresh mapping's first read
              * (even if it happens to land on a SeqNo matching our previous
@@ -1892,6 +2086,10 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
 
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
+    /* Workers are joined and the queues purged before context cleanup, so
+     * no read path can be touching the acknowledgement any more. */
+    CloseInputAckLocked(ctx);
+    CloseOwnerWatch(ctx);
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->PidStateMemPtr) { UnmapViewOfFile(ctx->PidStateMemPtr); ctx->PidStateMemPtr = NULL; }
@@ -2286,10 +2484,20 @@ EvtIoDeviceControl(
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);
 
+        /* Release frames the consumer's exit left queued (issue #67) go
+         * first, one per read. */
+        if (ctx->ReleaseNext < ctx->ReleaseCount) {
+            ULONG i = ctx->ReleaseNext++;
+            status = RequestCopyFromBuffer(Request, ctx->ReleaseFrames[i], ctx->ReleaseSizes[i]);
+            WdfWaitLockRelease(ctx->InputLock);
+            break;
+        }
+
         if (ctx->InputReportReady && ctx->SharedMemSeqNo > ctx->LastDeliveredInputSeqNo) {
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
+            AckInputDeliveredLocked(ctx, ctx->SharedMemSeqNo);
             WdfWaitLockRelease(ctx->InputLock);
         } else {
             WdfWaitLockRelease(ctx->InputLock);

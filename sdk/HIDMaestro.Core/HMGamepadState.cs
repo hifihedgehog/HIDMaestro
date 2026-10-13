@@ -400,12 +400,31 @@ public enum HMButton : uint
     // than as one of the standard gamepad roles.
     Misc1        = 1u << 15,
 
-    // Second paddle pair: the DualSense Edge's front Fn buttons. Same
-    // side-naming rationale as the first pair; SDL folds these into
-    // SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2 / LEFT_PADDLE2 in its PS5 Edge
-    // mapping.
+    // Second paddle pair: the DualSense Edge's front Fn buttons and the
+    // Steam Deck's and Steam Controller's lower rear buttons (R5 / L5, while the
+    // upper R4 / L4 are the first pair). Same side-naming rationale as the
+    // first pair. SDL folds these into SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2 /
+    // LEFT_PADDLE2.
     RightPaddle2 = 1u << 16,
     LeftPaddle2  = 1u << 17,
+
+    // Two-trackpad controllers (Steam Deck, Steam Controller, Steam
+    // Controller 2). The left pad's click is Touchpad, the button SDL maps
+    // to SDL_GAMEPAD_BUTTON_TOUCHPAD on the Deck and the Steam Controller 2.
+    // LeftTouchpad names the same bit. The right pad's click is SDL's
+    // SDL_GAMEPAD_BUTTON_MISC2 on those two.
+    RightTouchpad = 1u << 18,
+
+    // Capacitive touch, which SDL reports as SDL_GamepadCapSenseType
+    // rather than as buttons: the thumbstick tops on the Steam Deck and the
+    // Steam Controller 2, the grips on the Steam Controller 2.
+    LeftStickTouch  = 1u << 19,
+    RightStickTouch = 1u << 20,
+    LeftGripTouch   = 1u << 21,
+    RightGripTouch  = 1u << 22,
+
+    // The left trackpad's click on a two-trackpad controller.
+    LeftTouchpad = Touchpad,
 
     // Aliases for clarity when programming against PlayStation profiles
     Cross    = A,

@@ -55,6 +55,19 @@ public sealed class HidDescriptorBuilder
     private bool _xUsed, _yUsed, _zUsed, _rxUsed, _ryUsed, _rzUsed,
                  _sliderUsed, _dialUsed;
 
+    // The Usage Page in effect after the last emitted item, or 0xFFFF when
+    // unknown. AddStick emits no page of its own, so a stick added after
+    // AddButtons used to land on the Button page. It now restates Generic
+    // Desktop exactly when the page has moved, which leaves every
+    // descriptor that already worked byte for byte the same.
+    private ushort _currentPage = 0xFFFF;
+
+    // Keyboard and mouse starters (issue #67): complete top-level
+    // collections. More than one needs a report ID on each.
+    private int _starterCollections;
+    private bool _starterWithoutId;
+    private readonly HashSet<byte> _starterIds = new();
+
     // Allocate the next available paired-stick Usage pair. "Left" name biases
     // the first stick to X/Y; "Right" or any other name biases the first stick
     // to Z/Rz (v1.3.14's RumblePad/vJoy convention preserved for the common
@@ -95,24 +108,206 @@ public sealed class HidDescriptorBuilder
     /// FFB-capable virtuals.</summary>
     public HidDescriptorBuilder Gamepad()
     {
+        ThrowIfStarterBuilt();
         _bytes.AddRange(new byte[] { 0x05, 0x01 });       // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x05 });       // Usage (Game Pad)
         _bytes.AddRange(new byte[] { 0xA1, 0x01 });       // Collection (Application)
         _appCollectionEndPos = _bytes.Count;
         _tlcUsage = 0x05;
         _collectionOpen = true;
+        _currentPage = 0x01;
         return this;
     }
 
     /// <summary>Begin a Joystick application collection (Usage Page 0x01, Usage 0x04).</summary>
     public HidDescriptorBuilder Joystick()
     {
+        ThrowIfStarterBuilt();
         _bytes.AddRange(new byte[] { 0x05, 0x01 });       // Usage Page (Generic Desktop)
         _bytes.AddRange(new byte[] { 0x09, 0x04 });       // Usage (Joystick)
         _bytes.AddRange(new byte[] { 0xA1, 0x01 });       // Collection (Application)
         _appCollectionEndPos = _bytes.Count;
         _tlcUsage = 0x04;
         _collectionOpen = true;
+        _currentPage = 0x01;
+        return this;
+    }
+
+    private void ThrowIfStarterBuilt()
+    {
+        if (_starterCollections > 0)
+            throw new InvalidOperationException(
+                "Build a game controller collection in a HidDescriptorBuilder of its own, not after a keyboard or mouse collection.");
+    }
+
+    // ── Keyboards and mice (issue #67) ──────────────────────────────────
+
+    private void BeginStarter(byte reportId)
+    {
+        if (_collectionOpen)
+            throw new InvalidOperationException(
+                "A keyboard or mouse collection cannot go inside the open Gamepad or Joystick collection. " +
+                "Build it in a HidDescriptorBuilder of its own.");
+        if (reportId == 0 && _starterCollections > 0 || _starterWithoutId && _starterCollections > 0)
+            throw new InvalidOperationException(
+                "A descriptor with more than one top-level collection needs a nonzero report ID on every one.");
+        if (reportId != 0 && !_starterIds.Add(reportId))
+            throw new ArgumentException($"Report ID {reportId} is already used.", nameof(reportId));
+        _starterWithoutId |= reportId == 0;
+        _starterCollections++;
+    }
+
+    private void EndStarter(int inputBits)
+    {
+        // The first collection's input report is the one a data-only
+        // SubmitRawReport fills, so InputReportByteSize describes it.
+        if (_starterCollections == 1 && _totalInputBits == 0) _totalInputBits = inputBits;
+        _currentPage = 0xFFFF;
+    }
+
+    /// <summary>A complete mouse collection (Generic Desktop, Mouse), the
+    /// layout Windows' mouhid reads: <paramref name="buttons"/> buttons, X
+    /// and Y, then the wheel and the horizontal wheel (Consumer AC Pan)
+    /// when asked for.
+    ///
+    /// <para>Relative X and Y are 16-bit, -32767 to 32767 counts per
+    /// report, the range gaming mice use. Absolute X and Y run 0 to 32767
+    /// across the screen, the convention VMulti and digitizer-backed
+    /// pointers use. Raw Input's RAWMOUSE carries five buttons. Put more in
+    /// a <see cref="VendorButtons"/> collection beside this one.</para>
+    ///
+    /// <para>One mouse is one collection. For several independent mice,
+    /// create several controllers, each with its own identity key.</para></summary>
+    public HidDescriptorBuilder Mouse(int buttons = 5, bool absolute = false,
+                                     bool wheel = true, bool pan = true, byte reportId = 0)
+    {
+        if (buttons < 1 || buttons > 16)
+            throw new ArgumentOutOfRangeException(nameof(buttons), "A mouse takes 1 to 16 buttons.");
+        BeginStarter(reportId);
+        var b = new List<byte> { 0x05, 0x01, 0x09, 0x02, 0xA1, 0x01 };   // Mouse, Application
+        if (reportId != 0) b.AddRange(new byte[] { 0x85, reportId });
+        b.AddRange(new byte[] { 0x09, 0x01, 0xA1, 0x00 });              // Pointer, Physical
+        b.AddRange(new byte[] { 0x05, 0x09, 0x19, 0x01, 0x29, (byte)buttons,
+                                0x15, 0x00, 0x25, 0x01, 0x95, (byte)buttons, 0x75, 0x01, 0x81, 0x02 });
+        int bits = buttons;
+        if (buttons % 8 != 0)
+        {
+            int pad = 8 - buttons % 8;
+            b.AddRange(new byte[] { 0x95, 0x01, 0x75, (byte)pad, 0x81, 0x03 });
+            bits += pad;
+        }
+        b.AddRange(new byte[] { 0x05, 0x01, 0x09, 0x30, 0x09, 0x31 });
+        b.AddRange(absolute
+            ? new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02 }
+            : new byte[] { 0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x06 });
+        bits += 32;
+        if (wheel)
+        {
+            b.AddRange(new byte[] { 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06 });
+            bits += 8;
+        }
+        if (pan)
+        {
+            b.AddRange(new byte[] { 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x15, 0x81, 0x25, 0x7F,
+                                    0x75, 0x08, 0x95, 0x01, 0x81, 0x06 });
+            bits += 8;
+        }
+        b.AddRange(new byte[] { 0xC0, 0xC0 });
+        _bytes.AddRange(b);
+        EndStarter(bits);
+        return this;
+    }
+
+    /// <summary>A complete keyboard collection (Generic Desktop, Keyboard)
+    /// in the boot keyboard's layout (HID 1.11 Appendix B.1): a modifier
+    /// byte, a reserved byte, then an array of <paramref name="keys"/> key
+    /// usages, plus the Num Lock, Caps Lock, Scroll Lock, Compose and Kana
+    /// LED output report when <paramref name="leds"/> is set.</summary>
+    public HidDescriptorBuilder Keyboard(int keys = 6, bool leds = true, byte reportId = 0)
+    {
+        if (keys < 1 || keys > 32)
+            throw new ArgumentOutOfRangeException(nameof(keys), "A keyboard report holds 1 to 32 keys.");
+        BeginStarter(reportId);
+        var b = new List<byte> { 0x05, 0x01, 0x09, 0x06, 0xA1, 0x01 };   // Keyboard, Application
+        if (reportId != 0) b.AddRange(new byte[] { 0x85, reportId });
+        b.AddRange(new byte[] { 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+                                0x75, 0x01, 0x95, 0x08, 0x81, 0x02 });      // modifiers
+        b.AddRange(new byte[] { 0x95, 0x01, 0x75, 0x08, 0x81, 0x01 });      // reserved
+        if (leds)
+            b.AddRange(new byte[] { 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x95, 0x05, 0x75, 0x01, 0x91, 0x02,
+                                    0x95, 0x01, 0x75, 0x03, 0x91, 0x01 });
+        b.AddRange(new byte[] { 0x05, 0x07, 0x19, 0x00, 0x2A, 0xFF, 0x00, 0x15, 0x00, 0x26, 0xFF, 0x00,
+                                0x95, (byte)keys, 0x75, 0x08, 0x81, 0x00 });  // key array
+        b.Add(0xC0);
+        _bytes.AddRange(b);
+        EndStarter(16 + keys * 8);
+        return this;
+    }
+
+    /// <summary>A complete keyboard collection that reports every key as a
+    /// bit (n-key rollover): the eight modifiers, then usages 0x00 to 0xDF,
+    /// 29 bytes in all, with the same LED report as <see cref="Keyboard"/>.</summary>
+    public HidDescriptorBuilder KeyboardNkro(bool leds = true, byte reportId = 0)
+    {
+        BeginStarter(reportId);
+        var b = new List<byte> { 0x05, 0x01, 0x09, 0x06, 0xA1, 0x01 };
+        if (reportId != 0) b.AddRange(new byte[] { 0x85, reportId });
+        b.AddRange(new byte[] { 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+                                0x75, 0x01, 0x95, 0x08, 0x81, 0x02 });
+        if (leds)
+            b.AddRange(new byte[] { 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x95, 0x05, 0x75, 0x01, 0x91, 0x02,
+                                    0x95, 0x01, 0x75, 0x03, 0x91, 0x01 });
+        b.AddRange(new byte[] { 0x05, 0x07, 0x19, 0x00, 0x29, 0xDF, 0x15, 0x00, 0x25, 0x01,
+                                0x75, 0x01, 0x95, 0xE0, 0x81, 0x02 });
+        b.Add(0xC0);
+        _bytes.AddRange(b);
+        EndStarter(8 + 224);
+        return this;
+    }
+
+    /// <summary>A complete consumer-control collection (Consumer, Consumer
+    /// Control): <paramref name="slots"/> 16-bit usages held at once, any of
+    /// 0x000 to 0x3FF (volume, media, browser and launcher keys).</summary>
+    public HidDescriptorBuilder ConsumerControl(int slots = 1, byte reportId = 0)
+    {
+        if (slots < 1 || slots > 8)
+            throw new ArgumentOutOfRangeException(nameof(slots), "A consumer report holds 1 to 8 usages.");
+        BeginStarter(reportId);
+        var b = new List<byte> { 0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01 };
+        if (reportId != 0) b.AddRange(new byte[] { 0x85, reportId });
+        b.AddRange(new byte[] { 0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03,
+                                0x75, 0x10, 0x95, (byte)slots, 0x81, 0x00, 0xC0 });
+        _bytes.AddRange(b);
+        EndStarter(16 * slots);
+        return this;
+    }
+
+    /// <summary>A collection of <paramref name="count"/> plain buttons on a
+    /// vendor-defined page (0xFF00, usage 0x01). Windows gives it to no
+    /// class driver, so Raw Input reads it as a generic HID device: the
+    /// place for a mouse's buttons past the five RAWMOUSE carries.
+    /// <see cref="HMController.SubmitMouse"/> numbers them on from the mouse
+    /// collection's own.</summary>
+    public HidDescriptorBuilder VendorButtons(int count, byte reportId)
+    {
+        if (count < 1 || count > 32)
+            throw new ArgumentOutOfRangeException(nameof(count), "1 to 32 buttons.");
+        if (reportId == 0)
+            throw new ArgumentException("A second collection needs a report ID.", nameof(reportId));
+        BeginStarter(reportId);
+        var b = new List<byte> { 0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x85, reportId,
+                                 0x05, 0x09, 0x19, 0x01, 0x29, (byte)count, 0x15, 0x00, 0x25, 0x01,
+                                 0x75, 0x01, 0x95, (byte)count, 0x81, 0x02 };
+        int bits = count;
+        if (count % 8 != 0)
+        {
+            int pad = 8 - count % 8;
+            b.AddRange(new byte[] { 0x95, 0x01, 0x75, (byte)pad, 0x81, 0x03 });
+            bits += pad;
+        }
+        b.Add(0xC0);
+        _bytes.AddRange(b);
+        EndStarter(bits);
         return this;
     }
 
@@ -150,6 +345,11 @@ public sealed class HidDescriptorBuilder
 
         int logMax = (1 << bits) - 1;
 
+        if (_currentPage != 0x01)
+        {
+            _bytes.AddRange(new byte[] { 0x05, 0x01 });   // Usage Page (Generic Desktop)
+            _currentPage = 0x01;
+        }
         _bytes.AddRange(new byte[] { 0xA1, 0x00 });       // Collection (Physical)
         _bytes.AddRange(new byte[] { 0x09, usage1 });      // Usage (X or Z)
         _bytes.AddRange(new byte[] { 0x09, usage2 });      // Usage (Y or Rz)
@@ -210,6 +410,7 @@ public sealed class HidDescriptorBuilder
         int logMax = (1 << bits) - 1;
 
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
+        _currentPage = 0x01;
         _bytes.AddRange(new byte[] { 0x09, usage });        // Usage (Rx or Ry)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
         if (bits <= 8)
@@ -257,6 +458,7 @@ public sealed class HidDescriptorBuilder
         int max = logicalMax ?? (int)((1L << bits) - 1);
 
         _bytes.AddRange(new byte[] { 0x05, page });        // Usage Page
+        _currentPage = page;
         _bytes.AddRange(new byte[] { 0x09, usage });       // Usage
 
         // Logical Minimum: pick the smallest item form that fits.
@@ -306,6 +508,7 @@ public sealed class HidDescriptorBuilder
         declaredCount += pad;
 
         _bytes.AddRange(new byte[] { 0x05, 0x09 });        // Usage Page (Button)
+        _currentPage = 0x09;
         _bytes.AddRange(new byte[] { 0x19, 0x01 });        // Usage Minimum (1)
         _bytes.AddRange(new byte[] { 0x29, (byte)declaredCount }); // Usage Maximum (declaredCount)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
@@ -354,6 +557,7 @@ public sealed class HidDescriptorBuilder
         int physicalMax = (positions - 1) * 360 / positions;
 
         _bytes.AddRange(new byte[] { 0x05, 0x01 });        // Usage Page (Generic Desktop)
+        _currentPage = 0x01;
         _bytes.AddRange(new byte[] { 0x09, 0x39 });        // Usage (Hat switch)
         _bytes.AddRange(new byte[] { 0x15, 0x00 });        // Logical Minimum (0)
         if (logicalMax <= 0x7F)
@@ -387,7 +591,33 @@ public sealed class HidDescriptorBuilder
     public HidDescriptorBuilder AddRaw(byte[] bytes)
     {
         _bytes.AddRange(bytes);
+        TrackPage(bytes);
         return this;
+    }
+
+    /// <summary>Follow the Usage Page items in bytes this builder did not
+    /// write itself.</summary>
+    private void TrackPage(byte[] bytes)
+    {
+        int i = 0;
+        while (i < bytes.Length)
+        {
+            byte head = bytes[i];
+            if (head == 0xFE)
+            {
+                if (i + 1 >= bytes.Length) break;
+                i += 3 + bytes[i + 1];
+                continue;
+            }
+            int len = (head & 0x03) == 3 ? 4 : head & 0x03;
+            if ((head & 0xFC) == 0x04 && len > 0 && i + len < bytes.Length)
+            {
+                uint v = 0;
+                for (int k = 0; k < len; k++) v |= (uint)bytes[i + 1 + k] << (8 * k);
+                _currentPage = (ushort)v;
+            }
+            i += 1 + len;
+        }
     }
 
     /// <summary>Append the HID PID 1.0 force-feedback report block to the
@@ -476,6 +706,7 @@ public sealed class HidDescriptorBuilder
         }
 
         _bytes.AddRange(MinimumViablePidFfbBlock);
+        TrackPage(MinimumViablePidFfbBlock);
         return this;
     }
 

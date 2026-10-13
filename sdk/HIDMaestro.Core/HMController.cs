@@ -99,8 +99,32 @@ public sealed class HMController : IDisposable
 
     // v1.3.0: per-controller reusable raw report buffer. SubmitRawReport
     // (DualSense / vendor-protocol path) used to do report.ToArray() per
-    // call; this 64-byte buffer absorbs the copy without the alloc churn.
-    private readonly byte[] _rawReportBuffer = new byte[64];
+    // call. This buffer absorbs the copy without the alloc churn. Sized to
+    // the shared section's payload, the most either raw path accepts: at 64
+    // bytes a 78-byte Sony Bluetooth frame threw inside the copy.
+    private readonly byte[] _rawReportBuffer = new byte[SharedMemoryIO.DATA_CAPACITY];
+
+    // Issue #67: keyboards and mice. The packer writes SubmitMouse /
+    // SubmitKeyboard / SubmitConsumer into the profile's own reports.
+    // _deliverEvery holds each frame until the driver has handed the
+    // previous one to HID class (SharedMemoryIO.WaitInputDelivered), so a
+    // click's press, a key tap and every relative delta arrive. Gamepads
+    // keep latest-wins, which is right for state. Guarded by _submitLock.
+    private KeyboardMousePacker? _kbm;
+    private readonly bool _deliverEvery;
+    private uint _deliverySeq;
+    private bool _deliveryPending;
+    private int _deliveryMisses;
+    private uint _lastExtraButtons;
+    private bool _extraButtonsSent;
+    private const int DeliveryTimeoutMs = 200;
+    // One report per millisecond at most, the fastest a full-speed USB
+    // mouse or keyboard reports (bInterval 1). The acknowledgement says a
+    // report reached HID class. HID class keeps a short queue per reader,
+    // and a burst faster than mouhid and kbdhid drain it overflows that
+    // queue no matter what the driver does.
+    private long _lastFrameTicks;
+    private static readonly long s_minFrameTicks = System.Diagnostics.Stopwatch.Frequency / 1000;
 
     /// <summary>Raised on the SDK's output-polling thread whenever a host
     /// application sends a rumble, haptic, FFB, feature, or LED command to
@@ -420,6 +444,18 @@ public sealed class HMController : IDisposable
         _companionInputEvent = _packsGipBuffer
             ? SharedMemoryIO.GetCompanionInputEvent(index) : IntPtr.Zero;
 
+        // Issue #67. A keyboard or mouse profile gets every frame delivered,
+        // and so does an "other" profile whose descriptor is a mouse or a
+        // keyboard, the shape a consumer built before the types existed.
+        if (usbipHandle == null && profile.Inner.HasDescriptor)
+        {
+            var kbm = profile.Inner.GetOrBuildKeyboardMousePacker();
+            if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
+            _deliverEvery = profile.Inner.IsKeyboardOrMouse
+                || (string.Equals(profile.Type, "other", StringComparison.OrdinalIgnoreCase)
+                    && (kbm.HasMouse || kbm.HasKeyboard));
+        }
+
         // v1.3.5: pre-allocate vendor-blob buffer + encoder state ONLY when
         // the profile actually arms (Sony BT post-handshake). Profiles with
         // extendedReport metadata but no armOn list (every USB Sony profile,
@@ -570,17 +606,17 @@ public sealed class HMController : IDisposable
     {
         ThrowIfDisposed();
 
-        if (_idleThread == null)
-        {
-            SubmitStateCore(in state);
-            return;
-        }
-
-        // Remembered for the idle pump, and the timestamp is what
-        // keeps the pump from competing with a live consumer.
+        // Every submit path writes the shared section under _submitLock.
+        // The section is a single-writer seqlock: two threads writing one
+        // controller's frames at once could publish a frame mixed from both.
         lock (_submitLock)
         {
+            AwaitPreviousDelivery();
             SubmitStateCore(in state);
+            NoteFrameWritten();
+            if (_idleThread == null) return;
+            // Remembered for the idle pump, and the timestamp is what
+            // keeps the pump from competing with a live consumer.
             _lastSubmitted = state;
             _lastSubmitWasRaw = false;
             Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
@@ -912,15 +948,27 @@ public sealed class HMController : IDisposable
                 $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
                 nameof(report));
 
-        if (_idleThread == null)
-        {
-            SubmitRawReportCore(report);
-            return;
-        }
         lock (_submitLock)
         {
+            AwaitPreviousDelivery();
             SubmitRawReportCore(report);
-            RememberRawFrame(report, extended: false);
+            NoteFrameWritten();
+            if (_deliverEvery && _kbm != null)
+            {
+                // The driver sends this lane's data under the descriptor's
+                // first input report ID.
+                byte id = _kbm.FirstInputReportId;
+                if (id == 0) NoteReleaseFrame(report);
+                else
+                {
+                    var full = new byte[report.Length + 1];
+                    full[0] = id;
+                    report.CopyTo(full.AsSpan(1));
+                    NoteReleaseFrame(full);
+                }
+            }
+            if (_idleThread != null)
+                RememberRawFrame(report, extended: false);
         }
     }
 
@@ -1005,21 +1053,200 @@ public sealed class HMController : IDisposable
         ThrowIfDisposed();
         ThrowIfDeviceBuildsReports();
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
-        if (report.Length > SharedMemoryIO.DATA_CAPACITY)
+        // The extended lane carries the whole frame in an 80-byte field. The
+        // writer used to cut a longer one there without a word.
+        if (report.Length > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
             throw new ArgumentException(
-                $"Report length {report.Length} exceeds the {SharedMemoryIO.DATA_CAPACITY}-byte shared section payload.",
+                $"Report length {report.Length} exceeds the {SharedMemoryIO.EXTENDED_DATA_CAPACITY}-byte extended report field.",
                 nameof(report));
 
-        if (_idleThread == null)
-        {
-            SubmitRawExtendedReportCore(report);
-            return;
-        }
         lock (_submitLock)
         {
+            AwaitPreviousDelivery();
             SubmitRawExtendedReportCore(report);
-            RememberRawFrame(report, extended: true);
+            NoteFrameWritten();
+            if (_deliverEvery && _kbm != null) NoteReleaseFrame(report);
+            if (_idleThread != null)
+                RememberRawFrame(report, extended: true);
         }
+    }
+
+    // ── Keyboards and mice (issue #67) ───────────────────────────────────
+
+    /// <summary>True when this controller sends every report to HID class
+    /// in order instead of the latest one: a keyboard or mouse profile (or
+    /// an "other" profile whose descriptor is a keyboard or mouse) on a
+    /// driver that acknowledges delivery. Gamepads keep latest-wins, which
+    /// suits state.</summary>
+    public bool DeliversEveryReport =>
+        _deliverEvery && SharedMemoryIO.InputAckSupported(Index);
+
+    /// <summary>True when the driver lets go of every key and button this
+    /// keyboard or mouse holds if the consuming process ends without
+    /// disposing it, however it ends: keys and buttons go up, relative
+    /// motion stops, and an absolute pointer stays where it was. Without
+    /// it a held key repeats until the device is removed.
+    /// <see cref="Dispose"/> sends the same release itself.</summary>
+    public bool ReleasesOnConsumerExit =>
+        _deliverEvery && SharedMemoryIO.ReleaseOnExitSupported(Index);
+
+    /// <summary>Raised on the output thread when the host sets the
+    /// keyboard's LEDs (Num Lock, Caps Lock, Scroll Lock, Compose, Kana).
+    /// Windows sends a keyboard the current state when it arrives and again
+    /// on every change. Only for profiles whose keyboard collection declares
+    /// an LED output report.</summary>
+    public event Action<HMController, HMKeyboardLeds>? KeyboardLedsChanged;
+
+    /// <summary>The LED state the host last set on this keyboard, or null
+    /// until it sets one. Windows sends the state at arrival while
+    /// <see cref="HMContext.CreateController(HMProfile, string)"/> is still
+    /// running, so it can land here before any
+    /// <see cref="KeyboardLedsChanged"/> handler is attached. Attach the
+    /// handler, then read this property, and one of the two has
+    /// it.</summary>
+    public HMKeyboardLeds? KeyboardLeds
+    {
+        get { int v = _keyboardLeds; return v < 0 ? null : (HMKeyboardLeds)v; }
+    }
+    private volatile int _keyboardLeds = -1;
+
+    /// <summary>Send one mouse report, built from the profile's own mouse
+    /// collection. Buttons past the ones that collection declares go to the
+    /// profile's second, non-system collection when it has one (the
+    /// <see cref="HidDescriptorBuilder.VendorButtons"/> shape), since Raw
+    /// Input's RAWMOUSE carries five. A relative movement larger than the
+    /// report can hold is sent as several reports. Thread-safe. On a
+    /// keyboard or mouse profile it returns once the previous report has
+    /// been delivered, which takes well under a millisecond while Windows
+    /// is reading the device.</summary>
+    /// <exception cref="InvalidOperationException">The profile's descriptor
+    /// declares no mouse collection.</exception>
+    public void SubmitMouse(in HMMouseState state)
+    {
+        ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
+        var packer = KbmPacker();
+        lock (_submitLock)
+        {
+            var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent);
+            foreach (var frame in frames)
+                WriteKbmFrame(frame);
+        }
+    }
+
+    /// <summary>Send one keyboard report: the modifiers and up to as many
+    /// keys as the profile's keyboard report holds, all held down. Send
+    /// another report without a key to release it. More keys than the
+    /// report holds report ErrorRollOver, as a real keyboard does.</summary>
+    /// <exception cref="InvalidOperationException">The profile's descriptor
+    /// declares no keyboard collection.</exception>
+    public void SubmitKeyboard(HMKeyModifiers modifiers, ReadOnlySpan<HMKey> keys)
+    {
+        ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
+        var packer = KbmPacker();
+        lock (_submitLock)
+            WriteKbmFrame(packer.PackKeyboard(modifiers, keys));
+    }
+
+    /// <summary>Send one consumer-control report with these usages held
+    /// (HID Usage Tables, Consumer page: 0x00E9 Volume Increment, 0x00CD
+    /// Play/Pause and so on). Send an empty span to release them.</summary>
+    /// <exception cref="InvalidOperationException">The profile's descriptor
+    /// declares no consumer control collection.</exception>
+    public void SubmitConsumer(ReadOnlySpan<ushort> usages)
+    {
+        ThrowIfDisposed();
+        ThrowIfDeviceBuildsReports();
+        var packer = KbmPacker();
+        lock (_submitLock)
+            WriteKbmFrame(packer.PackConsumer(usages));
+    }
+
+    private KeyboardMousePacker KbmPacker() =>
+        _kbm ??= Profile.Inner.GetOrBuildKeyboardMousePacker();
+
+    /// <summary>A whole frame, report ID included, through the extended
+    /// lane, which sends it at its own length. Caller holds _submitLock.</summary>
+    private void WriteKbmFrame(byte[] frame)
+    {
+        AwaitPreviousDelivery();
+        SubmitRawExtendedReportCore(frame);
+        NoteFrameWritten();
+        if (_deliverEvery) NoteReleaseFrame(frame);
+    }
+
+    // The report that releases each input report this controller has sent,
+    // in the order the reports first appeared. Guarded by _submitLock.
+    private readonly List<byte[]> _releaseFrames = new();
+
+    /// <summary>Keep the release frame for the report just written, and hand
+    /// the set to the driver when it changed, so a consumer that goes away
+    /// with a key or button held does not leave it held. Caller holds
+    /// _submitLock.</summary>
+    private void NoteReleaseFrame(ReadOnlySpan<byte> frame)
+    {
+        if (_kbm?.ReleaseOf(frame) is not { } release) return;
+        bool withIds = _kbm.Map.UsesReportIds;
+        int slot = _releaseFrames.FindIndex(f => !withIds || f[0] == release[0]);
+        if (slot >= 0)
+        {
+            if (_releaseFrames[slot].AsSpan().SequenceEqual(release)) return;
+            _releaseFrames[slot] = release;
+        }
+        else
+        {
+            if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) return;
+            _releaseFrames.Add(release);
+        }
+        SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
+    }
+
+    /// <summary>Send every release frame, so a key or button the consumer
+    /// still holds is let go before the device goes away.</summary>
+    private void SendReleaseFrames()
+    {
+        if (!_deliverEvery) return;
+        lock (_submitLock)
+        {
+            if (_releaseFrames.Count == 0) return;
+            foreach (var f in _releaseFrames.ToArray())
+            {
+                AwaitPreviousDelivery();
+                SubmitRawExtendedReportCore(f);
+                NoteFrameWritten();
+            }
+            AwaitPreviousDelivery();
+        }
+    }
+
+    /// <summary>Hold the next frame until the driver has delivered the last
+    /// one. Gives up after DeliveryTimeoutMs (Windows not reading the
+    /// device, say while it starts), and after three misses in a row stops
+    /// waiting until an acknowledgement shows up again. Caller holds
+    /// _submitLock.</summary>
+    private void AwaitPreviousDelivery()
+    {
+        if (!_deliverEvery || !_deliveryPending) return;
+        if (SharedMemoryIO.InputAckSupported(Index))
+        {
+            int timeout = _deliveryMisses >= 3 ? 0 : DeliveryTimeoutMs;
+            if (SharedMemoryIO.WaitInputDelivered(Index, _deliverySeq, timeout))
+                _deliveryMisses = 0;
+            else
+                _deliveryMisses++;
+        }
+        long due = _lastFrameTicks + s_minFrameTicks;
+        while (System.Diagnostics.Stopwatch.GetTimestamp() < due)
+            Thread.SpinWait(64);
+    }
+
+    private void NoteFrameWritten()
+    {
+        if (!_deliverEvery) return;
+        _deliverySeq = _inputSeqNo;
+        _deliveryPending = true;
+        _lastFrameTicks = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
     /// <summary>Keep a raw consumer's frame for the idle pump, which repeats
@@ -1218,10 +1445,14 @@ public sealed class HMController : IDisposable
     private void OutputPollLoop()
     {
         if (_outputView == IntPtr.Zero) return;
-        // Initialize lastSeq to the current Head so any pre-existing ring
-        // contents (stale or legitimate) never fire a spurious
-        // OutputReceived for the prior session's data.
-        uint lastSeq = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(_outputView, 0);
+        // Start where this controller's setup found the ring
+        // (SharedMemoryIO.MarkOutputStart), so a packet a host sent while
+        // the device was starting is read too: Windows sends a new keyboard
+        // its LED state then (issue #67). Whatever an earlier controller at
+        // this index left stays behind the mark. With no mark, start at the
+        // current Head, so nothing from a prior session fires.
+        uint lastSeq = SharedMemoryIO.TakeOutputStart(Index)
+            ?? (uint)System.Runtime.InteropServices.Marshal.ReadInt32(_outputView, 0);
         byte[] buf = new byte[256];
         var ct = _outputCts.Token;
 
@@ -1267,6 +1498,16 @@ public sealed class HMController : IDisposable
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
+
+                    // Issue #67: the keyboard's LED report, decoded by its
+                    // own descriptor.
+                    if (_kbm is { HasKeyboardLeds: true } kbm
+                        && (HMOutputSource)source == HMOutputSource.HidOutput
+                        && kbm.DecodeLeds(reportId, data.Span) is HMKeyboardLeds leds)
+                    {
+                        _keyboardLeds = (int)leds;
+                        KeyboardLedsChanged?.Invoke(this, leds);
+                    }
 
                     // v1.3.5: vendor-blob output decode. When the profile
                     // declares an extendedOutputReport with a matching
@@ -1500,6 +1741,9 @@ public sealed class HMController : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+        // Issue #67: a key or button still held goes up before the device
+        // goes away, as it would if the hardware were unplugged.
+        try { SendReleaseFrames(); } catch { }
         _disposed = true;
         // Idle frames stop before the output pump, so no repeat can
         // land on a section this Dispose is about to unmap.

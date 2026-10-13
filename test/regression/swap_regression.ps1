@@ -177,6 +177,11 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\ds4_report_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\ds3_sixaxis_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\switch2_composite_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\registry_ownership_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\wgi_mapping_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\vr_driver_conflict_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\kbm_offline_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\kbm_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1559,11 +1564,14 @@ function Scenario-Valve-Wire {
 # device to a real SDL3.dll built from libsdl-org/SDL and asks SDL what it
 # sees. Those Steam drivers are the decoders Steam Input is built on, so a
 # persona SDL binds, names and reads is one a Valve-aware consumer reads.
-# SKIPs when the sibling SDL3-build/build-stock checkout is absent; the fork
-# beside it deliberately skips HIDMaestro devices and is never used here.
+# Every rear button, both trackpad clicks and QAM land on the SDL gamepad
+# button SDL documents for them, and the stick and grip touch sensors on its
+# capacitive-sense readings. SKIPs when the sibling SDL3-build/build-stock
+# checkout is absent. The fork beside it deliberately skips HIDMaestro
+# devices and is never used here.
 function Scenario-Valve-Sdl {
     Invoke-Probe -Dir 'valve_sdl_check' -Exe 'ValveSdlCheck.exe' `
-                 -Message 'stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, trackpads or motion (see probe stdout)' -SkipCodes 2
+                 -Message 'stock SDL stopped reading a Valve persona: enumeration, the Valve driver binding, sticks, triggers, rear buttons, trackpads, touch sensors or motion (see probe stdout)' -SkipCodes 2
 }
 
 # S54: the three Valve personas against the REAL Steam client. S53 proves
@@ -1732,6 +1740,61 @@ function Scenario-Switch2-Composite {
                  -Message 'the Switch 2 Pro composite persona no longer matches a real pad on the wire, lost its WinUSB binding, or stopped satisfying SDL or Steam (see probe stdout)' -SkipCodes 2
 }
 
+# S66: registry keys a virtual shares with real devices of the same VID and
+# PID (foundation-sunshine #1138). The probe plants a real pad's joy.cpl OEM
+# key with OEMName, OEMData and Axes, OEM keys of pads the run never creates
+# under the vendor prefixes the cleanup used to delete, a vendor's GameInput
+# mapping and a table HIDMaestro wrote through v1.11.0, then creates and disposes
+# virtuals of those identities, runs the full cleanup and a fresh context,
+# and diffs. It then follows the GameInput table a code-built game pad
+# holds, HMOemNameOverride against a live virtual in all four orders of
+# claim and release, and a consumer killed with its virtual alive.
+function Scenario-Registry-Ownership {
+    Invoke-Probe -Dir 'registry_ownership_check' -Exe 'RegistryOwnershipCheck.exe' `
+                 -Message 'a registry key a real device owns was changed, or a key HIDMaestro wrote outlived its virtual (see probe stdout)'
+}
+
+# S67: what WGI reads from a virtual pad (foundation-sunshine #1056). The
+# XUSB Xbox 360 pad is the same-window positive control. A DualSense must
+# stay a RawGameController with no GameInput key, as a real one is. A
+# DualShock 4 v1 must read correctly at rest and on every control through
+# the mapping Windows ships for it. A game pad built in code must hold the
+# table while it lives, read correctly through it and drop it on dispose.
+# A joystick built in code gets neither.
+function Scenario-Wgi-Mapping {
+    Invoke-Probe -Dir 'wgi_mapping_check' -Exe 'WgiMappingCheck.exe' `
+                 -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)'
+}
+
+# S68: another OpenVR driver registered under HIDMaestro's driver name.
+# OpenVR requires the name to be unique. HMVR.FindDriverNameConflicts lists
+# every other folder SteamVR can see under it. The probe points
+# VR_PATHREG_OVERRIDE at a path registry of its own, so the real one is
+# never touched, and needs neither SteamVR nor elevation.
+function Scenario-Vr-Driver-Conflict {
+    Invoke-Probe -Dir 'vr_driver_conflict_check' -Exe 'VrDriverConflictCheck.exe' `
+                 -Message 'a foreign OpenVR driver under the hidmaestro name went unreported, or HIDMaestro reported its own (see probe stdout)'
+}
+
+# S69: keyboard and mouse descriptors and packers, no devices (issue #67).
+# Builder recipes that worked before build the same bytes, the new
+# starters and their guards, the packers against bytes worked out by
+# hand, and every catalog keyboard and mouse parsed, packed and read back.
+function Scenario-Kbm-Descriptors {
+    Invoke-Probe -Dir 'kbm_offline_check' -Exe 'KbmOfflineCheck.exe' `
+                 -Message 'a keyboard or mouse descriptor parsed or packed wrong (see probe stdout)'
+}
+
+# S70: keyboards and mice through Raw Input (issue #67). Four mice with one
+# VID and PID get four stable paths, bursts and four threads at 250 Hz lose
+# no counts, absolute and extra-button mice, a keyboard's keys and LEDs, a
+# consumer usage, and every catalog keyboard and mouse starts as its kind.
+# Moves the cursor and puts it back, and presses Scroll Lock twice.
+function Scenario-Kbm-Raw-Input {
+    Invoke-Probe -Dir 'kbm_live_check' -Exe 'KbmLiveCheck.exe' `
+                 -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1801,7 +1864,12 @@ $scenarios = @(
     @{ Name = 'S62_Valve_Firmware';              Body = ${function:Scenario-Valve-Firmware} },
     @{ Name = 'S63_Ds4_Report';                  Body = ${function:Scenario-Ds4-Report} },
     @{ Name = 'S64_Ds3_Sixaxis';                 Body = ${function:Scenario-Ds3-Sixaxis} },
-    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} }
+    @{ Name = 'S65_Switch2_Composite';           Body = ${function:Scenario-Switch2-Composite} },
+    @{ Name = 'S66_Registry_Ownership';          Body = ${function:Scenario-Registry-Ownership} },
+    @{ Name = 'S67_Wgi_Mapping';                 Body = ${function:Scenario-Wgi-Mapping} },
+    @{ Name = 'S68_Vr_Driver_Conflict';          Body = ${function:Scenario-Vr-Driver-Conflict} },
+    @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
+    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

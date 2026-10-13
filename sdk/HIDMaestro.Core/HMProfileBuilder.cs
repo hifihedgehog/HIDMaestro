@@ -200,6 +200,7 @@ public sealed class HMProfileBuilder
             ButtonMap = _buttonMap,
             TriggerButtons = _triggerButtons,
             AxisMap = _axisMap,
+            BuiltInCode = true,
         };
 
         return new HMProfile(inner);

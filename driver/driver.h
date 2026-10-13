@@ -29,6 +29,10 @@
 #define HIDMAESTRO_MAX_DESCRIPTOR_SIZE  4096
 #define HIDMAESTRO_MAX_REPORT_SIZE      1024
 
+/* Release frames in the delivery acknowledgement (HIDMAESTRO_INPUT_ACK). */
+#define HIDMAESTRO_RELEASE_SLOTS         8
+#define HIDMAESTRO_RELEASE_FRAME_CAP     80
+
 /*
  * Common definitions shared with the vhidmini2 sample.
  * These must match what MsHidUmdf.sys expects.
@@ -88,12 +92,6 @@ typedef struct _DEVICE_CONTEXT {
 
     /* First Input Report ID from descriptor (0 if no Report IDs) */
     UCHAR   FirstInputReportId;
-
-    /* Cached at config-read: TRUE if the descriptor declares a second
-     * collection with Report ID 0x20 (separate-trigger Col2, Xbox 360
-     * family). The descriptor is immutable after init, so ProcessSharedInput
-     * reads this flag instead of rescanning the descriptor per frame. */
-    BOOLEAN HasCol2Report;
 
     /* The profile's connection is Bluetooth (registry value Bluetooth,
      * written by the SDK from the profile's "connection"). Sony pads end
@@ -172,6 +170,42 @@ typedef struct _DEVICE_CONTEXT {
                                   * (reset + recycle), so a live device can
                                   * never be left worker-less. */
     HANDLE  WorkerThread;        /* CreateThread handle */
+
+    /* Delivery acknowledgement (issue #67). The SDK pre-creates
+     * Global\HIDMaestroInputAck<N> (HIDMAESTRO_INPUT_ACK) and the auto-reset
+     * Global\HIDMaestroInputAckEvent<N> beside the input section. Each time
+     * a READ_REPORT completes with a frame, the driver stores that frame's
+     * SeqNo and signals the event, so a keyboard or mouse writer can hold
+     * the next frame until the previous one has reached HID class: a
+     * click's press, a key tap and every relative delta arrive instead of
+     * being overwritten by the frame after them. Opened with the input
+     * section, best effort. An SDK that does not create them gets the
+     * latest-wins behavior every gamepad uses. Every access is under
+     * InputLock, which the read path already holds. */
+    HANDLE  InputAckMemHandle;
+    volatile LONG *InputAckMemPtr;
+    HANDLE  InputAckEvent;
+    WCHAR   InputAckMappingName[64];  /* e.g. L"Global\\HIDMaestroInputAck0" */
+    WCHAR   InputAckEventName[64];    /* e.g. L"Global\\HIDMaestroInputAckEvent0" */
+
+    /* Owner watch (issue #67). The SDK holds the server end of
+     * \\.\pipe\HIDMaestroOwner<N> for as long as the controller lives. The
+     * worker connects and keeps one read pending, which completes when that
+     * end closes, on Dispose or when the consumer's process ends however
+     * it ends. The worker then queues the release frames from the
+     * acknowledgement section. Opened and closed by the worker only. */
+    HANDLE  OwnerPipe;
+    HANDLE  OwnerReadEvent;               /* manual reset, the read's OVERLAPPED event */
+    OVERLAPPED OwnerOverlapped;
+    UCHAR   OwnerReadByte;
+    WCHAR   OwnerPipeName[64];            /* e.g. L"\\\\.\\pipe\\HIDMaestroOwner0" */
+
+    /* Release frames waiting for a READ_REPORT, under InputLock. */
+    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
+    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
+    ULONG   ReleaseCount;
+    ULONG   ReleaseNext;
+
     WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
     WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
     WCHAR   OutputEventName[64]; /* e.g. L"Global\\HIDMaestroOutputEvent0" */
@@ -285,6 +319,38 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
     ULONG           ExtendedReportSize;
     UCHAR           ExtendedReportData[80];
 } HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
+
+/* Delivery acknowledgement, Global\HIDMaestroInputAck<N> (issue #67). A
+ * separate section, so no existing layout changes: readers of the input,
+ * output and PID sections never see it. The SDK creates and zeroes it, and the
+ * driver sets Capabilities when it opens the section and stores each
+ * delivered frame's SeqNo in DeliveredSeqNo. A writer that finds
+ * Capabilities zero is talking to a driver without acknowledgement and
+ * must not wait for one.
+ *
+ * Release frames: for a keyboard or mouse, the SDK keeps here, per input
+ * report, the report that lets go of everything the last one held (keys and
+ * buttons up, relative motion zero, absolute axes where they were). The
+ * driver sends them when the consumer's end of the owner pipe closes,
+ * whether by Dispose or because its process ended, so a key held at that
+ * moment does not repeat until the device is removed. ReleaseSeq is a
+ * seqlock, odd while the SDK rewrites the frames. */
+#define HIDMAESTRO_INPUT_ACK_CAP_DELIVERED  0x00000001u
+#define HIDMAESTRO_INPUT_ACK_CAP_RELEASE    0x00000002u  /* owner pipe is watched */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_RELEASE_FRAME {
+    ULONG           Size;
+    UCHAR           Data[HIDMAESTRO_RELEASE_FRAME_CAP];   /* report ID first when used */
+} HIDMAESTRO_RELEASE_FRAME;
+
+typedef struct _HIDMAESTRO_INPUT_ACK {
+    volatile LONG   DeliveredSeqNo;  /* SeqNo of the last frame a READ_REPORT carried */
+    volatile LONG   Capabilities;    /* HIDMAESTRO_INPUT_ACK_CAP_* */
+    volatile LONG   ReleaseSeq;
+    volatile LONG   ReleaseCount;    /* frames in Release, at most HIDMAESTRO_RELEASE_SLOTS */
+    HIDMAESTRO_RELEASE_FRAME Release[HIDMAESTRO_RELEASE_SLOTS];
+} HIDMAESTRO_INPUT_ACK, *PHIDMAESTRO_INPUT_ACK;
 #pragma pack(pop)
 
 /* Output passthrough section: written by driver/companion, read by consumer.

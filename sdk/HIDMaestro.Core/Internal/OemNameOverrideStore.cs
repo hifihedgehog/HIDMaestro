@@ -67,7 +67,9 @@ internal static class OemNameOverrideStore
     // ── Pending-record hive (sibling of HKLM\SOFTWARE\HIDMaestro;
     //    deliberately NOT under it: see DeviceOrchestrator cleanup)
     private const string PendingRoot = @"SOFTWARE\HIDMaestroOemOverrides";
-    private const string MutexName = @"Global\HIDMaestro-OEM-Recovery";
+    // Shared with RegistryLedger, which writes the same HKLM OEMName value
+    // for live virtual controllers.
+    internal const string MutexName = @"Global\HIDMaestro-OEM-Recovery";
 
     // ── Pending-record value names ─────────────────────────────────
     // DirectInput (v1 fields: preserved for backward compat)
@@ -196,10 +198,15 @@ internal static class OemNameOverrideStore
             $@"{DirectInputRoot}\{vidPid}\{DirectInputOemSubkey}",
             DirectInputOemNameValue);
 
-        var (jmOrig, jmExisted) = ReadOriginal(
-            Registry.LocalMachine,
-            $@"{JoystickRoot}\{vidPid}",
-            JoystickOemNameValue);
+        // A live virtual controller of this identity has already replaced the
+        // HKLM value with its own name. The registry ledger recorded what was
+        // there before, and that is the value to put back on Release.
+        var (jmOrig, jmExisted) = RegistryLedger.TryGetJoystickOriginal(vidPid, out string? ledgerName, out bool ledgerKeyExisted)
+            ? (ledgerName, ledgerKeyExisted)
+            : ReadOriginal(
+                Registry.LocalMachine,
+                $@"{JoystickRoot}\{vidPid}",
+                JoystickOemNameValue);
 
         var (juOrig, juExisted) = ReadOriginal(
             Registry.CurrentUser,
@@ -304,6 +311,40 @@ internal static class OemNameOverrideStore
 
     private static void DeleteSubkeyFromParent(RegistryKey baseKey, string parentPath, string subkey) =>
         DeleteSubkey(baseKey, parentPath, subkey);
+
+    // ────────────────────────────────────────────────────────────────
+    //  Registry ledger coordination. Callers hold the shared mutex.
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>An override record exists for this identity.</summary>
+    internal static bool HasRecord(string vidPid)
+    {
+        try
+        {
+            using var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false);
+            return pending is not null;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The HKLM Joystick OEMName this identity had before the
+    /// active override record claimed it. False when there is no record, or
+    /// the record predates the HKLM fields.</summary>
+    internal static bool TryGetJoystickHklmOriginal(string vidPid, out string? originalName, out bool keyExisted)
+    {
+        originalName = null; keyExisted = false;
+        try
+        {
+            using var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false);
+            if (pending is null) return false;
+            bool? existed = ReadExistedFlag(pending, JM_OriginalExisted);
+            if (existed is null) return false;
+            keyExisted = existed.Value;
+            originalName = pending.GetValue(JM_OriginalName) as string;
+            return true;
+        }
+        catch { return false; }
+    }
 
     // ────────────────────────────────────────────────────────────────
     //  Plumbing

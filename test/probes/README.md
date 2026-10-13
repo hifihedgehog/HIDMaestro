@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S64. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S70. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -18,6 +18,11 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "What source-file strings are embedded in a Windows runtime DLL?" | [wgi_dll_string_scan.ps1](wgi_dll_string_scan.ps1) |
 | "Does this profile's VID/PID surface in DirectInput's enumeration?" | [dinput_enum](dinput_enum/): `IDirectInput8::EnumDevices(DI8DEVCLASS_GAMECTRL)` with WPF host (DInput needs window focus) |
 | "Does WGI see this device at all (presence-only, no vibration fired)?" | [wgi_read_probe](wgi_read_probe/): native C++ `Windows.Gaming.Input.Gamepad` enumeration sampler |
+| "What does WGI read from this profile at rest and on each control, and which GameInput index moves?" | [wgi_mapping_check](wgi_mapping_check/): `--explore <profile>` prints the RawGameController and Gamepad readings side by side |
+| "Does a virtual leave the registry keys a real device of the same VID and PID uses as it found them?" | [registry_ownership_check](registry_ownership_check/) |
+| "Does a keyboard or mouse reach Raw Input as its kind, and does every report arrive?" | [kbm_live_check](kbm_live_check/): `--key-diag <profile>`, `--wheel-diag <profile>` and `--leds-diag` for one device at a time |
+| "Where does a keyboard or mouse descriptor put each field?" | [kbm_offline_check](kbm_offline_check/): no device |
+| "Is another OpenVR driver registered under HIDMaestro's driver name?" | [vr_driver_conflict_check](vr_driver_conflict_check/) |
 
 ## Near-duplicates and when to use which
 

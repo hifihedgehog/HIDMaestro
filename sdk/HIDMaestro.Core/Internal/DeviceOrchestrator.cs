@@ -480,11 +480,37 @@ internal static class DeviceOrchestrator
         catch { }
 
         // Clean ghost XUSB and WinExInput interface registrations
-        string[] interfaceGuids = {
-            @"{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
-            @"{6c53d5fd-6480-440f-b618-476750c5e1a6}",
-        };
-        foreach (var guid in interfaceGuids)
+        RemoveOwnedInterfaceEntries();
+
+        // Sweep accumulated HIDMaestro phantom devnodes from prior sessions.
+        // v1.1.30's per-call unique SwD instance suffix prevents the
+        // empty-shell bug at create time, but Windows preserves a per-
+        // instance registry hive entry indefinitely after each teardown,
+        // so heavy users see "hidden devices" in Device Manager pile up
+        // across many sessions. SetupDiRemoveDevice via DIGCF_ALLCLASSES
+        // deletes the registry cache cleanly. Only touches PHANTOM
+        // entries. PRESENT devnodes are explicitly skipped, so this is
+        // safe to call while a session is live.
+        try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
+    }
+
+    /// <summary>Delete the XUSB and WinExInput interface registrations of
+    /// HIDMaestro devnodes. Interface-class keys encode the devnode path with
+    /// <c>#</c> in place of <c>\</c>. Issue #28 (v1.3.16): the exclusively-HM
+    /// forms (ROOT#HIDMAESTRO*, SWD#HIDMAESTRO*, and the April 2026
+    /// ROOT#HMCOMPANION) go without further proof. The shared forms
+    /// (ROOT#VID_*, ROOT#HIDCLASS, ROOT#HID_IG_*, ROOT#XNACOMPOSITE,
+    /// ROOT#SYSTEM#) need the owning devnode's HardwareID proof, or no
+    /// devnode record at all: an entry whose instance key is gone describes
+    /// no device, ours or anyone's. The prior `ROOT#SYSTEM#(N>=2)`
+    /// heuristic tagged ViGEmBus / HidHide entries as ours, and the full
+    /// cleanup used to delete every ROOT# entry of both classes
+    /// (foundation-sunshine #1138). Any other form is not ours.</summary>
+    private static void RemoveOwnedInterfaceEntries()
+    {
+        foreach (var guid in new[] {
+            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
+            "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
         {
             try
             {
@@ -493,24 +519,16 @@ internal static class DeviceOrchestrator
                 if (classKey == null) continue;
                 foreach (var subName in classKey.GetSubKeyNames())
                 {
-                    // Interface-class keys encode devnode paths with `#` in place
-                    // of `\`. Issue #28 (v1.3.16): match exclusively-HM forms
-                    // (ROOT#HIDMAESTRO*, SWD#HIDMAESTRO*) without further
-                    // proof, and for the shared forms (ROOT#VID_*, ROOT#HIDCLASS,
-                    // ROOT#HID_IG_*, ROOT#XNACOMPOSITE, ROOT#SYSTEM*) resolve
-                    // the owning devnode and require IsHidMaestroOwned. The
-                    // prior `ROOT#SYSTEM#(N>=2)` instance-number heuristic
-                    // tagged ViGEmBus / HidHide interface entries as ours; the
-                    // HardwareID guard eliminates the false positive.
                     bool exclusivelyOurs =
                         subName.Contains("ROOT#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                        subName.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("ROOT#HMCOMPANION", StringComparison.OrdinalIgnoreCase);
                     bool sharedShape =
-                        subName.Contains("ROOT#VID_") ||
-                        subName.Contains("ROOT#HIDCLASS") ||
-                        subName.Contains("ROOT#HID_IG") ||
+                        subName.Contains("ROOT#VID_", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("ROOT#HIDCLASS", StringComparison.OrdinalIgnoreCase) ||
+                        subName.Contains("ROOT#HID_IG", StringComparison.OrdinalIgnoreCase) ||
                         subName.Contains("ROOT#XNACOMPOSITE", StringComparison.OrdinalIgnoreCase) ||
-                        subName.Contains("ROOT#SYSTEM#");
+                        subName.Contains("ROOT#SYSTEM#", StringComparison.OrdinalIgnoreCase);
 
                     bool isOurDevice = exclusivelyOurs;
                     if (!isOurDevice && sharedShape)
@@ -524,7 +542,14 @@ internal static class DeviceOrchestrator
                         if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
                         devPath = devPath.Replace("##?#", string.Empty);
                         devPath = devPath.Replace('#', '\\');
-                        isOurDevice = DeviceManager.IsHidMaestroOwned(devPath);
+                        bool recordExists;
+                        try
+                        {
+                            using var rec = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{devPath}");
+                            recordExists = rec != null;
+                        }
+                        catch { recordExists = true; }
+                        isOurDevice = !recordExists || DeviceManager.IsHidMaestroOwned(devPath);
                     }
 
                     if (isOurDevice)
@@ -535,17 +560,6 @@ internal static class DeviceOrchestrator
             }
             catch { }
         }
-
-        // Sweep accumulated HIDMaestro phantom devnodes from prior sessions.
-        // v1.1.30's per-call unique SwD instance suffix prevents the
-        // empty-shell bug at create time, but Windows preserves a per-
-        // instance registry hive entry indefinitely after each teardown,
-        // so heavy users see "hidden devices" in Device Manager pile up
-        // across many sessions. SetupDiRemoveDevice via DIGCF_ALLCLASSES
-        // deletes the registry cache cleanly. Only touches PHANTOM
-        // entries; PRESENT devnodes are explicitly skipped, so this is
-        // safe to call while a session is live.
-        try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -706,88 +720,22 @@ internal static class DeviceOrchestrator
     internal static void PrewarmGameInputService() => EnsureGameInputService();
 
     // ════════════════════════════════════════════════════════════════════
-    //  WriteGameInputRegistry
+    //  GameInput mapping
     // ════════════════════════════════════════════════════════════════════
 
-    // v1.3.0: per-VID:PID write cache. WriteGameInputRegistry is called
-    // per CreateController, but the data written is keyed only by
-    // VID:PID: two controllers using the same profile produce identical
-    // writes. Skip the redundant work after the first per-VID:PID call.
-    private static readonly HashSet<uint> s_gameInputRegistryWritten = new();
-    private static readonly object s_gameInputRegistryLock = new();
-
-    private static void WriteGameInputRegistry(ControllerProfile profile)
+    /// <summary>foundation-sunshine #1056 and #1138. A profile built in code
+    /// with the descriptor shape the table was measured on holds the
+    /// GameInput table while it lives (<see cref="GameInputMapping"/>,
+    /// <see cref="RegistryLedger"/>). Every other profile gets none and
+    /// reads through WGI as the real device does. A table an older build
+    /// left under the identity goes first, or this virtual and any real pad
+    /// of the same identity would read through it.</summary>
+    private static void ApplyGameInputMapping(int controllerIndex, ControllerProfile profile)
     {
-        uint vidPidKey = ((uint)profile.VendorId << 16) | profile.ProductId;
-        lock (s_gameInputRegistryLock)
-        {
-            if (!s_gameInputRegistryWritten.Add(vidPidKey)) return;
-        }
-
-        string deviceKey = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
-        try { Registry.LocalMachine.DeleteSubKeyTree(deviceKey, false); } catch { }
-
-        // Also clean up any stale entry from the earlier (now-disabled)
-        // SOFTWARE path experiment so we don't leave a DS4-shaped mapping
-        // for 045E VIDs that could override WGI's native handling.
-        string staleSoftwareKey = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices\{profile.VendorId:X4}{profile.ProductId:X4}00010005";
-        try { Registry.LocalMachine.DeleteSubKeyTree(staleSoftwareKey, false); } catch { }
-
-        using var root = Registry.LocalMachine.CreateSubKey(deviceKey);
-
-        // v1.3.0: keep the parent gpPath key open and create children
-        // through it instead of through Registry.LocalMachine. Each
-        // CreateSubKey/OpenSubKey via the static class opens the registry
-        // tree from HKLM root every time. Holding a parent handle and
-        // creating children relative to it cuts the per-key cost roughly
-        // in half. Also single-passes create + write per child: previously
-        // we created all 20 children, then re-opened each to set values.
-        using var gp = Registry.LocalMachine.CreateSubKey($@"{deviceKey}\Gamepad");
-
-        void SetAxis(string name, int index, bool invert = false)
-        {
-            using var k = gp!.CreateSubKey(name);
-            k.SetValue("AxisIndex", index, RegistryValueKind.DWord);
-            if (invert) k.SetValue("Invert", 1, RegistryValueKind.DWord);
-        }
-        void SetButton(string name, int index)
-        {
-            using var k = gp!.CreateSubKey(name);
-            k.SetValue("ButtonIndex", index, RegistryValueKind.DWord);
-        }
-        void SetDPad(string name, string position)
-        {
-            using var k = gp!.CreateSubKey(name);
-            k.SetValue("SwitchIndex", 0, RegistryValueKind.DWord);
-            k.SetValue("SwitchPosition", position, RegistryValueKind.String);
-            k.SetValue("IncludeAdjacent", 1, RegistryValueKind.DWord);
-        }
-
-        bool combinedTriggers = profile.HasCombinedTriggers;
-
-        SetAxis("LeftThumbstickX", 0);
-        SetAxis("LeftThumbstickY", 1, invert: true);
-        SetAxis("RightThumbstickX", 2);
-        SetAxis("RightThumbstickY", 3, invert: true);
-
-        if (combinedTriggers)
-        {
-            SetAxis("LeftTrigger", 5);
-            SetAxis("RightTrigger", 6);
-        }
+        if (GameInputMapping.Applies(profile))
+            RegistryLedger.ClaimGameInput(profile.VendorId, profile.ProductId, controllerIndex);
         else
-        {
-            SetAxis("LeftTrigger", 4);
-            SetAxis("RightTrigger", 5);
-        }
-
-        SetButton("A", 0); SetButton("B", 1); SetButton("X", 2); SetButton("Y", 3);
-        SetButton("LeftShoulder", 4); SetButton("RightShoulder", 5);
-        SetButton("View", 6); SetButton("Menu", 7);
-        SetButton("LeftThumbstickButton", 8); SetButton("RightThumbstickButton", 9);
-
-        SetDPad("DPadUp", "Up"); SetDPad("DPadDown", "Down");
-        SetDPad("DPadLeft", "Left"); SetDPad("DPadRight", "Right");
+            RegistryLedger.RemoveLegacyTable(profile.VendorId, profile.ProductId);
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -846,47 +794,16 @@ internal static class DeviceOrchestrator
 
         // Joystick OEM display name (HKLM only). HKCU Joystick\OEM\<VID&PID>
         // takes precedence over HKLM for joy.cpl, and Windows ships HKCU
-        // preloaded for many common clone VID:PIDs. Writing HKCU from
-        // DeviceOrchestrator would destructively overwrite that preload
-        // without a capture-and-restore mechanism, leaving joy.cpl showing
-        // the profile's ProductString forever even after the virtual is
-        // disposed. Route HKCU writes exclusively through HMOemNameOverride,
-        // which captures the prior value to a pending record before mutating
-        // and restores on Clear / RecoverOrphans. The HKLM write here stays
-        // because it's non-destructive (HKCU wins for joy.cpl anyway) and
-        // some legacy MME consumers do read HKLM.
-        // T25-2: per-VID:PID dedup. The OEM write is keyed only by
-        // VID:PID, not controllerIndex, so two controllers using the same
-        // profile produce identical writes. Skip after the first per-VID:PID.
-        uint oemKey = ((uint)profile.VendorId << 16) | profile.ProductId;
-        bool needsOemWrite;
-        lock (s_oemWrittenLock)
-            needsOemWrite = s_oemWritten.Add(oemKey);
-        if (needsOemWrite)
-        {
-            string oemKeyPath = $@"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}";
-            try
-            {
-                using var oem = Registry.LocalMachine.CreateSubKey(oemKeyPath);
-                oem?.SetValue("OEMName", displayName, RegistryValueKind.String);
-                oem?.DeleteValue("OEMData", false);
-                try { Registry.LocalMachine.DeleteSubKeyTree($@"{oemKeyPath}\Axes", throwOnMissingSubKey: false); } catch { }
-            }
-            catch
-            {
-                // Re-allow retry on a future call if the write failed (e.g.
-                // permission glitch). Caller may invalidate the cache via
-                // RemoveAllVirtualControllers.
-                lock (s_oemWrittenLock) s_oemWritten.Remove(oemKey);
-            }
-        }
+        // preloaded for many common clone VID:PIDs, so HKCU is written only
+        // through HMOemNameOverride. The HKLM key is shared with every real
+        // device of the same identity (foundation-sunshine #1138): the
+        // ledger records it before the write and puts it back when the last
+        // virtual holding it goes. OEMData and Axes belong to the device and
+        // are no longer deleted. A keyboard or mouse is no joystick and gets
+        // no joy.cpl entry (issue #67).
+        if (!profile.IsKeyboardOrMouse)
+            RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
     }
-
-    // T25-2: per-VID:PID OEM-write dedup. WriteInstanceConfig is called
-    // per CreateController; the HKLM Joystick OEM cache is keyed only by
-    // VID:PID and writing the same data more than once is wasted work.
-    private static readonly HashSet<uint> s_oemWritten = new();
-    private static readonly object s_oemWrittenLock = new();
 
     // ════════════════════════════════════════════════════════════════════
     //  CreateGamepadCompanion (xinputhid path)
@@ -1416,7 +1333,12 @@ internal static class DeviceOrchestrator
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.shm"))
         {
             SharedMemoryIO.EnsureInputMapping(controllerIndex);
-            try { SharedMemoryIO.EnsureOutputMapping(controllerIndex); } catch { }
+            try
+            {
+                SharedMemoryIO.EnsureOutputMapping(controllerIndex);
+                SharedMemoryIO.MarkOutputStart(controllerIndex);
+            }
+            catch { }
         }
 
         // Once-per-session cleanup
@@ -1453,6 +1375,10 @@ internal static class DeviceOrchestrator
                 }
             }
 
+            // Shared registry keys held by a process that died with its
+            // virtuals live go back to their prior state.
+            RegistryLedger.PruneDead();
+
             s_ghostsCleaned = true;
             LogDiag($"    once-per-session cleanup ran in {cleanupSw.ElapsedMilliseconds}ms");
         }
@@ -1460,7 +1386,7 @@ internal static class DeviceOrchestrator
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.gameinput_svc"))
         {
             EnsureGameInputService();
-            WriteGameInputRegistry(profile);
+            ApplyGameInputMapping(controllerIndex, profile);
         }
 
         // ── Step 1: per-instance registry config ────────────────────────
@@ -2067,6 +1993,11 @@ internal static class DeviceOrchestrator
         }
         finally
         {
+            // Shared registry keys this controller held (foundation-sunshine
+            // #1138) go back to their prior state once no other live
+            // controller holds them.
+            try { RegistryLedger.Release(controllerIndex); } catch { }
+
             // Release the gate: SetupController for this controllerIndex
             // can now proceed. Reached via every code path including
             // exceptions inside the teardown body.
@@ -2378,9 +2309,10 @@ internal static class DeviceOrchestrator
 
         // Clean Device Parameters under our enumerators via reg.exe (PnP ACLs
         // prevent direct writes). Leaves the PnP instance keys themselves intact.
-        // Sweeps both ROOT\ and SWD\ subtrees.
+        // Sweeps both ROOT\ and SWD\ subtrees. HIDMAESTRO* is ours alone. The
+        // other enumerators are shared with third-party root devices, so an
+        // instance there needs the HardwareID proof first (#28, #1138).
         {
-            string[] ourEnumerators = { "VID_", "XnaComposite", "HIDMAESTRO", "HID_IG_00", "HIDMAESTRO" };
             foreach (var enumRootName in new[] { "ROOT", "SWD" })
             try
             {
@@ -2388,14 +2320,17 @@ internal static class DeviceOrchestrator
                 if (enumRoot == null) continue;
                 foreach (var sub in enumRoot.GetSubKeyNames())
                 {
-                    bool ours = ourEnumerators.Any(e =>
-                        sub.StartsWith(e, StringComparison.OrdinalIgnoreCase)
-                        || sub.Equals(e, StringComparison.OrdinalIgnoreCase));
-                    if (!ours) continue;
+                    bool exclusivelyOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                    bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+                        || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase);
+                    if (!exclusivelyOurs && !shared) continue;
                     using var subKey = enumRoot.OpenSubKey(sub);
                     if (subKey == null) continue;
                     foreach (var inst in subKey.GetSubKeyNames())
                     {
+                        if (!exclusivelyOurs && !DeviceManager.IsHidMaestroOwned($@"{enumRootName}\{sub}\{inst}"))
+                            continue;
                         string dpPath = $@"SYSTEM\CurrentControlSet\Enum\{enumRootName}\{sub}\{inst}\Device Parameters";
                         RunProcess("reg.exe", $"delete \"HKLM\\{dpPath}\" /f", timeoutMs: 3000);
                     }
@@ -2406,90 +2341,22 @@ internal static class DeviceOrchestrator
 
         Phase("device-params");
 
-        // Clean interface registries (XUSB + WinExInput).
-        // Match both ROOT# and SWD# instance-name encodings (backslash → hash in
-        // interface-class registry keys).
-        foreach (var guid in new[] {
-            "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
-            "{6c53d5fd-6480-440f-b618-476750c5e1a6}" })
-        {
-            try
-            {
-                using var classKey = Registry.LocalMachine.OpenSubKey(
-                    $@"SYSTEM\CurrentControlSet\Control\DeviceClasses\{guid}", writable: true);
-                if (classKey != null)
-                    foreach (var sub in classKey.GetSubKeyNames())
-                        if (sub.Contains("ROOT#") ||
-                            sub.Contains("SWD#HIDMAESTRO", StringComparison.OrdinalIgnoreCase))
-                            try { classKey.DeleteSubKeyTree(sub); } catch { }
-            }
-            catch { }
-        }
+        // Clean interface registries (XUSB + WinExInput), with the same
+        // ownership proof the once-per-session cleanup uses.
+        RemoveOwnedInterfaceEntries();
 
         Phase("interface-classes");
 
-        // Clean joy.cpl joystick OEM cache + slot assignments
-        string[] oemPrefixes = { "VID_045E&PID_", "VID_054C&PID_", "VID_0000&PID_" };
-        string oemRelPath = @"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
-        foreach (var root in new[] { Registry.CurrentUser, Registry.LocalMachine })
-        {
-            try
-            {
-                using var oemKey = root.OpenSubKey(oemRelPath, writable: true);
-                if (oemKey != null)
-                    foreach (var sub in oemKey.GetSubKeyNames())
-                        if (oemPrefixes.Any(p => sub.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
-                            try { oemKey.DeleteSubKeyTree(sub, false); } catch { }
-            }
-            catch { }
-        }
-        try
-        {
-            using var jsRoot = Registry.CurrentUser.OpenSubKey(
-                @"System\CurrentControlSet\Control\MediaResources\Joystick", writable: true);
-            if (jsRoot != null)
-                foreach (var sub in jsRoot.GetSubKeyNames())
-                {
-                    try
-                    {
-                        using var settings = jsRoot.OpenSubKey($@"{sub}\CurrentJoystickSettings", writable: true);
-                        if (settings != null)
-                            foreach (var name in settings.GetValueNames())
-                            {
-                                if (name.StartsWith("Joystick", StringComparison.OrdinalIgnoreCase) &&
-                                    (name.Contains("OEMName", StringComparison.OrdinalIgnoreCase) ||
-                                     name.Contains("Configuration", StringComparison.OrdinalIgnoreCase)))
-                                    settings.DeleteValue(name, false);
-                            }
-                    }
-                    catch { }
-                    try
-                    {
-                        using var jsSettings = jsRoot.OpenSubKey($@"{sub}\JoystickSettings", writable: true);
-                        if (jsSettings != null)
-                            foreach (var vidPid in jsSettings.GetSubKeyNames())
-                            {
-                                try
-                                {
-                                    using var vidPidKey = jsSettings.OpenSubKey(vidPid, writable: true);
-                                    if (vidPidKey == null) continue;
-                                    foreach (var name in vidPidKey.GetValueNames())
-                                    {
-                                        if (name.StartsWith("Joystick", StringComparison.OrdinalIgnoreCase) &&
-                                            (name.Contains("OEMName", StringComparison.OrdinalIgnoreCase) ||
-                                             name.Contains("Configuration", StringComparison.OrdinalIgnoreCase)))
-                                            vidPidKey.DeleteValue(name, false);
-                                    }
-                                }
-                                catch { }
-                            }
-                    }
-                    catch { }
-                }
-        }
-        catch { }
+        // Shared joy.cpl and GameInput keys (foundation-sunshine #1138).
+        // Every virtual is gone by now, so every key the ledger holds goes
+        // back to its prior state, and tables older builds left behind go.
+        // Nothing else under those roots is touched: a vendor prefix is not
+        // ownership.
+        RegistryLedger.ReleaseAll();
+        int legacyTables = RegistryLedger.RemoveLegacyTables();
+        LogDiag($"    removed {legacyTables} legacy GameInput table(s)");
 
-        Phase("joycpl");
+        Phase("shared-keys");
 
         // The WUDFHost release-wait and the orphan drain below exist to
         // protect DriverStore FILE REPLACEMENT: a host that still has the

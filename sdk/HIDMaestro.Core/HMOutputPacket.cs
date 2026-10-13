@@ -19,8 +19,17 @@ public readonly struct HMOutputPacket
     /// <summary>Which API the host used to send this packet.</summary>
     public readonly HMOutputSource Source;
 
-    /// <summary>HID Report ID byte. 0 if the descriptor uses no report IDs,
-    /// or for non-HID sources (e.g. XInput rumble).</summary>
+    /// <summary>For <see cref="HMOutputSource.HidOutput"/> and
+    /// <see cref="HMOutputSource.HidFeature"/>, the first byte of the
+    /// report the device received. When the profile's descriptor declares
+    /// report IDs, that byte is the Report ID and <see cref="Data"/> holds
+    /// the report after it. When the descriptor declares none, Windows
+    /// sends the device the report alone, without the 0 an application
+    /// puts in front of it, so this is the report's first byte and
+    /// <see cref="Data"/> holds the rest. Both backends split the report
+    /// this way. For <see cref="HMOutputSource.HidFeatureRead"/>, the Report
+    /// ID the host asked for. 0 for non-HID sources (e.g. XInput
+    /// rumble).</summary>
     public readonly byte ReportId;
 
     /// <summary>The raw payload bytes. Length is <see cref="Data"/>.Length.</summary>
@@ -46,8 +55,9 @@ public readonly struct HMOutputPacket
 public enum HMOutputSource : byte
 {
     /// <summary>HidD_SetOutputReport / IOCTL_HID_WRITE_REPORT / dinput8 PID effects.
-    /// Bytes are the raw HID output report payload (no Report ID byte: that's
-    /// in <see cref="HMOutputPacket.ReportId"/>).</summary>
+    /// Bytes are the output report after its first byte, which is in
+    /// <see cref="HMOutputPacket.ReportId"/> (the Report ID, or the report's
+    /// own first byte when the descriptor declares no IDs).</summary>
     HidOutput  = 0,
 
     /// <summary>HidD_SetFeature. Used by some controllers (DualSense, DualShock 4)

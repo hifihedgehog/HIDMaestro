@@ -25,13 +25,13 @@
   <a href="https://x.com/hifihedgehog"><img src="https://img.shields.io/badge/X-@hifihedgehog-black?logo=x&logoColor=white" alt="Follow on X"></a>
 </p>
 
-**Virtual game controllers that look like real hardware to Windows. No kernel driver. No network. No reboot.**
+**Virtual game controllers, keyboards and mice that look like real hardware to Windows. No kernel driver. No network. No reboot.**
 
-HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 233 built-in profiles or point it at a controller you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines.
+HIDMaestro creates virtual controllers that present the exact identity of real hardware across the whole Windows input stack at once. Pick from 336 built-in profiles, 103 of them keyboards and mice, or point it at a device you own and clone it. DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see the VID/PID, product name, HID descriptor, axis and button layout, and bus type the profile defines. A virtual keyboard or mouse reaches Raw Input and the desktop as the device it copies.
 
 It runs entirely in user mode (UMDF2), signed with a locally trusted self-signed certificate. No EV certificate, no `testsigning` boot mode, no kernel driver that can blue-screen the machine.
 
-<p align="center"><b>233</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
+<p align="center"><b>336</b> device profiles · <b>20+</b> projects shipping it · <b>~35 µs</b> median single-press · <b>0</b> kernel drivers</p>
 
 ```csharp
 using var ctx = new HMContext();
@@ -62,7 +62,7 @@ bin\Release\net10.0-windows10.0.26100.0\win-x64\HIDMaestroTest.exe emulate xbox-
 # Several controllers at once, any mix of profiles
 HIDMaestroTest.exe emulate xbox-series-xs-bt xbox-360-wired dualsense
 
-# List or search the 233 profiles
+# List or search the 336 profiles
 HIDMaestroTest.exe list
 HIDMaestroTest.exe search thrustmaster
 
@@ -155,6 +155,30 @@ using var ctrl = ctx.CreateController(custom);
 
 Adding a controller to HIDMaestro is a data change. Adding one to a code-per-device emulator means writing and compiling a new device implementation. That difference is the whole point of the profile system.
 
+## Keyboards and mice.
+
+As of v1.12.0 a profile can be a keyboard or a mouse. The catalog has 51 keyboards and 52 mice from 32 vendors, each the report descriptor of a real device's keyboard or mouse interface, taken from public dumps. Windows treats them as it treats the hardware: Raw Input lists each one, the keyboard types into the focused window, and the mouse moves the cursor.
+
+```csharp
+using var mouse = ctx.CreateController(ctx.GetProfile("logitech-g502-hero")!, "mouse-1");
+mouse.SubmitMouse(new HMMouseState { X = 25, Y = -10, Buttons = HMMouseButtons.Left });
+mouse.SubmitMouse(new HMMouseState());
+
+using var keyboard = ctx.CreateController(ctx.GetProfile("keychron-q6")!);
+keyboard.SubmitKeyboard(HMKeyModifiers.LeftShift, new[] { HMKey.A });
+keyboard.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
+```
+
+- **Every report arrives.** A gamepad reports state, so only the newest report matters. A mouse reports movement, which adds up, and a keyboard reports presses and releases, which must all arrive. For keyboards and mice the driver confirms each report Windows has taken, and the SDK sends the next only after that, at most one per millisecond, as a full-speed USB device would. A burst of 600 one-count moves lost nothing, and neither did four mice driven from four threads at 250 Hz each.
+- **The descriptor decides the layout.** `SubmitMouse`, `SubmitKeyboard` and `SubmitConsumer` pack into whatever reports the profile declares, with or without report IDs. A movement larger than the descriptor's field is split across reports.
+- **Buttons past five.** Raw Input's mouse report carries five buttons. A mouse built with `HidDescriptorBuilder.VendorButtons` gets a second collection for the rest, which Raw Input lists as a HID device of its own.
+- **Absolute pointers.** `HidDescriptorBuilder.Mouse(absolute: true)` builds a pointer that takes 0 to 32767 and reaches Raw Input flagged `MOUSE_MOVE_ABSOLUTE`.
+- **Keyboard LEDs.** Windows sends a keyboard its Num Lock, Caps Lock and Scroll Lock state when it arrives and on every change. `KeyboardLedsChanged` reports each change and `KeyboardLeds` holds the latest, including the state sent while `CreateController` was still running.
+- **Stable paths.** Four mice with one VID and PID are four Raw Input devices, and each identity key gets the same device path back on every life.
+- **Nothing stays held.** If the consuming process ends with a key or button down, however it ends, the driver lets go of it. Without that, Windows would repeat a held key until the device was removed. `Dispose` sends the same release first.
+
+`HidDescriptorBuilder` builds them from scratch with the `Mouse`, `Keyboard`, `KeyboardNkro`, `ConsumerControl` and `VendorButtons` starters. Battery scenarios S69 and S70 check the descriptors and packers, then every catalog keyboard and mouse through Raw Input. [How this works](docs/INTERNALS.md#keyboards-and-mice).
+
 ---
 
 ## Every API at once.
@@ -165,7 +189,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
 - **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
-- **Validated across every API and both ends of the spectrum.** A 65-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, and WGI on every change. It passes on a 16-core Windows 11 laptop, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
+- **Validated across every API and both ends of the spectrum.** A 70-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It passes on a 16-core Windows 11 laptop, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
 
 ### Validation
 
@@ -180,7 +204,7 @@ Tested on Windows 11 IoT Enterprise LTSC 2024 (build 26200) and Windows 10 IoT E
 
 The Xbox Series BT row shows 16 buttons because Windows' `xinputhid` synthesizes a 16-button layout over the 12-button source descriptor. [Details](docs/INTERNALS.md#validation-results).
 
-A 65-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, and the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, verifying no PnP devnodes are left behind. 65/65 PASS on a 16-core AMD Ryzen 9 Windows 11 laptop. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
+A 70-scenario [live-swap regression battery](test/regression/swap_regression.ps1) drives every create / swap / remove / force-kill sequence, the FFB round-trip, the Sony vendor-blob encode/decode, the composite USB personas end to end through the real USB stack, the battery reply a pad gives XInput, the device identity of every family across nine lives, the driver catalog for both architectures, the 2026 Steam Controller persona against Steam's own firmware updater, the DualShock 3 and 4 reports against SDL, Linux and RPCS3, the Switch 2 Pro Controller persona against a capture of a real pad, SDL and the Steam client, the registry keys a virtual shares with real devices, what WGI reads from a virtual pad, and every keyboard and mouse through Raw Input, verifying no PnP devnodes are left behind. 70/70 PASS on a 16-core AMD Ryzen 9 Windows 11 laptop. The 57-scenario v1.7.3 battery also passed 57/57 on a 4-core Intel Atom Z8350 Windows 10 fixture, the low end of the performance and OS spectrum.
 
 Full device-tree dumps, HIDAPI enumeration logs, per-profile results, and startup/teardown timing are in [docs/INTERNALS.md](docs/INTERNALS.md#validation-results).
 
@@ -327,7 +351,7 @@ The hands hold real SteamVR hand roles, serve the modern input system through a 
 | Installs without test-signing mode | **Yes** | Yes | Yes | Yes | No (ships test-signed) |
 | EV certificate for new builds | **No** | No (uses signed usbip-win2) | Yes ($300+/yr) | Yes | No (OV cert for x64) |
 | Network play | **App layer via consumers (PadForge Remote Link), zero local penalty** | In the driver: +1-5 ms wired, +10-50 ms Wi-Fi | No | No | No |
-| Identity per controller | **Exact, 233 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
+| Identity per controller | **Exact, 336 profiles** | 6 fixed device types | 2 fixed types | Fixed "vJoy Device" | 4 presets, or raw descriptor |
 | Bus type fidelity | **Per-profile, incl. Bluetooth** | USB only (USBIP) | USB only | USB only | USB only |
 | Add a new device | **JSON file, or capture one you own** | Write Go (a few hundred lines/device) | N/A | N/A | Write C, or raw descriptor |
 | Local single-press latency | **~35 µs measured** | 168 µs published (localhost) | N/A | N/A | Not published |
@@ -339,7 +363,7 @@ The hands hold real SteamVR hand roles, serve the modern input system through a 
 
 VIIPER describes itself as running entirely in userspace. On Windows that holds only for its device code: the USB/IP transport is a third-party kernel-mode driver, and VIIPER makes you go install it. HIDMaestro's own driver is user-mode UMDF2, and it rides the host that already ships with Windows, so the "no kernel driver" row above is literal for everything the standard profiles do. The composite USB personas are the one deliberate exception, and they use the same signed usbip-win2 transport VIIPER does, because a Windows audio endpoint requires a driver-backed USB device and no user-mode API can create one. The difference is what the user has to do about it: HIDMaestro ships that transport inside its own DLL and deploys it on demand, so a composite persona is a profile you pick, not a prerequisite you chase. Use any other profile and no kernel-mode component is ever installed.
 
-HIDMaestro is Windows optimized and focused on game controllers and HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
+HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice and other HID game devices. Within that scope it gives you exact hardware identity with no kernel driver, no network layer, and no per-device code. That combination is what HIDMaestro is built for, and nothing else on this list delivers it.
 
 ### What it replaces
 
@@ -356,6 +380,7 @@ HIDMaestro is Windows optimized and focused on game controllers and HID game dev
 - **Output is delivered, not routed to hardware.** The driver accepts rumble/haptic/FFB writes and raises `OutputReceived` to the consumer. Sending those to a physical controller is the consumer's job (PadForge does this).
 - **Auth-chip controllers.** PS4/PS5 online and Nintendo Switch Online require cryptographic authentication from real controller hardware. HIDMaestro cannot replicate authentication chips.
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device and need per-controller work.
+- **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
 
 ## Security and Scope

@@ -14,7 +14,7 @@ A few HIDMaestro techniques that are not well documented elsewhere in the virtua
 
 Real Xbox 360 controllers have a combined trigger axis (Z) in DirectInput: both triggers share one axis. Browsers and WGI need separate trigger values. Previous solutions had to choose: correct DI (5 axes, combined) or correct browser (separate triggers, 6 axes).
 
-HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput does not map velocity usages to any axis slot, so it sees 5 axes. GameInput/WGI enumerates them as additional axes and reads separate trigger data via the GameInput registry mapping.
+HIDMaestro uses HID velocity usages (Vx and Vy, Usage Page 0x01, Usages 0x40/0x41) to carry separate trigger values in the same HID report. DirectInput does not map velocity usages to any axis slot, so it sees 5 axes, while a reader of the HID report gets each trigger on its own. WGI reads this profile through its XUSB companion, which reports the two triggers as separate axes.
 
 Result: 5 axes and 10 buttons in DirectInput (matching real xusb22.sys), separate triggers in the browser (matching real XInput), all from one HID descriptor.
 
@@ -102,9 +102,21 @@ By using `VID_*&PID_*&IG_00` as the device enumerator, the HID child's device pa
 
 One string in a device path controls three different detection paths across three different libraries.
 
-### GameInput Registry Override
+### GameInput Mappings
 
-Windows has a built-in GameInput mapping database for known VID/PIDs. HIDMaestro writes custom mappings that point the trigger axes to the velocity usage indices (5 and 6 instead of the default combined axis 4). This makes WGI's Gamepad object read actual separate trigger values from the Vx/Vy fields.
+WGI makes a HID device a `Gamepad` through a mapping keyed by VID and PID. Windows ships its own under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\GameInput\Devices` (279 on Windows 11 26200), and a key at `HKLM\SYSTEM\CurrentControlSet\Control\GameInput\Devices\<VID><PID>00010005` takes priority over them. A mapping names each axis and button by its position in the order WGI enumerates them, so it reads correctly only against the descriptor it was written for.
+
+Through v1.11.0 the SDK wrote one table for every profile Windows had no mapping for, and deleted Windows' entry for the profiles it had one for. The table fit one shape: the `HidDescriptorBuilder` game pad, with X and Y, Z and Rz, Rx, Ry and a hat in that order and ten or more buttons. Measured across the catalog, it made 25 non-Xbox profiles WGI Gamepads read through the wrong axes, 21 of them wrong even at rest: a resting DualSense read RightTrigger 0.498 and RightThumbstickY 1.000 (foundation-sunshine #1056). It also hid Windows' own DualShock 4 v1 mapping. For Xbox profiles it changed nothing WGI read, because WGI reads them through XUSB or xinputhid.
+
+Since v1.12.0 the SDK writes a table only for a profile built in code whose descriptor has exactly that shape, and only when neither Windows nor another program has a mapping for its VID and PID. Catalog profiles get none, the same as the real devices: WGI lists a virtual DualSense as a RawGameController, as it lists a real one, and reads a virtual DualShock 4 v1 as a Gamepad through Windows' own mapping. The table goes when the last controller holding it does. Tables an older SDK left behind are recognized by their exact bytes, and `RemoveAllVirtualControllers` deletes them. Battery scenario S67 reads each of these cases through WGI with an XUSB pad as the positive control.
+
+### Registry Keys Shared With Real Devices
+
+Two keys a virtual controller writes are named by VID and PID, so a real device with the same ids uses the same key: the GameInput mapping above, and joy.cpl's OEM key `HKLM\SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM\VID_xxxx&PID_xxxx`, whose `OEMName` is the name joy.cpl and DirectInput show. Through v1.11.0 the SDK overwrote `OEMName`, deleted `OEMData` and the `Axes` subkey, and left them that way. Its cleanup deleted every OEM key under the Microsoft, Sony and VID 0000 prefixes in HKLM and HKCU and cleared the HKCU joystick slots, so a real pad that shared an identity lost its joy.cpl data (foundation-sunshine #1138). A vendor prefix is not proof of ownership.
+
+Every such write now goes through a ledger at `HKLM\SOFTWARE\HIDMaestroRegistryLedger`. Before writing, the SDK records the key's prior state and the live controllers that hold it, each named by process id, process start time and controller index. When the last holder goes, the prior state comes back, and only while the key still holds what HIDMaestro wrote: a value another program changed in the meantime stays. A key HIDMaestro created is deleted only if nothing else was written under it. A holder whose process has exited counts as released, so a crashed consumer's writes are undone by the next session's first create. The ledger and `HMOemNameOverride` share one mutex and read each other's records, so `OEMName` ends at its original value in any order of claim and release. The `OEMData` value and hidden fifth axis that builds before April 6, 2026 wrote are removed where their bytes match exactly, and nowhere else. Keyboard and mouse profiles write neither key.
+
+The device sweep's ownership guard (v1.3.16, issue #28) now covers the `Device Parameters` cleanup and the interface registrations under `DeviceClasses` as well. An entry under an enumerator real devices share (`VID_`, `XnaComposite`, `HID_IG_00`) goes only when its device is provably HIDMaestro's or has no instance record left. Battery scenario S66 plants keys for real VID and PID pairs in both hives, creates and disposes virtuals over them, runs the full cleanup, starts a fresh context, recovers from a killed consumer, and compares every value.
 
 ### xinputhid UpperFilter Tripwire
 
@@ -168,6 +180,26 @@ The last row is the one hazard: a `SWD` instance key that exists before the soft
 
 Two consequences for consumers. A DirectInput ordinal still moves when a same-VID/PID pad in front of it leaves (that is DirectInput's rule, not ours), while the path and serial of the remaining pad do not. And a different profile at the same key keeps the identity and refreshes the descriptor: the battery swaps a DualShock 4 in at a DualSense's key and reads the new attributes at the old paths.
 
+### Keyboards and Mice
+
+A profile whose `type` is `keyboard` or `mouse` is created like any other plain HID profile and reaches Windows as the device its descriptor describes. Windows' keyboard and mouse class drivers open its collections, Raw Input lists them, and the desktop acts on the input. The catalog holds 51 keyboards and 52 mice. Each is the report descriptor of one interface of a real device, taken from public dumps: usbhid-dump output posted in project issues, libinput recordings and the Linux kernel's HID selftests. Two Bluetooth keyboard dumps end with a zero byte after the last End Collection, which Linux ignores and Windows' HID parser rejects, so those two profiles leave it out.
+
+`SubmitMouse`, `SubmitKeyboard` and `SubmitConsumer` pack into the profile's own reports. The SDK reads the descriptor with a parser that follows the HID 1.11 item rules (section 6.2.2): global items persist and stack with Push and Pop, local items reset after each main item, a 4-byte usage carries its own page, and each report ID counts its bits from zero. Every field lands where the descriptor puts it, so a mouse whose buttons and motion sit in separate reports gets both. A relative movement larger than the descriptor's field is split across as many reports as it takes. `HidDescriptorBuilder` has starters for building one in code: `Mouse` (relative 16-bit, or absolute 0 to 32767), `Keyboard` (the boot layout), `KeyboardNkro`, `ConsumerControl` and `VendorButtons`.
+
+RAWMOUSE carries five buttons. A mouse that needs more adds a second, vendor-page collection with `VendorButtons`, and `SubmitMouse` sends buttons six and up there. Raw Input lists that collection as a HID device of its own. An absolute mouse reaches Raw Input flagged `MOUSE_MOVE_ABSOLUTE`, on Windows' 0 to 65535 scale.
+
+The input section holds one report, the newest. That suits a gamepad, whose state replaces the last, and loses data for a mouse, whose movement adds up, and for a keyboard, whose make and break must both arrive. For keyboards and mice the driver acknowledges delivery. Once HID class takes a report, the driver writes the report's sequence number to `Global\HIDMaestroInputAck<N>` and signals `Global\HIDMaestroInputAckEvent<N>`. The SDK creates both objects, since the driver runs as LocalService and cannot create a Global object, and the driver opens them when its worker starts. Before writing a report, each submit method waits for the previous report's acknowledgement and keeps reports at least 1 ms apart, the interval of a full-speed USB device polled every frame. HID class keeps a short queue for each reader. Without the spacing, a burst of 600 one-count moves went out at 27,000 reports a second and Windows dropped counts. With it, the burst takes 601 ms and every count arrives, and four threads driving four mice at 250 Hz lose nothing. A wait gives up after 200 ms. After three misses in a row the controller stops waiting until an acknowledgement arrives again, so a device Windows has stopped reading does not hold up the caller. `DeliversEveryReport` is false on a gamepad and on a driver older than v1.12.0. Windows merges consecutive mouse moves into one WM_INPUT message (RAWMOUSE has `MOUSE_MOVE_NOCOALESCE` for that reason), so the checks compare the sum of movement, not the number of messages.
+
+Windows sends a keyboard its LED state as an output report when the keyboard arrives and on every change, and resends it to the keyboards already present when another one arrives. `KeyboardLedsChanged` raises the decoded state and `KeyboardLeds` keeps the last one. The arrival report comes while `CreateController` is still running, before a handler can be attached. Through v1.11.0 the output reader started at the ring position it found when the controller object was built, after the device had started, so the arrival report went unread, and so did anything else a host sent during creation, such as the feature reads a Sony Bluetooth host makes on arrival, which arm the extended report. Each controller's setup now records the ring position before the device exists, and the reader starts there.
+
+A consumer that goes away with a key or button held would leave it held. Windows repeats a held key about 30 times a second until the device is removed, measured at 32 repeats in 1.5 s after a consumer was killed with F24 down, and a held Shift or Ctrl stays held for the whole desktop. ViGEmBus unplugs a client's devices from its file-close callback, which Windows calls when the client's process exits or closes its handle (`sys/Driver.cpp`, `Bus_FileClose`). A user-mode driver gets no such callback, so the SDK holds the server end of a named pipe for each controller, `\\.\pipe\HIDMaestroOwner<N>`, and the driver connects and keeps one read pending on it. Nothing is ever written to the pipe, so the read completes only when the SDK's end closes, on Dispose or when the process ends however it ends. The driver then sends the release reports the SDK keeps in the acknowledgement section, one for each input report the controller has sent: keys and buttons up, relative motion and the wheel zero, array slots empty, a hat centered, and absolute pointer axes where they were, so the pointer does not jump. Dispose sends the same reports itself before teardown. The device then stays until the next session's cleanup removes it, as an orphaned gamepad does. `ReleasesOnConsumerExit` says whether the driver watches.
+
+A keyboard without report IDs receives its LED report as the LED byte alone. Both backends split a report at its first byte (`HMOutputPacket.ReportId`), so on such a keyboard `ReportId` holds the LED byte and `Data` is empty. The LED decoder puts the two back together.
+
+Four mice with one VID and PID are four Raw Input devices with four paths, and each identity key gets its own path back on every life (see Stable Device Identity Across Lives). Keyboard and mouse profiles get no GameInput mapping and no joy.cpl OEM name. Battery scenario S69 checks the parser, the starters and the packers with no device, and S70 checks the rest through Raw Input, including a consumer killed while it holds a key, a mouse button and an absolute pointer.
+
+The driver also no longer completes a second read with a synthetic report 0x20 built from the trigger values. That path was left from an April 2026 experiment with a second collection for Xbox 360 triggers. It fired on a byte scan for `85 20` in descriptors longer than 130 bytes, which matched only the DualSense family, where 0x20 is a feature report, so the five driver-backed DualSense profiles had an input report their descriptor does not declare put in their read queue on every frame.
+
 ## Architecture
 
 ```
@@ -181,6 +213,19 @@ User-Mode Test App
   │     Data[256] carries HID input reports up to 256 bytes (DualSense BT
   │       report 0x31 = 78 bytes, Switch Pro motion-IMU reports, etc.).
   │     Event-driven: SDK signals InputDataEvent on each write.
+  │
+  ├──► Input acknowledgement (per-controller, keyboards and mice)
+  │     DeliveredSeqNo(4) + Capabilities(4) + ReleaseSeq(4) +
+  │       ReleaseCount(4) + 8 release frames x (Size(4) + Data[80])
+  │       = 688 bytes. The driver writes the sequence number of each
+  │       report HID class has taken and signals InputAckEvent. The SDK
+  │       waits on it before the next report, and keeps the release
+  │       frames the driver sends when the owner pipe closes. Created by
+  │       the SDK, opened by the driver.
+  │
+  ├──► Owner pipe \\.\pipe\HIDMaestroOwner<N> (per-controller)
+  │     Server end held by the SDK, never written. The driver's pending
+  │       read completes when the consuming process ends.
   │
   ├──► Main HID Device (HIDMaestro.dll via mshidumdf)
   │     Xbox 360 Wired:    ROOT\VID_045E&PID_028E&IG_00\HM_0000
@@ -233,7 +278,8 @@ near zero and peak throughput scales with controller count.
 - **DirectInput** ← HID READ_REPORT ← shared memory (combined Z + Vx/Vy in descriptor)
 - **XInput** ← XUSB GET_STATE ← companion reads GipData from shared memory
 - **SDL3** ← HIDAPI skips (&IG_) → RawInput fallback → maps by VID/PID
-- **Browser (plain HID / Xbox Series BT)** ← WGI Gamepad ← GameInput reads Vx/Vy via registry mapping
+- **Browser (Xbox Series BT)** ← WGI Gamepad ← xinputhid
+- **Browser (plain HID)** ← Chromium's Raw Input or WGI fetcher. WGI makes a plain HID profile a Gamepad only where Windows ships a mapping for its VID and PID (see Techniques: GameInput Mappings)
 - **Browser (Xbox 360 Wired)** ← WGI Gamepad ← XUSB companion's interface, admitted via the xinputhid UpperFilter tripwire. Chromium `put_Vibration` dispatches `IOCTL_XUSB_SET_STATE` with motor bytes back through this path, where the SDK raises `OutputReceived` to the consumer.
 - **Bluetooth ID**: HIDAPI checks CompatibleIDs, reports bus_type=BT
 
@@ -481,7 +527,7 @@ To reproduce: run `HIDMaestroTest.exe emulate <profile-id>`, then run `python sc
 | **Identity token** | The instance-name segment every devnode of one virtual controller carries: `HM_0000` for the default key of index 0, `HM_` plus sixteen hex digits for a consumer key. Fixed across lives so the HID child keeps its path. Replaced the per-process session-id prefix in v1.8.0. See Techniques: Stable Device Identity. |
 | **ParentIdPrefix** | The `level&hash&n` value in a parent's instance key that PnP prepends to the instance id of every child that reports a non-unique id (HID children do). Read from the key when the child first arrives, minted with a fresh counter only when absent. HIDMaestro writes the identity's value so the child path is the same on every life. |
 | **ContainerID slot-1 skip** | Pre-fix bug in `xinput1_4!FUN_18000de2c`: a null-sentinel ContainerID `{00000000-...-FFFF-FFFFFFFFFFFF}` triggered a code path that set bit 2 on the device struct, made the fallback slot allocator skip iter 0, and surfaced an empty slot 1 to consumers. The SWD migration's explicit `pContainerId` closes the path. |
-| **GameInput mapping** | Registry entries at `HKLM\...\GameInput\Devices\{VID}{PID}...` that tell WGI how to map HID axes/buttons to the Gamepad interface. |
+| **GameInput mapping** | Registry entries at `HKLM\...\GameInput\Devices\{VID}{PID}...` that tell WGI how to map HID axes/buttons to the Gamepad interface. Windows ships its own. HIDMaestro writes one only for a code-built game pad of the one shape it fits. |
 | **&IG_** | "Interface Group" marker in Xbox device paths. Chrome and HIDAPI skip devices with this in the path; SDL3 falls through to its RawInput backend. |
 | **Vx/Vy** | HID velocity usages (0x40/0x41). Invisible to DirectInput's axis mapper but enumerated by GameInput; used to carry separate trigger values. |
 | **mshidumdf** | Microsoft's kernel-mode HID minidriver proxy that hosts UMDF2 HID drivers. |

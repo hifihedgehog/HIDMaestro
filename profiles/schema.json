@@ -55,9 +55,11 @@
         "hotas",
         "arcadestick",
         "pedals",
+        "mouse",
+        "keyboard",
         "other"
       ],
-      "description": "Controller category"
+      "description": "Device category. A mouse or keyboard profile delivers every input report in order, where a game controller sends the latest state, and gets no joy.cpl entry."
     },
     "connection": {
       "type": "string",

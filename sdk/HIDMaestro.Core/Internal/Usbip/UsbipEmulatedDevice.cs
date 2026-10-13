@@ -198,6 +198,7 @@ internal sealed class UsbipEmulatedDevice : IDisposable
         // HMController constructed after it see the same objects.
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _outputView = SharedMemoryIO.EnsureOutputMapping(index);
+        SharedMemoryIO.MarkOutputStart(index);
         _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
         _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
 

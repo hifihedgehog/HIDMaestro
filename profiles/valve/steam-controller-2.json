@@ -126,7 +126,7 @@
       },
       {
         "byte": 2,
-        "bits": "0-27",
+        "bits": "0-29",
         "type": "button-mask",
         "buttons": [
           "A",
@@ -149,14 +149,16 @@
           "LeftPaddle",
           "LeftPaddle2",
           "LeftBumper",
-          "_",
+          "RightStickTouch",
           "RIGHTPAD_TOUCH",
-          "Touchpad",
+          "RightTouchpad",
           "RT_DIGITAL",
-          "_",
+          "LeftStickTouch",
           "LEFTPAD_TOUCH",
-          "_",
-          "LT_DIGITAL"
+          "LeftTouchpad",
+          "LT_DIGITAL",
+          "RightGripTouch",
+          "LeftGripTouch"
         ]
       },
       {

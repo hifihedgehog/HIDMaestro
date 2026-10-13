@@ -20,6 +20,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using System.Threading;
 using HIDMaestro;
 
@@ -53,6 +54,15 @@ static class ValveSdlCheck
     [DllImport(SDL)] static extern ushort SDL_GetJoystickProductForID(uint id);
     [DllImport(SDL)] static extern IntPtr SDL_GetJoystickNameForID(uint id);
     [DllImport(SDL)] static extern bool SDL_IsGamepad(uint id);
+    [DllImport(SDL)] static extern bool SDL_GetGamepadButton(IntPtr gp, int button);
+    [DllImport(SDL)] static extern bool SDL_GamepadHasCapSense(IntPtr gp, int type);
+    [DllImport(SDL)] static extern bool SDL_GetGamepadCapSense(IntPtr gp, int type);
+
+    // SDL_GamepadButton (SDL_gamepad.h:156-177) and SDL_GamepadCapSenseType
+    // (:243-251).
+    const int GP_RIGHT_STICK = 8, GP_MISC1 = 15, GP_RIGHT_PADDLE1 = 16, GP_LEFT_PADDLE1 = 17,
+              GP_RIGHT_PADDLE2 = 18, GP_LEFT_PADDLE2 = 19, GP_TOUCHPAD = 20, GP_MISC2 = 21;
+    const int CS_LEFT_STICK = 0, CS_RIGHT_STICK = 1, CS_LEFT_GRIP = 2, CS_RIGHT_GRIP = 3;
 
     const uint SDL_INIT_GAMEPAD = 0x00002000u;
     const int AXIS_LEFTX = 0, AXIS_RIGHT_TRIGGER = 5;
@@ -252,6 +262,67 @@ static class ValveSdlCheck
                     Check("SDL sees a contact on the right touchpad", d1, $"({x1:F3},{y1:F3}) p={p1:F2}");
                     Check("SDL places it at the opposite corner",
                           x1 < t.Tol && y1 > 1.0f - t.Tol, $"tol={t.Tol:F2}");
+                }
+
+                // The rear buttons, the trackpad clicks, QAM and the touch
+                // sensors, one at a time, each read back from SDL's gamepad
+                // view: RIGHT_PADDLE1/LEFT_PADDLE1 are R4/L4 and PADDLE2 the
+                // lower pair (SDL_gamepad.h:172-175). The Deck and Triton
+                // mappings put the left pad's click on TOUCHPAD and the
+                // right one's on MISC2 (SDL_gamepad.c, "touchpad:b17" and
+                // "misc2:b16"). The 2015 controller has two rear buttons and
+                // no QAM, and SDL reads its right pad click as the right stick.
+                var buttonCases = t.Id switch
+                {
+                    "steam-controller-composite" => new (string, HMButton, int)[]
+                    {
+                        ("right paddle", HMButton.RightPaddle, GP_RIGHT_PADDLE1),
+                        ("left paddle", HMButton.LeftPaddle, GP_LEFT_PADDLE1),
+                        ("right trackpad click", HMButton.RightTouchpad, GP_RIGHT_STICK),
+                    },
+                    _ => new (string, HMButton, int)[]
+                    {
+                        ("R4", HMButton.RightPaddle, GP_RIGHT_PADDLE1),
+                        ("L4", HMButton.LeftPaddle, GP_LEFT_PADDLE1),
+                        ("R5", HMButton.RightPaddle2, GP_RIGHT_PADDLE2),
+                        ("L5", HMButton.LeftPaddle2, GP_LEFT_PADDLE2),
+                        ("left trackpad click", HMButton.LeftTouchpad, GP_TOUCHPAD),
+                        ("right trackpad click", HMButton.RightTouchpad, GP_MISC2),
+                        ("QAM", HMButton.Misc1, GP_MISC1),
+                    },
+                };
+                var neutral = HMGamepadStateHelpers.StandardAxes(prof, 0.5f, 0.5f, 0.5f, 0.5f, 0.0f, 0.0f);
+                foreach (var (label, button, gpButton) in buttonCases)
+                {
+                    Drive(c, new HMGamepadState { Axes = neutral, Buttons = button });
+                    bool down = SDL_GetGamepadButton(gp, gpButton);
+                    Drive(c, new HMGamepadState { Axes = neutral });
+                    bool up = !SDL_GetGamepadButton(gp, gpButton);
+                    Check($"SDL reads {label} ({button}) on its own button and lets go", down && up,
+                          $"down={down} released={up}");
+                }
+                if (t.Id != "steam-controller-composite")
+                {
+                    var touchCases = new List<(string, HMButton, int)>
+                    {
+                        ("left stick touch", HMButton.LeftStickTouch, CS_LEFT_STICK),
+                        ("right stick touch", HMButton.RightStickTouch, CS_RIGHT_STICK),
+                    };
+                    if (t.Id == "steam-controller-2")
+                    {
+                        touchCases.Add(("left grip touch", HMButton.LeftGripTouch, CS_LEFT_GRIP));
+                        touchCases.Add(("right grip touch", HMButton.RightGripTouch, CS_RIGHT_GRIP));
+                    }
+                    foreach (var (label, button, sense) in touchCases)
+                    {
+                        bool has = SDL_GamepadHasCapSense(gp, sense);
+                        Drive(c, new HMGamepadState { Axes = neutral, Buttons = button });
+                        bool on = SDL_GetGamepadCapSense(gp, sense);
+                        Drive(c, new HMGamepadState { Axes = neutral });
+                        bool off = !SDL_GetGamepadCapSense(gp, sense);
+                        Check($"SDL reads the {label} sensor ({button})", has && on && off,
+                              $"has={has} on={on} off={off}");
+                    }
                 }
 
                 // Motion. SDL scales the raw firmware units into rad/s and

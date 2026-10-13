@@ -306,6 +306,30 @@ public sealed class ControllerProfile
     [JsonIgnore]
     public bool HasDescriptor => !string.IsNullOrEmpty(Descriptor);
 
+    /// <summary>Built by <see cref="HIDMaestro.HMProfileBuilder"/> rather
+    /// than loaded from JSON. A JSON profile describes a real device and
+    /// reads through Windows exactly as that device does. Only a profile
+    /// built in code can get the GameInput table
+    /// (<see cref="GameInputMapping.Applies"/>).</summary>
+    [JsonIgnore]
+    public bool BuiltInCode { get; init; }
+
+    /// <summary>A keyboard or mouse profile (issue #67): <c>type</c> is
+    /// <c>keyboard</c> or <c>mouse</c>. These deliver every report in order,
+    /// and have no joy.cpl entry.</summary>
+    [JsonIgnore]
+    public bool IsKeyboardOrMouse =>
+        string.Equals(Type, "keyboard", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Type, "mouse", StringComparison.OrdinalIgnoreCase);
+
+    [JsonIgnore]
+    private KeyboardMousePacker? _cachedKbmPacker;
+
+    /// <summary>The keyboard, mouse and consumer-control packer for this
+    /// profile's descriptor, built once.</summary>
+    internal KeyboardMousePacker GetOrBuildKeyboardMousePacker() =>
+        _cachedKbmPacker ??= new KeyboardMousePacker(GetDescriptorBytes() ?? Array.Empty<byte>());
+
     // Lazy-cached parsed descriptor. v1.3.0: GetDescriptorBytes is called
     // multiple times per CreateController (HMController ctor +
     // WriteInstanceConfig + DriverBuilder validation), each time re-running

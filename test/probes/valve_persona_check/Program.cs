@@ -260,8 +260,80 @@ internal static class Program
         // 8. The input path: a submitted state has to reach the wire.
         CheckDeckInputFrame(ctx);
 
+        // 9. Every named control on the bit SDL's driver reads it from.
+        CheckButtonBits(ctx);
+
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>Each HMButton, pressed alone, must set exactly the bit the
+    /// device's SDL driver decodes for that control, and nothing else in the
+    /// mask. The tables are SDL's own constants: SteamDeckButtons in
+    /// SDL_hidapi_steamdeck.c:49-77 (ulButtonsH starts at bit 32),
+    /// TritonButtons in SDL_hidapi_steam_triton.c:61-97 and the
+    /// STEAM_*_MASK defines in SDL_hidapi_steam.c:117-139. SDL's
+    /// SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1 / LEFT_PADDLE1 are the upper rear
+    /// buttons (R4 / L4) and PADDLE2 the lower (R5 / L5)
+    /// (SDL_gamepad.h:172-175), which is the split HMButton documents.</summary>
+    static void CheckButtonBits(HMContext ctx)
+    {
+        Console.WriteLine("\n-- every named control on SDL's bit --");
+        var tables = new (string Id, int Byte, int Bits, (HMButton Button, int Bit)[] Table)[]
+        {
+            ("steam-deck-composite", 8, 64, new[]
+            {
+                (HMButton.A, 7), (HMButton.B, 5), (HMButton.X, 6), (HMButton.Y, 4),
+                (HMButton.LeftBumper, 3), (HMButton.RightBumper, 2),
+                (HMButton.Back, 12), (HMButton.Guide, 13), (HMButton.Start, 14),
+                (HMButton.LeftStick, 22), (HMButton.RightStick, 26),
+                (HMButton.LeftPaddle, 32 + 9), (HMButton.RightPaddle, 32 + 10),   // L4 0x200, R4 0x400 (H)
+                (HMButton.LeftPaddle2, 15), (HMButton.RightPaddle2, 16),           // L5, R5
+                (HMButton.LeftTouchpad, 17), (HMButton.RightTouchpad, 18),         // LEFT_PAD, RIGHT_PAD clicks
+                (HMButton.LeftStickTouch, 32 + 14), (HMButton.RightStickTouch, 32 + 15),
+                (HMButton.Misc1, 32 + 18),                                        // QAM 0x40000 (H)
+            }),
+            ("steam-controller-2", 2, 30, new[]
+            {
+                (HMButton.A, 0), (HMButton.B, 1), (HMButton.X, 2), (HMButton.Y, 3),
+                (HMButton.Misc1, 4), (HMButton.RightStick, 5), (HMButton.Back, 6),
+                (HMButton.RightPaddle, 7), (HMButton.RightPaddle2, 8), (HMButton.RightBumper, 9),
+                (HMButton.Start, 14), (HMButton.LeftStick, 15), (HMButton.Guide, 16),
+                (HMButton.LeftPaddle, 17), (HMButton.LeftPaddle2, 18), (HMButton.LeftBumper, 19),
+                (HMButton.RightStickTouch, 20), (HMButton.RightTouchpad, 22),
+                (HMButton.LeftStickTouch, 24), (HMButton.LeftTouchpad, 26),
+                (HMButton.RightGripTouch, 28), (HMButton.LeftGripTouch, 29),
+            }),
+            ("steam-controller-composite", 8, 24, new[]
+            {
+                (HMButton.A, 7), (HMButton.B, 5), (HMButton.X, 6), (HMButton.Y, 4),
+                (HMButton.LeftBumper, 3), (HMButton.RightBumper, 2),
+                (HMButton.Back, 12), (HMButton.Guide, 13), (HMButton.Start, 14),
+                (HMButton.LeftPaddle, 15), (HMButton.RightPaddle, 16),
+                (HMButton.LeftTouchpad, 17), (HMButton.RightTouchpad, 18),
+                (HMButton.LeftStick, 22),
+            }),
+        };
+        foreach (var (id, offset, bits, table) in tables)
+        {
+            var spec = ctx.GetProfile(id)!.Inner.ExtendedReport!;
+            ulong Mask(HMButton b)
+            {
+                var buf = new byte[spec.Size];
+                var st = new HMGamepadState { Buttons = b };
+                VendorBlobCodec.EncodeInput(spec, in st, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f,
+                                            buf, new VendorBlobCodec.EncoderState());
+                ulong m = 0;
+                for (int i = 0; i < (bits + 7) / 8; i++) m |= (ulong)buf[offset + i] << (8 * i);
+                return bits == 64 ? m : m & ((1UL << bits) - 1);
+            }
+            ulong rest = Mask(HMButton.None);
+            foreach (var (button, bit) in table)
+            {
+                ulong m = Mask(button) & ~rest;
+                Check($"{id}: {button} sets bit {bit} and nothing else", m == 1UL << bit, $"0x{m:X}");
+            }
+        }
     }
 
     /// <summary>The 2015 Steam Controller (D0G), wired. SDL binds it only on

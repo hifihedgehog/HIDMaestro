@@ -48,4 +48,18 @@ public static class HMVR
     /// Requires admin.</summary>
     public static void UnregisterDriver() =>
         VrDriverBuilder.UnregisterDriver();
+
+    /// <summary>The name SteamVR knows HIDMaestro's driver by
+    /// (<c>hidmaestro</c>).</summary>
+    public static string DriverName => VrDriverBuilder.DriverName;
+
+    /// <summary>Folders of other OpenVR drivers SteamVR can see under
+    /// <see cref="DriverName"/>: entries in the user's
+    /// <c>openvrpaths.vrpath</c> external driver list and folders in
+    /// SteamVR's own <c>drivers</c> directory, other than HIDMaestro's own.
+    /// OpenVR requires a driver's name to be unique, so with any of these
+    /// present SteamVR may load the other driver in place of HIDMaestro's.
+    /// Empty when there is no conflict. Reads only and changes nothing.</summary>
+    public static System.Collections.Generic.IReadOnlyList<string> FindDriverNameConflicts() =>
+        VrDriverBuilder.FindDriverNameConflicts();
 }
