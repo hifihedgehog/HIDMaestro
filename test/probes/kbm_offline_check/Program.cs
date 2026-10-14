@@ -8,10 +8,14 @@
 //   3. The packers against bytes worked out by hand from each descriptor:
 //      the starters, a Razer DeathAdder V2 and an Apple Magic Keyboard from
 //      the catalog, relative movement split across reports, ErrorRollOver,
-//      extra buttons in a second collection, and LED decoding.
+//      extra buttons in a second collection, and LED decoding. A relative
+//      field whose range excludes zero, as the Corsair K70 low profile's
+//      does, carries a click and a movement it cannot express as no motion,
+//      and a long split lets its frames go once sent.
 //   4. Every keyboard and mouse in the catalog parses, packs and reads back,
 //      fits the 80-byte extended lane, and is the only catalog profile that
-//      delivers every report.
+//      delivers every report. Every profile with a mouse collection packs a
+//      click and a movement back in one pass, and a long movement ends.
 //
 // Exit 0 PASS / 1 FAIL.
 
@@ -281,6 +285,64 @@ internal static class Program
         Check("its consumer report 0x52 carries Play/Pause on bit 0 and Next Track on bit 3",
               Hex(Cc(mkp, new ushort[] { 0x00CD })) == "5201" && Hex(Cc(mkp, new ushort[] { 0x00B5 })) == "5208");
         Check("its LED report is report 1", mkp.DecodeLeds(1, new byte[] { 0x02 }) == HMKeyboardLeds.CapsLock);
+
+        // corsair-k70-rgb-mk2-low-profile's report 5: the ID, 32 buttons,
+        // relative X and Y of 16 bits declared 1 to 32767 as the keyboard
+        // declares them, and an 8-bit wheel of -127 to 127. A click moves
+        // nothing and a movement left or up has no value in that range:
+        // each is one report with X and Y at 0, no motion. Until v1.13.0
+        // each split forever.
+        var k70 = ctx.GetProfile("corsair-k70-rgb-mk2-low-profile")!.Inner.GetOrBuildKeyboardMousePacker();
+        var click = Bounded(() => Mouse(k70, new HMMouseState { Buttons = HMMouseButtons.Left }));
+        Check("K70 low profile: a click is one report, X and Y at 0",
+              click is { Count: 1 } && Hex(click[0]) == "05010000000000000000", Show(click));
+        var back = Bounded(() => Mouse(k70, new HMMouseState { X = -5, Y = -5, Wheel = -1 }));
+        Check("a movement left and up, which X and Y cannot carry, is one report with no motion, the wheel still -1",
+              back is { Count: 1 } && Hex(back[0]) == "050000000000000000FF", Show(back));
+        var far = Bounded(() => Mouse(k70, new HMMouseState { X = 40000 }));
+        Check("+40000 goes as 32767 and 7233",
+              far is { Count: 2 } && Hex(far[0]) == "0500000000FF7F000000" && Hex(far[1]) == "0500000000411C000000", Show(far));
+        Check("+5 and +5 is one report, as before", Hex(Mouse(k70, new HMMouseState { X = 5, Y = 5 })[0]) == "05000000000500050000");
+
+        // A field whose range starts above one, worked by hand: 10 to 100.
+        // +5 cannot be carried exactly. The report carries 10 and owes
+        // nothing back, so the split ends.
+        var narrow = Packer(new byte[]
+        {
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+            0x05, 0x09, 0x19, 0x01, 0x29, 0x08, 0x15, 0x00, 0x25, 0x01, 0x95, 0x08, 0x75, 0x01, 0x81, 0x02,
+            0x05, 0x01, 0x09, 0x30, 0x15, 0x0A, 0x25, 0x64, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+            0xC0, 0xC0,
+        });
+        var over = Bounded(() => Mouse(narrow, new HMMouseState { X = 5 }));
+        Check("on a 10-to-100 field +5 is one report carrying 10", over is { Count: 1 } && Hex(over[0]) == "000A", Show(over));
+
+        // A long split leaves its frames once a submit has sent them.
+        var trim = new KeyboardMouseBuffers();
+        uint te = 0; bool ts = false;
+        int parts = m.PackMouse(new HMMouseState { X = 1_000_000 }, ref te, ref ts, trim).Count;
+        trim.TrimMotion();
+        Check($"+1,000,000 goes as {parts} reports, and the buffers keep {KeyboardMouseBuffers.MotionFramesKept} frames afterward",
+              parts == 31 && trim.Motion.Count == KeyboardMouseBuffers.MotionFramesKept && trim.Frames.Count == 0,
+              $"{parts} reports, {trim.Motion.Count} kept");
+    }
+
+    static string Show(List<byte[]>? frames) =>
+        frames == null ? "did not finish in 3 s" : string.Join(",", frames.Select(Hex));
+
+    // A split that never ends would hold this probe and then run it out of
+    // memory, so the packs that once did run on a thread with a deadline. A
+    // missed deadline fails the check and ends the probe at once.
+    static List<byte[]>? Bounded(Func<List<byte[]>> pack)
+    {
+        List<byte[]>? result = null;
+        var t = new System.Threading.Thread(() => { try { result = pack(); } catch { } }) { IsBackground = true };
+        t.Start();
+        if (t.Join(3000)) return result;
+        Check("a mouse pack finishes", false, "still splitting after 3 s");
+        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+        Environment.Exit(1);
+        return null;
     }
 
     static void Catalog(HMContext ctx)
@@ -322,6 +384,29 @@ internal static class Program
             if (problem != null) { bad++; Console.WriteLine($"    {p.Id}: {problem}"); }
         }
         Check("each one has its collection, fits the extended lane, and packs what it reads back", bad == 0, $"{bad} failed");
+
+        // Every catalog profile with a mouse collection, keyboards included:
+        // a click and a movement left and up are one pass over its mouse
+        // reports, as a movement of +1 is, and a movement past every
+        // field's range ends.
+        int mice = 0, runaway = 0;
+        foreach (var p in all.Where(p => p.IsDeployable))
+        {
+            var packer = p.Inner.GetOrBuildKeyboardMousePacker();
+            if (!packer.HasMouse) continue;
+            mice++;
+            int pass = Bounded(() => Mouse(packer, new HMMouseState { X = 1 }))!.Count;
+            var clickFrames = Bounded(() => Mouse(packer, new HMMouseState { Buttons = HMMouseButtons.Left }))!;
+            var backFrames = Bounded(() => Mouse(packer, new HMMouseState { X = -3, Y = -3, Wheel = -1, Pan = -1 }))!;
+            var longFrames = Bounded(() => Mouse(packer, new HMMouseState { X = 70000, Y = -70000 }))!;
+            if (clickFrames.Count != pass || backFrames.Count != pass || longFrames.Count < pass)
+            {
+                runaway++;
+                Console.WriteLine($"    {p.Id}: one pass is {pass}, a click {clickFrames.Count}, a move back {backFrames.Count}, a long move {longFrames.Count}");
+            }
+        }
+        Check($"all {mice} profiles with a mouse collection pack a click and a move back in one pass, and a long move ends",
+              runaway == 0 && mice > 0, $"{runaway} did not");
 
         var deliverAll = all.Where(p => p.Inner.IsKeyboardOrMouse
             || (string.Equals(p.Type, "other", StringComparison.OrdinalIgnoreCase) && p.IsDeployable

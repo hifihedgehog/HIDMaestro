@@ -27,6 +27,23 @@ internal sealed class KeyboardMouseBuffers
         Fits = new uint[size];
         Flags = new bool[size];
     }
+
+    /// <summary>The motion frames kept between mouse submits. A movement
+    /// split across more reports than this lets the rest go once they are
+    /// sent, so one large movement does not hold its frames for the
+    /// controller's life.</summary>
+    internal const int MotionFramesKept = 16;
+
+    /// <summary>Let go of the frames past <see cref="MotionFramesKept"/>
+    /// after their submit has sent them. Costs a count check otherwise.</summary>
+    internal void TrimMotion()
+    {
+        if (Motion.Count <= MotionFramesKept) return;
+        Motion.RemoveRange(MotionFramesKept, Motion.Count - MotionFramesKept);
+        Motion.TrimExcess();
+        Frames.Clear();
+        Frames.TrimExcess();
+    }
 }
 
 /// <summary>Packs <see cref="HMMouseState"/>, keys and consumer usages into
@@ -251,17 +268,24 @@ internal sealed class KeyboardMousePacker
         at is { } a && a.F.ReportId == r.ReportId;
 
     /// <summary>Write one pointer value, and return what is still owed: the
-    /// part of a relative movement past the field's range, or zero. A field
-    /// whose range cannot move in that direction at all owes nothing, or a
-    /// movement it can never carry would be sent forever.</summary>
+    /// part of a relative movement past the field's range, or zero. A
+    /// relative field writes 0, no motion, for a movement it cannot carry at
+    /// all, one of a sign its range lacks or none where its range excludes
+    /// zero, and owes nothing for it. A part that overshoots owes nothing
+    /// back, so every split ends. corsair-k70-rgb-mk2-low-profile declares
+    /// its relative X and Y as 1 to 32767, as the real keyboard does:
+    /// clamping a click's X of 0 up to 1 owed -1, then -2, and the split
+    /// never ended.</summary>
     private static int Put(byte[] frame, (HidField F, int E)? at, int value)
     {
         if (at is not { } a) return 0;
         var f = a.F;
         int v = Math.Clamp(value, f.LogicalMin, f.LogicalMax);
+        if (f.Relative && Math.Sign(v) != Math.Sign(value)) v = 0;
         HidReportMap.Write(frame, f, a.E, v);
         if (!f.Relative || v == 0) return 0;
-        return value - v;
+        int rest = value - v;
+        return Math.Sign(rest) == Math.Sign(value) ? rest : 0;
     }
 
     // ── Keyboard ─────────────────────────────────────────────────────────

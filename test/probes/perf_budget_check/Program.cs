@@ -148,6 +148,18 @@ internal static class Program
         {
             var move = new HMMouseState { X = 1 };
             Measure("SubmitMouse, " + Mouse, runs, 200, () => mouse.SubmitMouse(in move), gate);
+#if !HM_BASE
+            if (gate)
+            {
+                // A long movement splits across many reports. Once they are
+                // sent the controller keeps only a few of their frames.
+                mouse.SubmitMouse(new HMMouseState { X = 20_000 });
+                var kept = typeof(HMController).GetField("_kbmBuffers", Any)!.GetValue(mouse) as HIDMaestro.Internal.KeyboardMouseBuffers;
+                Check($"after a movement of 20,000 counts the mouse keeps at most {HIDMaestro.Internal.KeyboardMouseBuffers.MotionFramesKept} frames",
+                      kept != null && kept.Motion.Count <= HIDMaestro.Internal.KeyboardMouseBuffers.MotionFramesKept,
+                      $"{kept?.Motion.Count} kept");
+            }
+#endif
         }
 #if !HM_BASE
         using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!))

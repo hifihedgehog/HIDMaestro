@@ -1271,10 +1271,11 @@ public sealed partial class HMController : IDisposable
         var packer = KbmPacker();
         lock (_submitLock)
         {
-            var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent,
-                                          _kbmBuffers ??= new KeyboardMouseBuffers());
+            var buffers = _kbmBuffers ??= new KeyboardMouseBuffers();
+            var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent, buffers);
             for (int i = 0; i < frames.Count; i++)
                 WriteKbmFrame(frames[i]);
+            buffers.TrimMotion();
         }
     }
 
