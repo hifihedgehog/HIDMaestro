@@ -135,9 +135,49 @@ public sealed class HMPortSet : IReadOnlyList<HMPort>
         lock (_controller.SubmitLock)
         {
             _controller.ThrowIfDisposedInternal();
+            bool wasEmpty = _connection[port] == 0;
             SetConnectionLocked(port, index);
+            // A controller plugged into an empty port reports itself at rest
+            // until the program submits: hosts take its origin and SDL its
+            // calibration from its first report, and zeros put both sticks
+            // in a corner.
+            if (wasEmpty && index != 0) EncodeLocked(port, default);
             _controller.WritePortsReportLocked(_report, direct: true);
         }
+    }
+
+    internal void Connect(int port, string? connection, in HMGamepadState state)
+    {
+        RequireStatus();
+        int index = connection == null ? 1 : _in!.ConnectionIndex(connection);
+        if (index == 0)
+            throw new ArgumentException("The empty connection holds no controller, so it takes no input. Use Disconnect.", nameof(connection));
+        lock (_controller.SubmitLock)
+        {
+            _controller.ThrowIfDisposedInternal();
+            SetConnectionLocked(port, index);
+            EncodeLocked(port, in state);
+            _controller.WritePortsReportLocked(_report, direct: true);
+        }
+    }
+
+    /// <summary>Set the port's data bytes from a gamepad state, the six
+    /// simple-slot values resolved as SubmitState resolves them, leaving its
+    /// connection alone. Caller holds the submit lock.</summary>
+    private void EncodeLocked(int port, in HMGamepadState state)
+    {
+        var layout = _in!;
+        _controller.ResolveSlots(in state, out float lx, out float ly, out float rx,
+                                 out float ry, out float lt, out float rt);
+        VendorBlobCodec.EncodeInput(layout.FieldSpec, in state, lx, ly, rx, ry, lt, rt, _scratch, _encoders[port]);
+        int block = layout.BlockAt(port);
+        if (layout.DataLo >= 0)
+        {
+            _scratch.AsSpan(layout.DataLo, layout.DataLength).CopyTo(_report.AsSpan(block + layout.DataLo));
+            return;
+        }
+        for (int i = 0; i < layout.Stride; i++)
+            if (i != layout.StatusByte) _report[block + i] = _scratch[i];
     }
 
     internal void Disconnect(int port)
@@ -370,13 +410,24 @@ public sealed class HMPort
 
     /// <summary>Plug something into the port: a connection named in
     /// <see cref="HMPortSet.Connections"/>, or the profile's default, the
-    /// second it lists, when <paramref name="connection"/> is null. The
-    /// port's input stays as last submitted, zero after
-    /// <see cref="Disconnect"/>. The other ports are not touched. The empty
-    /// connection's name does what <see cref="Disconnect"/> does.</summary>
+    /// second it lists, when <paramref name="connection"/> is null. A port
+    /// that held nothing reports a controller at rest, sticks centered and
+    /// triggers and buttons released, until the next submit. A port that
+    /// held something keeps its input as last submitted. The other ports are
+    /// not touched. The empty connection's name does what
+    /// <see cref="Disconnect"/> does.</summary>
     /// <exception cref="ArgumentException">The device declares no
     /// connection of that name.</exception>
     public void Connect(string? connection = null) => _set.Connect(Number - 1, connection);
+
+    /// <summary>Plug something into the port already holding
+    /// <paramref name="state"/>: the connection and the input go out in one
+    /// report, as a controller plugged in with a button held reports it from
+    /// its first report. <paramref name="connection"/> is as for
+    /// <see cref="Connect(string?)"/>.</summary>
+    /// <exception cref="ArgumentException">The device declares no
+    /// connection of that name, or it names the empty connection.</exception>
+    public void Connect(string? connection, in HMGamepadState state) => _set.Connect(Number - 1, connection, in state);
 
     /// <summary>Unplug whatever the port holds. Its data bytes go to zero, as
     /// an empty port's are. The other ports are not touched.</summary>

@@ -5,7 +5,9 @@
 // replies with zero origins. 0x13 starts report 0x21, a report per 8 ms host
 // poll. Each port keeps its own connection, input and rumble: a submit,
 // connect or disconnect on one port leaves the others' bytes as they were,
-// and report 0x11 raises each port's own rumble event. 0x12 replies with each
+// a controller plugged into an empty port reports itself at rest, one
+// plugged in with a state reports that state from its first report, and
+// report 0x11 raises each port's own rumble event. 0x12 replies with each
 // port's origin, 0x14 replies and stops, a short 0x11, 0x16 and 0x17 stall the
 // reports until the next 0x13, other command bytes are ignored, SET_REPORT
 // works as the OUT endpoint does, and 0x15 stops the adapter answering until
@@ -186,23 +188,24 @@ internal static class Program
 
         ports[1].Connect("wireless");
         r = ReadFresh();
-        Probe.Check("port 2 connects as a WaveBird: 0x22 with rumble power", r != null && Probe.Hex(Block(r, 1)) == "260000000000000000", Show(r));
+        Probe.Check("port 2 connects as a WaveBird at rest: 0x22 with rumble power, sticks centered, nothing held",
+            r != null && Probe.Hex(Block(r, 1)) == "260000808080800000", Show(r));
         Probe.Check("port 1 untouched", r != null && Probe.Hex(Block(r, 0)) == "140100FF8080808000");
 
         ports[2].SubmitRaw(new byte[] { 0x80, 0x0B, 0x10, 0xF0, 0x20, 0xE0, 0x30, 0x40 });
         r = ReadFresh();
         Probe.Check("port 3 takes raw bytes and connects wired", r != null && Probe.Hex(Block(r, 2)) == "14800B10F020E03040", Show(r));
         Probe.Check("port 3 reads as wired", ports[2].Connection == "wired" && ports[2].IsConnected, ports[2].Connection);
-        Probe.Check("ports 1 and 2 untouched", r != null && Probe.Hex(Block(r, 0)) == "140100FF8080808000" && Probe.Hex(Block(r, 1)) == "260000000000000000");
+        Probe.Check("ports 1 and 2 untouched", r != null && Probe.Hex(Block(r, 0)) == "140100FF8080808000" && Probe.Hex(Block(r, 1)) == "260000808080800000");
 
         ports[0].Disconnect();
         r = ReadFresh();
         Probe.Check("port 1 disconnects: status 0x04, data zero", r != null && Probe.Hex(Block(r, 0)) == "040000000000000000", Show(r));
         Probe.Check("ports 2 and 3 untouched by the disconnect",
-            r != null && Probe.Hex(Block(r, 1)) == "260000000000000000" && Probe.Hex(Block(r, 2)) == "14800B10F020E03040");
+            r != null && Probe.Hex(Block(r, 1)) == "260000808080800000" && Probe.Hex(Block(r, 2)) == "14800B10F020E03040");
         ports[0].Connect();
         r = ReadFresh();
-        Probe.Check("port 1 returns wired with zero data", r != null && Probe.Hex(Block(r, 0)) == "140000000000000000", Show(r));
+        Probe.Check("port 1 returns wired at rest: sticks centered, nothing held", r != null && Probe.Hex(Block(r, 0)) == "140000808080800000", Show(r));
 
         var clicks = new HMGamepadState
         {
@@ -230,6 +233,24 @@ internal static class Program
         ports.Flags["rumblePower"] = true;
         r = ReadFresh();
         Probe.Check("and back on", r != null && r[1] == 0x14 && r[10] == 0x26 && r[19] == 0x14 && r[28] == 0x04, Show(r));
+
+        // With a state, the connection and its input go out in one report:
+        // no report shows the controller at rest first.
+        ports[3].Connect("wireless", new HMGamepadState { Buttons = HMButton.A, Axes = Centered() });
+        var seen = new List<string>();
+        for (int k = 0; k < 6; k++)
+            if (Read(150) is { } rr) seen.Add(Probe.Hex(Block(rr, 3)));
+        Probe.Check("port 4 connects as a WaveBird holding A, in the same report",
+            seen.Count > 0 && seen[^1] == "260100808080800000"
+            && seen.Where(b => b != "040000000000000000").All(b => b == "260100808080800000"),
+            string.Join(" ", seen));
+        bool refused;
+        try { ports[3].Connect("empty", default); refused = false; }
+        catch (ArgumentException) { refused = true; }
+        Probe.Check("a state with the empty connection is refused", refused);
+        ports[3].Disconnect();
+        r = ReadFresh();
+        Probe.Check("port 4 leaves again", r != null && Probe.Hex(Block(r, 3)) == "040000000000000000", Show(r));
     }
 
     // ── Rumble ──────────────────────────────────────────────────────────

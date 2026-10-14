@@ -174,8 +174,7 @@ internal static class Program
         for (int p = 0; p < 4; p++)
         {
             var i = Inputs[p];
-            c.Ports[p].Connect(p == 2 ? "wireless" : "wired");
-            c.Ports[p].SubmitState(Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+            c.Ports[p].Connect(p == 2 ? "wireless" : "wired", Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         }
     }
 
@@ -421,8 +420,7 @@ internal static class Program
         Probe.Check("SDL removes port 4's joystick when its controller leaves, and keeps the other three",
             gone && list.Count(IsAdapter) == 3 && list.Where(IsAdapter).Select(j => j.Player).OrderBy(x => x).SequenceEqual(new[] { 0, 1, 2 }), Describe(list));
         var i = Inputs[3];
-        port4.Connect();
-        port4.SubmitState(Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+        port4.Connect(null, Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         list = Joysticks(h.Ask("wait 057e 0337 4 3000", 5000));
         var back = list.Where(IsAdapter).FirstOrDefault(j => j.Player == 3);
         Probe.Check("it returns as a new joystick with player index 3", back != null && back.Id != old, Describe(list));
@@ -526,8 +524,7 @@ internal static class Program
                 var i = Inputs[p];
                 if (connected.Contains(p + 1))
                 {
-                    controller.Ports[p].Connect(p == 2 ? "wireless" : "wired");
-                    controller.Ports[p].SubmitState(Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+                    controller.Ports[p].Connect(p == 2 ? "wireless" : "wired", Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
                 }
                 else
                 {

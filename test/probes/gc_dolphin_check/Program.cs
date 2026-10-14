@@ -158,8 +158,7 @@ internal static class Program
         for (int p = 0; p < 4; p++)
         {
             var i = Inputs[p];
-            ports[p].Connect(p == 2 ? "wireless" : "wired");
-            ports[p].SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+            ports[p].Connect(p == 2 ? "wireless" : "wired", Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         }
     }
 
@@ -267,8 +266,7 @@ internal static class Program
         Probe.Check($"{name} sees port 4 leave", PollAnswer(h, "connected 3", "connected 0"));
         Probe.Check($"{name} keeps port 1 meanwhile", Pad(h.Ask("input 0"))?.Sx == Inputs[0].Sx);
         var i = Inputs[3];
-        port4.Connect();
-        port4.SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+        port4.Connect(null, Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         Probe.Check($"{name} sees port 4 return", PollAnswer(h, "connected 3", "connected 1"));
         var first = Pad(h.Ask("input 3"));
         Probe.Check($"{name} reads a new origin for the returning controller",
@@ -390,8 +388,7 @@ internal static class Program
                 var i = Inputs[p];
                 if (connected.Contains(p + 1))
                 {
-                    controller.Ports[p].Connect(p == 2 ? "wireless" : "wired");
-                    controller.Ports[p].SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+                    controller.Ports[p].Connect(p == 2 ? "wireless" : "wired", Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
                 }
                 else
                 {
@@ -416,8 +413,7 @@ internal static class Program
         for (int p = 0; p < 4; p++)
         {
             var i = Inputs[p];
-            controller.Ports[p].Connect(p == 2 ? "wireless" : "wired");
-            controller.Ports[p].SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
+            controller.Ports[p].Connect(p == 2 ? "wireless" : "wired", Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         }
         return results;
     }
