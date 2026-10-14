@@ -13,18 +13,18 @@ echo Compiling HIDMaestroCompanion.dll ...
 cl.exe /nologo /W4 /GS /Gz /wd4324 ^
     /D %HM_ARCH_DEFINE% /D _WIN64 /D UNICODE /D _UNICODE ^
     /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
-    "/I%WDK%\Include\%WDK_VER%\um" "/I%WDK%\Include\%WDK_VER%\shared" ^
-    "/I%WDK%\Include\%WDK_VER%\km" "/I%WDK%\Include\wdf\umdf\%UMDF_VER%" ^
+    "/I%HM_SDK_DIR%\Include\%WDK_VER%\um" "/I%HM_SDK_DIR%\Include\%WDK_VER%\shared" ^
+    "/I%HM_WDK_DIR%\Include\%WDK_VER%\km" "/I%HM_WDK_DIR%\Include\wdf\umdf\%UMDF_VER%" ^
     "/Fo%OUT_DIR%\\" /c "%DRIVER_DIR%\companion.c"
 if errorlevel 1 (echo COMPILE FAILED & exit /b 1)
 
 "%RC%" /nologo /fo "%OUT_DIR%\res_companion.res" ^
-    "/I%OUT_DIR%" "/I%WDK%\Include\%WDK_VER%\um" "/I%WDK%\Include\%WDK_VER%\shared" ^
+    "/I%OUT_DIR%" "/I%HM_SDK_DIR%\Include\%WDK_VER%\um" "/I%HM_SDK_DIR%\Include\%WDK_VER%\shared" ^
     "%DRIVER_DIR%\res_companion.rc"
 if errorlevel 1 (echo RESOURCE COMPILE FAILED & exit /b 1)
 
 link.exe /nologo /DLL /MACHINE:%HM_ARCH% "/OUT:%OUT_DIR%\HIDMaestroCompanion.dll" ^
-    "/LIBPATH:%WDK%\Lib\%WDK_VER%\um\%HM_ARCH%" "/LIBPATH:%WDK%\Lib\wdf\umdf\%HM_ARCH%\%UMDF_VER%" ^
+    "/LIBPATH:%HM_SDK_DIR%\Lib\%WDK_VER%\um\%HM_ARCH%" "/LIBPATH:%HM_WDK_DIR%\Lib\wdf\umdf\%HM_ARCH%\%UMDF_VER%" ^
     "%OUT_DIR%\companion.obj" "%OUT_DIR%\res_companion.res" WdfDriverStubUm.lib ntdll.lib OneCoreUAP.lib mincore.lib advapi32.lib
 if errorlevel 1 (echo LINK FAILED & exit /b 1)
 

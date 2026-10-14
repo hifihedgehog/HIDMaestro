@@ -8,13 +8,10 @@ setlocal enabledelayedexpansion
 set "DRIVER_NAME=HIDMaestro"
 set "DRIVER_DIR=%~dp0..\driver"
 set "INC_DIR=%~dp0..\include"
-call "%~dp0native_env.cmd" %1
-if errorlevel 1 exit /b 1
-
 echo.
 echo HIDMaestro UMDF2 Build
-echo   VS:  %VCVARS%
-echo   WDK: %WDK_VER%
+call "%~dp0native_env.cmd" %1
+if errorlevel 1 exit /b 1
 echo.
 
 :: Generate build\version_gen.h from Directory.Build.props so the
@@ -31,10 +28,10 @@ if errorlevel 1 (
 
 echo Compiling %DRIVER_NAME%.dll ...
 
-set "UM_INC=%WDK%\Include\%WDK_VER%\um"
-set "SHARED_INC=%WDK%\Include\%WDK_VER%\shared"
-set "KM_INC=%WDK%\Include\%WDK_VER%\km"
-set "WDF_INC=%WDK%\Include\wdf\umdf\%UMDF_VER%"
+set "UM_INC=%HM_SDK_DIR%\Include\%WDK_VER%\um"
+set "SHARED_INC=%HM_SDK_DIR%\Include\%WDK_VER%\shared"
+set "KM_INC=%HM_WDK_DIR%\Include\%WDK_VER%\km"
+set "WDF_INC=%HM_WDK_DIR%\Include\wdf\umdf\%UMDF_VER%"
 
 cl.exe /nologo /W4 /GS /Gz /wd4324 ^
     /D %HM_ARCH_DEFINE% /D _WIN64 /D UNICODE /D _UNICODE ^
@@ -63,8 +60,8 @@ if errorlevel 1 (
 
 echo Linking %DRIVER_NAME%.dll ...
 
-set "UM_LIB=%WDK%\Lib\%WDK_VER%\um\%HM_ARCH%"
-set "WDF_LIB=%WDK%\Lib\wdf\umdf\%HM_ARCH%\%UMDF_VER%"
+set "UM_LIB=%HM_SDK_DIR%\Lib\%WDK_VER%\um\%HM_ARCH%"
+set "WDF_LIB=%HM_WDK_DIR%\Lib\wdf\umdf\%HM_ARCH%\%UMDF_VER%"
 
 link.exe /nologo /DLL /MACHINE:%HM_ARCH% ^
     "/OUT:%OUT_DIR%\%DRIVER_NAME%.dll" ^

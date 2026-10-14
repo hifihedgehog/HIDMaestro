@@ -33,133 +33,240 @@
     <!-- Source paths used by the PackResources pre-build target. -->
     <HMRepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</HMRepoRoot>
     <HMBuildDir>$(HMRepoRoot)build\</HMBuildDir>
-    <HMWdkBin>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\</HMWdkBin>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(Configuration)' == 'Release'">
-    <GlobalAnalyzerConfigFiles Include="aot-analyzers.globalconfig" />
-  </ItemGroup>
-
-  <!-- Pre-build: refresh embedded payload from build/ and the local WDK install.
-       This runs once per `dotnet build` so the embedded resources always reflect
-       the latest driver binaries. The Resources/ directory is .gitignored. -->
-  <Target Name="PackResources" BeforeTargets="BeforeBuild">
-    <MakeDir Directories="$(MSBuildThisFileDirectory)Resources" />
-
-    <ItemGroup>
-      <!-- Driver binaries + INFs from build/ -->
-      <_HMDriverName Include="HIDMaestro.dll" />
-      <_HMDriverName Include="HMXInput.dll" />
-      <_HMDriverName Include="hidmaestro.inf" />
-      <_HMDriverName Include="hidmaestro_xusb.inf" />
-      <!-- hmswd.exe: SWD device creation helper, shelled out to by
-           SwdDeviceFactory for the ROOT\ → SWD\ migration (slot-1-skip fix).
-           Embedded here so single-file deployment still has it. -->
-      <_HMDriverName Include="hmswd.exe" />
-
-      <!-- OpenVR driver package (issue #32): the entire SteamVR driver
-           folder from build\openvr\hidmaestro, embedded with its layout
-           preserved so VrDriverBuilder can reconstruct it verbatim. Built
-           by scripts\build_openvr.cmd; absent on a fresh clone until the
-           native phase has run, same contract as the driver binaries. -->
-      <_HMVrFiles Include="$(HMBuildDir)openvr\hidmaestro\**\*"
-                  Exclude="$(HMBuildDir)openvr\hidmaestro\**\*.lib;$(HMBuildDir)openvr\hidmaestro\**\*.exp;$(HMBuildDir)openvr\hidmaestro\**\*.pdb" />
-
-      <!-- signtool.exe + its SXS dep tree (from WDK x64) -->
-      <_HMSignName Include="signtool.exe" />
-      <_HMSignName Include="signtool.exe.manifest" />
-      <_HMSignName Include="mssign32.dll" />
-      <_HMSignName Include="Microsoft.Windows.Build.Signing.mssign32.dll.manifest" />
-      <_HMSignName Include="wintrust.dll" />
-      <_HMSignName Include="wintrust.dll.ini" />
-      <_HMSignName Include="Microsoft.Windows.Build.Signing.wintrust.dll.manifest" />
-      <_HMSignName Include="appxsip.dll" />
-      <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxSip.dll.manifest" />
-      <_HMSignName Include="appxpackaging.dll" />
-      <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest" />
-      <_HMSignName Include="opcservices.dll" />
-      <_HMSignName Include="Microsoft.Windows.Build.Appx.OpcServices.dll.manifest" />
-
-      <!-- inf2cat.exe + its minimum dep set (from WDK x86).
-           apivalidator.exe / microsoft.kits.drivers.apivalidator.dll /
-           Microsoft.Extensions.CommandLineUtils.dll were tested and are NOT
-           required for /os:10_X64 catalog generation. -->
-      <_HMInf2cat Include="$(HMWdkBin)x86\Inf2Cat.exe" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\inf2cat.exe.manifest" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\WindowsProtectedFiles.xml" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll" />
-      <_HMInf2cat Include="$(HMWdkBin)x86\Microsoft.Kits.Logger.dll" />
-      <!-- One payload set per target architecture. Driver, XUSB
-           companion, SWD helper, both stamped INFs and the signing
-           tool tree all differ by architecture, and the machine that
-           installs them is the one that runs them. -->
-      <_HMX64File Include="@(_HMDriverName-&gt;'$(HMBuildDir)%(Identity)');@(_HMSignName-&gt;'$(HMWdkBin)x64\%(Identity)')" />
-      <_HMArm64File Include="@(_HMDriverName-&gt;'$(HMBuildDir)arm64\%(Identity)');@(_HMSignName-&gt;'$(HMWdkBin)arm64\%(Identity)')" />
-    </ItemGroup>
-
-    <Error Condition="!Exists('$(HMBuildDir)HIDMaestro.dll')"
-           Text="No x64 driver in $(HMBuildDir). Run scripts\build_all.cmd, which builds both architectures before this project." />
-    <Error Condition="!Exists('$(HMBuildDir)arm64\HIDMaestro.dll')"
-           Text="No ARM64 driver in $(HMBuildDir)arm64\. Run scripts\build_all.cmd, which builds both architectures before this project." />
-
-    <Copy SourceFiles="@(_HMX64File)" DestinationFolder="$(MSBuildThisFileDirectory)Resources\x64\" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(_HMArm64File)" DestinationFolder="$(MSBuildThisFileDirectory)Resources\arm64\" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(_HMVrFiles)" DestinationFiles="@(_HMVrFiles->'$(MSBuildThisFileDirectory)Resources\vr\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="'@(_HMVrFiles)' != ''" />
-    <Copy SourceFiles="@(_HMInf2cat)"    DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+  <!-- What the build carries, and where the kits come from. MSBuild reads
+       environment variables as properties, so each setting works as an
+       environment variable for scripts\build_all.cmd and this project alike,
+       or as -p: on this project. docs/design/v1.13.0.md ("Building from
+       source") has the table. Official releases set none of them.
+         HMSkipArm64=true  the x64 payload only, and no ARM64 usbip-win2
+                           installer.
+         HMSkipUsbip=true  no USB/IP transport: neither installer, no host
+                           controller files, nothing downloaded for them.
+         HM_SDK_ROOT       the Windows SDK. Default WindowsSdkDir, which a
+                           Visual Studio or EWDK prompt sets, else the
+                           installed kit.
+         HM_WDK_ROOT       the WDK. Default WDKContentRoot, which an EWDK
+                           prompt sets, else HM_SDK_ROOT.
+         HM_WDK_VERSION    the kits' version folder. Default Version_Number,
+                           which an EWDK prompt sets, else 10.0.26100.0.
+         HMWdkBin          the folder whose x64\ and arm64\ hold the signtool
+                           set. Default bin\<version>\ under HM_SDK_ROOT.
+         HMInf2catBin      the folder whose x86\ holds Inf2Cat. Default
+                           bin\<version>\ under HM_WDK_ROOT. -->
+  <PropertyGroup>
+    <HMKitVersion>$(HM_WDK_VERSION)</HMKitVersion>
+    <HMKitVersion Condition="'$(HMKitVersion)' == ''">$(Version_Number)</HMKitVersion>
+    <HMKitVersion Condition="'$(HMKitVersion)' == ''">10.0.26100.0</HMKitVersion>
+    <HMSdkRoot>$(HM_SDK_ROOT)</HMSdkRoot>
+    <HMSdkRoot Condition="'$(HMSdkRoot)' == ''">$(WindowsSdkDir)</HMSdkRoot>
+    <HMSdkRoot Condition="'$(HMSdkRoot)' == ''">$(MSBuildProgramFiles32)\Windows Kits\10</HMSdkRoot>
+    <HMWdkRoot>$(HM_WDK_ROOT)</HMWdkRoot>
+    <HMWdkRoot Condition="'$(HMWdkRoot)' == ''">$(WDKContentRoot)</HMWdkRoot>
+    <HMWdkRoot Condition="'$(HMWdkRoot)' == ''">$(HMSdkRoot)</HMWdkRoot>
+    <HMWdkBin Condition="'$(HMWdkBin)' == ''">$([MSBuild]::EnsureTrailingSlash('$(HMSdkRoot)'))bin\$(HMKitVersion)\</HMWdkBin>
+    <HMInf2catBin Condition="'$(HMInf2catBin)' == ''">$([MSBuild]::EnsureTrailingSlash('$(HMWdkRoot)'))bin\$(HMKitVersion)\</HMInf2catBin>
+    <_HMSignDir>$([MSBuild]::EnsureTrailingSlash('$(HMWdkBin)'))</_HMSignDir>
+    <_HMInf2catDir>$([MSBuild]::EnsureTrailingSlash('$(HMInf2catBin)'))</_HMInf2catDir>
+    <_HMWithArm64 Condition="'$(HMSkipArm64)' != 'true'">true</_HMWithArm64>
+    <_HMWithUsbip Condition="'$(HMSkipUsbip)' != 'true'">true</_HMWithUsbip>
+    <_HMUsbipArchs>x64</_HMUsbipArchs>
+    <_HMUsbipArchs Condition="'$(_HMWithArm64)' == 'true'">x64,arm64</_HMUsbipArchs>
+    <_HMResources>$(MSBuildThisFileDirectory)Resources\</_HMResources>
 
     <!-- usbip-win2 0.9.8.1 installer, bundled (issue #39). Composite USB
          personas need a driver-backed USB device for their audio
          endpoints, so the SDK ships the transport rather than asking a
          user to go install one: HIDMaestro deploys it on demand, the
          same way it deploys its own UMDF2 driver. BSD-2-Clause permits
-         binary redistribution; the required notice ships beside it as
+         binary redistribution, and the required notice ships beside it as
          THIRD-PARTY-NOTICES.txt and is written to disk at install time.
 
          The binaries are NOT committed. Each is fetched once and cached
          in Resources/ (gitignored), then checked against its pinned
          SHA-256. A hash mismatch FAILS the build rather than embedding an
-         unverified binary. -->
-    <PropertyGroup>
-      <HMUsbipVersion>0.9.8.1</HMUsbipVersion>
-      <HMUsbipAsset>USBip-$(HMUsbipVersion)-x64.exe</HMUsbipAsset>
-      <HMUsbipSha256>38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a</HMUsbipSha256>
-      <HMUsbipFile>$(MSBuildThisFileDirectory)Resources\$(HMUsbipAsset)</HMUsbipFile>
-      <HMUsbipUrl>https://github.com/vadimgrn/usbip-win2/releases/download/v.$(HMUsbipVersion)/$(HMUsbipAsset)</HMUsbipUrl>
-      <HMUsbipArmAsset>USBip-$(HMUsbipVersion)-arm64-release-attestation.exe</HMUsbipArmAsset>
-      <HMUsbipArmSha256>cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800</HMUsbipArmSha256>
-      <HMUsbipArmFile>$(MSBuildThisFileDirectory)Resources\$(HMUsbipArmAsset)</HMUsbipArmFile>
-      <HMUsbipArmUrl>https://static.ossign.org/signed/usbip-win2/$(HMUsbipArmAsset)</HMUsbipArmUrl>
-    </PropertyGroup>
+         unverified binary.
 
-    <DownloadFile SourceUrl="$(HMUsbipUrl)"
-                  DestinationFolder="$(MSBuildThisFileDirectory)Resources"
-                  DestinationFileName="$(HMUsbipAsset)"
-                  SkipUnchangedFiles="true"
-                  Condition="!Exists('$(HMUsbipFile)')" />
-
-    <GetFileHash Files="$(HMUsbipFile)" Algorithm="SHA256">
-      <Output TaskParameter="Hash" PropertyName="_HMUsbipActualHash" />
-    </GetFileHash>
-    <Error Condition="'$(_HMUsbipActualHash.ToLowerInvariant())' != '$(HMUsbipSha256)'"
-           Text="usbip-win2 installer hash mismatch. Expected $(HMUsbipSha256), got $(_HMUsbipActualHash). Delete $(HMUsbipFile) and rebuild to re-fetch." />
-
-    <!-- ARM64 transport. The 0.9.8.1 release page carries the x64
+         The ARM64 installer: the 0.9.8.1 release page carries the x64
          installer only. This is the ARM64 build of the same tag that the
          project's signer posted in usbip-win2 issue #13, with drivers
          attestation-signed by Microsoft. -->
+    <HMUsbipVersion>0.9.8.1</HMUsbipVersion>
+    <HMUsbipAsset>USBip-$(HMUsbipVersion)-x64.exe</HMUsbipAsset>
+    <HMUsbipSha256>38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a</HMUsbipSha256>
+    <HMUsbipFile>$(_HMResources)$(HMUsbipAsset)</HMUsbipFile>
+    <HMUsbipUrl>https://github.com/vadimgrn/usbip-win2/releases/download/v.$(HMUsbipVersion)/$(HMUsbipAsset)</HMUsbipUrl>
+    <HMUsbipArmAsset>USBip-$(HMUsbipVersion)-arm64-release-attestation.exe</HMUsbipArmAsset>
+    <HMUsbipArmSha256>cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800</HMUsbipArmSha256>
+    <HMUsbipArmFile>$(_HMResources)$(HMUsbipArmAsset)</HMUsbipArmFile>
+    <HMUsbipArmUrl>https://static.ossign.org/signed/usbip-win2/$(HMUsbipArmAsset)</HMUsbipArmUrl>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <GlobalAnalyzerConfigFiles Include="aot-analyzers.globalconfig" />
+  </ItemGroup>
+
+  <!-- The payload: every file the assembly carries besides the profiles,
+       each with the path PackResources stages it at and the name it is
+       embedded under, which DriverBuilder, UsbipDriverInstaller and
+       VrDriverBuilder look up. -->
+  <ItemGroup>
+    <!-- Driver binaries + INFs from build/ -->
+    <_HMDriverName Include="HIDMaestro.dll" />
+    <_HMDriverName Include="HMXInput.dll" />
+    <_HMDriverName Include="hidmaestro.inf" />
+    <_HMDriverName Include="hidmaestro_xusb.inf" />
+    <!-- hmswd.exe: SWD device creation helper, shelled out to by
+         SwdDeviceFactory for the ROOT\ → SWD\ migration (slot-1-skip fix).
+         Embedded here so single-file deployment still has it. -->
+    <_HMDriverName Include="hmswd.exe" />
+
+    <!-- signtool.exe + its SXS dep tree, from the Windows SDK -->
+    <_HMSignName Include="signtool.exe" />
+    <_HMSignName Include="signtool.exe.manifest" />
+    <_HMSignName Include="mssign32.dll" />
+    <_HMSignName Include="Microsoft.Windows.Build.Signing.mssign32.dll.manifest" />
+    <_HMSignName Include="wintrust.dll" />
+    <_HMSignName Include="wintrust.dll.ini" />
+    <_HMSignName Include="Microsoft.Windows.Build.Signing.wintrust.dll.manifest" />
+    <_HMSignName Include="appxsip.dll" />
+    <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxSip.dll.manifest" />
+    <_HMSignName Include="appxpackaging.dll" />
+    <_HMSignName Include="Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest" />
+    <_HMSignName Include="opcservices.dll" />
+    <_HMSignName Include="Microsoft.Windows.Build.Appx.OpcServices.dll.manifest" />
+
+    <!-- One payload set per target architecture. Driver, XUSB
+         companion, SWD helper, both stamped INFs and the signing
+         tool tree all differ by architecture, and the machine that
+         installs them is the one that runs them. -->
+    <_HMNative Include="@(_HMDriverName->'$(HMBuildDir)%(Identity)')">
+      <StagedPath>$(_HMResources)x64\%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Native.x64.%(Filename)%(Extension)</LogicalName>
+    </_HMNative>
+    <_HMNative Include="@(_HMSignName->'$(_HMSignDir)x64\%(Identity)')">
+      <StagedPath>$(_HMResources)x64\%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Native.x64.%(Filename)%(Extension)</LogicalName>
+      <Kit>HMWdkBin</Kit>
+    </_HMNative>
+    <_HMNative Include="@(_HMDriverName->'$(HMBuildDir)arm64\%(Identity)')" Condition="'$(_HMWithArm64)' == 'true'">
+      <StagedPath>$(_HMResources)arm64\%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Native.arm64.%(Filename)%(Extension)</LogicalName>
+    </_HMNative>
+    <_HMNative Include="@(_HMSignName->'$(_HMSignDir)arm64\%(Identity)')" Condition="'$(_HMWithArm64)' == 'true'">
+      <StagedPath>$(_HMResources)arm64\%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Native.arm64.%(Filename)%(Extension)</LogicalName>
+      <Kit>HMWdkBin</Kit>
+    </_HMNative>
+
+    <!-- Inf2Cat.exe and the files it loads or reads, from the WDK's x86
+         folder. Inf2Cat.exe and its UniversalStore libraries are AMD64 .NET
+         assemblies, so one copy serves both targets. apivalidator.exe,
+         microsoft.kits.drivers.apivalidator.dll and
+         Microsoft.Extensions.CommandLineUtils.dll were tested and are NOT
+         required for /os:10_X64 catalog generation. inf2cat.exe.manifest
+         and Microsoft.Kits.Logger.dll, carried until v1.13.0, do nothing:
+         no assembly here references the logger, Inf2Cat.exe's embedded
+         manifest takes precedence over an external one, and the NuGet WDK
+         carries neither (docs/design/v1.13.0.md). -->
+    <_HMNeutral Include="$(_HMInf2catDir)x86\Inf2Cat.exe;
+                         $(_HMInf2catDir)x86\WindowsProtectedFiles.xml;
+                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll;
+                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll;
+                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll;
+                         $(_HMInf2catDir)x86\Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll">
+      <StagedPath>$(_HMResources)%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
+      <Kit>HMInf2catBin</Kit>
+    </_HMNeutral>
+    <!-- The notices for usbip-win2 and DsHidMini, written beside
+         usbip-win2 when HIDMaestro installs it. -->
+    <_HMNeutral Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt">
+      <StagedPath>$(_HMResources)%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
+    </_HMNeutral>
+
+    <!-- OpenVR driver package (issue #32): the entire SteamVR driver
+         folder from build\openvr\hidmaestro, embedded with its layout
+         preserved so VrDriverBuilder can reconstruct it verbatim. Built
+         by scripts\build_openvr.cmd, and absent on a fresh clone until the
+         native phase has run, as the driver binaries are. Nested
+         logical names keep the folder layout (bin\win64\...,
+         resources\...), and the flat HIDMaestro.Resources.* namespace
+         stays collision-free. -->
+    <_HMVr Include="$(HMBuildDir)openvr\hidmaestro\**\*"
+           Exclude="$(HMBuildDir)openvr\hidmaestro\**\*.lib;$(HMBuildDir)openvr\hidmaestro\**\*.exp;$(HMBuildDir)openvr\hidmaestro\**\*.pdb">
+      <StagedPath>$(_HMResources)vr\%(RecursiveDir)%(Filename)%(Extension)</StagedPath>
+      <LogicalName>HIDMaestro.VR.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </_HMVr>
+
+    <!-- usbip-win2: each installer, and the host controller files
+         prepare_usbip.ps1 unpacks from it. PackResources fetches and
+         checks them where they sit in Resources\. -->
+    <_HMUsbipPayload Include="$(HMUsbipFile)" Condition="'$(_HMWithUsbip)' == 'true'">
+      <LogicalName>HIDMaestro.Resources.$(HMUsbipAsset)</LogicalName>
+    </_HMUsbipPayload>
+    <_HMUsbipPayload Include="$(_HMResources)usbip\x64\usbip2_ude.inf;$(_HMResources)usbip\x64\usbip2_ude.sys;$(_HMResources)usbip\x64\usbip2_ude.cat"
+                     Condition="'$(_HMWithUsbip)' == 'true'">
+      <LogicalName>HIDMaestro.Usbip.x64.%(Filename)%(Extension)</LogicalName>
+    </_HMUsbipPayload>
+    <_HMUsbipPayload Include="$(HMUsbipArmFile)" Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
+      <LogicalName>HIDMaestro.Resources.$(HMUsbipArmAsset)</LogicalName>
+    </_HMUsbipPayload>
+    <_HMUsbipPayload Include="$(_HMResources)usbip\arm64\usbip2_ude.inf;$(_HMResources)usbip\arm64\usbip2_ude.sys;$(_HMResources)usbip\arm64\usbip2_ude.cat"
+                     Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
+      <LogicalName>HIDMaestro.Usbip.arm64.%(Filename)%(Extension)</LogicalName>
+    </_HMUsbipPayload>
+  </ItemGroup>
+
+  <!-- Pre-build: stage the payload above into Resources/ (gitignored) from
+       build/, the kits and the pinned downloads, then embed exactly what
+       was staged. This runs once per `dotnet build`, so the embedded bytes
+       always reflect the latest driver binaries. -->
+  <Target Name="PackResources" BeforeTargets="BeforeBuild">
+    <MakeDir Directories="$(_HMResources)" />
+
+    <!-- Every source is checked before anything is copied, so a missing
+         native build or a wrong kit root stops the build with the setting
+         to change. -->
+    <Error Condition="!Exists('$(HMBuildDir)HIDMaestro.dll')"
+           Text="No x64 driver in $(HMBuildDir). Run scripts\build_all.cmd, which builds the native payloads before this project." />
+    <Error Condition="'$(_HMWithArm64)' == 'true' and !Exists('$(HMBuildDir)arm64\HIDMaestro.dll')"
+           Text="No ARM64 driver in $(HMBuildDir)arm64\. Run scripts\build_all.cmd, which builds both architectures before this project, or set HMSkipArm64=true for an x64-only build." />
+    <ItemGroup>
+      <_HMSignMissing Include="@(_HMNative)" Condition="'%(_HMNative.Kit)' == 'HMWdkBin' and !Exists('%(_HMNative.FullPath)')" />
+      <_HMInf2catMissing Include="@(_HMNeutral)" Condition="'%(_HMNeutral.Kit)' == 'HMInf2catBin' and !Exists('%(_HMNeutral.FullPath)')" />
+    </ItemGroup>
+    <Error Condition="'@(_HMSignMissing)' != ''"
+           Text="The signtool set is not under HMWdkBin, $(_HMSignDir). Missing: @(_HMSignMissing->'%(FullPath)', '; '). HMWdkBin defaults to bin\$(HMKitVersion)\ under HM_SDK_ROOT, here $(HMSdkRoot). Set HM_SDK_ROOT to a Windows SDK root, or HMWdkBin to a folder whose x64\ and arm64\ hold the set." />
+    <Error Condition="'@(_HMInf2catMissing)' != ''"
+           Text="Inf2Cat is not under HMInf2catBin, $(_HMInf2catDir)x86\. Missing: @(_HMInf2catMissing->'%(Filename)%(Extension)', ', '). HMInf2catBin defaults to bin\$(HMKitVersion)\ under HM_WDK_ROOT, here $(HMWdkRoot). Set HM_WDK_ROOT to a WDK root (an installed WDK, the EWDK's Program Files\Windows Kits\10, or the c folder of the Microsoft.Windows.WDK.x64 NuGet package), or HMInf2catBin to a folder whose x86\ holds Inf2Cat." />
+
+    <Copy SourceFiles="@(_HMNative)" DestinationFiles="@(_HMNative->'%(StagedPath)')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_HMNeutral)" DestinationFiles="@(_HMNeutral->'%(StagedPath)')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_HMVr)" DestinationFiles="@(_HMVr->'%(StagedPath)')" SkipUnchangedFiles="true" Condition="'@(_HMVr)' != ''" />
+
+    <DownloadFile SourceUrl="$(HMUsbipUrl)"
+                  DestinationFolder="$(_HMResources)"
+                  DestinationFileName="$(HMUsbipAsset)"
+                  SkipUnchangedFiles="true"
+                  Condition="'$(_HMWithUsbip)' == 'true' and !Exists('$(HMUsbipFile)')" />
+    <GetFileHash Files="$(HMUsbipFile)" Algorithm="SHA256" Condition="'$(_HMWithUsbip)' == 'true'">
+      <Output TaskParameter="Hash" PropertyName="_HMUsbipActualHash" />
+    </GetFileHash>
+    <Error Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMUsbipActualHash.ToLowerInvariant())' != '$(HMUsbipSha256)'"
+           Text="usbip-win2 installer hash mismatch. Expected $(HMUsbipSha256), got $(_HMUsbipActualHash). Delete $(HMUsbipFile) and rebuild to re-fetch." />
+
     <DownloadFile SourceUrl="$(HMUsbipArmUrl)"
-                  DestinationFolder="$(MSBuildThisFileDirectory)Resources"
+                  DestinationFolder="$(_HMResources)"
                   DestinationFileName="$(HMUsbipArmAsset)"
                   SkipUnchangedFiles="true"
-                  Condition="!Exists('$(HMUsbipArmFile)')" />
-
-    <GetFileHash Files="$(HMUsbipArmFile)" Algorithm="SHA256">
+                  Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true' and !Exists('$(HMUsbipArmFile)')" />
+    <GetFileHash Files="$(HMUsbipArmFile)" Algorithm="SHA256" Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true'">
       <Output TaskParameter="Hash" PropertyName="_HMUsbipArmActualHash" />
     </GetFileHash>
-    <Error Condition="'$(_HMUsbipArmActualHash.ToLowerInvariant())' != '$(HMUsbipArmSha256)'"
+    <Error Condition="'$(_HMWithUsbip)' == 'true' and '$(_HMWithArm64)' == 'true' and '$(_HMUsbipArmActualHash.ToLowerInvariant())' != '$(HMUsbipArmSha256)'"
            Text="usbip-win2 ARM64 installer hash mismatch. Expected $(HMUsbipArmSha256), got $(_HMUsbipArmActualHash). Delete $(HMUsbipArmFile) and rebuild to re-fetch." />
 
     <!-- The host controller's own INF/SYS/CAT, unpacked from the verified
@@ -168,61 +275,25 @@
          transport an earlier release installed through PnP, which the
          installer cannot do without launching the old version's
          uninstaller. -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(HMRepoRoot)scripts\prepare_usbip.ps1&quot; -InstallerDirectory &quot;$(MSBuildThisFileDirectory)Resources&quot; -DestinationDirectory &quot;$(MSBuildThisFileDirectory)Resources\usbip&quot;" />
+    <Exec Condition="'$(_HMWithUsbip)' == 'true'"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(HMRepoRoot)scripts\prepare_usbip.ps1&quot; -InstallerDirectory &quot;$(_HMResources.TrimEnd('\'))&quot; -DestinationDirectory &quot;$(_HMResources)usbip&quot; -Architectures $(_HMUsbipArchs)" />
 
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt"
-          DestinationFolder="$(MSBuildThisFileDirectory)Resources\" SkipUnchangedFiles="true" />
+    <!-- Embed exactly what was staged above. These items are made here, not
+         from globs over Resources\: a glob is evaluated before this target
+         stages anything, so on a fresh clone it found nothing and the
+         assembly needed a second build, and it would also pick up whatever
+         an earlier build left behind, such as a full build's ARM64 files
+         in an x64-only build. Each transform carries the item's
+         LogicalName. -->
+    <ItemGroup>
+      <EmbeddedResource Include="@(_HMNative->'%(StagedPath)')" />
+      <EmbeddedResource Include="@(_HMNeutral->'%(StagedPath)')" />
+      <EmbeddedResource Include="@(_HMVr->'%(StagedPath)')" />
+      <EmbeddedResource Include="@(_HMUsbipPayload)" />
+    </ItemGroup>
   </Target>
 
   <ItemGroup>
-    <!-- Driver/tool payload. Embedded with stable HIDMaestro.Resources.* logical
-         names so DriverBuilder can extract them by name at install time.
-         CAUTION: this glob is evaluated at MSBuild item-evaluation time,
-         BEFORE the PackResources target above runs. If Resources/ is empty
-         or missing (fresh clone, post-`rm -rf bin obj Resources`), the glob
-         emits zero items and the assembly compiles with NO driver embedded
-         (observed: 276 KB instead of 6.8 MB) → DriverBuilder.EnsureExtracted
-         throws at runtime. And when Resources/ has STALE bytes from a prior
-         build, they get silently embedded before the current PackResources
-         overwrites them. The canonical fix is `scripts/build_all.cmd`:
-         first build driver + companion for both architectures, then run
-         `dotnet build` ONCE to populate Resources/ (which will emit a
-         warning-size DLL), then run `dotnet build` AGAIN to embed the
-         fresh bytes. The release recipe does this two-phase build.
-
-         This glob is flat on purpose. It takes the architecture-neutral
-         payload only, and the two globs below take the per-architecture
-         sets out of Resources\x64 and Resources\arm64. -->
-    <EmbeddedResource Include="Resources\*">
-      <LogicalName>HIDMaestro.Resources.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-
-    <!-- Architecture-specific payload. DriverBuilder picks the
-         namespace matching the OS it runs on, so one AnyCPU assembly
-         serves both x64 and ARM64 Windows. -->
-    <EmbeddedResource Include="Resources\x64\*">
-      <LogicalName>HIDMaestro.Native.x64.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Resources\arm64\*">
-      <LogicalName>HIDMaestro.Native.arm64.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-
-    <!-- usbip-win2 host controller driver files, per architecture. -->
-    <EmbeddedResource Include="Resources\usbip\x64\*">
-      <LogicalName>HIDMaestro.Usbip.x64.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Resources\usbip\arm64\*">
-      <LogicalName>HIDMaestro.Usbip.arm64.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-
-    <!-- OpenVR driver package (issue #32). Nested logical names preserve
-         the SteamVR driver-folder layout (bin/win64/..., resources/...)
-         so extraction is a verbatim reconstruction; the flat
-         HIDMaestro.Resources.* namespace stays collision-free. -->
-    <EmbeddedResource Include="Resources\vr\**\*">
-      <LogicalName>HIDMaestro.VR.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-
     <!-- Profile catalog. Embedded with stable HIDMaestro.Profiles.* logical
          names so HMContext.LoadDefaultProfiles() can read them via
          Assembly.GetManifestResourceStream regardless of disk layout. The
@@ -230,11 +301,11 @@
          are linked, not copied.
 
          The composite USB personas (dualsense-composite,
-         dualshock-4-v2-composite) ship in the catalog as of the USB/IP
-         backend landing (issue #39): CreateController instantiates them
-         when usbip-win2 is installed and refuses with install guidance
-         when it is not. Consumers gate picker entries on
-         HMProfile.RequiresUsbipBackend + HMContext.IsUsbipBackendAvailable. -->
+         dualshock-4-v2-composite and the rest) ride the USB/IP backend,
+         whose transport this assembly carries and installs on the first
+         composite create. A build made with HMSkipUsbip carries the
+         profiles but refuses to create them. Consumers check
+         HMProfile.RequiresUsbipBackend against HMBuildInfo.UsbipArchitectures. -->
     <EmbeddedResource Include="..\..\profiles\**\*.json"
                       Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json">
       <LogicalName>HIDMaestro.Profiles.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>

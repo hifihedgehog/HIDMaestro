@@ -24,9 +24,14 @@ set "SRC_DIR=%~dp0..\driver\openvr"
 set "OUT_DIR=%~dp0..\build\openvr"
 set "PKG_DIR=%OUT_DIR%\hidmaestro"
 
-:: Find VS (same loop as build.cmd)
+:: Find VS the way native_env.cmd does: the VSINSTALLDIR a Visual Studio or
+:: EWDK prompt set, when it has the C++ tools, else the newest under
+:: Program Files.
 set "VCVARS="
-for /d %%A in ("C:\Program Files\Microsoft Visual Studio\*") do (
+set "HM_VS_DIR=%VSINSTALLDIR%"
+if defined HM_VS_DIR for %%I in ("%HM_VS_DIR%.") do set "HM_VS_DIR=%%~fI"
+if defined HM_VS_DIR if exist "%HM_VS_DIR%\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS=%HM_VS_DIR%\VC\Auxiliary\Build\vcvarsall.bat"
+if not defined VCVARS for /d %%A in ("C:\Program Files\Microsoft Visual Studio\*") do (
     for /d %%B in ("%%A\*") do (
         if exist "%%B\VC\Auxiliary\Build\vcvarsall.bat" set "VCVARS=%%B\VC\Auxiliary\Build\vcvarsall.bat"
     )

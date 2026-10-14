@@ -10,7 +10,10 @@
 param(
     [Parameter(Mandatory=$true)][string]$InstallerDirectory,
     [Parameter(Mandatory=$true)][string]$DestinationDirectory,
-    [string]$CacheDirectory = ''
+    [string]$CacheDirectory = '',
+    # x64 only for a build made with HMSkipArm64. A -File invocation passes
+    # "x64,arm64" as one string, so the list is split here.
+    [string[]]$Architectures = @('x64', 'arm64')
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -18,6 +21,10 @@ $ProgressPreference = 'SilentlyContinue'
 if (!$CacheDirectory) { $CacheDirectory = Join-Path $PSScriptRoot '..\build\downloads' }
 $manifestPath = Join-Path $PSScriptRoot '..\sdk\HIDMaestro.Core\UsbipPackage.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$Architectures = @($Architectures | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($arch in $Architectures) {
+    if (!$manifest.architectures.$arch) { throw "UsbipPackage.json has no architecture '$arch'." }
+}
 
 function Test-FileHash([string]$Path, [string]$Expected) {
     (Test-Path -LiteralPath $Path -PathType Leaf) -and
@@ -33,7 +40,7 @@ function Get-VerifiedFile([string]$Url, [string]$Path, [string]$Hash) {
 
 # Nothing to do when every output is already in place and correct.
 $pending = @()
-foreach ($arch in @('x64', 'arm64')) {
+foreach ($arch in $Architectures) {
     $package = $manifest.architectures.$arch
     foreach ($file in $package.files.PSObject.Properties) {
         if (!(Test-FileHash (Join-Path (Join-Path $DestinationDirectory $arch) $file.Name) $file.Value)) { $pending += $arch; break }

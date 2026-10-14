@@ -122,18 +122,19 @@ public static class DriverBuilder
     /// <summary>Architecture-neutral payload. Inf2Cat.exe and its
     /// UniversalStore libraries are AMD64 .NET assemblies, so on ARM64 they
     /// run under Windows 11's x64 emulation, which Windows 10 on ARM does
-    /// not have. One copy serves both targets.</summary>
+    /// not have. One copy serves both targets. These six are the files
+    /// Inf2Cat loads or reads. inf2cat.exe.manifest and
+    /// Microsoft.Kits.Logger.dll, staged until v1.13.0, did nothing: no
+    /// assembly here references the logger, and Inf2Cat.exe's embedded
+    /// manifest takes precedence over an external one.</summary>
     static readonly string[] NeutralFiles = new[]
     {
-        // Inf2Cat.exe + minimum deps
         "Inf2Cat.exe",
-        "inf2cat.exe.manifest",
         "WindowsProtectedFiles.xml",
         "Microsoft.UniversalStore.HardwareWorkflow.Cabinets.dll",
         "Microsoft.UniversalStore.HardwareWorkflow.Catalogs.dll",
         "Microsoft.UniversalStore.HardwareWorkflow.InfReader.dll",
         "Microsoft.UniversalStore.HardwareWorkflow.SubmissionBuilder.dll",
-        "Microsoft.Kits.Logger.dll",
     };
 
     /// <summary>Every file the staging directory must hold, paired with
@@ -184,6 +185,10 @@ public static class DriverBuilder
             if (StagingDir != null && Directory.Exists(StagingDir))
                 return StagingDir;
 
+            // A build without this machine's driver stops here, before the
+            // staging directory exists.
+            HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
+
             // The protected per-version "driver" staging directory, created
             // and verified Administrators/SYSTEM-write-only (ProtectedStaging).
             // Each file's SHA-256 is checked against the embedded resource on
@@ -192,16 +197,8 @@ public static class DriverBuilder
             string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationDriver);
 
             var asm = typeof(DriverBuilder).Assembly;
-            var available = new HashSet<string>(asm.GetManifestResourceNames(), StringComparer.Ordinal);
-
             foreach (var (file, logical) in AllPayload())
-            {
-                if (!available.Contains(logical))
-                    throw new InvalidOperationException(
-                        $"Embedded resource '{logical}' not found in HIDMaestro.Core.dll. " +
-                        "Did the PackResources MSBuild target run?");
                 ProtectedStaging.StageResource(dir, file, asm, logical);
-            }
 
             StagingDir = dir;
             return dir;

@@ -49,6 +49,10 @@ internal static class SwdDeviceFactory
     /// xinputhid's INF selects against.</summary>
     public const string DefaultEnumeratorName = "HIDMAESTRO";
 
+    /// <summary>The helper's file name, staged from
+    /// <c>HIDMaestro.Native.&lt;arch&gt;.hmswd.exe</c>.</summary>
+    internal const string HelperFile = "hmswd.exe";
+
     public readonly struct Result
     {
         public readonly bool    Success;
@@ -364,11 +368,11 @@ internal static class SwdDeviceFactory
             try
             {
                 var asm = typeof(SwdDeviceFactory).Assembly;
-                string logical = DriverBuilder.NativePrefix + "hmswd.exe";
+                string logical = DriverBuilder.NativePrefix + HelperFile;
                 string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationSwd);
                 s_expectedSha256 ??= ProtectedStaging.EmbeddedSha256(asm, logical);
-                ProtectedStaging.StageResource(dir, "hmswd.exe", asm, logical);
-                s_extractedPath = Path.Combine(dir, "hmswd.exe");
+                ProtectedStaging.StageResource(dir, HelperFile, asm, logical);
+                s_extractedPath = Path.Combine(dir, HelperFile);
                 return s_extractedPath;
             }
             catch { return null; }

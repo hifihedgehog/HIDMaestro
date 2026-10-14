@@ -191,6 +191,8 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\aot_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\json_parity_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\pnp_notify_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        # The copy in variant\ is a different build of the SDK on purpose.
+        Join-Path $scriptDir '..\probes\build_info_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1890,6 +1892,19 @@ function Scenario-Pnp-Notify {
                  -Message 'PnP notifications stopped reaching the SDK''s waits (see probe stdout)' -SkipCodes 2
 }
 
+# S78: what a build of the SDK carries. The release build must carry the
+# driver and the USB/IP transport for x64 and ARM64 and the OpenVR driver,
+# with no device involved. The probe's project build also makes a variant
+# with HMSkipArm64 and HMSkipUsbip from a tree without an ARM64 or OpenVR
+# driver. That variant must embed nothing stale, refuse what it lacks before
+# any machine-wide step, and still run a UMDF2 controller on x64.
+function Scenario-Build-Info {
+    Invoke-Probe -Dir 'build_info_check' -Exe 'BuildInfoCheck.exe' -Arguments 'complete' -Tag 'complete' `
+                 -Message 'the release build does not carry every payload, or carries Inf2Cat files Inf2Cat never loads (see probe stdout)'
+    Invoke-Probe -Dir 'build_info_check' -Exe 'variant\BuildInfoCheck.exe' -Arguments 'variant' -Tag 'variant' `
+                 -Message 'a build without the ARM64, USB/IP or OpenVR payload reported or refused the wrong thing (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1971,7 +1986,8 @@ $scenarios = @(
     @{ Name = 'S74_NativeAot_Smoke';             Body = ${function:Scenario-NativeAot-Smoke} },
     @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
     @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} },
-    @{ Name = 'S77_Pnp_Notify';                  Body = ${function:Scenario-Pnp-Notify} }
+    @{ Name = 'S77_Pnp_Notify';                  Body = ${function:Scenario-Pnp-Notify} },
+    @{ Name = 'S78_Build_Info';                  Body = ${function:Scenario-Build-Info} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -41,6 +41,16 @@ internal static class VrDriverBuilder
     private const string SteamVrPathRegValue = "SteamVRPath";
     private const string ResourcePrefix = "HIDMaestro.VR.";
 
+    /// <summary>What SteamVR needs to load the driver: the manifest at the
+    /// folder's root and the DLL under bin\win64, named for the manifest's
+    /// "name" (openvr/docs/Driver_API_Documentation.md). The resource names
+    /// keep the folder layout, so the DLL's carries a backslash.</summary>
+    internal static readonly string[] RequiredResources =
+    {
+        ResourcePrefix + "driver.vrdrivermanifest",
+        ResourcePrefix + @"bin\win64\driver_hidmaestro.dll",
+    };
+
     /// <summary>Stable extraction root. See class remarks for why this is
     /// not the per-version staging directory.</summary>
     public static string ExtractRoot =>
@@ -100,6 +110,9 @@ internal static class VrDriverBuilder
     /// or vrpathreg failure. Requires admin for %ProgramData% + HKLM.</summary>
     public static bool EnsureDriverRegistered()
     {
+        // The build's payload first: a build without the driver can never
+        // register it, whether or not this machine has SteamVR.
+        HMBuildInfo.ThrowIfMissing(HMPayload.OpenVrDriver);
         string? steamVr = FindSteamVR();
         if (steamVr == null)
             return false;
@@ -109,10 +122,6 @@ internal static class VrDriverBuilder
             .Where(n => n.StartsWith(ResourcePrefix, StringComparison.Ordinal))
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        if (names.Length == 0)
-            throw new InvalidOperationException(
-                "No embedded OpenVR driver payload (HIDMaestro.VR.*). " +
-                "Build with scripts/build_openvr.cmd before the SDK build.");
 
         string payloadHash = HashPayload(asm, names);
         using (var k = Registry.LocalMachine.OpenSubKey(RegKeyPath))

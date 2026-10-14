@@ -46,3 +46,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("RegistryOwnershipCheck")]
 [assembly: InternalsVisibleTo("KbmOfflineCheck")]
 [assembly: InternalsVisibleTo("KbmLiveCheck")]
+[assembly: InternalsVisibleTo("BuildInfoCheck")]

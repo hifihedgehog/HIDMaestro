@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -41,10 +42,25 @@ internal static partial class UsbipDriverInstaller
     public const string Version = "0.9.8.1";
     /// <summary>The installer matching this OS. One AnyCPU assembly carries
     /// both architectures and picks here.</summary>
-    internal static string InstallerFile =>
-        RuntimeInformation.OSArchitecture == Architecture.Arm64
+    internal static string InstallerFile => InstallerFileFor(RuntimeInformation.OSArchitecture);
+
+    /// <summary>The installer for an architecture.</summary>
+    internal static string InstallerFileFor(Architecture arch) =>
+        arch == Architecture.Arm64
             ? "USBip-" + Version + "-arm64-release-attestation.exe"
             : "USBip-" + Version + "-x64.exe";
+
+    /// <summary>The installer's embedded resource name for an architecture.</summary>
+    internal static string InstallerResourceFor(Architecture arch) =>
+        "HIDMaestro.Resources." + InstallerFileFor(arch);
+
+    /// <summary>The host controller files' embedded resource names for an
+    /// architecture.</summary>
+    internal static IEnumerable<string> UdeResourcesFor(Architecture arch)
+    {
+        string a = arch == Architecture.Arm64 ? "arm64" : "x64";
+        foreach (string file in UdeFiles) yield return $"HIDMaestro.Usbip.{a}.{file}";
+    }
 
     private const string NoticeFile = "THIRD-PARTY-NOTICES.txt";
 
@@ -73,6 +89,7 @@ internal static partial class UsbipDriverInstaller
     /// re-enumerates USB.</param>
     public static bool EnsureInstalled(Action<string>? progress = null)
     {
+        HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport);
         if (IsInstalled)
         {
             ReplaceLegacyTransportOnce(progress);
@@ -901,7 +918,7 @@ internal static partial class UsbipDriverInstaller
         string exePath = Path.Combine(dir, InstallerFile);
 
         var asm = typeof(UsbipDriverInstaller).Assembly;
-        string logical = "HIDMaestro.Resources." + InstallerFile;
+        string logical = InstallerResourceFor(RuntimeInformation.OSArchitecture);
         using (var stream = asm.GetManifestResourceStream(logical)
             ?? throw new InvalidOperationException(
                 $"The bundled usbip-win2 installer ('{logical}') is missing from " +

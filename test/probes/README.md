@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S77. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S78. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -28,6 +28,7 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Does HIDMaestro.Core work in a NativeAOT app, and in a trimmed single-file app?" | [aot_smoke](aot_smoke/): one source published both ways for x64 and ARM64. S74 and S75. `--startup` times process start to catalog loaded |
 | "Does source-generated JSON read every profile the way v1.12.0 did?" | [json_parity_check](json_parity_check/): no device. S76. `--time <runs>` times the full-catalog parse both ways |
 | "Do PnP notifications reach the SDK's create and dispose waits?" | [pnp_notify_check](pnp_notify_check/): S77 |
+| "Does a build carry what it reports, and refuse what it lacks?" | [build_info_check](build_info_check/): S78. Its project build also makes a variant without the ARM64, USB/IP and OpenVR payloads |
 
 ## Near-duplicates and when to use which
 

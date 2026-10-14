@@ -45,11 +45,27 @@ if errorlevel 1 (
     exit /b 2
 )
 
-rem 2. Build SDK + test app + extractor at the current source version
+rem 2. Build SDK + test app + extractor at the current source version.
+rem    A release carries every payload, so the two settings that leave one
+rem    out are cleared first: one left in the environment would build a
+rem    smaller SDK. S78 (build_info_check) also fails the battery unless
+rem    the SDK reports itself complete.
+set "HMSkipArm64="
+set "HMSkipUsbip="
 echo [1/4] Building SDK + driver + test apps...
 call scripts\build_all.cmd >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] build_all.cmd failed. Run it directly to see the error.
+    popd
+    exit /b 2
+)
+rem    Every kit layout the build supports (NuGet WDK, an EWDK prompt's
+rem    variables) and the errors for wrong roots, built from copies of this
+rem    tree and compared with the build above.
+echo        Checking build layouts...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts\check_build_layouts.ps1"
+if errorlevel 1 (
+    echo [ERROR] A build layout check failed. See its output above.
     popd
     exit /b 2
 )

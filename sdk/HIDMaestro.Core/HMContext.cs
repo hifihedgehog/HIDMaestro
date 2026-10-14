@@ -80,7 +80,13 @@ public sealed class HMContext : IDisposable
             // and never touches it, so the prewarm stages (and hashes) the
             // payload only when a deploy is coming. Staging needs elevation;
             // a non-elevated context skips it here and fails nothing.
-            try { if (!Internal.DriverBuilder.WillTakeFastPath()) Internal.DriverBuilder.EnsureExtracted(); } catch { }
+            try
+            {
+                if (HMBuildInfo.Carries(HMPayload.Driver, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
+                    !Internal.DriverBuilder.WillTakeFastPath())
+                    Internal.DriverBuilder.EnsureExtracted();
+            }
+            catch { }
             try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
         });
         System.Threading.Tasks.Task.Run(() =>
@@ -122,8 +128,12 @@ public sealed class HMContext : IDisposable
     /// re-enumerates the root hubs).</para>
     ///
     /// <para>Pure presence probe: requires no admin and installs
-    /// nothing.</para></summary>
-    public static bool IsUsbipBackendAvailable => Internal.Usbip.UsbipBackend.IsAvailable;
+    /// nothing. False in a build that carries no USB/IP transport for this
+    /// machine (<see cref="HMBuildInfo.UsbipArchitectures"/>), which creates
+    /// no composite controller whatever the machine has installed.</para></summary>
+    public static bool IsUsbipBackendAvailable =>
+        HMBuildInfo.Carries(HMPayload.UsbipTransport, System.Runtime.InteropServices.RuntimeInformation.OSArchitecture) &&
+        Internal.Usbip.UsbipBackend.IsAvailable;
 
     /// <summary>Issue #39: install the bundled USB transport now instead
     /// of on the first composite create. Optional, and only worth calling
@@ -131,6 +141,8 @@ public sealed class HMContext : IDisposable
     /// it controls (an onboarding step, a settings toggle) rather than
     /// mid-session. Idempotent, requires elevation, and reports progress
     /// through <paramref name="progress"/>.</summary>
+    /// <exception cref="HMPayloadMissingException">This build carries no
+    /// USB/IP transport for this machine's architecture.</exception>
     public static void InstallUsbipBackend(Action<string>? progress = null)
         => Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
 
@@ -150,9 +162,12 @@ public sealed class HMContext : IDisposable
     /// process is not elevated.</exception>
     /// <exception cref="InvalidOperationException">Thrown if any step of the
     /// install fails (cert install, signing, pnputil).</exception>
+    /// <exception cref="HMPayloadMissingException">This build carries no
+    /// driver for this machine's architecture.</exception>
     public void InstallDriver()
     {
         ThrowIfDisposed();
+        HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
 
         // Devices of programs that have exited go first: a device bound to
         // the old INF keeps pnputil from replacing the package, and a
@@ -403,6 +418,15 @@ public sealed class HMContext : IDisposable
     /// backend's create on them.</summary>
     private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey)
     {
+        // A payload this build lacks refuses the create before the lease,
+        // so the refusal touches nothing machine-wide.
+        if (profile.RequiresUsbipBackend)
+            HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport,
+                $"Profile '{profile.Id}' is a composite persona, which rides the USB/IP transport.");
+        else
+            HMBuildInfo.ThrowIfMissing(HMPayload.Driver,
+                $"Profile '{profile.Id}' runs on the UMDF2 driver.");
+
         var lease = Internal.ControllerLease.Acquire(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         try
