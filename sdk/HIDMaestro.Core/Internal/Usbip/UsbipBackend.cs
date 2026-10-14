@@ -88,11 +88,11 @@ internal static class UsbipBackend
     }
 
     /// <summary>Plug out every import in the SDK's port range whose server
-    /// no longer listens, and cancel the re-attach attempts against those
-    /// ports. Covers programs of every version: a v1.12.0 server listens the
-    /// same way. This process's own port counts as gone for the attempts:
-    /// whatever the driver keeps against it was left by the program that
-    /// held the port before.</summary>
+    /// no longer listens, and cancel the re-attach attempts of servers that
+    /// are gone. Covers programs of every version: a v1.12.0 server listens
+    /// the same way. This process's own port counts as gone for the
+    /// attempts: whatever the driver keeps against it was left by the
+    /// program that held the port before.</summary>
     internal static void DetachImportsOfDeadServers()
     {
         try
@@ -107,19 +107,43 @@ internal static class UsbipBackend
                 if (port == own || listening.Contains(port)) continue;
                 VhciClient.Detach(row.Port);
             }
-            var locations = new List<(int, string)>();
-            for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
-            {
-                if (port != own && listening.Contains(port)) continue;
-                foreach (string busId in s_legacyBusIds) locations.Add((port, busId));
-            }
-            VhciClient.StopAttachAttempts("127.0.0.1", locations);
+            VhciClient.StopAttachAttempts("127.0.0.1",
+                AttemptLocations(port => port == own || !listening.Contains(port), deadOnly: true));
         }
         catch { /* best-effort recovery */ }
     }
 
     // The bus ids a server before v1.13.0 canceled in its own sweep.
     private static readonly string[] s_legacyBusIds = { "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8" };
+
+    /// <summary>The locations whose re-attach attempts a sweep cancels. A
+    /// record names its server's port and each composite's transport index,
+    /// whose bus id is 1-&lt;index+1&gt;, any of 1-1 to 1-4096
+    /// (<see cref="ControllerLease"/>). The driver lists no attempts, so
+    /// once an import has dropped nothing else names its bus id. A server
+    /// before v1.13.0 leaves no record, and for the ports
+    /// <paramref name="portGone"/> picks, the bus ids that release canceled
+    /// itself are added. Any other attempt is canceled by the server on its
+    /// port when it gets there (<see cref="UsbipServer"/>).
+    /// <paramref name="deadOnly"/> false takes live programs' records too,
+    /// for the sweep that removes everything.</summary>
+    private static List<(int Port, string BusId)> AttemptLocations(Func<int, bool> portGone, bool deadOnly)
+    {
+        var list = new List<(int, string)>();
+        foreach (var rec in MachineClaims.ReadAll())
+        {
+            if ((deadOnly && rec.Live) || !IsOurPort(rec.UsbipPort)) continue;
+            foreach (var c in rec.Controllers)
+                if (c.TransportIndex >= 0 && string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
+                    list.Add((rec.UsbipPort, UsbipEmulatedDevice.BusIdFor(c.TransportIndex)));
+        }
+        for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
+        {
+            if (!portGone(port)) continue;
+            foreach (string busId in s_legacyBusIds) list.Add((port, busId));
+        }
+        return list;
+    }
 
     /// <summary>One dead program's composite: its import, found by the
     /// server port and bus id it was attached with, and the re-attach
@@ -130,7 +154,7 @@ internal static class UsbipBackend
         try
         {
             if (!VhciClient.IsAvailable()) return;
-            string busId = $"1-{transportIndex + 1}";
+            string busId = UsbipEmulatedDevice.BusIdFor(transportIndex);
             // A port with a listener has a new, live server, whose imports
             // stay. The attempts go all the same: canceling one never
             // touches an import, and this record is the last thing that
@@ -156,19 +180,23 @@ internal static class UsbipBackend
     }
 
     /// <summary>This process's composites: stop the emulated devices, then
-    /// detach their imports.</summary>
+    /// detach their imports and cancel any re-attach attempt against
+    /// them.</summary>
     internal static void DetachOwn()
     {
         try
         {
             var server = UsbipServer.Current;
             if (server == null) return;
+            var locations = new List<(int, string)>();
             foreach (var device in server.SnapshotDevices())
             {
                 int vhciPort = device.VhciPort;
                 try { server.Unregister(device); device.Dispose(); } catch { }
                 if (vhciPort > 0) try { VhciClient.Detach(vhciPort); } catch { }
+                locations.Add((server.Port, device.BusId));
             }
+            VhciClient.StopAttachAttempts("127.0.0.1", locations);
         }
         catch { }
     }
@@ -217,21 +245,16 @@ internal static class UsbipBackend
                 if (!IsOurLocation(row.Host, row.Service)) continue;
                 VhciClient.Detach(row.Port);
             }
-            for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
-            {
-                for (int devnum = 1; devnum <= 8; devnum++)
-                    VhciClient.StopAttachAttempts("127.0.0.1", port, $"1-{devnum}");
-            }
+            VhciClient.StopAttachAttempts("127.0.0.1", AttemptLocations(_ => true, deadOnly: false));
         }
         catch { /* best-effort: eviction must never throw out of a sweep */ }
     }
 
-    private static bool IsOurLocation(string host, string service)
-    {
-        if (host != "127.0.0.1") return false;
-        if (!int.TryParse(service, out int port)) return false;
-        return port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange;
-    }
+    private static bool IsOurLocation(string host, string service) =>
+        host == "127.0.0.1" && int.TryParse(service, out int port) && IsOurPort(port);
+
+    private static bool IsOurPort(int port) =>
+        port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange;
 }
 
 /// <summary>The live backing of one usbip-backend controller. Disposal
@@ -259,6 +282,10 @@ internal sealed class UsbipBackendHandle : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try { VhciClient.Detach(VhciPort); } catch { }
+        // An import that dropped while the controller lived left an attempt
+        // for this location, and no record names it once the controller's
+        // entry goes.
+        VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, Device.BusId);
         _server.Unregister(Device);
         Device.Dispose();
     }

@@ -163,6 +163,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         return q;
     }
 
+    /// <summary>The bus id the server exports a transport index under.</summary>
+    internal static string BusIdFor(int index) => $"1-{index + 1}";
+
     public UsbipEmulatedDevice(ControllerProfile profile, int index, DeviceIdentity? identity = null)
     {
         _index = index;
@@ -182,7 +185,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 break;
             }
         }
-        BusId = $"1-{index + 1}";
+        BusId = BusIdFor(index);
         Devid = (1u << 16) | (uint)(index + 1);
 
         if (Switch2ProPacker.IsSwitch2Pro(Descriptors.VendorId, Descriptors.ProductId))

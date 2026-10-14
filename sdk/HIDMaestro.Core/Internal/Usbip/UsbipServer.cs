@@ -192,6 +192,7 @@ internal sealed class UsbipServer : IDisposable
                 {
                     UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StNodev);
                     Send(reply[..8]);
+                    CancelAttempt(busid);
                     return;
                 }
                 if (!device.TryClaimConnection(this))
@@ -221,6 +222,28 @@ internal sealed class UsbipServer : IDisposable
                 _server.OnConnectionClosed(this);
                 Close();
             }
+        }
+
+        /// <summary>An import of a bus id this server does not export is a
+        /// re-attach attempt the host controller keeps for a server that
+        /// held this port before, or for a device this server has since
+        /// removed. Answered ST_NODEV it tries again, for about two hours
+        /// (persistent.cpp can_reattach, on_plugin_hardware). It is canceled
+        /// by its exact location once the controller closes this
+        /// connection: the controller completes the attempt, which re-arms
+        /// its timer, before it closes the socket (vhci_ioctl.cpp complete,
+        /// workitem_cleanup). A cancel that lands while the attempt is in
+        /// flight is lost, because the retry's WdfRequestReuse clears it.</summary>
+        private void CancelAttempt(string busid)
+        {
+            try
+            {
+                _socket.ReceiveTimeout = 5000;
+                Span<byte> one = stackalloc byte[1];
+                _socket.Receive(one, SocketFlags.None);
+            }
+            catch { /* closed, reset or timed out: cancel all the same */ }
+            VhciClient.StopAttachAttempts("127.0.0.1", _server.Port, busid);
         }
 
         private void WriteDeviceBlock(Span<byte> b, UsbipEmulatedDevice device)
