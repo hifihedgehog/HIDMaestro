@@ -15,17 +15,24 @@
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
+//   census         the census walk over Enum keys it cannot read (scratch
+//                  keys under HKCU: denied, deleted, gone) gives what the
+//                  configuration manager lists. Creates no device and needs
+//                  no elevation. Tells a fallback from a skip only while a
+//                  HIDMaestro devnode is present. S84 runs it with an Xbox
+//                  360 up
 //   gate           S84: no submit path allocates, the codec path, consumer
 //                  usages, a keyboard's raw reports and an absolute pointer
 //                  included, a long mouse movement leaves 16 frames kept,
-//                  the census finds what the configuration manager lists,
-//                  and hid.dll's BOOLEAN results read as one byte
+//                  the census's own walk completes and finds what the
+//                  configuration manager lists, also when it cannot read a
+//                  key, and hid.dll's BOOLEAN results read as one byte
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
-// Requires elevation. Exit 0 PASS, 1 FAIL (gate), 2 when another program
-// that embeds HIDMaestro is running.
+// Requires elevation, except census. Exit 0 PASS, 1 FAIL (gate, census), 2
+// when another program that embeds HIDMaestro is running.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -33,6 +40,8 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using HIDMaestro;
 using Microsoft.Win32.SafeHandles;
@@ -85,6 +94,7 @@ internal static class Program
             case "start": Start(runs); break;
 #if !HM_BASE
             case "claim": Claim(runs); break;
+            case "census": CensusFallback(); break;
 #endif
             case "gate":
 #if !HM_BASE
@@ -95,6 +105,11 @@ internal static class Program
             default:
                 Console.WriteLine($"unknown mode {mode}");
                 return 1;
+        }
+        if (mode == "census")
+        {
+            Console.WriteLine($"census: {(s_failures == 0 ? "PASS" : $"{s_failures} FAIL")}");
+            return s_failures == 0 ? 0 : 1;
         }
         if (mode == "gate")
         {
@@ -143,6 +158,25 @@ internal static class Program
                 Check("the census walk finds the devnodes the configuration manager lists, the Xbox 360's two among them",
                     walked.Count >= 2 && walked.SequenceEqual(listed, StringComparer.OrdinalIgnoreCase),
                     $"walked {string.Join(", ", walked)}; listed {string.Join(", ", listed)}");
+                // The walk falls back to the listings when it cannot read a
+                // key, which makes the check above pass by construction. The
+                // census's own walk must read every key it needs.
+                var candidates = new List<(string Id, bool Exclusive)>();
+                bool read;
+                string detail;
+                try
+                {
+                    read = HIDMaestro.Internal.OwnerCensus.TryWalkEnum(candidates);
+                    detail = $"{candidates.Count} candidate instances";
+                }
+                catch (Exception e)
+                {
+                    read = false;
+                    detail = $"threw {e.GetType().FullName}: {e.Message}";
+                }
+                Check("the census's own walk of Enum\\ROOT and Enum\\SWD reads every key it needs, without the fallback",
+                    read, detail);
+                CensusFallback();
             }
 #endif
         }
@@ -528,6 +562,246 @@ internal static class Program
         Report($"the listing the census made before, present SWD ids ({swdCount}), microseconds", swdIds, runs, "");
         Report($"census part: the owned devnodes ({ownedCount}), microseconds", owned, runs, "");
         Report("census part: the USB/IP imports, microseconds", imports, runs, "");
+    }
+#endif
+
+#if !HM_BASE
+    // ── The census walk on keys it cannot read ──────────────────────────
+
+    /// <summary>The census walk handed Enum roots it cannot read must give
+    /// what the configuration manager lists, as it does past 64 candidates.
+    /// The roots are scratch keys under HKCU\Software\HIDMaestroProbe, so no
+    /// device key's DACL changes: a device key whose DACL denies everyone
+    /// its subkeys and values, so OpenSubKey meets ERROR_ACCESS_DENIED, a
+    /// root that cannot be opened for the same reason, a root deleted after
+    /// the walk opened it, as PnP deletes a removed device's key, so listing
+    /// it meets ERROR_KEY_DELETED, and a device key its root lists that is
+    /// gone when the walk opens it, so OpenSubKey returns null. A null can
+    /// also come from a failure other than a missing key, so the walk does
+    /// not read it as "no instances". A readable root holding only an
+    /// absent instance is the positive control: the walk reads it and finds
+    /// nothing. With a controller up (S84) the listing is not empty, so the
+    /// control tells a walk that read its keys from one that fell back.
+    /// Each run first removes the scratch keys of a run killed before its
+    /// cleanup.</summary>
+    static void CensusFallback()
+    {
+        RemoveStaleCensusScratch();
+        string scratch = $@"{ProbeRoot}\{ScratchPrefix}{Environment.ProcessId}";
+        var hkcu = Microsoft.Win32.Registry.CurrentUser;
+        // Handles the cases keep open, closed after the walks.
+        var handles = new List<Microsoft.Win32.RegistryKey>();
+        try
+        {
+            List<string> listed;
+            try
+            {
+                listed = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodesListed().OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            }
+            catch (Exception e)
+            {
+                Check("the configuration manager lists the present devnodes", false, $"threw {e.GetType().FullName}: {e.Message}");
+                return;
+            }
+            Func<string, Microsoft.Win32.RegistryKey?> Under(string tree) =>
+                root => hkcu.OpenSubKey($@"{scratch}\{tree}\{root}");
+            void Create(params string[] paths)
+            {
+                foreach (string path in paths) hkcu.CreateSubKey($@"{scratch}\{path}").Dispose();
+            }
+
+            CensusCase("the census walk reads a readable root and finds its absent instance absent", () =>
+            {
+                Create(@"readable\ROOT\HIDMAESTRO\PROBE-ABSENT", @"readable\SWD");
+                return Under("readable");
+            }, new List<string>());
+            CensusCase("the census walk on a device key it may not open gives what the configuration manager lists", () =>
+            {
+                Create(@"denied-device\ROOT\HIDMAESTRO", @"denied-device\SWD");
+                SetDenyAll($@"{scratch}\{DeniedDevice}", add: true);
+                return Under("denied-device");
+            }, listed);
+            CensusCase("the census walk on a root key it may not open gives what the configuration manager lists", () =>
+            {
+                Create(@"denied-root\ROOT", @"denied-root\SWD");
+                SetDenyAll($@"{scratch}\{DeniedRoot}", add: true);
+                return Under("denied-root");
+            }, listed);
+            CensusCase("the census walk on a device key that is gone when it opens it gives what the configuration manager lists", () =>
+            {
+                Create(@"dangling\ROOT", @"dangling\SWD");
+                CreateDanglingLink($@"{scratch}\{DanglingLink}", $@"{scratch}\dangling\nowhere");
+                return Under("dangling");
+            }, listed);
+            CensusCase("the census walk on a root key deleted after it was opened gives what the configuration manager lists", () =>
+            {
+                Create(@"deleted\ROOT\HIDMAESTRO", @"deleted-rest\SWD");
+                var gone = hkcu.OpenSubKey($@"{scratch}\deleted\ROOT")
+                    ?? throw new InvalidOperationException($@"{scratch}\deleted\ROOT did not open");
+                handles.Add(gone);
+                hkcu.DeleteSubKeyTree($@"{scratch}\deleted");
+                var rest = Under("deleted-rest");
+                return root => root == "ROOT" ? gone : rest(root);
+            }, listed);
+        }
+        finally
+        {
+            foreach (var h in handles) h.Dispose();
+            RemoveCensusScratch(scratch);
+            try
+            {
+                using var parent = hkcu.OpenSubKey(ProbeRoot);
+                bool empty = parent != null && parent.SubKeyCount == 0 && parent.ValueCount == 0;
+                parent?.Dispose();
+                if (empty) hkcu.DeleteSubKey(ProbeRoot, throwOnMissingSubKey: false);
+            }
+            catch (Exception e) { Console.WriteLine($@"  cleanup of {ProbeRoot}: {e.GetType().Name} {e.Message}"); }
+        }
+    }
+
+    const string ProbeRoot = @"Software\HIDMaestroProbe";
+    const string ScratchPrefix = "CensusFallback.";
+    // The keys a run denies or links, relative to its scratch key. The
+    // cleanup undoes them by these paths, a stale run's as well.
+    const string DeniedDevice = @"denied-device\ROOT\HIDMAESTRO";
+    const string DeniedRoot = @"denied-root\SWD";
+    const string DanglingLink = @"dangling\ROOT\HIDMAESTRO";
+
+    static readonly RegistryAccessRule s_denyAll = new(new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+        RegistryRights.EnumerateSubKeys | RegistryRights.QueryValues, AccessControlType.Deny);
+
+    /// <summary>Add or remove the deny rule on one HKCU key. Opening it for
+    /// its DACL alone works while the rule is in place.</summary>
+    static void SetDenyAll(string path, bool add)
+    {
+        using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(path, Microsoft.Win32.RegistryKeyPermissionCheck.ReadWriteSubTree,
+            RegistryRights.ChangePermissions | RegistryRights.ReadPermissions);
+        if (k == null)
+        {
+            if (add) throw new InvalidOperationException($"{path} did not open for its DACL");
+            return;
+        }
+        var acl = k.GetAccessControl();
+        if (add) acl.AddAccessRule(s_denyAll);
+        else acl.RemoveAccessRule(s_denyAll);
+        k.SetAccessControl(acl);
+    }
+
+    /// <summary>Scratch keys a run killed before its cleanup left behind:
+    /// every key under HIDMaestroProbe named with this probe's prefix but
+    /// another process id.</summary>
+    static void RemoveStaleCensusScratch()
+    {
+        string[] names;
+        try
+        {
+            using var parent = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(ProbeRoot);
+            if (parent == null) return;
+            names = parent.GetSubKeyNames();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  stale scratch keys under {ProbeRoot} not listed: {e.GetType().Name} {e.Message}");
+            return;
+        }
+        string own = $"{ScratchPrefix}{Environment.ProcessId}";
+        foreach (string name in names)
+        {
+            if (!name.StartsWith(ScratchPrefix, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, own, StringComparison.OrdinalIgnoreCase))
+                continue;
+            Console.WriteLine($@"  removing {ProbeRoot}\{name}, left by an earlier run");
+            RemoveCensusScratch($@"{ProbeRoot}\{name}");
+        }
+    }
+
+    /// <summary>Delete one run's scratch key: its link through a handle to
+    /// the link itself, since DeleteSubKeyTree would open the missing key
+    /// it names, then its deny rules, then the tree. Each step logs its own
+    /// failure and the next one runs.</summary>
+    static void RemoveCensusScratch(string scratch)
+    {
+        string link = $@"{scratch}\{DanglingLink}";
+        int cr = RegOpenKeyExW(HKEY_CURRENT_USER, link, REG_OPTION_OPEN_LINK, DELETE, out IntPtr h);
+        if (cr == 0)
+        {
+            int status = NtDeleteKey(h);
+            RegCloseKey(h);
+            if (status != 0) Console.WriteLine($"  cleanup of {link}: NtDeleteKey 0x{status:X8}");
+        }
+        else if (cr != ERROR_FILE_NOT_FOUND) Console.WriteLine($"  cleanup of {link}: RegOpenKeyEx error {cr}");
+        foreach (string path in new[] { $@"{scratch}\{DeniedDevice}", $@"{scratch}\{DeniedRoot}" })
+        {
+            try { SetDenyAll(path, add: false); }
+            catch (Exception e) { Console.WriteLine($"  cleanup of {path}: {e.GetType().Name} {e.Message}"); }
+        }
+        try { Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(scratch, throwOnMissingSubKey: false); }
+        catch (Exception e) { Console.WriteLine($"  cleanup of {scratch}: {e.GetType().Name} {e.Message}"); }
+    }
+
+    /// <summary>A volatile registry link at <paramref name="path"/> under HKCU
+    /// to <paramref name="target"/>, a key that does not exist. The parent
+    /// lists it, and opening it fails with ERROR_FILE_NOT_FOUND, as when a
+    /// key is deleted between the walk's listing and its open.</summary>
+    static void CreateDanglingLink(string path, string target)
+    {
+        int cr = RegCreateKeyExW(HKEY_CURRENT_USER, path, 0, null, REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
+            KEY_SET_VALUE | KEY_CREATE_LINK, IntPtr.Zero, out IntPtr h, out _);
+        if (cr != 0) throw new InvalidOperationException($"RegCreateKeyEx of the link {path} failed, error {cr}");
+        string sid = WindowsIdentity.GetCurrent().User!.Value;
+        byte[] name = System.Text.Encoding.Unicode.GetBytes($@"\REGISTRY\USER\{sid}\{target}");
+        cr = RegSetValueExW(h, "SymbolicLinkValue", 0, REG_LINK, name, name.Length);
+        RegCloseKey(h);
+        if (cr != 0) throw new InvalidOperationException($"RegSetValueEx of the link {path} failed, error {cr}");
+    }
+
+    static readonly IntPtr HKEY_CURRENT_USER = unchecked((IntPtr)(int)0x80000001);
+    const int REG_OPTION_VOLATILE = 0x1, REG_OPTION_CREATE_LINK = 0x2, REG_OPTION_OPEN_LINK = 0x8;
+    const int KEY_SET_VALUE = 0x2, KEY_CREATE_LINK = 0x20, DELETE = 0x10000, REG_LINK = 6;
+    const int ERROR_FILE_NOT_FOUND = 2;
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegCreateKeyExW(IntPtr key, string subKey, int reserved, string? cls, int options, int sam,
+        IntPtr sa, out IntPtr result, out int disposition);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegSetValueExW(IntPtr key, string name, int reserved, int type, byte[] data, int size);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegOpenKeyExW(IntPtr key, string subKey, int options, int sam, out IntPtr result);
+
+    [DllImport("advapi32.dll")]
+    static extern int RegCloseKey(IntPtr key);
+
+    [DllImport("ntdll.dll")]
+    static extern int NtDeleteKey(IntPtr key);
+
+    /// <summary>One case: its setup, then one walk over the roots the setup
+    /// hands back. Passes when the walk returns the expected devnodes. A
+    /// setup or a walk that throws is a failed check, and the next case
+    /// runs.</summary>
+    static void CensusCase(string name, Func<Func<string, Microsoft.Win32.RegistryKey?>> setup, List<string> expected)
+    {
+        Func<string, Microsoft.Win32.RegistryKey?> openEnumRoot;
+        try
+        {
+            openEnumRoot = setup();
+        }
+        catch (Exception e)
+        {
+            Check(name, false, $"setup threw {e.GetType().FullName}: {e.Message}");
+            return;
+        }
+        try
+        {
+            var got = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodes(openEnumRoot).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            Check(name, got.SequenceEqual(expected, StringComparer.OrdinalIgnoreCase),
+                $"got [{string.Join(", ", got)}], expected [{string.Join(", ", expected)}]");
+        }
+        catch (Exception e)
+        {
+            Check(name, false, $"threw {e.GetType().FullName}: {e.Message}");
+        }
     }
 #endif
 

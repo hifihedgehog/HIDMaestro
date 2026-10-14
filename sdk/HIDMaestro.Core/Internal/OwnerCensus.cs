@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security;
 using Microsoft.Win32;
 
 namespace HIDMaestro.Internal;
@@ -171,7 +173,15 @@ internal sealed partial class OwnerCensus
     /// <summary>Present ROOT and SWD devnodes HIDMaestro made: the
     /// enumerators only HIDMaestro uses, and the shared ones where the
     /// HardwareID proves it (issue #28).</summary>
-    internal static List<string> PresentOwnedDevnodes()
+    internal static List<string> PresentOwnedDevnodes() => PresentOwnedDevnodes(s_openEnumRoot);
+
+    private static readonly Func<string, RegistryKey?> s_openEnumRoot =
+        root => Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}");
+
+    /// <summary>The same, walking the Enum keys <paramref name="openEnumRoot"/>
+    /// opens for ROOT and SWD. The probe of S84 hands it keys it made
+    /// unreadable or deleted.</summary>
+    internal static List<string> PresentOwnedDevnodes(Func<string, RegistryKey?> openEnumRoot)
     {
         // The device ids and their instances come from the Enum keys, which
         // hold present and absent devnodes alike, and a normal
@@ -181,23 +191,9 @@ internal sealed partial class OwnerCensus
         // 45 for the ROOT key's names and 5 per presence check. Past 64
         // candidate instances, absent ones piled up by programs that never
         // swept, the walk goes back to the listings, whose cost does not
-        // grow with them.
+        // grow with them. So does a walk that cannot read a key.
         var candidates = new List<(string Id, bool Exclusive)>();
-        foreach (string root in EnumRoots)
-        {
-            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}");
-            if (enumKey == null) continue;
-            foreach (string device in enumKey.GetSubKeyNames())
-            {
-                bool exclusive = IsExclusiveEnumerator(device);
-                if (!exclusive && !IsSharedEnumerator(device)) continue;
-                using var deviceKey = enumKey.OpenSubKey(device);
-                if (deviceKey == null) continue;
-                foreach (string instance in deviceKey.GetSubKeyNames())
-                    candidates.Add(($@"{root}\{device}\{instance}", exclusive));
-            }
-        }
-        if (candidates.Count > 64) return PresentOwnedDevnodesListed();
+        if (!TryWalkEnum(openEnumRoot, candidates) || candidates.Count > 64) return PresentOwnedDevnodesListed();
 
         var list = new List<string>();
         foreach (var (id, exclusive) in candidates)
@@ -206,6 +202,47 @@ internal sealed partial class OwnerCensus
             if (CM_Locate_DevNode(out _, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) list.Add(id);
         }
         return list;
+    }
+
+    /// <summary>The census's own walk of HKLM's Enum keys, for S84: the
+    /// fallback gives the listings' answer, so only this tells whether the
+    /// walk itself still reads its keys.</summary>
+    internal static bool TryWalkEnum(List<(string Id, bool Exclusive)> candidates) =>
+        TryWalkEnum(s_openEnumRoot, candidates);
+
+    /// <summary>The instances under ROOT and SWD of the device ids
+    /// HIDMaestro uses. False when a key cannot be read: one the walk may
+    /// not open, or one PnP deleted after the walk listed or opened it. A
+    /// null from OpenSubKey can mean a resource failure as well as a key
+    /// that is gone, so it counts too, and the listings decide.</summary>
+    private static bool TryWalkEnum(Func<string, RegistryKey?> openEnumRoot, List<(string Id, bool Exclusive)> candidates)
+    {
+        try
+        {
+            foreach (string root in EnumRoots)
+            {
+                using var enumKey = openEnumRoot(root);
+                if (enumKey == null) return false;
+                foreach (string device in enumKey.GetSubKeyNames())
+                {
+                    bool exclusive = IsExclusiveEnumerator(device);
+                    if (!exclusive && !IsSharedEnumerator(device)) continue;
+                    using var deviceKey = enumKey.OpenSubKey(device);
+                    if (deviceKey == null) return false;
+                    foreach (string instance in deviceKey.GetSubKeyNames())
+                        candidates.Add(($@"{root}\{device}\{instance}", exclusive));
+                }
+            }
+            return true;
+        }
+        // OpenSubKey throws SecurityException on access denied. GetSubKeyNames
+        // throws IOException on a deleted key (ERROR_KEY_DELETED) and
+        // UnauthorizedAccessException on access denied (RegistryKey.cs,
+        // Win32Error).
+        catch (Exception e) when (e is SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return false;
+        }
     }
 
     private static readonly string[] EnumRoots = { "ROOT", "SWD" };

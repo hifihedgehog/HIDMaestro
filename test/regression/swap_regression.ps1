@@ -1960,10 +1960,13 @@ function Scenario-GameCube-Sdl {
 # S84: no submit path allocates: SubmitState and SubmitRawReport on a
 # DualShock 4, SubmitState on an Xbox 360, SubmitKeyboard, SubmitMouse, and a
 # GameCube adapter port's SubmitState and the controller's, each called
-# thousands of times on a live controller.
+# thousands of times on a live controller. With an Xbox 360 up, the census
+# walk reads HKLM's Enum keys without falling back and finds what the
+# configuration manager lists, also over Enum keys it cannot read (scratch
+# keys under HKCU, denied, deleted or gone).
 function Scenario-Perf-Budget {
     Invoke-Probe -Dir 'perf_budget_check' -Exe 'PerfBudgetCheck.exe' -Arguments 'gate' -Tag 'gate' `
-                 -Message 'a submit path allocated (see probe stdout)' -SkipCodes 2
+                 -Message 'a submit path allocated or the census missed a devnode (see probe stdout)' -SkipCodes 2
 }
 
 # S85: an exception a program's event handler throws stops nothing else. A
