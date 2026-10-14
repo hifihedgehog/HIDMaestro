@@ -1697,14 +1697,13 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static bool WaitForHidChild(string parentInstanceId, int timeoutMs)
     {
-        // v1.3.0 wip 12: kept the registry-poll shape after empirical
-        // diag-log evidence that DeviceManager.WaitForHidChild's
-        // CM_Register_Notification path returns False immediately for SWD-
-        // rooted gamepad-companion parents (the registration call itself
-        // errors before xinputhid has had time to bind the HID child PDO).
-        // Polling is robust to that race; the 25 ms tighter cadence vs
-        // the v1.2.x 100 ms cadence is the actual win here (75 ms tail
-        // wait saved per controller after the child appears).
+        // v1.3.0 wip 12 kept this poll after the diag log showed
+        // DeviceManager.WaitForHidChild returning False at once. That was
+        // the registration failing on a misdeclared CM_NOTIFY_FILTER (432
+        // bytes, refused as CR_INVALID_DATA), not a race with xinputhid,
+        // and is fixed in DeviceManager. The poll stays: the 25 ms cadence
+        // vs the v1.2.x 100 ms one saves up to 75 ms per controller after
+        // the child appears.
         int budget = TimeoutScale.Apply(timeoutMs);
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < budget)
@@ -1723,9 +1722,9 @@ internal static class DeviceOrchestrator
     /// </summary>
     private static bool WaitForDeviceStarted(string instanceId, int timeoutMs)
     {
-        // CM_Register_Notification doesn't signal on DN_STARTED transitions
-        // (PnP only surfaces add/remove/interface events), so this stays as
-        // a poll loop. v1.3.0: tighter poll cadence (25 ms vs 100 ms)
+        // A poll loop. Windows does report a start
+        // (CM_NOTIFY_ACTION_DEVICEINSTANCESTARTED), but this poll carries the
+        // measured create timings. v1.3.0: tighter poll cadence (25 ms vs 100 ms)
         // reduces the worst-case tail wait from ~99 ms to ~24 ms after
         // the device actually starts. The 75 ms saved on every Xbox-family
         // create adds up across multi-controller batches.

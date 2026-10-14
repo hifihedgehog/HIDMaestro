@@ -1620,12 +1620,14 @@ function Scenario-Valve-Raw-Path {
 # stamps it into the pre-registration property state AND restarts the
 # main devnode once in step 5. Three fresh cycles assert one Gamepad,
 # one RawGameController, one XUSB interface, XInput intact, and the
-# 10-button descriptor unchanged (the xinputhid synthesis trap).
+# 10-button descriptor unchanged (the xinputhid synthesis trap). Thirty
+# quick create-and-dispose cycles under one identity key then assert that
+# no XInput slot reads connected again after Dispose returns.
 function Scenario-Xusb-Wgi-Single {
     $probe = Resolve-ProbeBinary 'xusb_wgi_single_check' 'XusbWgiSingleCheck.exe'
     $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait
     if ($p.ExitCode -ne 0) {
-        throw ("XusbWgiSingleCheck exited " + $p.ExitCode + " - a 360-family virtual doubled in WGI again, lost its tripwire, lost XInput, or its HID child stopped reporting 10 buttons (see probe stdout)")
+        throw ("XusbWgiSingleCheck exited " + $p.ExitCode + " - a 360-family virtual doubled in WGI again, lost its tripwire, lost XInput, its HID child stopped reporting 10 buttons, or its XInput slot came back after Dispose (see probe stdout)")
     }
 }
 

@@ -30,8 +30,11 @@ public static class DeviceManager
     [DllImport("CfgMgr32.dll")]
     static extern uint CM_Uninstall_DevNode(uint dnDevInst, uint ulFlags);
 
+    [DllImport("CfgMgr32.dll")]
+    static extern uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INTERFACE pFilter, IntPtr pContext, CM_NOTIFY_CALLBACK pCallback, out IntPtr pNotifyContext);
+
     [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Register_Notification(ref CM_NOTIFY_FILTER pFilter, IntPtr pContext, CM_NOTIFY_CALLBACK pCallback, out IntPtr pNotifyContext);
+    static extern uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INSTANCE pFilter, IntPtr pContext, CM_NOTIFY_CALLBACK pCallback, out IntPtr pNotifyContext);
 
     [DllImport("CfgMgr32.dll")]
     static extern uint CM_Unregister_Notification(IntPtr NotifyContext);
@@ -45,44 +48,153 @@ public static class DeviceManager
     [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
     static extern uint CM_Get_Device_IDW(uint dnDevInst, char[] Buffer, uint BufferLen, uint ulFlags);
 
-    delegate uint CM_NOTIFY_CALLBACK(IntPtr hNotify, IntPtr Context, uint Action, ref CM_NOTIFY_EVENT_DATA EventData, uint EventDataSize);
+    delegate uint CM_NOTIFY_CALLBACK(IntPtr hNotify, IntPtr Context, uint Action, IntPtr EventData, uint EventDataSize);
 
     const uint CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE = 0;
     const uint CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE = 2;
 
+    const uint CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES = 0x00000002;
+
     const uint CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL = 0;
+    const uint CM_NOTIFY_ACTION_DEVICEINSTANCEENUMERATED = 7;
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED = 9;
 
     const uint CR_SUCCESS = 0;
     const uint CR_NOT_DISABLEABLE = 0x00000028;
     const uint DN_STARTED = 0x00000008;
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct CM_NOTIFY_FILTER
+    // cfgmgr32.h: CM_NOTIFY_FILTER is four DWORDs and then a union at offset
+    // 16 holding a GUID (interface filters), a HANDLE, or WCHAR
+    // InstanceId[MAX_DEVICE_ID_LEN] with MAX_DEVICE_ID_LEN 200 (instance
+    // filters): 416 bytes. CM_Register_Notification refuses any other
+    // cbSize with CR_INVALID_DATA. One struct used to carry the GUID and then
+    // the instance ID after it, 432 bytes, so every registration failed and
+    // each wait below returned at once. Measured 2026-10-13: CR 0x1F for that
+    // layout, CR_SUCCESS for these, for both filter kinds.
+    [StructLayout(LayoutKind.Sequential, Size = 416)]
+    struct CM_NOTIFY_FILTER_INTERFACE
     {
         public uint cbSize;
         public uint Flags;
         public uint FilterType;
         public uint Reserved;
-        // Union: for DEVICEINTERFACE, this is the ClassGuid
         public Guid ClassGuid;
-        // Padding for the union (device instance string or handle)
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 200)]
-        public string? FilterData;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct CM_NOTIFY_EVENT_DATA
+    struct CM_NOTIFY_FILTER_INSTANCE
     {
+        public uint cbSize;
+        public uint Flags;
         public uint FilterType;
         public uint Reserved;
-        // Union depends on FilterType
-        public Guid ClassGuid;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 200)]
-        public string? SymbolicLink;
+        public string? InstanceId;
     }
 
-    static readonly Guid HID_INTERFACE_GUID = new("4D1E55B2-F16F-11CF-88CB-001111000030");
+    /// <summary>The symbolic link of an interface event. CM_NOTIFY_EVENT_DATA
+    /// is FilterType and Reserved, then a union at offset 8, and an interface
+    /// event puts its class GUID there and the link after it, at offset 24.
+    /// Reads no further than <paramref name="size"/>.</summary>
+    static string? EventSymbolicLink(IntPtr data, uint size)
+    {
+        if (data == IntPtr.Zero || size <= 24) return null;
+        string s = Marshal.PtrToStringUni(data + 24, (int)(size - 24) / 2);
+        int nul = s.IndexOf('\0');
+        return nul >= 0 ? s.Substring(0, nul) : s;
+    }
+
+    /// <summary>A handle no one sets, for waits that only re-check.</summary>
+    static readonly WaitHandle NeverSignaled = new ManualResetEvent(false);
+
+    /// <summary>The devnode is present and started.</summary>
+    static bool IsStarted(string instanceId) =>
+        CM_Locate_DevNodeW(out uint d, instanceId, 0) == CR_SUCCESS
+        && CM_Get_DevNode_Status(out uint status, out _, d, 0) == CR_SUCCESS
+        && (status & DN_STARTED) != 0;
+
+    /// <summary>How often a wait re-checks its condition between
+    /// notifications, so an event that is missed, or that the callback
+    /// cannot match, costs at most this long.</summary>
+    const int RecheckMs = 50;
+
+    /// <summary>Waits until <paramref name="done"/> holds, checking at once,
+    /// again whenever <paramref name="signal"/> is set, and every
+    /// <paramref name="recheckMs"/> besides. False when the scaled budget runs
+    /// out first.</summary>
+    static bool WaitUntil(Func<bool> done, WaitHandle signal, int timeoutMs, int recheckMs = RecheckMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int budget = TimeoutScale.Apply(timeoutMs);
+        while (true)
+        {
+            if (done()) return true;
+            long left = budget - sw.ElapsedMilliseconds;
+            if (left <= 0) return false;
+            signal.WaitOne((int)Math.Min(left, recheckMs));
+        }
+    }
+
+    /// <summary>Registers <paramref name="callback"/> for interface events of
+    /// one class. Zero when Windows refuses, and the caller's wait then runs
+    /// on its re-checks alone.</summary>
+    static IntPtr RegisterInterfaceEvents(Guid interfaceClass, CM_NOTIFY_CALLBACK callback)
+    {
+        var filter = new CM_NOTIFY_FILTER_INTERFACE
+        {
+            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER_INTERFACE>(),
+            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+            ClassGuid = interfaceClass,
+        };
+        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+    }
+
+    /// <summary>Registers <paramref name="callback"/> for the events of one
+    /// device instance. Zero when Windows refuses.</summary>
+    static IntPtr RegisterInstanceEvents(string instanceId, CM_NOTIFY_CALLBACK callback)
+    {
+        var filter = new CM_NOTIFY_FILTER_INSTANCE
+        {
+            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER_INSTANCE>(),
+            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
+            InstanceId = instanceId,
+        };
+        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+    }
+
+    /// <summary>Registers <paramref name="callback"/> for the events of every
+    /// device instance (CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES, with an
+    /// empty instance ID). Zero when Windows refuses.</summary>
+    static IntPtr RegisterAllInstanceEvents(CM_NOTIFY_CALLBACK callback)
+    {
+        var filter = new CM_NOTIFY_FILTER_INSTANCE
+        {
+            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER_INSTANCE>(),
+            Flags = CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES,
+            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
+            InstanceId = string.Empty,
+        };
+        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+    }
+
+    /// <summary>Runs <paramref name="wait"/> with <paramref name="callback"/>
+    /// registered through <paramref name="register"/>, keeping the delegate
+    /// alive for Windows and unregistering it before returning.</summary>
+    static bool WithNotification(Func<CM_NOTIFY_CALLBACK, IntPtr> register, CM_NOTIFY_CALLBACK callback, Func<bool> wait)
+    {
+        var keep = GCHandle.Alloc(callback);
+        IntPtr h = IntPtr.Zero;
+        try
+        {
+            h = register(callback);
+            return wait();
+        }
+        finally
+        {
+            if (h != IntPtr.Zero) CM_Unregister_Notification(h);
+            keep.Free();
+        }
+    }
 
     /// <summary>
     /// Waits for a specific device interface GUID to appear on the given device.
@@ -90,55 +202,26 @@ public static class DeviceManager
     /// </summary>
     public static bool WaitForDeviceInterface(string instanceId, Guid interfaceGuid, int timeoutMs = 10000)
     {
-        using var readyEvent = new ManualResetEventSlim(false);
-
         // Check if already present
         // (CM_Locate + check interfaces via registry)
         if (HasInterface(instanceId, interfaceGuid))
             return true;
 
-        var filter = new CM_NOTIFY_FILTER
-        {
-            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER>(),
-            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
-            ClassGuid = interfaceGuid
-        };
-
         string instHash = instanceId.Replace('\\', '#').ToLowerInvariant();
-
-        CM_NOTIFY_CALLBACK callback = (IntPtr hNotify, IntPtr context, uint action, ref CM_NOTIFY_EVENT_DATA data, uint size) =>
+        bool arrived = false;
+        using var signal = new AutoResetEvent(false);
+        CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
         {
-            if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL)
+            if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL
+                && EventSymbolicLink(data, size)?.ToLowerInvariant().Contains(instHash) == true)
             {
-                string? symLink = data.SymbolicLink;
-                if (symLink != null && symLink.ToLowerInvariant().Contains(instHash))
-                    readyEvent.Set();
+                Volatile.Write(ref arrived, true);
+                signal.Set();
             }
             return 0u;
         };
-
-        var callbackHandle = GCHandle.Alloc(callback);
-        try
-        {
-            if (CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr notifyCtx) != CR_SUCCESS)
-                return false;
-
-            try
-            {
-                // Re-check after registration (race window)
-                if (HasInterface(instanceId, interfaceGuid))
-                    return true;
-                return readyEvent.Wait(TimeoutScale.Apply(timeoutMs));
-            }
-            finally
-            {
-                CM_Unregister_Notification(notifyCtx);
-            }
-        }
-        finally
-        {
-            callbackHandle.Free();
-        }
+        return WithNotification(cb => RegisterInterfaceEvents(interfaceGuid, cb), callback,
+            () => WaitUntil(() => Volatile.Read(ref arrived) || HasInterface(instanceId, interfaceGuid), signal, timeoutMs));
     }
 
     static bool HasInterface(string instanceId, Guid interfaceGuid)
@@ -161,63 +244,24 @@ public static class DeviceManager
     /// </summary>
     public static bool WaitForHidChild(string parentInstanceId, int timeoutMs = 5000)
     {
-        using var readyEvent = new ManualResetEventSlim(false);
+        static bool HasChild(string parent) =>
+            CM_Locate_DevNodeW(out uint p, parent, 0) == CR_SUCCESS && CM_Get_Child(out uint _, p, 0) == CR_SUCCESS;
+        if (HasChild(parentInstanceId))
+            return true;
 
-        // Check if already present
-        if (CM_Locate_DevNodeW(out uint parentInst, parentInstanceId, 0) == CR_SUCCESS)
+        // Wakes on every devnode Windows enumerates and re-checks the parent,
+        // so the wait ends as the child appears. A HID interface arrives
+        // only after the child has started, and its link names the child,
+        // not the parent. Waking on those cost 30 to 50 ms per plain HID
+        // create (measured 2026-10-13, DualSense and G502 medians).
+        using var signal = new AutoResetEvent(false);
+        CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
         {
-            if (CM_Get_Child(out uint _, parentInst, 0) == CR_SUCCESS)
-                return true; // Already has a child
-        }
-
-        // Register for HID interface arrival
-        var filter = new CM_NOTIFY_FILTER
-        {
-            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER>(),
-            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
-            ClassGuid = HID_INTERFACE_GUID
-        };
-
-        CM_NOTIFY_CALLBACK callback = (IntPtr hNotify, IntPtr context, uint action, ref CM_NOTIFY_EVENT_DATA data, uint size) =>
-        {
-            if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL)
-            {
-                string? symLink = data.SymbolicLink;
-                if (symLink != null)
-                {
-                    string parentHash = parentInstanceId.Replace('\\', '#').ToLowerInvariant();
-                    if (symLink.ToLowerInvariant().Contains(parentHash))
-                        readyEvent.Set();
-                }
-            }
+            if (action == CM_NOTIFY_ACTION_DEVICEINSTANCEENUMERATED) signal.Set();
             return 0u;
         };
-
-        var callbackHandle = GCHandle.Alloc(callback);
-        try
-        {
-            if (CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr notifyCtx) != CR_SUCCESS)
-                return false;
-
-            try
-            {
-                // Check again after registration (race condition window)
-                uint childInst;
-                if (CM_Locate_DevNodeW(out parentInst, parentInstanceId, 0) == CR_SUCCESS
-                    && CM_Get_Child(out childInst, parentInst, 0) == CR_SUCCESS)
-                    return true;
-
-                return readyEvent.Wait(TimeoutScale.Apply(timeoutMs));
-            }
-            finally
-            {
-                CM_Unregister_Notification(notifyCtx);
-            }
-        }
-        finally
-        {
-            callbackHandle.Free();
-        }
+        return WithNotification(RegisterAllInstanceEvents, callback,
+            () => WaitUntil(() => HasChild(parentInstanceId), signal, timeoutMs));
     }
 
     /// <summary>
@@ -226,50 +270,23 @@ public static class DeviceManager
     /// </summary>
     public static bool WaitForDeviceRemoval(string instanceId, int timeoutMs = 5000)
     {
-        // Check if already gone
-        if (CM_Locate_DevNodeW(out uint _, instanceId, 0) != CR_SUCCESS)
+        static bool Gone(string id) => CM_Locate_DevNodeW(out uint _, id, 0) != CR_SUCCESS;
+        if (Gone(instanceId))
             return true;
 
-        using var goneEvent = new ManualResetEventSlim(false);
-
-        var filter = new CM_NOTIFY_FILTER
-        {
-            cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER>(),
-            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
-            FilterData = instanceId
-        };
-
-        CM_NOTIFY_CALLBACK callback = (IntPtr hNotify, IntPtr context, uint action, ref CM_NOTIFY_EVENT_DATA data, uint size) =>
+        bool removed = false;
+        using var signal = new AutoResetEvent(false);
+        CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
         {
             if (action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED)
-                goneEvent.Set();
+            {
+                Volatile.Write(ref removed, true);
+                signal.Set();
+            }
             return 0u;
         };
-
-        var callbackHandle = GCHandle.Alloc(callback);
-        try
-        {
-            if (CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr notifyCtx) != CR_SUCCESS)
-                return false;
-
-            try
-            {
-                // Check again after registration
-                uint devInst2;
-                if (CM_Locate_DevNodeW(out devInst2, instanceId, 0) != CR_SUCCESS)
-                    return true;
-
-                return goneEvent.Wait(TimeoutScale.Apply(timeoutMs));
-            }
-            finally
-            {
-                CM_Unregister_Notification(notifyCtx);
-            }
-        }
-        finally
-        {
-            callbackHandle.Free();
-        }
+        return WithNotification(cb => RegisterInstanceEvents(instanceId, cb), callback,
+            () => WaitUntil(() => Volatile.Read(ref removed) || Gone(instanceId), signal, timeoutMs));
     }
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
@@ -960,12 +977,12 @@ public static class DeviceManager
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS)
             return false;
-        CM_Disable_DevNode(devInst, 0);
-        // Wait for driver to unload before re-enabling. The 5 s base is
-        // a backstop: WaitForDeviceRemoval is signal-driven internally
-        // via CM_Register_Notification, this just caps the wait.
-        // WaitForDeviceRemoval applies TimeoutScale internally.
-        WaitForDeviceRemoval(instanceId, 5000);
+        // A disable stops the stack and leaves the devnode in place, so no
+        // removal event follows it. Wait until the device has left the
+        // started state, checked at once and every 2 ms, capped at 5 s. A
+        // refused disable has nothing to wait for.
+        if (CM_Disable_DevNode(devInst, 0) == CR_SUCCESS)
+            WaitUntil(() => !IsStarted(instanceId), NeverSignaled, 5000, recheckMs: 2);
         // Re-locate (may have become phantom after disable)
         CM_Locate_DevNodeW(out devInst, instanceId, 1); // phantom flag
         CM_Enable_DevNode(devInst, 0);

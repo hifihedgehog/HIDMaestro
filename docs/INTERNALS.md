@@ -407,6 +407,8 @@ Two of the three architecture groups (Xbox 360 Wired and Xbox Series BT) own a S
 
 v1.3.1 inverts the order: for any `SWD\` parent, close the SwDevice handle FIRST via `SwdDeviceFactory.Remove`, block on `CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED` for the parent (so callers know the kernel has actually propagated removal, not just that the handle closed), then mop up any HID children that survived the cascade: usually none, because the SwD parent's release fires its children's removal in one cascade.
 
+Until October 2026 that block never happened. `CM_Register_Notification` refused the SDK's filter struct, declared at 432 bytes against the header's 416, with `CR_INVALID_DATA`, so every wait in `DeviceManager` returned at once and `WaitForDeviceRemoval` reported a device that was still present as not removed. Dispose went on while the SwD device was still leaving, and in 12 of 30 quick create-and-dispose cycles an Xbox 360 Wired controller's XInput slot read connected again 8 to 24 ms after Dispose returned, for about 15 ms. With the struct declared as the header defines it, the wait blocks until Windows reports the device gone. In those quick cycles Dispose took about 15 ms longer and no slot came back (S57 checks it). In create-and-dispose timing runs on five profiles, medians moved by no more than run-to-run noise.
+
 A second optimization in the same change: when a HIDMAESTRO sweep walks registry entries that exist only as PHANTOM (registry residue from prior sessions, no live devnode), skip the `hmswd.exe` SwDeviceCreate-reconnect roundtrip entirely. Saves ~50-75ms per stale entry and prevents creep across same-process recreation cycles.
 
 #### Why this matters for consumers
