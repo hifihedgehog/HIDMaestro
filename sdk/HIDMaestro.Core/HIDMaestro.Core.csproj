@@ -12,6 +12,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
 
+    <!-- Usable from NativeAOT, trimmed and single-file apps. This marks the
+         assembly trimmable and turns on the trim, single-file and AOT
+         analyzers. aot-analyzers.globalconfig makes any of their warnings an
+         error in Release, so a change that breaks one of those app kinds
+         fails the build instead of the consumer. -->
+    <IsAotCompatible>true</IsAotCompatible>
+
     <!-- Library identity -->
     <AssemblyName>HIDMaestro.Core</AssemblyName>
     <RootNamespace>HIDMaestro</RootNamespace>
@@ -28,6 +35,10 @@
     <HMBuildDir>$(HMRepoRoot)build\</HMBuildDir>
     <HMWdkBin>C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\</HMWdkBin>
   </PropertyGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <GlobalAnalyzerConfigFiles Include="aot-analyzers.globalconfig" />
+  </ItemGroup>
 
   <!-- Pre-build: refresh embedded payload from build/ and the local WDK install.
        This runs once per `dotnet build` so the embedded resources always reflect

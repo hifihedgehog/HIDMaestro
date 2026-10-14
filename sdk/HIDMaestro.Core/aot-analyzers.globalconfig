@@ -1,0 +1,9 @@
+is_global = true
+
+# IsAotCompatible turns on the trim, single-file and NativeAOT analyzers,
+# which report under these three categories. In a Release build any of their
+# warnings is an error, so a change that would break HIDMaestro.Core in a
+# trimmed, single-file or NativeAOT app fails here instead.
+dotnet_analyzer_diagnostic.category-Trimming.severity = error
+dotnet_analyzer_diagnostic.category-SingleFile.severity = error
+dotnet_analyzer_diagnostic.category-AOT.severity = error

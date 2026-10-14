@@ -38,6 +38,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("XusbBatteryCheck")]
 [assembly: InternalsVisibleTo("DriverCatalogCheck")]
 [assembly: InternalsVisibleTo("ValveFirmwareCheck")]
+[assembly: InternalsVisibleTo("JsonParityCheck")]
 [assembly: InternalsVisibleTo("Ds4ReportCheck")]
 [assembly: InternalsVisibleTo("Ds3SixaxisCheck")]
 [assembly: InternalsVisibleTo("Switch2CompositeCheck")]

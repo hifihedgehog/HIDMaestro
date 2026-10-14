@@ -186,6 +186,10 @@ if ($verMatch.Success) {
         # The copy that runs inside Windows Sandbox is published from the same
         # build into sandbox\, so this one's freshness is that one's too.
         Join-Path $scriptDir '..\probes\usbip_install_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        # The NativeAOT and single-file copies carry no separate DLL. They
+        # are published from the same build as this one.
+        Join-Path $scriptDir '..\probes\aot_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\json_parity_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1850,6 +1854,33 @@ function Scenario-Usbip-Clean-Install {
                  -Message 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, or ran over an existing install (see probe stdout)' -SkipCodes 2
 }
 
+# The smoke apps the aot_smoke probe publishes for this machine's
+# architecture.
+function Get-SmokeArch {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'x64' }
+}
+
+# S74: HIDMaestro.Core in a NativeAOT app. The whole catalog loads, the
+# driver installs, a UMDF2 controller and a USB/IP composite each carry input
+# and raise OutputReceived for an output report, and both go away on dispose.
+function Scenario-NativeAot-Smoke {
+    Invoke-Probe -Dir 'aot_smoke' -Exe ('aot-' + (Get-SmokeArch) + '\AotSmoke.exe') -Arguments 'aot' -Tag 'aot' `
+                 -Message 'HIDMaestro.Core failed in a NativeAOT app (see probe stdout)' -SkipCodes 2
+}
+
+# S75: the same in a trimmed, self-contained, single-file app.
+function Scenario-SingleFile-Smoke {
+    Invoke-Probe -Dir 'aot_smoke' -Exe ('trim-' + (Get-SmokeArch) + '\AotSmoke.exe') -Arguments 'trim' -Tag 'trim' `
+                 -Message 'HIDMaestro.Core failed in a trimmed single-file app (see probe stdout)' -SkipCodes 2
+}
+
+# S76: source-generated JSON reads every profile into the same objects
+# v1.12.0's reflection-based reading did. No device.
+function Scenario-Json-Parity {
+    Invoke-Probe -Dir 'json_parity_check' -Exe 'JsonParityCheck.exe' `
+                 -Message 'a profile reads differently through source-generated JSON than v1.12.0 read it (see probe stdout)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1927,7 +1958,10 @@ $scenarios = @(
     @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
     @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} },
     @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} },
-    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} }
+    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} },
+    @{ Name = 'S74_NativeAot_Smoke';             Body = ${function:Scenario-NativeAot-Smoke} },
+    @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
+    @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

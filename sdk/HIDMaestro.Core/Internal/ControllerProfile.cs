@@ -712,8 +712,6 @@ public sealed class ProfileDatabase
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        var options = HMLayoutJsonOptions.Default;
-
         // v1.3.0: parallel parse mirroring LoadEmbedded. Disk reads are
         // serialized at the kernel level on most filesystems, but JSON
         // parse is CPU-bound and benefits from cores. For a directory
@@ -728,7 +726,7 @@ public sealed class ProfileDatabase
             try
             {
                 var json = File.ReadAllText(file);
-                var profile = JsonSerializer.Deserialize<ControllerProfile>(json, options);
+                var profile = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile);
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
                     parsed.Add(profile);
             }
@@ -771,7 +769,6 @@ public sealed class ProfileDatabase
     {
         var db = new ProfileDatabase();
         var asm = typeof(ProfileDatabase).Assembly;
-        var options = HMLayoutJsonOptions.Default;
         const string prefix = "HIDMaestro.Profiles.";
 
         // Collect resource names first so we can parse in parallel. The
@@ -792,7 +789,7 @@ public sealed class ProfileDatabase
                 if (s == null) return;
                 using var reader = new StreamReader(s);
                 string json = reader.ReadToEnd();
-                var profile = JsonSerializer.Deserialize<ControllerProfile>(json, options);
+                var profile = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile);
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
                     parsed.Add(profile);
             }

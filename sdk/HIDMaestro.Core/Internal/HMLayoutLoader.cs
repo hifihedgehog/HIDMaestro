@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace HIDMaestro.Internal;
 
@@ -28,32 +29,216 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
         var kind = SnakeCaseToEnum<HMLayoutKind>(kindStr)
                    ?? throw new JsonException($"HMLayout: unknown kind '{kindStr}'");
 
-        var json = root.GetRawText();
-        var sub = options;  // reuse options (already configured with snake_case enum support)
-        return kind switch
+        // Each concrete layout is read with the metadata the options carry:
+        // the source-generated HMJsonContext for the SDK's own options, so
+        // no reflection runs, and whatever resolver a caller's own options
+        // carry otherwise. The kind is matched leniently above, as it has
+        // been since layouts shipped, which is why this stays a converter
+        // and not a [JsonPolymorphic] discriminator, which matches exactly.
+        Type concrete = kind switch
         {
-            HMLayoutKind.Unspecified         => JsonSerializer.Deserialize<HMUnspecifiedLayout>(json, sub),
-            HMLayoutKind.Gamepad             => JsonSerializer.Deserialize<HMGamepadLayout>(json, sub),
-            HMLayoutKind.Joystick            => JsonSerializer.Deserialize<HMJoystickLayout>(json, sub),
-            HMLayoutKind.FlightStick         => JsonSerializer.Deserialize<HMFlightStickLayout>(json, sub),
-            HMLayoutKind.Hotas               => JsonSerializer.Deserialize<HMHotasLayout>(json, sub),
-            HMLayoutKind.Wheel               => JsonSerializer.Deserialize<HMWheelLayout>(json, sub),
-            HMLayoutKind.Pedals              => JsonSerializer.Deserialize<HMPedalsLayout>(json, sub),
-            HMLayoutKind.Shifter             => JsonSerializer.Deserialize<HMShifterLayout>(json, sub),
-            HMLayoutKind.Handbrake           => JsonSerializer.Deserialize<HMHandbrakeLayout>(json, sub),
-            HMLayoutKind.SingleAxisAccessory => JsonSerializer.Deserialize<HMSingleAxisAccessoryLayout>(json, sub),
-            HMLayoutKind.ArcadeStick         => JsonSerializer.Deserialize<HMArcadeStickLayout>(json, sub),
-            HMLayoutKind.DancePad            => JsonSerializer.Deserialize<HMDancePadLayout>(json, sub),
-            HMLayoutKind.Guitar              => JsonSerializer.Deserialize<HMGuitarLayout>(json, sub),
-            HMLayoutKind.MotionWand          => JsonSerializer.Deserialize<HMMotionWandLayout>(json, sub),
-            HMLayoutKind.Remote              => JsonSerializer.Deserialize<HMRemoteLayout>(json, sub),
-            HMLayoutKind.ControllerAdapter   => JsonSerializer.Deserialize<HMControllerAdapterLayout>(json, sub),
+            HMLayoutKind.Unspecified         => typeof(HMUnspecifiedLayout),
+            HMLayoutKind.Gamepad             => typeof(HMGamepadLayout),
+            HMLayoutKind.Joystick            => typeof(HMJoystickLayout),
+            HMLayoutKind.FlightStick         => typeof(HMFlightStickLayout),
+            HMLayoutKind.Hotas               => typeof(HMHotasLayout),
+            HMLayoutKind.Wheel               => typeof(HMWheelLayout),
+            HMLayoutKind.Pedals              => typeof(HMPedalsLayout),
+            HMLayoutKind.Shifter             => typeof(HMShifterLayout),
+            HMLayoutKind.Handbrake           => typeof(HMHandbrakeLayout),
+            HMLayoutKind.SingleAxisAccessory => typeof(HMSingleAxisAccessoryLayout),
+            HMLayoutKind.ArcadeStick         => typeof(HMArcadeStickLayout),
+            HMLayoutKind.DancePad            => typeof(HMDancePadLayout),
+            HMLayoutKind.Guitar              => typeof(HMGuitarLayout),
+            HMLayoutKind.MotionWand          => typeof(HMMotionWandLayout),
+            HMLayoutKind.Remote              => typeof(HMRemoteLayout),
+            HMLayoutKind.ControllerAdapter   => typeof(HMControllerAdapterLayout),
             _                                => throw new JsonException($"HMLayout: unhandled kind {kind}")
         };
+
+        // The source generator builds a record whose properties are init-only
+        // in one object initializer that assigns every one of them, and a key
+        // the JSON leaves out arrives as default(T): null for the empty lists
+        // and new() objects the records initialize, 0 for a trigger's Stages
+        // and HMAxisRole.Unknown for a rotary encoder's Role. Reflection built
+        // the record first and kept those initializers. The JSON is written
+        // out again with each such missing key filled from a freshly
+        // constructed record, which keeps them here too.
+        var info = options.GetTypeInfo(concrete);
+        var plan = PlanFor(concrete, options);
+        if (plan == null) return (HMLayout?)root.Deserialize(info);
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>(4096);
+        using (var w = new Utf8JsonWriter(buffer)) WriteFilled(w, root, plan);
+        return (HMLayout?)JsonSerializer.Deserialize(buffer.WrittenSpan, info);
     }
 
+    /// <summary>For one record type under one options instance: each
+    /// settable property whose missing-key value differs from the record's
+    /// own initializer, with the initializer's value as JSON, and the plans
+    /// of the nested records that need the same. Built once.</summary>
+    private sealed class FillPlan
+    {
+        public readonly List<(string Name, byte[] Json)> Defaults = new();
+        public readonly Dictionary<string, (FillPlan Plan, JsonTypeInfoKind Container)> Nested = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<JsonSerializerOptions, System.Collections.Concurrent.ConcurrentDictionary<Type, FillPlan?>> s_plans = new();
+
+    /// <summary>The fill plan of <paramref name="type"/>, or null when
+    /// nothing in it or under it needs filling, which is every type when the
+    /// options read with reflection: that path keeps initializers itself.</summary>
+    private static FillPlan? PlanFor(Type type, JsonSerializerOptions options)
+    {
+        var cache = s_plans.GetValue(options, static _ => new());
+        if (cache.TryGetValue(type, out var plan)) return plan;
+        lock (cache)
+        {
+            if (cache.TryGetValue(type, out plan)) return plan;
+            return Build(type, options, cache, new HashSet<Type>());
+        }
+    }
+
+    private static FillPlan? Build(Type type, JsonSerializerOptions options,
+        System.Collections.Concurrent.ConcurrentDictionary<Type, FillPlan?> cache, HashSet<Type> path)
+    {
+        if (cache.TryGetValue(type, out var done)) return done;
+        var info = options.GetTypeInfo(type);
+        if (info.Kind != JsonTypeInfoKind.Object || !path.Add(type)) return null;
+
+        // What a missing key turns into is what the same metadata builds from
+        // an empty object. Where that differs from a freshly constructed
+        // record, the record's value has to be supplied.
+        object? fresh = NewInstance(type), bare = null;
+        if (fresh != null)
+        {
+            try { bare = JsonSerializer.Deserialize("{}"u8, info); }
+            catch (JsonException) { }
+            catch (NotSupportedException) { }
+        }
+        var plan = new FillPlan();
+        foreach (var p in info.Properties)
+        {
+            if (p.Set == null && p.AssociatedParameter == null) continue; // read-only: never bound on read
+            if (fresh != null && p.Get != null)
+            {
+                var valueInfo = options.GetTypeInfo(p.PropertyType);
+                byte[] want = JsonSerializer.SerializeToUtf8Bytes(p.Get(fresh), valueInfo);
+                if (bare == null || !want.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(p.Get(bare), valueInfo)))
+                    plan.Defaults.Add((p.Name, want));
+            }
+            Type t = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+            var ti = options.GetTypeInfo(t);
+            Type? inner = ti.Kind switch
+            {
+                JsonTypeInfoKind.Object => t,
+                JsonTypeInfoKind.Enumerable or JsonTypeInfoKind.Dictionary => ti.ElementType,
+                _ => null,
+            };
+            if (inner != null && Build(Nullable.GetUnderlyingType(inner) ?? inner, options, cache, path) is { } child)
+                plan.Nested[p.Name] = (child, ti.Kind);
+        }
+        path.Remove(type);
+        var result = plan.Defaults.Count > 0 || plan.Nested.Count > 0 ? plan : null;
+        cache[type] = result;
+        return result;
+    }
+
+    /// <summary>Write <paramref name="obj"/> as it is, with each missing key
+    /// <paramref name="plan"/> names added and the nested records it names
+    /// written the same way.</summary>
+    private static void WriteFilled(Utf8JsonWriter w, JsonElement obj, FillPlan plan)
+    {
+        w.WriteStartObject();
+        Span<bool> present = stackalloc bool[plan.Defaults.Count];
+        foreach (var prop in obj.EnumerateObject())
+        {
+            for (int i = 0; i < plan.Defaults.Count; i++)
+                if (string.Equals(plan.Defaults[i].Name, prop.Name, StringComparison.OrdinalIgnoreCase)) present[i] = true;
+            w.WritePropertyName(prop.Name);
+            if (plan.Nested.TryGetValue(prop.Name, out var n)) WriteNested(w, prop.Value, n.Plan, n.Container);
+            else prop.Value.WriteTo(w);
+        }
+        for (int i = 0; i < plan.Defaults.Count; i++)
+        {
+            if (present[i]) continue;
+            w.WritePropertyName(plan.Defaults[i].Name);
+            w.WriteRawValue(plan.Defaults[i].Json, skipInputValidation: true);
+        }
+        w.WriteEndObject();
+    }
+
+    private static void WriteNested(Utf8JsonWriter w, JsonElement value, FillPlan plan, JsonTypeInfoKind container)
+    {
+        switch (container)
+        {
+            case JsonTypeInfoKind.Object when value.ValueKind == JsonValueKind.Object:
+                WriteFilled(w, value, plan);
+                return;
+            case JsonTypeInfoKind.Enumerable when value.ValueKind == JsonValueKind.Array:
+                w.WriteStartArray();
+                foreach (var e in value.EnumerateArray())
+                {
+                    if (e.ValueKind == JsonValueKind.Object) WriteFilled(w, e, plan);
+                    else e.WriteTo(w);
+                }
+                w.WriteEndArray();
+                return;
+            case JsonTypeInfoKind.Dictionary when value.ValueKind == JsonValueKind.Object:
+                w.WriteStartObject();
+                foreach (var kv in value.EnumerateObject())
+                {
+                    w.WritePropertyName(kv.Name);
+                    if (kv.Value.ValueKind == JsonValueKind.Object) WriteFilled(w, kv.Value, plan);
+                    else kv.Value.WriteTo(w);
+                }
+                w.WriteEndObject();
+                return;
+            default:
+                value.WriteTo(w);
+                return;
+        }
+    }
+
+    /// <summary>A newly constructed instance of each record in the layout
+    /// graph, whose initializers are the values a missing key stands for.
+    /// Every layout kind is here, and every nested record. A record added to
+    /// the layout graph belongs here too: json_parity_check reads the whole
+    /// catalog both ways and fails on any profile whose contents differ.</summary>
+    private static object? NewInstance(Type t) =>
+        t == typeof(HMUnspecifiedLayout) ? new HMUnspecifiedLayout() :
+        t == typeof(HMGamepadLayout) ? new HMGamepadLayout() :
+        t == typeof(HMJoystickLayout) ? new HMJoystickLayout() :
+        t == typeof(HMFlightStickLayout) ? new HMFlightStickLayout() :
+        t == typeof(HMHotasLayout) ? new HMHotasLayout() :
+        t == typeof(HMWheelLayout) ? new HMWheelLayout() :
+        t == typeof(HMPedalsLayout) ? new HMPedalsLayout() :
+        t == typeof(HMShifterLayout) ? new HMShifterLayout() :
+        t == typeof(HMHandbrakeLayout) ? new HMHandbrakeLayout() :
+        t == typeof(HMSingleAxisAccessoryLayout) ? new HMSingleAxisAccessoryLayout() :
+        t == typeof(HMArcadeStickLayout) ? new HMArcadeStickLayout() :
+        t == typeof(HMDancePadLayout) ? new HMDancePadLayout() :
+        t == typeof(HMGuitarLayout) ? new HMGuitarLayout() :
+        t == typeof(HMMotionWandLayout) ? new HMMotionWandLayout() :
+        t == typeof(HMRemoteLayout) ? new HMRemoteLayout() :
+        t == typeof(HMControllerAdapterLayout) ? new HMControllerAdapterLayout() :
+        t == typeof(HMStick) ? new HMStick() :
+        t == typeof(HMTrigger) ? new HMTrigger() :
+        t == typeof(HMDpad) ? new HMDpad() :
+        t == typeof(HMButtonBinding) ? new HMButtonBinding() :
+        t == typeof(HMHatBinding) ? new HMHatBinding() :
+        t == typeof(HMHaptics) ? new HMHaptics() :
+        t == typeof(HMImu) ? new HMImu() :
+        t == typeof(HMRudder) ? new HMRudder() :
+        t == typeof(HMWheelSpec) ? new HMWheelSpec() :
+        t == typeof(HMPedal) ? new HMPedal() :
+        t == typeof(HMShifter) ? new HMShifter() :
+        t == typeof(HMRotaryEncoder) ? new HMRotaryEncoder() :
+        t == typeof(HMRevIndicator) ? new HMRevIndicator() :
+        t == typeof(HMTriggerButton) ? new HMTriggerButton() :
+        null;
+
     public override void Write(Utf8JsonWriter writer, HMLayout value, JsonSerializerOptions options)
-        => JsonSerializer.Serialize(writer, value, value.GetType(), options);
+        => JsonSerializer.Serialize(writer, value, options.GetTypeInfo(value.GetType()));
 
     /// <summary>Convert a snake_case JSON string ("left_stick_x") to its
     /// matching PascalCase enum value (HMAxisRole.LeftStickX). Returns null
@@ -70,30 +255,15 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
 }
 
 /// <summary>JSON serializer options preconfigured for HMLayout
-/// deserialization. Registered once per ControllerProfile load.</summary>
+/// deserialization. Registered once per ControllerProfile load.
+///
+/// <para>Since v1.13.0 these are the options of the SDK's source-generated
+/// context, with no reflection behind them, so they work in NativeAOT and
+/// trimmed apps. They read and write profiles and every <see cref="HMLayout"/>
+/// type. A type outside the SDK needs options of its own.</para></summary>
 public static class HMLayoutJsonOptions
 {
-    public static readonly JsonSerializerOptions Default = Build();
-
-    private static JsonSerializerOptions Build()
-    {
-        var opts = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            PropertyNameCaseInsensitive = true,    // matches legacy ControllerProfile load behavior
-            ReadCommentHandling = JsonCommentHandling.Skip,
-            AllowTrailingCommas = true,
-        };
-        // HMAxisJsonConverter must come BEFORE JsonStringEnumConverter or
-        // the latter wins for HMAxis (it's an enum) and produces snake_case
-        // names like "x" / "left_stick_x" instead of the canonical PascalCase
-        // axis names ("X", "Y", "LeftStickX") that the descriptor parser
-        // emits.
-        opts.Converters.Add(new HMAxisJsonConverter());
-        opts.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower));
-        opts.Converters.Add(new HMLayoutJsonConverter());
-        return opts;
-    }
+    public static readonly JsonSerializerOptions Default = HMJsonContext.Default.Options;
 }
 
 /// <summary>Reads <see cref="HMAxis"/> from JSON as the canonical

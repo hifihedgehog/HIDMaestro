@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S73. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S76. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -25,6 +25,8 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Is another OpenVR driver registered under HIDMaestro's driver name?" | [vr_driver_conflict_check](vr_driver_conflict_check/) |
 | "Do two programs that embed HIDMaestro leave each other's controllers, driver and staging alone?" | [coexist_check](coexist_check/): sections A to H are S71, section I is S72. Each program is a peer process, and older releases run as peers built against their own HIDMaestro.Core.dll |
 | "What does the bundled usbip-win2 install leave on a clean machine, and does it run over an existing one?" | [usbip_install_check](usbip_install_check/): runs itself inside Windows Sandbox, started without a window. S73 |
+| "Does HIDMaestro.Core work in a NativeAOT app, and in a trimmed single-file app?" | [aot_smoke](aot_smoke/): one source published both ways for x64 and ARM64. S74 and S75. `--startup` times process start to catalog loaded |
+| "Does source-generated JSON read every profile the way v1.12.0 did?" | [json_parity_check](json_parity_check/): no device. S76. `--time <runs>` times the full-catalog parse both ways |
 
 ## Near-duplicates and when to use which
 
