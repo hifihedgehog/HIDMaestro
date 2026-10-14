@@ -60,6 +60,7 @@ public static partial class DeviceManager
     const uint CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES = 0x00000002;
 
     const uint CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL = 0;
+    const uint CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL = 1;
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEENUMERATED = 7;
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED = 9;
 
@@ -116,6 +117,9 @@ public static partial class DeviceManager
     static uint NotifyDispatch(IntPtr hNotify, IntPtr context, uint action, IntPtr eventData, uint eventDataSize)
     {
         Interlocked.Increment(ref s_notificationsDelivered);
+        // An interface filter delivers only the interface actions, arrival
+        // and removal (0 and 1). Every instance action is 2 or higher.
+        if (action <= CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL) Interlocked.Increment(ref s_interfaceNotificationsDelivered);
         try
         {
             if (GCHandle.FromIntPtr(context).Target is CM_NOTIFY_CALLBACK handler)
@@ -132,6 +136,14 @@ public static partial class DeviceManager
     /// its re-checks, only later, so this count is the evidence that the
     /// notifications themselves arrive. pnp_notify_check reads it.</summary>
     internal static long NotificationsDelivered => Interlocked.Read(ref s_notificationsDelivered);
+
+    private static long s_interfaceNotificationsDelivered;
+
+    /// <summary>The part of <see cref="NotificationsDelivered"/> that came
+    /// through a device-interface filter: interface arrivals and removals.
+    /// An instance filter never delivers these, so a count above zero shows
+    /// the interface filter itself works. pnp_notify_check reads it.</summary>
+    internal static long InterfaceNotificationsDelivered => Interlocked.Read(ref s_interfaceNotificationsDelivered);
 
     /// <summary>The symbolic link of an interface event. CM_NOTIFY_EVENT_DATA
     /// is FilterType and Reserved, then a union at offset 8, and an interface

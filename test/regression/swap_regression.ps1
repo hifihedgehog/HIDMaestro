@@ -1888,7 +1888,8 @@ function Scenario-Json-Parity {
 
 # S77: PnP notifications reach the SDK's create and dispose waits. Without
 # them every wait still finishes, on its 50 ms re-checks, so only the count
-# taken inside the SDK's callback shows they arrive.
+# taken inside the SDK's callback shows they arrive. The count is split by
+# filter kind so the device-interface filter is checked on its own.
 function Scenario-Pnp-Notify {
     Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' `
                  -Message 'PnP notifications stopped reaching the SDK''s waits (see probe stdout)' -SkipCodes 2
