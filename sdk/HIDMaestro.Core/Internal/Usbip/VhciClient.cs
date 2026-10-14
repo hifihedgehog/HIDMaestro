@@ -100,11 +100,12 @@ internal static partial class VhciClient
     }
 
     // The host controller's interface path and the request layout it
-    // answered, kept once found. Looking the path up is a configuration
-    // manager call of about 150 microseconds, and the census that lists the
-    // imports runs on every create. A failed open looks the path up again,
-    // and a failed request on the kept layout probes again, so a controller
-    // reinstalled while this process runs is found anew.
+    // answered, kept once found. Looking the path up takes two configuration
+    // manager calls, about 40 microseconds at p50 on the bench, and the
+    // census that lists the imports runs on every create. A failed open
+    // looks the path up again, and a failed request on the kept layout
+    // probes again, so a controller reinstalled while this process runs is
+    // found anew.
     private static string? s_path;
     private static Layout? s_layout;
 
