@@ -1866,8 +1866,9 @@ function Get-SmokeArch {
 }
 
 # S74: HIDMaestro.Core in a NativeAOT app. The whole catalog loads, the
-# driver installs, a UMDF2 controller and a USB/IP composite each carry input
-# and raise OutputReceived for an output report, and both go away on dispose.
+# driver installs, a UMDF2 controller and a USB/IP composite each deliver the
+# submitted state to a HID read and raise OutputReceived for an output report,
+# and both go away on dispose.
 function Scenario-NativeAot-Smoke {
     Invoke-Probe -Dir 'aot_smoke' -Exe ('aot-' + (Get-SmokeArch) + '\AotSmoke.exe') -Arguments 'aot' -Tag 'aot' `
                  -Message 'HIDMaestro.Core failed in a NativeAOT app (see probe stdout)' -SkipCodes 2

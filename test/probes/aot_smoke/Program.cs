@@ -9,12 +9,20 @@
 //   3. Installs the driver.
 //   4. Creates dualshock-4-v2 on the UMDF2 driver and dualsense-composite on
 //      USB/IP. For each, the HID interface appears, input submitted with
-//      SubmitState arrives as input reports, and an output report written to
-//      the interface raises OutputReceived.
+//      SubmitState is read back from the interface the way a host reads it,
+//      and an output report written to the interface raises OutputReceived.
+//      Delivery is judged on content: the reports read while a neutral state
+//      is submitted and the reports read while a pressed state is submitted
+//      must differ in at least one byte that is steady within each window.
+//      A counter or timestamp changes inside a window and so cannot pass
+//      for the state.
 //   5. Disposes both, and both interfaces go away.
 //
-// Usage: AotSmoke.exe aot|trim. Requires elevation. Exit 0 PASS, 1 FAIL, 2
-// when another program that embeds HIDMaestro is running.
+// Usage: AotSmoke.exe aot|trim [--neutral-only]. Requires elevation. Exit 0
+// PASS, 1 FAIL, 2 when another program that embeds HIDMaestro is running.
+// --neutral-only is the negative control for the delivery check: it submits
+// the neutral state in both windows, so reports flow but carry no pressed
+// state, and the check must fail.
 //
 // AotSmoke.exe --startup prints the milliseconds from process start to the
 // catalog loaded and exits, touching no device: the cold start the
@@ -52,6 +60,7 @@ internal static class Program
             return n > 0 ? 0 : 1;
         }
         string expected = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        bool neutralOnly = args.Contains("--neutral-only");
         Console.WriteLine($"=== HIDMaestro in a {(expected == "aot" ? "NativeAOT" : expected == "trim" ? "trimmed single-file" : "plain")} app ===");
 
         string? consumer = OtherSdkConsumer();
@@ -128,10 +137,21 @@ internal static class Program
             Check($"{d.Id}: its HID interface appears", path != null);
             if (path != null)
             {
-                var state = new HMGamepadState { Buttons = HMButton.A };
-                var (reports, readError) = Native.CountReports(path, 1000, () => { try { c.SubmitState(in state); } catch { } });
-                Check($"{d.Id}: input arrives", reports > 0 && readError == 0,
-                      $"{reports} report(s) in 1 s{(readError != 0 ? $", a read failed with Win32 error {readError}" : "")}");
+                var neutral = new HMGamepadState();
+                var pressed = new HMGamepadState
+                {
+                    Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
+                    Hat = HMHat.North,
+                };
+                var (idle, idleError) = ReadWhileSubmitting(c, path, neutral);
+                var (held, heldError) = ReadWhileSubmitting(c, path, neutralOnly ? neutral : pressed);
+                int readError = idleError != 0 ? idleError : heldError;
+                Check($"{d.Id}: input arrives", idle != null && held != null && idle.Count > 0 && held.Count > 0 && readError == 0,
+                      $"{idle?.Count ?? -1} and {held?.Count ?? -1} report(s) in 600 ms each{(readError != 0 ? $", a read failed with Win32 error {readError}" : "")}");
+                var changed = idle != null && held != null ? SteadyDifferences(idle, held) : new List<int>();
+                Check($"{d.Id}: the submitted state is what the host reads", changed.Count > 0,
+                      changed.Count > 0 ? $"byte(s) {string.Join(",", changed)} differ between the neutral and pressed windows"
+                                        : "no byte that is steady in each window differs between them");
                 int writeError = Native.WriteOutput(path, d.OutputId, d.Body);
                 bool raised = WaitFor(() => Volatile.Read(ref outputs) > 0 ? "yes" : null, 3000) != null;
                 Check($"{d.Id}: an output report raises OutputReceived", writeError == 0 && raised,
@@ -146,6 +166,31 @@ internal static class Program
 
         Console.WriteLine($"  timing: LoadDefaultProfiles {catalogMs:F0} ms, first CreateController {firstControllerMs:F0} ms");
         return Finish();
+    }
+
+    /// <summary>Submits <paramref name="state"/> for a short settle, then
+    /// reads the interface for 600 ms with the state still submitted every
+    /// 8 ms. The handle is opened after the settle, so its queue holds only
+    /// reports of this state.</summary>
+    static (List<byte[]>? Reports, int ReadError) ReadWhileSubmitting(HMController c, string path, HMGamepadState state)
+    {
+        void Submit() { try { c.SubmitState(in state); } catch { } }
+        for (int i = 0; i < 40; i++) { Submit(); Thread.Sleep(8); }
+        return Native.CaptureReports(path, 600, Submit);
+    }
+
+    /// <summary>The byte positions that hold one value in every report of
+    /// <paramref name="a"/>, one value in every report of <paramref name="b"/>,
+    /// and different values between the two. Reports of different lengths
+    /// are compared over the shortest length.</summary>
+    static List<int> SteadyDifferences(List<byte[]> a, List<byte[]> b)
+    {
+        var found = new List<int>();
+        if (a.Count == 0 || b.Count == 0) return found;
+        int n = Math.Min(a.Min(r => r.Length), b.Min(r => r.Length));
+        for (int i = 0; i < n; i++)
+            if (a.All(r => r[i] == a[0][i]) && b.All(r => r[i] == b[0][i]) && a[0][i] != b[0][i]) found.Add(i);
+        return found;
     }
 
     static int Finish()

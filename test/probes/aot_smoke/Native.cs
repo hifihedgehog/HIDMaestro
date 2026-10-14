@@ -90,17 +90,20 @@ internal static unsafe partial class Native
         finally { HidD_FreePreparsedData(pp); }
     }
 
-    /// <summary>Input reports read in <paramref name="ms"/> milliseconds
-    /// while <paramref name="tick"/> runs every 8 ms, and the Win32 error of
-    /// a read that failed before the window ended (0 when none did).</summary>
-    internal static (int Reports, int ReadError) CountReports(string path, int ms, Action tick)
+    /// <summary>The input reports read in <paramref name="ms"/> milliseconds
+    /// while <paramref name="tick"/> runs every 8 ms, each as the bytes the
+    /// host read (the report id first), and the Win32 error of a read that
+    /// failed before the window ended (0 when none did). Null when the
+    /// interface could not be opened or declares no input report.</summary>
+    internal static (List<byte[]>? Reports, int ReadError) CaptureReports(string path, int ms, Action tick)
     {
         IntPtr h = CreateFile(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h == Invalid) return (-1, Marshal.GetLastPInvokeError());
+        if (h == Invalid) return (null, Marshal.GetLastPInvokeError());
         int len = ReportLengths(h).Input;
-        if (len == 0) { CloseHandle(h); return (-1, 0); }
+        if (len == 0) { CloseHandle(h); return (null, 0); }
 
-        int count = 0, readError = 0;
+        var reports = new List<byte[]>();
+        int readError = 0;
         var stop = new StopFlag();
         var reader = new Thread(() =>
         {
@@ -115,7 +118,7 @@ internal static unsafe partial class Native
                     if (!stop.Set) readError = Marshal.GetLastPInvokeError();
                     break;
                 }
-                if (read > 0) Interlocked.Increment(ref count);
+                if (read > 0) lock (reports) reports.Add(buf[..read]);
             }
         }) { IsBackground = true };
         reader.Start();
@@ -126,7 +129,7 @@ internal static unsafe partial class Native
         CancelIoEx(h, IntPtr.Zero);
         reader.Join(2000);
         CloseHandle(h);
-        return (count, readError);
+        lock (reports) return (new List<byte[]>(reports), readError);
     }
 
     /// <summary>Write one output report: the report id, then
