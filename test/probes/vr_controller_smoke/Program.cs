@@ -9,7 +9,10 @@
 //   seqlock-reads submitted frames and checks every field lands at its
 //   vr_protocol.h offset, writes a haptic ring slot with the driver's
 //   publish protocol and asserts HapticReceived fires. This pins the C#
-//   and C++ layout mirrors to each other at the byte level.
+//   and C++ layout mirrors to each other at the byte level. A child
+//   process then holds the channel with a HapticReceived handler that
+//   throws ahead of one that counts: the second still gets every pulse and
+//   the reader goes on.
 //
 //   LIVE STEAMVR (runs when a SteamVR install is found): registers the
 //   embedded driver via HMVR.EnsureDriverRegistered, starts the headless
@@ -40,6 +43,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -85,10 +89,93 @@ internal static class Program
     static unsafe T Read<T>(IntPtr view, int offset) where T : unmanaged => *(T*)(view + offset);
     static unsafe void Write<T>(IntPtr view, int offset, T value) where T : unmanaged => *(T*)(view + offset) = value;
 
+    /// <summary>Produce one haptic slot exactly as controller_device.cpp
+    /// ProcessEvent does: fill, barrier, seqNo, barrier, head.</summary>
+    static void PublishHaptic(IntPtr view, uint hand, float amplitude)
+    {
+        ulong seqNo = Read<ulong>(view, VrSharedMemory.HapticHeadOffset) + 1;
+        int slot = VrSharedMemory.HapticRingOffset + (int)((seqNo - 1) % VrSharedMemory.HapticSlots) * VrSharedMemory.HapticReplySize;
+        Write<uint>(view, slot + 8, hand);        // 0 left, 1 right
+        Write<float>(view, slot + 12, 0.25f);     // duration
+        Write<float>(view, slot + 16, 160f);      // frequency
+        Write<float>(view, slot + 20, amplitude);
+        Write<ulong>(view, slot + 24, (ulong)Stopwatch.GetTimestamp());
+        Thread.MemoryBarrier();
+        Write<ulong>(view, slot, seqNo);
+        Thread.MemoryBarrier();
+        Write<ulong>(view, VrSharedMemory.HapticHeadOffset, seqNo);
+    }
+
+    // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+    const uint QuietErrorMode = 0x8003;
+
+    [DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
+
+    static (int Code, string Line) RunThrowingHapticChild()
+    {
+        // The child inherits this error mode: a crash there ends in an exit
+        // code, never in a dialog on the desktop.
+        SetErrorMode(QuietErrorMode);
+        var psi = new ProcessStartInfo(Environment.ProcessPath!, "--throwing-haptic")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        var stderr = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(30_000))
+        {
+            try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            p.WaitForExit();
+        }
+        var lines = (stdout.Result + "\n" + stderr.Result).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        return (p.ExitCode, lines.LastOrDefault(l => l.StartsWith("CHILD ", StringComparison.Ordinal)) ?? lines.FirstOrDefault() ?? "no output");
+    }
+
+    /// <summary>The child: the consumer channel with a HapticReceived
+    /// handler that throws ahead of one that counts, and two pulses written
+    /// in the driver's role.</summary>
+    static int ThrowingHapticMain()
+    {
+        SetErrorMode(QuietErrorMode);
+        int seen = 0;
+        using var vr = new HMVRController();
+        vr.HapticReceived += (_, _) => throw new InvalidOperationException("a throwing HapticReceived handler");
+        vr.HapticReceived += (_, _) => Interlocked.Increment(ref seen);
+        IntPtr mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, false, VrSharedMemory.SectionName);
+        if (mapping == IntPtr.Zero)
+        {
+            Console.WriteLine($"CHILD haptic failed: OpenFileMapping error {Marshal.GetLastWin32Error()}");
+            return 1;
+        }
+        IntPtr view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, (UIntPtr)VrSharedMemory.SectionSize);
+        try
+        {
+            for (int n = 1; n <= 2; n++)
+            {
+                PublishHaptic(view, hand: (uint)(n - 1), amplitude: 0.25f * n);
+                System.Threading.SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= n, 2000);
+            }
+            Console.WriteLine($"CHILD haptic seen={Volatile.Read(ref seen)}");
+            return 0;
+        }
+        finally
+        {
+            if (view != IntPtr.Zero) UnmapViewOfFile(view);
+            CloseHandle(mapping);
+        }
+    }
+
     static int Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--legacy-reader")
             return LegacyReaderMain(args[1]);
+        if (args.Length >= 1 && args[0] == "--throwing-haptic")
+            return ThrowingHapticMain();
 
         // Diagnostic: hold a pumping consumer with the known legacy state
         // for N seconds so a reader can be timed independently.
@@ -176,17 +263,7 @@ internal static class Program
             HMVRHapticEventArgs? received = null;
             vr.HapticReceived += (_, e) => { received = e; got.Set(); };
 
-            ulong seqNo = Read<ulong>(view, VrSharedMemory.HapticHeadOffset) + 1;
-            int slot = VrSharedMemory.HapticRingOffset + (int)((seqNo - 1) % VrSharedMemory.HapticSlots) * VrSharedMemory.HapticReplySize;
-            Write<uint>(view, slot + 8, 1);           // right hand
-            Write<float>(view, slot + 12, 0.25f);     // duration
-            Write<float>(view, slot + 16, 160f);      // frequency
-            Write<float>(view, slot + 20, 0.9f);      // amplitude
-            Write<ulong>(view, slot + 24, (ulong)Stopwatch.GetTimestamp());
-            Thread.MemoryBarrier();
-            Write<ulong>(view, slot, seqNo);
-            Thread.MemoryBarrier();
-            Write<ulong>(view, VrSharedMemory.HapticHeadOffset, seqNo);
+            PublishHaptic(view, hand: 1, amplitude: 0.9f);
 
             Check("HapticReceived fires from a driver-protocol ring write", got.Wait(2000));
             Check("haptic hand decoded", received?.Hand == HMVRHand.Right);
@@ -200,6 +277,12 @@ internal static class Program
         // A second consumer must be able to claim after disposal.
         using (var again = new HMVRController())
             Check("channel re-claimable after Dispose (pid released)", true);
+
+        // A throwing haptic handler, in a child: before v1.13.0 its
+        // exception ended the haptic reader's thread and the process.
+        var (hapticCode, hapticLine) = RunThrowingHapticChild();
+        Check("behind a throwing HapticReceived handler, the next one gets both pulses and the reader goes on",
+              hapticCode == 0 && hapticLine == "CHILD haptic seen=2", $"exit {hapticCode}: {hapticLine}");
 
         // ── Phase 2: live SteamVR ──────────────────────────────────────
         Console.WriteLine("\n-- phase 2: live SteamVR --");

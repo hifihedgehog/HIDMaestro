@@ -7,7 +7,8 @@
 // connect or disconnect on one port leaves the others' bytes as they were,
 // a controller plugged into an empty port reports itself at rest, one
 // plugged in with a state reports that state from its first report, and
-// report 0x11 raises each port's own rumble event. 0x12 replies with each
+// report 0x11 raises each port's own rumble event, behind handlers that
+// throw too. 0x12 replies with each
 // port's origin, 0x14 replies and stops, a short 0x11, 0x16 and 0x17 stall the
 // reports until the next 0x13, other command bytes are ignored, SET_REPORT
 // works as the OUT endpoint does, and 0x15 stops the adapter answering until
@@ -88,6 +89,7 @@ internal static class Program
             Start(proto);
             PortsAndInput(controller);
             Rumble(controller, proto);
+            ThrowingHandlers(controller);
             StopAndStall(proto);
             ControlPath();
             EngineChecks(gc);
@@ -292,6 +294,53 @@ internal static class Program
         Probe.Check("and sets no motor", s_outputs.IsEmpty && ports[0].GetOutput("rumble") == 2);
         Send(0x13);
         Probe.Check("0x13 resumes them", Read(150)?.Length == 37 && !proto.GetState("stalled"));
+    }
+
+    // ── Handlers that throw ─────────────────────────────────────────────
+
+    /// <summary>A throwing OutputReceived handler, and a throwing
+    /// OutputChanged and OutputDecoded handler ahead of a counting one. The
+    /// SDK drops each exception: port 1's rumble still changes, and the
+    /// handlers after the throwing ones still see it.</summary>
+    static void ThrowingHandlers(HMController controller)
+    {
+        Console.WriteLine("-- handlers that throw");
+        var port1 = controller.Ports[0];
+        var changes = new ConcurrentQueue<(string Name, int Value)>();
+        var decoded = new ConcurrentQueue<object>();
+        Action<HMController, HMOutputPacket> throwOnOutput = (_, _) => throw new InvalidOperationException("S80: a throwing OutputReceived handler");
+        EventHandler<HMPortOutputEventArgs> throwOnChange = (_, _) => throw new InvalidOperationException("S80: a throwing OutputChanged handler");
+        EventHandler<HMOutputDecodedEventArgs> throwOnDecoded = (_, _) => throw new InvalidOperationException("S80: a throwing OutputDecoded handler");
+        EventHandler<HMPortOutputEventArgs> countChange = (_, e) => changes.Enqueue((e.Name, e.Value));
+        EventHandler<HMOutputDecodedEventArgs> countDecoded = (_, e) =>
+        {
+            if (e.Fields.TryGetValue("port1.rumble", out var v)) decoded.Enqueue(v);
+        };
+        controller.OutputReceived += throwOnOutput;
+        port1.OutputChanged += throwOnChange;
+        port1.OutputChanged += countChange;
+        controller.OutputDecoded += throwOnDecoded;
+        controller.OutputDecoded += countDecoded;
+        try
+        {
+            Send(0x11, 0x01, 0x00, 0x00, 0x00);
+            bool on = Probe.WaitFor(() => changes.Contains(("rumble", 1)), 2000);
+            Send(0x11, 0x00, 0x00, 0x00, 0x00);
+            bool off = Probe.WaitFor(() => changes.Contains(("rumble", 0)), 2000);
+            Probe.Check("behind throwing handlers, port 1's rumble goes to 1 and back to 0, and OutputChanged's next handler sees both",
+                on && off && port1.GetOutput("rumble") == 0, string.Join(" ", changes.Select(c => $"{c.Name}={c.Value}")));
+            Probe.Check("OutputDecoded's next handler sees both reports",
+                Probe.WaitFor(() => decoded.Count >= 2, 2000) && decoded.Select(Convert.ToInt32).SequenceEqual(new[] { 1, 0 }),
+                string.Join(" ", decoded));
+        }
+        finally
+        {
+            controller.OutputReceived -= throwOnOutput;
+            port1.OutputChanged -= throwOnChange;
+            port1.OutputChanged -= countChange;
+            controller.OutputDecoded -= throwOnDecoded;
+            controller.OutputDecoded -= countDecoded;
+        }
     }
 
     // ── 0x14, stalls, ignored bytes ─────────────────────────────────────

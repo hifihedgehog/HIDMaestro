@@ -1966,6 +1966,16 @@ function Scenario-Perf-Budget {
                  -Message 'a submit path allocated (see probe stdout)' -SkipCodes 2
 }
 
+# S85: an exception a program's event handler throws stops nothing else. A
+# throwing handler sits ahead of a counting one on OutputReceived,
+# OutputDecoded and KeyboardLedsChanged: the counting handler gets every
+# event, the keyboard's LED state follows Scroll Lock, and a Bluetooth
+# DualSense still switches to report 0x31 on the feature read that arms it.
+function Scenario-Handler-Isolation {
+    Invoke-Probe -Dir 'handler_isolation_check' -Exe 'HandlerIsolationCheck.exe' `
+                 -Message 'a throwing event handler stopped another handler or the SDK (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2054,7 +2064,8 @@ $scenarios = @(
     @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} },
     @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
     @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
-    @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} }
+    @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
+    @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

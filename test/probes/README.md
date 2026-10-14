@@ -35,6 +35,7 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Do Dolphin and Slippi read the persona as they read a real adapter?" | [gc_dolphin_check](gc_dolphin_check/): S82. `native\build.ps1` compiles each emulator's adapter code unmodified from the reference clones. `hold <seconds>` keeps a bound persona up for a manual run, `--libusb-log <level>` writes libusb's log, `measure <runs> [dolphin|slippi]` repeats only the latency and rate measurements and pools them |
 | "What does SDL do with the persona?" | [gc_sdl_check](gc_sdl_check/): S83. `native\build.ps1` builds SDL 3.4.18 with libusb and checks the official SDL3.dll's hash. `measure <runs>` pools the latency and rate measurements |
 | "Do the submit paths allocate, and what do creates, claims and frames cost before and after a change?" | [perf_budget_check](perf_budget_check/): `gate` is S84. The other modes measure, and `-p:HmBase=true` builds it against an older tree for the comparison |
+| "Does an exception a program's event handler throws stop another handler, the SDK's handling of the event, or the program?" | [handler_isolation_check](handler_isolation_check/): S85, for the output thread's events. The adapter ports' `OutputChanged` is checked in S80, the USB audio events by `usbip_server_check`, `HapticReceived` by `vr_controller_smoke` (S50), and the Switch 2 Pro's decode by `switch2_composite_check`, each with a throwing handler ahead of its own |
 
 ## Near-duplicates and when to use which
 

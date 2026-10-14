@@ -100,6 +100,11 @@ internal static partial class Program
             a.CreateMs = sw.ElapsedMilliseconds;
             a.Serial = a.Pad.UsbipHandle!.Device.Descriptors.SerialString ?? "";
             a.UsbId = $@"USB\VID_057E&PID_2069\{a.Serial}";
+            // Handlers that throw, ahead of the probe's own: the SDK drops
+            // their exceptions, so every check below also shows that the
+            // handlers after a throwing one, and the rumble decode, still run.
+            a.Pad.OutputReceived += (_, _) => throw new InvalidOperationException("a throwing OutputReceived handler");
+            a.Pad.OutputDecoded += (_, _) => throw new InvalidOperationException("a throwing OutputDecoded handler");
             a.Pad.OutputDecoded += (_, e) =>
             {
                 if (e.Fields.TryGetValue("leftMotor", out var l) && e.Fields.TryGetValue("rightMotor", out var r))

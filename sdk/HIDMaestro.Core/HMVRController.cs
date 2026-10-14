@@ -108,7 +108,8 @@ public sealed class HMVRController : IDisposable
     private bool _disposed;
 
     /// <summary>Raised on a background thread for each haptic pulse a VR
-    /// app plays on either virtual controller.</summary>
+    /// app plays on either virtual controller. An exception a handler throws
+    /// is caught and dropped, and the next pulse is still read.</summary>
     public event EventHandler<HMVRHapticEventArgs>? HapticReceived;
 
     /// <summary>Creates the IPC channel and activates both hands. Throws
@@ -219,14 +220,16 @@ public sealed class HMVRController : IDisposable
             while (VrSharedMemory.TryReadHaptic(_channel, ref _hapticCursor,
                        out uint hand, out float dur, out float freq, out float amp, out ulong ts))
             {
-                HapticReceived?.Invoke(this, new HMVRHapticEventArgs
+                var handler = HapticReceived;
+                if (handler == null) continue;
+                EventRaise.Each(handler, this, new HMVRHapticEventArgs
                 {
                     Hand = hand == 0 ? HMVRHand.Left : HMVRHand.Right,
                     DurationSeconds = dur,
                     Frequency = freq,
                     Amplitude = amp,
                     TimestampQpc = (long)ts,
-                });
+                }, nameof(HapticReceived));
             }
             WaitHandle.WaitAny(waits, 250);
         }

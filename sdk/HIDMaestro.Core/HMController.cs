@@ -181,7 +181,13 @@ public sealed partial class HMController : IDisposable
     /// writing at burst rate, the oldest packets get overwritten
     /// keep the handler cheap (no synchronous I/O, no long locks).
     /// Pre-1.1.40 was a single-slot channel that silently coalesced
-    /// back-to-back writes; that drop pattern is fixed.</para></summary>
+    /// back-to-back writes. That drop pattern is fixed.</para>
+    ///
+    /// <para><b>Exceptions:</b> an exception a handler throws is caught and
+    /// dropped. The other handlers still get the packet, and the SDK still
+    /// applies it: the keyboard's LED state, <see cref="OutputDecoded"/>,
+    /// the ports' outputs, and a profile's switch to its extended input
+    /// report.</para></summary>
     public event Action<HMController, HMOutputPacket>? OutputReceived;
 
     /// <summary>v1.3.5: raised when an inbound output report matches the
@@ -192,7 +198,9 @@ public sealed partial class HMController : IDisposable
     ///
     /// <para>Consumers that want raw bytes still get them via
     /// <see cref="OutputReceived"/>: both events fire for matching reports.
-    /// Subscribers must be thread-safe (raised on the polling thread).</para></summary>
+    /// Subscribers must be thread-safe (raised on the polling thread). An
+    /// exception a handler throws is caught and dropped, as
+    /// <see cref="OutputReceived"/> drops them.</para></summary>
     public event EventHandler<HMOutputDecodedEventArgs>? OutputDecoded;
 
     // v1.3.5: vendor-blob input encoder state. Built lazily when the profile
@@ -1237,7 +1245,8 @@ public sealed partial class HMController : IDisposable
     /// keyboard's LEDs (Num Lock, Caps Lock, Scroll Lock, Compose, Kana).
     /// Windows sends a keyboard the current state when it arrives and again
     /// on every change. Only for profiles whose keyboard collection declares
-    /// an LED output report.</summary>
+    /// an LED output report. An exception a handler throws is caught and
+    /// dropped, as <see cref="OutputReceived"/> drops them.</summary>
     public event Action<HMController, HMKeyboardLeds>? KeyboardLedsChanged;
 
     /// <summary>The LED state the host last set on this keyboard, or null
@@ -1620,8 +1629,8 @@ public sealed partial class HMController : IDisposable
         // advanced Head without signaling (version-skewed companion,
         // event-create failure, a foreign waiter stealing wakes). Drop
         // to the historical 8 ms cadence so delivery and ring headroom
-        // return to pre-#34 behavior. A drain aborted by a throwing
-        // subscriber also shortens the next wait: the consumed signal
+        // return to pre-#34 behavior. A drain aborted by a failure also
+        // shortens the next wait: the consumed signal
         // can cover a packet the aborted drain never reached.
         int eventTimeoutMs = 500;
         int missedSignalStrikes = 0;
@@ -1659,7 +1668,7 @@ public sealed partial class HMController : IDisposable
                     }
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
-                    OutputReceived?.Invoke(this, pkt);
+                    EventRaise.Each(OutputReceived, this, pkt, nameof(OutputReceived));
 
                     // Issue #67: the keyboard's LED report, decoded by its
                     // own descriptor.
@@ -1668,7 +1677,7 @@ public sealed partial class HMController : IDisposable
                         && kbm.DecodeLeds(reportId, data.Span) is HMKeyboardLeds leds)
                     {
                         _keyboardLeds = (int)leds;
-                        KeyboardLedsChanged?.Invoke(this, leds);
+                        EventRaise.Each(KeyboardLedsChanged, this, leds, nameof(KeyboardLedsChanged));
                     }
 
                     // v1.3.5: vendor-blob output decode. When the profile
@@ -1693,13 +1702,13 @@ public sealed partial class HMController : IDisposable
 
                             var (fields, crcValid) = VendorBlobCodec.Decode(extOut, full);
                             Ports.AddDecoded(fields, reportId, new ReadOnlySpan<byte>(buf, 0, dataSize));
-                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
                             {
                                 ReportId = reportId,
                                 Fields = fields,
                                 RawBytes = full,
                                 CrcValid = crcValid,
-                            });
+                            }, nameof(OutputDecoded));
                         }
                         catch
                         {
@@ -1730,7 +1739,7 @@ public sealed partial class HMController : IDisposable
                             var full = new byte[dataSize + 1];
                             full[0] = reportId;
                             Buffer.BlockCopy(buf, 0, full, 1, dataSize);
-                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
                             {
                                 ReportId = reportId,
                                 Fields = new Dictionary<string, object>
@@ -1740,7 +1749,7 @@ public sealed partial class HMController : IDisposable
                                 },
                                 RawBytes = full,
                                 CrcValid = true,
-                            });
+                            }, nameof(OutputDecoded));
                         }
                         catch
                         {
@@ -1765,7 +1774,7 @@ public sealed partial class HMController : IDisposable
                             var full = new byte[dataSize + 1];
                             full[0] = reportId;
                             Buffer.BlockCopy(buf, 0, full, 1, dataSize);
-                            OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
+                            EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
                             {
                                 ReportId = reportId,
                                 Fields = new Dictionary<string, object>
@@ -1775,7 +1784,7 @@ public sealed partial class HMController : IDisposable
                                 },
                                 RawBytes = full,
                                 CrcValid = true,
-                            });
+                            }, nameof(OutputDecoded));
                         }
                         catch
                         {

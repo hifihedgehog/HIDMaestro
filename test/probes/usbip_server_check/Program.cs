@@ -16,6 +16,9 @@
 //   - stream state with no SET_INTERFACE (usbip-win2 0.9.8.1 beside an
 //     older filter): traffic opens each stream and its end closes it, and
 //     an interface that has seen SET_INTERFACE follows SET_INTERFACE alone
+//   - a throwing handler on any public audio event, each in a child
+//     process: the handler after it still runs and the connection still
+//     answers
 //
 // Bridges to the SDK's shared-memory contract are exercised end to end:
 // the probe writes input frames exactly as HMController.SubmitState does
@@ -50,8 +53,10 @@ internal static class Program
 
     const int Index = 60; // far from live controller indices
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
+
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
 
         using var ctx = new HMContext();
@@ -70,6 +75,7 @@ internal static class Program
         try
         {
             RunAll(server, device, profile, outFrames, controlWrites);
+            ThrowingHandlers();
         }
         finally
         {
@@ -707,6 +713,162 @@ internal static class Program
         cl.ControlOut(0x01, 0x0B, 0x0000, 0x0001, Array.Empty<byte>());
         cl.ControlOut(0x01, 0x0B, 0x0000, 0x0002, Array.Empty<byte>());
     }
+
+    // ── Audio handlers that throw ───────────────────────────────────────
+
+    /// <summary>Each public audio event, with a throwing handler ahead of a
+    /// counting one, in a child process of its own. Before v1.13.0 a
+    /// throwing handler on the connection thread closed the device's
+    /// connection, and one on the audio pump or the thread pool ended the
+    /// process.</summary>
+    static void ThrowingHandlers()
+    {
+        Console.WriteLine("\n-- audio handlers that throw --");
+        foreach (var (which, want, what) in new[]
+        {
+            ("control", 1, "a volume write"),
+            ("speaker-streaming", 2, "the speaker stream opened and parked by SET_INTERFACE"),
+            ("microphone-streaming", 2, "the microphone stream opened and parked by SET_INTERFACE"),
+            ("frames", 2, "two isochronous OUT transfers of speaker audio"),
+            ("inferred-close", 2, "a speaker stream opened by its traffic and closed when it stops"),
+        })
+        {
+            var (code, line) = RunChild(which);
+            Check($"{which}: behind a throwing handler, the next one sees {what}, and the connection still answers",
+                  code == 0 && line == $"CHILD {which} seen={want} alive=True", $"exit {code}: {line}");
+        }
+    }
+
+    static (int Code, string Line) RunChild(string which)
+    {
+        // The child inherits this error mode: a crash or a loader failure
+        // there ends in an exit code, never in a dialog on the desktop.
+        SetErrorMode(QuietErrorMode);
+        var psi = new ProcessStartInfo(Environment.ProcessPath!, $"--throwing {which}")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        var stderr = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(30_000))
+        {
+            try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            p.WaitForExit();
+        }
+        var lines = (stdout.Result + "\n" + stderr.Result).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+        return (p.ExitCode, lines.LastOrDefault(l => l.StartsWith("CHILD ", StringComparison.Ordinal)) ?? lines.FirstOrDefault() ?? "no output");
+    }
+
+    /// <summary>The child: one device on its own server, the public audio
+    /// object over it, and the host's requests for one event.</summary>
+    static int ThrowingChild(string which)
+    {
+        SetErrorMode(QuietErrorMode);
+        const int ChildIndex = 61;
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var profile = ctx.GetProfile("dualsense-composite")!.Inner;
+        var server = UsbipServer.GetOrStart();
+        var device = new UsbipEmulatedDevice(profile, ChildIndex);
+        server.Register(device);
+        var audio = new HMUsbAudio(profile, device);
+        int seen = 0;
+        void Count() => Interlocked.Increment(ref seen);
+        static Exception Thrown(string name) => new InvalidOperationException($"a throwing {name} handler");
+        switch (which)
+        {
+            case "control":
+                audio.ControlChanged += (_, _) => throw Thrown("ControlChanged");
+                audio.ControlChanged += (_, _) => Count();
+                break;
+            case "speaker-streaming":
+            case "inferred-close":
+                audio.Output.StreamingChanged += (_, _) => throw Thrown("StreamingChanged");
+                audio.Output.StreamingChanged += (_, _) => Count();
+                break;
+            case "microphone-streaming":
+                audio.Microphone.StreamingChanged += (_, _) => throw Thrown("StreamingChanged");
+                audio.Microphone.StreamingChanged += (_, _) => Count();
+                break;
+            case "frames":
+                audio.Output.FramesReceived += (_, _) => throw Thrown("FramesReceived");
+                audio.Output.FramesReceived += (_, _) => Count();
+                break;
+            default:
+                Console.WriteLine($"CHILD {which} is not a case");
+                return 1;
+        }
+
+        try
+        {
+            using var cl = new Client(server.Port);
+            cl.SendImport(device.BusId);
+            cl.ReadExactly(8);
+            cl.ReadExactly(312);
+            cl.ControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());
+            const int P = 10, B = 392;
+            switch (which)
+            {
+                case "control":
+                    cl.ControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 });
+                    break;
+                case "speaker-streaming":
+                    cl.ControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());
+                    cl.ControlOut(0x01, 0x0B, 0x0000, 0x0001, Array.Empty<byte>());
+                    break;
+                case "microphone-streaming":
+                    cl.ControlOut(0x01, 0x0B, 0x0001, 0x0002, Array.Empty<byte>());
+                    cl.ControlOut(0x01, 0x0B, 0x0000, 0x0002, Array.Empty<byte>());
+                    break;
+                case "frames":
+                {
+                    cl.ControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());
+                    uint o1 = cl.NextSeq(), o2 = cl.NextSeq();
+                    cl.SendSubmitIsoOut(o1, 1, MakePattern(P * B, 1), P, B);
+                    cl.SendSubmitIsoOut(o2, 1, MakePattern(P * B, 2), P, B);
+                    cl.ReadRet(o1);
+                    cl.ReadRet(o2);
+                    break;
+                }
+                case "inferred-close":
+                {
+                    // No SET_INTERFACE: the traffic opens the stream, and the
+                    // engine closes it from the thread pool once it stops.
+                    uint o1 = cl.NextSeq(), o2 = cl.NextSeq();
+                    cl.SendSubmitIsoOut(o1, 1, new byte[P * B], P, B);
+                    cl.SendSubmitIsoOut(o2, 1, new byte[P * B], P, B);
+                    cl.ReadRet(o1);
+                    cl.ReadRet(o2);
+                    SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= 2, 3000);
+                    break;
+                }
+            }
+            var cfg = cl.ControlIn(0x80, 0x08, 0, 0, 1);
+            Console.WriteLine($"CHILD {which} seen={Volatile.Read(ref seen)} alive={cfg.Status == 0 && cfg.Data.Length == 1}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"CHILD {which} failed: {ex.GetType().Name}: {ex.Message}");
+            return 1;
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(ChildIndex);
+        }
+    }
+
+    // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+    const uint QuietErrorMode = 0x8003;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
 
     static uint ReadSeqNoBase(IntPtr view)
         => (uint)System.Runtime.InteropServices.Marshal.ReadInt32(view, 0);

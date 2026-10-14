@@ -32,7 +32,9 @@ public sealed class HMUsbAudio
 
     /// <summary>Raised when the host writes a UAC control (volume or mute
     /// on either feature unit). Windows drives these from the volume
-    /// mixer and the recording control panel.</summary>
+    /// mixer and the recording control panel. Raised on the device's USB/IP
+    /// connection thread. An exception a handler throws is caught and
+    /// dropped, and the host's request still completes.</summary>
     public event EventHandler<HMAudioControlChangedEventArgs>? ControlChanged;
 
     private readonly Dictionary<byte, string> _unitFunctions = new();
@@ -69,14 +71,14 @@ public sealed class HMUsbAudio
         {
             var handler = ControlChanged;
             if (handler == null) return;
-            handler(this, new HMAudioControlChangedEventArgs
+            EventRaise.Each(handler, this, new HMAudioControlChangedEventArgs
             {
                 Function = _unitFunctions.TryGetValue(unit, out var fn) ? fn : $"unit{unit}",
                 IsMute = selector == 1,
                 MuteValue = selector == 1 && raw != 0,
                 RawValue = raw,
                 VolumeDb = selector == 2 ? raw / 256.0 : 0.0,
-            });
+            }, nameof(ControlChanged));
         };
     }
 }
@@ -107,12 +109,15 @@ public sealed class HMAudioOutput
 
     /// <summary>Interleaved 16-bit little-endian PCM for one paced
     /// window (typically a few milliseconds). The memory is only valid
-    /// for the duration of the callback; copy to retain.</summary>
+    /// for the duration of the callback. Copy it to keep it. Raised on the
+    /// audio pump thread. An exception a handler throws is caught and
+    /// dropped, and the host's transfer still completes.</summary>
     public event Action<HMAudioOutput, ReadOnlyMemory<byte>>? FramesReceived;
 
     /// <summary>Raised when the host opens or parks the stream. Where the
     /// transport never forwards SET_INTERFACE, the close is raised within
-    /// about half a second of the last isochronous transfer.</summary>
+    /// about half a second of the last isochronous transfer. An exception a
+    /// handler throws is caught and dropped.</summary>
     public event Action<HMAudioOutput, bool>? StreamingChanged;
 
     internal HMAudioOutput(UsbAudioStreamSpec? stream, byte interfaceNumber)
@@ -124,13 +129,13 @@ public sealed class HMAudioOutput
         _ = interfaceNumber;
     }
 
-    internal void RaiseFrames(ReadOnlyMemory<byte> pcm) => FramesReceived?.Invoke(this, pcm);
+    internal void RaiseFrames(ReadOnlyMemory<byte> pcm) => EventRaise.Each(FramesReceived, this, pcm, nameof(FramesReceived));
 
     internal void SetStreaming(bool streaming)
     {
         if (IsStreaming == streaming) return;
         IsStreaming = streaming;
-        StreamingChanged?.Invoke(this, streaming);
+        EventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
 
@@ -149,7 +154,8 @@ public sealed class HMMicrophoneInput
     public bool IsStreaming { get; private set; }
 
     /// <summary>Raised when the host opens or parks the capture stream,
-    /// by the same rule as <see cref="HMAudioOutput.StreamingChanged"/>.</summary>
+    /// by the same rule as <see cref="HMAudioOutput.StreamingChanged"/>. An
+    /// exception a handler throws is caught and dropped.</summary>
     public event Action<HMMicrophoneInput, bool>? StreamingChanged;
 
     private readonly UsbAudioEngine _engine;
@@ -176,7 +182,7 @@ public sealed class HMMicrophoneInput
     {
         if (IsStreaming == streaming) return;
         IsStreaming = streaming;
-        StreamingChanged?.Invoke(this, streaming);
+        EventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
 

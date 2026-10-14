@@ -463,12 +463,7 @@ public sealed class HMPort
     {
         var handler = OutputChanged;
         if (handler == null) return;
-        try { handler(this, new HMPortOutputEventArgs(this, name, value)); }
-        catch
-        {
-            // OutputReceived's contract: a throwing subscriber must not end
-            // the output thread.
-        }
+        EventRaise.Each(handler, this, new HMPortOutputEventArgs(this, name, value), nameof(OutputChanged));
     }
 }
 
