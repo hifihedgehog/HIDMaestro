@@ -36,6 +36,7 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "What does SDL do with the persona?" | [gc_sdl_check](gc_sdl_check/): S83. `native\build.ps1` builds SDL 3.4.18 with libusb and checks the official SDL3.dll's hash. `measure <runs>` pools the latency and rate measurements |
 | "Do the submit paths allocate, and what do creates, claims and frames cost before and after a change?" | [perf_budget_check](perf_budget_check/): `gate` is S84. The other modes measure, and `-p:HmBase=true` builds it against an older tree for the comparison |
 | "Does an exception a program's event handler throws stop another handler, the SDK's handling of the event, or the program?" | [handler_isolation_check](handler_isolation_check/): S85, for the output thread's events. The adapter ports' `OutputChanged` is checked in S80, the USB audio events by `usbip_server_check`, `HapticReceived` by `vr_controller_smoke` (S50), and the Switch 2 Pro's decode by `switch2_composite_check`, each with a throwing handler ahead of its own |
+| "Is any DllImport left, does every method an SDK message names exist, and do the XInput slot count and the SetupAPI enumeration still work?" | [interop_decl_check](interop_decl_check/): S87. `static` is offline, `live` needs the bench |
 
 ## Near-duplicates and when to use which
 

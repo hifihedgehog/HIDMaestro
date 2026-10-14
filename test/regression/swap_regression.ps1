@@ -1976,6 +1976,18 @@ function Scenario-Handler-Isolation {
                  -Message 'a throwing event handler stopped another handler or the SDK (see probe stdout)' -SkipCodes 2
 }
 
+# S87: interop declarations and the method names in the SDK's text. No
+# DllImport is left, SetupDiGetClassDevsW takes its Enumerator as the pointer
+# it is, and every method a message or XML doc names exists as written. The
+# live run creates an Xbox 360 persona and reads the SDK's own XInput slot
+# count, disposes it, and runs the phantom sweep.
+function Scenario-Interop-Decl {
+    Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'static' -Tag 'static' `
+                 -Message 'an interop declaration or a method name in the SDK''s text is wrong (see probe stdout)' -SkipCodes 2
+    Invoke-Probe -Dir 'interop_decl_check' -Exe 'InteropDeclCheck.exe' -Arguments 'live' -Tag 'live' `
+                 -Message 'the XInput slot count or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2065,7 +2077,8 @@ $scenarios = @(
     @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
     @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
     @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
-    @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} }
+    @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
+    @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

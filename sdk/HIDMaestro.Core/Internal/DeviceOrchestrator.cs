@@ -1632,8 +1632,8 @@ internal static partial class DeviceOrchestrator
         return count;
     }
 
-    [System.Runtime.InteropServices.DllImport("xinput1_4.dll")]
-    private static extern uint XInputGetState(uint dwUserIndex, out _XINPUT_STATE pState);
+    [LibraryImport("xinput1_4.dll")]
+    private static partial uint XInputGetState(uint dwUserIndex, out _XINPUT_STATE pState);
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct _XINPUT_GAMEPAD
