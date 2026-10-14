@@ -11,7 +11,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 internal static partial class Program
 {
@@ -24,6 +27,8 @@ internal static partial class Program
         SectionX1();
         Clean();
         SectionX2();
+        Clean();
+        SectionX3();
     }
 
     /// <summary>The deploy lock.</summary>
@@ -106,6 +111,45 @@ internal static partial class Program
         Check($"X2: a sweep still waits while an elevated program holds {name}", Ok(r2) && ms >= 2500, $"{ms} ms: {r2}");
     }
 
+    /// <summary>The claim pipes.</summary>
+    static void SectionX3()
+    {
+        const string key = "coexist-x3";
+        string token = IdentityToken(key);
+        string index0 = "HIDMaestro.Index.0";
+        string identity = $"HIDMaestro.Identity.{token}";
+        var sq = new Squatter(s =>
+        {
+            s.Pipe(index0);
+            s.Pipe(identity);
+            s.Pipe(Native.ClaimPrefix + index0);
+            s.Pipe(Native.ClaimPrefix + identity);
+        });
+        try
+        {
+            Check("X3: a program that is not elevated creates the claim names without the prefix",
+                  sq.Holds(index0) && sq.Holds(identity), sq.Describe());
+            Check("X3: it cannot create them under the claim prefix",
+                  sq.Error(Native.ClaimPrefix + index0) == 5 && sq.Error(Native.ClaimPrefix + identity) == 5, sq.Describe());
+            using var p = PeerProcess.Start("X3");
+            p.Send("install");
+            string c1 = p.Send("create pad F0E3 -");
+            Check("X3: a keyless create takes transport index 0", Ok(c1) && PeerProcess.Field(c1, "transport") == "0", c1);
+            string c2 = p.Send($"create pad F0E4 {key}");
+            Check($"X3: a create of the key whose identity name it holds succeeds", Ok(c2), c2);
+        }
+        finally { sq.Dispose(); }
+        Check("X3: nothing the squatter made is left", !Native.PipeExists(index0) && !Native.PipeExists(identity));
+    }
+
+    /// <summary>DeviceIdentity's token for a key: HM_ and the first eight
+    /// bytes of the key's tagged SHA-256, big-endian.</summary>
+    static string IdentityToken(string key)
+    {
+        byte[] d = SHA256.HashData(Encoding.UTF8.GetBytes("HIDMaestro.DeviceIdentity.v1\n" + key));
+        return "HM_" + Convert.ToHexString(d, 0, 8);
+    }
+
     /// <summary>A program that is not elevated, played by one thread of
     /// this probe. The setup runs under <see cref="Native.MediumToken"/>.
     /// The thread then reverts to the probe's own token and keeps what it
@@ -117,6 +161,7 @@ internal static partial class Program
         readonly ManualResetEventSlim _ready = new();
         readonly ManualResetEventSlim _release = new();
         readonly Dictionary<string, IntPtr> _handles = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, SafeFileHandle> _pipes = new(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, int> _errors = new(StringComparer.OrdinalIgnoreCase);
         readonly List<IntPtr> _owned = new();
         readonly HashSet<string> _toHold = new(StringComparer.OrdinalIgnoreCase);
@@ -144,6 +189,7 @@ internal static partial class Program
                 _release.Wait();
                 foreach (IntPtr h in _owned) Native.ReleaseMutex(h);
                 foreach (IntPtr h in _handles.Values) Native.CloseHandle(h);
+                foreach (var p in _pipes.Values) p.Dispose();
             }) { IsBackground = true, Name = "squatter" };
             _thread.Start();
             _ready.Wait();
@@ -164,10 +210,20 @@ internal static partial class Program
             if (Native.WaitForSingleObject(h, 0) == 0) _owned.Add(h);
         }
 
+        public void Pipe(string name)
+        {
+            var h = Native.CreatePipe(name, out int error);
+            _errors[name] = error;
+            if (h != null) _pipes[name] = h;
+        }
+
         /// <summary>Whether the squatter created the name, and for a mutex
         /// it was asked to hold, holds it.</summary>
         public bool Holds(string name) =>
-            _failure == null && _handles.TryGetValue(name, out IntPtr h) && (!_toHold.Contains(name) || _owned.Contains(h));
+            _failure == null && (_pipes.ContainsKey(name)
+                || (_handles.TryGetValue(name, out IntPtr h) && (!_toHold.Contains(name) || _owned.Contains(h))));
+
+        public int Error(string name) => _errors.TryGetValue(name, out int e) ? e : -1;
 
         public string Describe() =>
             _failure != null ? $"{_failure.GetType().Name}: {_failure.Message}"

@@ -339,15 +339,35 @@ internal static class Native
     static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateNamedPipeW(string name, uint openMode, uint pipeMode,
         uint maxInstances, uint outSize, uint inSize, uint timeout, IntPtr sa);
 
+    /// <summary>The pipe prefix every claim lives under, where only an
+    /// elevated process can create a pipe.</summary>
+    internal const string ClaimPrefix = @"ProtectedPrefix\Administrators\";
+
     /// <summary>A pipe the way a running program's claim holds its name:
-    /// the first and only instance. Null when the name is taken.</summary>
+    /// the first and only instance, under the claim prefix. Null when the
+    /// name is taken.</summary>
     internal static Microsoft.Win32.SafeHandles.SafeFileHandle? HoldPipe(string name)
     {
-        var h = CreateNamedPipeW(@"\\.\pipe\" + name, 0x00000001 | 0x00080000, 0x00000008, 1, 0, 0, 0, IntPtr.Zero);
+        var h = CreateNamedPipeW(@"\\.\pipe\" + ClaimPrefix + name, 0x00000001 | 0x00080000, 0x00000008, 1, 0, 0, 0, IntPtr.Zero);
         if (!h.IsInvalid) return h;
         h.Dispose();
         return null;
     }
+
+    /// <summary>The first instance of a pipe under any name, with the
+    /// default security of the calling thread's token. Null and the Win32
+    /// error when it cannot be created.</summary>
+    internal static Microsoft.Win32.SafeHandles.SafeFileHandle? CreatePipe(string name, out int error)
+    {
+        var h = CreateNamedPipeW(@"\\.\pipe\" + name, 0x00000001 | 0x00080000, 0x00000008, 1, 0, 0, 0, IntPtr.Zero);
+        error = h.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        if (!h.IsInvalid) return h;
+        h.Dispose();
+        return null;
+    }
+
+    /// <summary>Whether a claim, named without its prefix, is held.</summary>
+    internal static bool ClaimExists(string name) => PipeExists(ClaimPrefix + name);
 
     // ── The SDK's private namespace ────────────────────────────────────
 

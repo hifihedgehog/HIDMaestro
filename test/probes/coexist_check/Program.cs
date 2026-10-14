@@ -75,9 +75,10 @@
 //      a running program's own composite losing its connection.
 //      SectionV.cs has the detail.
 //   X. Machine-wide names a program that is not elevated creates first:
-//      the deploy lock and the registry ledger's lock. A thread of this
-//      probe that impersonates such a program creates and holds each, and
-//      neither a create nor a sweep waits on them. SectionX.cs.
+//      the deploy lock, the registry ledger's lock and the claim pipes.
+//      Each is created by a thread of this probe that impersonates such a
+//      program, and HIDMaestro's create and sweep neither wait on them nor
+//      take them for a running program's. SectionX.cs.
 //   S71 runs A to H, J to V and X.
 //
 // Each program is a peer process (this binary with --peer, or the same
@@ -722,11 +723,11 @@ internal static partial class Program
                 string? ownerId = Native.OwnerRecords().Where(r => r.Value == p1.Pid).Select(r => r.Key).FirstOrDefault();
                 Check("H: the program has an owner record", ownerId != null);
                 if (ownerId != null)
-                    Check("H: its ownership claim is held while it runs", Native.PipeExists($"HIDMaestro.Owner.{ownerId}"));
+                    Check("H: its ownership claim is held while it runs", Native.ClaimExists($"HIDMaestro.Owner.{ownerId}"));
                 p1.Kill();
                 Check("H: the child still runs", child != null && !child.HasExited);
                 if (ownerId != null)
-                    Check("H: the claim is gone with the parent though the child runs", !Native.PipeExists($"HIDMaestro.Owner.{ownerId}"));
+                    Check("H: the claim is gone with the parent though the child runs", !Native.ClaimExists($"HIDMaestro.Owner.{ownerId}"));
                 Check("H: the v1.12.0 owner pipe is gone too", !Native.PipeExists($"HIDMaestroOwner{transport}"));
             }
             using var p2 = PeerProcess.Start("H2");

@@ -29,7 +29,9 @@ internal static class OwnerSweep
     /// enumerator walk.</summary>
     internal static void ReclaimDeadOwners()
     {
-        MachineClaims.EnsureOwner();
+        // A process that is not elevated can take no claim and remove
+        // nothing, and its InstallDriver may still find the driver current.
+        if (!MachineClaims.TryEnsureOwner()) return;
         var sw = Stopwatch.StartNew();
         var census = OwnerCensus.Take();
         if (!census.NothingToReclaim)
@@ -55,7 +57,9 @@ internal static class OwnerSweep
     /// another program is between its check and its install.</summary>
     internal static void RemoveOrphaned(bool preserveInstall)
     {
-        MachineClaims.EnsureOwner();
+        // A process that is not elevated can take no claim and remove
+        // nothing.
+        if (!MachineClaims.TryEnsureOwner()) return;
         var census = OwnerCensus.Take();
         Reclaim(census, includeSelf: false);
 

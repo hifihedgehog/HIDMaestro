@@ -14,6 +14,12 @@ namespace HIDMaestro.Internal;
 /// <para>A claim is a named pipe created with
 /// <c>FILE_FLAG_FIRST_PIPE_INSTANCE</c> and one instance. The create either
 /// makes the first instance or fails, so claiming and checking are one call.
+/// Claims live under the pipe prefix <c>ProtectedPrefix\Administrators\</c>,
+/// which the Session Manager creates at boot and under which only a token
+/// with Administrators enabled can create a pipe. Under a plain name a
+/// program that is not elevated could create a claim first, and every
+/// HIDMaestro program would take it for a live owner's for as long as that
+/// program ran.
 /// The handle is not inheritable, and Windows deletes the pipe when the
 /// last handle closes, which it does when the process ends however it ends.
 /// Liveness is a <c>WaitNamedPipe</c> probe, which opens nothing, so a probe
@@ -37,9 +43,11 @@ internal static partial class MachineClaims
     internal const string RecordsRoot = @"SOFTWARE\HIDMaestroOwners";
     private const string ControllersKey = "Controllers";
 
-    internal static string OwnerPipeName(string ownerId) => $"HIDMaestro.Owner.{ownerId}";
-    internal static string IndexPipeName(int transportIndex) => $"HIDMaestro.Index.{transportIndex}";
-    internal static string IdentityPipeName(string token) => $"HIDMaestro.Identity.{token}";
+    private const string ClaimPrefix = @"ProtectedPrefix\Administrators\";
+
+    internal static string OwnerPipeName(string ownerId) => $"{ClaimPrefix}HIDMaestro.Owner.{ownerId}";
+    internal static string IndexPipeName(int transportIndex) => $"{ClaimPrefix}HIDMaestro.Index.{transportIndex}";
+    internal static string IdentityPipeName(string token) => $"{ClaimPrefix}HIDMaestro.Identity.{token}";
 
     /// <summary>The v1.12.0 owner pipe of a transport index. A v1.12.0
     /// program holds it while it has a controller at that index.</summary>
@@ -47,7 +55,8 @@ internal static partial class MachineClaims
 
     // SYNCHRONIZE | FILE_READ_ATTRIBUTES for SYSTEM, Administrators and
     // LocalService. Nobody can write or read a claim, and a non-elevated
-    // process cannot even open one. Probing needs no access at all.
+    // process cannot even open one. Probing needs no access at all, so any
+    // process can still probe a claim under the prefix.
     private const string ClaimSddl = "D:P(A;;0x00100080;;;SY)(A;;0x00100080;;;BA)(A;;0x00100080;;;LS)";
 
     private static readonly object s_lock = new();
@@ -70,8 +79,10 @@ internal static partial class MachineClaims
 
     /// <summary>Take this process's owner claim if it has none yet, and
     /// write its record. Every machine-wide write the SDK makes comes after
-    /// this. A process that cannot write HKLM, one not elevated, gets the
-    /// claim, and its record is written by the first call that can.</summary>
+    /// this. A claim whose record could not be written gets it from the
+    /// first call that can write it.</summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated, so it can take no claim.</exception>
     internal static void EnsureOwner()
     {
         if (s_ownerClaim != null)
@@ -84,17 +95,32 @@ internal static partial class MachineClaims
             if (s_ownerClaim != null) return;
             string id = Guid.NewGuid().ToString("N");
             SafeFileHandle? h = TryClaim(OwnerPipeName(id));
-            // A fresh GUID collides with nothing, so a failure here is the
-            // system refusing pipes outright. Nothing machine-wide can be
+            // A fresh GUID collides with nothing, so a failure here is a
+            // process that is not elevated, refused by the claim prefix, or
+            // the system refusing pipes outright. Nothing machine-wide can be
             // arbitrated without the claim.
             if (h == null)
+            {
+                int err = Marshal.GetLastPInvokeError();
+                if (err == ERROR_ACCESS_DENIED)
+                    throw new UnauthorizedAccessException(
+                        "HIDMaestro needs an elevated process: only a token with Administrators enabled can take its ownership claim.");
                 throw new InvalidOperationException(
-                    $"HIDMaestro could not create its ownership claim (Win32 error {Marshal.GetLastPInvokeError()}).");
+                    $"HIDMaestro could not create its ownership claim (Win32 error {err}).");
+            }
             s_ownerId = id;
             s_ownerClaim = h;
             OwnerSweep.RegisterExitCleanup();
             TryWriteRecordLocked();
         }
+    }
+
+    /// <summary><see cref="EnsureOwner"/> for the sweeps, which have
+    /// nothing to do in a process that is not elevated: false there.</summary>
+    internal static bool TryEnsureOwner()
+    {
+        try { EnsureOwner(); return true; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     private static void TryWriteRecord()
@@ -377,6 +403,7 @@ internal static partial class MachineClaims
     private const uint PIPE_TYPE_BYTE = 0x00000000;
     private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
     private const int ERROR_FILE_NOT_FOUND = 2;
+    private const int ERROR_ACCESS_DENIED = 5;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SECURITY_ATTRIBUTES

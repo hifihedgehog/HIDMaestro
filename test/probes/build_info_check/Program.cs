@@ -215,9 +215,14 @@ internal static class Program
     static HashSet<string> ClaimSnapshot()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // The pipe root lists a claim with its prefix,
+        // ProtectedPrefix\Administrators\HIDMaestro.Index.0.
+        const string prefix = @"ProtectedPrefix\Administrators\";
         foreach (string p in Directory.GetFiles(@"\\.\pipe\"))
         {
-            string n = Path.GetFileName(p);
+            string n = p.Substring(@"\\.\pipe\".Length);
+            if (!n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            n = n.Substring(prefix.Length);
             if (n.StartsWith("HIDMaestro.Owner.", StringComparison.OrdinalIgnoreCase) ||
                 n.StartsWith("HIDMaestro.Index.", StringComparison.OrdinalIgnoreCase) ||
                 n.StartsWith("HIDMaestro.Identity.", StringComparison.OrdinalIgnoreCase))
