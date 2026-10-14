@@ -507,6 +507,32 @@ public static class DeviceManager
                 continue;
             }
 
+            // A present rival is removed only when its owner is provably
+            // gone. One that belongs to a running program, here or
+            // elsewhere, or to a program whose state cannot be known,
+            // stays, and this create is refused instead: either way there
+            // is never a second parent on one prefix.
+            if (live)
+            {
+                var owner = OwnerCensus.Classify(rival);
+                if (owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
+                {
+                    DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix} and its owner is {owner}; refusing to create beside it");
+                    string who = owner switch
+                    {
+                        OwnerCensus.Owner.Unknown =>
+                            "a program built on HIDMaestro older than 1.12.0, which may still be running. " +
+                            "If it is not, remove the device with HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything)",
+                        OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
+                        _ => "a running program",
+                    };
+                    throw new HMResourceInUseException(
+                        $"The device {rival} holds the ParentIdPrefix {prefix} this controller's identity derives, and it belongs to {who}. " +
+                        "Two devices on one prefix stop Windows from booting, so this create is refused.",
+                        $"ParentIdPrefix {prefix}", null);
+                }
+            }
+
             DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix}; removing it before create");
             RemoveDevice(rival, timeoutMs: 120_000, forceFallbacks: true);
 

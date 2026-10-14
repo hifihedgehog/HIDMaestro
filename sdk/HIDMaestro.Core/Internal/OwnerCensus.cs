@@ -119,6 +119,25 @@ internal sealed partial class OwnerCensus
         return census;
     }
 
+    /// <summary>The owner of one present devnode, by the same rules as
+    /// <see cref="Take"/>.</summary>
+    public static Owner Classify(string instanceId)
+    {
+        string name = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
+        int index = ReadControllerIndex(instanceId);
+        foreach (var r in MachineClaims.ReadAll())
+        {
+            bool listed = r.Controllers.Any(c =>
+                string.Equals(c.Token, name, StringComparison.OrdinalIgnoreCase)
+                || (index >= 0 && c.TransportIndex == index && !DeviceIdentity.IsIdentityToken(name)));
+            if (listed) return r.Self ? Owner.Self : r.Live ? Owner.Live : Owner.Dead;
+        }
+        if (index < 0) return Owner.Unknown;
+        if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return Owner.LiveLegacy;
+        if (SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;
+        return Owner.Unknown;
+    }
+
     /// <summary>Present ROOT and SWD devnodes HIDMaestro made: the
     /// enumerators only HIDMaestro uses, and the shared ones where the
     /// HardwareID proves it (issue #28).</summary>

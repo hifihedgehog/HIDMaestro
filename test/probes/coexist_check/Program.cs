@@ -3,6 +3,9 @@
 //   A. Two programs create a controller with no identity key. Each gets
 //      its own transport index and identity, and in one capture window
 //      each device carries only its own program's input.
+//   B. A second program asks for an identity key a live program holds.
+//      Its create is refused with HMResourceInUseException naming the
+//      owner, and the first program's devices never change.
 //   C. A second program runs InstallDriver and a create while the first
 //      streams. The first program's devnodes, XInput slot, WGI entry and
 //      Raw Input entry stay as they were, and its frame gaps stay within
@@ -93,6 +96,7 @@ internal static class Program
         var sections = new (char Id, string Title, Action Body)[]
         {
             ('A', "two programs with no identity key", SectionA),
+            ('B', "one identity key in two programs", SectionB),
             ('C', "a second program starts while the first streams", SectionC),
             ('D', "a killed program's devices", SectionD),
             ('G', "two composite controllers", SectionG),
@@ -188,6 +192,37 @@ internal static class Program
             Check("A: each device carries its own program's input",
                   pat1[0].Buttons != pat2[0].Buttons && pat1[0].Buttons != "none" && pat2[0].Buttons != "none" && pat1[0].X < pat2[0].X,
                   $"device 1 {Show(pat1)}, device 2 {Show(pat2)}");
+    }
+
+    // ── B ──────────────────────────────────────────────────────────────
+
+    static void SectionB()
+    {
+        using var p1 = PeerProcess.Start("B1");
+        string c1 = p1.Send("install") is var i1 && Ok(i1) ? p1.Send("create pad F0D2 coexist-same") : i1;
+        if (!Ok(c1)) { Check("B: the first program creates", false, c1); return; }
+        p1.Send("stream 2 0.5 125 0");
+        string inst1 = PeerProcess.Field(c1, "instance")!;
+        var path = WaitPaths(0xBEEF, 0xF0D2, 1, 10_000);
+        if (path.Count != 1) { Check("B: the first program's device is present", false, $"{path.Count} interfaces"); return; }
+        var tree = Native.Subtree(inst1);
+        using var cap = HidCapture.Open(path[0]);
+        if (cap == null) { Check("B: the first program's device opens", false); return; }
+
+        using var p2 = PeerProcess.Start("B2");
+        string i2 = p2.Send("install");
+        string c2 = p2.Send("create pad F0D2 coexist-same");
+        Check("B: the second program installs", Ok(i2), i2);
+        Check("B: the second program's create is refused with HMResourceInUseException, an InvalidOperationException",
+              c2.StartsWith("ERR create", StringComparison.Ordinal) && c2.Contains("HMResourceInUseException") && c2.Contains("InvalidOperationException"), c2);
+        Check("B: the refusal names the owning process", c2.Contains($"{p1.Pid}"), c2);
+        Thread.Sleep(500);
+        var tree2 = Native.Subtree(inst1);
+        Check("B: the first program's devnodes are unchanged and started",
+              tree2.SequenceEqual(tree, StringComparer.OrdinalIgnoreCase) && tree.All(Native.IsStarted),
+              $"before {tree.Count} nodes, after {tree2.Count}");
+        Check("B: the first program's open handle never failed", !cap.Broken, cap.Broken ? $"read error {cap.ReadError}" : "");
+        Check("B: the first program's input still arrives", Flows(cap));
     }
 
     // ── C ──────────────────────────────────────────────────────────────

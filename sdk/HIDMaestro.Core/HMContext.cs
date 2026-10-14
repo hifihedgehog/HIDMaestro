@@ -19,7 +19,7 @@ namespace HIDMaestro;
 /// controller also holds a machine-wide transport index
 /// (<see cref="HMController.TransportIndex"/>), so several contexts in one
 /// process, and several programs that embed HIDMaestro on one machine, run
-/// side by side without sharing a section.</para>
+/// side by side without sharing a section, an identity or a device.</para>
 ///
 /// <para><b>Driver install:</b> the UMDF2 driver and its XUSB companion are
 /// embedded as resources inside this assembly. On first run on a given
@@ -356,17 +356,18 @@ public sealed class HMContext : IDisposable
     /// slot number when no other program on the machine uses it, so a
     /// keyless controller's index and default identity can differ between
     /// runs when other programs that embed HIDMaestro are running. Pass a
-    /// key for paths that must stay put. The form
-    /// <c>index:&lt;N&gt;</c> is reserved for that default: it names the
-    /// identity of index N wherever it is passed. Two live controllers
-    /// in one context cannot share a key; dispose the first before creating
-    /// the second. A different profile at the same key keeps the identity
-    /// and refreshes the descriptor.</para></summary>
+    /// key for paths that must stay put. The form <c>index:&lt;N&gt;</c> is
+    /// reserved for the default: it names the identity of index N wherever
+    /// it is passed. One identity is held by one live controller on the
+    /// whole machine, in whichever program created it: dispose the first
+    /// before creating the second. A different profile at the same key
+    /// keeps the identity and refreshes the descriptor.</para></summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="InvalidOperationException">Driver install failed,
-    /// device node creation failed, or the key is in use by a live
-    /// controller of this context.</exception>
+    /// <exception cref="HMResourceInUseException">A live controller on this
+    /// machine, in this program or another, holds the key.</exception>
+    /// <exception cref="InvalidOperationException">Driver install failed or
+    /// device node creation failed.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -385,16 +386,13 @@ public sealed class HMContext : IDisposable
             while (_controllers.ContainsKey(slot) || _pendingSlots.Contains(slot)) slot++;
             _pendingSlots.Add(slot);
         }
-        try
-        {
-            ThrowIfKeyInUse(identityKey, slot);
-            return CreateAtSlot(slot, profile, identityKey);
-        }
+        try { return CreateAtSlot(slot, profile, identityKey); }
         finally { lock (_lock) _pendingSlots.Remove(slot); }
     }
 
-    /// <summary>The machine-wide half of a create: the lease on a transport
-    /// index, taken before any PnP work, then the backend's create on it.</summary>
+    /// <summary>The machine-wide half of a create: the lease on a
+    /// transport index and an identity, taken before any PnP work, then the
+    /// backend's create on them.</summary>
     private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey)
     {
         var lease = Internal.ControllerLease.Acquire(slot, identityKey,
@@ -442,25 +440,6 @@ public sealed class HMContext : IDisposable
         }
     }
 
-    /// <summary>Two live controllers of this context with one key would
-    /// race for the same devnode instance ids. Refuse the second before any
-    /// PnP work. A keyless controller's identity follows its transport
-    /// index, which no two live controllers share.</summary>
-    private void ThrowIfKeyInUse(string? identityKey, int slot)
-    {
-        if (string.IsNullOrWhiteSpace(identityKey)) return;
-        string key = Internal.DeviceIdentity.ForKey(identityKey!, slot).Key;
-        lock (_lock)
-        {
-            foreach (var live in _controllers.Values)
-            {
-                if (string.Equals(live.IdentityKey, key, StringComparison.Ordinal))
-                    throw new InvalidOperationException(
-                        $"Identity key '{key}' is in use by the live controller at slot {live.Slot}. Dispose it first.");
-            }
-        }
-    }
-
     // Issue #39: the USB/IP create path. The backend's device emulator
     // pre-creates the per-index shared sections and events, attaches
     // through usbip-win2's vhci, and the HMController then binds to the
@@ -500,8 +479,10 @@ public sealed class HMContext : IDisposable
     /// <summary>Create a controller pinned to a specific slot with a
     /// durable identity key. See <see cref="CreateController(HMProfile, string)"/>
     /// for what the key does. A null or empty key uses the transport index.</summary>
-    /// <exception cref="InvalidOperationException">If the slot or the key
-    /// is already in use by another live controller of this context.</exception>
+    /// <exception cref="InvalidOperationException">If the slot is already
+    /// in use by another live controller of this context.</exception>
+    /// <exception cref="HMResourceInUseException">A live controller on this
+    /// machine, in this program or another, holds the key.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -517,11 +498,7 @@ public sealed class HMContext : IDisposable
                     $"Controller index {index} is already in use. Dispose the existing controller first.");
             _pendingSlots.Add(index);
         }
-        try
-        {
-            ThrowIfKeyInUse(identityKey, index);
-            return CreateAtSlot(index, profile, identityKey);
-        }
+        try { return CreateAtSlot(index, profile, identityKey); }
         finally { lock (_lock) _pendingSlots.Remove(index); }
     }
 
@@ -612,8 +589,8 @@ public sealed class HMContext : IDisposable
         }
         finally
         {
-            // The index goes back to the machine, and the record entry with
-            // it, only once the devices they name are gone.
+            // The index and identity go back to the machine only once the
+            // devices they name are gone.
             controller.Lease?.Dispose();
         }
     }
