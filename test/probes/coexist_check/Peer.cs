@@ -1,0 +1,216 @@
+// One program that embeds HIDMaestro, driven line by line over stdin by the
+// probe. Each reply is one stdout line starting with OK or ERR. Everything
+// a release before v1.13.0 lacks is read through reflection, so this file
+// compiles unchanged against an older HIDMaestro.Core.dll and runs as a
+// program built on that release.
+//
+//   install                     HMContext.InstallDriver
+//   create pad <pid> <key|->    a custom gamepad, VID BEEF and this PID
+//   create xbox - <key|->       xbox-360-wired
+//   create composite - <key|->  dualsense-composite (USB/IP)
+//   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
+//                               button <btn> held, X at <x>, and with
+//                               ramp 1, X stepping by one count a frame
+//   stopstream                  stop, and report the submit intervals
+//   sweep                       RemoveAllVirtualControllers(preserveInstall: true)
+//   everything                  remove every controller of every program,
+//                               keep the driver
+//   uninstall                   remove every controller and the driver
+//   spawnchild                  start a child that inherits handles
+//   dispose                     dispose every controller
+//   exit                        dispose the context and exit
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
+using System.Threading;
+using HIDMaestro;
+
+internal static class Peer
+{
+    static HMContext? s_ctx;
+    static readonly List<HMController> s_live = new();
+    static Thread? s_streamer;
+    static volatile bool s_streaming;
+    static readonly List<double> s_intervals = new();
+
+    public static int Run()
+    {
+        Reply($"OK ready pid={Environment.ProcessId} sdk={typeof(HMContext).Assembly.GetName().Version}");
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var a = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (a.Length == 0) continue;
+            try
+            {
+                switch (a[0])
+                {
+                    case "install":
+                    {
+                        s_ctx ??= NewContext();
+                        var sw = Stopwatch.StartNew();
+                        s_ctx.InstallDriver();
+                        Reply($"OK install ms={sw.ElapsedMilliseconds} outcome={Get(s_ctx, "LastDriverInstall") ?? "unknown"}");
+                        break;
+                    }
+                    case "create":
+                    {
+                        s_ctx ??= NewContext();
+                        HMProfile profile = a[1] switch
+                        {
+                            "pad" => Pad(Convert.ToUInt16(a[2], 16)),
+                            "xbox" => s_ctx.GetProfile("xbox-360-wired")!,
+                            "composite" => s_ctx.GetProfile("dualsense-composite")!,
+                            _ => throw new ArgumentException(a[1]),
+                        };
+                        string? key = a.Length > 3 && a[3] != "-" ? a[3] : null;
+                        var sw = Stopwatch.StartNew();
+                        HMController c = s_ctx.CreateController(profile, key);
+                        long ms = sw.ElapsedMilliseconds;
+                        lock (s_live) s_live.Add(c);
+                        string index = Get(c, "Index") ?? "?";
+                        Reply($"OK create index={index} transport={Get(c, "TransportIndex") ?? index} " +
+                              $"instance={Get(c, "InstanceId") ?? "none"} key={c.IdentityKey} ms={ms}");
+                        break;
+                    }
+                    case "stream":
+                        StartStream(int.Parse(a[1]), float.Parse(a[2], CultureInfo.InvariantCulture), int.Parse(a[3]), a[4] == "1");
+                        Reply("OK stream");
+                        break;
+                    case "stopstream":
+                    {
+                        StopStream();
+                        double[] v;
+                        lock (s_intervals) v = s_intervals.OrderBy(x => x).ToArray();
+                        Reply(v.Length == 0 ? "OK stopstream n=0" :
+                              FormattableString.Invariant($"OK stopstream n={v.Length} p50={v[v.Length / 2]:F3} p99={v[Math.Min(v.Length - 1, (int)(v.Length * 0.99))]:F3} max={v[^1]:F3}"));
+                        break;
+                    }
+                    case "sweep":
+                        HMContext.RemoveAllVirtualControllers(preserveInstall: true);
+                        Reply("OK sweep");
+                        break;
+                    case "everything":
+                        RemoveEverything(preserveInstall: true);
+                        Reply("OK everything");
+                        break;
+                    case "uninstall":
+                        RemoveEverything(preserveInstall: false);
+                        Reply("OK uninstall");
+                        break;
+                    case "spawnchild":
+                    {
+                        // Started the way the SDK starts pnputil and hmswd:
+                        // redirected output, so CreateProcess inherits every
+                        // inheritable handle.
+                        var p = Process.Start(new ProcessStartInfo("cmd.exe", "/c ping -n 300 127.0.0.1 >nul")
+                        { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true })!;
+                        Reply($"OK spawnchild pid={p.Id}");
+                        break;
+                    }
+                    case "dispose":
+                        StopStream();
+                        lock (s_live) { foreach (var c in s_live) c.Dispose(); s_live.Clear(); }
+                        Reply("OK dispose");
+                        break;
+                    case "exit":
+                        StopStream();
+                        s_ctx?.Dispose();
+                        Reply("OK exit");
+                        return 0;
+                    default:
+                        Reply($"ERR unknown {a[0]}");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                var chain = new List<string>();
+                for (var t = ex.GetType(); t != null && t != typeof(object); t = t.BaseType) chain.Add(t.Name);
+                Reply($"ERR {a[0]} {string.Join('<', chain)} {ex.Message.Replace('\n', ' ').Replace('\r', ' ')}");
+            }
+        }
+        StopStream();
+        return 0;
+    }
+
+    /// <summary>A gamepad nothing else on a machine has: VID BEEF, one stick, eight buttons.</summary>
+    public static HMProfile Pad(ushort pid) =>
+        new HMProfileBuilder().Id($"coexist-{pid:x4}").Name($"HIDMaestro Coexist {pid:X4}").Vendor("HIDMaestro")
+            .Vid(0xBEEF).Pid(pid).ProductString($"HIDMaestro Coexist {pid:X4}").ManufacturerString("HIDMaestro")
+            .Type("gamepad").Connection("usb")
+            .FromDescriptorBuilder(new HidDescriptorBuilder().Gamepad().AddStick("Left").AddButtons(8))
+            .Build();
+
+    static HMContext NewContext()
+    {
+        var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        return ctx;
+    }
+
+    /// <summary>The uninstall-grade cleanup. From v1.13.0 the existing
+    /// overloads leave live programs' controllers alone, and the scope
+    /// argument asks for everything. Before it they removed everything.</summary>
+    static void RemoveEverything(bool preserveInstall)
+    {
+        Type? scope = typeof(HMContext).Assembly.GetType("HIDMaestro.HMCleanupScope");
+        if (scope != null)
+        {
+            MethodInfo m = typeof(HMContext).GetMethod("RemoveAllVirtualControllers", new[] { scope, typeof(bool) })
+                ?? throw new MissingMethodException("HMContext.RemoveAllVirtualControllers(HMCleanupScope, bool)");
+            m.Invoke(null, new[] { Enum.Parse(scope, "Everything"), (object)preserveInstall });
+        }
+        else if (preserveInstall) HMContext.RemoveAllVirtualControllers(preserveInstall: true);
+        else HMContext.RemoveAllVirtualControllers();
+    }
+
+    static void StartStream(int button, float x, int hz, bool ramp)
+    {
+        StopStream();
+        lock (s_intervals) s_intervals.Clear();
+        s_streaming = true;
+        s_streamer = new Thread(() =>
+        {
+            long step = Stopwatch.Frequency / hz, next = Stopwatch.GetTimestamp(), last = 0;
+            var axes = new Dictionary<HMAxis, float> { [HMAxis.X] = x, [HMAxis.Y] = 0.5f };
+            var state = new HMGamepadState { Axes = axes, Buttons = (HMButton)(1u << button) };
+            int frame = 0;
+            while (s_streaming)
+            {
+                if (ramp) axes[HMAxis.X] = x + (frame++ % 64) / 65535f;
+                HMController[] live;
+                lock (s_live) live = s_live.ToArray();
+                foreach (var c in live)
+                {
+                    try { c.SubmitState(in state); } catch { }
+                }
+                long now = Stopwatch.GetTimestamp();
+                if (last != 0) lock (s_intervals) s_intervals.Add((now - last) * 1000.0 / Stopwatch.Frequency);
+                last = now;
+                next += step;
+                while (Stopwatch.GetTimestamp() < next) Thread.Sleep(0);
+            }
+        }) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
+        s_streamer.Start();
+    }
+
+    static void StopStream()
+    {
+        s_streaming = false;
+        s_streamer?.Join(2000);
+        s_streamer = null;
+    }
+
+    static string? Get(object o, string name) =>
+        o.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(o)?.ToString();
+
+    static void Reply(string s)
+    {
+        Console.WriteLine(s);
+        Console.Out.Flush();
+    }
+}

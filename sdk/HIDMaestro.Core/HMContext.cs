@@ -139,6 +139,10 @@ public sealed class HMContext : IDisposable
     {
         ThrowIfDisposed();
 
+        // The owner claim comes before any machine-wide write, so another
+        // program can tell this one is alive.
+        Internal.MachineClaims.EnsureOwner();
+
         // Proactive ghost sweep FIRST, before FullDeploy. Without this, when a
         // prior process crashed or was force-killed (Dispose never ran), its
         // virtual controllers + HIDMAESTRO stay PnP-live and REMAIN BOUND to
@@ -375,38 +379,58 @@ public sealed class HMContext : IDisposable
         }
         var identity = Internal.DeviceIdentity.Resolve(identityKey, index);
         ThrowIfIdentityInUse(identity);
+        return CreateRecorded(index, profile, identity);
+    }
 
-        // Issue #39: composite USB personas run on the USB/IP backend,
-        // never on UMDF2, which can only present the single HID interface
-        // and would silently drop the three USB Audio Class interfaces
-        // the profile promises. The backend's transport is bundled and
-        // deploys itself on first use, so this path needs no precondition
-        // from the consumer. The UMDF2 path below is untouched.
-        if (profile.RequiresUsbipBackend)
-            return CreateUsbipController(index, profile, identity);
-
-        // The driver INF lives next to the driver binaries in the repo's
-        // build/ directory. This will move to embedded-resource extraction
-        // when single-file SDK deployment is implemented.
-        string infPath = System.IO.Path.Combine(
-            Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
-
-        string? instanceId;
+    /// <summary>The backend's create, with the controller listed in this
+    /// process's owner record before any PnP work and dropped again if the
+    /// create fails. A record whose owner claim is gone tells every other
+    /// program what a dead program left behind.</summary>
+    private HMController CreateRecorded(int index, HMProfile profile, Internal.DeviceIdentity identity)
+    {
+        Internal.MachineClaims.AddController(identity.Token, index,
+            profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         try
         {
-            instanceId = Internal.DeviceOrchestrator.SetupController(
-                index, profile.Inner, infPath, identity);
+            // Issue #39: composite USB personas run on the USB/IP backend,
+            // never on UMDF2, which can only present the single HID interface
+            // and would silently drop the three USB Audio Class interfaces
+            // the profile promises. The backend's transport is bundled and
+            // deploys itself on first use, so this path needs no precondition
+            // from the consumer. The UMDF2 path below is untouched.
+            if (profile.RequiresUsbipBackend)
+                return CreateUsbipController(index, profile, identity);
+
+            // The driver INF lives next to the driver binaries in the repo's
+            // build/ directory. This will move to embedded-resource extraction
+            // when single-file SDK deployment is implemented.
+            string infPath = System.IO.Path.Combine(
+                Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
+
+            string? instanceId;
+            try
+            {
+                instanceId = Internal.DeviceOrchestrator.SetupController(
+                    index, profile.Inner, infPath, identity);
+            }
+            catch
+            {
+                // Best-effort cleanup of any partial state, then rethrow.
+                try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
+                throw;
+            }
+            if (instanceId != null)
+                Internal.MachineClaims.SetControllerValue(identity.Token, "InstanceId", instanceId);
+
+            var controller = new HMController(this, index, profile, instanceId, identityKey: identity.Key);
+            lock (_lock) _controllers[index] = controller;
+            return controller;
         }
         catch
         {
-            // Best-effort cleanup of any partial state, then rethrow.
-            try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
+            Internal.MachineClaims.RemoveController(identity.Token);
             throw;
         }
-
-        var controller = new HMController(this, index, profile, instanceId, identityKey: identity.Key);
-        lock (_lock) _controllers[index] = controller;
-        return controller;
     }
 
     /// <summary>Two live controllers with one key would race for the same
@@ -434,6 +458,7 @@ public sealed class HMContext : IDisposable
             Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, identity);
         try
         {
+            Internal.MachineClaims.SetControllerValue(identity.Token, "VhciPort", handle.VhciPort);
             var controller = new HMController(this, index, profile, instanceId: null, handle, identity.Key);
             lock (_lock) _controllers[index] = controller;
             return controller;
@@ -480,27 +505,7 @@ public sealed class HMContext : IDisposable
         // Issue #39: same backend routing as CreateController. Live-swap
         // consumers can pin a composite persona to an index like any
         // other profile.
-        if (profile.RequiresUsbipBackend)
-            return CreateUsbipController(index, profile, identity);
-
-        string infPath = System.IO.Path.Combine(
-            Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
-
-        string? instanceId;
-        try
-        {
-            instanceId = Internal.DeviceOrchestrator.SetupController(
-                index, profile.Inner, infPath, identity);
-        }
-        catch
-        {
-            try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
-            throw;
-        }
-
-        var controller = new HMController(this, index, profile, instanceId, identityKey: identity.Key);
-        lock (_lock) _controllers[index] = controller;
-        return controller;
+        return CreateRecorded(index, profile, identity);
     }
 
     /// <summary>All currently-live controllers owned by this context.</summary>
@@ -580,11 +585,22 @@ public sealed class HMContext : IDisposable
         {
             try { controller.UsbipHandle.Dispose(); } catch { }
             try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
+            Internal.MachineClaims.RemoveController(
+                Internal.DeviceIdentity.Resolve(controller.IdentityKey, controller.Index).Token);
             return;
         }
 
-        Internal.DeviceOrchestrator.TeardownController(
-            controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
+        try
+        {
+            Internal.DeviceOrchestrator.TeardownController(
+                controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
+        }
+        finally
+        {
+            // The entry goes once the devices it names are gone.
+            Internal.MachineClaims.RemoveController(
+                Internal.DeviceIdentity.Resolve(controller.IdentityKey, controller.Index).Token);
+        }
     }
 
     private void ThrowIfDisposed()

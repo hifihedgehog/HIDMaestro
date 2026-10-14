@@ -182,6 +182,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\vr_driver_conflict_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\kbm_offline_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\kbm_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\coexist_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1799,6 +1800,14 @@ function Scenario-Kbm-Raw-Input {
                  -Message 'a virtual keyboard or mouse reached Raw Input wrong, lost input, or did not start (see probe stdout)'
 }
 
+# S71: programs that embed HIDMaestro, side by side on one machine. Each
+# program is a peer process the probe drives, and the probe judges what
+# they did from outside both. Its header lists every section.
+function Scenario-Coexistence {
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' `
+                 -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1873,7 +1882,8 @@ $scenarios = @(
     @{ Name = 'S67_Wgi_Mapping';                 Body = ${function:Scenario-Wgi-Mapping} },
     @{ Name = 'S68_Vr_Driver_Conflict';          Body = ${function:Scenario-Vr-Driver-Conflict} },
     @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
-    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} }
+    @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
+    @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

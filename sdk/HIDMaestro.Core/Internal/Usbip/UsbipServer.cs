@@ -49,6 +49,10 @@ internal sealed class UsbipServer : IDisposable
         {
             if (s_instance != null && !s_instance._stop) return s_instance;
             s_instance = new UsbipServer();
+            // Imports are matched to their program by this port, so a sweep
+            // in another program can tell this server's devices from a dead
+            // server's.
+            MachineClaims.SetUsbipPort(s_instance.Port);
             return s_instance;
         }
     }
