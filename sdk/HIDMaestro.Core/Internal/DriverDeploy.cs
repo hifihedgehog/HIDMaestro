@@ -182,6 +182,10 @@ internal static partial class DriverDeploy
         }
         finally
         {
+            // Under the mutex, drop staging directories of versions no live
+            // owner names. Best effort: a directory still in use by another
+            // program's version is kept because its owner record names it.
+            try { ProtectedStaging.PruneOldVersions(); } catch { }
             mutex.ReleaseMutex();
         }
     }

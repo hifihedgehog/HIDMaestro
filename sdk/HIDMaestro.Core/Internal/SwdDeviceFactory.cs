@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Text;
 using System.Threading;
 
@@ -124,7 +123,9 @@ internal static class SwdDeviceFactory
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             CreateNoWindow         = true,
-            WorkingDirectory       = Path.GetTempPath(),
+            // The helper's own protected staging directory, never a
+            // directory a non-administrator can write.
+            WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
         };
         psi.ArgumentList.Add("create");
         psi.ArgumentList.Add(enumName);
@@ -286,7 +287,9 @@ internal static class SwdDeviceFactory
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             CreateNoWindow         = true,
-            WorkingDirectory       = Path.GetTempPath(),
+            // The helper's own protected staging directory, never a
+            // directory a non-administrator can write.
+            WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
         };
         psi.ArgumentList.Add("remove");
         psi.ArgumentList.Add(enumerator);
@@ -328,64 +331,45 @@ internal static class SwdDeviceFactory
 
     private static readonly object s_extractLock = new();
     private static string? s_extractedPath;
+    private static string? s_expectedSha256;
 
-    /// <summary>Extract <c>hmswd.exe</c> from the embedded resources to a
-    /// stable per-user location and return its path. Idempotent. Throws on
-    /// failure.</summary>
-#pragma warning disable CS8600 // assembly.Location can legitimately be null for single-file
+    /// <summary>Stage <c>hmswd.exe</c> from the embedded resources into the
+    /// protected per-version staging directory and return its path, or null
+    /// on failure. Its SHA-256 is verified against the embedded bytes when it
+    /// is staged, so the file the helper process runs from matches what
+    /// shipped inside HIDMaestro.Core.dll.
+    ///
+    /// <para>There is no longer a sibling-to-the-assembly fast path: it read
+    /// <c>Assembly.Location</c>, which is empty in a single-file or NativeAOT
+    /// app, and it trusted whatever <c>hmswd.exe</c> sat next to the DLL. The
+    /// helper always comes from the embedded resource now, which is both
+    /// single-file-safe and the source whose bytes are verified.</para></summary>
     internal static string? EnsureHelperExtracted()
     {
         lock (s_extractLock)
         {
-            if (s_extractedPath != null && File.Exists(s_extractedPath))
-                return s_extractedPath;
-
-            // Prefer a sibling to the SDK assembly if it's already there
-            // (source builds don't embed + extract: the file is next to
-            // HIDMaestro.Core.dll).
-            try
+            // Every caller runs the helper elevated right after this returns,
+            // so the staged file is checked against the embedded hash each
+            // time, not only when it was first staged.
+            if (s_extractedPath != null && s_expectedSha256 != null)
             {
-                string? asmDir = Path.GetDirectoryName(typeof(SwdDeviceFactory).Assembly.Location);
-                if (asmDir != null)
+                try
                 {
-                    string candidate = Path.Combine(asmDir, "hmswd.exe");
-                    if (File.Exists(candidate))
-                    {
-                        s_extractedPath = candidate;
-                        return candidate;
-                    }
+                    ProtectedStaging.VerifyBeforeUse(s_extractedPath, s_expectedSha256);
+                    return s_extractedPath;
                 }
+                catch { s_extractedPath = null; } // changed or gone: stage again
             }
-            catch { }
 
-            // Otherwise extract from embedded resource
-            string targetDir  = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-            string targetPath = Path.Combine(targetDir, "hmswd.exe");
             try
             {
-                Directory.CreateDirectory(targetDir);
-
                 var asm = typeof(SwdDeviceFactory).Assembly;
-                using var s = asm.GetManifestResourceStream(DriverBuilder.NativePrefix + "hmswd.exe");
-                if (s == null) return null;
-
-                // Only re-extract if missing or different length (cheap check).
-                bool needWrite = true;
-                if (File.Exists(targetPath))
-                {
-                    var fi = new FileInfo(targetPath);
-                    if (fi.Length == s.Length) needWrite = false;
-                }
-
-                if (needWrite)
-                {
-                    s.Position = 0;
-                    using var fs = File.Create(targetPath);
-                    s.CopyTo(fs);
-                }
-
-                s_extractedPath = targetPath;
-                return targetPath;
+                string logical = DriverBuilder.NativePrefix + "hmswd.exe";
+                string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationSwd);
+                s_expectedSha256 ??= ProtectedStaging.EmbeddedSha256(asm, logical);
+                ProtectedStaging.StageResource(dir, "hmswd.exe", asm, logical);
+                s_extractedPath = Path.Combine(dir, "hmswd.exe");
+                return s_extractedPath;
             }
             catch { return null; }
         }
@@ -393,5 +377,4 @@ internal static class SwdDeviceFactory
 
     private static bool IsHex(char c) =>
         (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-#pragma warning restore CS8600
 }

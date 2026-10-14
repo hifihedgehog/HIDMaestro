@@ -14,8 +14,10 @@ namespace HIDMaestro.Internal;
 /// Self-contained driver installer. The driver binaries (HIDMaestro.dll,
 /// HMXInput.dll), their INFs, and every external tool needed to sign + catalog
 /// + deploy them (signtool.exe + SXS deps, inf2cat.exe + deps) ship as embedded
-/// resources inside HIDMaestro.Core.dll. At install time we extract the whole
-/// payload to %TEMP%\HIDMaestro_{guid}\ and shell out to the extracted tools.
+/// resources inside HIDMaestro.Core.dll. At install time the whole payload is
+/// staged under <c>%ProgramData%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\driver</c>
+/// (<see cref="ProtectedStaging"/>), each file checked against its embedded
+/// SHA-256, and the SDK shells out to the staged tools.
 ///
 /// No WDK install is required on the consumer's machine. The SDK consumer ships
 /// a single DLL.
@@ -148,17 +150,17 @@ public static class DriverBuilder
         foreach (string f in NeutralFiles) yield return (f, "HIDMaestro.Resources." + f);
     }
 
-    /// <summary>Lazily extracts the embedded payload to a deterministic
-    /// per-manifest-hash directory under %TEMP% and returns the path.
+    /// <summary>Stages the embedded payload into this build's protected
+    /// "driver" staging directory and returns its path. Requires elevation.
     ///
-    /// <para><b>Cross-launch cache (v1.3.0+):</b> the staging directory
-    /// is named <c>HIDMaestro_&lt;sha256-prefix&gt;</c> where the prefix
-    /// is the first 16 hex chars of <see cref="EmbeddedManifest.Sha256Hex"/>.
-    /// Different SDK versions land in different dirs (auto-invalidation
-    /// without explicit cleanup); identical SDK rebuilds with identical
-    /// embedded payload reuse the same dir. On warm launches we just
-    /// validate file count + size and return: no rewrites. Drops
-    /// extraction time from 200 ms–3 s on slow eMMC to single-digit ms.</para>
+    /// <para><b>Cross-launch reuse:</b> the directory is named for the SDK
+    /// version and the first 16 hex chars of
+    /// <see cref="EmbeddedManifest.Sha256Hex"/>, so different builds land in
+    /// different directories and an identical build reuses its own. A file
+    /// already staged is reused only when its SHA-256 still matches the
+    /// embedded bytes, so a warm launch rewrites nothing. Until v1.13.0 the
+    /// directory was under <c>%TEMP%</c> and reuse trusted a matching file
+    /// size.</para>
     ///
     /// <para>Within a single process, idempotent via the
     /// <see cref="StagingDir"/> static cache (set on first successful
@@ -182,70 +184,27 @@ public static class DriverBuilder
             if (StagingDir != null && Directory.Exists(StagingDir))
                 return StagingDir;
 
-            string hashPrefix = EmbeddedManifest.Sha256Hex.Substring(0, 16);
-            string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_{hashPrefix}");
-
-            // Cache hit: dir exists with the right set of files at the right
-            // sizes. Trust the contents: corruption is rare and the next
-            // signtool / inf2cat / pnputil run will surface any tampering.
-            if (Directory.Exists(dir) && IsStagingDirComplete(dir))
-            {
-                StagingDir = dir;
-                return dir;
-            }
-
-            // Cache miss or partial dir: re-extract everything.
-            Directory.CreateDirectory(dir);
+            // The protected per-version "driver" staging directory, created
+            // and verified Administrators/SYSTEM-write-only (ProtectedStaging).
+            // Each file's SHA-256 is checked against the embedded resource on
+            // write and on reuse, which replaces the old length-only trust of
+            // a %TEMP% directory any process of the user could write.
+            string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationDriver);
 
             var asm = typeof(DriverBuilder).Assembly;
-            var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string name in asm.GetManifestResourceNames())
-                available[name] = name;
+            var available = new HashSet<string>(asm.GetManifestResourceNames(), StringComparer.Ordinal);
 
             foreach (var (file, logical) in AllPayload())
             {
-                if (!available.TryGetValue(logical, out var actual))
+                if (!available.Contains(logical))
                     throw new InvalidOperationException(
                         $"Embedded resource '{logical}' not found in HIDMaestro.Core.dll. " +
                         "Did the PackResources MSBuild target run?");
-
-                using var stream = asm.GetManifestResourceStream(actual)
-                    ?? throw new InvalidOperationException($"Failed to open resource '{actual}'.");
-                string outPath = Path.Combine(dir, file);
-                using var fs = File.Create(outPath);
-                stream.CopyTo(fs);
+                ProtectedStaging.StageResource(dir, file, asm, logical);
             }
 
             StagingDir = dir;
             return dir;
-        }
-    }
-
-    /// <summary>Validates that an existing staging dir contains every
-    /// expected file at the same size as the embedded resource. Catches
-    /// partial extracts (process killed mid-extract) and prevents a stale
-    /// dir from satisfying the cache.</summary>
-    private static bool IsStagingDirComplete(string dir)
-    {
-        try
-        {
-            var asm = typeof(DriverBuilder).Assembly;
-            foreach (var (file, logical) in AllPayload())
-            {
-                string outPath = Path.Combine(dir, file);
-                if (!File.Exists(outPath)) return false;
-
-                using var stream = asm.GetManifestResourceStream(logical);
-                if (stream == null) return false;
-                long expected = stream.Length;
-                long actual = new FileInfo(outPath).Length;
-                if (expected != actual) return false;
-            }
-            return true;
-        }
-        catch
-        {
-            return false;
         }
     }
 
@@ -453,12 +412,31 @@ public static class DriverBuilder
         // device after the package changes. With no HIDMaestro device left,
         // every such host is an orphan.
         DeviceOrchestrator.ReleaseStaleDriverHosts();
-        EnsureExtracted();
+        string dir = EnsureExtracted();
+        VerifyStagedBeforeUse(dir);
         RemoveOldDriverPackages();
         SignDrivers();
         GenerateCatalogs();
         InstallDrivers();
         RecordInstalledPayload();
+    }
+
+    /// <summary>Re-check, against the embedded bytes, every staged file that
+    /// is about to run elevated or be signed: the signing and catalog tools,
+    /// and the two driver binaries before signtool rewrites them. A staged
+    /// file changed since <see cref="EnsureExtracted"/> is caught here, before
+    /// anything runs. The signed binaries and the generated catalogs are not
+    /// re-checked afterward, because signing and inf2cat change their bytes by
+    /// design.</summary>
+    private static void VerifyStagedBeforeUse(string dir)
+    {
+        var asm = typeof(DriverBuilder).Assembly;
+        string neutral(string f) => "HIDMaestro.Resources." + f;
+        string native(string f) => NativePrefix + f;
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "signtool.exe"), asm, native("signtool.exe"));
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "Inf2Cat.exe"), asm, neutral("Inf2Cat.exe"));
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "HIDMaestro.dll"), asm, native("HIDMaestro.dll"));
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "HMXInput.dll"), asm, native("HMXInput.dll"));
     }
 
     /// <summary>Record the embedded payload's hash as the installed one,

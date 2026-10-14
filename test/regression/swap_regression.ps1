@@ -644,13 +644,30 @@ function Invoke-Probe {
         [Parameter(Mandatory)][string]$Dir,
         [Parameter(Mandatory)][string]$Exe,
         [Parameter(Mandatory)][string]$Message,
-        [int[]]$SkipCodes = @()
+        [int[]]$SkipCodes = @(),
+        # Passed to the probe as its command line. Two scenarios that run
+        # one probe with different arguments also pass a distinct -Tag, so
+        # each keeps its own transcript.
+        [string]$Arguments = '',
+        [string]$Tag = ''
     )
     $probe = Resolve-ProbeBinary $Dir $Exe
-    $out = Join-Path $env:TEMP ("HIDMaestro_probe_" + [IO.Path]::GetFileNameWithoutExtension($Exe) + ".log")
+    $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
+    if ($Tag) { $name += '_' + $Tag }
+    $out = Join-Path $env:TEMP ("HIDMaestro_probe_" + $name + ".log")
     $err = "$out.err"
-    $p = Start-Process -FilePath $probe -PassThru -NoNewWindow -Wait `
-                       -RedirectStandardOutput $out -RedirectStandardError $err
+    $start = @{
+        FilePath               = $probe
+        PassThru               = $true
+        NoNewWindow            = $true
+        Wait                   = $true
+        RedirectStandardOutput = $out
+        RedirectStandardError  = $err
+    }
+    # Start-Process rejects an empty -ArgumentList, so it is passed only
+    # when there is something to pass.
+    if ($Arguments) { $start.ArgumentList = $Arguments }
+    $p = Start-Process @start
     if ($SkipCodes -contains $p.ExitCode) {
         Write-Host ('    [SKIP] probe reported exit ' + $p.ExitCode) -ForegroundColor Yellow
         return
@@ -1804,8 +1821,18 @@ function Scenario-Kbm-Raw-Input {
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' `
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGH' -Tag 'coexistence' `
                  -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
+}
+
+# S72: everything the elevated SDK runs or hands to pnputil is staged under
+# %ProgramData%\HIDMaestro\Staging in directories only Administrators and
+# SYSTEM can write, a planted writable staging tree is repaired before use,
+# and a staged file with the right length but the wrong bytes is replaced
+# from the embedded copy. Section I of the coexistence probe.
+function Scenario-Protected-Staging {
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
+                 -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2
 }
 
 # ====================================================================
@@ -1883,7 +1910,8 @@ $scenarios = @(
     @{ Name = 'S68_Vr_Driver_Conflict';          Body = ${function:Scenario-Vr-Driver-Conflict} },
     @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
     @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
-    @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} }
+    @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} },
+    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

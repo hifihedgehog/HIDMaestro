@@ -53,7 +53,6 @@ internal static class UsbipDriverInstaller
             : "38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a";
 
     private static readonly object s_lock = new();
-    private static bool s_verifiedThisProcess;
 
     /// <summary>True when the vhci host controller is present and started,
     /// meaning composite personas can be created right now with no
@@ -72,7 +71,6 @@ internal static class UsbipDriverInstaller
         if (IsInstalled)
         {
             ReplaceLegacyTransportOnce(progress);
-            s_verifiedThisProcess = true;
             StampOwnerHardwareId();
             return true;
         }
@@ -288,6 +286,7 @@ internal static class UsbipDriverInstaller
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
+            WorkingDirectory = Path.GetDirectoryName(helper)!,
         };
         psi.ArgumentList.Add("force-driver");
         psi.ArgumentList.Add(inf);
@@ -431,25 +430,16 @@ internal static class UsbipDriverInstaller
     private static string StageUdePackage()
     {
         string arch = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64" : "x64";
-        string dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "HIDMaestro", "usbip", Version, arch);
-        Directory.CreateDirectory(dir);
+        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationUsbipUde);
 
         var asm = typeof(UsbipDriverInstaller).Assembly;
         foreach (string file in UdeFiles)
         {
-            string path = Path.Combine(dir, file);
-            if (!(File.Exists(path) && Sha256Of(path).Equals(PinnedUdeHash(file), StringComparison.OrdinalIgnoreCase)))
-            {
-                string logical = $"HIDMaestro.Usbip.{arch}.{file}";
-                using var src = asm.GetManifestResourceStream(logical)
-                    ?? throw new InvalidOperationException($"Embedded resource '{logical}' is missing from HIDMaestro.Core.dll.");
-                using (var dst = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
-                    src.CopyTo(dst);
-            }
-            if (!Sha256Of(path).Equals(PinnedUdeHash(file), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException($"{file} failed SHA256 verification after staging; refusing to install it.");
+            string logical = $"HIDMaestro.Usbip.{arch}.{file}";
+            using var src = asm.GetManifestResourceStream(logical)
+                ?? throw new InvalidOperationException($"Embedded resource '{logical}' is missing from HIDMaestro.Core.dll.");
+            // Verified against the pinned per-file hash from UsbipPackage.json.
+            ProtectedStaging.StageStream(dir, file, src, PinnedUdeHash(file));
         }
         return Path.Combine(dir, "usbip2_ude.inf");
     }
@@ -816,39 +806,29 @@ internal static class UsbipDriverInstaller
     [DllImport("cfgmgr32.dll")]
     private static extern int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
 
-    /// <summary>Extract the bundled installer and its license notice to a
-    /// per-version temp directory, verifying the binary's hash. Reuses an
-    /// already-extracted copy when the hash still matches.</summary>
+    /// <summary>Stage the bundled installer and its license notice into the
+    /// protected per-version "usbip" directory (Administrators/SYSTEM-write
+    /// only), verifying the binary against the pinned SHA-256. Through
+    /// v1.12.0 this lived in <c>%TEMP%\HIDMaestro_usbip_&lt;ver&gt;</c>, which
+    /// any process of the user could write between the check and the run.</summary>
     private static string ExtractInstaller()
     {
-        string dir = Path.Combine(Path.GetTempPath(), $"HIDMaestro_usbip_{Version}");
-        Directory.CreateDirectory(dir);
+        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationUsbip);
         string exePath = Path.Combine(dir, InstallerFile);
-
-        if (File.Exists(exePath) && (s_verifiedThisProcess || HashMatches(exePath)))
-            return exePath;
 
         var asm = typeof(UsbipDriverInstaller).Assembly;
         string logical = "HIDMaestro.Resources." + InstallerFile;
-        using (var stream = asm.GetManifestResourceStream(logical))
+        using (var stream = asm.GetManifestResourceStream(logical)
+            ?? throw new InvalidOperationException(
+                $"The bundled usbip-win2 installer ('{logical}') is missing from " +
+                "HIDMaestro.Core.dll. The PackResources MSBuild target fetches and embeds it; " +
+                "rebuild the SDK."))
         {
-            if (stream == null)
-                throw new InvalidOperationException(
-                    $"The bundled usbip-win2 installer ('{logical}') is missing from " +
-                    "HIDMaestro.Core.dll. The PackResources MSBuild target fetches and embeds it; " +
-                    "rebuild the SDK.");
-            using var fs = File.Create(exePath);
-            stream.CopyTo(fs);
+            // Verified against the pinned release hash, not merely the
+            // embedded bytes' own hash, so a substituted embedded resource is
+            // also caught.
+            ProtectedStaging.StageStream(dir, InstallerFile, stream, InstallerSha256);
         }
-
-        if (!HashMatches(exePath))
-        {
-            try { File.Delete(exePath); } catch { }
-            throw new InvalidOperationException(
-                "The extracted usbip-win2 installer failed its SHA256 check and was deleted. " +
-                "Refusing to run an unverified driver installer.");
-        }
-        s_verifiedThisProcess = true;
 
         // Ship the BSD-2-Clause notice next to the binary, which is the
         // license's "documentation and/or other materials provided with
@@ -867,27 +847,20 @@ internal static class UsbipDriverInstaller
         return exePath;
     }
 
-    private static bool HashMatches(string path)
-    {
-        try
-        {
-            using var fs = File.OpenRead(path);
-            byte[] hash = SHA256.HashData(fs);
-            return Convert.ToHexString(hash).Equals(InstallerSha256, StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return false; }
-    }
-
     /// <summary>Run the Inno Setup installer silently. The flags are the
     /// upstream installer's own: no UI, no message boxes, no reboot.</summary>
     private static void RunSilentInstall(string exePath)
     {
+        // Point-of-use check: the staged installer still matches the pinned
+        // hash right before it runs elevated.
+        ProtectedStaging.VerifyBeforeUse(exePath, InstallerSha256);
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
             Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
             UseShellExecute = false,
             CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(exePath)!,
         };
 
         using var p = Process.Start(psi)

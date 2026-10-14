@@ -28,6 +28,16 @@
 //   H. A program killed while a child process it started still runs. Its
 //      ownership claim goes with it, and another program can take the
 //      same identity at once.
+//   I. Staging. The driver payload and hmswd.exe stage under
+//      %ProgramData%\HIDMaestro\Staging, every directory on the path is
+//      Administrators/SYSTEM-write-only, and nothing is left in %TEMP%. A
+//      staging root a non-administrator could write is repaired before use.
+//      A staged tool overwritten with different bytes of the same length
+//      is restored from the embedded copy on the next use. A deploy prunes
+//      the staging of versions no running program uses, a staging
+//      directory replaced by a link is moved aside rather than followed,
+//      and a temporary file a process left when it ended mid-write is
+//      removed. Battery S72 runs this section, and S71 runs A to H.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -100,7 +110,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGH";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHI";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -112,6 +122,7 @@ internal static class Program
             ('F', "InstallDriver at the same moment in two programs", SectionF),
             ('G', "two composite controllers", SectionG),
             ('H', "a program killed while its child runs", SectionH),
+            ('I', "staging under a protected directory", SectionI),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -675,5 +686,228 @@ internal static class Program
         {
             try { child?.Kill(); } catch { }
         }
+    }
+
+    // ── I ──────────────────────────────────────────────────────────────
+
+    static string ProgramDataRoot =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HIDMaestro");
+    static string StagingRoot => Path.Combine(ProgramDataRoot, "Staging");
+
+    /// <summary>Reply to a peer "stagingdir" command, whose path runs to the
+    /// end of the line so a directory with spaces survives.</summary>
+    static string? StagingPath(string reply)
+    {
+        const string tag = "path=";
+        int i = reply.IndexOf(tag, StringComparison.Ordinal);
+        return i < 0 ? null : reply[(i + tag.Length)..].Trim();
+    }
+
+    static void SectionI()
+    {
+        try { SectionIChecks(); }
+        finally
+        {
+            // I3 makes the staging root writable by others. An SDK that does
+            // not repair it would leave it that way, so the probe puts the
+            // protection back itself and never leaves the machine weaker
+            // than the SDK under test found it.
+            try { if (Directory.Exists(StagingRoot) && Native.WhyWritableByOthers(StagingRoot) != null) Native.Protect(StagingRoot); }
+            catch (Exception ex) { Check("I: the staging root is protected again", false, ex.Message); }
+        }
+    }
+
+    static void SectionIChecks()
+    {
+        // I1. The driver payload stages under the protected directory, and
+        // every directory on the path denies a non-administrator write.
+        string? driverDir;
+        using (var p = PeerProcess.Start("I1"))
+        {
+            p.Send("install");
+            string r = p.Send("stagingdir");
+            driverDir = Ok(r) ? StagingPath(r) : null;
+            if (driverDir == null) { Check("I1: the driver payload stages somewhere", false, r); return; }
+            Check("I1: the driver payload stages under %ProgramData%\\HIDMaestro\\Staging",
+                  driverDir.StartsWith(StagingRoot, StringComparison.OrdinalIgnoreCase), driverDir);
+            string? why = Native.WhyWritableByOthers(driverDir);
+            Check("I1: its directory is Administrators/SYSTEM-write-only", why == null, why ?? "");
+            // Every ancestor down from %ProgramData%\HIDMaestro.
+            for (string d = driverDir; d.Length >= ProgramDataRoot.Length && d.StartsWith(ProgramDataRoot, StringComparison.OrdinalIgnoreCase);
+                 d = Path.GetDirectoryName(d)!)
+            {
+                string? w = Native.WhyWritableByOthers(d);
+                Check($"I1: {Path.GetFileName(d)} on the path denies others write", w == null, $"{d}: {w}");
+                if (string.Equals(d, ProgramDataRoot, StringComparison.OrdinalIgnoreCase)) break;
+            }
+        }
+
+        // I2. hmswd.exe stages under the protected directory too, and the
+        // SDK no longer writes it to the user-writable %TEMP%\HIDMaestro it
+        // used before. The stale copy a pre-v1.13.0 run leaves there is
+        // removed first, so the check reflects only what this SDK does.
+        string legacyTemp = Path.Combine(Path.GetTempPath(), "HIDMaestro", "hmswd.exe");
+        try { if (File.Exists(legacyTemp)) File.Delete(legacyTemp); } catch { }
+        using (var p = PeerProcess.Start("I2"))
+        {
+            string r = p.Send("swdhelper");
+            string? swd = Ok(r) ? StagingPath(r) : null;
+            if (swd == null) { Check("I2: the SWD helper stages", false, r); return; }
+            string swdDir = Path.GetDirectoryName(swd)!;
+            Check("I2: hmswd.exe stages under the version's swd directory",
+                  swd.StartsWith(StagingRoot, StringComparison.OrdinalIgnoreCase) &&
+                  string.Equals(Path.GetFileName(swdDir), "swd", StringComparison.OrdinalIgnoreCase) &&
+                  File.Exists(swd), swd);
+            Check("I2: that directory is Administrators/SYSTEM-write-only",
+                  Native.WhyWritableByOthers(swdDir) == null, Native.WhyWritableByOthers(swdDir) ?? "");
+            Check("I2: the SDK did not write hmswd.exe to the user-writable %TEMP% location",
+                  !File.Exists(legacyTemp), legacyTemp);
+        }
+
+        // I3. A staging tree a non-administrator could write before the SDK
+        // ran is repaired, not used as found.
+        Native.MakeUserWritable(StagingRoot);
+        Check("I3: the planted staging root starts out writable by others",
+              Native.WhyWritableByOthers(StagingRoot) != null);
+        using (var p = PeerProcess.Start("I3"))
+        {
+            p.Send("install");
+            string r = p.Send("stagingdir");
+            string? dir = Ok(r) ? StagingPath(r) : null;
+            Check("I3: the planted staging root is repaired to deny others write",
+                  Native.WhyWritableByOthers(StagingRoot) == null, Native.WhyWritableByOthers(StagingRoot) ?? "");
+            Check("I3: and the driver still stages into a protected directory",
+                  dir != null && Native.WhyWritableByOthers(dir) == null, dir ?? r);
+        }
+
+        // I4. A staged file changed to different bytes of the same length is
+        // caught by its hash on the next use, not trusted on its size.
+        byte[]? good = ReadEmbedded("HIDMaestro.Resources.Inf2Cat.exe");
+        if (good == null) { Check("I4: the embedded Inf2Cat.exe is readable", false); return; }
+        string? dirA;
+        using (var p = PeerProcess.Start("I4-a"))
+        {
+            p.Send("install");
+            dirA = StagingPath(p.Send("stagingdir"));
+        }
+        string tool = dirA == null ? "" : Path.Combine(dirA, "Inf2Cat.exe");
+        if (dirA == null || !File.Exists(tool)) { Check("I4: Inf2Cat.exe is staged", false, tool); return; }
+        byte[] tampered = (byte[])good.Clone();
+        for (int i = 0; i < tampered.Length; i++) tampered[i] ^= 0xFF;
+        try
+        {
+            File.WriteAllBytes(tool, tampered);
+            Check("I4: the staged tool starts out tampered, same length",
+                  new FileInfo(tool).Length == good.Length && !File.ReadAllBytes(tool).SequenceEqual(good));
+            // Staging only: a fresh process re-stages, and nothing in this
+            // step runs the tool.
+            using (var p = PeerProcess.Start("I4-b"))
+                p.Send("stagingdir");
+            Check("I4: the next use restores the staged tool from the embedded bytes",
+                  File.ReadAllBytes(tool).SequenceEqual(good));
+        }
+        finally
+        {
+            // An SDK that trusts the size leaves the scrambled bytes in
+            // place, and Windows answers an attempt to run them with a
+            // modal "Unsupported 16-Bit Application" dialog. Put the
+            // original back before anything later can run it.
+            try { if (!File.ReadAllBytes(tool).SequenceEqual(good)) File.WriteAllBytes(tool, good); } catch { }
+        }
+
+        // I5 to I7 plant files in the version's staging directory. An SDK
+        // that stages somewhere else, such as a user's %TEMP%, gets no files
+        // planted there, and these checks fail on that alone.
+        string versionDir = Path.GetDirectoryName(dirA)!;
+        if (!versionDir.StartsWith(StagingRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (string name in new[]
+                     {
+                         "I5: a deploy prunes the staging of versions no running program uses",
+                         "I6: a staging directory replaced by a link is moved aside, not followed",
+                         "I7: a temporary file a process left when it ended mid-write is removed",
+                     })
+                Check(name, false, $"the SDK stages in {versionDir}");
+            return;
+        }
+
+        // I5. A deploy, which holds the deploy lock, removes the staging
+        // directory of a version no running program uses, and anything a
+        // repair moved aside, and keeps its own version's.
+        string stale = Path.Combine(StagingRoot, "0.0.1-0000000000000000");
+        string movedAside = Path.Combine(versionDir, "swd.untrusted-00000000000000000000000000000000");
+        Directory.CreateDirectory(Path.Combine(stale, "driver"));
+        File.WriteAllText(Path.Combine(stale, "driver", "stale.txt"), "stale");
+        Directory.CreateDirectory(movedAside);
+        Uninstall();
+        using (var p = PeerProcess.Start("I5"))
+        {
+            string ri = p.Send("install");
+            Check("I5: a deploy runs", PeerProcess.Field(ri, "outcome") == "Installed", ri);
+        }
+        Check("I5: the stale version's staging directory is removed", !Directory.Exists(stale), stale);
+        Check("I5: a moved-aside directory is removed", !Directory.Exists(movedAside), movedAside);
+        Check("I5: this version's staging directory stays", Directory.Exists(versionDir), versionDir);
+
+        // I6. A staging directory replaced by a link is moved aside, not
+        // followed: the helper lands in a real, protected directory and the
+        // link's target receives nothing.
+        string swdOp = Path.Combine(versionDir, "swd");
+        string linkTarget = Path.Combine(Path.GetTempPath(), "HIDMaestro_coexist_link_target");
+        if (Directory.Exists(linkTarget)) Directory.Delete(linkTarget, true);
+        Directory.CreateDirectory(linkTarget);
+        if (Directory.Exists(swdOp)) Directory.Delete(swdOp, true);
+        Directory.CreateSymbolicLink(swdOp, linkTarget);
+        Check("I6: the swd directory starts out as a link",
+              (File.GetAttributes(swdOp) & FileAttributes.ReparsePoint) != 0);
+        using (var p = PeerProcess.Start("I6"))
+        {
+            string r = p.Send("swdhelper");
+            string? swd = Ok(r) ? StagingPath(r) : null;
+            Check("I6: the helper stages", swd != null && File.Exists(swd), r);
+        }
+        Check("I6: the swd directory is now a real directory",
+              Directory.Exists(swdOp) && (File.GetAttributes(swdOp) & FileAttributes.ReparsePoint) == 0);
+        Check("I6: and Administrators/SYSTEM-write-only",
+              Native.WhyWritableByOthers(swdOp) == null, Native.WhyWritableByOthers(swdOp) ?? "");
+        Check("I6: the link's target received nothing",
+              Directory.GetFileSystemEntries(linkTarget).Length == 0,
+              string.Join(", ", Directory.GetFileSystemEntries(linkTarget).Select(Path.GetFileName)));
+        try { Directory.Delete(linkTarget, true); } catch { }
+
+        // I7. A temporary file a process left when it ended between writing
+        // a staged file and renaming it into place is removed on the next
+        // use. One whose writer still runs is left alone.
+        int deadPid;
+        using (var gone = Process.Start(new ProcessStartInfo("cmd.exe", "/c exit 0") { UseShellExecute = false, CreateNoWindow = true })!)
+        {
+            gone.WaitForExit();
+            deadPid = gone.Id;
+        }
+        string orphan = Path.Combine(swdOp, $"hmswd.exe.new-{deadPid}-00000000000000000000000000000000");
+        string inFlight = Path.Combine(swdOp, $"hmswd.exe.new-{Environment.ProcessId}-00000000000000000000000000000000");
+        File.WriteAllText(orphan, "orphan");
+        File.WriteAllText(inFlight, "in flight");
+        using (var p = PeerProcess.Start("I7"))
+        {
+            string r = p.Send("swdhelper");
+            Check("I7: the helper stages", Ok(r), r);
+        }
+        Check("I7: the temporary file of a process that ended is removed", !File.Exists(orphan), orphan);
+        Check("I7: the temporary file of a running process stays", File.Exists(inFlight), inFlight);
+        try { File.Delete(inFlight); } catch { }
+    }
+
+    static byte[]? ReadEmbedded(string logicalName)
+    {
+        try
+        {
+            using var s = typeof(HIDMaestro.HMContext).Assembly.GetManifestResourceStream(logicalName);
+            if (s == null) return null;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch { return null; }
     }
 }

@@ -277,4 +277,75 @@ internal static class Native
         using var k = Registry.LocalMachine.OpenSubKey($@"SOFTWARE\HIDMaestroRegistryLedger\{kind}\{name}\Holders");
         return k?.GetValueNames().ToList() ?? new List<string>();
     }
+
+    // ── Directory security ─────────────────────────────────────────────
+
+    static readonly System.Security.Principal.SecurityIdentifier SidSystem =
+        new(System.Security.Principal.WellKnownSidType.LocalSystemSid, null);
+    static readonly System.Security.Principal.SecurityIdentifier SidAdmins =
+        new(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null);
+
+    const System.Security.AccessControl.FileSystemRights WriteRights =
+        System.Security.AccessControl.FileSystemRights.WriteData |
+        System.Security.AccessControl.FileSystemRights.AppendData |
+        System.Security.AccessControl.FileSystemRights.WriteExtendedAttributes |
+        System.Security.AccessControl.FileSystemRights.WriteAttributes |
+        System.Security.AccessControl.FileSystemRights.Delete |
+        System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles |
+        System.Security.AccessControl.FileSystemRights.ChangePermissions |
+        System.Security.AccessControl.FileSystemRights.TakeOwnership;
+
+    /// <summary>Why a directory is not Administrators/SYSTEM-write-only, or
+    /// null when it is: owned by Administrators or SYSTEM, and no other
+    /// principal holds an allow ACE with any write-class right, inherited or
+    /// not. Read without the SDK, from the directory itself.</summary>
+    internal static string? WhyWritableByOthers(string dir)
+    {
+        if (!System.IO.Directory.Exists(dir)) return "missing";
+        var attrs = System.IO.File.GetAttributes(dir);
+        if ((attrs & System.IO.FileAttributes.ReparsePoint) != 0) return "a reparse point";
+        var sec = System.IO.FileSystemAclExtensions.GetAccessControl(new System.IO.DirectoryInfo(dir));
+        var owner = sec.GetOwner(typeof(System.Security.Principal.SecurityIdentifier)) as System.Security.Principal.SecurityIdentifier;
+        if (owner == null || !(owner.Equals(SidAdmins) || owner.Equals(SidSystem)))
+            return $"owner {Name(owner)}";
+        foreach (System.Security.AccessControl.FileSystemAccessRule r in
+                 sec.GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)))
+        {
+            if (r.AccessControlType != System.Security.AccessControl.AccessControlType.Allow) continue;
+            if ((r.FileSystemRights & WriteRights) == 0) continue;
+            var sid = r.IdentityReference as System.Security.Principal.SecurityIdentifier;
+            if (sid != null && (sid.Equals(SidAdmins) || sid.Equals(SidSystem))) continue;
+            return $"{Name(sid)} has {r.FileSystemRights}";
+        }
+        return null;
+    }
+
+    static string Name(System.Security.Principal.SecurityIdentifier? sid)
+    {
+        if (sid == null) return "(none)";
+        try { return sid.Translate(typeof(System.Security.Principal.NTAccount)).Value; }
+        catch { return sid.Value; }
+    }
+
+    /// <summary>Give the directory the descriptor the SDK gives its staging
+    /// tree: owner Administrators, protected, full control for SYSTEM and
+    /// Administrators and nobody else. Undoes <see cref="MakeUserWritable"/>
+    /// when the SDK under test did not.</summary>
+    internal static void Protect(string dir)
+    {
+        var sec = new System.Security.AccessControl.DirectorySecurity();
+        sec.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        System.IO.FileSystemAclExtensions.SetAccessControl(new System.IO.DirectoryInfo(dir), sec);
+    }
+
+    /// <summary>Create the directory, or reset an existing one, so that
+    /// Users have full control of it and everything under it. Stands in for
+    /// a directory some other program made writable before the SDK ran.</summary>
+    internal static void MakeUserWritable(string dir)
+    {
+        System.IO.Directory.CreateDirectory(dir);
+        var sec = new System.Security.AccessControl.DirectorySecurity();
+        sec.SetSecurityDescriptorSddlForm("D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)");
+        System.IO.FileSystemAclExtensions.SetAccessControl(new System.IO.DirectoryInfo(dir), sec);
+    }
 }

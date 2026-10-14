@@ -23,12 +23,13 @@ namespace HIDMaestro;
 ///
 /// <para><b>Driver install:</b> the UMDF2 driver and its XUSB companion are
 /// embedded as resources inside this assembly. On first run on a given
-/// machine, call <see cref="InstallDriver"/> to extract them to %TEMP% and
-/// register them with Windows via pnputil. This requires admin and only
-/// needs to happen once per machine: subsequent runs detect that the
-/// driver is already in the DriverStore and skip the install. The temp
-/// extraction is deleted after install; nothing is left in the consuming
-/// app's directory.</para>
+/// machine, call <see cref="InstallDriver"/> to stage them under
+/// <c>%ProgramData%\HIDMaestro\Staging</c>, in directories only
+/// Administrators and SYSTEM can write, and register them with Windows via
+/// pnputil. This requires admin and only needs to happen once per machine:
+/// subsequent runs detect that the driver is already in the DriverStore and
+/// skip the install. Nothing is written to the consuming app's
+/// directory.</para>
 ///
 /// <para><b>Admin requirement:</b> Windows requires SeLoadDriverPrivilege
 /// (admin) for both <see cref="InstallDriver"/> and <see cref="CreateController"/>.
@@ -51,14 +52,14 @@ public sealed class HMContext : IDisposable
     /// controllers are separate steps; this constructor only allocates the
     /// in-process state.
     ///
-    /// <para>v1.3.0: fires a background warm-up that pre-extracts the
-    /// embedded driver payload to %TEMP% and pre-computes the manifest
-    /// hash. Both are normally done synchronously by the first
-    /// <see cref="InstallDriver"/> call; doing them in parallel with
+    /// <para>v1.3.0: fires a background warm-up that pre-computes the
+    /// manifest hash and, when a driver deploy is coming, pre-stages the
+    /// embedded driver payload. Both are otherwise done synchronously by the
+    /// first <see cref="InstallDriver"/> call. Doing them in parallel with
     /// whatever the consumer is doing on the foreground thread (UI init,
     /// profile lookups, settings UI) hides 200–500 ms of cold-start cost
     /// in the consumer's think-time budget. Failures are silently
-    /// swallowed: if the warm-up couldn't extract for some reason, the
+    /// swallowed: if the warm-up couldn't stage for some reason, the
     /// foreground InstallDriver path will retry it.</para></summary>
     public HMContext()
     {
@@ -74,7 +75,12 @@ public sealed class HMContext : IDisposable
         System.Threading.Tasks.Task.Run(() =>
         {
             try { _ = Internal.EmbeddedManifest.Sha256Hex; } catch { }
-            try { Internal.DriverBuilder.EnsureExtracted(); } catch { }
+            // Only a deploy reads the staged payload. On a machine already
+            // running this build's driver, InstallDriver takes the fast path
+            // and never touches it, so the prewarm stages (and hashes) the
+            // payload only when a deploy is coming. Staging needs elevation;
+            // a non-elevated context skips it here and fails nothing.
+            try { if (!Internal.DriverBuilder.WillTakeFastPath()) Internal.DriverBuilder.EnsureExtracted(); } catch { }
             try { Internal.DriverBuilder.IsDriverInstalled(); } catch { }
         });
         System.Threading.Tasks.Task.Run(() =>
@@ -128,12 +134,14 @@ public sealed class HMContext : IDisposable
     public static void InstallUsbipBackend(Action<string>? progress = null)
         => Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
 
-    /// <summary>Extract the embedded driver files to %TEMP%, install the
-    /// self-signed code-signing certificate to the trusted root and trusted
-    /// publisher stores, sign the driver binaries, and register them with
-    /// Windows via pnputil. Requires admin. Idempotent and silent: no
-    /// user prompts beyond the elevation that brought the calling process
-    /// here. The temp extraction is deleted on success.
+    /// <summary>Stage the embedded driver files under
+    /// <c>%ProgramData%\HIDMaestro\Staging</c>, verifying each against its
+    /// embedded SHA-256, install the self-signed code-signing certificate to
+    /// the trusted root and trusted publisher stores, sign the driver
+    /// binaries, and register them with Windows via pnputil. Requires admin.
+    /// Idempotent and silent: no user prompts beyond the elevation that
+    /// brought the calling process here. A deploy also removes the staging of
+    /// SDK versions no running program uses.
     ///
     /// <para>If the driver is already installed at the same build version,
     /// this returns immediately without doing any work.</para>

@@ -19,6 +19,13 @@
 //   spawnchild                  start a child that inherits handles
 //   driverversion               the last controller's DriverVersion, read
 //                               for up to 2 s, or none
+//   stagingdir                  stage the driver payload the way an install
+//                               does (DriverBuilder.EnsureExtracted) in this
+//                               process and reply with its directory, last
+//                               on the line so a path with spaces survives
+//   swdhelper                   stage hmswd.exe the way a device create does
+//                               (SwdDeviceFactory.EnsureHelperExtracted) and
+//                               reply with its path, last on the line
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 using System;
@@ -112,6 +119,30 @@ internal static class Peer
                         while (last != null && (v = Get(last, "DriverVersion")) == null && sw.ElapsedMilliseconds < 2000)
                             Thread.Sleep(20);
                         Reply($"OK driverversion {v ?? "none"}");
+                        break;
+                    }
+                    case "stagingdir":
+                    {
+                        // Public since v1.3.0, but read through reflection
+                        // like everything else here so the file compiles
+                        // against any release.
+                        var builder = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverBuilder");
+                        var ensure = builder?.GetMethod("EnsureExtracted", BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                        if (ensure == null) { Reply("ERR stagingdir no DriverBuilder.EnsureExtracted"); break; }
+                        string dir = (string)ensure.Invoke(null, null)!;
+                        Reply($"OK stagingdir path={dir}");
+                        break;
+                    }
+                    case "swdhelper":
+                    {
+                        // Stage hmswd.exe the way a device create does, and
+                        // report its path. Internal on every release, so
+                        // reflection reaches it.
+                        var swd = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SwdDeviceFactory");
+                        var m = swd?.GetMethod("EnsureHelperExtracted", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                        if (m == null) { Reply("ERR swdhelper no SwdDeviceFactory.EnsureHelperExtracted"); break; }
+                        string? path = (string?)m.Invoke(null, null);
+                        Reply(path == null ? "ERR swdhelper none" : $"OK swdhelper path={path}");
                         break;
                     }
                     case "spawnchild":

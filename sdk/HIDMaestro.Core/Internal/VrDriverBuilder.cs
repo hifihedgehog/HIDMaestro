@@ -16,7 +16,7 @@ namespace HIDMaestro.Internal;
 /// <para>Mirrors the established install machinery with two deliberate
 /// differences from <see cref="DriverBuilder"/>: the extract path is
 /// STABLE (<c>%ProgramData%\HIDMaestro\openvr\hidmaestro</c>) rather than
-/// the hash-keyed <c>%TEMP%</c> staging dir, because vrpathreg stores the
+/// the per-version staging directory, because vrpathreg stores the
 /// absolute path and a moving target would strand the registration; and
 /// the driver DLL is NOT part of <see cref="EmbeddedManifest"/>'s hashed
 /// set, because vrpathreg is a different install mechanism from pnputil
@@ -42,7 +42,7 @@ internal static class VrDriverBuilder
     private const string ResourcePrefix = "HIDMaestro.VR.";
 
     /// <summary>Stable extraction root. See class remarks for why this is
-    /// not the hash-keyed %TEMP% staging dir.</summary>
+    /// not the per-version staging directory.</summary>
     public static string ExtractRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                      "HIDMaestro", "openvr", "hidmaestro");
