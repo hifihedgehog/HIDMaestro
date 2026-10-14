@@ -1,9 +1,10 @@
 // U. A create that fails after it claimed a transport index and an
-//    identity. The program's record is made to refuse the controller entry
-//    the create writes before any device exists, for a keyless create and
-//    a keyed one. Each time the create leaves no claim pipe and no record
-//    entry, and the same identity creates again at once, in the same
-//    program and in another.
+//    identity. The program's record is made to refuse the write the create
+//    needs, once before any device exists and once after the device is
+//    made, and a composite's device emulator fails after it mapped the
+//    index's sections. Each time the create leaves no claim pipe, no device
+//    and no record entry, and the same identity creates again at once, in
+//    the same program and in another.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -74,6 +75,65 @@ internal static partial class Program
         string r2 = a.Send("create pad F1B0 coexist-u");
         Check("U: a retry of key coexist-u in the failed program creates", Ok(r2), r2);
         a.Send("dispose");
+        WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
+
+        // The device is made, then the entry refuses its instance id. A
+        // controller's new entry inherits a deny on setting values: the
+        // create's own handle wrote the entry, and reopening it to add the
+        // instance id after the device exists fails.
+        var noValue = DenyRule(RegistryRights.SetValue, children: true);
+        string f3;
+        SetDeny(controllers, noValue, on: true);
+        try
+        {
+            f3 = a.Send("create pad F1B0 -");
+            Check("U: a create whose instance id write is refused fails", !Ok(f3), f3);
+            Check("U: no device of it is left",
+                  WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000),
+                  $"{Native.HidPaths(0xBEEF, UPid).Count} present");
+            UnclaimedAndUnrecorded("U: after the refused instance id", baseline, controllers, entriesChecked: false);
+        }
+        finally { SetDeny(controllers, noValue, on: false); }
+        // The same deny refused the SDK's removal of the entry, so the
+        // probe removes it to leave the record as the SDK would.
+        using (var cs = Registry.LocalMachine.OpenSubKey(controllers, writable: true))
+            foreach (var name in cs?.GetSubKeyNames() ?? Array.Empty<string>())
+                cs!.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
+        string r3 = a.Send("create pad F1B0 -");
+        Check($"U: a retry in the failed program takes transport index {t} and identity index:{t} again",
+              Ok(r3) && PeerProcess.Field(r3, "transport") == t && PeerProcess.Field(r3, "key") == "index:" + t, r3);
+        Check("U: and one device of it is present", WaitPaths(0xBEEF, UPid, 1, 5000).Count == 1);
+        a.Send("dispose");
+        Check("U: its dispose leaves no entry", WaitFor(() => Entries(controllers).Count == 0, 5000),
+              string.Join(",", Entries(controllers)));
+        WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
+
+        // A composite's device emulator maps the index's sections, which
+        // holds the index's v1.12.0 owner pipe, then creates its output
+        // doorbell. A mutex squatting the doorbell's name fails that step.
+        var before = Native.HidPaths(0x054C, 0x0CE6);
+        string c4 = a.Send("create composite - -");
+        if (!Ok(c4)) { Check("U: the program creates a composite", false, c4); return; }
+        string tc = PeerProcess.Field(c4, "transport")!;
+        a.Send("dispose");
+        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        string f4;
+        using (var squat = new System.Threading.Mutex(false, $@"Global\HIDMaestroOutputEvent{tc}"))
+            f4 = a.Send("create composite - -");
+        Check("U: a composite whose device emulator fails is refused", !Ok(f4), f4);
+        UnclaimedAndUnrecorded("U: after the failed composite", baseline, controllers, entriesChecked: true);
+        using (var b = PeerProcess.Start("U4"))
+        {
+            string cb = b.Send("create composite - -");
+            Check($"U: another program creates a composite on transport index {tc} at once",
+                  Ok(cb) && PeerProcess.Field(cb, "transport") == tc, cb);
+            b.Send("dispose");
+        }
+        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        string r4 = a.Send("create composite - -");
+        Check($"U: a retry in the failed program takes transport index {tc} and identity index:{tc}",
+              Ok(r4) && PeerProcess.Field(r4, "transport") == tc && PeerProcess.Field(r4, "key") == "index:" + tc, r4);
+        a.Send("dispose");
     }
 
     /// <summary>No claim pipe beyond the baseline, and with
@@ -89,7 +149,8 @@ internal static partial class Program
         }
     }
 
-    /// <summary>The transport index and identity claim pipes on the machine.</summary>
+    /// <summary>The transport index and identity claim pipes on the machine,
+    /// and the v1.12.0 owner pipe a mapped index holds.</summary>
     static HashSet<string> ClaimPipes()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -97,7 +158,8 @@ internal static partial class Program
         {
             string name = Path.GetFileName(path);
             if (name.StartsWith("HIDMaestro.Index.", StringComparison.OrdinalIgnoreCase)
-                || name.StartsWith("HIDMaestro.Identity.", StringComparison.OrdinalIgnoreCase))
+                || name.StartsWith("HIDMaestro.Identity.", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("HIDMaestroOwner", StringComparison.OrdinalIgnoreCase))
                 set.Add(name);
         }
         return set;

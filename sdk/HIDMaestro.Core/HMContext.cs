@@ -449,24 +449,26 @@ public sealed class HMContext : IDisposable
             if (profile.RequiresUsbipBackend)
                 return CreateUsbipController(slot, lease, profile);
 
-            string? instanceId;
+            string? instanceId = null;
             try
             {
                 instanceId = Internal.DeviceOrchestrator.SetupController(
                     lease.TransportIndex, profile.Inner, lease.Identity);
+                if (instanceId != null)
+                    Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
+
+                var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
+                lock (_lock) _controllers[slot] = controller;
+                return controller;
             }
             catch
             {
                 // Best-effort cleanup of any partial state, then rethrow.
-                try { Internal.DeviceOrchestrator.TeardownController(lease.TransportIndex, null); } catch { }
+                // The devices go before the lease below gives their index
+                // and identity back to the machine.
+                try { Internal.DeviceOrchestrator.TeardownController(lease.TransportIndex, instanceId); } catch { }
                 throw;
             }
-            if (instanceId != null)
-                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
-
-            var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
-            lock (_lock) _controllers[slot] = controller;
-            return controller;
         }
         catch
         {
@@ -482,10 +484,12 @@ public sealed class HMContext : IDisposable
     private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
     {
         int index = lease.TransportIndex;
-        Internal.Usbip.UsbipBackendHandle handle =
-            Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
+        Internal.Usbip.UsbipBackendHandle? handle = null;
         try
         {
+            // The device emulator maps the index's sections before its
+            // attach, so a failed attach leaves them for the catch below.
+            handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
             Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "VhciPort", handle.VhciPort);
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             lock (_lock) _controllers[slot] = controller;
@@ -493,7 +497,7 @@ public sealed class HMContext : IDisposable
         }
         catch
         {
-            try { handle.Dispose(); } catch { }
+            try { handle?.Dispose(); } catch { }
             try { Internal.SharedMemoryIO.DestroyController(index); } catch { }
             throw;
         }
