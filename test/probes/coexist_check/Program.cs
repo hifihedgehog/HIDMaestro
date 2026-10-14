@@ -1,5 +1,11 @@
 // Two or more programs that embed HIDMaestro on one machine.
 //
+//   D. A program killed with TerminateProcess. The next sweep of a live
+//      program, or the start of a new one, removes the killed program's
+//      devices and releases its registry ledger holds, and leaves the live
+//      program's controller running.
+//   G. Two composite controllers on USB/IP. One program's sweep leaves
+//      the other's import attached. Killing one lets the other remove it.
 //   H. A program killed while a child process it started still runs. Its
 //      ownership claim goes with it, and another program can take the
 //      same identity at once.
@@ -79,6 +85,8 @@ internal static class Program
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
+            ('D', "a killed program's devices", SectionD),
+            ('G', "two composite controllers", SectionG),
             ('H', "a program killed while its child runs", SectionH),
         };
         foreach (var (id, title, body) in sections)
@@ -130,6 +138,90 @@ internal static class Program
 
     static string Show(List<(string Buttons, uint X)> p) =>
         p.Count == 0 ? "(no reports)" : string.Join(", ", p.Take(4).Select(t => $"buttons {t.Buttons} X {t.X}")) + (p.Count > 4 ? $" (+{p.Count - 4})" : "");
+
+    // ── D ──────────────────────────────────────────────────────────────
+
+    static void SectionD()
+    {
+        using var p1 = PeerProcess.Start("D1");
+        using var p2 = PeerProcess.Start("D2");
+        p1.Send("install");
+        string c1 = p1.Send("create pad F0D5 coexist-d-killed");
+        p2.Send("install");
+        string c2 = p2.Send("create pad F0D6 coexist-d-live");
+        if (!Ok(c1) || !Ok(c2)) { Check("D: both programs create", false, $"{c1} / {c2}"); return; }
+        p2.Send("stream 4 0.3 125 0");
+        string inst1 = PeerProcess.Field(c1, "instance")!, inst2 = PeerProcess.Field(c2, "instance")!;
+        var tree1 = Native.Subtree(inst1);
+        bool held1 = Native.LedgerHolds("JoystickOem", "VID_BEEF&PID_F0D5");
+        bool held2 = Native.LedgerHolds("JoystickOem", "VID_BEEF&PID_F0D6");
+        var path2 = WaitPaths(0xBEEF, 0xF0D6, 1, 10_000);
+        if (path2.Count != 1) { Check("D: the live program's device is present", false); return; }
+        using var cap2 = HidCapture.Open(path2[0]);
+        if (cap2 == null) { Check("D: the live program's device opens", false); return; }
+
+        p1.Kill();
+        Check("D: the killed program's devices are still there before anything sweeps", tree1.Count > 0 && tree1.All(Native.IsPresent));
+        string s = p2.Send("sweep");
+        Check("D: the live program's sweep runs", Ok(s), s);
+        WaitFor(() => tree1.All(Native.IsGone), 5000);
+        Check("D: the live program's sweep removes the killed program's devices", tree1.All(Native.IsGone),
+              string.Join(", ", tree1.Where(t => !Native.IsGone(t))));
+        if (held1)
+            Check("D: the killed program's registry ledger hold is released", !Native.LedgerHolds("JoystickOem", "VID_BEEF&PID_F0D5"));
+        Check("D: the sweep leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Flows(cap2),
+              cap2.Broken ? $"read error {cap2.ReadError}" : "");
+        if (held2)
+            Check("D: the live program's ledger hold stays", Native.LedgerHolds("JoystickOem", "VID_BEEF&PID_F0D6"));
+
+        // The next program's start does the same.
+        using var p3 = PeerProcess.Start("D3");
+        p3.Send("install");
+        string c3 = p3.Send("create pad F0D7 coexist-d-killed-2");
+        if (!Ok(c3)) { Check("D: a third program creates", false, c3); return; }
+        var tree3 = Native.Subtree(PeerProcess.Field(c3, "instance")!);
+        p3.Kill();
+        using var p4 = PeerProcess.Start("D4");
+        string i4 = p4.Send("install");
+        WaitFor(() => tree3.All(Native.IsGone), 5000);
+        Check("D: a new program's start removes a killed program's devices", Ok(i4) && tree3.All(Native.IsGone),
+              string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
+        Check("D: a new program's start leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Flows(cap2));
+    }
+
+    // ── G ──────────────────────────────────────────────────────────────
+
+    static void SectionG()
+    {
+        var before = Native.HidPaths(0x054C, 0x0CE6);
+        using var p1 = PeerProcess.Start("G1");
+        p1.Send("install");
+        string c1 = p1.Send("create composite - coexist-g-a");
+        var pathA = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+        if (!Ok(c1) || pathA.Count != 1) { Check("G: the first composite appears", false, $"{c1}, {pathA.Count} interfaces"); return; }
+
+        using var p2 = PeerProcess.Start("G2");
+        p2.Send("install");
+        string c2 = p2.Send("create composite - coexist-g-b");
+        var pathB = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before.Concat(pathA).ToList());
+        Check("G: the second program's start leaves the first composite", Native.HidPaths(0x054C, 0x0CE6).Contains(pathA[0], StringComparer.OrdinalIgnoreCase));
+        if (!Ok(c2) || pathB.Count != 1) { Check("G: the second composite appears", false, $"{c2}, {pathB.Count} interfaces"); return; }
+        using (var capB = HidCapture.Open(pathB[0]))
+        {
+            if (capB == null) { Check("G: the second composite opens", false); return; }
+            p2.Send("stream 7 0.6 125 0");
+            string s = p1.Send("sweep");
+            Thread.Sleep(1000);
+            Check("G: one program's sweep leaves the other's import attached",
+                  Ok(s) && !capB.Broken && Flows(capB) && Native.HidPaths(0x054C, 0x0CE6).Contains(pathB[0], StringComparer.OrdinalIgnoreCase),
+                  capB.Broken ? $"read error {capB.ReadError}" : "");
+        }
+        p2.Kill();
+        string s2 = p1.Send("sweep");
+        bool gone = WaitFor(() => !Native.HidPaths(0x054C, 0x0CE6).Contains(pathB[0], StringComparer.OrdinalIgnoreCase), 15_000);
+        Check("G: after the second program is killed, the first's sweep detaches its import", Ok(s2) && gone);
+        Check("G: the first composite is still there", Native.HidPaths(0x054C, 0x0CE6).Contains(pathA[0], StringComparer.OrdinalIgnoreCase));
+    }
 
     // ── H ──────────────────────────────────────────────────────────────
 

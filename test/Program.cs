@@ -1175,8 +1175,11 @@ partial class Program
 
     static int RunCleanup()
     {
+        // Uninstall-grade: every HIDMaestro controller on the machine,
+        // whoever made it, then the driver packages. The overload without a
+        // scope leaves running programs' controllers alone since v1.13.0.
         Console.WriteLine("Removing all HIDMaestro virtual devices...");
-        HMContext.RemoveAllVirtualControllers();
+        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: false);
         Console.WriteLine("  OK");
         return 0;
     }

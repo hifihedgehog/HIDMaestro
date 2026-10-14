@@ -22,8 +22,6 @@ internal static class DeviceOrchestrator
     private static string RegPathForIndex(int index) =>
         $@"{REG_BASE}\Controller{index}";
 
-    private static bool s_ghostsCleaned;
-
     // SwD instance suffixes are the controller's DeviceIdentity token
     // (issue #60): the same (enumerator + suffix + ContainerId) tuple on
     // every life of one identity. From v1.1.30 to v1.7.3 the suffix was
@@ -328,71 +326,50 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  Cleanup-paths topology
+    //  Cleanup-paths topology (v1.13.0)
     //
-    //  Five distinct cleanup entry points, each with a specific scope and
-    //  trigger. Reading order: triggered earliest first.
+    //  Every sweep but one acts only on proof that a device's owner is gone
+    //  (OwnerCensus). Reading order: triggered earliest first.
     //
-    //   1. RemoveAllVirtualControllers (public)
-    //        Trigger:  consumer calls explicitly (PadForge calls it at
-    //                  startup AND from its ProcessExit handler)
-    //        Scope:    full purge: every ROOT/SWD enumerator subtree owned
-    //                  by HM, every HID orphan child, EC87F1E3 and
-    //                  WinExInput interface registrations, joy.cpl OEM
-    //                  cache. Uses fast=true + forceFallbacks=true so
-    //                  pnputil/devcon are tried for stuck phantoms.
-    //        Cost:     seconds to tens of seconds when stale state exists
+    //   1. OwnerSweep.ReclaimDeadOwners
+    //        Trigger:  HMContext.InstallDriver, and once per process ahead
+    //                  of the first create (OwnerSweep.SessionSweepOnce)
+    //        Scope:    devices and USB/IP imports of dead owners: a record
+    //                  whose owner claim is gone, or a v1.12.0 device whose
+    //                  owner pipe has closed. Ledger holds of dead pids.
+    //        Cost:     one census when nothing is dead, no enumerator walk
     //
-    //   2. CleanupGhostDevices (private)
-    //        Trigger:  lazy, once per process via the s_ghostsCleaned gate
-    //                  in SetupController's first invocation
-    //        Scope:    similar enumerator walk to (1) plus the EC87F1E3
-    //                  registry pruning. Uses fast=true with no forceFall-
-    //                  backs (the post-v1.1.31 perf fix made fallbacks for
-    //                  SWD\ a no-op anyway). Calls (4) and (5) below.
-    //        Cost:     ~hundreds of ms on a clean machine, more if
-    //                  phantoms exist
+    //   2. OwnerSweep.RemoveOrphaned
+    //        Trigger:  RemoveAllVirtualControllers() and (bool), which
+    //                  PadForge calls at engine start and from its
+    //                  ProcessExit handler
+    //        Scope:    (1), then the packages only when no device of any
+    //                  program is left on the driver. A running program's
+    //                  controllers, the caller's own included, stay.
     //
-    //   3. RemoveOrphanHidChildren (public, in DeviceManager)
-    //        Trigger:  TeardownController calls it after each per-
-    //                  controller teardown (skipped during batch dispose
-    //                  via skipOrphanSweep flag, which calls (3) once
-    //                  after the batch instead of N times during)
-    //        Scope:    HID-class children whose parent devnode is gone.
-    //                  Most common after a force-kill where SDL3/etc.
-    //                  held the HID handle past the parent removal.
+    //   2a. OwnerSweep.RemoveOwnDevicesAtExit
+    //        Trigger:  ProcessExit, registered with the owner claim
+    //        Scope:    the devices of this process's controllers that it
+    //                  did not dispose
     //
-    //   4. DisableGhostXusbInterfaces (private)
-    //        Trigger:  invoked by (2)
-    //        Scope:    {EC87F1E3} interface entries that are still listed
-    //                  but have a gone or stuck devnode behind them.
+    //   3. RemoveEverything
+    //        Trigger:  RemoveAllVirtualControllers(HMCleanupScope.Everything)
+    //        Scope:    every HIDMaestro device, import and ledger entry on
+    //                  the machine, whoever made it. The pre-1.13.0 sweep.
     //
-    //   5. RemoveAccumulatedHmPhantoms (internal, in DeviceManager)
-    //        Trigger:  invoked by (2) [added in v1.1.32]
-    //        Scope:    SetupDiGetClassDevs(DIGCF_ALLCLASSES) walk of every
-    //                  HM-named devinfo record that is NOT currently
-    //                  PRESENT, calls SetupDiRemoveDevice on each. This
-    //                  is the only path that actually deletes the
-    //                  per-instance registry hive cache for non-present
-    //                  devnodes (the other paths leave hidden devices
-    //                  in Device Manager).
+    //   4. RemoveOrphanHidChildren (DeviceManager)
+    //        Trigger:  each teardown, once after a batch, and after (1)
+    //        Scope:    HID children whose parent devnode is gone
     //
-    //  Why so many paths: each fixed a different observable symptom over
-    //  the v1.1.x series. (1) was the original consumer purge. (2) was
-    //  added so even consumers that don't call (1) still get a clean
-    //  slate. (3) was added when force-kill scenarios surfaced HID
-    //  orphans that (1) and (2) missed. (4) was added when stale XUSB
-    //  interface registrations occupied XInput slots even after their
-    //  devnodes were gone. (5) was added in v1.1.32 to clean the
-    //  registry-cache "hidden devices" accumulation that the per-call
-    //  unique SwD suffix scheme inevitably produces over many sessions.
-    //
-    //  Consolidation tradeoff: extracting the shared enumerator walks
-    //  into one helper would reduce duplication by ~40 lines but loses
-    //  the per-path tuning (timeouts, fast/force flags, walk-prefix
-    //  variants) that has been adjusted for specific failure modes. The
-    //  current shape is verbose but each call site is self-contained;
-    //  any future regression localizes cleanly.
+    //   5. Phantom cleanup: RemoveAccumulatedHmPhantoms (DeviceManager),
+    //      RemoveGhostXusbInterfaces and RemoveOwnedInterfaceEntries
+    //      (phantomOnly)
+    //        Trigger:  a background thread once per process, started by
+    //                  (1), behind OwnerSweep.CreateGate so it never runs
+    //                  during one of this process's creates
+    //        Scope:    HIDMaestro records of devnodes that are not
+    //                  present, except one whose identity claim another
+    //                  program holds, and their interface registrations
     // ════════════════════════════════════════════════════════════════════
 
     // Issue #28 (v1.3.16): resolve a HID child's parent instance ID so the
@@ -412,88 +389,6 @@ internal static class DeviceOrchestrator
             @"SYSTEM\CurrentControlSet\Enum\HID", deviceName, instName);
     }
 
-    private static void CleanupGhostDevices()
-    {
-        // Issue #28 (v1.3.16): every sweep here is gated on
-        // DeviceManager.IsHidMaestroOwned (HardwareID multi-sz contains
-        // "HIDMaestro") for any path that shares its enumerator with
-        // third-party drivers. The HIDMAESTRO* enumerators are exclusive
-        // and skip the guard for speed.
-
-        // Remove known non-VID_ enumerators under ROOT (legacy paths)
-        string[] fixedPrefixes = { @"ROOT\HID_IG_00", @"ROOT\HIDCLASS", @"ROOT\XnaComposite",
-                                   @"ROOT\HIDMAESTRO", @"SWD\HIDMAESTRO" };
-        foreach (var prefix in fixedPrefixes)
-        {
-            // HIDMAESTRO-prefixed enumerators are exclusively HM-owned by
-            // construction. The other three (HID_IG_00, HIDCLASS,
-            // XnaComposite) are shared: vJoy registers itself as a root
-            // HIDClass device, so an unguarded sweep here disabled coexisting
-            // vJoy instances. Gate the destructive call on HardwareID proof.
-            bool exclusivePrefix =
-                prefix.EndsWith(@"\HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-            // Every instance name under the enumerator, not 0000..0009:
-            // identity-named parents (ROOT\HIDCLASS\HM_0000, issue #60)
-            // live here too, and a crashed prior session leaves them live.
-            string[] instNames;
-            try
-            {
-                using var prefixKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{prefix}");
-                instNames = prefixKey?.GetSubKeyNames() ?? Array.Empty<string>();
-            }
-            catch { instNames = Array.Empty<string>(); }
-            foreach (var instName in instNames)
-            {
-                string instId = $@"{prefix}\{instName}";
-                if (CM_Locate_DevNodeW(out _, instId, 0) != 0) continue;
-                if (!exclusivePrefix && !DeviceManager.IsHidMaestroOwned(instId)) continue;
-                DeviceManager.RemoveDevice(instId, fast: true);
-            }
-        }
-
-        // Enumerators we own under ROOT and SWD: legacy VID_* (ROOT) and
-        // any HIDMAESTRO-prefixed SWD enumerator (gamepad companion form is
-        // HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00).
-        foreach (var enumRoot in new[] { "ROOT", "SWD" })
-        try
-        {
-            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
-            if (enumKey == null) continue;
-            foreach (var subName in enumKey.GetSubKeyNames())
-            {
-                bool isVidForm = subName.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                bool isSwdForm = subName.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                if (!isVidForm && !isSwdForm) continue;
-                using var vidKey = enumKey.OpenSubKey(subName);
-                if (vidKey == null) continue;
-                // VID_* is third-party-shared (any root-enumerated USB-style
-                // device lives here); HIDMAESTRO* is exclusive.
-                bool exclusiveSub = isSwdForm;
-                foreach (var instName in vidKey.GetSubKeyNames())
-                {
-                    string instId = $@"{enumRoot}\{subName}\{instName}";
-                    if (!exclusiveSub && !DeviceManager.IsHidMaestroOwned(instId)) continue;
-                    DeviceManager.RemoveDevice(instId, fast: true);
-                }
-            }
-        }
-        catch { }
-
-        // Clean ghost XUSB and WinExInput interface registrations
-        RemoveOwnedInterfaceEntries();
-
-        // Sweep accumulated HIDMaestro phantom devnodes from prior sessions.
-        // v1.1.30's per-call unique SwD instance suffix prevents the
-        // empty-shell bug at create time, but Windows preserves a per-
-        // instance registry hive entry indefinitely after each teardown,
-        // so heavy users see "hidden devices" in Device Manager pile up
-        // across many sessions. SetupDiRemoveDevice via DIGCF_ALLCLASSES
-        // deletes the registry cache cleanly. Only touches PHANTOM
-        // entries. PRESENT devnodes are explicitly skipped, so this is
-        // safe to call while a session is live.
-        try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
-    }
-
     /// <summary>Delete the XUSB and WinExInput interface registrations of
     /// HIDMaestro devnodes. Interface-class keys encode the devnode path with
     /// <c>#</c> in place of <c>\</c>. Issue #28 (v1.3.16): the exclusively-HM
@@ -506,7 +401,11 @@ internal static class DeviceOrchestrator
     /// heuristic tagged ViGEmBus / HidHide entries as ours, and the full
     /// cleanup used to delete every ROOT# entry of both classes
     /// (foundation-sunshine #1138). Any other form is not ours.</summary>
-    private static void RemoveOwnedInterfaceEntries()
+    /// <param name="phantomOnly">Leave the entries of present devnodes alone.
+    /// A present HIDMaestro devnode is a running program's controller, or
+    /// the reclaim has just removed it, so only the explicit uninstall-grade
+    /// sweep passes false.</param>
+    internal static void RemoveOwnedInterfaceEntries(bool phantomOnly)
     {
         foreach (var guid in new[] {
             "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
@@ -531,17 +430,20 @@ internal static class DeviceOrchestrator
                         subName.Contains("ROOT#SYSTEM#", StringComparison.OrdinalIgnoreCase);
 
                     bool isOurDevice = exclusivelyOurs;
+                    // Decode the symbolic-link form back to a devnode
+                    // instance path. The leading `##?#` (or `\??\`) and
+                    // trailing `#{guid}` are interface-link encoding;
+                    // the middle is `Enumerator#Device#Instance`.
+                    string devPath = subName;
+                    int guidStart = devPath.LastIndexOf("#{");
+                    if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
+                    devPath = devPath.Replace("##?#", string.Empty);
+                    devPath = devPath.Replace('#', '\\');
+                    if (phantomOnly && (exclusivelyOurs || sharedShape)
+                        && CM_Locate_DevNodeW(out _, devPath, 0) == 0)
+                        continue;
                     if (!isOurDevice && sharedShape)
                     {
-                        // Decode the symbolic-link form back to a devnode
-                        // instance path. The leading `##?#` (or `\??\`) and
-                        // trailing `#{guid}` are interface-link encoding;
-                        // the middle is `Enumerator#Device#Instance`.
-                        string devPath = subName;
-                        int guidStart = devPath.LastIndexOf("#{");
-                        if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
-                        devPath = devPath.Replace("##?#", string.Empty);
-                        devPath = devPath.Replace('#', '\\');
                         bool recordExists;
                         try
                         {
@@ -563,10 +465,17 @@ internal static class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  DisableGhostXusbInterfaces
+    //  RemoveGhostXusbInterfaces
     // ════════════════════════════════════════════════════════════════════
 
-    private static void DisableGhostXusbInterfaces()
+    /// <summary>Disable HIDMaestro HID devnodes that carry the xinputhid
+    /// filter and are no longer present, and delete their XUSB and
+    /// WinExInput registrations, which otherwise keep an XInput slot
+    /// occupied. Before v1.13.0 this also disabled present devnodes that had
+    /// a problem or had not started yet, which is what another program's
+    /// controller looks like in the middle of its create. A present
+    /// devnode of a dead program is removed outright by the reclaim.</summary>
+    internal static void RemoveGhostXusbInterfaces()
     {
         try
         {
@@ -607,28 +516,9 @@ internal static class DeviceOrchestrator
                 catch { continue; }
                 if (!hasXinputHid) continue;
 
-                bool isGhost = false;
-                uint devInst = 0;
-                if (CM_Locate_DevNodeW(out devInst, devPath, 0) != 0)
-                {
-                    if (CM_Locate_DevNodeW(out devInst, devPath, CM_LOCATE_DEVNODE_PHANTOM) == 0)
-                        isGhost = true;
-                    else
-                        continue;
-                }
-                else
-                {
-                    if (CM_Get_DevNode_Status(out uint status, out _, devInst, 0) == 0)
-                    {
-                        if ((status & DN_HAS_PROBLEM) != 0 || (status & DN_STARTED) == 0)
-                            isGhost = true;
-                        else
-                            continue;
-                    }
-                    else
-                        isGhost = true;
-                }
-                if (!isGhost) continue;
+                // Present: a running program's device, never touched here.
+                if (CM_Locate_DevNodeW(out _, devPath, 0) == 0) continue;
+                if (CM_Locate_DevNodeW(out uint devInst, devPath, CM_LOCATE_DEVNODE_PHANTOM) != 0) continue;
 
                 CM_Disable_DevNode(devInst, 0);
 
@@ -1291,6 +1181,16 @@ internal static class DeviceOrchestrator
     public static string? SetupController(
         int controllerIndex, ControllerProfile profile, string infPath, DeviceIdentity? identity = null)
     {
+        // The read side of the gate the background phantom cleanup takes for
+        // writing: creates run together, the cleanup never during one.
+        OwnerSweep.CreateGate.EnterReadLock();
+        try { return SetupControllerCore(controllerIndex, profile, infPath, identity); }
+        finally { OwnerSweep.CreateGate.ExitReadLock(); }
+    }
+
+    private static string? SetupControllerCore(
+        int controllerIndex, ControllerProfile profile, string infPath, DeviceIdentity? identity)
+    {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (controllerIndex < 0) throw new ArgumentOutOfRangeException(nameof(controllerIndex));
         if (!profile.HasDescriptor)
@@ -1341,47 +1241,13 @@ internal static class DeviceOrchestrator
             catch { }
         }
 
-        // Once-per-session cleanup
-        if (!s_ghostsCleaned)
-        {
-            var cleanupSw = Stopwatch.StartNew();
-            using var _ts = new TimingScope(controllerIndex, profile.Id, "0.ghost_cleanup");
-            CleanupGhostDevices();
-            DisableGhostXusbInterfaces();
-
-            // Clean HIDMaestro SYSTEM companions (never ViGEmBus/HidHide)
-            for (int idx = 0; idx < 10; idx++)
-            {
-                string sysId = $@"ROOT\SYSTEM\{idx:D4}";
-                if (CM_Locate_DevNodeW(out _, sysId, 0) == 0)
-                {
-                    try
-                    {
-                        using var key = Registry.LocalMachine.OpenSubKey(
-                            $@"SYSTEM\CurrentControlSet\Enum\{sysId}");
-                        if (key != null)
-                        {
-                            string? fn = key.GetValue("FriendlyName") as string;
-                            string? dd = key.GetValue("DeviceDesc") as string;
-                            string?[] hwIds = key.GetValue("HardwareID") as string[] ?? Array.Empty<string>();
-                            bool isOurs = (fn != null && fn.Contains("HIDMaestro")) ||
-                                          (dd != null && dd.Contains("HIDMaestro")) ||
-                                          hwIds.Any(h => h != null && h.Contains("HIDMaestro"));
-                            if (isOurs)
-                                DeviceManager.RemoveDevice(sysId, fast: true);
-                        }
-                    }
-                    catch { }
-                }
-            }
-
-            // Shared registry keys held by a process that died with its
-            // virtuals live go back to their prior state.
-            RegistryLedger.PruneDead();
-
-            s_ghostsCleaned = true;
-            LogDiag($"    once-per-session cleanup ran in {cleanupSw.ElapsedMilliseconds}ms");
-        }
+        // Once-per-session cleanup, for a program that creates without
+        // calling InstallDriver first: the devices and ledger holds of
+        // programs that have exited. A running program's devices, in this
+        // process or another, are never touched, and the phantom-record
+        // cleanup runs in the background behind OwnerSweep.CreateGate.
+        using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.ghost_cleanup"))
+            OwnerSweep.SessionSweepOnce();
 
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.gameinput_svc"))
         {
@@ -2142,25 +2008,27 @@ internal static class DeviceOrchestrator
         return unindexed ? null : indices;
     }
 
-    public static void RemoveAllVirtualControllers()
-        => RemoveAllVirtualControllers(preserveInstall: false);
+    /// <summary>Signal the stop events of these indices so their driver
+    /// workers exit before their devices are removed.</summary>
+    internal static void SignalStopEvents(HashSet<int> indices) => SignalStopEventsAndDrain(indices);
 
-    /// <summary>Core sweep. <paramref name="preserveInstall"/> = true is the
-    /// launch path (HMContext.InstallDriver): evict every device and orphan
-    /// exactly as the full sweep does (the documented prerequisite for a
-    /// driver UPGRADE's package replacement to succeed) but keep the
-    /// installed driver packages and the manifest-hash fast-path intact.
-    /// The 2026-07-21 perf audit found the launch path deleting both on
-    /// every start, which forced FullDeploy's full extract+sign+catalog+
-    /// pnputil pipeline (~3.0-3.2 s measured) on EVERY consumer launch and
-    /// re-introduced package delete/add churn (the FAILED_PRIOR_UNLOAD
-    /// class) for zero benefit in the same-version case. When the embedded
-    /// payload actually differs, FullDeploy's full path still runs and its
-    /// RemoveOldDriverPackages purges the old packages, with devices
-    /// already evicted here so the ordering contract holds. The standalone
-    /// cleanup command keeps preserveInstall=false: full nuke stays its
-    /// documented job.</summary>
-    internal static void RemoveAllVirtualControllers(bool preserveInstall)
+    /// <summary>Delete one index's per-instance configuration key.</summary>
+    internal static void DeleteInstanceConfig(int controllerIndex)
+    {
+        try { Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false); }
+        catch { }
+    }
+
+    /// <summary>The uninstall-grade sweep, <see cref="HMCleanupScope.Everything"/>:
+    /// every HIDMaestro device and USB/IP import on the machine, whoever made
+    /// it, then the ledger, and with <paramref name="preserveInstall"/> false
+    /// the driver packages and <c>SOFTWARE\HIDMaestro</c>. Running programs
+    /// lose their controllers. Before v1.13.0 this was what InstallDriver and
+    /// every RemoveAllVirtualControllers overload ran. The 2026-07-21 perf
+    /// audit's <paramref name="preserveInstall"/> keeps the packages and the
+    /// manifest-hash fast path, which a battery or support tool resetting
+    /// devices between runs wants.</summary>
+    internal static void RemoveEverything(bool preserveInstall)
     {
         var sweepSw = System.Diagnostics.Stopwatch.StartNew();
         long lastMs = 0;
@@ -2342,7 +2210,7 @@ internal static class DeviceOrchestrator
 
         // Clean interface registries (XUSB + WinExInput), with the same
         // ownership proof the once-per-session cleanup uses.
-        RemoveOwnedInterfaceEntries();
+        RemoveOwnedInterfaceEntries(phantomOnly: false);
 
         Phase("interface-classes");
 
@@ -2372,26 +2240,7 @@ internal static class DeviceOrchestrator
 
         // Wait for WUDFHost processes to release our DLLs.
         if (!skipWudfSteps)
-        try
-        {
-            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
-            foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
-            {
-                try
-                {
-                    bool hostsOurs = false;
-                    foreach (ProcessModule mod in wudf.Modules)
-                    {
-                        if (ourDlls.Any(d => mod.ModuleName.Equals(d, StringComparison.OrdinalIgnoreCase)))
-                        { hostsOurs = true; break; }
-                    }
-                    if (hostsOurs)
-                        wudf.WaitForExit(TimeoutScale.Apply(10000));
-                }
-                catch { }
-            }
-        }
-        catch { }
+            WaitForDriverHostsToExit();
 
         // Remove driver packages from store. Strict, retry-aware, verifies
         // afterward (see PnputilHelper). Catch the verification throw here
@@ -2419,6 +2268,12 @@ internal static class DeviceOrchestrator
         // Release shared-memory mappings
         try { SharedMemoryIO.Cleanup(); } catch { }
 
+        // Records of programs that have exited describe nothing now. A
+        // running program's record stays: it still holds its claims, and
+        // its own dispose removes its entries.
+        foreach (var rec in MachineClaims.ReadAll())
+            if (!rec.Live) MachineClaims.DeleteRecord(rec.OwnerId);
+
         // Drain orphaned WUDFHost processes that STILL have our stale
         // HIDMaestro.dll memory-mapped from a since-deleted DriverStore
         // directory. This is what bit us for hours: pnputil /delete-driver
@@ -2442,6 +2297,30 @@ internal static class DeviceOrchestrator
             DrainOrphanedWudfHosts();
         Phase("wudf-drain");
         LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
+    }
+
+    private static void WaitForDriverHostsToExit()
+    {
+        try
+        {
+            string[] ourDlls = { "HIDMaestro.dll", "HMXInput.dll", "HIDMaestroCompanion.dll" };
+            foreach (var wudf in Process.GetProcessesByName("WUDFHost"))
+            {
+                try
+                {
+                    bool hostsOurs = false;
+                    foreach (ProcessModule mod in wudf.Modules)
+                    {
+                        if (ourDlls.Any(d => mod.ModuleName.Equals(d, StringComparison.OrdinalIgnoreCase)))
+                        { hostsOurs = true; break; }
+                    }
+                    if (hostsOurs)
+                        wudf.WaitForExit(TimeoutScale.Apply(10000));
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     /// <summary>Terminate WUDFHost instances that are hosting ONLY our

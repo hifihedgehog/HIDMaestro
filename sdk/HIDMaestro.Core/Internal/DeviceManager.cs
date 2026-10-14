@@ -392,6 +392,14 @@ public static class DeviceManager
                     if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
                         continue;
 
+                    // A phantom whose identity another program holds is that
+                    // program's create in flight: its record exists before
+                    // its devnode starts.
+                    string instName = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
+                    if (DeviceIdentity.IsIdentityToken(instName)
+                        && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(instName)))
+                        continue;
+
                     if (SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
                         removed++;
                 }

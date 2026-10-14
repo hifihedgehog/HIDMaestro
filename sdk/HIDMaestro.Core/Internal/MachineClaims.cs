@@ -34,6 +34,11 @@ internal static partial class MachineClaims
     private const string ControllersKey = "Controllers";
 
     internal static string OwnerPipeName(string ownerId) => $"HIDMaestro.Owner.{ownerId}";
+    internal static string IdentityPipeName(string token) => $"HIDMaestro.Identity.{token}";
+
+    /// <summary>The v1.12.0 owner pipe of a transport index. A v1.12.0
+    /// program holds it while it has a controller at that index.</summary>
+    internal static string LegacyOwnerPipeName(int transportIndex) => $"HIDMaestroOwner{transportIndex}";
 
     // SYNCHRONIZE | FILE_READ_ATTRIBUTES for SYSTEM, Administrators and
     // LocalService. Nobody can write or read a claim, and a non-elevated
@@ -73,6 +78,7 @@ internal static partial class MachineClaims
                     $"HIDMaestro could not create its ownership claim (Win32 error {Marshal.GetLastPInvokeError()}).");
             s_ownerId = id;
             s_ownerClaim = h;
+            OwnerSweep.RegisterExitCleanup();
         }
     }
 

@@ -143,62 +143,57 @@ public sealed class HMContext : IDisposable
         // program can tell this one is alive.
         Internal.MachineClaims.EnsureOwner();
 
-        // Proactive ghost sweep FIRST, before FullDeploy. Without this, when a
-        // prior process crashed or was force-killed (Dispose never ran), its
-        // virtual controllers + HIDMAESTRO stay PnP-live and REMAIN BOUND to
-        // the old INF. On the next launch, DriverBuilder.FullDeploy calls
-        // pnputil /delete-driver /uninstall /force: which fails with "One or
-        // more devices are presently installed using the specified INF" and
-        // leaves the old INF + stale DLL bytes in DriverStore. The subsequent
-        // /add-driver then sees package-already-present + "Needed repairing"
-        // and RESTORES the stale bytes from pnputil's internal cache rather
-        // than installing the fresh extracted binary. Net effect: every
-        // launch since the first one serves the stale driver forever, the
-        // v1.1.5 self-heal code never actually loads, input keeps hanging,
-        // and the only escape is manual devcon + TrustedInstaller takeown of
-        // the FileRepository subdirectory (which users do not have).
-        //
-        // Running the sweep here FIRST removes the bound devices via devcon
-        // (returning "Removed on reboot" is sufficient, as the INF becomes
-        // eligible for package deletion immediately), so FullDeploy's
-        // /delete-driver call actually succeeds and the fresh extracted
-        // binary replaces the DriverStore contents.
-        //
-        // preserveInstall: evict devices/orphans only. The 2026-07-21 perf
-        // audit found the full sweep also deleting the installed packages
-        // and the manifest hash, which forced the ~3 s full deploy pipeline
-        // on EVERY launch; the same-version fast path never got to run.
-        // Package replacement still happens inside FullDeploy's full path
-        // when the embedded payload differs.
-        Internal.DeviceOrchestrator.RemoveAllVirtualControllers(preserveInstall: true);
+        // Devices of programs that have exited go first: a device bound to
+        // the old INF keeps pnputil from replacing the package. Only provably
+        // dead owners' devices are removed. A running program's controllers,
+        // this one's included, stay.
+        Internal.OwnerSweep.ReclaimDeadOwners();
 
         if (!DriverBuilder.FullDeploy())
             throw new InvalidOperationException(
                 "Driver install failed. Run elevated and check pnputil output.");
     }
 
-    /// <summary>Removes ALL HIDMaestro virtual devices on the system, including
-    /// orphans from previous runs that weren't cleanly disposed. Use this from
-    /// a "cleanup" command-line command. Static (no HMContext instance needed).
-    /// Requires admin.</summary>
+    /// <summary>Removes the virtual controllers of programs that have
+    /// exited without removing theirs, then the driver packages and
+    /// <c>HKLM\SOFTWARE\HIDMaestro</c> once no controller of any program
+    /// remains on the driver. A running program's controllers, this one's
+    /// included, are never touched: dispose a controller to remove it.
+    /// Static (no HMContext instance needed). Requires admin.
+    ///
+    /// <para>Before 1.13.0 this removed every HIDMaestro controller on the
+    /// machine. That is now
+    /// <see cref="RemoveAllVirtualControllers(HMCleanupScope, bool)"/> with
+    /// <see cref="HMCleanupScope.Everything"/>. A program that exits without
+    /// disposing its controllers has their devices removed by the SDK as it
+    /// exits, and a program that is killed has them removed by the next
+    /// sweep of any program on the machine.</para></summary>
     public static void RemoveAllVirtualControllers()
-    {
-        Internal.DeviceOrchestrator.RemoveAllVirtualControllers();
-    }
+        => RemoveAllVirtualControllers(HMCleanupScope.Orphaned, preserveInstall: false);
 
-    /// <summary>Same device/orphan eviction as
-    /// <see cref="RemoveAllVirtualControllers()"/>, but with
-    /// <paramref name="preserveInstall"/> = true the installed driver
-    /// packages and the SOFTWARE\HIDMaestro configuration (including the
-    /// manifest hash that powers <see cref="InstallDriver"/>'s same-version
-    /// fast path) are kept. Use this from a consumer's own launch or exit
-    /// sweep: a full nuke there forces the next <see cref="InstallDriver"/>
-    /// through the multi-second full deploy pipeline for no benefit when
-    /// the driver version hasn't changed. Pass false (or call the
-    /// parameterless overload) for a true uninstall-grade cleanup.</summary>
+    /// <summary>The same removal as <see cref="RemoveAllVirtualControllers()"/>.
+    /// With <paramref name="preserveInstall"/> true the driver packages and
+    /// <c>HKLM\SOFTWARE\HIDMaestro</c>, which holds the manifest hash behind
+    /// <see cref="InstallDriver"/>'s same-version fast path, are kept. Use
+    /// that from a program's own launch or exit sweep: removing them forces
+    /// the next <see cref="InstallDriver"/> through the multi-second full
+    /// deploy for nothing when the version has not changed.</summary>
     public static void RemoveAllVirtualControllers(bool preserveInstall)
+        => RemoveAllVirtualControllers(HMCleanupScope.Orphaned, preserveInstall);
+
+    /// <summary>Remove the virtual controllers <paramref name="scope"/>
+    /// names. <see cref="HMCleanupScope.Everything"/> removes every
+    /// HIDMaestro controller and USB/IP import on the machine, whoever made
+    /// it and whether or not that program still runs, which is what an
+    /// uninstall, a test harness or a support tool wants. With
+    /// <paramref name="preserveInstall"/> false it also removes the driver
+    /// packages and <c>HKLM\SOFTWARE\HIDMaestro</c>.</summary>
+    public static void RemoveAllVirtualControllers(HMCleanupScope scope, bool preserveInstall)
     {
-        Internal.DeviceOrchestrator.RemoveAllVirtualControllers(preserveInstall);
+        if (scope == HMCleanupScope.Everything)
+            Internal.DeviceOrchestrator.RemoveEverything(preserveInstall);
+        else
+            Internal.OwnerSweep.RemoveOrphaned(preserveInstall);
     }
 
     /// <summary>Disposes a set of controllers concurrently, suppressing the

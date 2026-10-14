@@ -46,6 +46,10 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     public UsbAudioEngine Audio { get; }
     public string BusId { get; }
 
+    /// <summary>The vhci port this device is attached on, once attached.
+    /// Lets a sweep detach this process's own imports and nobody else's.</summary>
+    internal int VhciPort { get; set; }
+
     /// <summary>Controller index, kept so the synthetic pairing MAC in
     /// BuildFeatureStub is stable and unique per controller (#43).</summary>
     private readonly int _index;
