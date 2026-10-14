@@ -523,8 +523,7 @@ public sealed class ExtendedReportSpec
     public PortsSpec? Ports { get; set; }
 
     [JsonIgnore]
-    public byte ReportIdByte => string.IsNullOrEmpty(ReportId) ? (byte)0
-        : Convert.ToByte(ReportId.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ReportId.Substring(2) : ReportId, 16);
+    public byte ReportIdByte => ReportIds.Parse(ReportId);
 }
 
 /// <summary>Issue #56. A persona's feature-report answer table.</summary>
@@ -559,8 +558,7 @@ public sealed class FeatureStubReport
     public string Id { get; set; } = "";
 
     [JsonIgnore]
-    public byte IdByte => string.IsNullOrEmpty(Id) ? (byte)0
-        : Convert.ToByte(Id.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Id.Substring(2) : Id, 16);
+    public byte IdByte => ReportIds.Parse(Id);
 
     /// <summary>The report's wire length. The device pads to it.</summary>
     [JsonPropertyName("size")]
@@ -629,6 +627,21 @@ public sealed class InputBytePatch
     public int Value { get; set; }
 }
 
+/// <summary>A report ID as profiles write it, "0x31" or "31", hex.</summary>
+internal static class ReportIds
+{
+    /// <summary>Parse without allocating: the codec reads the ID on every
+    /// frame it encodes and the output reader on every packet. Until
+    /// v1.13.0 each read cut the "0x" off with Substring, 32 bytes a time.</summary>
+    public static byte Parse(string? id)
+    {
+        if (string.IsNullOrEmpty(id)) return 0;
+        ReadOnlySpan<char> hex = id.AsSpan();
+        if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
+        return byte.Parse(hex, System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture);
+    }
+}
+
 /// <summary>v1.3.5: host-side write trigger that arms extended-report emission.
 /// Type "featureWrite" matches an outgoing HID feature SetFeature; "outputWrite"
 /// matches an outgoing HID output report. ReportId is hex.</summary>
@@ -641,8 +654,7 @@ public sealed class ArmTrigger
     public string ReportId { get; set; } = "";
 
     [JsonIgnore]
-    public byte ReportIdByte => string.IsNullOrEmpty(ReportId) ? (byte)0
-        : Convert.ToByte(ReportId.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ReportId.Substring(2) : ReportId, 16);
+    public byte ReportIdByte => ReportIds.Parse(ReportId);
 }
 
 /// <summary>v1.3.5: single-field descriptor inside an ExtendedReportSpec.

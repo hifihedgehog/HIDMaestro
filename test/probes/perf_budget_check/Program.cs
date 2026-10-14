@@ -15,10 +15,11 @@
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
-//   gate           S84: no submit path allocates, a long mouse movement
-//                  leaves 16 frames kept, the census finds what the
-//                  configuration manager lists, and hid.dll's BOOLEAN
-//                  results read as one byte
+//   gate           S84: no submit path allocates, the codec path, consumer
+//                  usages, a keyboard's raw reports and an absolute pointer
+//                  included, a long mouse movement leaves 16 frames kept,
+//                  the census finds what the configuration manager lists,
+//                  and hid.dll's BOOLEAN results read as one byte
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
@@ -46,6 +47,10 @@ internal static class Program
     const string Keyboard = "microsoft-wired-keyboard-600";
     const string Mouse = "microsoft-notebook-optical-mouse";
     const string GameCube = "gamecube-adapter";
+    // Codec path on every frame, and a keyboard with consumer controls and
+    // report IDs.
+    const string Ds3 = "dualshock-3-full";
+    const string MagicKeyboard = "apple-magic-keyboard-touch-id-numeric";
 
 #if HM_BASE
     const string Build = "b4d29d9";
@@ -168,6 +173,43 @@ internal static class Program
             }
 #endif
         }
+        using (var ds3 = ctx.CreateController(ctx.GetProfile(Ds3)!))
+        {
+            bool flip = false;
+            Measure("SubmitState, " + Ds3 + " (the report codec)", runs, 20_000, () => { ds3.SubmitState(flip ? a : b); flip = !flip; }, gate);
+        }
+        using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!))
+        {
+            var playPause = new ushort[] { 0x00CD };
+            bool flip = false;
+            Measure("SubmitConsumer, " + MagicKeyboard, runs, 200, () =>
+            {
+                mk.SubmitConsumer(flip ? playPause : ReadOnlySpan<ushort>.Empty);
+                flip = !flip;
+            }, gate);
+            // Report 1's data, which the driver sends after the ID:
+            // modifiers, reserved, six keys and the extras byte.
+            var down = new byte[] { 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            var up = new byte[9];
+            Measure("SubmitRawReport, " + MagicKeyboard + " report 1", runs, 200, () =>
+            {
+                mk.SubmitRawReport(flip ? down : up);
+                flip = !flip;
+            }, gate);
+        }
+        var absolute = new HMProfileBuilder().Id("perf-absolute-pointer").Name("HIDMaestro Perf Absolute Pointer").Vendor("HIDMaestro")
+            .Vid(0xBEEF).Pid(0xF0C0).ProductString("HIDMaestro Perf Absolute Pointer").ManufacturerString("HIDMaestro")
+            .Type("mouse").Connection("usb")
+            .FromDescriptorBuilder(new HidDescriptorBuilder().Mouse(absolute: true, wheel: false, pan: false)).Build();
+        using (var abs = ctx.CreateController(absolute, "perf-absolute-pointer"))
+        {
+            int x = 0;
+            Measure("SubmitMouse, an absolute pointer", runs, 200, () =>
+            {
+                x = (x + 997) % 32768;
+                abs.SubmitMouse(new HMMouseState { X = x, Y = 32767 - x });
+            }, gate);
+        }
 #if !HM_BASE
         using (var gc = ctx.CreateController(ctx.GetProfile(GameCube)!))
         {
@@ -196,7 +238,7 @@ internal static class Program
         }
         Report($"{name}: ns per call", perCall, runs, $", most bytes allocated in one run of {calls} calls {worstBytes}");
         if (gate)
-            Check($"{name} allocates nothing", worstBytes == 0, $"{worstBytes} bytes over {runs} runs of {calls} calls");
+            Check($"{name} allocates nothing", worstBytes == 0, $"{worstBytes} bytes in the worst of {runs} runs of {calls} calls");
     }
 
     // ── Submit to the driver's acknowledgement ──────────────────────────
