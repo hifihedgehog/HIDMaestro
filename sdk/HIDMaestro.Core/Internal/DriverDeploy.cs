@@ -25,14 +25,17 @@ namespace HIDMaestro.Internal;
 /// </list>
 ///
 /// <para>Every deploy, of this driver or of the USB/IP transport, holds the
-/// machine-wide mutex <see cref="MutexName"/> for the length of one call.
-/// The holder re-reads the installed state after acquiring it, so of two
-/// programs calling InstallDriver at once, one deploys and the other finds
-/// the result current.</para>
+/// machine-wide mutex <see cref="MutexObject"/> for the length of one call.
+/// It lives in <see cref="AdminNamespace"/>, so a program that is not
+/// elevated can neither take the name first nor hold the lock. The holder
+/// re-reads the installed state after acquiring it, so of two programs
+/// calling InstallDriver at once, one deploys and the other finds the result
+/// current.</para>
 /// </summary>
 internal static partial class DriverDeploy
 {
-    internal const string MutexName = @"Global\HIDMaestro.Deploy";
+    /// <summary>The deploy mutex's name in <see cref="AdminNamespace"/>.</summary>
+    internal const string MutexObject = "Deploy";
 
     /// <summary>The oldest driver this SDK runs on: protocol 2, the v1.12.0
     /// layouts, including the InputAck section keyboards and mice need.</summary>
@@ -121,9 +124,11 @@ internal static partial class DriverDeploy
 
     /// <summary>Acquire the deploy mutex. An abandoned mutex is acquired,
     /// and the caller re-reads the installed state before acting.</summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
     internal static Mutex Acquire()
     {
-        var m = new Mutex(false, MutexName);
+        var m = new Mutex(false, AdminNamespace.Name(MutexObject));
         try
         {
             if (!m.WaitOne(TimeoutScale.Apply(600_000)))

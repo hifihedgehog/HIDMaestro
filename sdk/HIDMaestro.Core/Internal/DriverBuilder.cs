@@ -452,7 +452,7 @@ public static class DriverBuilder
     }
 
     /// <summary>The extract, sign, catalog and install pipeline. The caller
-    /// holds <see cref="DriverDeploy.MutexName"/> and has checked that no
+    /// holds <see cref="DriverDeploy.MutexObject"/> and has checked that no
     /// device runs on the installed driver.</summary>
     internal static void DeployLocked()
     {

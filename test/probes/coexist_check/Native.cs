@@ -349,6 +349,191 @@ internal static class Native
         return null;
     }
 
+    // ── The SDK's private namespace ────────────────────────────────────
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateBoundaryDescriptorW(string name, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AddSIDToBoundaryDescriptor(ref IntPtr boundary, byte[] sid);
+    [DllImport("kernel32.dll")] static extern void DeleteBoundaryDescriptor(IntPtr boundary);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreatePrivateNamespaceW(IntPtr sa, IntPtr boundary, string alias);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr OpenPrivateNamespaceW(IntPtr boundary, string alias);
+
+    // The SDK's boundary (AdminNamespace.cs): the name HIDMaestro and the
+    // Administrators SID. The alias is this process's own.
+    const string AdminBoundary = "HIDMaestro";
+    const string ProbeAlias = "CoexistCheck.Admin";
+    static IntPtr s_adminNamespace;
+
+    static IntPtr AdminBoundaryDescriptor()
+    {
+        IntPtr b = CreateBoundaryDescriptorW(AdminBoundary, 0);
+        AddSIDToBoundaryDescriptor(ref b, SidBytes(SidAdmins));
+        return b;
+    }
+
+    /// <summary>A mutex in the namespace the SDK keeps its locks in, the
+    /// way another program on this SDK takes it. The probe keeps its
+    /// namespace handle for its whole run, as the SDK does.</summary>
+    internal static System.Threading.Mutex AdminMutex(string name)
+    {
+        if (s_adminNamespace == IntPtr.Zero)
+        {
+            IntPtr b = AdminBoundaryDescriptor();
+            // The SDK's descriptor for it: SYSTEM and Administrators only.
+            IntPtr sa = Sa("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+            try
+            {
+                for (int i = 0; i < 8 && s_adminNamespace == IntPtr.Zero; i++)
+                {
+                    s_adminNamespace = CreatePrivateNamespaceW(sa, b, ProbeAlias);
+                    if (s_adminNamespace == IntPtr.Zero) s_adminNamespace = OpenPrivateNamespaceW(b, ProbeAlias);
+                }
+            }
+            finally
+            {
+                DeleteBoundaryDescriptor(b);
+                FreeSa(sa);
+            }
+            if (s_adminNamespace == IntPtr.Zero) throw new InvalidOperationException("the SDK's namespace did not open");
+        }
+        return new System.Threading.Mutex(false, ProbeAlias + @"\" + name);
+    }
+
+    /// <summary>What a program that is not elevated gets when it tries to
+    /// create, then open, the SDK's namespace: the two Win32 errors, 0 for
+    /// success. Run on a thread that impersonates such a program.</summary>
+    internal static (int Create, int Open) TryAdminNamespace()
+    {
+        IntPtr b = AdminBoundaryDescriptor();
+        try
+        {
+            IntPtr h = CreatePrivateNamespaceW(IntPtr.Zero, b, "CoexistCheck.Squat");
+            int create = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            if (h != IntPtr.Zero) ClosePrivateNamespace(h, 0);
+            IntPtr o = OpenPrivateNamespaceW(b, "CoexistCheck.Squat");
+            int open = o == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            if (o != IntPtr.Zero) ClosePrivateNamespace(o, 0);
+            return (create, open);
+        }
+        finally { DeleteBoundaryDescriptor(b); }
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool ClosePrivateNamespace(IntPtr h, uint flags);
+
+    // ── A program that is not elevated, on one thread ──────────────────
+
+    [StructLayout(LayoutKind.Sequential)] struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disableCount, SID_AND_ATTRIBUTES[] disable,
+        uint deleteCount, IntPtr delete, uint restrictCount, IntPtr restrict, out IntPtr newToken);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool DuplicateTokenEx(IntPtr token, uint access, IntPtr sa, int level, int type, out IntPtr dup);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int cls, IntPtr info, uint length);
+    [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool SetThreadToken(IntPtr thread, IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool RevertToSelf();
+    [DllImport("kernel32.dll")] internal static extern uint SetErrorMode(uint mode);
+    internal const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOGPFAULTERRORBOX = 0x0002, SEM_NOOPENFILEERRORBOX = 0x8000;
+
+    static byte[] SidBytes(System.Security.Principal.SecurityIdentifier sid)
+    {
+        var b = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(b, 0);
+        return b;
+    }
+
+    /// <summary>An impersonation token for this user as a program that is
+    /// not elevated runs: Administrators deny-only, medium integrity, the
+    /// user as default owner, and only the privileges such a program has.
+    /// Nothing runs under it but a thread of this process, which
+    /// SetThreadToken gives it and RevertToSelf takes back.</summary>
+    internal static IntPtr MediumToken()
+    {
+        const uint TOKEN_ASSIGN_PRIMARY = 0x1, TOKEN_DUPLICATE = 0x2, TOKEN_QUERY = 0x8, TOKEN_ADJUST_DEFAULT = 0x80, MAXIMUM_ALLOWED = 0x02000000;
+        const uint DISABLE_MAX_PRIVILEGE = 0x1;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, out IntPtr own))
+            throw new System.ComponentModel.Win32Exception();
+        var pins = new List<System.Runtime.InteropServices.GCHandle>();
+        try
+        {
+            byte[] admins = SidBytes(SidAdmins);
+            var ha = GCHandle.Alloc(admins, GCHandleType.Pinned); pins.Add(ha);
+            var disable = new[] { new SID_AND_ATTRIBUTES { Sid = ha.AddrOfPinnedObject() } };
+            if (!CreateRestrictedToken(own, DISABLE_MAX_PRIVILEGE, 1, disable, 0, IntPtr.Zero, 0, IntPtr.Zero, out IntPtr restricted))
+                throw new System.ComponentModel.Win32Exception();
+            try
+            {
+                if (!DuplicateTokenEx(restricted, MAXIMUM_ALLOWED, IntPtr.Zero, 2 /* SecurityImpersonation */, 2 /* TokenImpersonation */, out IntPtr imp))
+                    throw new System.ComponentModel.Win32Exception();
+
+                byte[] medium = SidBytes(new System.Security.Principal.SecurityIdentifier("S-1-16-8192"));
+                var hm = GCHandle.Alloc(medium, GCHandleType.Pinned); pins.Add(hm);
+                IntPtr label = Marshal.AllocHGlobal(IntPtr.Size * 2);
+                try
+                {
+                    Marshal.WriteIntPtr(label, hm.AddrOfPinnedObject());
+                    Marshal.WriteInt32(label, IntPtr.Size, 0x20 /* SE_GROUP_INTEGRITY */);
+                    if (!SetTokenInformation(imp, 25 /* TokenIntegrityLevel */, label, (uint)(IntPtr.Size * 2 + medium.Length)))
+                        throw new System.ComponentModel.Win32Exception();
+                }
+                finally { Marshal.FreeHGlobal(label); }
+
+                byte[] user = SidBytes(System.Security.Principal.WindowsIdentity.GetCurrent().User!);
+                var hu = GCHandle.Alloc(user, GCHandleType.Pinned); pins.Add(hu);
+                IntPtr owner = Marshal.AllocHGlobal(IntPtr.Size);
+                try
+                {
+                    Marshal.WriteIntPtr(owner, hu.AddrOfPinnedObject());
+                    if (!SetTokenInformation(imp, 4 /* TokenOwner */, owner, (uint)IntPtr.Size))
+                        throw new System.ComponentModel.Win32Exception();
+                }
+                finally { Marshal.FreeHGlobal(owner); }
+                return imp;
+            }
+            finally { CloseHandle(restricted); }
+        }
+        finally
+        {
+            foreach (var h in pins) h.Free();
+            CloseHandle(own);
+        }
+    }
+
+    // ── Named objects ──────────────────────────────────────────────────
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr CreateMutexW(IntPtr sa, bool initialOwner, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr OpenMutexW(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool ReleaseMutex(IntPtr h);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr sd, IntPtr size);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr mem);
+    internal const uint SYNCHRONIZE = 0x00100000;
+
+    /// <summary>SECURITY_ATTRIBUTES for an SDDL string, freed by the caller
+    /// with <see cref="FreeSa"/>.</summary>
+    internal static IntPtr Sa(string sddl)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out IntPtr sd, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception();
+        IntPtr sa = Marshal.AllocHGlobal(IntPtr.Size * 3);
+        Marshal.WriteInt32(sa, 0, IntPtr.Size * 3);
+        Marshal.WriteIntPtr(sa, IntPtr.Size, sd);
+        Marshal.WriteInt32(sa, IntPtr.Size * 2, 0);
+        return sa;
+    }
+
+    internal static void FreeSa(IntPtr sa)
+    {
+        LocalFree(Marshal.ReadIntPtr(sa, IntPtr.Size));
+        Marshal.FreeHGlobal(sa);
+    }
+
     internal static bool LedgerHolds(string kind, string name)
     {
         using var k = Registry.LocalMachine.OpenSubKey($@"SOFTWARE\HIDMaestroRegistryLedger\{kind}\{name}");

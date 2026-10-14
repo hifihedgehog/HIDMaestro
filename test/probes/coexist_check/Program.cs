@@ -74,7 +74,11 @@
 //      killed program's port taken over, sweeps beside live programs, and
 //      a running program's own composite losing its connection.
 //      SectionV.cs has the detail.
-//   S71 runs A to H and J to V.
+//   X. Machine-wide names a program that is not elevated creates first:
+//      the deploy lock. A thread of this probe that impersonates such a
+//      program creates and holds it, and a create does not wait on it.
+//      SectionX.cs.
+//   S71 runs A to H, J to V and X.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -139,6 +143,9 @@ internal static partial class Program
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--peer") return Peer.Run();
+        // Every process the probe starts is a peer with no window, and a
+        // loader failure in one returns an exit code, never a dialog.
+        Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
         string? consumer = FindLiveSdkConsumer();
@@ -148,7 +155,7 @@ internal static partial class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUV";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVX";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -174,6 +181,7 @@ internal static partial class Program
             ('T', "a driver set a deploy left incomplete", SectionT),
             ('U', "a create that fails after its claims", SectionU),
             ('V', "re-attach attempts a killed composite program leaves", SectionV),
+            ('X', "machine-wide names a program that is not elevated creates first", SectionX),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -997,7 +1005,7 @@ internal static partial class Program
         using var release = new ManualResetEventSlim();
         var holder = new Thread(() =>
         {
-            using var m = new Mutex(false, @"Global\HIDMaestro.Deploy");
+            using var m = Native.AdminMutex("Deploy");
             m.WaitOne();
             held.Set();
             release.Wait(15_000);

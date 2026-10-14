@@ -1,0 +1,135 @@
+// X. Machine-wide names a program that is not elevated creates first.
+//
+// Any local program can create a Global\ mutex or event, or a pipe, under
+// any name no one holds yet, and hold it. The probe plays that program with
+// one of its own threads, which impersonates this user's token as a program
+// that is not elevated runs (Native.MediumToken): Administrators deny-only,
+// medium integrity. No process is started for it, and everything it made is
+// closed before the section ends.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+internal static partial class Program
+{
+    static void SectionX()
+    {
+        // The SDK's namespace exists, as it does once any program on this
+        // SDK has taken a lock, so the squatter's open below meets it.
+        using (Native.AdminMutex("Deploy")) { }
+
+        SectionX1();
+    }
+
+    /// <summary>The deploy lock.</summary>
+    static void SectionX1()
+    {
+        const string name = @"Global\HIDMaestro.Deploy";
+        using var p = PeerProcess.Start("X1");
+        Check("X1: the program installs", Ok(p.Send("install")));
+        (int Create, int Open) ns = (-1, -1);
+        var sq = new Squatter(s =>
+        {
+            s.Mutex(name, hold: true);
+            ns = Native.TryAdminNamespace();
+        });
+        try
+        {
+            Check($"X1: a program that is not elevated creates and holds {name}", sq.Holds(name), sq.Describe());
+            Check("X1: it can neither create nor open the namespace the deploy lock lives in",
+                  ns == (5, 5), $"create error {ns.Create}, open error {ns.Open}");
+            p.Post("create pad F0E1 -");
+            string c = p.Receive("create", 20_000);
+            Check($"X1: a create, which takes the deploy lock, finishes while it holds {name}", Ok(c), c);
+            if (!Ok(c))
+            {
+                sq.Dispose();
+                p.Receive("create, once the name is let go", 120_000);
+            }
+        }
+        finally { sq.Dispose(); }
+        Check("X1: nothing the squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
+    }
+
+    /// <summary>A program that is not elevated, played by one thread of
+    /// this probe. The setup runs under <see cref="Native.MediumToken"/>.
+    /// The thread then reverts to the probe's own token and keeps what it
+    /// made, mutexes it took included, until <see cref="Dispose"/>, which
+    /// releases and closes everything and ends the thread.</summary>
+    sealed class Squatter : IDisposable
+    {
+        readonly Thread _thread;
+        readonly ManualResetEventSlim _ready = new();
+        readonly ManualResetEventSlim _release = new();
+        readonly Dictionary<string, IntPtr> _handles = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, int> _errors = new(StringComparer.OrdinalIgnoreCase);
+        readonly List<IntPtr> _owned = new();
+        readonly HashSet<string> _toHold = new(StringComparer.OrdinalIgnoreCase);
+        Exception? _failure;
+        bool _disposed;
+
+        public Squatter(Action<Squatter> setup)
+        {
+            _thread = new Thread(() =>
+            {
+                IntPtr token = IntPtr.Zero;
+                try
+                {
+                    token = Native.MediumToken();
+                    if (!Native.SetThreadToken(IntPtr.Zero, token)) throw new System.ComponentModel.Win32Exception();
+                    try { setup(this); }
+                    finally { Native.RevertToSelf(); }
+                }
+                catch (Exception ex) { _failure = ex; }
+                finally
+                {
+                    if (token != IntPtr.Zero) Native.CloseHandle(token);
+                    _ready.Set();
+                }
+                _release.Wait();
+                foreach (IntPtr h in _owned) Native.ReleaseMutex(h);
+                foreach (IntPtr h in _handles.Values) Native.CloseHandle(h);
+            }) { IsBackground = true, Name = "squatter" };
+            _thread.Start();
+            _ready.Wait();
+        }
+
+        const string OpenToAll = "D:(A;;GA;;;WD)";
+
+        public void Mutex(string name, bool hold)
+        {
+            IntPtr sa = Native.Sa(OpenToAll);
+            IntPtr h = Native.CreateMutexW(sa, false, name);
+            _errors[name] = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            Native.FreeSa(sa);
+            if (h == IntPtr.Zero) return;
+            _handles[name] = h;
+            if (!hold) return;
+            _toHold.Add(name);
+            if (Native.WaitForSingleObject(h, 0) == 0) _owned.Add(h);
+        }
+
+        /// <summary>Whether the squatter created the name, and for a mutex
+        /// it was asked to hold, holds it.</summary>
+        public bool Holds(string name) =>
+            _failure == null && _handles.TryGetValue(name, out IntPtr h) && (!_toHold.Contains(name) || _owned.Contains(h));
+
+        public string Describe() =>
+            _failure != null ? $"{_failure.GetType().Name}: {_failure.Message}"
+            : string.Join(", ", _errors.Select(e => $"{e.Key} {(e.Value == 0 ? "created" : $"error {e.Value}")}")) +
+              (_owned.Count > 0 ? $", {_owned.Count} held" : "");
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _release.Set();
+            _thread.Join(10_000);
+            _ready.Dispose();
+            _release.Dispose();
+        }
+    }
+}
