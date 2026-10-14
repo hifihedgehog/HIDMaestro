@@ -230,6 +230,26 @@ internal static class Program
         Check("removing drops every copy", changed &&
               File.ReadAllBytes(file).AsSpan().SequenceEqual(Apply(Apply(twice, "removedriver", path), "removedriver", path)));
 
+        // A failed registration surfaces as InvalidOperationException with
+        // the cause inside, as it did when vrpathreg ran. OpenVR's own reader
+        // opens the file with _wfsopen(_SH_DENYNO), which does not share
+        // delete, so the move over it fails while SteamVR is reading.
+        var addCall = (Func<string, bool>)Delegate.CreateDelegate(typeof(Func<string, bool>), add);
+        File.WriteAllBytes(file, compact);
+        var removeCall = (Func<string, bool>)Delegate.CreateDelegate(typeof(Func<string, bool>), remove);
+        removeCall(path);
+        byte[] before = File.ReadAllBytes(file);
+        Exception? caught = null;
+        using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            try { addCall(path); }
+            catch (Exception e) { caught = e; }
+        }
+        Check("a write that loses to OpenVR's reader throws InvalidOperationException with the cause inside",
+              caught is InvalidOperationException { InnerException: IOException or UnauthorizedAccessException },
+              caught == null ? "no exception" : caught.GetType().Name + " / " + caught.InnerException?.GetType().Name);
+        Check("and the file is as it was", File.ReadAllBytes(file).AsSpan().SequenceEqual(before));
+
         Check("no temporary file is left beside it",
               Directory.GetFiles(dir).Select(Path.GetFileName).SequenceEqual(new[] { "openvrpaths.vrpath" }),
               string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));

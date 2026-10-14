@@ -136,7 +136,27 @@ internal static partial class OpenVrPathRegistry
         throw new ArgumentOutOfRangeException(nameof(verb), verb, null);
     }
 
-    private static bool Mutate(Func<Lists, bool> edit) => RunAsUser(() =>
+    /// <summary>Read, edit and write the registry. A failure surfaces as
+    /// <see cref="InvalidOperationException"/> with the cause as its inner
+    /// exception, the type a failed vrpathreg run gave through v1.12.0.</summary>
+    private static bool Mutate(Func<Lists, bool> edit)
+    {
+        try
+        {
+            return MutateFile(edit);
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception e)
+        {
+            throw new InvalidOperationException(
+                $"Could not update the OpenVR path registry {FilePath}: {e.Message}", e);
+        }
+    }
+
+    private static bool MutateFile(Func<Lists, bool> edit) => RunAsUser(() =>
     {
         string file = Path.GetFullPath(FilePath);
         var l = Load(ReadFile(file, missingOnly: true));
