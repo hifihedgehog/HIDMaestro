@@ -52,13 +52,14 @@ internal sealed partial class UsbipEmulatedDevice
         _protocolWake = new AutoResetEvent(false);
         _protocolTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        _protocolThread = new Thread(ProtocolClockLoop)
+        var clock = new Thread(ProtocolClockLoop)
         {
             IsBackground = true,
             Name = $"HMUsbipProtocolClock_{_index}",
             Priority = ThreadPriority.AboveNormal,
         };
-        _protocolThread.Start();
+        clock.Start();
+        _protocolThread = clock;
     }
 
     /// <summary>Initial state: at attach, at detach and on a port reset. The
@@ -79,7 +80,7 @@ internal sealed partial class UsbipEmulatedDevice
         }
         Volatile.Write(ref _protocolClockOrigin, Stopwatch.GetTimestamp());
         PublishOutput(SourceDeviceReset, 0, ReadOnlySpan<byte>.Empty);
-        _protocolWake?.Set();
+        WakeProtocolClock();
     }
 
     /// <summary>Caller holds _hidLock.</summary>
@@ -109,7 +110,7 @@ internal sealed partial class UsbipEmulatedDevice
                     _readsPerEp.TryGetValue(_engine.Protocol.InputEndpoint, out var rc) ? rc + 1 : 1;
             _protocolReads.AddLast(node);
         }
-        _protocolWake!.Set();
+        WakeProtocolClock();
     }
 
     /// <summary>Command bytes from the OUT endpoint, or from a
@@ -131,7 +132,7 @@ internal sealed partial class UsbipEmulatedDevice
         if ((effect & ProtocolEngine.Effect.Halted) != 0)
             FailProtocolReads(engine.Protocol.HaltStatus);
         if (effect != ProtocolEngine.Effect.None)
-            _protocolWake!.Set();
+            WakeProtocolClock();
     }
 
     private void ProtocolSubmitOut(uint seqnum, byte[] payload)
@@ -261,6 +262,35 @@ internal sealed partial class UsbipEmulatedDevice
     /// to send, the clock sleeps until something changes.</summary>
     private void ProtocolClockLoop()
     {
+        try
+        {
+            ProtocolClock();
+        }
+        finally
+        {
+            CloseProtocolClock();
+        }
+    }
+
+    /// <summary>Wake the poll clock, unless it has ended and closed its
+    /// event.</summary>
+    private void WakeProtocolClock()
+    {
+        lock (_lifetimeLock)
+            if (!_protocolWakeClosed) _protocolWake?.Set();
+    }
+
+    /// <summary>The poll clock's event and timer, closed by the clock as it
+    /// ends, or by DisposeProtocol when the clock never started.</summary>
+    private void CloseProtocolClock()
+    {
+        lock (_lifetimeLock) _protocolWakeClosed = true;
+        if (_protocolTimer != IntPtr.Zero) CloseHandle(_protocolTimer);
+        _protocolWake?.Dispose();
+    }
+
+    private void ProtocolClock()
+    {
         var engine = _engine!;
         var waits = new[] { _protocolTimer, _protocolWake!.SafeWaitHandle.DangerousGetHandle() };
         long freq = Stopwatch.Frequency;
@@ -318,18 +348,15 @@ internal sealed partial class UsbipEmulatedDevice
         }
     }
 
+    /// <summary>A started clock closes its own handles as it ends. A
+    /// constructor that failed inside StartProtocolClock leaves some of
+    /// these unset, and the clock unstarted.</summary>
     private void DisposeProtocol(int joinMs)
     {
-        // A constructor that failed inside StartProtocolClock leaves some
-        // of these unset.
-        try { _protocolWake?.Set(); } catch { }
+        WakeProtocolClock();
         if (_protocolThread is { } clock)
             try { clock.Join(joinMs); } catch { }
-        if (_protocolTimer != IntPtr.Zero)
-        {
-            CloseHandle(_protocolTimer);
-            _protocolTimer = IntPtr.Zero;
-        }
-        _protocolWake?.Dispose();
+        else
+            CloseProtocolClock();
     }
 }

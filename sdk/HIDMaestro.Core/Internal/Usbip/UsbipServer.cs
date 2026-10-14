@@ -365,6 +365,11 @@ internal sealed class UsbipServer : IDisposable
             while (true)
             {
                 ReadExactly(header);
+                // A device disposed under an open connection answers nothing
+                // more. Ending the connection lets usbip-win2 detach it
+                // (wsk_receive_events.cpp async_reattach), and the re-attach
+                // that follows finds no device.
+                if (device.IsDisposed) return;
                 var cmd = UsbipProtocol.ParseHeader(header);
 
                 if (cmd.Command == UsbipProtocol.CmdSubmit)

@@ -198,6 +198,9 @@ internal sealed partial class UsbAudioEngine : IDisposable
         bool opened = false;
         lock (_lock)
         {
+            // After Dispose the pump has ended, or is ending and closing its
+            // event.
+            if (_stop) return;
             ref long cursor = ref urb.IsIn ? ref _inCursor : ref _outCursor;
             if (cursor < now - 50 * TicksPerMs) cursor = now; // (re)anchor
             cursor += urb.Packets.Length * TicksPerMs;
@@ -215,8 +218,8 @@ internal sealed partial class UsbAudioEngine : IDisposable
                     opened = true;
                 }
             }
+            _wake.Set();
         }
-        _wake.Set();
         if (opened) RaiseAltChanged(urb.InterfaceNumber);
     }
 
@@ -438,6 +441,24 @@ internal sealed partial class UsbAudioEngine : IDisposable
 
     private void PumpLoop()
     {
+        try
+        {
+            Pump();
+        }
+        finally
+        {
+            // The pump closes the handles it waits on, so a pump Dispose's
+            // bounded join gave up on (a consumer's OutFrames handler still
+            // running) never waits on a closed one. Under the lock, _stop
+            // orders the close after every Set, Dispose's own included.
+            lock (_lock) _stop = true;
+            if (_timer != IntPtr.Zero) CloseHandle(_timer);
+            _wake.Dispose();
+        }
+    }
+
+    private void Pump()
+    {
         var completedThisTick = new List<PendingIso>(8);
         while (!_stop)
         {
@@ -544,13 +565,17 @@ internal sealed partial class UsbAudioEngine : IDisposable
         }
     }
 
+    /// <summary>Stops the pump. It closes its own handles as it ends. A
+    /// second call returns.</summary>
     public void Dispose()
     {
-        _stop = true;
-        _wake.Set();
+        lock (_lock)
+        {
+            if (_stop) return;
+            _stop = true;
+            _wake.Set();
+        }
         try { _thread.Join(500); } catch { }
-        if (_timer != IntPtr.Zero) CloseHandle(_timer);
-        _wake.Dispose();
     }
 
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;

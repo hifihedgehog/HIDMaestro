@@ -85,6 +85,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// <summary>Whether <paramref name="connection"/> holds the device.</summary>
     internal bool IsClaimedBy(UsbipServer.Connection connection) => Volatile.Read(ref _connection) == connection;
 
+    /// <summary>True once Dispose has begun. The device answers nothing
+    /// after that, so its connection's reader ends the connection.</summary>
+    internal bool IsDisposed => _stop;
+
     /// <summary>Controller index, kept so the synthetic pairing MAC in
     /// BuildFeatureStub is stable and unique per controller (#43).</summary>
     private readonly int _index;
@@ -95,8 +99,26 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly IntPtr _outputView;
     private readonly IntPtr _outputEvent;
     private IntPtr _inputWaitEvent;
-    private readonly Thread _inputThread;
+    // Set once the thread has started, as are the clocks' threads below.
+    private readonly Thread? _inputThread;
     private volatile bool _stop;
+
+    // Teardown. StopAndRelease sets _stop under _lifetimeLock, and the input
+    // pump reads the input section under it, so no read follows Dispose's
+    // return and the controller unmaps the section after that. Each worker
+    // thread closes the handles it waits on as it ends, and a clock's event
+    // is set from other threads only under this lock while it is still
+    // open: a thread Dispose's bounded join gave up on never waits on a
+    // closed handle, and a late call from the connection never sets a
+    // closed event. No lock is held across consumer code, so Dispose never
+    // waits for a handler on the connection's thread. It waits for one on
+    // the audio pump (OutFrames) only through that pump's bounded join.
+    private readonly object _lifetimeLock = new();
+    private bool _protocolWakeClosed;
+    private bool _streamWakeClosed;
+    // Set under _publishLock: nothing writes the output section after
+    // Dispose.
+    private bool _outputClosed;
 
     // The connection's serialized sender; null until attached. Claimed
     // and released with CompareExchange so a racing second import can
@@ -252,13 +274,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
             Audio = new UsbAudioEngine(profile, CompleteIsoOnWire);
 
-            _inputThread = new Thread(InputPumpLoop)
+            var input = new Thread(InputPumpLoop)
             {
                 IsBackground = true,
                 Name = $"HMUsbipInput_{index}",
                 Priority = ThreadPriority.AboveNormal,
             };
-            _inputThread.Start();
+            input.Start();
+            _inputThread = input;
             AfterInputPumpStart?.Invoke(index);
 
             if (_switch2 != null)
@@ -266,13 +289,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 _streamWake = new AutoResetEvent(false);
                 _streamTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
                     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-                _streamThread = new Thread(Switch2StreamLoop)
+                var stream = new Thread(Switch2StreamLoop)
                 {
                     IsBackground = true,
                     Name = $"HMUsbipSwitch2Stream_{index}",
                     Priority = ThreadPriority.AboveNormal,
                 };
-                _streamThread.Start();
+                stream.Start();
+                _streamThread = stream;
             }
 
             // A device with a declared protocol answers its IN endpoint on its
@@ -294,8 +318,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// while attached is refused ST_DEV_BUSY by the server.</summary>
     public bool TryClaimConnection(UsbipServer.Connection connection)
     {
+        // A device disposed after the server found it is gone.
+        if (_stop) return false;
         if (Interlocked.CompareExchange(ref _connection, connection, null) != null)
             return false;
+        if (_stop)
+        {
+            Interlocked.CompareExchange(ref _connection, null, connection);
+            return false;
+        }
         // Attach is power-on for the Switch 2 Pro persona's protocol state,
         // and for a declared protocol's.
         ResetSwitch2State();
@@ -303,8 +334,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         return true;
     }
 
+    /// <summary>The connection's reader thread, as it ends. Dispose can be
+    /// running on another thread: a controller's teardown plugs the device
+    /// out first, which closes the socket (UsbipBackendHandle.Dispose).
+    /// Everything here is either managed state or a write Dispose has
+    /// closed off.</summary>
     public void DetachConnection(UsbipServer.Connection connection)
     {
+        if (_stop) return; // Dispose released the device already
         // The import is gone with its connection. Cleared and released
         // under one lock, so neither the next import's port nor this one's
         // is ever overwritten by the other.
@@ -343,6 +380,18 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     private void InputPumpLoop()
     {
+        try
+        {
+            InputPump();
+        }
+        finally
+        {
+            if (_inputWaitEvent != IntPtr.Zero) CloseHandle(_inputWaitEvent);
+        }
+    }
+
+    private void InputPump()
+    {
         while (!_stop)
         {
             try
@@ -377,7 +426,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         catch { }
                     }
                 }
-                if (!TryReadInputFrame(out var report)) continue;
+                byte[] report;
+                lock (_lifetimeLock)
+                {
+                    if (_stop) break;
+                    if (!TryReadInputFrame(out report)) continue;
+                }
 
                 // A declared protocol sends nothing from here either. The
                 // frame is the report its next host poll gets.
@@ -500,6 +554,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         int size = Math.Min(data.Length, SharedMemoryIO.DATA_CAPACITY);
         lock (_publishLock)
         {
+            if (_outputClosed) return;
             uint newSeq;
             unsafe { newSeq = (uint)Interlocked.Increment(ref *(int*)view); }
             int slotIdx = (int)((newSeq - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS);
@@ -518,15 +573,21 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
             Thread.MemoryBarrier();
             Marshal.WriteInt32(view, slotBase + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SEQNO, (int)newSeq);
+            // Under the lock too: the controller closes the event with the
+            // section.
+            if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);
         }
-        if (_outputEvent != IntPtr.Zero) SetEvent(_outputEvent);
     }
 
     // ── URB dispatch (called on the connection reader thread) ────────────
 
+    /// <summary>A CMD_SUBMIT. One the connection's reader passed in while
+    /// Dispose ran goes unanswered, and the reader ends the connection at
+    /// the next one (<see cref="IsDisposed"/>).</summary>
     public void HandleSubmit(in UsbipProtocol.CommandHeader cmd, byte[]? outPayload,
                              (uint Offset, uint Length)[]? isoPackets)
     {
+        if (_stop) return;
         if (cmd.Ep == 0)
         {
             HandleControl(cmd, outPayload);
@@ -647,7 +708,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
             SendRetSubmit(cmd.Seqnum, 0, command.Length, null);
             CompleteBulkIn();
-            if (started) _streamWake!.Set();
+            if (started) WakeStreamClock();
             return;
         }
 
@@ -754,6 +815,35 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// thing that sends a report.</summary>
     private void Switch2StreamLoop()
     {
+        try
+        {
+            Switch2Stream();
+        }
+        finally
+        {
+            CloseStreamClock();
+        }
+    }
+
+    /// <summary>Wake the report clock, unless it has ended and closed its
+    /// event.</summary>
+    private void WakeStreamClock()
+    {
+        lock (_lifetimeLock)
+            if (!_streamWakeClosed) _streamWake?.Set();
+    }
+
+    /// <summary>The report clock's event and timer, closed by the clock as
+    /// it ends, or by StopAndRelease when the clock never started.</summary>
+    private void CloseStreamClock()
+    {
+        lock (_lifetimeLock) _streamWakeClosed = true;
+        if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
+        _streamWake?.Dispose();
+    }
+
+    private void Switch2Stream()
+    {
         long interval = System.Diagnostics.Stopwatch.Frequency * Switch2ReportIntervalMs / 1000;
         var waits = new[] { _streamTimer, _streamWake!.SafeWaitHandle.DangerousGetHandle() };
         bool running = false;
@@ -814,6 +904,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
+        if (_stop) return;
         bool removed = Audio.TryUnlink(victimSeqnum);
         if (!removed && _engine != null)
             removed = TryUnlinkProtocolRead(victimSeqnum);
@@ -1390,26 +1481,36 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// <summary>Stop every thread this device started and close what it
     /// opened. Dispose ends here, and so does a constructor that throws
     /// partway, so every field may still be unset. Each loop checks
-    /// <c>_stop</c> after a wait of at most 500 ms.</summary>
+    /// <c>_stop</c> after a wait of at most 500 ms.
+    ///
+    /// <para>The controller unmaps the sections once Dispose returns, so
+    /// nothing here waits on the connection, and no thread reads or writes
+    /// a section afterward. A thread that started closes the handles it
+    /// waits on as it ends. What a constructor opened for a thread it never
+    /// started is closed here. A sweep disposes the device and the
+    /// controller's own teardown disposes it again: the second call
+    /// returns.</para></summary>
     private void StopAndRelease(int joinMs)
     {
-        _stop = true;
-        _connection = null;
+        lock (_lifetimeLock)
+        {
+            if (_stop) return;
+            _stop = true;
+            _connection = null;
+            // Inside the lifetime lock, so a second Dispose racing this one
+            // returns only once nothing can write the output section.
+            lock (_publishLock) _outputClosed = true;
+        }
         Audio?.Dispose();
         if (_inputThread is { } input)
             try { input.Join(joinMs); } catch { }
-        if (_inputWaitEvent != IntPtr.Zero)
-        {
+        else if (_inputWaitEvent != IntPtr.Zero)
             CloseHandle(_inputWaitEvent);
-            _inputWaitEvent = IntPtr.Zero;
-        }
-        // _stop is set above. Wake the clock and wait for it before the
-        // handles it waits on go away.
-        try { _streamWake?.Set(); } catch { }
+        WakeStreamClock();
         if (_streamThread is { } stream)
             try { stream.Join(joinMs); } catch { }
-        if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
-        _streamWake?.Dispose();
+        else
+            CloseStreamClock();
         DisposeProtocol(joinMs);
     }
 

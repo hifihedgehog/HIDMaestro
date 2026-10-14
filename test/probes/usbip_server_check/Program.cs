@@ -19,6 +19,9 @@
 //   - a throwing handler on any public audio event, each in a child
 //     process: the handler after it still runs and the connection still
 //     answers
+//   - teardown: the connection's detach racing the device's Dispose, and a
+//     transfer that arrives after Dispose, neither touching a disposed
+//     object or ending the process ("teardown" runs these alone)
 //
 // Bridges to the SDK's shared-memory contract are exercised end to end:
 // the probe writes input frames exactly as HMController.SubmitState does
@@ -34,6 +37,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Threading;
 
 using HIDMaestro;
@@ -42,7 +46,7 @@ using HIDMaestro.Internal.Usbip;
 
 internal static class Program
 {
-    static int s_total, s_failures;
+    static int s_total, s_failures, s_unhandled;
 
     static void Check(string name, bool cond, string detail = "")
     {
@@ -56,33 +60,53 @@ internal static class Program
     static int Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
+        if (args.Length >= 1 && args[0] == "--held-pump") return HeldPumpChild();
 
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
+        // An exception that escapes a connection thread ends the process.
+        // The handler records it and ends the process itself with exit code
+        // 3, and the error mode keeps any crash from opening an error dialog.
+        SetErrorMode(QuietErrorMode);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Interlocked.Increment(ref s_unhandled);
+            Console.WriteLine($"  [FAIL] unhandled {e.ExceptionObject.GetType().Name} on thread " +
+                              $"{Thread.CurrentThread.Name ?? "(unnamed)"}: {(e.ExceptionObject as Exception)?.Message}");
+            Console.WriteLine($"\n=== {s_total - s_failures}/{s_total + 1} checks passed, the process ended by an unhandled exception ===");
+            Console.Out.Flush();
+            TerminateProcess(GetCurrentProcess(), 3);
+        };
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
-        var profile = ctx.GetProfile("dualsense-composite")!.Inner;
-
         var server = UsbipServer.GetOrStart();
-        var device = new UsbipEmulatedDevice(profile, Index);
-        server.Register(device);
 
-        var outFrames = new MemoryStream();
-        device.Audio.OutFrames += pcm => { lock (outFrames) outFrames.Write(pcm.Span); };
-        var controlWrites = new List<(byte Unit, byte Sel, short Raw)>();
-        device.Audio.ControlChanged += (u, s, c, v) => { lock (controlWrites) controlWrites.Add((u, s, v)); };
+        // "teardown" runs the teardown checks alone.
+        if (!args.Contains("teardown"))
+        {
+            var profile = ctx.GetProfile("dualsense-composite")!.Inner;
+            var device = new UsbipEmulatedDevice(profile, Index);
+            server.Register(device);
 
-        try
-        {
-            RunAll(server, device, profile, outFrames, controlWrites);
-            ThrowingHandlers();
+            var outFrames = new MemoryStream();
+            device.Audio.OutFrames += pcm => { lock (outFrames) outFrames.Write(pcm.Span); };
+            var controlWrites = new List<(byte Unit, byte Sel, short Raw)>();
+            device.Audio.ControlChanged += (u, s, c, v) => { lock (controlWrites) controlWrites.Add((u, s, v)); };
+
+            try
+            {
+                RunAll(server, device, profile, outFrames, controlWrites);
+                ThrowingHandlers();
+            }
+            finally
+            {
+                server.Unregister(device);
+                device.Dispose();
+                SharedMemoryIO.DestroyController(Index);
+            }
         }
-        finally
-        {
-            server.Unregister(device);
-            device.Dispose();
-            SharedMemoryIO.DestroyController(Index);
-        }
+
+        Teardown(ctx, server);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -739,18 +763,21 @@ internal static class Program
         }
     }
 
-    static (int Code, string Line) RunChild(string which)
+    static (int Code, string Line) RunChild(string which) => RunChild($"--throwing {which}", null);
+
+    static (int Code, string Line) RunChild(string arguments, (string Name, string Value)? env)
     {
         // The child inherits this error mode: a crash or a loader failure
         // there ends in an exit code, never in a dialog on the desktop.
         SetErrorMode(QuietErrorMode);
-        var psi = new ProcessStartInfo(Environment.ProcessPath!, $"--throwing {which}")
+        var psi = new ProcessStartInfo(Environment.ProcessPath!, arguments)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        if (env is { } e) psi.Environment[e.Name] = e.Value;
         using var p = Process.Start(psi)!;
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
@@ -869,6 +896,298 @@ internal static class Program
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern uint SetErrorMode(uint mode);
+
+    // ── Teardown racing Dispose ─────────────────────────────────────────
+    //
+    // A controller's Dispose plugs the device out, which closes the socket
+    // (usbip-win2 device.cpp detach), then disposes the device while the
+    // connection's reader thread runs its own detach, and unmaps the sections
+    // once Dispose returns (HMContext.OnControllerDisposing). A sweep disposes
+    // the device first and plugs it out after, so the host's transfers keep
+    // arriving on the open connection meanwhile. The GameCube adapter persona
+    // runs a protocol clock with an event and a timer of its own.
+
+    const int TeardownIndex = 61;
+    const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    static void Teardown(HMContext ctx, UsbipServer server)
+    {
+        Console.WriteLine("\n-- Teardown racing Dispose --");
+        var gc = ctx.GetProfile("gamecube-adapter")!.Inner;
+        var hidLockField = typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!;
+        var connectionField = typeof(UsbipEmulatedDevice).GetField("_connection", Private)!;
+        var clockField = typeof(UsbipEmulatedDevice).GetField("_protocolThread", Private)!;
+        var connections = (System.Collections.ICollection)typeof(UsbipServer).GetField("_connections", Private)!.GetValue(server)!;
+        bool NoConnections() => WaitUntil(() => { lock (connections) return connections.Count == 0; }, 5000);
+
+        NoConnections();
+
+        // A transfer the host sends after Dispose, the connection still open:
+        // the device ends the connection, so the host controller detaches it.
+        {
+            var (device, cl) = Attach(server, gc);
+            server.Unregister(device);
+            device.Dispose();
+            cl.SendSubmitInterruptIn(cl.NextSeq(), 1, 37);
+            string answer = cl.Within(1000);
+            Check("a transfer after Dispose gets no answer and the device ends the connection",
+                  answer == "closed", answer);
+            // A sweep disposes the device, then the controller's teardown
+            // disposes it again.
+            string second = "returned";
+            try { device.Dispose(); }
+            catch (Exception ex) { second = $"{ex.GetType().Name}: {ex.Message}"; }
+            Check("a second Dispose returns without touching what the first released", second == "returned", second);
+            cl.Dispose();
+            NoConnections();
+            SharedMemoryIO.DestroyController(TeardownIndex);
+        }
+
+        // The Switch 2 Pro report clock held past Dispose's join, then let go
+        // with the sections unmapped: it ends on its own and waits on nothing
+        // Dispose released.
+        {
+            var s2 = ctx.GetProfile("switch2-pro-controller-composite")!.Inner;
+            var (device, cl) = Attach(server, s2);
+            var clock = (Thread)typeof(UsbipEmulatedDevice).GetField("_streamThread", Private)!.GetValue(device)!;
+            object sync = typeof(Switch2ProDevice).GetField("_sync", Private)!.GetValue(device.Switch2)!;
+            var met = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> watch = (_, e) =>
+            {
+                if (Thread.CurrentThread == clock) met.Enqueue($"{e.Exception.GetType().Name}: {e.Exception.Message}");
+            };
+            AppDomain.CurrentDomain.FirstChanceException += watch;
+            bool disposed;
+            Monitor.Enter(sync);
+            try
+            {
+                // With reports off the clock asks for the report state at
+                // least every 500 ms, and now waits for this lock.
+                Thread.Sleep(700);
+                var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
+                disposer.Start();
+                disposed = disposer.Join(5000);
+                if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
+            }
+            finally { Monitor.Exit(sync); }
+            bool ended = WaitUntil(() => !clock.IsAlive, 3000);
+            AppDomain.CurrentDomain.FirstChanceException -= watch;
+            Check("the report clock held past Dispose's join ends without meeting anything Dispose released",
+                  disposed && ended && met.IsEmpty,
+                  !disposed ? "Dispose did not return" : !ended ? "the clock is still running" : met.IsEmpty ? "" : string.Join("; ", met));
+            cl.Dispose();
+            NoConnections();
+            if (!disposed) SharedMemoryIO.DestroyController(TeardownIndex);
+        }
+
+        // The input pump held after its stop check and before its read of the
+        // input section, past Dispose's join, with the section unmapped once
+        // Dispose returns. Only the pump's diagnostic dump
+        // (HIDMAESTRO_DIAG_READS) takes a lock there, so this runs in a child
+        // with it set. Before this release the pump then read the unmapped
+        // section, an access violation.
+        {
+            string diag = Path.Combine(Path.GetTempPath(), $"hm-usbip-held-pump-{Environment.ProcessId}.log");
+            var (code, line) = RunChild("--held-pump", ("HIDMAESTRO_DIAG_READS", diag));
+            try { File.Delete(diag); } catch (IOException) { }
+            Check("the input pump held past Dispose's join ends without reading the unmapped section",
+                  code == 0 && line == "CHILD held-pump held=True disposed=True ended=True", $"exit {code}: {line}");
+        }
+
+        // A consumer's handler on the connection thread that waits for a
+        // Dispose running on another thread, as a handler does that marshals
+        // to a UI thread while that thread disposes the controller.
+        {
+            var ds = ctx.GetProfile("dualsense-composite")!.Inner;
+            var (device, cl) = Attach(server, ds);
+            bool joined = false;
+            using var handled = new ManualResetEventSlim();
+            device.Audio.ControlChanged += (_, _, _, _) =>
+            {
+                var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
+                disposer.Start();
+                joined = disposer.Join(5000);
+                handled.Set();
+            };
+            cl.SendControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 });   // SET_CUR(volume)
+            bool ran = handled.Wait(10_000);
+            Check("Dispose returns while a consumer's handler on the connection thread waits for it",
+                  ran && joined, ran ? $"Dispose returned within 5 s: {joined}" : "the handler never ran");
+            cl.Dispose();
+            NoConnections();
+            SharedMemoryIO.DestroyController(TeardownIndex);
+        }
+
+        // A consumer's OutFrames handler on the audio pump still running when
+        // Dispose's join of the pump gives up, and the sections unmapped
+        // before it returns.
+        {
+            var ds = ctx.GetProfile("dualsense-composite")!.Inner;
+            var (device, cl) = Attach(server, ds);
+            var pump = (Thread)typeof(UsbAudioEngine).GetField("_thread", Private)!.GetValue(device.Audio)!;
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            device.Audio.OutFrames += _ => { entered.Set(); release.Wait(5000); };
+            cl.SendSubmitIsoOut(cl.NextSeq(), 1, new byte[10 * 392], 10, 392);
+            bool inHandler = entered.Wait(2000);
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(TeardownIndex);
+            release.Set();
+            bool pumpEnded = WaitUntil(() => !pump.IsAlive, 3000);
+            Check("the audio pump ends cleanly when Dispose's join gives up on a consumer's handler",
+                  inHandler && pumpEnded && Volatile.Read(ref s_unhandled) == 0,
+                  $"handler running at Dispose {inHandler}, pump ended {pumpEnded}");
+            cl.Dispose();
+            NoConnections();
+        }
+
+        // The reader thread's detach held between its claim on the device and
+        // its reset while Dispose runs on another thread, and the sections
+        // unmapped once Dispose returns, as the controller does.
+        const int Held = 5;
+        int heldOk = 0;
+        string heldDetail = "";
+        for (int i = 0; i < Held; i++)
+        {
+            var (device, cl) = Attach(server, gc);
+            object hidLock = hidLockField.GetValue(device)!;
+            var disposer = new Thread(() => device.Dispose()) { IsBackground = true, Name = "probe-dispose" };
+            bool detaching, disposed;
+            Monitor.Enter(hidLock);
+            try
+            {
+                cl.Dispose();   // the host closes the connection
+                detaching = WaitUntil(() => connectionField.GetValue(device) == null, 2000);
+                server.Unregister(device);
+                disposer.Start();
+                disposed = disposer.Join(5000);
+                if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
+            }
+            finally { Monitor.Exit(hidLock); }
+            bool closed = NoConnections();
+            if (!disposed)
+            {
+                disposer.Join(10_000);
+                SharedMemoryIO.DestroyController(TeardownIndex);
+            }
+            bool clockEnded = WaitUntil(() => !((Thread)clockField.GetValue(device)!).IsAlive, 3000);
+            if (detaching && disposed && closed && clockEnded) heldOk++;
+            else heldDetail = $"run {i}: detach under way {detaching}, Dispose returned {disposed}, connection closed {closed}, clock ended {clockEnded}";
+        }
+        Check($"Dispose returns while a detach is under way, and the detach then finishes and ends the connection ({Held} runs)",
+              heldOk == Held, heldDetail);
+
+        // The race as it comes: the host closes the connection while the
+        // device is torn down, each side after its own random delay.
+        const int Raced = 30;
+        var rng = new Random(86);
+        int racedOk = 0;
+        for (int i = 0; i < Raced; i++)
+        {
+            var (device, cl) = Attach(server, gc);
+            cl.ControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());   // SET_CONFIGURATION(1)
+            uint start = cl.NextSeq();
+            cl.SendSubmitInterruptOut(start, 2, new byte[] { 0x13 });      // reports on
+            cl.ReadRet(start);
+            cl.SendSubmitInterruptIn(cl.NextSeq(), 1, 37);
+            cl.SendSubmitInterruptIn(cl.NextSeq(), 1, 37);
+            int closeAfter = rng.Next(0, 3000), disposeAfter = rng.Next(0, 3000);
+            var closer = new Thread(() => { Spin(closeAfter); cl.Dispose(); }) { IsBackground = true };
+            closer.Start();
+            Spin(disposeAfter);
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(TeardownIndex);
+            closer.Join();
+            if (NoConnections()) racedOk++;
+        }
+        Check($"every connection closes when the host's close races Dispose ({Raced} runs)", racedOk == Raced, $"{racedOk}/{Raced}");
+        Check("no exception escaped a device or connection thread", Volatile.Read(ref s_unhandled) == 0, $"{s_unhandled}");
+    }
+
+    /// <summary>The child for the held input pump. HIDMAESTRO_DIAG_READS is
+    /// set, so the pump's dump takes _hidLock every 2 s, after the pump's
+    /// stop check and before its read of the section.</summary>
+    static int HeldPumpChild()
+    {
+        SetErrorMode(QuietErrorMode);
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var server = UsbipServer.GetOrStart();
+        var device = new UsbipEmulatedDevice(ctx.GetProfile("dualsense-composite")!.Inner, TeardownIndex);
+        server.Register(device);
+        object hidLock = typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!.GetValue(device)!;
+        var lastDump = typeof(UsbipEmulatedDevice).GetField("_diagLastDump", Private)!;
+        var pump = (Thread)typeof(UsbipEmulatedDevice).GetField("_inputThread", Private)!.GetValue(device)!;
+        IntPtr view = (IntPtr)typeof(UsbipEmulatedDevice).GetField("_inputView", Private)!.GetValue(device)!;
+        bool held, disposed, guarded = false;
+        Monitor.Enter(hidLock);
+        try
+        {
+            // Read under the lock: a dump that stamps its time after this
+            // read is waiting for the lock.
+            long before = (long)lastDump.GetValue(device)!;
+            // The next dump stamps its time, then waits for this lock.
+            held = WaitUntil(() => (long)lastDump.GetValue(device)! != before, 5000);
+            var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
+            disposer.Start();
+            disposed = disposer.Join(5000);
+            if (disposed)
+            {
+                SharedMemoryIO.DestroyController(TeardownIndex);
+                // Reserve the freed range with no access, so a read of the
+                // unmapped section faults every time rather than finding
+                // whatever the process maps there next.
+                guarded = VirtualAlloc(view, (UIntPtr)4096, MEM_RESERVE, PAGE_NOACCESS) == view;
+            }
+        }
+        finally { Monitor.Exit(hidLock); }
+        bool ended = WaitUntil(() => !pump.IsAlive, 3000);
+        Console.WriteLine($"CHILD held-pump held={held && guarded} disposed={disposed} ended={ended}");
+        return 0;
+    }
+
+    const uint MEM_RESERVE = 0x2000, PAGE_NOACCESS = 0x01;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern IntPtr VirtualAlloc(IntPtr address, UIntPtr size, uint type, uint protect);
+
+    static (UsbipEmulatedDevice Device, Client Client) Attach(UsbipServer server, ControllerProfile profile)
+    {
+        var device = new UsbipEmulatedDevice(profile, TeardownIndex);
+        server.Register(device);
+        var cl = new Client(server.Port);
+        cl.SendImport(device.BusId);
+        var op = cl.ReadExactly(8);
+        cl.ReadExactly(312);
+        if (BinaryPrimitives.ReadUInt32BigEndian(op.AsSpan(4)) != 0)
+            throw new InvalidOperationException($"import of {device.BusId} refused");
+        return (device, cl);
+    }
+
+    static bool WaitUntil(Func<bool> done, int ms)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!done())
+        {
+            if (sw.ElapsedMilliseconds > ms) return false;
+            Thread.Sleep(1);
+        }
+        return true;
+    }
+
+    static void Spin(long micros)
+    {
+        long end = Stopwatch.GetTimestamp() + micros * Stopwatch.Frequency / 1_000_000;
+        while (Stopwatch.GetTimestamp() < end) Thread.SpinWait(64);
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
 
     static uint ReadSeqNoBase(IntPtr view)
         => (uint)System.Runtime.InteropServices.Marshal.ReadInt32(view, 0);
@@ -993,6 +1312,15 @@ internal static class Program
             return ReadRet(seq);
         }
 
+        /// <summary>A control write whose answer the caller does not wait
+        /// for.</summary>
+        public void SendControlOut(byte bmRequestType, byte bRequest, ushort wValue, ushort wIndex, byte[] data)
+        {
+            SendHeader(NextSeq(), 0, 0, 0, data.Length, -1, 0,
+                Setup(bmRequestType, bRequest, wValue, wIndex, (ushort)data.Length));
+            if (data.Length > 0) _s.Write(data);
+        }
+
         public Ret ControlOut(byte bmRequestType, byte bRequest, ushort wValue, ushort wIndex, byte[] data)
         {
             uint seq = NextSeq();
@@ -1047,6 +1375,14 @@ internal static class Program
             BinaryPrimitives.WriteUInt32BigEndian(h.AsSpan(8), (1u << 16) | (Index + 1));
             BinaryPrimitives.WriteUInt32BigEndian(h.AsSpan(20), victim);
             _s.Write(h);
+        }
+
+        /// <summary>What the server sends within <paramref name="ms"/>:
+        /// "data", "closed" or "nothing".</summary>
+        public string Within(int ms)
+        {
+            if (!_tcp.Client.Poll(ms * 1000, SelectMode.SelectRead)) return "nothing";
+            return _tcp.Client.Available > 0 ? "data" : "closed";
         }
 
         public bool SawSeqnum(uint seq) { lock (_stash) return _stash.ContainsKey(seq) || _seen.Contains(seq); }
