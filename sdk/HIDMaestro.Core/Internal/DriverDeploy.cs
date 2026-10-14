@@ -79,22 +79,35 @@ internal static partial class DriverDeploy
     /// or null when none is installed.</summary>
     internal static DriverStamp? InstalledDriver()
     {
+        var stamps = InstalledStamps("hidmaestro.inf");
+        return stamps.Count == 0 ? null : stamps.Max();
+    }
+
+    /// <summary>The stamps of every package of one of the two INFs in the
+    /// driver store, read from the INF in each package's FileRepository
+    /// directory.</summary>
+    internal static List<DriverStamp> InstalledStamps(string infName)
+    {
         string repo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
-        DriverStamp? best = null;
+        var stamps = new List<DriverStamp>();
         try
         {
-            foreach (string dir in Directory.EnumerateDirectories(repo, "hidmaestro.inf_*"))
+            foreach (string dir in Directory.EnumerateDirectories(repo, infName + "_*"))
             {
-                string inf = Path.Combine(dir, "hidmaestro.inf");
+                string inf = Path.Combine(dir, infName);
                 if (!File.Exists(inf)) continue;
-                var stamp = ParseDriverVer(File.ReadAllText(inf));
-                if (stamp is { } s && (best == null || s.CompareTo(best.Value) > 0)) best = s;
+                if (ParseDriverVer(File.ReadAllText(inf)) is { } s) stamps.Add(s);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
-        return best;
+        return stamps;
     }
+
+    /// <summary>This build's INFs that have no package of this build's stamp
+    /// in the driver store.</summary>
+    internal static List<string> MissingOfBuild(DriverStamp embedded) =>
+        DriverBuilder.PackageInfs.Where(inf => !InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0)).ToList();
 
     /// <summary>This SDK's own driver stamp, from its embedded INF.</summary>
     internal static DriverStamp EmbeddedDriver()
@@ -146,30 +159,12 @@ internal static partial class DriverDeploy
             DriverStamp? installed = InstalledDriver();
             DeviceOrchestrator.LogDiag($"    deploy: embedded {embedded} ({embedded.Date:yyyy-MM-dd}), installed {(installed?.ToString() ?? "none")}");
 
-            if (installed == null)
-            {
-                DriverBuilder.DeployLocked();
-                return HMDriverInstallOutcome.Installed;
-            }
-
-            int cmp = installed.Value.CompareTo(embedded);
-            if (cmp > 0)
-                return HMDriverInstallOutcome.KeptNewer;
-            if (cmp == 0)
-            {
-                // The same build is installed and only the record of it is
-                // missing, as after SOFTWARE\HIDMaestro was deleted. Restore
-                // the record rather than reinstall under running devices.
-                DriverBuilder.RecordInstalledPayload();
-                return HMDriverInstallOutcome.AlreadyCurrent;
-            }
-
-            // Older. The reclaim before this removed what dead programs
-            // left, so whatever is present now belongs to a running program
-            // or to one whose state cannot be known. A running program's
-            // controller whose devices are not present yet holds the driver
-            // too: its record entry comes before its PnP work, and its
-            // create waits for this lock before that work (EnsureForCreate).
+            // Whatever is present now belongs to a running program or to one
+            // whose state cannot be known: the reclaim before this removed
+            // what dead programs left. A running program's controller whose
+            // devices are not present yet holds the driver too: its record
+            // entry comes before its PnP work, and its create waits for this
+            // lock before that work (EnsureForCreate).
             var census = OwnerCensus.Take();
             var holders = census.Devices
                 .Where(d => d.Owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
@@ -181,7 +176,45 @@ internal static partial class DriverDeploy
                         && !holders.Any(h => string.Equals(h.Key, c.Token, StringComparison.OrdinalIgnoreCase)))
                     .Select(c => (Record: r, Controller: c)))
                 .ToList();
-            if (holders.Count == 0 && pending.Count == 0)
+            bool held = holders.Count > 0 || pending.Count > 0;
+
+            if (installed == null)
+            {
+                // No main package. With nothing on the driver, a full deploy.
+                // With devices on a lone XUSB package, only what this build
+                // lacks is added: a full deploy would remove that package and
+                // its hosts under them.
+                if (held && DriverBuilder.PackageInfs.Any(inf => InstalledStamps(inf).Count > 0))
+                    DriverBuilder.AddPackagesLocked(MissingOfBuild(embedded));
+                else
+                    DriverBuilder.DeployLocked();
+                return HMDriverInstallOutcome.Installed;
+            }
+
+            int cmp = installed.Value.CompareTo(embedded);
+            if (cmp > 0)
+                return HMDriverInstallOutcome.KeptNewer;
+            if (cmp == 0)
+            {
+                // The same build. A deploy cut off between its two adds, or
+                // a package of it removed since, leaves the set incomplete,
+                // and the fast path needs both. Adding what is missing touches
+                // nothing installed. Otherwise only the record of the install
+                // is missing, as after SOFTWARE\HIDMaestro was deleted: it is
+                // restored rather than reinstalled under running devices.
+                var missing = MissingOfBuild(embedded);
+                if (missing.Count > 0)
+                {
+                    DriverBuilder.AddPackagesLocked(missing);
+                    DriverBuilder.RecordInstalledPayload();
+                    return HMDriverInstallOutcome.Installed;
+                }
+                DriverBuilder.RecordInstalledPayload();
+                return HMDriverInstallOutcome.AlreadyCurrent;
+            }
+
+            // Older.
+            if (!held)
             {
                 DriverBuilder.DeployLocked();
                 return HMDriverInstallOutcome.Upgraded;

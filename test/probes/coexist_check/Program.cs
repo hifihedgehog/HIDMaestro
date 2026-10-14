@@ -65,7 +65,10 @@
 //   S. Two deploys in one program, with another program's uninstall
 //      between them: both succeed, and the driver staging still holds the
 //      embedded binaries after a deploy, since each deploy signs its own copy.
-//   S71 runs A to H and J to S.
+//   T. A set a deploy left incomplete, this build's XUSB package gone and
+//      its main package installed: InstallDriver adds the missing package,
+//      and an Xbox 360 controller, which needs it, creates.
+//   S71 runs A to H and J to T.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -139,7 +142,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRS";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRST";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -162,6 +165,7 @@ internal static class Program
             ('Q', "a create during another program's deploy", SectionQ),
             ('R', "staging a running program uses", SectionR),
             ('S', "two deploys in one program", SectionS),
+            ('T', "a driver set a deploy left incomplete", SectionT),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -1278,6 +1282,48 @@ internal static class Program
         Check("S: the same program's second deploy installs again", PeerProcess.Field(r2, "outcome") == "Installed", r2);
         string c = p.Send("create pad F0F6 -");
         Check("S: and a controller creates on it", Ok(c), c);
+    }
+
+    static int XusbPackages() => Directory.GetDirectories(FileRepository, "hidmaestro_xusb.inf_*").Length;
+
+    /// <summary>The published name (oemNN.inf) of each package of an INF, as
+    /// pnputil lists them.</summary>
+    static List<string> PublishedNames(string originalName)
+    {
+        var psi = new ProcessStartInfo("pnputil.exe", "/enum-drivers")
+        { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+        using var proc = Process.Start(psi)!;
+        string text = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit();
+        var names = new List<string>();
+        string? published = null;
+        foreach (string raw in text.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("Published Name:", StringComparison.OrdinalIgnoreCase))
+                published = line["Published Name:".Length..].Trim();
+            else if (line.StartsWith("Original Name:", StringComparison.OrdinalIgnoreCase)
+                     && string.Equals(line["Original Name:".Length..].Trim(), originalName, StringComparison.OrdinalIgnoreCase)
+                     && published != null)
+                names.Add(published);
+        }
+        return names;
+    }
+
+    static void SectionT()
+    {
+        var xusb = PublishedNames("hidmaestro_xusb.inf");
+        Check("T: this build's XUSB package is installed", xusb.Count == 1, string.Join(", ", xusb));
+        if (xusb.Count != 1) return;
+        Run("pnputil.exe", $"/delete-driver {xusb[0]}", FileRepository);
+        Check("T: deleting it leaves the main package", XusbPackages() == 0 && MainPackages() == 1,
+              $"{MainPackages()} main, {XusbPackages()} XUSB");
+        using var p = PeerProcess.Start("T");
+        string r = p.Send("install");
+        Check("T: InstallDriver adds the missing package", Ok(r) && PeerProcess.Field(r, "outcome") == "Installed"
+              && XusbPackages() == 1 && MainPackages() == 1, $"{r}, {MainPackages()} main, {XusbPackages()} XUSB");
+        string c = p.Send("create xbox - coexist-t");
+        Check("T: an Xbox 360 controller, which needs it, creates", Ok(c), c);
     }
 
     static byte[]? ReadEmbedded(string logicalName)

@@ -490,6 +490,33 @@ public static class DriverBuilder
 
     private static readonly string[] PackageFiles = { "HIDMaestro.dll", "HMXInput.dll", "hidmaestro.inf", "hidmaestro_xusb.inf" };
 
+    /// <summary>The driver package's two INFs.</summary>
+    internal static readonly string[] PackageInfs = { "hidmaestro.inf", "hidmaestro_xusb.inf" };
+
+    /// <summary>Add this build's packages of <paramref name="infs"/> to the
+    /// driver store and remove nothing, for a set a deploy left incomplete.
+    /// Signed and catalogued as a full deploy does it. The caller holds the
+    /// deploy lock.</summary>
+    internal static void AddPackagesLocked(IReadOnlyCollection<string> infs)
+    {
+        if (infs.Count == 0) return;
+        string tools = EnsureExtracted();
+        VerifyStagedBeforeUse(tools);
+        string package = StagePackage();
+        SignDriversIn(tools, package);
+        GenerateCatalogsIn(tools, package);
+        string pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
+        var embedded = DriverDeploy.EmbeddedDriver();
+        foreach (string inf in infs)
+        {
+            DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
+            Run(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\" /install", timeoutMs: 30_000);
+            if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
+                throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
+        }
+        PnputilHelper.InvalidateInstalledCache();
+    }
+
     private static string? s_packageDir;
 
     /// <summary>Re-check, against the embedded bytes, the signing and
