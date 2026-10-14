@@ -1,0 +1,151 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+
+namespace HIDMaestro.Internal;
+
+/// <summary>
+/// The machine-wide lock over the registry keys HIDMaestro shares with real
+/// devices: <see cref="RegistryLedger"/> and <see cref="OemNameOverrideStore"/>.
+/// Held by the calling thread until it calls <see cref="ReleaseMutex"/>.
+/// The ledger's own calls inside it take it again on the same thread, which
+/// both mutexes allow.
+///
+/// <para>The lock is the mutex <see cref="MutexObject"/> in
+/// <see cref="AdminNamespace"/>, which a program that is not elevated can
+/// neither take first nor hold. A v1.12.0 program writes the same OEM keys
+/// under <c>Global\HIDMaestro-OEM-Recovery</c>, so the lock takes that
+/// mutex too, after its own. Any program can create that name first and
+/// hold it. When an elevated process created it, the lock waits for it as
+/// v1.12.0 does. When anyone else did, the lock takes it only if it is free
+/// and never waits: a v1.12.0 program holds it only while it writes
+/// registry values.</para>
+/// </summary>
+internal sealed partial class LedgerLock : IDisposable
+{
+    internal const string MutexObject = "Ledger";
+    internal const string LegacyMutexName = @"Global\HIDMaestro-OEM-Recovery";
+
+    private readonly Mutex _lock;
+    private SafeWaitHandle? _legacy;
+    private bool _legacyHeld;
+
+    private LedgerLock(Mutex m) => _lock = m;
+
+    /// <summary>Take the lock. An abandoned mutex is acquired: the ledger
+    /// writes its records before its targets, so a replay is safe.</summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    internal static LedgerLock Acquire()
+    {
+        var m = new Mutex(false, AdminNamespace.Name(MutexObject));
+        try { m.WaitOne(); }
+        catch (AbandonedMutexException) { }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        var l = new LedgerLock(m);
+        try { l.TakeLegacy(); }
+        catch
+        {
+            l.ReleaseMutex();
+            l.Dispose();
+            throw;
+        }
+        return l;
+    }
+
+    private void TakeLegacy()
+    {
+        IntPtr sd = IntPtr.Zero, sa = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(LegacySddl, 1, out sd, IntPtr.Zero)) return;
+            sa = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+            Marshal.StructureToPtr(new SECURITY_ATTRIBUTES
+            {
+                nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+                lpSecurityDescriptor = sd,
+                bInheritHandle = 0,
+            }, sa, false);
+            // A name someone created with a DACL that refuses this process,
+            // or as another kind of object, opens nothing: no v1.12.0
+            // program can take it either.
+            var h = CreateMutexExW(sa, LegacyMutexName, 0, SYNCHRONIZE | MUTEX_MODIFY_STATE | READ_CONTROL);
+            if (h.IsInvalid)
+            {
+                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} did not open (Win32 error {Marshal.GetLastPInvokeError()}), not taken");
+                h.Dispose();
+                return;
+            }
+            _legacy = h;
+            bool administrative = ObjectOwner.IsAdministrative(h);
+            uint r = WaitForSingleObject(h, administrative ? INFINITE : 0);
+            _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
+            if (!administrative)
+                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} was created by a process that is not elevated, {(_legacyHeld ? "taken while free" : "held, not waited on")}");
+        }
+        finally
+        {
+            if (sa != IntPtr.Zero) Marshal.FreeHGlobal(sa);
+            if (sd != IntPtr.Zero) LocalFree(sd);
+        }
+    }
+
+    /// <summary>Release both mutexes, the v1.12.0 one first.</summary>
+    public void ReleaseMutex()
+    {
+        if (_legacyHeld && _legacy != null)
+        {
+            ReleaseMutexNative(_legacy);
+            _legacyHeld = false;
+        }
+        _lock.ReleaseMutex();
+    }
+
+    public void Dispose()
+    {
+        _legacy?.Dispose();
+        _legacy = null;
+        _lock.Dispose();
+    }
+
+    // SYSTEM and Administrators, the security a v1.12.0 program's elevated
+    // default gives the same name.
+    private const string LegacySddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    private const uint SYNCHRONIZE = 0x00100000;
+    private const uint MUTEX_MODIFY_STATE = 0x0001;
+    private const uint READ_CONTROL = 0x00020000;
+    private const uint INFINITE = 0xFFFFFFFF;
+    private const uint WAIT_OBJECT_0 = 0x00000000;
+    private const uint WAIT_ABANDONED = 0x00000080;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        public int bInheritHandle;
+    }
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial SafeWaitHandle CreateMutexExW(IntPtr attributes, string name, uint flags, uint desiredAccess);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "ReleaseMutex", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ReleaseMutexNative(SafeWaitHandle handle);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision,
+        out IntPtr securityDescriptor, IntPtr securityDescriptorSize);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr LocalFree(IntPtr mem);
+}

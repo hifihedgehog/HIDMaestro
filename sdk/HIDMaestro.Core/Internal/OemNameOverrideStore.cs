@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Threading;
 using Microsoft.Win32;
 
 namespace HIDMaestro.Internal;
@@ -67,9 +66,8 @@ internal static class OemNameOverrideStore
     // ── Pending-record hive (sibling of HKLM\SOFTWARE\HIDMaestro;
     //    deliberately NOT under it: see DeviceOrchestrator cleanup)
     private const string PendingRoot = @"SOFTWARE\HIDMaestroOemOverrides";
-    // Shared with RegistryLedger, which writes the same HKLM OEMName value
-    // for live virtual controllers.
-    internal const string MutexName = @"Global\HIDMaestro-OEM-Recovery";
+    // The lock is LedgerLock, shared with RegistryLedger, which writes the
+    // same HKLM OEMName value for live virtual controllers.
 
     // ── Pending-record value names ─────────────────────────────────
     // DirectInput (v1 fields: preserved for backward compat)
@@ -350,13 +348,8 @@ internal static class OemNameOverrideStore
     //  Plumbing
     // ────────────────────────────────────────────────────────────────
 
-    private static Mutex AcquireMutex()
-    {
-        var mutex = new Mutex(initiallyOwned: false, MutexName);
-        try { mutex.WaitOne(); }
-        catch (AbandonedMutexException) { /* safe: two-phase ordering guards state */ }
-        return mutex;
-    }
+    // An abandoned lock is acquired: two-phase ordering guards state.
+    private static LedgerLock AcquireMutex() => LedgerLock.Acquire();
 
     private static string FormatVidPid(ushort vid, ushort pid) =>
         $"VID_{vid:X4}&PID_{pid:X4}";

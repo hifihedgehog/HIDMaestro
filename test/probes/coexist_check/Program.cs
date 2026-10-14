@@ -75,9 +75,9 @@
 //      a running program's own composite losing its connection.
 //      SectionV.cs has the detail.
 //   X. Machine-wide names a program that is not elevated creates first:
-//      the deploy lock. A thread of this probe that impersonates such a
-//      program creates and holds it, and a create does not wait on it.
-//      SectionX.cs.
+//      the deploy lock and the registry ledger's lock. A thread of this
+//      probe that impersonates such a program creates and holds each, and
+//      neither a create nor a sweep waits on them. SectionX.cs.
 //   S71 runs A to H, J to V and X.
 //
 // Each program is a peer process (this binary with --peer, or the same

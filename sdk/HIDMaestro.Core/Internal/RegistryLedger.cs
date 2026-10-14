@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Threading;
 using Microsoft.Win32;
 
 namespace HIDMaestro.Internal;
@@ -29,10 +28,10 @@ namespace HIDMaestro.Internal;
 /// as released. <see cref="ReleaseAll"/> restores everything, which the
 /// full cleanup does because it has removed every virtual by then.</para>
 ///
-/// <para>The ledger shares its mutex with <see cref="OemNameOverrideStore"/>.
-/// Both write the HKLM OEMName value, and each consults the other so the
-/// value ends at the true pre-HIDMaestro state in either order of claim and
-/// release.</para>
+/// <para>The ledger shares its lock, <see cref="LedgerLock"/>, with
+/// <see cref="OemNameOverrideStore"/>. Both write the HKLM OEMName value,
+/// and each consults the other so the value ends at the true pre-HIDMaestro
+/// state in either order of claim and release.</para>
 /// </summary>
 internal static class RegistryLedger
 {
@@ -90,19 +89,13 @@ internal static class RegistryLedger
         return actual.Value == start;
     }
 
-    private static Mutex Acquire()
-    {
-        var m = new Mutex(false, OemNameOverrideStore.MutexName);
-        try { m.WaitOne(); }
-        catch (AbandonedMutexException) { /* records are written before targets, so replay is safe */ }
-        return m;
-    }
+    private static LedgerLock Acquire() => LedgerLock.Acquire();
 
     /// <summary>The ledger's machine-wide lock, held by the calling thread
     /// until it calls <c>ReleaseMutex</c>, for a caller that must take it
     /// before a lock of its own. The ledger's own calls inside it take it
     /// again on the same thread, which a mutex allows.</summary>
-    internal static Mutex AcquireLock() => Acquire();
+    internal static LedgerLock AcquireLock() => Acquire();
 
     // ── GameInput mapping ────────────────────────────────────────────────
 

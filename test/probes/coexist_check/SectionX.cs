@@ -22,6 +22,8 @@ internal static partial class Program
         using (Native.AdminMutex("Deploy")) { }
 
         SectionX1();
+        Clean();
+        SectionX2();
     }
 
     /// <summary>The deploy lock.</summary>
@@ -52,6 +54,56 @@ internal static partial class Program
         }
         finally { sq.Dispose(); }
         Check("X1: nothing the squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
+    }
+
+    /// <summary>The registry ledger's lock, which v1.12.0 programs take as
+    /// Global\HIDMaestro-OEM-Recovery.</summary>
+    static void SectionX2()
+    {
+        const string name = @"Global\HIDMaestro-OEM-Recovery";
+        using var p = PeerProcess.Start("X2");
+        var sq = new Squatter(s => s.Mutex(name, hold: true));
+        try
+        {
+            Check($"X2: a program that is not elevated creates and holds {name}", sq.Holds(name), sq.Describe());
+            p.Post("sweep");
+            string r = p.Receive("sweep", 20_000);
+            Check($"X2: a sweep, which takes the ledger lock, finishes while it holds {name}", Ok(r), r);
+            if (!Ok(r))
+            {
+                sq.Dispose();
+                p.Receive("sweep, once the name is let go", 120_000);
+            }
+        }
+        finally { sq.Dispose(); }
+        Check("X2: nothing the squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
+
+        // An elevated program holding the name, as a v1.12.0 program does
+        // while it writes OEM keys, is still waited for.
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            IntPtr sa = Native.Sa("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+            IntPtr h = Native.CreateMutexW(sa, false, name);
+            Native.FreeSa(sa);
+            if (h == IntPtr.Zero) { held.Set(); return; }
+            Native.WaitForSingleObject(h, 0xFFFFFFFF);
+            held.Set();
+            release.Wait(15_000);
+            Native.ReleaseMutex(h);
+            Native.CloseHandle(h);
+        }) { IsBackground = true };
+        holder.Start();
+        held.Wait(10_000);
+        var sw = Stopwatch.StartNew();
+        p.Post("sweep");
+        Thread.Sleep(3000);
+        release.Set();
+        string r2 = p.Receive("sweep", 30_000);
+        long ms = sw.ElapsedMilliseconds;
+        holder.Join(5000);
+        Check($"X2: a sweep still waits while an elevated program holds {name}", Ok(r2) && ms >= 2500, $"{ms} ms: {r2}");
     }
 
     /// <summary>A program that is not elevated, played by one thread of
