@@ -60,16 +60,21 @@ internal static partial class OpenVrPathRegistry
     internal const string RemoveDriverVerb = "removedriver";
 
     /// <summary><c>GetVRPathRegistryFilename</c>: the override when set,
-    /// else <c>%LOCALAPPDATA%\openvr\openvrpaths.vrpath</c>.</summary>
-    internal static string FilePath
+    /// else <c>%LOCALAPPDATA%\openvr\openvrpaths.vrpath</c>. Null when
+    /// neither is available, where OpenVR returns "" and BSaveToFile writes
+    /// nothing (vrpathregistry_public.cpp:140-142, :279-281).</summary>
+    internal static string? FilePath => ResolveFilePath(
+        Environment.GetEnvironmentVariable("VR_PATHREG_OVERRIDE"),
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+
+    /// <summary><see cref="FilePath"/> from its two inputs. An empty
+    /// LocalApplicationData (no profile loaded) gives null, never a path
+    /// relative to the working directory.</summary>
+    internal static string? ResolveFilePath(string? overridePath, string localAppData)
     {
-        get
-        {
-            string? file = Environment.GetEnvironmentVariable("VR_PATHREG_OVERRIDE");
-            if (!string.IsNullOrEmpty(file)) return file;
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                                "openvr", "openvrpaths.vrpath");
-        }
+        if (!string.IsNullOrEmpty(overridePath)) return overridePath;
+        if (string.IsNullOrEmpty(localAppData)) return null;
+        return Path.Combine(localAppData, "openvr", "openvrpaths.vrpath");
     }
 
     /// <summary>The external_drivers entries SteamVR reads, decoded as
@@ -77,7 +82,9 @@ internal static partial class OpenVrPathRegistry
     internal static List<string> ExternalDrivers()
     {
         var list = new List<string>();
-        byte[]? raw = ReadFile(FilePath);
+        string? file = FilePath;
+        if (file == null) return list;
+        byte[]? raw = ReadFile(file);
         foreach (var e in Load(raw).ExternalDrivers)
             list.Add(Encoding.UTF8.GetString(e));
         return list;
@@ -141,9 +148,11 @@ internal static partial class OpenVrPathRegistry
     /// exception, the type a failed vrpathreg run gave through v1.12.0.</summary>
     private static bool Mutate(Func<Lists, bool> edit)
     {
+        string file = FilePath ?? throw new InvalidOperationException(
+            "Could not update the OpenVR path registry: this account has no local application data folder.");
         try
         {
-            return MutateFile(edit);
+            return MutateFile(Path.GetFullPath(file), edit);
         }
         catch (InvalidOperationException)
         {
@@ -152,13 +161,12 @@ internal static partial class OpenVrPathRegistry
         catch (Exception e)
         {
             throw new InvalidOperationException(
-                $"Could not update the OpenVR path registry {FilePath}: {e.Message}", e);
+                $"Could not update the OpenVR path registry {file}: {e.Message}", e);
         }
     }
 
-    private static bool MutateFile(Func<Lists, bool> edit) => RunAsUser(() =>
+    private static bool MutateFile(string file, Func<Lists, bool> edit) => RunAsUser(() =>
     {
-        string file = Path.GetFullPath(FilePath);
         var l = Load(ReadFile(file, missingOnly: true));
         if (!edit(l)) return false;
         byte[] bytes = Save(l);

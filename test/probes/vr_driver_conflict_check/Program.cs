@@ -191,6 +191,21 @@ internal static class Program
         Check("OpenVrPathRegistry.AddDriver and RemoveDriver exist", add != null && remove != null);
         if (add == null || remove == null) return;
 
+        // GetVRPathRegistryFilename returns "" when the per-user folder
+        // cannot be resolved, and BSaveToFile then writes nothing. The SDK
+        // must not fall back to a path relative to the working directory.
+        var resolve = Internal("ResolveFilePath", typeof(string), typeof(string));
+        Check("the registry path is resolved by OpenVrPathRegistry.ResolveFilePath", resolve != null);
+        if (resolve != null)
+        {
+            string? R(string? over, string local) => (string?)resolve.Invoke(null, new object?[] { over, local });
+            Check("no override and no LocalApplicationData resolves to no file", R(null, "") == null, R(null, "") ?? "null");
+            Check("an empty override counts as none", R("", "") == null, R("", "") ?? "null");
+            Check("LocalApplicationData gives openvr\\openvrpaths.vrpath under it",
+                  R(null, @"C:\Users\x\AppData\Local") == @"C:\Users\x\AppData\Local\openvr\openvrpaths.vrpath");
+            Check("an override wins", R(@"D:\o\reg.vrpath", "") == @"D:\o\reg.vrpath");
+        }
+
         string dir = Path.Combine(root, "roundtrip", "openvr");   // not created yet
         string file = Path.Combine(dir, "openvrpaths.vrpath");
         Environment.SetEnvironmentVariable("VR_PATHREG_OVERRIDE", file);
