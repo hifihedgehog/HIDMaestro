@@ -47,6 +47,8 @@ ctrl.SubmitState(new HMGamepadState { Buttons = HMButton.A });
 
 Requirements: Visual Studio 2022+ with the MSVC x64 and ARM64 build tools, Windows SDK/WDK 10.0.26100.0, .NET 10. Runs on x64 and ARM64 Windows. `HIDMaestro.Core.dll` is one AnyCPU assembly that carries a driver payload for each and picks the one matching the machine it is on.
 
+As of v1.13.0 the SDK also runs in NativeAOT, trimmed and single-file apps. Profiles load through source-generated JSON, every Win32 call goes through `LibraryImport`, and the trim, single-file and AOT analyzers fail a Release build on any warning. A source build can leave out the ARM64 payload (`HMSkipArm64`) or the USB/IP transport (`HMSkipUsbip`), and can point at a NuGet WDK or at the variables an EWDK prompt sets. `HMBuildInfo` reports what a build carries, and a build without the USB/IP transport refuses a composite persona before it touches the machine. [Build settings](#build-settings).
+
 ```bash
 # Build the native driver + companion for x64 and ARM64, then the SDK (idempotent).
 scripts\build_all.cmd
@@ -78,6 +80,25 @@ The test app is self-contained. First run creates a locally trusted certificate,
 During emulation you can `remove 2` to dispose one controller, `2 dualsense` to live-swap controller 2, or `quit` to shut down cleanly.
 
 If you want to use HIDMaestro through a UI instead of code, install [PadForge](https://padforge.org/). It wraps this SDK with a full input-mapping app.
+
+### Build settings
+
+`scripts\build_all.cmd` builds everything an official release carries: the UMDF2 driver, XUSB companion and SWD helper for x64 and ARM64, the OpenVR driver, and the SDK with both usbip-win2 installers. Each setting below is an environment variable, which MSBuild reads as a property, so one setting reaches the native scripts and the SDK project alike. Each also works as `-p:` on a `dotnet build` of the SDK.
+
+| Setting | Effect | Default |
+|--|--|--|
+| `HMSkipArm64=true` | Builds and embeds the x64 driver, companion and helper only, and leaves out the ARM64 usbip-win2 installer. | unset |
+| `HMSkipUsbip=true` | Leaves out the USB/IP transport: both installers and the host controller files. Nothing is downloaded, hashed or unpacked for it. | unset |
+| `HM_SDK_ROOT` | The Windows SDK: the `um` and `shared` headers, the `um` libraries, `rc.exe` and the signtool set the SDK embeds. | `WindowsSdkDir` when a Visual Studio or EWDK prompt set it, otherwise `%ProgramFiles(x86)%\Windows Kits\10` |
+| `HM_WDK_ROOT` | The WDK: the `km` headers, the UMDF 2.15 headers and stub library, and Inf2Cat. | `WDKContentRoot` when an EWDK prompt set it, otherwise `HM_SDK_ROOT` |
+| `HM_WDK_ROOT_ARM64` | The WDK for the ARM64 build. | `HM_WDK_ROOT` |
+| `HM_WDK_VERSION` | The kits' version folder. | `Version_Number` when an EWDK prompt set it, otherwise `10.0.26100.0` |
+| `HMWdkBin` | The folder whose `x64` and `arm64` folders hold the signtool set. | `HM_SDK_ROOT\bin\<version>\` |
+| `HMInf2catBin` | The folder whose `x86` folder holds Inf2Cat. | `HM_WDK_ROOT\bin\<version>\` |
+
+Installed kits need no setting. With the NuGet WDK, `HM_WDK_ROOT` is the `c` folder of `Microsoft.Windows.WDK.x64` and `HM_WDK_ROOT_ARM64` the `c` folder of `Microsoft.Windows.WDK.ARM64`, because each package carries the UMDF stub library for its own architecture only. The Windows SDK still comes from an installed kit, which Visual Studio's C++ workload installs. `HM_SDK_ROOT` cannot point at the SDK's own NuGet packages, which lay out libraries as `c\um\<arch>`. In an EWDK build prompt the defaults pick up the image's kit, version and Build Tools. The EWDK layout is read from the variables its prompt sets and has not been run. The scripts find Visual Studio through `VSINSTALLDIR` when a prompt set it, and otherwise search `%ProgramFiles%\Microsoft Visual Studio`. A root missing the folders the build reads stops the build with an error that names the setting.
+
+`HMBuildInfo` reports what a built `HIDMaestro.Core.dll` carries: `DriverArchitectures`, `UsbipArchitectures`, `HasOpenVrDriver` and `IsComplete`. Each is read once from the assembly's own resource names, so it describes the bytes embedded, whatever settings built it. A controller that needs a payload the build lacks for the machine's architecture throws `HMPayloadMissingException`, derived from `InvalidOperationException`, before any machine-wide step. `InstallDriver`, `InstallUsbipBackend` and `HMVR.EnsureDriverRegistered` throw it too, and `IsUsbipBackendAvailable` is false in a build without the transport. Official releases stay complete: `pre-tag-validate.cmd` clears `HMSkipArm64` and `HMSkipUsbip` before it builds, and `check_build_layouts.ps1` builds every layout above before the battery runs.
 
 ---
 
@@ -115,7 +136,7 @@ Their header also describes the layout as "the constant-force and sine-periodic 
 VID/PID, product string, descriptor, axis and button layout, and bus type all match the real device. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
 
 - **Exact hardware identity.** VID/PID, product string, HID descriptor, axis and button counts, trigger behavior, and bus type all come from the profile. SDL3's controller database matches it, Steam recognizes it, Chrome identifies it, joy.cpl shows the right name. A Bluetooth controller reports as Bluetooth, not as a USB device wearing its name.
-- **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes.
+- **Devices are JSON, not hardcoded.** Add a controller by writing a data-only JSON profile or by capturing one you already own. No per-device source code, no recompile, no hardcoded device classes. A device that carries several controllers in one report, and the commands it answers, are data too: the Wii U GameCube adapter's four ports and its command protocol are its profile, run by mechanisms any profile can use.
 - **Data-driven profiles.** Every controller is a JSON file. Adding support for a new one means writing JSON, not modifying code.
 - **Sony pads answer the whole startup interrogation.** A game with native PlayStation support interrogates a DualSense before it will use it: firmware info, pairing info, then motion calibration. Serve a plausible-looking blob of zeros to any of them and the pad is refused, which is why a virtual controller can work in Steam Input and still be invisible to the game. Calibration is a divisor, so zeros make the consumer's sensitivity NaN. Firmware info is validated on content, and a real title abandons the device and retries every 500 ms on a zeroed reply, before it ever asks for calibration. HIDMaestro serves real payloads for all of them on both the UMDF2 and composite backends, byte-identical between them, with every field offset checked against the Linux `hid-playstation` driver and a second independent consumer. The calibration is the identity for the pads' own units, so a submitted 1 g reads as 1 g in SDL and Linux, and the Bluetooth profiles end those replies with the CRC-32 a real pad sends over Bluetooth, which Linux and RPCS3 check.
 - **Where hardware revisions disagree, the current one wins.** A DualSense made in 2020 reports the product string `Wireless Controller`. A DualSense made today reports `DualSense Wireless Controller`. Both report `bcdDevice` 0x0100, so nothing on the wire distinguishes them and a profile can only serve one. As of v1.4.5 `dualsense` and `dualsense-composite` serve the current string, because a consumer keyed to the launch string is already broken against real modern hardware. The launch string stays reachable on `dualsense-bt`, whose `dualsense-bt-full` sibling carries the current one.
@@ -181,6 +202,79 @@ keyboard.SubmitKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty);
 
 ---
 
+## Programs side by side.
+
+As of v1.13.0 two or more programs that embed HIDMaestro run on one machine without touching each other's controllers, drivers or files. Before this, every machine-wide name was keyed by a controller index that each program numbered for itself, so two programs that each created a first controller wrote the same sections and registry keys, and a driver deploy or a cleanup in one removed what the other was using.
+
+### Claims and the transport index
+
+A program takes an ownership claim before its first machine-wide write. The claim is a named pipe, `\\.\pipe\HIDMaestro.Owner.<id>`, created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and one instance. A second claimant fails on the same call that would have won, and Windows deletes the pipe when the program ends, however it ends. A record under `HKLM\SOFTWARE\HIDMaestroOwners` names the program, its image path, its SDK version and its controllers, and stays until the program exits.
+
+Each controller claims a transport index, `\\.\pipe\HIDMaestro.Index.<N>`, and an identity, `\\.\pipe\HIDMaestro.Identity.<token>`, for its life. The transport index names the controller's shared sections, events, owner pipe and registry key, and it is the `ControllerIndex` the driver reads. `CreateController` still numbers controllers by slot within a context. The transport index is the slot when no one else on the machine holds that number, and the lowest free number otherwise. A program running alone therefore gets the numbers it always got, and two programs that each create a first controller get indices 0 and 1. A number is free when its claim can be created, no v1.12.0 program holds its owner pipe, no present HIDMaestro device records it and no USB/IP import uses it.
+
+`HMController.TransportIndex` is the number and `HMController.SectionNames` lists the names of the controller's sections. A native writer that opens the sections without the SDK reads the names there or computes them from `TransportIndex`. A keyless controller derives its identity from its transport index, so when another program holds index 0 it lands on another index and another identity. Pass an identity key for paths that stay the same between runs.
+
+### Identity claims
+
+Asking for an identity key that a running program holds throws `HMResourceInUseException`, derived from `InvalidOperationException`. Its message and its `OwnerProcessId`, `OwnerImagePath` and `OwnerSdkVersion` name the holder, and the holder's devices see no PnP activity. The check covers two contexts in one process too. A v1.12.0 program takes no identity claim, so when a present device carries the identity, the create probes that device's owner pipe and refuses the same way while it is held. A create is also refused when a device with the same `ParentIdPrefix` belongs to a running program or to an owner the SDK cannot determine, because the SDK never lets two parents share a prefix. The message names the device. For a device whose owner cannot be determined it also names the cleanup call that removes it.
+
+### Sweeps and cleanup
+
+A sweep removes a device only on proof that its owner is gone. The SDK reads the records and the present HIDMaestro devices and decides who owns what. A device in a record whose claim is gone is removed. A device in a live record is left alone, the caller's own included. A device with no record is judged by v1.12.0's signs: while its owner pipe is held its program is running, and with the pipe gone and the `Global\HIDMaestroInputAck<N>` section its driver keeps still present, its program has exited and the device is removed. A device with neither sign came from a program older than v1.12.0, which leaves no trace of whether it still runs, so no sweep removes it on a guess. Only the `Everything` cleanup and a create that asks for that device's own identity key remove it. A USB/IP import is matched by the server port its program's record names, and an import whose port has no listener on loopback is detached.
+
+`InstallDriver`, the session cleanup and `RemoveAllVirtualControllers()` act on the devices of exited programs only. `RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall)` removes every HIDMaestro device and import on the machine, whoever owns it, which is what `HIDMaestroTest cleanup` does. Driver packages are removed only while no other program runs and no device remains. A program that exits without disposing its controllers has them removed by the SDK's own exit handler, and a killed program's devices go with the next sweep of any program.
+
+### Driver install policy
+
+Every driver deploy holds the machine-wide mutex `Global\HIDMaestro.Deploy` for one call and reads the installed state again once it has the mutex, so of two programs calling `InstallDriver` at once, one deploys and the other finds the driver current. A call that finds the installed driver already matching skips the mutex. The installed version is the newest `DriverVer` among the `hidmaestro.inf` packages in the driver store, compared by release version, then build date, then build number. `HMContext.LastDriverInstall` reports what `InstallDriver` did:
+
+| Installed driver | Outcome |
+|--|--|
+| none | `Installed` |
+| this SDK's | `AlreadyCurrent` |
+| newer | `KeptNewer`, never downgraded |
+| older, no present device of any program on it | `Upgraded` |
+| older, devices of running or unknown programs on it, driver from v1.12.0 or later | `KeptInUse`, and this SDK runs on it |
+| older, held the same way, driver older than v1.12.0 | `HMDriverVersionException` |
+
+`HMDriverVersionException` derives from `InvalidOperationException` and carries `InstalledVersion`, `MinimumVersion` and `Blockers`, the devices and programs that hold the driver.
+
+A UMDF2 `CreateController` checks the installed set under the same mutex, after its record entry and before its PnP work. When the installed-payload record is the one this process last confirmed, the check ends there. Otherwise it looks for a package of each of `hidmaestro.inf` and `hidmaestro_xusb.inf` in the driver store, of any stamp. When one is missing it applies the install policy above. At the installed driver's own stamp it adds whichever of this build's packages is missing and removes nothing. With nothing on the driver it deploys in full, which removes older packages first, and with an older driver that no device holds it upgrades the same way. A program whose packages another program uninstalled therefore gets them back at its next create, and a create can wait for another program's deploy to finish. A composite create takes the same mutex for the usbip-win2 transport install instead. A create of a plain HID or non-xinputhid controller installs the driver on its own device with `DiInstallDevice`, which touches no other device, so a newer SDK no longer moves another program's controller of the same profile onto its own driver. `HMController.DriverVersion` reports the driver a controller runs on, read from a per-controller version section, `Global\HIDMaestroVersion<N>`, that the SDK and the driver both write.
+
+### Staging
+
+Everything the SDK runs elevated or hands to pnputil is staged per version and per operation under `%ProgramData%\HIDMaestro\Staging\<version>-<hash>\<operation>`. Each directory is created with a security descriptor that gives write access to Administrators and SYSTEM only. Before each use the SDK checks every directory on the path: no reparse point, owned by Administrators or SYSTEM, and no write right granted to anyone else. A version or operation directory that fails is moved aside to `<name>.untrusted-<guid>` and created again, and the two roots are reset in place. A file is written under a temporary name, checked against its embedded SHA-256 (the pinned release hash for the usbip-win2 files), renamed into place and checked again immediately before it runs. `hmswd.exe` always comes from the embedded resource. A deploy deletes the staging directory of every version that no running program's record names.
+
+### Older SDKs
+
+A program on v1.12.0 and a program on this release run side by side. This release judges the v1.12.0 program's liveness by its owner pipes, never removes its controllers while it runs, and runs on the v1.12.0 driver when that program's controllers hold it.
+
+The other direction is not fixable from here. A v1.12.0 program, and every older one, calls `RemoveAllVirtualControllers(preserveInstall: true)` inside its `InstallDriver`, which removes every HIDMaestro device on the machine, and replaces the installed driver with its own whenever the payload differs. Starting one while a v1.13.0 program runs removes that program's controllers. Moving every program on the machine to v1.13.0 or later is the fix. A program older than v1.12.0 also blocks a driver upgrade while its devices are present, and when the installed driver predates v1.12.0, `InstallDriver` throws `HMDriverVersionException` naming them.
+
+Battery scenario S71 runs programs side by side, with peers built on v1.12.0 and v1.11.0, and S72 checks the staging. [How this works](docs/design/v1.13.0.md).
+
+---
+
+## NativeAOT, trimmed and single-file apps.
+
+As of v1.13.0 `HIDMaestro.Core` publishes as NativeAOT and as a trimmed single-file app, for x64 and ARM64. Profiles and layouts load through `HMJsonContext`, a source-generated `JsonSerializerContext` with no reflection behind it, and every Win32 declaration is `LibraryImport`. `hmswd.exe` comes from the embedded resource and never from beside the assembly, whose location is empty in a single-file app. The project sets `IsAotCompatible`, and the trim, single-file and AOT analyzers report as errors in a Release build.
+
+`HMLayoutJsonOptions.Default` is now the source-generated context's options, so it is read-only and reads and writes the SDK's own types only. Code that changed a setting on it throws `InvalidOperationException`. Copy it with `new JsonSerializerOptions(HMLayoutJsonOptions.Default)` to change a copy.
+
+Battery scenarios S74 and S75 publish one app four ways, NativeAOT and trimmed single-file for x64 and ARM64, and run the two for the machine's architecture. Each app loads the catalog, installs the driver, creates `dualshock-4-v2` on the UMDF2 driver and `dualsense-composite` on USB/IP, submits input, waits for an output report and disposes. S76 requires the source-generated parse to read every embedded profile to the same contents as v1.12.0's reflection-based parse. At v1.12.0 both kinds of app load 0 of 336 profiles, because reflection-based JSON is off in them.
+
+Process start to catalog loaded, 30 runs on the devbox:
+
+| | p50 | p95 |
+|--|--|--|
+| JIT | 168.4 ms | 174.1 ms |
+| NativeAOT | 17.0 ms | 17.9 ms |
+| Trimmed single-file | 345.6 ms | 350.4 ms |
+
+Trimming drops the framework's precompiled code, which is why the trimmed single-file app starts slowest.
+
+---
+
 ## Every API at once.
 
 DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see one correct device.
@@ -189,6 +283,7 @@ DirectInput, XInput, SDL3, the browser Gamepad API, and WGI/GameInput all see on
 - **Multiple controllers at once.** No hard limit. Verified with 6 mixed controllers, correct per-controller ordering across all APIs. XInput caps Xbox-family profiles at its own 4 slots.
 - **Force feedback.** HID PID 1.0 answers for DirectInput FFB games, plus rumble/haptic output events the consumer routes to real hardware.
 - **Hot-plug.** Create and remove controllers with no reboot. Live-swap a controller's profile mid-session. Warm single-controller create is ~200 ms.
+- **A throwing handler stays contained.** An exception a handler throws on one of the SDK's own threads is dropped and the next handler runs. The nine events covered are `OutputReceived`, `OutputDecoded` and `KeyboardLedsChanged`, a port's `OutputChanged`, the USB audio events and `HapticReceived`. Set `HIDMAESTRO_DIAG=1` to log each dropped exception.
 - **Validated across every API and both ends of the spectrum.** A 70-scenario regression battery checks DirectInput, XInput, SDL3/HIDAPI, the browser Gamepad API, WGI and Raw Input on every change. It runs on a 16-core Windows 11 laptop, with the latest results under the battery below, and the 57-scenario v1.7.3 battery also passed on a low-power Intel Atom Windows 10 fixture.
 
 ### Validation
@@ -280,7 +375,7 @@ The original DS4 v1 (054C:05C4) has no composite variant for a reason worth stat
 
 A composite persona is a real Sony pad at every level a filter can inspect, which is what the audio class driver requires and is not negotiable. That leaves a host with nothing of its own to recognize, so the emulated host controller these personas sit behind carries a second hardware ID, `ROOT\HIDMAESTRO_UDE`, alongside its upstream one. An application that already excludes its own virtual pads by looking for `HIDMAESTRO` in a device's hardware IDs keeps working if it walks far enough up: from the persona's HID interface that node is four parents away. Nothing is added to the persona itself.
 
-That same invisibility is why cleanup has to reach the personas by a different route. The device sweep behind `RemoveAllVirtualControllers` walks the ROOT and SWD enumerators for the `HIDMAESTRO` token, and a composite carries none, so before v1.4.5 a consumer that created one and exited left a USB DualSense enumerated on the machine with nothing left running to feed it. The sweep now detaches every persona this SDK owns from the emulated host controller first, then walks the enumerators as before. Personas belonging to another live process are detached too, which is the intent: a consumer asking for a clean machine gets one.
+That same invisibility is why cleanup has to reach the personas by a different route. The device sweep behind `RemoveAllVirtualControllers` walks the ROOT and SWD enumerators for the `HIDMAESTRO` token, and a composite carries none, so before v1.4.5 a consumer that created one and exited left a USB DualSense enumerated on the machine with nothing left running to feed it. The sweep detaches personas from the emulated host controller first, then walks the enumerators. As of v1.13.0 it detaches only the personas of programs that have exited, and `RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall)` detaches every one.
 
 ```csharp
 using var ctrl = ctx.CreateController(ctx.GetProfile("dualsense-composite")!);
@@ -289,6 +384,8 @@ ctrl.UsbAudio.Microphone.Submit(micPcm);
 ```
 
 That is the whole setup. Composite personas create like any other profile, because the USB transport they need ships **inside `HIDMaestro.Core.dll`** and installs itself the first time one is created, exactly the way the UMDF2 driver already does. No second package, no separate download, nothing for a user to go find. The bundled component is [usbip-win2](https://github.com/vadimgrn/usbip-win2) 0.9.8.1, BSD-2-Clause, with Microsoft-signed drivers for x64 and ARM64, redistributed unmodified with its notice, and checked against its pinned SHA-256 both when the SDK is built and again before it is ever executed. The x64 installer is the 0.9.8.1 release asset. The ARM64 installer is the same tag's build from the project's signing service, posted in [usbip-win2#13](https://github.com/vadimgrn/usbip-win2/issues/13). A machine that HIDMaestro itself put on an older usbip-win2, 0.9.7.7 through v1.8.1 or 0.9.7.5 in v1.9.0 and v1.9.1, is moved to 0.9.8.1 automatically: the SDK replaces the host controller driver through Windows' own driver update, leaves the root-hub filter alone so no USB device drops, and does it only in a Windows session where nothing has used the controller yet. Until such a session comes, the older transport keeps working. Any other usbip-win2 version was put there by another program and is left as it is. The SDK speaks the request layouts of 0.9.7.x, 0.9.8.0 and 0.9.8.1 and asks the driver which one it has. Set `HIDMAESTRO_KEEP_TRANSPORT=1` to keep the older transport. Windows re-enumerates the USB root hubs once during that one-time install, so devices blink for a moment on the very first composite controller a machine ever creates.
+
+The bundled installer runs only where no copy of usbip-win2 is installed, with the smallest set it allows: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS=main,client /TASKS=vcredist /NOICONS`. That installs the root-hub filter and host controller drivers and the Visual C++ runtime they need, and no GUI, SDK headers, PDB files, Start menu folder or shortcut. `usbip.exe`, `devnode.exe`, `libusbip.dll`, an uninstaller and its scheduled task stay on the machine, since the installer has no switch to leave them out. A machine counts as having a copy when the driver store holds its package or an uninstall entry for it exists in the 64-bit or 32-bit view of HKLM or in HKCU and its uninstaller file is still there, because the installer would run that copy's uninstaller first. The install and the move to 0.9.8.1 hold the deploy mutex, so two programs whose first composites arrive together find one host controller after one installer run.
 
 Every device behavior stays in HIDMaestro's own user-mode code: the SDK runs an in-process USB/IP device server on loopback, including the 1 ms isochronous audio pacing. 0.9.8.1 is the first release with the fix for the attach work item that blocked driver unload in 0.9.8.0 ([usbip-win2#188](https://github.com/vadimgrn/usbip-win2/pull/188)).
 
@@ -323,6 +420,24 @@ pad.SubmitState(new HMGamepadState { AccelGY = 1.0f, GyroDpsX = 100f });
 Only a host that speaks the command protocol gets input. On Windows that is Steam, and SDL where libusb is present. DirectInput, RawInput, WGI and browsers see a gamepad that never reports, as they do with a real pad, and `switch2-pro-controller` stays the profile for them. A bulk read that a host abandons comes back as success with stale bytes, and so do the reads after it, because usbip-win2 0.9.8.1 completes a canceled transfer without resetting its length. SDL and Steam read only after they send a command, so neither meets it. Headset audio, NFC, pairing, firmware update and the magnetometer are not emulated.
 
 Battery scenario S65 checks the persona on the wire against the capture, through HidUsb and WinUSB, through PadForge's SDL3 fork with libusb, as two pads at once, and through the Steam client, which adds it as a Nintendo Switch Pro Controller and takes its 250 reports a second.
+
+### Wii U GameCube adapter for Dolphin and Slippi
+
+`gamecube-adapter` (057E:0337) is Nintendo's WUP-028, the four-port adapter Melee players use, on the USB/IP transport. Its device, configuration, string and report descriptors match 57 public dumps of real units, except where those dumps differ among themselves: the control endpoint's packet size and the strings of seven units. Like the adapter, it sends nothing until a host writes 0x13, then reports all four ports in report 0x21 on every 8 ms poll, takes each port's rumble from 0x11, and answers 0x12, 0x14 and SET_PROTOCOL as the adapter does.
+
+Dolphin, Slippi and SDL open the adapter through libusb, which needs WinUSB, and Windows binds its HID driver instead, which is why a real adapter needs Zadig. `BindWinUsb()` binds WinUSB to this one virtual adapter and to nothing else, and the binding goes back when the controller does. A real adapter plugged in meanwhile keeps the driver Windows gives it.
+
+```csharp
+using var adapter = ctx.CreateController(ctx.GetProfile("gamecube-adapter")!);
+adapter.BindWinUsb();
+adapter.Ports[0].SubmitState(new HMGamepadState { Buttons = HMButton.A });   // port 1
+adapter.Ports[2].Connect("wireless");                                          // a WaveBird on port 3
+adapter.Ports[1].OutputChanged += (_, e) => { /* "rumble": 0 stop, 1 run, 2 stop hard */ };
+```
+
+Each port has its own connection (wired, wireless or empty), its own input and its own rumble, and keeps its number when a controller leaves and returns. `Ports.Flags["rumblePower"]` is the second USB cable. L and R report their analog travel on the triggers and their clicks as `HMButton.LeftTriggerClick` and `RightTriggerClick`. The ports, the status values, the commands and their replies are the profile's JSON, which the SDK compiles at create.
+
+Dolphin's and Slippi's own adapter code, compiled unmodified, reads all four ports, and so does SDL 3.4.18 built with libusb. The official SDL3 build for Windows has no libusb and lists no adapter, real or virtual. A port submit reaches Dolphin in 4.8 ms at p50 on the adapter's 8 ms poll, and in 1.5 ms when the host polls every millisecond, as Melee players overclock it, at 832 reports a second against a real adapter's 833. Battery scenarios S79 to S83 check the bytes, the protocol, the binding, Dolphin, Slippi and SDL.
 
 ## Virtual VR controllers
 
@@ -382,6 +497,7 @@ HIDMaestro is Windows optimized and focused on game controllers, keyboards, mice
 - **Vendor-specific feature reports.** LED control, calibration, and firmware-update reports vary per device and need per-controller work.
 - **One interface per keyboard or mouse.** A keyboard or mouse profile carries the descriptor of the real device's keyboard or mouse interface. Its other interfaces, including the ones vendor configuration tools use, are not emulated.
 - **Anti-cheat.** Virtual devices are detectable by kernel-level anti-cheat. HIDMaestro does not hide that it is virtual.
+- **Older SDKs side by side.** A program built on HIDMaestro 1.12.0 or older removes every HIDMaestro device on the machine when it calls `InstallDriver`, another program's included. Programs on 1.13.0 or later leave each other's devices alone.
 
 ## Security and Scope
 
