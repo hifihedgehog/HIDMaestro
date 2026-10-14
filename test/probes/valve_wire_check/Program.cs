@@ -34,10 +34,10 @@ static class Program
     static extern int CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid c, string? d, uint f);
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_Interface_ListW(ref Guid c, string? d, char[] b, uint bl, uint f);
-    [DllImport("hid.dll")] static extern bool HidD_GetAttributes(IntPtr h, byte[] a);
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FlushQueue(IntPtr h);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetAttributes(IntPtr h, byte[] a);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FlushQueue(IntPtr h);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
 
     static Guid HidGuid = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");

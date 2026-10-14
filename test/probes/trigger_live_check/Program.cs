@@ -50,15 +50,18 @@ internal sealed class Program
     }
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES attr);
 
     [DllImport("hid.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetProductString(IntPtr h, [MarshalAs(UnmanagedType.LPArray)] byte[] buf, int len);
 
     [DllImport("hid.dll", SetLastError = true)]
     static extern void HidD_GetHidGuid(out Guid guid);
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetInputReport(IntPtr h, byte[] buf, int len);
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]

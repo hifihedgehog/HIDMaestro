@@ -671,7 +671,7 @@ internal static partial class Program
     static extern IntPtr LoadLibraryW(string path);
 
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
-    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetSerialNumberString(SafeFileHandle h, byte[] buffer, int length);
+    [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetSerialNumberString(SafeFileHandle h, byte[] buffer, int length);
 
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)] static extern int CM_Locate_DevNodeW(out uint node, string id, uint flags);
     [DllImport("cfgmgr32.dll")] static extern int CM_Get_Child(out uint child, uint node, uint flags);

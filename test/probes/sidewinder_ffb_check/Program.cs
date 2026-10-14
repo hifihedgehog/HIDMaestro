@@ -209,9 +209,11 @@ internal static class Program
         IntPtr sec, uint disp, uint flags, IntPtr template);
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, uint len);
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, uint len);
 
     const int SECTION_SIZE = 40;

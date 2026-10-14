@@ -15,8 +15,10 @@
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
-//   gate           S84: no submit path allocates, and the census finds
-//                  what the configuration manager lists
+//   gate           S84: no submit path allocates, a long mouse movement
+//                  leaves 16 frames kept, the census finds what the
+//                  configuration manager lists, and hid.dll's BOOLEAN
+//                  results read as one byte
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
@@ -79,7 +81,12 @@ internal static class Program
 #if !HM_BASE
             case "claim": Claim(runs); break;
 #endif
-            case "gate": Frame(3, gate: true); break;
+            case "gate":
+#if !HM_BASE
+                HidBoolean();
+#endif
+                Frame(3, gate: true);
+                break;
             default:
                 Console.WriteLine($"unknown mode {mode}");
                 return 1;
@@ -497,6 +504,24 @@ internal static class Program
             $"  {name}: p50 {P(0.50):F3}, p95 {P(0.95):F3}, max {s[^1]:F3} ({s.Count} samples, {runs} runs){tail}"));
     }
 
+#if !HM_BASE
+    /// <summary>hid.dll's HidD_* functions return BOOLEAN, one byte
+    /// (hidsdi.h). On an invalid handle this machine's HidD_GetAttributes
+    /// returns FALSE in AL with the rest of EAX nonzero, which a four-byte
+    /// BOOL read as TRUE. The SDK's own declaration, called as the profile
+    /// extractor calls it.</summary>
+    static void HidBoolean()
+    {
+        var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.HidDeviceEnumerator")!;
+        var getAttributes = type.GetMethod("HidD_GetAttributes", Any)!;
+        var attrType = type.GetNestedType("HIDD_ATTRIBUTES", Any)!;
+        object attrs = Activator.CreateInstance(attrType)!;
+        attrType.GetField("Size", Any)!.SetValue(attrs, Marshal.SizeOf(attrType));
+        bool result = (bool)getAttributes.Invoke(null, new object[] { new IntPtr(-1), attrs })!;
+        Check("HidD_GetAttributes on an invalid handle reads false through the SDK's declaration", !result, $"returned {result}");
+    }
+#endif
+
     static void Check(string name, bool ok, string detail)
     {
         if (!ok) s_failures++;
@@ -595,5 +620,6 @@ internal static class Program
     static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buffer, int length);
 }

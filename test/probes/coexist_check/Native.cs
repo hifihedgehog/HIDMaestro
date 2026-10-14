@@ -20,9 +20,9 @@ internal static class Native
     [StructLayout(LayoutKind.Sequential)]
     internal struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID, ProductID, VersionNumber; }
 
-    [DllImport("hid.dll")] internal static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
-    [DllImport("hid.dll")] internal static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
-    [DllImport("hid.dll")] internal static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] internal static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")] internal static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
     [DllImport("hid.dll")]
     internal static extern int HidP_GetUsages(int reportType, ushort usagePage, ushort collection,

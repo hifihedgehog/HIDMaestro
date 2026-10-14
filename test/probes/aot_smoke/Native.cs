@@ -19,15 +19,15 @@ internal static unsafe partial class Native
     struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID, ProductID, VersionNumber; }
 
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
 
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
 
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_FreePreparsedData(IntPtr pp);
 
     [LibraryImport("hid.dll")]

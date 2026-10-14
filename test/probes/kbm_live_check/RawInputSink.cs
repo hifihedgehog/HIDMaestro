@@ -163,9 +163,9 @@ internal sealed class RawInputSink : IDisposable
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool WriteFile(IntPtr h, byte[] buffer, uint count, out uint written, IntPtr overlapped);
-    [DllImport("hid.dll")] private static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
-    [DllImport("hid.dll")] private static extern bool HidD_SetFeature(IntPtr h, byte[] report, uint length);
-    [DllImport("hid.dll")] private static extern bool HidD_SetOutputReport(IntPtr h, byte[] report, uint length);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] private static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] private static extern bool HidD_SetFeature(IntPtr h, byte[] report, uint length);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] private static extern bool HidD_SetOutputReport(IntPtr h, byte[] report, uint length);
 
     public static string Name(IntPtr device)
     {

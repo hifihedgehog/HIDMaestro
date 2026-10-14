@@ -735,8 +735,10 @@ internal static class Program
     }
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr preparsedData);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_FreePreparsedData(IntPtr preparsedData);
     [DllImport("hid.dll", SetLastError = true)]
     static extern int HidP_GetCaps(IntPtr preparsedData, ref HIDP_CAPS caps);

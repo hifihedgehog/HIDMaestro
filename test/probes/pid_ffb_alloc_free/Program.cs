@@ -326,7 +326,9 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern SafeFileHandle CreateFile(string path, uint a, uint b, IntPtr c, uint d, uint e, IntPtr f);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, uint len);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buf, uint len);
 }

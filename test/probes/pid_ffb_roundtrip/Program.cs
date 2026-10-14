@@ -369,5 +369,6 @@ internal static class Program
     static extern SafeFileHandle CreateFile(string path, uint access, uint share,
         IntPtr sec, uint disp, uint flags, IntPtr template);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, uint len);
 }

@@ -48,6 +48,7 @@ internal static class Program
     }
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buffer, int bufferLength);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]

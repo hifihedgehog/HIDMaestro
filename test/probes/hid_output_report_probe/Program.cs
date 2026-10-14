@@ -13,6 +13,7 @@ using System.IO;
 internal static class P
 {
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetOutputReport(SafeFileHandle HidDeviceObject,
         byte[] ReportBuffer, uint ReportBufferLength);
 
@@ -58,6 +59,7 @@ internal static class P
     }
 
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetAttributes(SafeFileHandle HidDeviceObject, out HIDD_ATTRIBUTES Attributes);
 
     [StructLayout(LayoutKind.Sequential)]

@@ -264,10 +264,13 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool WriteFile(SafeFileHandle h, byte[] buf, int len, out int written, IntPtr overlapped);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buf, int len);
     [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
     [DllImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.U1)]
     static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")]
     static extern int HidP_GetCaps(IntPtr pp, byte[] caps);

@@ -50,8 +50,8 @@ static class ValveRawPathCheck
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid g);
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")] static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode)]

@@ -46,22 +46,22 @@ internal static partial class HidDeviceEnumerator
     [LibraryImport("hid.dll")]
     private static partial void HidD_GetHidGuid(out Guid guid);
     [LibraryImport("hid.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetPreparsedData(IntPtr hidDeviceObject, out IntPtr data);
     [LibraryImport("hid.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_FreePreparsedData(IntPtr data);
     [LibraryImport("hid.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetAttributes(IntPtr hidDeviceObject, ref HIDD_ATTRIBUTES attr);
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetProductString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetManufacturerString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
     [LibraryImport("hid.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
+    [return: MarshalAs(UnmanagedType.U1)]
     private static partial bool HidD_GetSerialNumberString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
 
     [StructLayout(LayoutKind.Sequential)]

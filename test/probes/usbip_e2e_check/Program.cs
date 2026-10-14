@@ -740,12 +740,12 @@ internal static class Program
     }
 
 
-    [DllImport("hid.dll")] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
-    [DllImport("hid.dll")] static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_FreePreparsedData(IntPtr pp);
     [DllImport("hid.dll")] static extern int  HidP_GetCaps(IntPtr pp, byte[] caps);
-    [DllImport("hid.dll")] static extern bool HidD_GetManufacturerString(IntPtr h, byte[] b, int len);
-    [DllImport("hid.dll")] static extern bool HidD_GetProductString(IntPtr h, byte[] b, int len);
-    [DllImport("hid.dll")] static extern bool HidD_GetSerialNumberString(IntPtr h, byte[] b, int len);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetManufacturerString(IntPtr h, byte[] b, int len);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetProductString(IntPtr h, byte[] b, int len);
+    [DllImport("hid.dll")] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetSerialNumberString(IntPtr h, byte[] b, int len);
 
     /// <summary>Exactly the calls hidapi makes while enumerating, in order.
     /// hidapi skips a device the moment one of them fails, and a skipped
@@ -952,10 +952,10 @@ internal static class Program
     static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
     [DllImport("hid.dll")] static extern void HidD_GetHidGuid(out Guid guid);
-    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES attr);
-    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetInputReport(IntPtr h, byte[] buf, int len);
-    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_SetOutputReport(IntPtr h, byte[] buf, int len);
-    [DllImport("hid.dll", SetLastError = true)] static extern bool HidD_GetFeature(IntPtr h, byte[] buf, int len);
+    [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES attr);
+    [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetInputReport(IntPtr h, byte[] buf, int len);
+    [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_SetOutputReport(IntPtr h, byte[] buf, int len);
+    [DllImport("hid.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.U1)] static extern bool HidD_GetFeature(IntPtr h, byte[] buf, int len);
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwnd, uint flags);
