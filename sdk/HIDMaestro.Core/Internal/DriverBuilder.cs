@@ -256,25 +256,33 @@ public static class DriverBuilder
 
     // ── Sign / Catalog / Install pipeline ──────────────────────────────────
 
-    /// <summary>Signs HIDMaestro.dll and HMXInput.dll using the extracted
-    /// signtool.exe and the test certificate from LocalMachine\My.</summary>
+    /// <summary>Signs HIDMaestro.dll and HMXInput.dll of a driver package
+    /// staged fresh from the embedded bytes, with the staged signtool.exe and
+    /// the test certificate from LocalMachine\My.</summary>
     public static bool SignDrivers()
     {
-        EnsureTestCertificate();
-        string dir = EnsureExtracted();
-        string signtool = Path.Combine(dir, "signtool.exe");
+        SignDriversIn(EnsureExtracted(), s_packageDir ??= StagePackage());
+        return true;
+    }
 
+    private static void SignDriversIn(string tools, string package)
+    {
+        EnsureTestCertificate();
+        s_packageDir = package;
+        string signtool = Path.Combine(tools, "signtool.exe");
+
+        var asm = typeof(DriverBuilder).Assembly;
         foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
         {
-            string path = Path.Combine(dir, dll);
+            string path = Path.Combine(package, dll);
             if (!File.Exists(path)) continue;
+            ProtectedStaging.VerifyBeforeUse(path, asm, NativePrefix + dll);
             var (rc, output) = Run(signtool,
                 $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{path}\"",
-                workingDir: dir);
+                workingDir: tools);
             if (rc != 0)
                 throw new InvalidOperationException($"signtool failed for {dll}: {output}");
         }
-        return true;
     }
 
     /// <summary>The Inf2Cat <c>/os:</c> value for an architecture's INFs.
@@ -289,34 +297,38 @@ public static class DriverBuilder
     internal static string CatalogOsFor(Architecture arch) =>
         arch == Architecture.Arm64 ? "10_RS3_ARM64" : "10_X64";
 
-    /// <summary>Generates the catalogs for the extracted INFs and signs each
-    /// resulting .cat file with the test certificate.</summary>
+    /// <summary>Generates the catalogs for the driver package's INFs and
+    /// signs each resulting .cat file with the test certificate.</summary>
     public static bool GenerateCatalogs()
     {
-        string dir = EnsureExtracted();
-        string inf2cat = Path.Combine(dir, "Inf2Cat.exe");
-        string signtool = Path.Combine(dir, "signtool.exe");
+        GenerateCatalogsIn(EnsureExtracted(), s_packageDir ??= StagePackage());
+        return true;
+    }
+
+    private static void GenerateCatalogsIn(string tools, string package)
+    {
+        string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
+        string signtool = Path.Combine(tools, "signtool.exe");
 
         // Delete any stale catalogs from a previous run.
-        foreach (string cat in Directory.GetFiles(dir, "*.cat"))
+        foreach (string cat in Directory.GetFiles(package, "*.cat"))
         {
             try { File.Delete(cat); } catch { }
         }
 
         string catalogOs = CatalogOsFor(RuntimeInformation.OSArchitecture);
-        var (rc, output) = Run(inf2cat, $"/driver:\"{dir}\" /os:{catalogOs}", workingDir: dir);
+        var (rc, output) = Run(inf2cat, $"/driver:\"{package}\" /os:{catalogOs}", workingDir: tools);
         if (rc != 0)
             throw new InvalidOperationException($"inf2cat failed: {output}");
 
-        foreach (string cat in Directory.GetFiles(dir, "*.cat"))
+        foreach (string cat in Directory.GetFiles(package, "*.cat"))
         {
             var (rc2, output2) = Run(signtool,
                 $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
-                workingDir: dir);
+                workingDir: tools);
             if (rc2 != 0)
                 throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
         }
-        return true;
     }
 
     /// <summary>Catalog and sign an INF-only package staged in its own
@@ -354,10 +366,15 @@ public static class DriverBuilder
         }
     }
 
-    /// <summary>Installs the staged INFs via pnputil (Windows builtin).</summary>
+    /// <summary>Installs the driver package's INFs via pnputil (Windows builtin).</summary>
     public static bool InstallDrivers()
     {
-        string dir = EnsureExtracted();
+        InstallDriversFrom(s_packageDir ??= StagePackage());
+        return true;
+    }
+
+    private static void InstallDriversFrom(string dir)
+    {
         string pnputil = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
 
@@ -390,7 +407,6 @@ public static class DriverBuilder
         // this scan was 5–20 s of pure overhead. RemoveAllVirtualControllers
         // (called before FullDeploy) DIF_REMOVEs any of our prior-session
         // devnodes; nothing else needs the scan.
-        return true;
     }
 
     /// <summary>Removes all HIDMaestro driver packages from the driver store.
@@ -444,31 +460,50 @@ public static class DriverBuilder
         // device after the package changes. With no HIDMaestro device left,
         // every such host is an orphan.
         DeviceOrchestrator.ReleaseStaleDriverHosts();
-        string dir = EnsureExtracted();
-        VerifyStagedBeforeUse(dir);
+        string tools = EnsureExtracted();
+        VerifyStagedBeforeUse(tools);
+        string package = StagePackage();
         RemoveOldDriverPackages();
-        SignDrivers();
-        GenerateCatalogs();
-        InstallDrivers();
+        SignDriversIn(tools, package);
+        GenerateCatalogsIn(tools, package);
+        InstallDriversFrom(package);
         RecordInstalledPayload();
     }
 
-    /// <summary>Re-check, against the embedded bytes, every staged file that
-    /// is about to run elevated or be signed: the signing and catalog tools,
-    /// and the two driver binaries before signtool rewrites them. A staged
-    /// file changed since <see cref="EnsureExtracted"/> is caught here, before
-    /// anything runs. The signed binaries and the generated catalogs are not
-    /// re-checked afterward, because signing and inf2cat change their bytes by
-    /// design.</summary>
+    /// <summary>The driver package this deploy signs and installs: the two
+    /// binaries and two INFs, staged fresh from the embedded bytes into the
+    /// deploy's own directory, and no catalog. Signing rewrites the binaries,
+    /// so the driver staging never holds a signed one: a second deploy in
+    /// this process finds it as embedded, and another process of this build
+    /// that stages it never rewrites a file this deploy is signing. Only a
+    /// holder of the deploy lock calls this.</summary>
+    internal static string StagePackage()
+    {
+        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationPackage);
+        foreach (string cat in Directory.GetFiles(dir, "*.cat"))
+            File.Delete(cat);
+        var asm = typeof(DriverBuilder).Assembly;
+        foreach (string f in PackageFiles)
+            ProtectedStaging.StageResource(dir, f, asm, NativePrefix + f);
+        return dir;
+    }
+
+    private static readonly string[] PackageFiles = { "HIDMaestro.dll", "HMXInput.dll", "hidmaestro.inf", "hidmaestro_xusb.inf" };
+
+    private static string? s_packageDir;
+
+    /// <summary>Re-check, against the embedded bytes, the signing and
+    /// catalog tools about to run elevated. A staged tool changed since
+    /// <see cref="EnsureExtracted"/> is caught here, before anything runs.
+    /// The package's two binaries are checked the same way just before
+    /// signtool rewrites them (<see cref="SignDriversIn"/>). The signed
+    /// binaries and the generated catalogs are not re-checked afterward,
+    /// because signing and inf2cat change their bytes by design.</summary>
     private static void VerifyStagedBeforeUse(string dir)
     {
         var asm = typeof(DriverBuilder).Assembly;
-        string neutral(string f) => "HIDMaestro.Resources." + f;
-        string native(string f) => NativePrefix + f;
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "signtool.exe"), asm, native("signtool.exe"));
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "Inf2Cat.exe"), asm, neutral("Inf2Cat.exe"));
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "HIDMaestro.dll"), asm, native("HIDMaestro.dll"));
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "HMXInput.dll"), asm, native("HMXInput.dll"));
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "signtool.exe"), asm, NativePrefix + "signtool.exe");
+        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "Inf2Cat.exe"), asm, "HIDMaestro.Resources.Inf2Cat.exe");
     }
 
     /// <summary>Record the embedded payload's hash as the installed one,

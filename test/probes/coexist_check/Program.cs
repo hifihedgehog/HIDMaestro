@@ -62,7 +62,10 @@
 //   Q. A create waits for a deploy that holds the deploy lock.
 //   R. A program that has only staged names its staging in its record, and
 //      a deploy keeps the staging a running program's record names.
-//   S71 runs A to H and J to R.
+//   S. Two deploys in one program, with another program's uninstall
+//      between them: both succeed, and the driver staging still holds the
+//      embedded binaries after a deploy, since each deploy signs its own copy.
+//   S71 runs A to H and J to S.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -136,7 +139,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQR";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRS";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -158,6 +161,7 @@ internal static class Program
             ('P', "a create after another program removed the driver", SectionP),
             ('Q', "a create during another program's deploy", SectionQ),
             ('R', "staging a running program uses", SectionR),
+            ('S', "two deploys in one program", SectionS),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -1248,6 +1252,32 @@ internal static class Program
         Check("I7: the temporary file of a process that ended is removed", !File.Exists(orphan), orphan);
         Check("I7: the temporary file of a running process stays", File.Exists(inFlight), inFlight);
         try { File.Delete(inFlight); } catch { }
+    }
+
+    static void SectionS()
+    {
+        Uninstall();
+        using var p = PeerProcess.Start("S");
+        string r1 = p.Send("install");
+        Check("S: the first deploy installs", PeerProcess.Field(r1, "outcome") == "Installed", r1);
+        string dir = StagingPath(p.Send("stagingdir")) ?? "";
+        string prefix = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64
+            ? "HIDMaestro.Native.arm64." : "HIDMaestro.Native.x64.";
+        foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
+        {
+            byte[]? embedded = ReadEmbedded(prefix + dll);
+            string staged = Path.Combine(dir, dll);
+            Check($"S: after a deploy the driver staging's {dll} is still the embedded, unsigned binary",
+                  embedded != null && File.Exists(staged) && File.ReadAllBytes(staged).AsSpan().SequenceEqual(embedded),
+                  staged);
+        }
+        using (var other = PeerProcess.Start("S-other"))
+            other.Send("uninstall");
+        Check("S: another program's uninstall removed the packages", MainPackages() == 0, $"{MainPackages()} package(s)");
+        string r2 = p.Send("install");
+        Check("S: the same program's second deploy installs again", PeerProcess.Field(r2, "outcome") == "Installed", r2);
+        string c = p.Send("create pad F0F6 -");
+        Check("S: and a controller creates on it", Ok(c), c);
     }
 
     static byte[]? ReadEmbedded(string logicalName)

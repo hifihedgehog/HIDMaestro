@@ -50,6 +50,12 @@ internal static class ProtectedStaging
     /// <summary>Operation name for the usbip-win2 host-controller package the
     /// SDK forces onto an older transport.</summary>
     internal const string OperationUsbipUde = "usbip-ude";
+    /// <summary>Operation name for one deploy's driver package: the two
+    /// binaries and two INFs, staged fresh from the embedded bytes, then
+    /// signed and catalogued there. Only a holder of the deploy lock writes
+    /// it, so the driver staging keeps the embedded bytes and another
+    /// process staging them never touches a package being signed.</summary>
+    internal const string OperationPackage = "package";
 
     // Staging tree: Administrators and SYSTEM full control, nobody else any
     // access. Protected (P) so it does not inherit the ProgramData ACEs that
