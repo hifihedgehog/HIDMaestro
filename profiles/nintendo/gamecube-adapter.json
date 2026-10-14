@@ -1,14 +1,136 @@
-﻿{
+{
   "id": "gamecube-adapter",
-  "name": "GameCube Controller Adapter (Wii U / Switch)",
+  "name": "GameCube Controller Adapter (Wii U / Switch): Full",
   "vendor": "Nintendo",
   "vid": "0x057E",
   "pid": "0x0337",
   "productString": "WUP-028",
-  "manufacturerString": "Nintendo Co., Ltd.",
+  "manufacturerString": "Nintendo",
+  "serialString": "15/07/2014",
   "type": "gamepad",
   "connection": "usb",
-  "descriptor": null,
-  "inputReportSize": null,
-  "notes": "Does NOT use HID: uses raw USB bulk endpoints. Most software (Dolphin, etc.) accesses it via libusb. Supports 4 GC controllers. Would need a different approach to impersonate."
+  "backend": "usbip",
+  "descriptor": "05050900a101851119002aff00150026ff00750895059100c0a101852119002aff00150026ff00750895258100c0a101851219002aff00150026ff00750895019100c0a101852219002aff00150026ff00750895198100c0a101851319002aff00150026ff00750895019100c0a101852319002aff00150026ff00750895028100c0a101851419002aff00150026ff00750895019100c0a101852419002aff00150026ff00750895028100c0a101851519002aff00150026ff00750895019100c0a101852519002aff00150026ff00750895028100c0",
+  "inputReportSize": 37,
+  "notes": "The Wii U GameCube adapter, WUP-028, as Dolphin, Slippi and SDL read it through libusb: one USB device with four controller ports. The descriptors are a real adapter's byte for byte: USB 2.00, full speed, bMaxPacketSize0 8, bcdDevice 1.00, strings Nintendo, WUP-028 and 15/07/2014, one HID interface with interrupt IN 0x81 of 37 bytes and interrupt OUT 0x02 of 5 bytes at 8 ms, and the 214-byte report descriptor of gamecube-adapter-hid. Every unit carries the serial 15/07/2014, so a second adapter gets a Windows instance named after its port. The adapter sends nothing until a host writes 0x13. From then on each host poll gets report 0x21: the report ID and nine bytes per port, a status byte (0x04 rumble power, 0x10 wired, 0x22 WaveBird, 0x20 WaveBird receiver alone), two button bytes, the sticks, and the analog L and R. 0x11 sets each port's motor, 0x12 reads the origins, 0x14 stops the reports and 0x15 stops the adapter until a port reset. SET_PROTOCOL succeeds. extendedReport.ports and usbConfiguration.protocol describe all of it as data. Windows' HID parser rejects the report descriptor, so a real adapter has no HID collection on Windows, and HMController.BindWinUsb binds WinUSB to this device alone. HMController.Ports takes input per port, and SubmitState goes to port 1. docs/design/v1.13.0.md has the sources.",
+  "extendedReport": {
+    "reportId": "0x21",
+    "size": 37,
+    "alwaysArmed": true,
+    "fields": [],
+    "ports": {
+      "count": 4,
+      "offset": 1,
+      "stride": 9,
+      "status": {
+        "byte": 0,
+        "connections": [
+          { "name": "empty", "value": "0x00" },
+          { "name": "wired", "value": "0x10" },
+          { "name": "wireless", "value": "0x22" },
+          { "name": "wirelessReceiverOnly", "value": "0x20" }
+        ],
+        "flags": [
+          { "name": "rumblePower", "value": "0x04", "default": true }
+        ]
+      },
+      "data": "1-8",
+      "snapshots": [
+        { "name": "origin", "on": "connect" }
+      ],
+      "fields": [
+        { "byte": 1, "type": "button-mask", "buttons": ["A", "B", "X", "Y", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_DOWN", "DPAD_UP"] },
+        { "byte": 2, "type": "button-mask", "buttons": ["Start", "RightBumper", "RightTriggerClick", "LeftTriggerClick"] },
+        { "byte": 3, "type": "uint8-axis", "semantic": "leftStickX" },
+        { "byte": 4, "type": "uint8-axis", "semantic": "leftStickY", "invert": true },
+        { "byte": 5, "type": "uint8-axis", "semantic": "rightStickX" },
+        { "byte": 6, "type": "uint8-axis", "semantic": "rightStickY", "invert": true },
+        { "byte": 7, "type": "uint8-trigger", "semantic": "leftTrigger" },
+        { "byte": 8, "type": "uint8-trigger", "semantic": "rightTrigger" }
+      ]
+    }
+  },
+  "extendedOutputReport": {
+    "reportId": "0x11",
+    "size": 5,
+    "fields": [],
+    "ports": {
+      "count": 4,
+      "offset": 1,
+      "stride": 1,
+      "fields": [
+        { "byte": 0, "type": "uint8", "semantic": "rumble" }
+      ]
+    }
+  },
+  "layout": {
+    "kind": "controller_adapter",
+    "source": "https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/InputCommon/GCAdapter.cpp",
+    "ports": 4,
+    "perPortLayout": "A GameCube controller: main stick, C-stick, analog L and R with their clicks, Z, Start, A, B, X, Y and the D-pad. The report descriptor declares byte arrays under Game Controls, as the real adapter's does, so it names no axes or buttons, and extendedReport.ports maps each port's nine bytes."
+  },
+  "usbConfiguration": {
+    "configurationValue": 1,
+    "attributes": 224,
+    "maxPowerMilliamps": 500,
+    "busSpeed": "full",
+    "sharedSerial": true,
+    "deviceDescriptor": "12010002000000087e053703000101020301",
+    "configurationDescriptor": "09022900010100e0fa09040000020300000009211001000122d6000705810325000807050203050008",
+    "interfaces": [
+      {
+        "interfaceNumber": 0,
+        "function": "hid",
+        "altSettings": [
+          {
+            "altSetting": 0,
+            "interfaceClass": 3,
+            "interfaceSubClass": 0,
+            "interfaceProtocol": 0,
+            "endpoints": [
+              { "address": 129, "transferType": "interrupt", "maxPacketSize": 37, "interval": 8 },
+              { "address": 2, "transferType": "interrupt", "maxPacketSize": 5, "interval": 8 }
+            ]
+          }
+        ]
+      }
+    ],
+    "protocol": {
+      "state": [
+        { "name": "polling", "initial": false },
+        { "name": "stalled", "initial": false },
+        { "name": "halted", "initial": false }
+      ],
+      "input": {
+        "endpoint": "0x81",
+        "while": ["polling", "!stalled"],
+        "clock": {
+          "sourcePollMs": 1.19971,
+          "sourcePollRules": [
+            { "portsConnected": [1, 2], "periodMs": 0.9995 }
+          ]
+        }
+      },
+      "commands": {
+        "endpoint": "0x02",
+        "setReport": true,
+        "rules": [
+          { "match": "11", "minLength": 5 },
+          { "match": "11", "set": { "stalled": true } },
+          { "match": "12", "reply": [ { "hex": "22" }, { "snapshot": "origin", "bytes": "3-8", "while": ["polling"] } ] },
+          { "match": "13", "set": { "polling": true, "stalled": false } },
+          { "match": "14", "reply": [ { "hex": "24" }, { "state": "polling" } ], "set": { "polling": false } },
+          { "match": "15", "set": { "halted": true, "polling": false } },
+          { "match": "16", "set": { "stalled": true } },
+          { "match": "17", "set": { "stalled": true } }
+        ]
+      },
+      "halt": { "while": ["halted"], "status": "EPROTO" },
+      "setProtocol": "ack",
+      "getStatus": "descriptor"
+    },
+    "winUsb": {
+      "interfaceGuid": "{7F216CFC-A59A-41F6-947D-E7BF407BCAD0}"
+    }
+  }
 }

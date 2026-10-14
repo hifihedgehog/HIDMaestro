@@ -167,6 +167,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         _index = index;
         Descriptors = new UsbDescriptorSet(profile, index, identity);
+        // Before any section or thread exists, so a profile whose protocol
+        // does not fit its descriptors is refused with nothing to undo.
+        if (CompiledProtocol.Compile(profile, Descriptors) is { } protocol)
+            _engine = new ProtocolEngine(protocol);
         _stubs = FeatureStubTable.From(profile);
         _primaryInEndpoint = 0;
         foreach (var kv in Descriptors.Endpoints)
@@ -229,6 +233,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             };
             _streamThread.Start();
         }
+
+        // A device with a declared protocol answers its IN endpoint on its
+        // own host poll clock (UsbipEmulatedDevice.Protocol.cs).
+        if (_engine != null)
+            StartProtocolClock();
     }
 
     /// <summary>Claim this device for one connection. A second import
@@ -237,8 +246,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         if (Interlocked.CompareExchange(ref _connection, connection, null) != null)
             return false;
-        // Attach is power-on for the Switch 2 Pro persona's protocol state.
+        // Attach is power-on for the Switch 2 Pro persona's protocol state,
+        // and for a declared protocol's.
         ResetSwitch2State();
+        ResetProtocolState();
         return true;
     }
 
@@ -253,6 +264,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _frameQueue.Clear();
         }
         ResetSwitch2State();
+        ResetProtocolState();
     }
 
     /// <summary>The Switch 2 Pro persona as it is at attach and after a
@@ -308,6 +320,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                 }
                 if (!TryReadInputFrame(out var report)) continue;
+
+                // A declared protocol sends nothing from here either. The
+                // frame is the report its next host poll gets.
+                if (_engine != null)
+                {
+                    _engine.SetReport(report, System.Diagnostics.Stopwatch.GetTimestamp(),
+                                      Volatile.Read(ref _protocolClockOrigin));
+                    continue;
+                }
 
                 // The Switch 2 Pro persona sends nothing from here. The
                 // frame is the state its own clock builds the next report
@@ -454,6 +475,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             return;
         }
 
+        // A halted protocol answers nothing until a port reset.
+        if (_engine is { Protocol.HasHalt: true } halting && halting.IsHalted)
+        {
+            SendError(cmd.Seqnum, halting.Protocol.HaltStatus);
+            return;
+        }
+
         byte epAddr = (byte)(cmd.Ep | (cmd.IsIn ? 0x80u : 0u));
         if (!Descriptors.Endpoints.TryGetValue(epAddr, out var ep))
         {
@@ -486,6 +514,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     SubmitSwitch2Read(cmd.Seqnum);
                     return;
                 }
+                if (_engine != null && epAddr == _engine.Protocol.InputEndpoint)
+                {
+                    ProtocolSubmitRead(cmd.Seqnum, cmd.TransferBufferLength);
+                    return;
+                }
 
                 byte[]? frame = null;
                 lock (_hidLock)
@@ -503,6 +536,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
                 if (frame != null) SendInterruptInReply(cmd.Seqnum, frame);
+                return;
+            }
+
+            // A declared protocol reads its command endpoint as packets of
+            // commands.
+            if (_engine != null && epAddr == _engine.Protocol.CommandEndpoint)
+            {
+                ProtocolSubmitOut(cmd.Seqnum, outPayload ?? Array.Empty<byte>());
                 return;
             }
 
@@ -716,6 +757,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public void HandleUnlink(uint seqnum, uint victimSeqnum)
     {
         bool removed = Audio.TryUnlink(victimSeqnum);
+        if (!removed && _engine != null)
+            removed = TryUnlinkProtocolRead(victimSeqnum);
         if (!removed)
         {
             lock (_hidLock)
@@ -762,6 +805,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         byte type = (byte)((bmRequestType >> 5) & 0x03);      // 0 standard, 1 class, 2 vendor
         byte recipient = (byte)(bmRequestType & 0x1F);        // 0 device, 1 interface, 2 endpoint, 3 other
         bool deviceToHost = (bmRequestType & 0x80) != 0;
+        if (DeviceOrchestrator.DiagEnabled)
+            DeviceOrchestrator.LogDiag($"usbip control {BusId}: {Convert.ToHexString(setup)} seq {cmd.Seqnum} buffer {cmd.TransferBufferLength}");
 
         // Hub port reset arrives as USB_RT_PORT SET_FEATURE(PORT_RESET)
         // (usbip-win2 device_ioctl.cpp make_reset_port: "meaningless for a
@@ -772,6 +817,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             SendRetSubmit(cmd.Seqnum, 0, 0, null);
             return;
         }
+
+        if (_engine != null && ProtocolControl(cmd, bmRequestType, bRequest, wLength))
+            return;
 
         if (type == 0) // standard
         {
@@ -956,6 +1004,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // would send next, in the layout asked for, and does
                     // not count it.
                     if (_switch2 != null) snapshot = _switch2.PeekReport(reportId);
+                    else if (_engine != null) snapshot = _engine.CopyReport();
                     else lock (_hidLock) snapshot = _lastInputReport;
                     int n = Math.Min(snapshot.Length, wLength);
                     SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
@@ -972,6 +1021,19 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 break;
             }
+            case 0x09 when !deviceToHost && reportType == 0x02
+                           && _engine is { Protocol.CommandsFromSetReport: true }: // SET_REPORT(Output)
+            {
+                // The protocol reads the data stage as it reads its command
+                // endpoint, report ID first.
+                var payload = outPayload ?? Array.Empty<byte>();
+                ProtocolHandleCommands(payload);
+                SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                return;
+            }
+            case 0x0B when !deviceToHost && _engine is { Protocol.AckSetProtocol: true }: // SET_PROTOCOL
+                SendRetSubmit(cmd.Seqnum, 0, 0, null);
+                return;
             case 0x09 when !deviceToHost: // SET_REPORT
             {
                 var payload = outPayload ?? Array.Empty<byte>();
@@ -1214,6 +1276,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             _frameQueue.Clear();
         }
         ResetSwitch2State();
+        ResetProtocolState();
     }
 
     private void ResetAltSettings()
@@ -1240,6 +1303,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         => SendRetSubmit(seqnum, status, 0, null);
 
     private void SendRetSubmit(uint seqnum, int status, int actualLength, byte[]? inPayload)
+    {
+        var c = _connection;
+        if (c == null) return;
+        try { c.SendRetSubmitNonIso(seqnum, status, actualLength, inPayload); } catch { }
+    }
+
+    /// <summary>The same reply from a span, for a caller that answers from
+    /// a pooled or stack buffer.</summary>
+    private void SendRetSubmitSpan(uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
     {
         var c = _connection;
         if (c == null) return;
@@ -1275,6 +1347,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
             _streamWake!.Dispose();
         }
+        DisposeProtocol();
     }
 
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;

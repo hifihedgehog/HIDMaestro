@@ -41,6 +41,12 @@ internal static class RegistryLedger
         @"SYSTEM\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM";
     private const string GameInputKind = "GameInput";
     private const string JoystickOemKind = "JoystickOem";
+    // v1.13.0: a devnode HIDMaestro bound WinUSB to (WinUsbBinding).
+    private const string WinUsbKind = "WinUsb";
+    private static readonly string[] AllKinds = { GameInputKind, JoystickOemKind, WinUsbKind };
+    private const string V_InstanceId = "InstanceId";
+    private const string V_PriorService = "PriorService";
+    private const string V_PriorInf = "PriorInf";
     private const string HoldersKey = "Holders";
     private const string OemNameValue = "OEMName";
 
@@ -340,6 +346,55 @@ internal static class RegistryLedger
         catch { return false; }
     }
 
+    // ── WinUSB on one devnode ────────────────────────────────────────────
+
+    /// <summary>Record a devnode and the driver it has before
+    /// <see cref="WinUsbBinding"/> binds WinUSB to it, and the controller as
+    /// holder. Throws when the record cannot be written, so nothing is bound
+    /// that the ledger cannot put back.</summary>
+    internal static void ClaimWinUsb(string instanceId, string? priorService, string? priorInf, int controllerIndex)
+    {
+        string entryPath = $@"{Root}\{WinUsbKind}\{WinUsbEntryName(instanceId)}";
+        using var m = Acquire();
+        try
+        {
+            bool held;
+            using (var e = Registry.LocalMachine.OpenSubKey(entryPath)) held = e != null;
+            if (!held)
+            {
+                using var entry = Registry.LocalMachine.CreateSubKey(entryPath);
+                entry.SetValue(V_InstanceId, instanceId, RegistryValueKind.String);
+                entry.SetValue(V_PriorService, priorService ?? "", RegistryValueKind.String);
+                entry.SetValue(V_PriorInf, priorInf ?? "", RegistryValueKind.String);
+            }
+            using var holders = Registry.LocalMachine.CreateSubKey($@"{entryPath}\{HoldersKey}");
+            holders.SetValue(HolderName(controllerIndex), 1, RegistryValueKind.DWord);
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>A registry key name for a devnode: instance ids carry
+    /// backslashes, which a key name cannot.</summary>
+    private static string WinUsbEntryName(string instanceId)
+        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+               System.Text.Encoding.UTF8.GetBytes(instanceId.ToUpperInvariant())))[..16];
+
+    /// <summary>The devnodes the ledger holds a WinUSB binding for.</summary>
+    internal static List<string> HeldWinUsbDevnodes()
+    {
+        var list = new List<string>();
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}");
+            if (k == null) return list;
+            foreach (var n in k.GetSubKeyNames())
+                using (var e = k.OpenSubKey(n))
+                    if (e?.GetValue(V_InstanceId) is string id) list.Add(id);
+        }
+        catch { }
+        return list;
+    }
+
     // ── Release ──────────────────────────────────────────────────────────
 
     /// <summary>Teardown of one controller: drop its holds, restore every
@@ -354,7 +409,7 @@ internal static class RegistryLedger
         using var m = Acquire();
         try
         {
-            foreach (var kind in new[] { GameInputKind, JoystickOemKind })
+            foreach (var kind in AllKinds)
             {
                 using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
                 if (kindKey == null) continue;
@@ -370,7 +425,7 @@ internal static class RegistryLedger
                         restore = holders == null || holders.GetValueNames().Length == 0;
                     }
                     if (!restore) continue;
-                    RestoreEntry(kindKey, kind, name);
+                    RestoreEntry(kindKey, kind, name, waitGoneMs: releasing != null ? 2000 : 0);
                 }
             }
             // Leave no trace once nothing is held.
@@ -399,12 +454,12 @@ internal static class RegistryLedger
         using var m = Acquire();
         try
         {
-            foreach (var kind in new[] { GameInputKind, JoystickOemKind })
+            foreach (var kind in AllKinds)
             {
                 using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
                 if (kindKey == null) continue;
                 foreach (var name in kindKey.GetSubKeyNames())
-                    RestoreEntry(kindKey, kind, name);
+                    RestoreEntry(kindKey, kind, name, waitGoneMs: 0);
             }
             Registry.LocalMachine.DeleteSubKeyTree(Root, throwOnMissingSubKey: false);
         }
@@ -412,12 +467,22 @@ internal static class RegistryLedger
         finally { m.ReleaseMutex(); }
     }
 
-    private static void RestoreEntry(RegistryKey kindKey, string kind, string name)
+    /// <summary><paramref name="waitGoneMs"/>: how long a WinUSB entry's
+    /// devnode gets to leave after its controller's detach. A teardown
+    /// releases right after the detach, and a devnode that is gone needs
+    /// nothing but the reinstall flag it already carries.</summary>
+    private static void RestoreEntry(RegistryKey kindKey, string kind, string name, int waitGoneMs)
     {
         try
         {
             if (kind == GameInputKind)
                 RestoreGameInput(name);
+            else if (kind == WinUsbKind)
+                using (var entry = kindKey.OpenSubKey(name))
+                {
+                    if (entry?.GetValue(V_InstanceId) is string id)
+                        WinUsbBinding.Restore(id, waitGoneMs);
+                }
             else
                 using (var entry = kindKey.OpenSubKey(name))
                     if (entry != null) RestoreJoystickOem(name, entry);

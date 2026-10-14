@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>GcDolphinCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\gc_common\GcCommon.cs" />
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <!-- The Dolphin and Slippi harnesses, built from the reference clones beside
+       this repository (native\build.ps1). The script skips a harness whose
+       sources and pins have not changed. -->
+  <Target Name="BuildGcHarnesses" AfterTargets="Build">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
+  </Target>
+</Project>

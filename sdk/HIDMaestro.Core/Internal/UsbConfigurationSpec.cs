@@ -87,6 +87,27 @@ public sealed class UsbConfigurationSpec
     /// real pad stalls string 0xEE, which is all the Sony and Valve ones.</summary>
     [JsonPropertyName("microsoftOs")]
     public UsbMicrosoftOsSpec? MicrosoftOs { get; set; }
+
+    /// <summary>True when every unit of the device carries the same serial,
+    /// so the profile's <c>serialString</c> is served unchanged for every
+    /// identity key instead of being varied per identity. The Wii U GameCube
+    /// adapter is one: its serial is <c>15/07/2014</c> on every unit, and
+    /// Windows gives a second adapter an instance named after its port.</summary>
+    [JsonPropertyName("sharedSerial")]
+    public bool SharedSerial { get; set; }
+
+    /// <summary>v1.13.0: how the device behaves beyond its descriptors: the
+    /// commands it takes, its replies, when and how often it reports, and
+    /// when it stops answering. Null for a device that reports whatever is
+    /// submitted as it is submitted. See <see cref="DeviceProtocolSpec"/>.</summary>
+    [JsonPropertyName("protocol")]
+    public DeviceProtocolSpec? Protocol { get; set; }
+
+    /// <summary>v1.13.0: the device takes a WinUSB binding on request
+    /// (HMController.BindWinUsb), for libusb hosts. See
+    /// <see cref="WinUsbSpec"/>.</summary>
+    [JsonPropertyName("winUsb")]
+    public WinUsbSpec? WinUsb { get; set; }
 }
 
 /// <summary>Issue #66. Microsoft OS 1.0 descriptors, each a hex string of the

@@ -233,6 +233,42 @@ public sealed class ControllerProfile
     public bool RequiresUsbipBackend =>
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
 
+    /// <summary>v1.13.0: check the profile's port blocks. They fit their
+    /// reports, an output report's ports pair with the input report's, and
+    /// every port field compiles. Throws <see cref="InvalidOperationException"/>
+    /// naming the JSON path.</summary>
+    internal void ValidatePorts()
+    {
+        var input = PortLayout.Of(ExtendedReport, $"Profile '{Id}': extendedReport");
+        var output = PortLayout.Of(ExtendedOutputReport, $"Profile '{Id}': extendedOutputReport");
+        if (output == null) return;
+        if (input == null)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': extendedOutputReport.ports needs extendedReport.ports, which number the ports.");
+        if (output.Count != input.Count)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': extendedOutputReport.ports.count {output.Count} differs from extendedReport.ports.count {input.Count}.");
+        output.PrepareOutput($"Profile '{Id}': extendedOutputReport");
+    }
+
+    /// <summary>v1.13.0: compile everything the profile declares about its
+    /// device beyond the descriptors: the port blocks, the USB/IP protocol
+    /// against the profile's own descriptors, and the WinUSB package. Runs
+    /// before a create takes anything machine-wide, so a mis-authored
+    /// profile is refused with nothing to undo.</summary>
+    internal void ValidateDeviceModel()
+    {
+        ValidatePorts();
+        var cfg = UsbConfiguration;
+        if (cfg?.Protocol == null && cfg?.WinUsb == null) return;
+        if (!RequiresUsbipBackend)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': usbConfiguration.protocol and usbConfiguration.winUsb apply to the usbip backend only.");
+        var descriptors = new Usbip.UsbDescriptorSet(this);
+        Usbip.CompiledProtocol.Compile(this, descriptors);
+        WinUsbBinding.PackageFor(this, descriptors);
+    }
+
     /// <summary>
     /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
     /// Combined: Z centers at 50%, LT pulls toward 0%, RT pulls toward 100%.
@@ -424,6 +460,10 @@ public sealed class ExtendedReportSpec
     /// race); typed as object to keep the DTO layer free of codec types.</summary>
     internal object? CompiledProgramCache;
 
+    /// <summary>The compiled <see cref="PortLayout"/> of <see cref="Ports"/>,
+    /// built on first use. Not serialized.</summary>
+    internal object? PortLayoutCache;
+
     /// <summary>Hex string for the report ID, e.g. "0x31".</summary>
     [JsonPropertyName("reportId")]
     public string ReportId { get; set; } = "";
@@ -474,6 +514,13 @@ public sealed class ExtendedReportSpec
     /// vocabulary.</summary>
     [JsonPropertyName("fields")]
     public List<FieldSpec> Fields { get; set; } = new();
+
+    /// <summary>v1.13.0: the report's repeated per-port blocks, for a device
+    /// that carries several controllers in one report (a multi-port adapter,
+    /// a multitap, a receiver). Fields outside the ports stay in
+    /// <see cref="Fields"/>. See <see cref="PortsSpec"/>.</summary>
+    [JsonPropertyName("ports")]
+    public PortsSpec? Ports { get; set; }
 
     [JsonIgnore]
     public byte ReportIdByte => string.IsNullOrEmpty(ReportId) ? (byte)0
@@ -672,7 +719,9 @@ public sealed class FieldSpec
     public int? SourceResolution { get; set; }
 
     /// <summary>v1.10.0: for a <c>uint10-be</c> sensor field, true when the
-    /// wire axis points opposite to the SDK's.</summary>
+    /// wire axis points opposite to the SDK's. v1.13.0: the same for a
+    /// <c>uint8-axis</c> stick axis, which the SDK runs 0 at the left and at
+    /// the top, such as a stick Y that grows upward.</summary>
     [JsonPropertyName("invert")]
     public bool? Invert { get; set; }
 }

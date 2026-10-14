@@ -319,6 +319,41 @@ public static class DriverBuilder
         return true;
     }
 
+    /// <summary>Catalog and sign an INF-only package staged in its own
+    /// directory, with the same Inf2Cat, signtool and test certificate the
+    /// driver package uses, such as a profile's WinUSB binding. Inf2Cat
+    /// catalogs every INF in the directory it is given, which is why the
+    /// package has a directory of its own.</summary>
+    internal static void CatalogAndSignPackage(string packageDir)
+    {
+        EnsureTestCertificate();
+        string tools = EnsureExtracted();
+        var asm = typeof(DriverBuilder).Assembly;
+        string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
+        string signtool = Path.Combine(tools, "signtool.exe");
+        ProtectedStaging.VerifyBeforeUse(signtool, asm, NativePrefix + "signtool.exe");
+        ProtectedStaging.VerifyBeforeUse(inf2cat, asm, "HIDMaestro.Resources.Inf2Cat.exe");
+
+        foreach (string cat in Directory.GetFiles(packageDir, "*.cat"))
+        {
+            try { File.Delete(cat); } catch { }
+        }
+
+        string catalogOs = CatalogOsFor(RuntimeInformation.OSArchitecture);
+        var (rc, output) = Run(inf2cat, $"/driver:\"{packageDir}\" /os:{catalogOs}", workingDir: tools);
+        if (rc != 0)
+            throw new InvalidOperationException($"inf2cat failed: {output}");
+
+        foreach (string cat in Directory.GetFiles(packageDir, "*.cat"))
+        {
+            var (rc2, output2) = Run(signtool,
+                $"sign /a /sm /s My /n {CertFriendlyName} /fd SHA256 \"{cat}\"",
+                workingDir: tools);
+            if (rc2 != 0)
+                throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
+        }
+    }
+
     /// <summary>Installs the staged INFs via pnputil (Windows builtin).</summary>
     public static bool InstallDrivers()
     {

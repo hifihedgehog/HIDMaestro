@@ -423,6 +423,13 @@ public enum HMButton : uint
     LeftGripTouch   = 1u << 21,
     RightGripTouch  = 1u << 22,
 
+    // A trigger's own digital click, apart from its analog travel. The
+    // GameCube controller's L and R report both: the analog value, and a
+    // click once the trigger bottoms out. A profile names these where its
+    // report carries the click, and the axis stays the analog value.
+    LeftTriggerClick  = 1u << 23,
+    RightTriggerClick = 1u << 24,
+
     // The left trackpad's click on a two-trackpad controller.
     LeftTouchpad = Touchpad,
 

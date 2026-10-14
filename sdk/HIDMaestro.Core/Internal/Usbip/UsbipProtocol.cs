@@ -66,6 +66,8 @@ internal static class UsbipProtocol
     public const int EPipe = 32;                   // stall: unsupported/refused request
     public const int EConnReset = 104;             // successful unlink
     public const int ENoDev = 19;                  // device gone
+    public const int EProto = 71;                  // device did not answer: USBD_STATUS_BTSTUFF
+    public const int EOverflow = 75;               // packet larger than the room left: babble
 
     /// <summary>One parsed CMD header (both submit and unlink shapes).</summary>
     public struct CommandHeader

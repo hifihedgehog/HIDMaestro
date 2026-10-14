@@ -418,8 +418,10 @@ public sealed class HMContext : IDisposable
     /// backend's create on them.</summary>
     private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey)
     {
-        // A payload this build lacks refuses the create before the lease,
-        // so the refusal touches nothing machine-wide.
+        // A profile whose device model does not compile, and a payload this
+        // build lacks, refuse the create before the lease, so the refusal
+        // touches nothing machine-wide.
+        profile.Inner.ValidateDeviceModel();
         if (profile.RequiresUsbipBackend)
             HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport,
                 $"Profile '{profile.Id}' is a composite persona, which rides the USB/IP transport.");
@@ -607,6 +609,9 @@ public sealed class HMContext : IDisposable
             {
                 try { controller.UsbipHandle.Dispose(); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
+                // A WinUSB binding (HMController.BindWinUsb) goes back once
+                // the device is gone.
+                try { Internal.RegistryLedger.Release(controller.Index); } catch { }
                 return;
             }
 

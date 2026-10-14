@@ -236,6 +236,21 @@ internal static class PnputilHelper
         return false;
     }
 
+    /// <summary>Add a package to the driver store without installing it on
+    /// any device.</summary>
+    public static (int exitCode, string output) AddDriver(string infPath)
+        => Run($"/add-driver \"{infPath}\"", timeoutMs: 60_000);
+
+    /// <summary>Delete one package from the driver store, nothing more: no
+    /// /uninstall and no /force, so a package a device still uses stays.
+    /// The caller moves every device off the package first.</summary>
+    public static bool DeletePackagePlain(string publishedName, out string error)
+    {
+        var (rc, output) = Run($"/delete-driver {publishedName}", timeoutMs: 30_000);
+        error = output.Trim();
+        return rc == 0 && !output.Contains("Failed", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Removes every HIDMaestro package from the driver store and
     /// verifies they're actually gone. Throws <see cref="InvalidOperationException"/>
     /// if any package can't be removed. This is the strict version that

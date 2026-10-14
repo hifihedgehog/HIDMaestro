@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>GcSdlCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\gc_common\GcCommon.cs" />
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <!-- The SDL harness and the two SDL3 builds it loads, from the reference
+       clones beside this repository (native\build.ps1). The script skips
+       whatever is already built from the same sources and pins. -->
+  <Target Name="BuildSdlHarness" AfterTargets="Build">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
+  </Target>
+</Project>

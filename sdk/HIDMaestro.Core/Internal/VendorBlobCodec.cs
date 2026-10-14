@@ -109,6 +109,10 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightStickY => rightStickY,
                         _ => 0.5f,
                     };
+                    // "invert" for a wire axis that grows the other way
+                    // from the SDK's, which runs 0 at the left and the top,
+                    // such as a stick Y that grows upward.
+                    if (f.Invert) v = 1f - Math.Clamp(v, 0f, 1f);
                     int raw = (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
                     if (f.Center != 128)
                         raw = f.Center + (int)Math.Round((Math.Clamp(v, 0f, 1f) - 0.5f) * 254);
@@ -618,8 +622,9 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || field.Semantic == null) break;
                     if (fields.TryGetValue(field.Semantic, out var val))
                     {
-                        if (val is float fv) buffer[f.B] = (byte)Math.Clamp(f.Center + (int)Math.Round(fv * 127), 0, 255);
-                        else if (val is double d) buffer[f.B] = (byte)Math.Clamp(f.Center + (int)Math.Round(d * 127), 0, 255);
+                        int sign = f.Invert ? -1 : 1;
+                        if (val is float fv) buffer[f.B] = (byte)Math.Clamp(f.Center + sign * (int)Math.Round(fv * 127), 0, 255);
+                        else if (val is double d) buffer[f.B] = (byte)Math.Clamp(f.Center + sign * (int)Math.Round(d * 127), 0, 255);
                         else buffer[f.B] = ToByte(val);
                     }
                     else
@@ -724,7 +729,8 @@ internal static class VendorBlobCodec
                 {
                     if (f.B < 0 || field.Semantic == null) continue;
                     if ((uint)f.B >= (uint)buffer.Length) continue;
-                    result[field.Semantic] = (float)((buffer[f.B] - f.Center) / 127.0);
+                    int delta = f.Invert ? f.Center - buffer[f.B] : buffer[f.B] - f.Center;
+                    result[field.Semantic] = (float)(delta / 127.0);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.U8Trigger:

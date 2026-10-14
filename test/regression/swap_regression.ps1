@@ -1905,6 +1905,56 @@ function Scenario-Build-Info {
                  -Message 'a build without the ARM64, USB/IP or OpenVR payload reported or refused the wrong thing (see probe stdout)' -SkipCodes 2
 }
 
+# S79: the Wii U GameCube adapter persona's bytes. Every catalog profile
+# compiles as a device model, the three 057E:0337 profiles carry the
+# corrected descriptors and one Full, and the persona's device,
+# configuration, string and report descriptors are a real WUP-028's as the
+# persona serves them, as Windows enumerates them before any driver loads,
+# and as libusb reads them through WinUSB after BindWinUsb.
+function Scenario-GameCube-Descriptors {
+    Invoke-Probe -Dir 'gc_descriptor_check' -Exe 'GcDescriptorCheck.exe' `
+                 -Message 'the GameCube adapter persona served a byte a real WUP-028 does not (see probe stdout)' -SkipCodes 2
+}
+
+# S80: the adapter's protocol through WinUSB, as libusb hosts drive it:
+# SET_PROTOCOL, no input before 0x13, each port's input, connection and
+# rumble apart from the others, the origins, stalls and ignored commands,
+# 0x15 and the port reset, and the 8 ms and 1 ms report rates. Runs the
+# generic port and protocol model in process on exact clock ticks too.
+function Scenario-GameCube-Protocol {
+    Invoke-Probe -Dir 'gc_protocol_check' -Exe 'GcProtocolCheck.exe' `
+                 -Message 'the GameCube adapter persona answered a command, a poll or a port change as a real WUP-028 does not (see probe stdout)' -SkipCodes 2
+}
+
+# S81: BindWinUsb puts WinUSB on one virtual adapter and no real one: the
+# package ranks below input.inf, a second adapter stays on input.inf, the
+# bound devnode carries no reinstall flag, and the binding goes back on
+# dispose and after a killed program, with an adapter arriving before the
+# next program's reclaim and after it.
+function Scenario-GameCube-WinUsb {
+    Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' `
+                 -Message 'the WinUSB binding reached a device it should not, or was not put back (see probe stdout)' -SkipCodes 2
+}
+
+# S82: Dolphin's and Slippi's own adapter code, compiled unmodified with the
+# libusb each pins, reads all four ports, sends rumble to each wired port
+# alone and none to a WaveBird, and sees a port leave and return. Measures
+# submit-to-read latency and the delivered report rate at 8 ms and 1 ms.
+function Scenario-GameCube-Dolphin {
+    Invoke-Probe -Dir 'gc_dolphin_check' -Exe 'GcDolphinCheck.exe' `
+                 -Message 'Dolphin or Slippi read the GameCube adapter persona wrong (see probe stdout)' -SkipCodes 2
+}
+
+# S83: the official SDL3 3.4.18 lists nothing for the adapter beside a
+# DualShock 4 it lists, and SDL 3.4.18 built with libusb lists one gamepad
+# per port with SDL's mapping, refuses rumble on a WaveBird and without
+# rumble power, and sends each port's rumble to that port. Measures latency
+# and the report rate as S82 does.
+function Scenario-GameCube-Sdl {
+    Invoke-Probe -Dir 'gc_sdl_check' -Exe 'GcSdlCheck.exe' `
+                 -Message 'SDL listed, mapped or drove the GameCube adapter persona wrong (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1987,7 +2037,12 @@ $scenarios = @(
     @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
     @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} },
     @{ Name = 'S77_Pnp_Notify';                  Body = ${function:Scenario-Pnp-Notify} },
-    @{ Name = 'S78_Build_Info';                  Body = ${function:Scenario-Build-Info} }
+    @{ Name = 'S78_Build_Info';                  Body = ${function:Scenario-Build-Info} },
+    @{ Name = 'S79_GameCube_Descriptors';        Body = ${function:Scenario-GameCube-Descriptors} },
+    @{ Name = 'S80_GameCube_Protocol';           Body = ${function:Scenario-GameCube-Protocol} },
+    @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} },
+    @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
+    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -67,6 +67,7 @@ internal static class OwnerSweep
             if (after.Devices.Count == 0 && !after.Records.Any(r => r.Live && r.Controllers.Count > 0))
             {
                 try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+                try { WinUsbBinding.RemovePackage(); } catch { }
                 try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
             }
             else

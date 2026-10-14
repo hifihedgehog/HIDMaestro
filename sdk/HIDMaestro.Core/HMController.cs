@@ -256,6 +256,17 @@ public sealed partial class HMController : IDisposable
     private readonly bool _switch2Protocol;
     private readonly byte[]? _switch2BodyBuffer;
 
+    /// <summary>v1.13.0: the controller ports of a device that carries
+    /// several controllers in one report, as the profile's
+    /// <c>extendedReport.ports</c> declares them. Empty for a profile with
+    /// one controller. On a device with ports, <see cref="SubmitState"/>
+    /// submits to port 1.</summary>
+    public HMPortSet Ports { get; }
+
+    /// <summary>v1.13.0: the protocol of a USB/IP device whose profile
+    /// declares <c>usbConfiguration.protocol</c>, else null.</summary>
+    public HMDeviceProtocol? DeviceProtocol { get; }
+
     // Cached layout projections (audit 1n): Profile.Sticks / Profile.Triggers
     // allocate on every access, so snapshot them once in the ctor and read
     // the cached lists on the SubmitState hot path. The profile's layout is
@@ -543,6 +554,13 @@ public sealed partial class HMController : IDisposable
         if (_switch2Protocol)
             _switch2BodyBuffer = new byte[Switch2ProPacker.BodySize];
 
+        // v1.13.0: the profile's controller ports, whose report goes out
+        // once now so the device starts from it, and its USB/IP protocol.
+        Ports = new HMPortSet(this, profile.Inner);
+        lock (_submitLock) Ports.PublishInitialLocked();
+        if (usbipHandle?.Device.Protocol is { } engine)
+            DeviceProtocol = new HMDeviceProtocol(engine);
+
         // Output passthrough is best-effort. If the section can't be created
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
@@ -675,48 +693,21 @@ public sealed partial class HMController : IDisposable
         long startTicks = latency != null
             ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
-        // v1.3.9: single unified state.Axes dict drives every analog input.
-        // Resolve the 6 "simple-slot" values (left stick X/Y, right stick
-        // X/Y, LT, RT) by looking up each profile's declared sticks/triggers
-        // in the axes dict. Auto-default: 0.5 (centered) for sticks, 0.0
-        // (released) for triggers.
-        var axes = state.Axes;
-        double GetAxis(HMAxis ax, double def) =>
-            axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
+        ResolveSimpleSlots(in state, out double mlx, out double mly, out double mrx,
+                           out double mry, out double mlt, out double mrt);
 
-        // Cached at construction: Profile.Sticks / Profile.Triggers are
-        // uncached computed properties that each allocate a List plus
-        // record elements on every access. Reading them per SubmitState
-        // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
-        // avoidable GC pressure on the hot path (audit 1n). The layout is
-        // immutable for the controller's lifetime, so resolve once.
-        var sticks = _cachedSticks;
-        var triggers = _cachedTriggers;
-        // Sticks resolve canonical-first when the descriptor declares none,
-        // mirroring ResolveTrigger below (issue #56). Profile.Sticks derives
-        // from the descriptor-built report builder, so a profile whose
-        // descriptor is an opaque vendor blob - every Valve state packet -
-        // has no declared sticks at all. Hard-defaulting those to 0.5 put a
-        // live device on the wire whose sticks never left center, while its
-        // triggers worked, because only triggers had a fallback. The right
-        // stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
-        double mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : GetAxis(HMAxis.X, 0.5);
-        double mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : GetAxis(HMAxis.Y, 0.5);
-        double mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5)
-                   : axes != null && axes.ContainsKey(HMAxis.Rx) ? GetAxis(HMAxis.Rx, 0.5)
-                                                                 : GetAxis(HMAxis.Z, 0.5);
-        double mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5)
-                   : axes != null && axes.ContainsKey(HMAxis.Ry) ? GetAxis(HMAxis.Ry, 0.5)
-                                                                 : GetAxis(HMAxis.Rz, 0.5);
-        // Triggers resolve canonical-first, then fall back to the descriptor's
-        // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
-        // ResolveAxisByRole (canonical defaults when no axisMap); HIDMaestroTest
-        // / StandardAxes writes axes[triggers[N].Axis] directly. Both must feed
-        // the GIP buffer that drives XInput / WGI / RawInput; otherwise the
-        // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
-        // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
-        double mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
-        double mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
+        // A device with controller ports: SubmitState is port 1.
+        if (Ports.Count > 0)
+        {
+            Ports.SubmitLocked(0, in state, direct: false,
+                (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt);
+            if (latency != null)
+            {
+                long portElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+                latency(portElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
+            }
+            return;
+        }
 
         // Switch Pro protocol path (issue #33): pack the wire-format 0x30
         // body instead of the descriptor-driven build. The descriptor's
@@ -948,6 +939,110 @@ public sealed partial class HMController : IDisposable
             long micros = elapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
             latency(micros);
         }
+    }
+
+    /// <summary>The six simple-slot values (left stick X/Y, right stick X/Y,
+    /// LT, RT) every encoder starts from, resolved from
+    /// <see cref="HMGamepadState.Axes"/> through the profile's declared
+    /// sticks and triggers. v1.3.9: a single unified Axes dict drives every
+    /// analog input. Auto-default: 0.5 (centered) for sticks, 0.0
+    /// (released) for triggers.</summary>
+    private void ResolveSimpleSlots(in HMGamepadState state, out double mlx, out double mly,
+                                    out double mrx, out double mry, out double mlt, out double mrt)
+    {
+        var axes = state.Axes;
+        double GetAxis(HMAxis ax, double def) =>
+            axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
+
+        // Cached at construction: Profile.Sticks / Profile.Triggers are
+        // uncached computed properties that each allocate a List plus
+        // record elements on every access. Reading them per SubmitState
+        // frame (~250 Hz × N controllers) is ~6 heap objects/frame of
+        // avoidable GC pressure on the hot path (audit 1n). The layout is
+        // immutable for the controller's lifetime, so resolve once.
+        var sticks = _cachedSticks;
+        var triggers = _cachedTriggers;
+        // Sticks resolve canonical-first when the descriptor declares none,
+        // mirroring ResolveTrigger below (issue #56). Profile.Sticks derives
+        // from the descriptor-built report builder, so a profile whose
+        // descriptor is an opaque vendor blob - every Valve state packet -
+        // has no declared sticks at all. Hard-defaulting those to 0.5 put a
+        // live device on the wire whose sticks never left center, while its
+        // triggers worked, because only triggers had a fallback. The right
+        // stick accepts either convention: Rx/Ry, or Sony's Z/Rz.
+        mlx = sticks.Count > 0 ? GetAxis(sticks[0].XAxis, 0.5) : GetAxis(HMAxis.X, 0.5);
+        mly = sticks.Count > 0 ? GetAxis(sticks[0].YAxis, 0.5) : GetAxis(HMAxis.Y, 0.5);
+        mrx = sticks.Count > 1 ? GetAxis(sticks[1].XAxis, 0.5)
+                   : axes != null && axes.ContainsKey(HMAxis.Rx) ? GetAxis(HMAxis.Rx, 0.5)
+                                                                 : GetAxis(HMAxis.Z, 0.5);
+        mry = sticks.Count > 1 ? GetAxis(sticks[1].YAxis, 0.5)
+                   : axes != null && axes.ContainsKey(HMAxis.Ry) ? GetAxis(HMAxis.Ry, 0.5)
+                                                                 : GetAxis(HMAxis.Rz, 0.5);
+        // Triggers resolve canonical-first, then fall back to the descriptor's
+        // declared trigger field. PadForge writes axes[Z]/axes[Rz] via
+        // ResolveAxisByRole (canonical defaults when no axisMap). HIDMaestroTest
+        // and StandardAxes write axes[triggers[N].Axis] directly. Both must feed
+        // the GIP buffer that drives XInput, WGI and Raw Input. Otherwise the
+        // unified xbox-360-* descriptors (layout.triggers = Vx/Vy) silently
+        // drop PadForge's writes and triggers freeze in non-DirectInput APIs.
+        mlt = ResolveTrigger(axes, triggers, 0, _canonicalLt);
+        mrt = ResolveTrigger(axes, triggers, 1, _canonicalRt);
+    }
+
+    /// <summary>The six simple-slot values as the port encoders take them.</summary>
+    internal void ResolveSlots(in HMGamepadState state, out float lx, out float ly, out float rx,
+                               out float ry, out float lt, out float rt)
+    {
+        ResolveSimpleSlots(in state, out double mlx, out double mly, out double mrx,
+                           out double mry, out double mlt, out double mrt);
+        lx = (float)mlx; ly = (float)mly; rx = (float)mrx;
+        ry = (float)mry; lt = (float)mlt; rt = (float)mrt;
+    }
+
+    /// <summary>The lock every submit path writes the input section under.</summary>
+    internal object SubmitLock => _submitLock;
+
+    internal void ThrowIfDisposedInternal() => ThrowIfDisposed();
+
+    /// <summary>The ports' whole report through the extended lane, which a
+    /// USB/IP device reads back byte for byte. <paramref name="direct"/> is
+    /// true for a port call of the consumer's own, which this records as
+    /// SubmitRawExtendedReport records a frame, and false inside
+    /// SubmitState, which records its own. Caller holds
+    /// <see cref="SubmitLock"/>.</summary>
+    internal void WritePortsReportLocked(byte[] report, bool direct)
+    {
+        if (!direct)
+        {
+            SubmitRawExtendedReportCore(report);
+            return;
+        }
+        AwaitPreviousDelivery();
+        SubmitRawExtendedReportCore(report);
+        NoteFrameWritten();
+        if (_idleThread != null)
+            RememberRawFrame(report, extended: true);
+    }
+
+    /// <summary>v1.13.0: bind WinUSB to this controller's virtual USB/IP
+    /// device, so libusb hosts can open it, for a profile that declares
+    /// <c>usbConfiguration.winUsb</c>. Nothing the device reports changes,
+    /// and no other device is touched: a real device, now or later, keeps
+    /// the driver Windows gives it. The binding is recorded and is undone
+    /// when the controller is disposed or its program ends. Requires
+    /// elevation, as creating the controller does.</summary>
+    /// <returns><see cref="HMWinUsbBinding.Bound"/>, or
+    /// <see cref="HMWinUsbBinding.AlreadyBound"/> when the device already
+    /// carries a driver libusb opens, or <see cref="HMWinUsbBinding.OtherDriver"/>
+    /// when it carries a driver from outside Windows, which this step leaves
+    /// alone.</returns>
+    /// <exception cref="InvalidOperationException">The profile declares no
+    /// winUsb, or no driver Windows has ranks above the package, which would
+    /// let Windows choose the package for real devices.</exception>
+    public HMWinUsbBinding BindWinUsb()
+    {
+        ThrowIfDisposed();
+        return Internal.WinUsbBinding.Bind(this);
     }
 
     /// <summary>Push a raw HID input report for features that
@@ -1539,6 +1634,14 @@ public sealed partial class HMController : IDisposable
                         out byte source, out byte reportId, out int dataSize, buf))
                 {
                     drainedAny = true;
+                    // A protocol device's return to its initial state. It
+                    // came from the device, not a host, so it is not output.
+                    if (source == Internal.Usbip.UsbipEmulatedDevice.SourceDeviceReset)
+                    {
+                        Ports.OnDeviceReset();
+                        if (ct.IsCancellationRequested) break;
+                        continue;
+                    }
                     var data = new ReadOnlyMemory<byte>(buf, 0, dataSize);
                     var pkt = new HMOutputPacket((HMOutputSource)source, reportId, data, lastSeq);
                     OutputReceived?.Invoke(this, pkt);
@@ -1574,6 +1677,7 @@ public sealed partial class HMController : IDisposable
                             Buffer.BlockCopy(buf, 0, full, 1, dataSize);
 
                             var (fields, crcValid) = VendorBlobCodec.Decode(extOut, full);
+                            Ports.AddDecoded(fields, reportId, new ReadOnlySpan<byte>(buf, 0, dataSize));
                             OutputDecoded.Invoke(this, new HMOutputDecodedEventArgs
                             {
                                 ReportId = reportId,
@@ -1663,6 +1767,11 @@ public sealed partial class HMController : IDisposable
                             // Same containment contract as the codec path.
                         }
                     }
+
+                    // Each port's output fields, from an output report that
+                    // covers every port. A shorter one sets nothing.
+                    if (Ports.Count > 0 && source == (byte)HMOutputSource.HidOutput)
+                        Ports.OnOutputReport(reportId, new ReadOnlySpan<byte>(buf, 0, dataSize));
 
                     // v1.3.5: arm-handshake watcher. When the profile
                     // declares armOn triggers and a matching host action

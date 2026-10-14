@@ -327,14 +327,20 @@ internal sealed class UsbipServer : IDisposable
         // ── Reply builders ───────────────────────────────────────────────
 
         public void SendRetSubmitNonIso(uint seqnum, int status, int actualLength, byte[]? inPayload)
+            => SendRetSubmitNonIso(seqnum, status, actualLength, (ReadOnlySpan<byte>)inPayload);
+
+        /// <summary>The same reply from a span, so a caller that fills a
+        /// pooled buffer sends it without copying it to an array of its
+        /// own.</summary>
+        public void SendRetSubmitNonIso(uint seqnum, int status, int actualLength, ReadOnlySpan<byte> inPayload)
         {
-            int payloadLen = inPayload?.Length ?? 0;
+            int payloadLen = inPayload.Length;
             var buf = ArrayPool<byte>.Shared.Rent(UsbipProtocol.HeaderSize + payloadLen);
             try
             {
                 UsbipProtocol.WriteRetSubmit(buf, seqnum, status, actualLength, 0,
                     UsbipProtocol.NumberOfPacketsNonIsoch, 0);
-                inPayload?.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
+                inPayload.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
                 Send(buf.AsSpan(0, UsbipProtocol.HeaderSize + payloadLen));
             }
             finally { ArrayPool<byte>.Shared.Return(buf); }

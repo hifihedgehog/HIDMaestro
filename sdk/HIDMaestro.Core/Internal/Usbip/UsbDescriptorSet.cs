@@ -29,6 +29,11 @@ internal sealed class UsbDescriptorSet
 
     public byte ConfigurationValue { get; }
     public byte NumInterfaces { get; }
+
+    /// <summary>bInterfaceClass, bInterfaceSubClass and bInterfaceProtocol of
+    /// the configuration's first interface descriptor, from which Windows
+    /// builds a single-interface device's compatible IDs.</summary>
+    public (byte Class, byte SubClass, byte Protocol) FirstInterfaceClass { get; }
     public ushort VendorId { get; }
     public ushort ProductId { get; }
     public ushort BcdDevice { get; }
@@ -165,7 +170,11 @@ internal sealed class UsbDescriptorSet
         _iConfiguration = ConfigurationDescriptor.Length > 6 ? ConfigurationDescriptor[6] : (byte)0;
         if (!string.IsNullOrEmpty(profile.SerialString))
         {
-            _serial = InstanceSerial(profile.SerialString, identity.SerialVariant);
+            // A device whose units all carry one serial keeps it on every
+            // identity, as a second real unit does (UsbConfigurationSpec.SharedSerial).
+            _serial = cfg.SharedSerial
+                ? profile.SerialString
+                : InstanceSerial(profile.SerialString, identity.SerialVariant);
         }
         else
         {
@@ -237,6 +246,7 @@ internal sealed class UsbDescriptorSet
 
         byte curIface = 0xFF, curAlt = 0;
         byte hidIface = 0xFF;
+        bool sawInterface = false;
         var classByIface = new Dictionary<byte, byte[]>();
         for (int off = 0; off + 2 <= blob.Length;)
         {
@@ -249,6 +259,11 @@ internal sealed class UsbDescriptorSet
                 curIface = blob[off + 2];
                 curAlt = blob[off + 3];
                 if (blob[off + 5] == 0x03 && hidIface == 0xFF) hidIface = curIface;
+                if (!sawInterface)
+                {
+                    FirstInterfaceClass = (blob[off + 5], blob[off + 6], blob[off + 7]);
+                    sawInterface = true;
+                }
             }
             else if (type == 0x05) // endpoint
             {

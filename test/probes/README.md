@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S78. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S83. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -29,6 +29,11 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Does source-generated JSON read every profile the way v1.12.0 did?" | [json_parity_check](json_parity_check/): no device. S76. `--time <runs>` times the full-catalog parse both ways |
 | "Do PnP notifications reach the SDK's create and dispose waits?" | [pnp_notify_check](pnp_notify_check/): S77 |
 | "Does a build carry what it reports, and refuse what it lacks?" | [build_info_check](build_info_check/): S78. Its project build also makes a variant without the ARM64, USB/IP and OpenVR payloads |
+| "Does the GameCube adapter persona serve a real WUP-028's bytes?" | [gc_descriptor_check](gc_descriptor_check/): S79. As served, as Windows enumerates them before any driver, and through WinUSB. Builds against b4d29d9, reaching newer members by reflection |
+| "Does the persona answer commands and polls as the real adapter does?" | [gc_protocol_check](gc_protocol_check/): S80, through WinUSB. Also drives the generic port and protocol model in process on exact clock ticks |
+| "Does BindWinUsb reach one virtual adapter and no real one, and go back?" | [gc_winusb_check](gc_winusb_check/): S81. `child` mode is the program it kills |
+| "Do Dolphin and Slippi read the persona as they read a real adapter?" | [gc_dolphin_check](gc_dolphin_check/): S82. `nativeuild.ps1` compiles each emulator's adapter code unmodified from the reference clones. `hold <seconds>` keeps a bound persona up for a manual run, `--libusb-log <level>` writes libusb's log |
+| "What does SDL do with the persona?" | [gc_sdl_check](gc_sdl_check/): S83. `nativeuild.ps1` builds SDL 3.4.18 with libusb and checks the official SDL3.dll's hash |
 
 ## Near-duplicates and when to use which
 

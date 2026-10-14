@@ -2262,6 +2262,9 @@ internal static partial class DeviceOrchestrator
         if (!preserveInstall)
         {
             try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+            // The WinUSB binding packages, after every devnode still on
+            // one is put back.
+            try { WinUsbBinding.RemovePackage(); } catch { }
 
             // Clear registry config
             try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
