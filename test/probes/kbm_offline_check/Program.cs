@@ -151,19 +151,29 @@ internal static class Program
     static List<byte[]> Mouse(KeyboardMousePacker p, HMMouseState s)
     {
         uint extra = 0; bool sent = false;
-        return p.PackMouse(in s, ref extra, ref sent);
+        return Copy(p.PackMouse(in s, ref extra, ref sent, new KeyboardMouseBuffers()));
     }
+
+    // The packer hands back its buffers, which its next call on the same
+    // set reuses, so a check that keeps frames copies them.
+    static List<byte[]> Copy(List<byte[]> frames) => frames.Select(f => f.ToArray()).ToList();
+
+    static byte[] Kb(KeyboardMousePacker p, HMKeyModifiers m, ReadOnlySpan<HMKey> keys) =>
+        p.PackKeyboard(m, keys, new KeyboardMouseBuffers()).ToArray();
+
+    static byte[] Cc(KeyboardMousePacker p, ReadOnlySpan<ushort> usages) =>
+        p.PackConsumer(usages, new KeyboardMouseBuffers()).ToArray();
 
     static void Packers(HMContext ctx)
     {
         Console.WriteLine("\n== 3. Packing ==");
         var kb = Packer(new HidDescriptorBuilder().Keyboard().Build());
         Check("Shift+A+B is 02 00 04 05 00 00 00 00",
-              Hex(kb.PackKeyboard(HMKeyModifiers.LeftShift, new[] { HMKey.A, HMKey.B })) == "0200040500000000");
+              Hex(Kb(kb, HMKeyModifiers.LeftShift, new[] { HMKey.A, HMKey.B })) == "0200040500000000");
         Check("a modifier passed as a key lands on its bit",
-              Hex(kb.PackKeyboard(HMKeyModifiers.None, new[] { HMKey.LeftShift })) == "0200000000000000");
+              Hex(Kb(kb, HMKeyModifiers.None, new[] { HMKey.LeftShift })) == "0200000000000000");
         Check("seven keys roll over: ErrorRollOver in all six slots",
-              Hex(kb.PackKeyboard(HMKeyModifiers.None, new[] { HMKey.A, HMKey.B, HMKey.C, HMKey.D, HMKey.E, HMKey.F, HMKey.G })) == "0000010101010101");
+              Hex(Kb(kb, HMKeyModifiers.None, new[] { HMKey.A, HMKey.B, HMKey.C, HMKey.D, HMKey.E, HMKey.F, HMKey.G })) == "0000010101010101");
         // An array whose usages start at A (0x04) with Logical Minimum 0: 0
         // selects A, so an empty slot must hold a value past the range.
         var fromA = Packer(new byte[]
@@ -173,8 +183,8 @@ internal static class Program
             0xC0,
         });
         Check("an array starting at A leaves empty slots past its range (A, then 0x62)",
-              Hex(fromA.PackKeyboard(HMKeyModifiers.None, new[] { HMKey.A })) == "0062"
-              && Hex(fromA.PackKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty)) == "6262");
+              Hex(Kb(fromA, HMKeyModifiers.None, new[] { HMKey.A })) == "0062"
+              && Hex(Kb(fromA, HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty)) == "6262");
 
         // A keyboard without report IDs receives the LED byte alone, and both
         // backends carry a report's first byte in the packet's report ID
@@ -187,7 +197,7 @@ internal static class Program
         Check("a report ID the LED report does not use decodes to nothing", kb2.DecodeLeds(5, new byte[] { 0x03 }) == null);
 
         var nkro = Packer(new HidDescriptorBuilder().KeyboardNkro().Build());
-        var n = nkro.PackKeyboard(HMKeyModifiers.LeftControl, new[] { HMKey.A, HMKey.Z });
+        var n = Kb(nkro, HMKeyModifiers.LeftControl, new[] { HMKey.A, HMKey.Z });
         Check("NKRO: Ctrl, then A as bit 12 and Z as bit 37",
               n.Length == 29 && n[0] == 0x01 && n[1] == 0x10 && n[4] == 0x20 && n.Where((b, i) => i is not (0 or 1 or 4)).All(b => b == 0),
               Hex(n));
@@ -217,20 +227,37 @@ internal static class Program
         var mv = new HidDescriptorBuilder().Mouse(reportId: 1).VendorButtons(3, 2).Build();
         var pv = Packer(mv);
         uint extra = 0; bool sent = false;
+        var pvb = new KeyboardMouseBuffers();
         var s1 = new HMMouseState { Buttons = HMMouseButtons.Left | HMMouseButtons.Button6 | HMMouseButtons.Button8 };
-        var fr1 = pv.PackMouse(in s1, ref extra, ref sent);
+        var fr1 = Copy(pv.PackMouse(in s1, ref extra, ref sent, pvb));
         Check("buttons 6 and 8 go to the vendor collection as its buttons 1 and 3",
               fr1.Count == 2 && Hex(fr1[0]) == "0101000000000000" && Hex(fr1[1]) == "0205", string.Join(",", fr1.Select(Hex)));
-        var fr2 = pv.PackMouse(in s1, ref extra, ref sent);
+        var fr2 = Copy(pv.PackMouse(in s1, ref extra, ref sent, pvb));
         Check("an unchanged extra-button state sends no second report", fr2.Count == 1);
         var s3 = new HMMouseState { Buttons = HMMouseButtons.Left };
-        var fr3 = pv.PackMouse(in s3, ref extra, ref sent);
+        var fr3 = Copy(pv.PackMouse(in s3, ref extra, ref sent, pvb));
         Check("releasing them sends it once more, cleared", fr3.Count == 2 && Hex(fr3[1]) == "0200");
         Check("the packer counts 5 + 3 buttons", pv.ButtonCount == 8);
 
+        // One controller packs every frame into the same buffers. Each frame
+        // starts clear, and a split movement followed by a short one sends
+        // only the short one's report.
+        var shared = new KeyboardMouseBuffers();
+        string r1 = Hex(kb.PackKeyboard(HMKeyModifiers.LeftShift, new[] { HMKey.A, HMKey.B }, shared));
+        string r2 = Hex(kb.PackKeyboard(HMKeyModifiers.None, ReadOnlySpan<HMKey>.Empty, shared));
+        string r3 = Hex(kb.PackKeyboard(HMKeyModifiers.None, new[] { HMKey.C }, shared));
+        Check("one buffer set packs Shift+A+B, nothing, then C, each from clear",
+              r1 == "0200040500000000" && r2 == "0000000000000000" && r3 == "0000060000000000", $"{r1} {r2} {r3}");
+        uint e2 = 0; bool s2 = false;
+        var long1 = Copy(m.PackMouse(new HMMouseState { X = 70000 }, ref e2, ref s2, shared));
+        var short1 = Copy(m.PackMouse(new HMMouseState { X = 1 }, ref e2, ref s2, shared));
+        Check("on the same buffers +70000 still goes as three reports, and +1 after it as one",
+              long1.Count == 3 && short1.Count == 1 && Hex(short1[0]) == "00010000000000",
+              $"{long1.Count}: {string.Join(",", short1.Select(Hex))}");
+
         var cc = Packer(new HidDescriptorBuilder().ConsumerControl().Build());
-        Check("Volume Increment is E9 00", Hex(cc.PackConsumer(new ushort[] { 0x00E9 })) == "E900");
-        Check("no usage is 00 00", Hex(cc.PackConsumer(Array.Empty<ushort>())) == "0000");
+        Check("Volume Increment is E9 00", Hex(Cc(cc, new ushort[] { 0x00E9 })) == "E900");
+        Check("no usage is 00 00", Hex(Cc(cc, Array.Empty<ushort>())) == "0000");
 
         // Two catalog devices, worked out from their own descriptors.
         var da = ctx.GetProfile("razer-deathadder-v2")!;
@@ -248,11 +275,11 @@ internal static class Program
 
         var mk = ctx.GetProfile("apple-magic-keyboard-touch-id-numeric")!;
         var mkp = mk.Inner.GetOrBuildKeyboardMousePacker();
-        string mkf = Hex(mkp.PackKeyboard(HMKeyModifiers.LeftGui, new[] { HMKey.Space }));
+        string mkf = Hex(Kb(mkp, HMKeyModifiers.LeftGui, new[] { HMKey.Space }));
         Check("Magic Keyboard: Cmd+Space is report 1: modifiers, reserved, six keys, the extras byte",
               mkf == "0108002C000000000000", mkf);
         Check("its consumer report 0x52 carries Play/Pause on bit 0 and Next Track on bit 3",
-              Hex(mkp.PackConsumer(new ushort[] { 0x00CD })) == "5201" && Hex(mkp.PackConsumer(new ushort[] { 0x00B5 })) == "5208");
+              Hex(Cc(mkp, new ushort[] { 0x00CD })) == "5201" && Hex(Cc(mkp, new ushort[] { 0x00B5 })) == "5208");
         Check("its LED report is report 1", mkp.DecodeLeds(1, new byte[] { 0x02 }) == HMKeyboardLeds.CapsLock);
     }
 
@@ -286,7 +313,7 @@ internal static class Program
                     }
                     else
                     {
-                        var frame = packer.PackKeyboard(HMKeyModifiers.LeftShift, new[] { HMKey.A });
+                        var frame = Kb(packer, HMKeyModifiers.LeftShift, new[] { HMKey.A });
                         problem = ReadBackKeyboard(packer, frame);
                     }
                 }

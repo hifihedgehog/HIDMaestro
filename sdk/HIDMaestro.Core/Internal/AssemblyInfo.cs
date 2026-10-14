@@ -52,3 +52,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("GcWinUsbCheck")]
 [assembly: InternalsVisibleTo("GcDolphinCheck")]
 [assembly: InternalsVisibleTo("GcSdlCheck")]
+[assembly: InternalsVisibleTo("PerfBudgetCheck")]

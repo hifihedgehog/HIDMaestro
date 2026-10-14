@@ -3,6 +3,32 @@ using System.Collections.Generic;
 
 namespace HIDMaestro.Internal;
 
+/// <summary>One controller's working space for <see cref="KeyboardMousePacker"/>:
+/// the frames the packer hands back and the usage lists it sorts. A packer
+/// is shared by every controller of its profile, so each controller keeps
+/// its own of these and uses it under its submit lock. Once each buffer has
+/// grown to what the controller sends, a submit allocates nothing.</summary>
+internal sealed class KeyboardMouseBuffers
+{
+    /// <summary>The frames of the last mouse submit, in send order.</summary>
+    internal readonly List<byte[]> Frames = new();
+    internal readonly List<byte[]> Motion = new();
+    internal byte[]? Extra, Keyboard, Consumer, Release, RawFrame;
+    internal uint[] Usages = new uint[16], Rest = new uint[16], Fits = new uint[16];
+    internal bool[] Flags = new bool[16];
+
+    /// <summary>Room for <paramref name="n"/> usages in every list.</summary>
+    internal void Reserve(int n)
+    {
+        if (Usages.Length >= n) return;
+        int size = Math.Max(n, Usages.Length * 2);
+        Usages = new uint[size];
+        Rest = new uint[size];
+        Fits = new uint[size];
+        Flags = new bool[size];
+    }
+}
+
 /// <summary>Packs <see cref="HMMouseState"/>, keys and consumer usages into
 /// the input reports a profile's own descriptor declares (issue #67). Built
 /// once per profile from <see cref="HidReportMap"/>.
@@ -40,6 +66,8 @@ internal sealed class KeyboardMousePacker
     private readonly HidReportLayout? _keyboardReport;
     private readonly HidReportLayout? _keyboardLedReport;
     private readonly HidReportLayout? _consumerReport;
+    // The longest input report, the size of a release frame's buffer.
+    private readonly int _maxInputFrameBytes;
 
     public bool HasMouse => _mouseReports.Count > 0;
     public bool HasKeyboard => _keyboardReport != null;
@@ -114,6 +142,9 @@ internal sealed class KeyboardMousePacker
         if (cc != null)
             foreach (var r in Map.ReportsOf(cc, HidReportKind.Input))
                 if (HasPage(r, cc, PageConsumer)) { _consumerReport = r; break; }
+
+        foreach (var r in Map.Reports)
+            if (r.Kind == HidReportKind.Input) _maxInputFrameBytes = Math.Max(_maxInputFrameBytes, r.FrameBytes);
     }
 
     private static bool IsSystemCollection(HidCollection c) =>
@@ -131,11 +162,36 @@ internal sealed class KeyboardMousePacker
         return false;
     }
 
-    private static byte[] NewFrame(HidReportLayout r)
+    /// <summary>A cleared frame of report <paramref name="r"/> with its ID,
+    /// in <paramref name="buffer"/>, which is made the report's size the
+    /// first time.</summary>
+    private static byte[] Frame(ref byte[]? buffer, HidReportLayout r)
     {
-        var frame = new byte[r.FrameBytes];
-        if (r.ReportId != 0) frame[0] = r.ReportId;
+        if (buffer == null || buffer.Length != r.FrameBytes) buffer = new byte[r.FrameBytes];
+        else Array.Clear(buffer);
+        if (r.ReportId != 0) buffer[0] = r.ReportId;
+        return buffer;
+    }
+
+    /// <summary>The same for the frame at <paramref name="i"/> of a list
+    /// whose positions each keep one report.</summary>
+    private static byte[] FrameAt(List<byte[]> frames, int i, HidReportLayout r)
+    {
+        if (i == frames.Count) frames.Add(new byte[r.FrameBytes]);
+        byte[]? frame = frames[i];
+        frame = Frame(ref frame, r);
+        frames[i] = frame;
         return frame;
+    }
+
+    /// <summary>Add <paramref name="u"/> to the first <paramref name="n"/>
+    /// usages unless it is there. Returns the new count.</summary>
+    private static int AddOnce(uint[] usages, int n, uint u)
+    {
+        for (int i = 0; i < n; i++)
+            if (usages[i] == u) return n;
+        usages[n] = u;
+        return n + 1;
     }
 
     // ── Mouse ────────────────────────────────────────────────────────────
@@ -145,11 +201,13 @@ internal sealed class KeyboardMousePacker
     /// many reports as it takes, so none of it is lost. Buttons and an
     /// absolute position repeat in each. The extra-button report follows
     /// when it changed.</summary>
-    public List<byte[]> PackMouse(in HMMouseState s, ref uint lastExtraButtons, ref bool extraSent)
+    public List<byte[]> PackMouse(in HMMouseState s, ref uint lastExtraButtons, ref bool extraSent, KeyboardMouseBuffers b)
     {
         if (_mouseReports.Count == 0)
             throw new InvalidOperationException("This profile's descriptor declares no mouse collection (Generic Desktop, Mouse).");
-        var frames = new List<byte[]>();
+        var frames = b.Frames;
+        frames.Clear();
+        int next = 0;
         // A part the descriptor does not declare owes nothing, or the loop
         // below would wait forever for a field to carry it.
         int rx = _x != null ? s.X : 0, ry = _y != null ? s.Y : 0;
@@ -158,7 +216,7 @@ internal sealed class KeyboardMousePacker
         {
             foreach (var r in _mouseReports)
             {
-                var frame = NewFrame(r);
+                var frame = FrameAt(b.Motion, next++, r);
                 foreach (var (n, at) in _mouseButtons)
                     if (n <= 32 && at.F.ReportId == r.ReportId)
                         HidReportMap.Write(frame, at.F, at.E, (int)(((uint)s.Buttons >> (n - 1)) & 1u));
@@ -178,7 +236,7 @@ internal sealed class KeyboardMousePacker
                 if (n <= 32 && (((uint)s.Buttons >> (n - 1)) & 1u) != 0) extra |= 1u << (n - 1);
             if (!extraSent || extra != lastExtraButtons)
             {
-                var frame = NewFrame(_extraButtonReport);
+                var frame = Frame(ref b.Extra, _extraButtonReport);
                 foreach (var (n, at) in _extraButtons)
                     if (n <= 32) HidReportMap.Write(frame, at.F, at.E, (int)((extra >> (n - 1)) & 1u));
                 frames.Add(frame);
@@ -212,18 +270,23 @@ internal sealed class KeyboardMousePacker
     /// lists as a bit go in as bits, and the rest fill the key array. More keys
     /// than the array holds report ErrorRollOver in every slot, as the HID
     /// 1.11 boot keyboard does (Appendix C).</summary>
-    public byte[] PackKeyboard(HMKeyModifiers modifiers, ReadOnlySpan<HMKey> keys)
+    public byte[] PackKeyboard(HMKeyModifiers modifiers, ReadOnlySpan<HMKey> keys, KeyboardMouseBuffers b)
     {
         if (_keyboardReport == null)
             throw new InvalidOperationException("This profile's descriptor declares no keyboard collection (Generic Desktop, Keyboard).");
-        var frame = NewFrame(_keyboardReport);
-        var pressed = new HashSet<uint>();
+        var frame = Frame(ref b.Keyboard, _keyboardReport);
+        b.Reserve(8 + keys.Length);
+        // Every usage held, each once.
+        uint[] pressed = b.Usages;
+        int n = 0;
         for (int m = 0; m < 8; m++)
-            if (((int)modifiers & (1 << m)) != 0) pressed.Add(((uint)PageKeyboard << 16) | (uint)(0xE0 + m));
+            if (((int)modifiers & (1 << m)) != 0) n = AddOnce(pressed, n, ((uint)PageKeyboard << 16) | (uint)(0xE0 + m));
         foreach (var k in keys)
-            if (k != HMKey.None) pressed.Add(((uint)PageKeyboard << 16) | (byte)k);
+            if (k != HMKey.None) n = AddOnce(pressed, n, ((uint)PageKeyboard << 16) | (byte)k);
 
-        var asBits = new HashSet<uint>();
+        // A usage the report lists as a bit goes on its bit.
+        bool[] asBit = b.Flags;
+        Array.Clear(asBit, 0, n);
         foreach (var f in _keyboardReport.Fields)
         {
             if (f.Constant || !f.Variable) continue;
@@ -231,23 +294,34 @@ internal sealed class KeyboardMousePacker
             {
                 uint u = f.UsageAt(e);
                 if (HidField.PageOf(u) != PageKeyboard) continue;
-                bool on = pressed.Contains(u);
-                HidReportMap.Write(frame, f, e, on ? 1 : 0);
-                if (on) asBits.Add(u);
+                int at = Array.IndexOf(pressed, u, 0, n);
+                HidReportMap.Write(frame, f, e, at >= 0 ? 1 : 0);
+                if (at >= 0) asBit[at] = true;
             }
         }
-        var rest = new List<uint>();
-        foreach (var u in pressed)
-            if (!asBits.Contains(u)) rest.Add(u);
-        rest.Sort();
 
+        // The rest fill the key arrays in usage order.
+        uint[] rest = b.Rest;
+        int restCount = 0;
+        for (int i = 0; i < n; i++)
+            if (!asBit[i]) rest[restCount++] = pressed[i];
+        Array.Sort(rest, 0, restCount);
+
+        uint[] fits = b.Fits;
         foreach (var f in _keyboardReport.Fields)
         {
             if (f.Constant || f.Variable) continue;
             if (f.Usages.Length == 0 || HidField.PageOf(f.Usages[0].Min) != PageKeyboard) continue;
-            var fits = rest.FindAll(u => f.IndexOf(u) >= 0);
+            // The usages this array can name leave the rest, in order.
+            int fitCount = 0, kept = 0;
+            for (int i = 0; i < restCount; i++)
+            {
+                if (f.IndexOf(rest[i]) >= 0) fits[fitCount++] = rest[i];
+                else rest[kept++] = rest[i];
+            }
+            restCount = kept;
             int empty = EmptyArrayValue(f);
-            if (fits.Count > f.Count)
+            if (fitCount > f.Count)
             {
                 int roll = f.IndexOf(((uint)PageKeyboard << 16) | 0x01);
                 for (int e = 0; e < f.Count; e++)
@@ -256,9 +330,8 @@ internal sealed class KeyboardMousePacker
             else
             {
                 for (int e = 0; e < f.Count; e++)
-                    HidReportMap.Write(frame, f, e, e < fits.Count ? f.LogicalMin + f.IndexOf(fits[e]) : empty);
+                    HidReportMap.Write(frame, f, e, e < fitCount ? f.LogicalMin + f.IndexOf(fits[e]) : empty);
             }
-            foreach (var u in fits) rest.Remove(u);
         }
         return frame;
     }
@@ -284,35 +357,54 @@ internal sealed class KeyboardMousePacker
 
     /// <summary>One consumer-control report: each usage on a bit sets the
     /// bit, the rest fill the usage array.</summary>
-    public byte[] PackConsumer(ReadOnlySpan<ushort> usages)
+    public byte[] PackConsumer(ReadOnlySpan<ushort> usages, KeyboardMouseBuffers b)
     {
         if (_consumerReport == null)
             throw new InvalidOperationException("This profile's descriptor declares no consumer control collection (Consumer, Consumer Control).");
-        var frame = NewFrame(_consumerReport);
-        var pressed = new List<uint>();
+        var frame = Frame(ref b.Consumer, _consumerReport);
+        b.Reserve(usages.Length);
+        // The usages held, in the order given, repeats kept.
+        uint[] pressed = b.Usages;
+        int n = 0;
         foreach (var u in usages)
-            if (u != 0) pressed.Add(((uint)PageConsumer << 16) | u);
-        var placed = new HashSet<uint>();
+            if (u != 0) pressed[n++] = ((uint)PageConsumer << 16) | u;
+
+        // A usage the report lists as a bit goes on its bit, and every
+        // repeat of it with it.
+        bool[] onBit = b.Flags;
+        Array.Clear(onBit, 0, n);
         foreach (var f in _consumerReport.Fields)
         {
             if (f.Constant || !f.Variable) continue;
             for (int e = 0; e < f.Count; e++)
             {
                 uint u = f.UsageAt(e);
-                bool on = pressed.Contains(u);
+                bool on = false;
+                for (int i = 0; i < n; i++)
+                    if (pressed[i] == u) { on = true; onBit[i] = true; }
                 HidReportMap.Write(frame, f, e, on ? 1 : 0);
-                if (on) placed.Add(u);
             }
         }
-        var rest = pressed.FindAll(u => !placed.Contains(u));
+
+        uint[] rest = b.Rest;
+        int restCount = 0;
+        for (int i = 0; i < n; i++)
+            if (!onBit[i]) rest[restCount++] = pressed[i];
+
+        uint[] fits = b.Fits;
         foreach (var f in _consumerReport.Fields)
         {
             if (f.Constant || f.Variable) continue;
-            var fits = rest.FindAll(u => f.IndexOf(u) >= 0);
+            int fitCount = 0, kept = 0;
+            for (int i = 0; i < restCount; i++)
+            {
+                if (f.IndexOf(rest[i]) >= 0) fits[fitCount++] = rest[i];
+                else rest[kept++] = rest[i];
+            }
+            restCount = kept;
             int empty = EmptyArrayValue(f);
             for (int e = 0; e < f.Count; e++)
-                HidReportMap.Write(frame, f, e, e < fits.Count ? f.LogicalMin + f.IndexOf(fits[e]) : empty);
-            foreach (var u in fits) rest.Remove(u);
+                HidReportMap.Write(frame, f, e, e < fitCount ? f.LogicalMin + f.IndexOf(fits[e]) : empty);
         }
         return frame;
     }
@@ -337,14 +429,16 @@ internal sealed class KeyboardMousePacker
     /// zero, array slots empty, a hat switch centered, and absolute Generic
     /// Desktop axes (X through Dial) where they were, so a pointer does not
     /// jump. The driver sends it if the consumer goes away with input held.
-    /// Null when the frame is not one of the descriptor's input
-    /// reports.</summary>
-    public byte[]? ReleaseOf(ReadOnlySpan<byte> frame)
+    /// The frame is written to the start of <c>b.Release</c>.</summary>
+    /// <returns>Its length, or -1 when <paramref name="frame"/> is not one
+    /// of the descriptor's input reports.</returns>
+    public int ReleaseOf(ReadOnlySpan<byte> frame, KeyboardMouseBuffers b)
     {
         byte id = Map.UsesReportIds && frame.Length > 0 ? frame[0] : (byte)0;
         var r = Map.Find(HidReportKind.Input, id);
-        if (r == null || frame.Length < r.FrameBytes) return null;
-        var release = frame[..r.FrameBytes].ToArray();
+        if (r == null || frame.Length < r.FrameBytes) return -1;
+        var release = b.Release ??= new byte[_maxInputFrameBytes];
+        frame[..r.FrameBytes].CopyTo(release);
         foreach (var f in r.Fields)
         {
             if (f.Constant) continue;
@@ -364,7 +458,7 @@ internal sealed class KeyboardMousePacker
                 HidReportMap.Write(release, f, e, desktop && usage == 0x39 ? EmptyArrayValue(f) : 0);
             }
         }
-        return release;
+        return r.FrameBytes;
     }
 
     // ── Keyboard LEDs ────────────────────────────────────────────────────
@@ -380,16 +474,16 @@ internal sealed class KeyboardMousePacker
     {
         var r = _keyboardLedReport;
         if (r == null) return null;
-        ReadOnlySpan<byte> fields = data;
+        scoped ReadOnlySpan<byte> fields = data;
         if (r.ReportId != 0)
         {
             if (reportId != r.ReportId) return null;
         }
         else
         {
-            var whole = new byte[1 + data.Length];
+            Span<byte> whole = data.Length < 256 ? stackalloc byte[1 + data.Length] : new byte[1 + data.Length];
             whole[0] = reportId;
-            data.CopyTo(whole.AsSpan(1));
+            data.CopyTo(whole[1..]);
             fields = whole;
         }
         int leds = 0;

@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S83. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S84. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -34,6 +34,7 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Does BindWinUsb reach one virtual adapter and no real one, and go back?" | [gc_winusb_check](gc_winusb_check/): S81. `child` mode is the program it kills |
 | "Do Dolphin and Slippi read the persona as they read a real adapter?" | [gc_dolphin_check](gc_dolphin_check/): S82. `nativeuild.ps1` compiles each emulator's adapter code unmodified from the reference clones. `hold <seconds>` keeps a bound persona up for a manual run, `--libusb-log <level>` writes libusb's log |
 | "What does SDL do with the persona?" | [gc_sdl_check](gc_sdl_check/): S83. `nativeuild.ps1` builds SDL 3.4.18 with libusb and checks the official SDL3.dll's hash |
+| "Do the submit paths allocate, and what do creates, claims and frames cost before and after a change?" | [perf_budget_check](perf_budget_check/): `gate` is S84. The other modes measure, and `-p:HmBase=true` builds it against an older tree for the comparison |
 
 ## Near-duplicates and when to use which
 

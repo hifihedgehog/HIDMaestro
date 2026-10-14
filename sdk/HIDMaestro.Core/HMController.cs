@@ -146,6 +146,9 @@ public sealed partial class HMController : IDisposable
     // click's press, a key tap and every relative delta arrive. Gamepads
     // keep latest-wins, which is right for state. Guarded by _submitLock.
     private KeyboardMousePacker? _kbm;
+    // The frames and lists the packer works in, this controller's own.
+    // Guarded by _submitLock.
+    private KeyboardMouseBuffers? _kbmBuffers;
     private readonly bool _deliverEvery;
     private uint _deliverySeq;
     private bool _deliveryPending;
@@ -1100,10 +1103,11 @@ public sealed partial class HMController : IDisposable
                 if (id == 0) NoteReleaseFrame(report);
                 else
                 {
-                    var full = new byte[report.Length + 1];
+                    var b = _kbmBuffers ??= new KeyboardMouseBuffers();
+                    var full = b.RawFrame ??= new byte[SharedMemoryIO.DATA_CAPACITY + 1];
                     full[0] = id;
                     report.CopyTo(full.AsSpan(1));
-                    NoteReleaseFrame(full);
+                    NoteReleaseFrame(full.AsSpan(0, report.Length + 1));
                 }
             }
             if (_idleThread != null)
@@ -1267,9 +1271,10 @@ public sealed partial class HMController : IDisposable
         var packer = KbmPacker();
         lock (_submitLock)
         {
-            var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent);
-            foreach (var frame in frames)
-                WriteKbmFrame(frame);
+            var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent,
+                                          _kbmBuffers ??= new KeyboardMouseBuffers());
+            for (int i = 0; i < frames.Count; i++)
+                WriteKbmFrame(frames[i]);
         }
     }
 
@@ -1285,7 +1290,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDeviceBuildsReports();
         var packer = KbmPacker();
         lock (_submitLock)
-            WriteKbmFrame(packer.PackKeyboard(modifiers, keys));
+            WriteKbmFrame(packer.PackKeyboard(modifiers, keys, _kbmBuffers ??= new KeyboardMouseBuffers()));
     }
 
     /// <summary>Send one consumer-control report with these usages held
@@ -1299,7 +1304,7 @@ public sealed partial class HMController : IDisposable
         ThrowIfDeviceBuildsReports();
         var packer = KbmPacker();
         lock (_submitLock)
-            WriteKbmFrame(packer.PackConsumer(usages));
+            WriteKbmFrame(packer.PackConsumer(usages, _kbmBuffers ??= new KeyboardMouseBuffers()));
     }
 
     private KeyboardMousePacker KbmPacker() =>
@@ -1325,18 +1330,27 @@ public sealed partial class HMController : IDisposable
     /// _submitLock.</summary>
     private void NoteReleaseFrame(ReadOnlySpan<byte> frame)
     {
-        if (_kbm?.ReleaseOf(frame) is not { } release) return;
+        if (_kbm == null) return;
+        var b = _kbmBuffers ??= new KeyboardMouseBuffers();
+        int length = _kbm.ReleaseOf(frame, b);
+        if (length < 0) return;
+        var release = b.Release.AsSpan(0, length);
         bool withIds = _kbm.Map.UsesReportIds;
-        int slot = _releaseFrames.FindIndex(f => !withIds || f[0] == release[0]);
+        int slot = -1;
+        for (int i = 0; i < _releaseFrames.Count; i++)
+            if (!withIds || _releaseFrames[i][0] == release[0]) { slot = i; break; }
         if (slot >= 0)
         {
-            if (_releaseFrames[slot].AsSpan().SequenceEqual(release)) return;
-            _releaseFrames[slot] = release;
+            byte[] kept = _releaseFrames[slot];
+            if (kept.AsSpan().SequenceEqual(release)) return;
+            // One report keeps one length, so the frame is rewritten in place.
+            if (kept.Length == length) release.CopyTo(kept);
+            else _releaseFrames[slot] = release.ToArray();
         }
         else
         {
             if (_releaseFrames.Count >= SharedMemoryIO.RELEASE_SLOTS) return;
-            _releaseFrames.Add(release);
+            _releaseFrames.Add(release.ToArray());
         }
         SharedMemoryIO.WriteReleaseFrames(Index, _releaseFrames);
     }

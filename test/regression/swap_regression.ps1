@@ -1955,6 +1955,15 @@ function Scenario-GameCube-Sdl {
                  -Message 'SDL listed, mapped or drove the GameCube adapter persona wrong (see probe stdout)' -SkipCodes 2
 }
 
+# S84: no submit path allocates: SubmitState and SubmitRawReport on a
+# DualShock 4, SubmitState on an Xbox 360, SubmitKeyboard, SubmitMouse, and a
+# GameCube adapter port's SubmitState and the controller's, each called
+# thousands of times on a live controller.
+function Scenario-Perf-Budget {
+    Invoke-Probe -Dir 'perf_budget_check' -Exe 'PerfBudgetCheck.exe' -Arguments 'gate' -Tag 'gate' `
+                 -Message 'a submit path allocated (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2042,7 +2051,8 @@ $scenarios = @(
     @{ Name = 'S80_GameCube_Protocol';           Body = ${function:Scenario-GameCube-Protocol} },
     @{ Name = 'S81_GameCube_WinUsb';             Body = ${function:Scenario-GameCube-WinUsb} },
     @{ Name = 'S82_GameCube_Dolphin';            Body = ${function:Scenario-GameCube-Dolphin} },
-    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} }
+    @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
+    @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

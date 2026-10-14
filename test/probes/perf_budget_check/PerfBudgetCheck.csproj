@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PerfBudgetCheck</AssemblyName>
+    <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
+         measurements, leaving out what b4d29d9 lacks. -->
+    <DefineConstants Condition="'$(HmBase)' == 'true'">$(DefineConstants);HM_BASE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+</Project>
