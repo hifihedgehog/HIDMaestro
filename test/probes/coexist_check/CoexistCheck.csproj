@@ -5,8 +5,29 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>CoexistCheck</AssemblyName>
+    <HMLegacyCache>$(MSBuildThisFileDirectory)legacy_cache\</HMLegacyCache>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="legacy_peer\**" />
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
+
+  <!-- Releases the mixed-version section runs against. The zip hash is
+       the one GitHub lists for the release asset. The DLL hash pins the
+       file inside it. -->
+  <ItemGroup>
+    <HMLegacyRelease Include="v1.12.0"
+                     ZipSha256="CF03347A0BC88BFB198A606C0FF8375BC4A9420FA80C07EF336186986D79B244"
+                     CoreSha256="F0B048E1B566804226EFDF854F6201EB9D2895C1E83F3C1A8813562AAB2D186C" />
+    <HMLegacyRelease Include="v1.11.0"
+                     ZipSha256="51C5A957FEB7573CF60EE8F30F791DD013053208EAF23D013E28B438303FBDF2"
+                     CoreSha256="36CAEFC2F457A7C69ECA10E44D9E9750A3991F256EAFEA6000DCA0E450E0635C" />
+  </ItemGroup>
+
+  <!-- One peer per release, built into legacy\<version>\ beside the
+       probe. Batched on HMLegacyRelease. -->
+  <Target Name="BuildLegacyPeers" AfterTargets="Build" Inputs="@(HMLegacyRelease)" Outputs="$(OutDir)legacy\%(HMLegacyRelease.Identity)\CoexistPeer.exe">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)fetch_legacy.ps1&quot; -Version %(HMLegacyRelease.Identity) -ZipSha256 %(HMLegacyRelease.ZipSha256) -CoreSha256 %(HMLegacyRelease.CoreSha256) -Cache &quot;$(HMLegacyCache.TrimEnd('\'))&quot;" />
+    <Exec Command="dotnet build &quot;$(MSBuildThisFileDirectory)legacy_peer\CoexistPeer.csproj&quot; -c $(Configuration) --nologo -v:quiet -p:HMLegacyVersion=%(HMLegacyRelease.Identity) -p:HMLegacyCore=&quot;$(HMLegacyCache)%(HMLegacyRelease.Identity)\HIDMaestro.Core.dll&quot; -o &quot;$(OutDir)legacy\%(HMLegacyRelease.Identity)&quot;" />
+  </Target>
 </Project>

@@ -146,20 +146,20 @@ public sealed class HMContext : IDisposable
     {
         ThrowIfDisposed();
 
-        // The owner claim comes before any machine-wide write, so another
-        // program can tell this one is alive.
-        Internal.MachineClaims.EnsureOwner();
-
         // Devices of programs that have exited go first: a device bound to
-        // the old INF keeps pnputil from replacing the package. Only provably
-        // dead owners' devices are removed. A running program's controllers,
-        // this one's included, stay.
+        // the old INF keeps pnputil from replacing the package, and a
+        // driver upgrade below needs nothing left on it. Only provably dead
+        // owners' devices are removed. A running program's controllers,
+        // this one's included, stay, and the deploy below keeps the
+        // installed driver for them.
         Internal.OwnerSweep.ReclaimDeadOwners();
 
-        if (!DriverBuilder.FullDeploy())
-            throw new InvalidOperationException(
-                "Driver install failed. Run elevated and check pnputil output.");
+        LastDriverInstall = Internal.DriverDeploy.Run();
     }
+
+    /// <summary>What the last <see cref="InstallDriver"/> call on this
+    /// context did, or null before the first one.</summary>
+    public HMDriverInstallOutcome? LastDriverInstall { get; private set; }
 
     /// <summary>Removes the virtual controllers of programs that have
     /// exited without removing theirs, then the driver packages and
@@ -408,17 +408,11 @@ public sealed class HMContext : IDisposable
             if (profile.RequiresUsbipBackend)
                 return CreateUsbipController(slot, lease, profile);
 
-            // The driver INF lives next to the driver binaries in the repo's
-            // build/ directory. This will move to embedded-resource extraction
-            // when single-file SDK deployment is implemented.
-            string infPath = System.IO.Path.Combine(
-                Internal.DriverBuilder.BuildDir, "hidmaestro.inf");
-
             string? instanceId;
             try
             {
                 instanceId = Internal.DeviceOrchestrator.SetupController(
-                    lease.TransportIndex, profile.Inner, infPath, lease.Identity);
+                    lease.TransportIndex, profile.Inner, lease.Identity);
             }
             catch
             {

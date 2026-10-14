@@ -1179,17 +1179,17 @@ internal static class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
 
     public static string? SetupController(
-        int controllerIndex, ControllerProfile profile, string infPath, DeviceIdentity? identity = null)
+        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity = null)
     {
         // The read side of the gate the background phantom cleanup takes for
         // writing: creates run together, the cleanup never during one.
         OwnerSweep.CreateGate.EnterReadLock();
-        try { return SetupControllerCore(controllerIndex, profile, infPath, identity); }
+        try { return SetupControllerCore(controllerIndex, profile, identity); }
         finally { OwnerSweep.CreateGate.ExitReadLock(); }
     }
 
     private static string? SetupControllerCore(
-        int controllerIndex, ControllerProfile profile, string infPath, DeviceIdentity? identity)
+        int controllerIndex, ControllerProfile profile, DeviceIdentity? identity)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (controllerIndex < 0) throw new ArgumentOutOfRangeException(nameof(controllerIndex));
@@ -1299,7 +1299,7 @@ internal static class DeviceOrchestrator
             // Plain HID or non-xinputhid Xbox: create main device node
             var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_main_devnode");
-            var result = DeviceNodeCreator.CreateDeviceNode(profile, infPath, controllerIndex, identity);
+            var result = DeviceNodeCreator.CreateDeviceNode(profile, controllerIndex, identity);
             if (!result.Success || result.InstanceId == null)
             {
                 LogDiag($"    DeviceNodeCreator.CreateDeviceNode FAILED after {createSw.ElapsedMilliseconds}ms");
@@ -2297,6 +2297,17 @@ internal static class DeviceOrchestrator
             DrainOrphanedWudfHosts();
         Phase("wudf-drain");
         LogDiag($"<<< SWEEP EXIT total={sweepSw.ElapsedMilliseconds}ms");
+    }
+
+    /// <summary>Before a package replacement with no HIDMaestro device
+    /// left: wait for the hosts of the removed devices to exit, then drain
+    /// any that still map the old DLL (<see cref="DrainOrphanedWudfHosts"/>).
+    /// The caller has established that no device remains, so every such
+    /// host is an orphan.</summary>
+    internal static void ReleaseStaleDriverHosts()
+    {
+        WaitForDriverHostsToExit();
+        DrainOrphanedWudfHosts();
     }
 
     private static void WaitForDriverHostsToExit()

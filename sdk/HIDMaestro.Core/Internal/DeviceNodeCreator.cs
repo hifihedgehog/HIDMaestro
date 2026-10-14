@@ -74,12 +74,13 @@ internal static class DeviceNodeCreator
     /// <list type="bullet">
     /// <item>The device exists at <c>ROOT\&lt;enumerator&gt;\&lt;instId&gt;</c></item>
     /// <item>Its <c>Device Parameters\ControllerIndex</c> = <paramref name="controllerIndex"/></item>
-    /// <item>The driver is installed and bound</item>
+    /// <item>The driver is installed and bound: the best HIDMaestro package
+    ///       in the driver store, on this devnode only</item>
     /// <item>The HID child interface has arrived (so the next per-controller
     ///       setup can start without racing PnP)</item>
     /// </list>
     /// </summary>
-    public static Result CreateDeviceNode(ControllerProfile profile, string infPath, int controllerIndex,
+    public static Result CreateDeviceNode(ControllerProfile profile, int controllerIndex,
                                           DeviceIdentity? identity = null)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -358,18 +359,26 @@ internal static class DeviceNodeCreator
             // above is retained because its effect on older Windows
             // versions has not been verified.)
 
-            // Install our driver against the new device's hardware ID.
-            // Perf audit 2026-07-21: surface a binding failure immediately
-            // in the diag instead of letting the two downstream readiness
-            // waits burn their full budgets against a device that never
-            // bound. Control flow is unchanged (the waits still run and
-            // still time out) so no working configuration is affected;
-            // the diag line converts a silent 15 s stall into a named one.
-            if (!UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwId, infPath, 0, out _))
+            // Install the driver on this devnode alone. DiInstallDevice with no
+            // driver named takes the best match the driver store holds, which
+            // is the package DriverDeploy left there: this SDK's, or the one it
+            // kept because running programs use it or because it is newer.
+            // Until v1.13.0 this was UpdateDriverForPlugAndPlayDevices with the
+            // VID/PID hardware id and this SDK's own INF, which installs on
+            // every present device with that id whenever the INF ranks better
+            // ("installs the driver package on all devices present in the
+            // system that have a hardware ID or compatible ID that matches",
+            // learn.microsoft.com, SetupAPI functions that simplify driver
+            // installation): a newer SDK's create moved another program's
+            // controller of the same profile onto its driver, and staged its
+            // package beside one the deploy policy had kept. Perf audit
+            // 2026-07-21: a binding failure is named in the diag at once rather
+            // than left to the two readiness waits below.
+            if (!InstallBestStoreDriver(dis, instId))
             {
-                int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                int err = Marshal.GetLastWin32Error();
                 DeviceOrchestrator.LogDiag(
-                    $"      UpdateDriverForPlugAndPlayDevicesW FAILED (Win32={err}) for {hwId}; downstream waits will time out");
+                    $"      DiInstallDevice FAILED (Win32={err}) for {instId}; downstream waits will time out");
             }
 
             // XnaComposite (legacy XInput path) needs an explicit restart to
@@ -470,9 +479,34 @@ internal static class DeviceNodeCreator
 
     private const int ERROR_DEVINST_ALREADY_EXISTS = unchecked((int)0xE0000207);
 
-    [DllImport("newdev.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwndParent, string HardwareId,
-        string FullInfPath, int InstallFlags, out bool RebootRequired);
+    /// <summary>DiInstallDevice on one element of <paramref name="dis"/>, with
+    /// no driver named, so the best driver-store match is installed on that
+    /// device and no other. The element is opened by instance id because the
+    /// create's SP_DEVINFO_DATA buffer has been released by now.</summary>
+    private static bool InstallBestStoreDriver(IntPtr dis, string instId)
+    {
+        byte[] buf = new byte[IntPtr.Size == 8 ? 32 : 28];
+        BitConverter.GetBytes(buf.Length).CopyTo(buf, 0);
+        var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
+        try
+        {
+            if (!SetupDiOpenDeviceInfoW(dis, instId, IntPtr.Zero, 0, handle.AddrOfPinnedObject()))
+                return false;
+            return DiInstallDevice(IntPtr.Zero, dis, handle.AddrOfPinnedObject(), IntPtr.Zero,
+                                   DIIDFLAG_NOFINISHINSTALLUI, out _);
+        }
+        finally { handle.Free(); }
+    }
+
+    private const uint DIIDFLAG_NOFINISHINSTALLUI = 0x00000002;
+
+    [DllImport("newdev.dll", SetLastError = true)]
+    private static extern bool DiInstallDevice(IntPtr hwndParent, IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
+        IntPtr DriverInfoData, uint Flags, out bool NeedReboot);
+
+    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiOpenDeviceInfoW")]
+    private static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
+        IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
 
     [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);

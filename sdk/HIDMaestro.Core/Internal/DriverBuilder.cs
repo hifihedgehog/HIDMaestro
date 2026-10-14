@@ -437,46 +437,40 @@ public static class DriverBuilder
     public static bool FullDeploy(bool rebuild = true)
     {
         _ = rebuild; // intentionally unused
+        // v1.13.0: every deploy goes through the machine-wide policy and its
+        // lock (DriverDeploy): never a downgrade, never an upgrade under a
+        // running program's controllers.
+        DriverDeploy.Run();
+        return true;
+    }
 
-        // Fast path: matching manifest hash means the embedded payload is
-        // bit-identical to what was last installed. Verify presence with
-        // a direct DriverStore filesystem check (~1 ms) instead of pnputil
-        // /enum-drivers /format xml (~200–500 ms on a machine with many
-        // installed drivers). The filesystem check is locale-stable and
-        // the OEM-named directory's existence is the same signal pnputil
-        // would surface anyway. If something cleared the hash but didn't
-        // touch the DriverStore, we'd run the full pipeline (slow but
-        // correct); if something cleared the DriverStore but didn't
-        // touch the hash, we'd skip and the next SwDeviceCreate would
-        // surface a missing-driver error to the caller: both edge
-        // cases are recoverable via a single InstallDriver retry.
-        string embeddedHash = EmbeddedManifest.Sha256Hex;
-        string? installedHash = ReadInstalledManifestHash();
-        if (string.Equals(embeddedHash, installedHash, StringComparison.OrdinalIgnoreCase)
-            && DriverStoreContainsHidMaestro())
-        {
-            // Mark the per-process cache so subsequent IsDriverInstalled
-            // calls don't run pnputil either.
-            PnputilHelper.MarkInstalledConfirmed();
-            return true;
-        }
-
+    /// <summary>The extract, sign, catalog and install pipeline. The caller
+    /// holds <see cref="DriverDeploy.MutexName"/> and has checked that no
+    /// device runs on the installed driver.</summary>
+    internal static void DeployLocked()
+    {
+        // Hosts that still map the old DLL would hand its code to a new
+        // device after the package changes. With no HIDMaestro device left,
+        // every such host is an orphan.
+        DeviceOrchestrator.ReleaseStaleDriverHosts();
         EnsureExtracted();
         RemoveOldDriverPackages();
         SignDrivers();
         GenerateCatalogs();
         InstallDrivers();
-
-        WriteInstalledManifestHash(embeddedHash);
-        return true;
+        RecordInstalledPayload();
     }
 
-    /// <summary>True when the next <see cref="FullDeploy"/> call will take
-    /// the same-version fast path (matching manifest hash + DriverStore
-    /// presence, the exact predicate FullDeploy itself evaluates). Used by
-    /// the launch sweep to decide whether the WUDFHost release-wait/drain
-    /// steps are needed: they protect DriverStore file replacement, which
-    /// only the full pipeline performs.</summary>
+    /// <summary>Record the embedded payload's hash as the installed one,
+    /// which arms the fast path.</summary>
+    internal static void RecordInstalledPayload() => WriteInstalledManifestHash(EmbeddedManifest.Sha256Hex);
+
+    /// <summary>True when the installed payload is this SDK's: the manifest
+    /// hash recorded at install matches the embedded one, and the driver
+    /// store holds both packages. Checking presence with a FileRepository
+    /// directory walk costs about 1 ms, against 200 to 500 ms for pnputil
+    /// /enum-drivers. This is the same-version fast path
+    /// <see cref="DriverDeploy.Run"/> takes outside any lock.</summary>
     internal static bool WillTakeFastPath()
     {
         try

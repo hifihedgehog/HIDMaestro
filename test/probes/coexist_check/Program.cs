@@ -14,14 +14,23 @@
 //      program, or the start of a new one, removes the killed program's
 //      devices and releases its registry ledger holds, and leaves the live
 //      program's controller running.
+//   E. Mixed SDK versions. A v1.12.0 program and a v1.13.0 program side by
+//      side keep each other's controllers and the installed driver. Then
+//      each install policy branch: upgrade when nobody uses the older
+//      driver, a v1.12.0 program on a machine with a newer driver, a
+//      v1.11.0 program whose driver the new SDK cannot run on, and a
+//      driver newer than the SDK, which is never replaced.
+//   F. Two programs call InstallDriver at the same moment on a machine
+//      without the driver. One deploys, the other finds it current, and
+//      both succeed.
 //   G. Two composite controllers on USB/IP. One program's sweep leaves
 //      the other's import attached. Killing one lets the other remove it.
 //   H. A program killed while a child process it started still runs. Its
 //      ownership claim goes with it, and another program can take the
 //      same identity at once.
 //
-// Each program is a peer process, this binary started with --peer.
-// Requires
+// Each program is a peer process (this binary with --peer, or the same
+// source built against an older release under legacy\). Requires
 // elevation. Exit 0 PASS / 1 FAIL / 2 when another program that embeds
 // HIDMaestro is running.
 using System;
@@ -99,6 +108,8 @@ internal static class Program
             ('B', "one identity key in two programs", SectionB),
             ('C', "a second program starts while the first streams", SectionC),
             ('D', "a killed program's devices", SectionD),
+            ('E', "mixed SDK versions", SectionE),
+            ('F', "InstallDriver at the same moment in two programs", SectionF),
             ('G', "two composite controllers", SectionG),
             ('H', "a program killed while its child runs", SectionH),
         };
@@ -377,6 +388,192 @@ internal static class Program
         Check("D: a new program's start removes a killed program's devices", Ok(i4) && tree3.All(Native.IsGone),
               string.Join(", ", tree3.Where(t => !Native.IsGone(t))));
         Check("D: a new program's start leaves the live program's controller", Native.IsStarted(inst2) && !cap2.Broken && Flows(cap2));
+    }
+
+    // ── E ──────────────────────────────────────────────────────────────
+
+    static void SectionE()
+    {
+        foreach (var v in new[] { "v1.12.0", "v1.11.0" })
+            if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", v, "CoexistPeer.exe")))
+            {
+                Check($"E: the {v} peer is built", false, "build CoexistCheck.csproj, which fetches the release and builds legacy\\" + v);
+                return;
+            }
+
+        // E1. v1.12.0 first, then the new SDK beside it.
+        Uninstall();
+        string verOld, instOld;
+        using (var old = PeerProcess.Start("E1-v1.12.0", "v1.12.0"))
+        {
+            old.Send("install");
+            string co = old.Send("create pad F0E0 coexist-e-old");
+            if (!Ok(co)) { Check("E1: the v1.12.0 program creates", false, co); return; }
+            old.Send("stream 5 0.2 125 0");
+            instOld = PeerProcess.Field(co, "instance")!;
+            verOld = Native.DriverVersionOf(instOld) ?? "?";
+            var pathOld = WaitPaths(0xBEEF, 0xF0E0, 1, 10_000);
+            using var capOld = pathOld.Count == 1 ? HidCapture.Open(pathOld[0]) : null;
+            if (capOld == null) { Check("E1: the v1.12.0 program's device opens", false); return; }
+            var treeOld = Native.Subtree(instOld);
+
+            using var nu = PeerProcess.Start("E1-new");
+            string ri = nu.Send("install");
+            Check("E1: beside a live v1.12.0 program the new SDK keeps the installed driver",
+                  PeerProcess.Field(ri, "outcome") == "KeptInUse", ri);
+            string cn = nu.Send("create pad F0E1 coexist-e-new");
+            Check("E1: the new program creates", Ok(cn), cn);
+            if (Ok(cn))
+            {
+                string instNew = PeerProcess.Field(cn, "instance")!;
+                Check("E1: the new program's controller runs on the installed v1.12.0 driver",
+                      Native.DriverVersionOf(instNew) == verOld, $"{Native.DriverVersionOf(instNew)} vs {verOld}");
+                nu.Send("stream 6 0.8 125 0");
+                var pathNew = WaitPaths(0xBEEF, 0xF0E1, 1, 10_000);
+                using var capNew = pathNew.Count == 1 ? HidCapture.Open(pathNew[0]) : null;
+                Check("E1: the new program's input arrives", capNew != null && Flows(capNew));
+            }
+            nu.Send("sweep");
+            Check("E1: the v1.12.0 program's controller is untouched, driver and all",
+                  !capOld.Broken && Native.Subtree(instOld).SequenceEqual(treeOld, StringComparer.OrdinalIgnoreCase)
+                  && Native.DriverVersionOf(instOld) == verOld && Flows(capOld),
+                  capOld.Broken ? $"read error {capOld.ReadError}" : $"driver {Native.DriverVersionOf(instOld)}");
+        }
+
+        // E2. The older driver, nobody on it: the new SDK upgrades.
+        using (var nu = PeerProcess.Start("E2-new"))
+        {
+            string ri = nu.Send("install");
+            Check("E2: with nobody on the v1.12.0 driver the new SDK upgrades it", PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+            string cn = nu.Send("create pad F0E2 coexist-e-upgraded");
+            string? ver = Ok(cn) ? Native.DriverVersionOf(PeerProcess.Field(cn, "instance")!) : null;
+            Check("E2: the new controller runs on the new driver", ver != null && ver != verOld, $"{ver} (was {verOld})");
+        }
+
+        // E3. A v1.12.0 program on a machine with the newer driver.
+        using (var old = PeerProcess.Start("E3-v1.12.0", "v1.12.0"))
+        {
+            string ri = old.Send("install");
+            string co = old.Send("create pad F0E3 coexist-e-old-2");
+            old.Send("stream 5 0.2 125 0");
+            var path = WaitPaths(0xBEEF, 0xF0E3, 1, 10_000);
+            using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+            Check("E3: a v1.12.0 program runs on a machine where a newer driver was installed",
+                  Ok(ri) && Ok(co) && cap != null && Flows(cap), $"{ri} / {co}");
+        }
+
+        // E4. A live v1.11.0 program on its own driver, which predates the
+        // driver protocol this SDK needs.
+        Uninstall();
+        using (var v11 = PeerProcess.Start("E4-v1.11.0", "v1.11.0"))
+        {
+            v11.Send("install");
+            string cv = v11.Send("create pad F0E4 coexist-e-v11");
+            if (!Ok(cv)) { Check("E4: the v1.11.0 program creates", false, cv); return; }
+            v11.Send("stream 5 0.2 125 0");
+            string instV = PeerProcess.Field(cv, "instance")!;
+            var path = WaitPaths(0xBEEF, 0xF0E4, 1, 10_000);
+            using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+            if (cap == null) { Check("E4: the v1.11.0 program's device opens", false); return; }
+
+            using var nu = PeerProcess.Start("E4-new");
+            string ri = nu.Send("install");
+            Check("E4: the new SDK refuses with HMDriverVersionException, an InvalidOperationException",
+                  ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException") && ri.Contains("InvalidOperationException"), ri);
+            Check("E4: the refusal names the device holding the old driver", ri.Contains(instV, StringComparison.OrdinalIgnoreCase), ri);
+            Check("E4: the v1.11.0 program's controller is untouched", !cap.Broken && Native.IsStarted(instV) && Flows(cap));
+        }
+        using (var nu = PeerProcess.Start("E4-new-after"))
+        {
+            string ri = nu.Send("install");
+            Check("E4: once the v1.11.0 program is gone the new SDK upgrades", PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+        }
+
+        // E5. A driver newer than the SDK is never replaced.
+        Uninstall();
+        string newer = InstallNewerDriver();
+        using (var nu = PeerProcess.Start("E5-new"))
+        {
+            string ri = nu.Send("install");
+            Check("E5: a newer installed driver is kept", PeerProcess.Field(ri, "outcome") == "KeptNewer", ri);
+            string cn = nu.Send("create pad F0E5 coexist-e-newer");
+            string? ver = Ok(cn) ? Native.DriverVersionOf(PeerProcess.Field(cn, "instance")!) : null;
+            Check("E5: the controller runs on the newer driver", ver == newer, $"{ver} vs {newer}");
+            nu.Send("stream 6 0.8 125 0");
+            var path = WaitPaths(0xBEEF, 0xF0E5, 1, 10_000);
+            using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+            Check("E5: its input arrives", cap != null && Flows(cap));
+        }
+        Uninstall();
+    }
+
+    static void Uninstall()
+    {
+        using var u = PeerProcess.Start("uninstall");
+        u.Send("uninstall");
+    }
+
+    /// <summary>The SDK's own driver package with a DriverVer above this
+    /// SDK's version, catalogued and signed the way the SDK does it, then
+    /// installed. Returns the version Windows reports for it.</summary>
+    static string InstallNewerDriver()
+    {
+        string staging = HIDMaestro.Internal.DriverBuilder.EnsureExtracted();
+        string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro_coexist_newer");
+        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        Directory.CreateDirectory(dir);
+        foreach (var f in Directory.GetFiles(staging)) File.Copy(f, Path.Combine(dir, Path.GetFileName(f)));
+        foreach (var f in Directory.GetFiles(dir, "*.cat")) File.Delete(f);
+        const string version = "1.99.0.0";
+        foreach (var inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
+        {
+            string p = Path.Combine(dir, inf);
+            string text = File.ReadAllText(p);
+            text = Regex.Replace(text, @"(?m)^(DriverVer\s*=\s*)\d{2}/\d{2}/\d{4}\s*,\s*[\d.]+", "${1}" + DateTime.Now.ToString("MM/dd/yyyy") + "," + version);
+            File.WriteAllText(p, text);
+        }
+        Run(Path.Combine(dir, "signtool.exe"), $"sign /a /sm /s My /n HIDMaestroTestCert /fd SHA256 \"{Path.Combine(dir, "HIDMaestro.dll")}\" \"{Path.Combine(dir, "HMXInput.dll")}\"", dir);
+        string os = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "10_RS3_ARM64" : "10_X64";
+        Run(Path.Combine(dir, "Inf2Cat.exe"), $"/driver:\"{dir}\" /os:{os}", dir);
+        foreach (var cat in Directory.GetFiles(dir, "*.cat"))
+            Run(Path.Combine(dir, "signtool.exe"), $"sign /a /sm /s My /n HIDMaestroTestCert /fd SHA256 \"{cat}\"", dir);
+        foreach (var inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
+            Run("pnputil.exe", $"/add-driver \"{Path.Combine(dir, inf)}\" /install", dir);
+        return version;
+    }
+
+    static void Run(string exe, string args, string dir)
+    {
+        var psi = new ProcessStartInfo(exe, args)
+        { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, WorkingDirectory = dir };
+        using var p = Process.Start(psi)!;
+        string o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        if (p.ExitCode != 0 && !exe.Equals("pnputil.exe", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"{Path.GetFileName(exe)} exited {p.ExitCode}: {o.Trim()}");
+    }
+
+    // ── F ──────────────────────────────────────────────────────────────
+
+    static void SectionF()
+    {
+        Uninstall();
+        using var p1 = PeerProcess.Start("F1");
+        using var p2 = PeerProcess.Start("F2");
+        p1.Post("install");
+        p2.Post("install");
+        string r1 = p1.Receive("install");
+        string r2 = p2.Receive("install");
+        Check("F: both programs' InstallDriver succeed", Ok(r1) && Ok(r2), $"{r1} / {r2}");
+        var outcomes = new[] { PeerProcess.Field(r1, "outcome"), PeerProcess.Field(r2, "outcome") }.OrderBy(o => o).ToArray();
+        Check("F: one deploys and the other finds it current",
+              outcomes.SequenceEqual(new[] { "AlreadyCurrent", "Installed" }), string.Join(" and ", outcomes));
+        string repo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
+        int main = Directory.GetDirectories(repo, "hidmaestro.inf_*").Length;
+        int xusb = Directory.GetDirectories(repo, "hidmaestro_xusb.inf_*").Length;
+        Check("F: the driver store holds one package of each INF", main == 1 && xusb == 1, $"{main} and {xusb}");
+        string c1 = p1.Send("create pad F0D9 coexist-f");
+        Check("F: a controller creates on the deployed driver", Ok(c1), c1);
     }
 
     // ── G ──────────────────────────────────────────────────────────────

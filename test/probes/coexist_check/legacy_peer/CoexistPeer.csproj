@@ -1,0 +1,33 @@
+<Project>
+  <!-- The coexistence probe's peer program, compiled against a published
+       release's HIDMaestro.Core.dll instead of the SDK in this tree.
+       CoexistCheck.csproj builds it once per release it tests against,
+       passing HMLegacyVersion and HMLegacyCore. Each release gets its own
+       intermediate directory, which must be set before the SDK import. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>obj\$(HMLegacyVersion)\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CoexistPeer</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Peer.cs" />
+    <Compile Include="LegacyMain.cs" />
+    <Reference Include="HIDMaestro.Core">
+      <HintPath>$(HMLegacyCore)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+  <Target Name="RequireLegacyCore" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(HMLegacyCore)' == '' or !Exists('$(HMLegacyCore)')"
+           Text="CoexistPeer builds against a published release. Build CoexistCheck.csproj, which fetches the release and passes HMLegacyCore." />
+  </Target>
+</Project>
