@@ -1,14 +1,1 @@
-﻿{
-  "id": "gamecube-adapter",
-  "name": "GameCube Controller Adapter (Wii U / Switch)",
-  "vendor": "Nintendo",
-  "vid": "0x057E",
-  "pid": "0x0337",
-  "productString": "WUP-028",
-  "manufacturerString": "Nintendo Co., Ltd.",
-  "type": "gamepad",
-  "connection": "usb",
-  "descriptor": null,
-  "inputReportSize": null,
-  "notes": "Does NOT use HID: uses raw USB bulk endpoints. Most software (Dolphin, etc.) accesses it via libusb. Supports 4 GC controllers. Would need a different approach to impersonate."
-}
+{"id":"gamecube-adapter","name":"GameCube Controller Adapter (Wii U / Switch)","vendor":"Nintendo","vid":"0x057E","pid":"0x0337","productString":"WUP-028","manufacturerString":"Nintendo Co., Ltd.","type":"gamepad","connection":"usb","backend":"usbip","descriptor":"05010905a101a103851119002aff00150026ff00750895059100c0a10385210500150025ff7508950181020509190129081500250175089502810205010930093109320933093409351581257f750895068102c0a103851319002aff00150026ff00750895019100c0c0","inputReportSize":37,"notes":"The Wii U GameCube Controller Adapter (WUP-028) as Dolphin and Slippi read it: USB 057E:0337, one interface with interrupt IN 0x81 (37-byte report 0x21: a status byte and 8 data bytes per port) and interrupt OUT 0x02 (0x13 init, 0x11 rumble with one byte per port). Dolphin talks to it through libusb, so the Microsoft OS descriptors bind WinUSB with no driver install; on a PC where Zadig's WUP-028 driver is installed, that driver matches the IDs and binds instead, and Dolphin works either way. bcdDevice is 2.00, not the real adapter's 1.00, because Windows remembers each VID, PID and revision's Microsoft OS answer, and a real adapter seen before has none. The consumer builds every report and submits it whole, report ID first, with SubmitRawExtendedReport.","usbConfiguration":{"configurationValue":1,"attributes":192,"maxPowerMilliamps":500,"busSpeed":"full","deviceDescriptor":"12010002000000407e053703000201020001","configurationDescriptor":"09022900010100c0fa090400000203000000092110010001226a000705810325000107050203050001","interfaces":[{"interfaceNumber":0,"function":"hid","altSettings":[{"altSetting":0,"interfaceClass":3,"interfaceSubClass":0,"interfaceProtocol":0,"endpoints":[{"address":129,"transferType":"interrupt","maxPacketSize":37,"interval":1},{"address":2,"transferType":"interrupt","maxPacketSize":5,"interval":1}]}]}],"microsoftOs":{"string":"12034d005300460054003100300030000100","extendedCompatId":"28000000000104000100000000000000000157494e55534200000000000000000000000000000000","extendedProperties":"8e0000000001050001008400000001000000280044006500760069006300650049006e007400650072006600610063006500470055004900440000004e0000007b00320041003200370044004300350032002d0030003900340046002d0034003900320042002d0039003500390030002d003700340039004600430043003100420039003500430032007d000000"}}}
