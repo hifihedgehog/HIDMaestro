@@ -24,9 +24,12 @@ namespace HIDMaestro.Internal;
 /// write until it exits, and one claim per transport index and per
 /// identity it uses. Beside the owner claim sits a record under
 /// <c>HKLM\SOFTWARE\HIDMaestroOwners\&lt;owner id&gt;</c> naming the
-/// process and every controller it has, written before any PnP work. A
-/// record whose owner claim is gone describes a dead program, and that is
-/// the only thing the sweeps remove without being asked to remove
+/// process, the staging it uses and every controller it has, written with
+/// the claim and kept until the process exits, so a program between its
+/// InstallDriver and its first create is as visible to other programs as
+/// one with controllers. A controller's entry is written before any PnP
+/// work. A record whose owner claim is gone describes a dead program, and
+/// that is the only thing the sweeps remove without being asked to remove
 /// everything.</para>
 /// </summary>
 internal static partial class MachineClaims
@@ -65,11 +68,17 @@ internal static partial class MachineClaims
         }
     }
 
-    /// <summary>Take this process's owner claim if it has none yet. Every
-    /// machine-wide write the SDK makes comes after this.</summary>
+    /// <summary>Take this process's owner claim if it has none yet, and
+    /// write its record. Every machine-wide write the SDK makes comes after
+    /// this. A process that cannot write HKLM, one not elevated, gets the
+    /// claim, and its record is written by the first call that can.</summary>
     internal static void EnsureOwner()
     {
-        if (s_ownerClaim != null) return;
+        if (s_ownerClaim != null)
+        {
+            if (!s_recordWritten) TryWriteRecord();
+            return;
+        }
         lock (s_lock)
         {
             if (s_ownerClaim != null) return;
@@ -84,6 +93,69 @@ internal static partial class MachineClaims
             s_ownerId = id;
             s_ownerClaim = h;
             OwnerSweep.RegisterExitCleanup();
+            TryWriteRecordLocked();
+        }
+    }
+
+    private static void TryWriteRecord()
+    {
+        lock (s_lock) TryWriteRecordLocked();
+    }
+
+    /// <summary>Write the record's header if it is not written yet. Caller
+    /// holds s_lock. Non-elevated, the write fails and is tried again later.</summary>
+    private static void TryWriteRecordLocked()
+    {
+        if (s_recordWritten || s_ownerId == null) return;
+        try
+        {
+            using var rec = Registry.LocalMachine.CreateSubKey($@"{RecordsRoot}\{s_ownerId}");
+            WriteHeader(rec);
+        }
+        catch (UnauthorizedAccessException) { }
+        catch (System.Security.SecurityException) { }
+        catch (System.IO.IOException) { }
+    }
+
+    /// <summary>The process's own values in its record. Caller holds s_lock.</summary>
+    private static void WriteHeader(RegistryKey rec)
+    {
+        if (s_startTimeUtc == 0)
+        {
+            using var self = Process.GetCurrentProcess();
+            s_startTimeUtc = self.StartTime.ToFileTimeUtc();
+        }
+        rec.SetValue("Pid", Environment.ProcessId, RegistryValueKind.DWord);
+        rec.SetValue("Image", Environment.ProcessPath ?? "", RegistryValueKind.String);
+        rec.SetValue("StartTime", s_startTimeUtc, RegistryValueKind.QWord);
+        rec.SetValue("SdkVersion", SdkVersion, RegistryValueKind.String);
+        if (s_stagingTag != null) rec.SetValue("StagingTag", s_stagingTag, RegistryValueKind.String);
+        if (s_usbipPort > 0) rec.SetValue("UsbipPort", s_usbipPort, RegistryValueKind.DWord);
+        s_recordWritten = true;
+    }
+
+    private static string? s_stagingTag;
+    private static int s_usbipPort;
+
+    /// <summary>Name the staging directory this process uses, the build's
+    /// <c>&lt;version&gt;-&lt;hash&gt;</c>, in its record, so a deploy by
+    /// another build keeps the directory while this process runs.</summary>
+    internal static void NoteStaging(string tag)
+    {
+        EnsureOwner();
+        lock (s_lock)
+        {
+            if (string.Equals(s_stagingTag, tag, StringComparison.Ordinal) && s_recordWritten) return;
+            s_stagingTag = tag;
+            if (!s_recordWritten) { TryWriteRecordLocked(); return; }
+            try
+            {
+                using var rec = Registry.LocalMachine.CreateSubKey($@"{RecordsRoot}\{s_ownerId}");
+                rec.SetValue("StagingTag", tag, RegistryValueKind.String);
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+            catch (System.IO.IOException) { }
         }
     }
 
@@ -149,7 +221,8 @@ internal static partial class MachineClaims
 
     /// <summary>One program's record, and whether its owner claim is held.</summary>
     internal sealed record OwnerRecord(string OwnerId, int Pid, string? Image, long StartTime,
-        string? SdkVersion, int UsbipPort, bool Live, bool Self, IReadOnlyList<ControllerEntry> Controllers);
+        string? SdkVersion, int UsbipPort, bool Live, bool Self, IReadOnlyList<ControllerEntry> Controllers,
+        string? StagingTag = null);
 
     /// <summary>Record a controller before any PnP work for it. Creates
     /// this process's record on first use.</summary>
@@ -159,19 +232,7 @@ internal static partial class MachineClaims
         lock (s_lock)
         {
             using var rec = Registry.LocalMachine.CreateSubKey($@"{RecordsRoot}\{s_ownerId}");
-            if (!s_recordWritten)
-            {
-                if (s_startTimeUtc == 0)
-                {
-                    using var self = Process.GetCurrentProcess();
-                    s_startTimeUtc = self.StartTime.ToFileTimeUtc();
-                }
-                rec.SetValue("Pid", Environment.ProcessId, RegistryValueKind.DWord);
-                rec.SetValue("Image", Environment.ProcessPath ?? "", RegistryValueKind.String);
-                rec.SetValue("StartTime", s_startTimeUtc, RegistryValueKind.QWord);
-                rec.SetValue("SdkVersion", SdkVersion, RegistryValueKind.String);
-                s_recordWritten = true;
-            }
+            if (!s_recordWritten) WriteHeader(rec);
             using var c = rec.CreateSubKey($@"{ControllersKey}\{token}");
             c.SetValue("TransportIndex", transportIndex, RegistryValueKind.DWord);
             c.SetValue("Backend", backend, RegistryValueKind.String);
@@ -198,30 +259,35 @@ internal static partial class MachineClaims
         EnsureOwner();
         lock (s_lock)
         {
+            s_usbipPort = port;
             using var rec = Registry.LocalMachine.CreateSubKey($@"{RecordsRoot}\{s_ownerId}");
+            if (!s_recordWritten) WriteHeader(rec);
             rec.SetValue("UsbipPort", port, RegistryValueKind.DWord);
         }
     }
 
     /// <summary>Drop a controller's entry after its teardown. The record
-    /// goes with its last controller.</summary>
+    /// stays until the process exits.</summary>
     internal static void RemoveController(string token)
     {
         lock (s_lock)
         {
             if (s_ownerId == null) return;
-            string path = $@"{RecordsRoot}\{s_ownerId}";
             try
             {
-                using var rec = Registry.LocalMachine.OpenSubKey(path, writable: true);
-                if (rec == null) return;
-                using (var cs = rec.OpenSubKey(ControllersKey, writable: true))
-                {
-                    cs?.DeleteSubKeyTree(token, throwOnMissingSubKey: false);
-                    if (cs != null && cs.SubKeyCount > 0) return;
-                }
+                using var cs = Registry.LocalMachine.OpenSubKey($@"{RecordsRoot}\{s_ownerId}\{ControllersKey}", writable: true);
+                cs?.DeleteSubKeyTree(token, throwOnMissingSubKey: false);
             }
-            catch { return; }
+            catch { }
+        }
+    }
+
+    /// <summary>Delete this process's record, at its exit.</summary>
+    internal static void DeleteOwnRecord()
+    {
+        lock (s_lock)
+        {
+            if (s_ownerId == null) return;
             DeleteRecord(s_ownerId);
             s_recordWritten = false;
         }
@@ -279,7 +345,8 @@ internal static partial class MachineClaims
                     rec.GetValue("UsbipPort") is int up ? up : 0,
                     self || IsHeld(OwnerPipeName(id)),
                     self,
-                    controllers));
+                    controllers,
+                    rec.GetValue("StagingTag") as string));
             }
         }
         catch { }

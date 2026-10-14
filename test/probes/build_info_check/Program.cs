@@ -155,10 +155,17 @@ internal static class Program
             return 2;
         }
 
-        var before = ClaimSnapshot();
         using (var ctx = new HMContext())
         {
             ctx.LoadDefaultProfiles();
+            // The program's first machine-wide write takes its ownership
+            // claim and writes its record, as the constructor's staging of
+            // the driver does when a deploy is coming. That write goes
+            // first here, so the snapshot holds what any running program
+            // holds, and the refusals below must add nothing to it.
+            try { HIDMaestro.Internal.DriverBuilder.EnsureExtracted(); }
+            catch (HMPayloadMissingException) { }
+            var before = ClaimSnapshot();
             var composite = ctx.GetProfile("dualsense-composite")!;
             ExpectMissing("a composite persona's create", HMPayload.UsbipTransport, os,
                           () => ctx.CreateController(composite).Dispose());
@@ -169,7 +176,7 @@ internal static class Program
             ExpectMissing("the driver for ARM64", HMPayload.Driver, Architecture.Arm64,
                           () => HMBuildInfo.ThrowIfMissing(HMPayload.Driver, Architecture.Arm64));
             var after = ClaimSnapshot();
-            Check("the refusals took no machine-wide claim and wrote no owner record",
+            Check("the refusals took no machine-wide claim and wrote nothing to the owner record",
                   after.SetEquals(before),
                   after.SetEquals(before) ? "" : "new: " + string.Join(", ", after.Except(before)));
 
@@ -202,8 +209,9 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>Claim pipes and owner records that name this process. A
-    /// refused create must leave both untouched.</summary>
+    /// <summary>Claim pipes, and the owner record that names this process
+    /// with its controller entries. A refused create must leave all of them
+    /// untouched.</summary>
     static HashSet<string> ClaimSnapshot()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -221,8 +229,11 @@ internal static class Program
             foreach (string id in root.GetSubKeyNames())
             {
                 using var k = root.OpenSubKey(id);
-                if (k?.GetValue("Pid") is int pid && pid == Environment.ProcessId)
-                    set.Add("record " + id);
+                if (k?.GetValue("Pid") is not int pid || pid != Environment.ProcessId) continue;
+                set.Add("record " + id);
+                using var cs = k.OpenSubKey("Controllers");
+                foreach (string token in cs?.GetSubKeyNames() ?? Array.Empty<string>())
+                    set.Add("controller " + token);
             }
         }
         return set;

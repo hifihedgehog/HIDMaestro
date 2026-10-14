@@ -266,6 +266,47 @@ internal static class Native
         return d;
     }
 
+    /// <summary>A record the way a program on this SDK writes it, with its
+    /// staging and its controllers' entries. It is live while someone holds
+    /// its owner claim pipe.</summary>
+    internal static void WriteRecord(string ownerId, string? stagingTag, params (string Token, int Index)[] controllers)
+    {
+        using var r = Registry.LocalMachine.CreateSubKey($@"SOFTWARE\HIDMaestroOwners\{ownerId}");
+        r.SetValue("Pid", 0, RegistryValueKind.DWord);
+        r.SetValue("Image", "coexist_check, a running program's record", RegistryValueKind.String);
+        r.SetValue("StartTime", 0L, RegistryValueKind.QWord);
+        r.SetValue("SdkVersion", "0.0.0", RegistryValueKind.String);
+        if (stagingTag != null) r.SetValue("StagingTag", stagingTag, RegistryValueKind.String);
+        foreach (var (token, index) in controllers)
+        {
+            using var c = r.CreateSubKey($@"Controllers\{token}");
+            c.SetValue("TransportIndex", index, RegistryValueKind.DWord);
+            c.SetValue("Backend", "umdf", RegistryValueKind.String);
+            c.SetValue("Profile", "coexist-live", RegistryValueKind.String);
+        }
+    }
+
+    /// <summary>A value of the record a process wrote, or null.</summary>
+    internal static string? RecordValue(int pid, string name)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (k == null) return null;
+        foreach (var id in k.GetSubKeyNames())
+        {
+            using var r = k.OpenSubKey(id);
+            if (r?.GetValue("Pid") is int p && p == pid) return r.GetValue(name)?.ToString();
+        }
+        return null;
+    }
+
+    /// <summary>Forget which payload is installed, so the next InstallDriver
+    /// runs the deploy policy instead of its fast path.</summary>
+    internal static void DropInstalledManifest()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro", writable: true);
+        k?.DeleteValue("InstalledManifestSha256", throwOnMissingValue: false);
+    }
+
     /// <summary>A record the way a killed program on this SDK leaves it:
     /// no ownership claim, and one controller entry.</summary>
     internal static void WriteDeadRecord(string ownerId, string token, int transportIndex)

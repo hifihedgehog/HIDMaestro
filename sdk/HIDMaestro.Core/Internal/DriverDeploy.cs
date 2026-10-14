@@ -166,19 +166,32 @@ internal static partial class DriverDeploy
 
             // Older. The reclaim before this removed what dead programs
             // left, so whatever is present now belongs to a running program
-            // or to one whose state cannot be known.
+            // or to one whose state cannot be known. A running program's
+            // controller whose devices are not present yet holds the driver
+            // too: its record entry comes before its PnP work, and its
+            // create waits for this lock before that work (EnsureForCreate).
             var census = OwnerCensus.Take();
             var holders = census.Devices
                 .Where(d => d.Owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
                 .ToList();
-            if (holders.Count == 0)
+            var pending = census.Records
+                .Where(r => r.Live)
+                .SelectMany(r => r.Controllers.Where(c =>
+                        !string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase)
+                        && !holders.Any(h => string.Equals(h.Key, c.Token, StringComparison.OrdinalIgnoreCase)))
+                    .Select(c => (Record: r, Controller: c)))
+                .ToList();
+            if (holders.Count == 0 && pending.Count == 0)
             {
                 DriverBuilder.DeployLocked();
                 return HMDriverInstallOutcome.Upgraded;
             }
             if (installed.Value.Release >= MinimumDriverVersion)
                 return HMDriverInstallOutcome.KeptInUse;
-            throw new HMDriverVersionException(installed.Value.Release, MinimumDriverVersion, Describe(holders));
+            var blockers = Describe(holders);
+            foreach (var (r, c) in pending)
+                blockers.Add($"identity {c.Token} on transport index {c.TransportIndex}, being created ({(r.Self ? "this program" : MachineClaims.Describe(r))})");
+            throw new HMDriverVersionException(installed.Value.Release, MinimumDriverVersion, blockers);
         }
         finally
         {
@@ -188,6 +201,42 @@ internal static partial class DriverDeploy
             try { ProtectedStaging.PruneOldVersions(); } catch { }
             mutex.ReleaseMutex();
         }
+    }
+
+    // The installed-payload record this process last saw with both
+    // packages in the store. Every deploy and package removal rewrites or
+    // deletes it, so a create finds it unchanged only while the store is as
+    // it was.
+    private static string? s_confirmedManifest;
+
+    /// <summary>The deploy gate of a create, run after the controller's
+    /// record entry and before its PnP work. Under the deploy lock: when the
+    /// installed-payload record changed since this process last saw the
+    /// packages, or is missing, the driver store is read again, and a
+    /// missing driver is deployed by the policy above. A deploy of another
+    /// program therefore either finished before this create's PnP work or
+    /// saw its entry. Returns true when this call deployed.</summary>
+    internal static bool EnsureForCreate()
+    {
+        using var mutex = Acquire();
+        try
+        {
+            string? recorded = DriverBuilder.InstalledManifestHash();
+            if (recorded != null && string.Equals(recorded, Volatile.Read(ref s_confirmedManifest), StringComparison.OrdinalIgnoreCase))
+                return false;
+            bool deployed = false;
+            if (!DriverBuilder.DriverStoreHasBothPackages())
+            {
+                var outcome = Run();
+                deployed = outcome is HMDriverInstallOutcome.Installed or HMDriverInstallOutcome.Upgraded;
+                if (!DriverBuilder.DriverStoreHasBothPackages())
+                    throw new InvalidOperationException(
+                        $"The HIDMaestro driver is not in the driver store, and a deploy for this create ended with {outcome}.");
+            }
+            Volatile.Write(ref s_confirmedManifest, DriverBuilder.InstalledManifestHash());
+            return deployed;
+        }
+        finally { mutex.ReleaseMutex(); }
     }
 
     private static List<string> Describe(List<OwnerCensus.DeviceGroup> holders)

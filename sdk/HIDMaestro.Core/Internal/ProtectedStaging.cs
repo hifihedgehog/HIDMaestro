@@ -95,6 +95,10 @@ internal static class ProtectedStaging
     /// directory owned by Administrators needs it.</summary>
     internal static string DirFor(string operation)
     {
+        // Staging is a machine-wide write: the owner claim and record come
+        // first, and the record names this build's directory so a deploy of
+        // another build keeps it while this process runs.
+        MachineClaims.NoteStaging(VersionTag);
         lock (s_lock)
         {
             // The shared root cannot be moved aside: vrpathreg stores an
@@ -235,10 +239,17 @@ internal static class ProtectedStaging
         try
         {
             if (!Directory.Exists(StagingRoot)) return;
+            // A running program's directory, by the tag its record names. A
+            // record without one, written by a build before the tag, keeps
+            // every directory of its version.
+            var liveTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var liveVersions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in MachineClaims.ReadAll())
-                if (r.Live && !string.IsNullOrEmpty(r.SdkVersion))
-                    liveVersions.Add(r.SdkVersion!);
+            {
+                if (!r.Live) continue;
+                if (!string.IsNullOrEmpty(r.StagingTag)) liveTags.Add(r.StagingTag!);
+                else if (!string.IsNullOrEmpty(r.SdkVersion)) liveVersions.Add(r.SdkVersion!);
+            }
 
             foreach (string dir in Directory.EnumerateDirectories(StagingRoot))
             {
@@ -256,7 +267,8 @@ internal static class ProtectedStaging
                 // everything before the first '-'.
                 int dash = tag.IndexOf('-');
                 string version = dash > 0 ? tag[..dash] : tag;
-                if (!tag.Contains(".untrusted-", StringComparison.Ordinal) && liveVersions.Contains(version))
+                if (!tag.Contains(".untrusted-", StringComparison.Ordinal)
+                    && (liveTags.Contains(tag) || liveVersions.Contains(version)))
                     continue;
                 TryDelete(dir);
             }

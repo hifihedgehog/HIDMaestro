@@ -528,6 +528,12 @@ public static class DriverBuilder
         }
     }
 
+    /// <summary>The installed-payload record, or null.</summary>
+    internal static string? InstalledManifestHash() => ReadInstalledManifestHash();
+
+    /// <summary>Both packages are in the driver store, read now.</summary>
+    internal static bool DriverStoreHasBothPackages() => DriverStoreContainsHidMaestro();
+
     private static string? ReadInstalledManifestHash()
     {
         try

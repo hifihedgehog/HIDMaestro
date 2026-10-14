@@ -51,7 +51,18 @@
 //      was killed. A create of the same key on another transport index takes
 //      its XUSB companion over, restarts it on the new index, and XInput
 //      reads the new program's input.
-//   S71 runs A to H and J to M.
+//   N. A running program's controller whose devices are not present yet
+//      holds an older driver: InstallDriver keeps it, and upgrades it once
+//      that program is gone.
+//   O. Another running program, with no controller, keeps the driver
+//      packages through RemoveAllVirtualControllers(). Once it is gone they
+//      go.
+//   P. A program's create after another program removed the driver
+//      deploys it again and succeeds.
+//   Q. A create waits for a deploy that holds the deploy lock.
+//   R. A program that has only staged names its staging in its record, and
+//      a deploy keeps the staging a running program's record names.
+//   S71 runs A to H and J to R.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -64,6 +75,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Microsoft.Win32;
 using Windows.Gaming.Input;
 
 internal static class Program
@@ -124,7 +136,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLM";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQR";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -141,6 +153,11 @@ internal static class Program
             ('K', "a keyless program started again after a crash", SectionK),
             ('L', "a killed program that only created composites", SectionL),
             ('M', "a companion taken over on another transport index", SectionM),
+            ('N', "an older driver and a create in flight", SectionN),
+            ('O', "removing the packages while another program runs", SectionO),
+            ('P', "a create after another program removed the driver", SectionP),
+            ('Q', "a create during another program's deploy", SectionQ),
+            ('R', "staging a running program uses", SectionR),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -566,7 +583,11 @@ internal static class Program
     /// installed. Returns the version Windows reports for it.</summary>
     static string InstallNewerDriver()
     {
-        string staging = HIDMaestro.Internal.DriverBuilder.EnsureExtracted();
+        // A peer stages the payload, so this probe never becomes a program
+        // that embeds HIDMaestro: later sections count the programs running.
+        string staging;
+        using (var stager = PeerProcess.Start("stage"))
+            staging = StagingPath(stager.Send("stagingdir")) ?? throw new InvalidOperationException("the peer staged nothing");
         string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro_coexist_newer");
         if (Directory.Exists(dir)) Directory.Delete(dir, true);
         Directory.CreateDirectory(dir);
@@ -864,6 +885,160 @@ internal static class Program
     }
 
     static readonly Guid XusbGuid = new("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
+
+    // ── N to R ─────────────────────────────────────────────────────────
+
+    static string FileRepository =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
+
+    static int MainPackages() => Directory.GetDirectories(FileRepository, "hidmaestro.inf_*").Length;
+
+    /// <summary>A running program's ownership claim and record, held by this
+    /// probe: the claim pipe while the returned handle lives, and a record
+    /// naming <paramref name="controllers"/>, each a token on an index.</summary>
+    static Microsoft.Win32.SafeHandles.SafeFileHandle? LiveRecord(string ownerId, string? stagingTag,
+        params (string Token, int Index)[] controllers)
+    {
+        var claim = Native.HoldPipe($"HIDMaestro.Owner.{ownerId}");
+        Native.WriteRecord(ownerId, stagingTag, controllers);
+        return claim;
+    }
+
+    static void SectionN()
+    {
+        const string ownerId = "0000000000000000000000000000000a";
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        {
+            Check("N: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        Uninstall();
+        using (var old = PeerProcess.Start("N-v1.12.0", "v1.12.0"))
+            Check("N: a v1.12.0 program installs its driver", Ok(old.Send("install")));
+        try
+        {
+            using (LiveRecord(ownerId, null, ("HM_0042", 42)))
+            {
+                using var nu = PeerProcess.Start("N1-new");
+                string ri = nu.Send("install");
+                Check("N1: a running program's controller with no device yet keeps the older driver",
+                      PeerProcess.Field(ri, "outcome") == "KeptInUse", ri);
+            }
+            using (var nu = PeerProcess.Start("N2-new"))
+            {
+                string ri = nu.Send("install");
+                Check("N2: once that program is gone the driver is upgraded", PeerProcess.Field(ri, "outcome") == "Upgraded", ri);
+            }
+        }
+        finally { Native.DeleteRecord(ownerId); }
+    }
+
+    static void SectionO()
+    {
+        const string ownerId = "0000000000000000000000000000000b";
+        try
+        {
+            using (LiveRecord(ownerId, null))
+            {
+                using var p = PeerProcess.Start("O1");
+                string r = p.Send("removeall");
+                Check("O1: with another program running, RemoveAllVirtualControllers() keeps the driver packages",
+                      Ok(r) && MainPackages() > 0 && Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro") != null,
+                      $"{r}, {MainPackages()} package(s)");
+            }
+            using (var p = PeerProcess.Start("O2"))
+            {
+                string r = p.Send("removeall");
+                Check("O2: with no other program, they go", Ok(r) && MainPackages() == 0, $"{r}, {MainPackages()} package(s)");
+            }
+        }
+        finally { Native.DeleteRecord(ownerId); }
+    }
+
+    static void SectionP()
+    {
+        using var p1 = PeerProcess.Start("P1");
+        Check("P: the first program installs", Ok(p1.Send("install")));
+        using (var p2 = PeerProcess.Start("P2"))
+            p2.Send("uninstall");
+        Check("P: a second program's uninstall removed the packages", MainPackages() == 0, $"{MainPackages()} package(s)");
+        string c = p1.Send("create pad F0F4 -");
+        Check("P: the first program's next create deploys the driver again and succeeds", Ok(c) && MainPackages() > 0, c);
+        if (Ok(c))
+        {
+            p1.Send("stream 3 0.7 125 0");
+            var path = WaitPaths(0xBEEF, 0xF0F4, 1, 10_000);
+            using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+            Check("P: its input arrives", cap != null && Flows(cap));
+        }
+    }
+
+    static void SectionQ()
+    {
+        using var p = PeerProcess.Start("Q");
+        p.Send("install");
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using var m = new Mutex(false, @"Global\HIDMaestro.Deploy");
+            m.WaitOne();
+            held.Set();
+            release.Wait(15_000);
+            m.ReleaseMutex();
+        }) { IsBackground = true };
+        holder.Start();
+        held.Wait(10_000);
+        p.Post("create pad F0F5 -");
+        Thread.Sleep(3000);
+        release.Set();
+        string c = p.Receive("create");
+        holder.Join(5000);
+        // The create's own time, as the program measured it: the lock was
+        // held for 3 s from just before the create was sent.
+        int ms = int.TryParse(PeerProcess.Field(c, "ms"), out int v) ? v : -1;
+        Check("Q: a create waits for the deploy lock another program holds, then succeeds",
+              Ok(c) && ms >= 2500, $"CreateController took {ms} ms: {c}");
+    }
+
+    static void SectionR()
+    {
+        const string ownerId = "0000000000000000000000000000000c";
+        const string tag = "9.9.9-0123456789abcdef";
+        string fake = Path.Combine(StagingRoot, tag);
+        try
+        {
+            using (var p = PeerProcess.Start("R1"))
+            {
+                string sd = p.Send("stagingdir");
+                string? dir = StagingPath(sd);
+                string? own = dir == null ? null : Path.GetFileName(Path.GetDirectoryName(dir));
+                string? recTag = Native.RecordValue(p.Pid, "StagingTag");
+                Check("R1: a program that has only staged has a record naming its staging",
+                      own != null && string.Equals(recTag, own, StringComparison.OrdinalIgnoreCase), $"record {recTag ?? "none"}, staging {own}");
+            }
+
+            Directory.CreateDirectory(Path.Combine(fake, "driver"));
+            using (LiveRecord(ownerId, tag))
+            {
+                using var p = PeerProcess.Start("R2");
+                Native.DropInstalledManifest();
+                string ri = p.Send("install");
+                Check("R2: a deploy keeps the staging a running program's record names", Ok(ri) && Directory.Exists(fake), ri);
+            }
+            using (var p = PeerProcess.Start("R3"))
+            {
+                Native.DropInstalledManifest();
+                string ri = p.Send("install");
+                Check("R3: once that program is gone the next deploy removes it", Ok(ri) && !Directory.Exists(fake), ri);
+            }
+        }
+        finally
+        {
+            Native.DeleteRecord(ownerId);
+            try { if (Directory.Exists(fake)) Directory.Delete(fake, true); } catch { }
+        }
+    }
 
     // ── I ──────────────────────────────────────────────────────────────
 

@@ -13,6 +13,7 @@
 //                               ramp 1, X stepping by one count a frame
 //   stopstream                  stop, and report the submit intervals
 //   sweep                       RemoveAllVirtualControllers(preserveInstall: true)
+//   removeall                   RemoveAllVirtualControllers()
 //   everything                  remove every controller of every program,
 //                               keep the driver
 //   uninstall                   remove every controller and the driver
@@ -101,6 +102,10 @@ internal static class Peer
                     case "sweep":
                         HMContext.RemoveAllVirtualControllers(preserveInstall: true);
                         Reply("OK sweep");
+                        break;
+                    case "removeall":
+                        HMContext.RemoveAllVirtualControllers();
+                        Reply("OK removeall");
                         break;
                     case "everything":
                         RemoveEverything(preserveInstall: true);

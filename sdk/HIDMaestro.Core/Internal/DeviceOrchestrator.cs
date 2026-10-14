@@ -1283,25 +1283,14 @@ internal static partial class DeviceOrchestrator
             WriteInstanceConfig(controllerIndex, profile);
 
         // ── Step 2: ensure driver is in the store ────────────────────────
-        // Use IsDriverInstalled here (not unconditional FullDeploy) because
-        // SetupController may be called per-controller in tight loops; the
-        // strict pnputil parser is reliable so this gate is now safe. The
-        // unconditional FullDeploy lives in HMContext.InstallDriver, which
-        // is the canonical entry point and is called once at app startup.
+        // The deploy gate: under the machine-wide deploy lock, after this
+        // controller's record entry exists, so a deploy or package removal
+        // of another program either finished before this create's PnP work
+        // or saw the entry and left the driver alone (DriverDeploy).
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "2.driver_install_check"))
         {
             var driverSw = Stopwatch.StartNew();
-            bool deployed = false;
-            if (!DriverBuilder.IsDriverInstalled())
-            {
-                deployed = true;
-                if (!DriverBuilder.FullDeploy())
-                {
-                    LogDiag($"    driver install FAILED (FullDeploy returned false) after {driverSw.ElapsedMilliseconds}ms");
-                    throw new InvalidOperationException(
-                        "Driver install failed. Run elevated and check pnputil output.");
-                }
-            }
+            bool deployed = DriverDeploy.EnsureForCreate();
             LogDiag($"    driver install check (deployed={deployed}) in {driverSw.ElapsedMilliseconds}ms");
         }
 
@@ -2283,13 +2272,20 @@ internal static partial class DeviceOrchestrator
 
         if (!preserveInstall)
         {
-            try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
-            // The WinUSB binding packages, after every devnode still on
-            // one is put back.
-            try { WinUsbBinding.RemovePackage(); } catch { }
+            // Under the deploy lock, so no other program's deploy is between
+            // its check and its install while the packages go.
+            using var deploy = DriverDeploy.Acquire();
+            try
+            {
+                try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+                // The WinUSB binding packages, after every devnode still on
+                // one is put back.
+                try { WinUsbBinding.RemovePackage(); } catch { }
 
-            // Clear registry config
-            try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+                // Clear registry config
+                try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+            }
+            finally { deploy.ReleaseMutex(); }
         }
         Phase("package-removal");
 

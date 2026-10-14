@@ -50,7 +50,9 @@ internal static class OwnerSweep
     /// controllers of programs that have exited. A running program's
     /// controllers, this one's included, stay. The packages and
     /// <c>SOFTWARE\HIDMaestro</c> go only with <paramref name="preserveInstall"/>
-    /// false and only when no controller of any program remains.</summary>
+    /// false, only when no device of any program remains and no other
+    /// program runs, and under the deploy lock, so no deploy or create of
+    /// another program is between its check and its install.</summary>
     internal static void RemoveOrphaned(bool preserveInstall)
     {
         MachineClaims.EnsureOwner();
@@ -63,17 +65,25 @@ internal static class OwnerSweep
 
         if (!preserveInstall)
         {
-            var after = OwnerCensus.Take();
-            if (after.Devices.Count == 0 && !after.Records.Any(r => r.Live && r.Controllers.Count > 0))
+            using var mutex = DriverDeploy.Acquire();
+            try
             {
-                try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
-                try { WinUsbBinding.RemovePackage(); } catch { }
-                try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+                var after = OwnerCensus.Take();
+                bool othersRun = after.Records.Any(r => r.Live && !r.Self);
+                bool ownHeld = after.Records.Any(r => r.Self && r.Controllers.Count > 0);
+                if (after.Devices.Count == 0 && !othersRun && !ownHeld)
+                {
+                    try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
+                    try { WinUsbBinding.RemovePackage(); } catch { }
+                    try { Registry.LocalMachine.DeleteSubKeyTree(@"SOFTWARE\HIDMaestro", false); } catch { }
+                }
+                else
+                {
+                    DeviceOrchestrator.LogDiag($"    cleanup kept the driver packages: {after.Devices.Count} device group(s), " +
+                        $"{after.Records.Count(r => r.Live && !r.Self)} other running program(s)");
+                }
             }
-            else
-            {
-                DeviceOrchestrator.LogDiag($"    cleanup kept the driver packages: {after.Devices.Count} device group(s) of running or unknown programs remain");
-            }
+            finally { mutex.ReleaseMutex(); }
         }
     }
 
@@ -96,7 +106,12 @@ internal static class OwnerSweep
     {
         var census = OwnerCensus.Take();
         var own = census.Records.FirstOrDefault(r => r.Self);
-        if (own == null || own.Controllers.Count == 0) return;
+        if (own == null) return;
+        if (own.Controllers.Count == 0)
+        {
+            MachineClaims.DeleteOwnRecord();
+            return;
+        }
         // The composites first: their emulated devices read sections this
         // process is about to release.
         Usbip.UsbipBackend.DetachOwn();
