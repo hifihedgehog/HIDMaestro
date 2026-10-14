@@ -11,42 +11,46 @@ namespace HIDMaestro.Internal;
 /// Event-driven PnP device management using CM_Register_Notification.
 /// No sleeps, no polling: waits on OS callbacks for actual system state changes.
 /// </summary>
-public static class DeviceManager
+public static partial class DeviceManager
 {
     // ── CfgMgr32 P/Invoke ──
 
-    [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Uninstall_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Uninstall_DevNode(uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INTERFACE pFilter, IntPtr pContext, CM_NOTIFY_CALLBACK pCallback, out IntPtr pNotifyContext);
+    // The callback is a plain function pointer to NotifyDispatch. Each wait's
+    // own handler travels in the context argument as a GCHandle.
+    [LibraryImport("CfgMgr32.dll")]
+    private static unsafe partial uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INTERFACE pFilter, IntPtr pContext,
+        delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, IntPtr, uint, uint> pCallback, out IntPtr pNotifyContext);
 
-    [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INSTANCE pFilter, IntPtr pContext, CM_NOTIFY_CALLBACK pCallback, out IntPtr pNotifyContext);
+    [LibraryImport("CfgMgr32.dll")]
+    private static unsafe partial uint CM_Register_Notification(ref CM_NOTIFY_FILTER_INSTANCE pFilter, IntPtr pContext,
+        delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, IntPtr, uint, uint> pCallback, out IntPtr pNotifyContext);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Unregister_Notification(IntPtr NotifyContext);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Unregister_Notification(IntPtr NotifyContext);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Get_Device_ID_Size(out uint pulLen, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_Device_ID_Size(out uint pulLen, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", CharSet = CharSet.Unicode)]
-    static extern uint CM_Get_Device_IDW(uint dnDevInst, char[] Buffer, uint BufferLen, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Get_Device_IDW(uint dnDevInst, char[] Buffer, uint BufferLen, uint ulFlags);
 
     delegate uint CM_NOTIFY_CALLBACK(IntPtr hNotify, IntPtr Context, uint Action, IntPtr EventData, uint EventDataSize);
 
@@ -81,16 +85,53 @@ public static class DeviceManager
         public Guid ClassGuid;
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct CM_NOTIFY_FILTER_INSTANCE
+    [StructLayout(LayoutKind.Sequential)]
+    unsafe struct CM_NOTIFY_FILTER_INSTANCE
     {
         public uint cbSize;
         public uint Flags;
         public uint FilterType;
         public uint Reserved;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 200)]
-        public string? InstanceId;
+        public fixed char InstanceId[200];   // WCHAR InstanceId[MAX_DEVICE_ID_LEN]
     }
+
+    /// <summary>Copy <paramref name="id"/> into the filter's instance ID: at
+    /// most 199 characters and a terminator, as the ByValTStr marshalling
+    /// this field had before did.</summary>
+    static unsafe void SetInstanceId(ref CM_NOTIFY_FILTER_INSTANCE filter, string id)
+    {
+        int n = Math.Min(id.Length, 199);
+        fixed (char* p = filter.InstanceId)
+        {
+            id.AsSpan(0, n).CopyTo(new Span<char>(p, 200));
+            p[n] = '\0';
+        }
+    }
+
+    /// <summary>The one callback cfgmgr32 calls. It hands the event to the
+    /// handler whose GCHandle is the registration's context. An exception
+    /// must not unwind into cfgmgr32, and one left unhandled in an
+    /// UnmanagedCallersOnly method ends the process, so none escapes.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvStdcall) })]
+    static uint NotifyDispatch(IntPtr hNotify, IntPtr context, uint action, IntPtr eventData, uint eventDataSize)
+    {
+        Interlocked.Increment(ref s_notificationsDelivered);
+        try
+        {
+            if (GCHandle.FromIntPtr(context).Target is CM_NOTIFY_CALLBACK handler)
+                return handler(hNotify, context, action, eventData, eventDataSize);
+        }
+        catch { }
+        return 0; // ERROR_SUCCESS
+    }
+
+    private static long s_notificationsDelivered;
+
+    /// <summary>PnP notifications delivered to a wait since the process
+    /// started. A wait whose registration Windows refuses still finishes on
+    /// its re-checks, only later, so this count is the evidence that the
+    /// notifications themselves arrive. pnp_notify_check reads it.</summary>
+    internal static long NotificationsDelivered => Interlocked.Read(ref s_notificationsDelivered);
 
     /// <summary>The symbolic link of an interface event. CM_NOTIFY_EVENT_DATA
     /// is FilterType and Reserved, then a union at offset 8, and an interface
@@ -135,10 +176,10 @@ public static class DeviceManager
         }
     }
 
-    /// <summary>Registers <paramref name="callback"/> for interface events of
-    /// one class. Zero when Windows refuses, and the caller's wait then runs
-    /// on its re-checks alone.</summary>
-    static IntPtr RegisterInterfaceEvents(Guid interfaceClass, CM_NOTIFY_CALLBACK callback)
+    /// <summary>Registers the handler whose GCHandle is <paramref name="context"/>
+    /// for interface events of one class. Zero when Windows refuses, and the
+    /// caller's wait then runs on its re-checks alone.</summary>
+    static unsafe IntPtr RegisterInterfaceEvents(Guid interfaceClass, IntPtr context)
     {
         var filter = new CM_NOTIFY_FILTER_INTERFACE
         {
@@ -146,47 +187,49 @@ public static class DeviceManager
             FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
             ClassGuid = interfaceClass,
         };
-        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+        return CM_Register_Notification(ref filter, context, &NotifyDispatch, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
     }
 
-    /// <summary>Registers <paramref name="callback"/> for the events of one
-    /// device instance. Zero when Windows refuses.</summary>
-    static IntPtr RegisterInstanceEvents(string instanceId, CM_NOTIFY_CALLBACK callback)
+    /// <summary>Registers the handler whose GCHandle is <paramref name="context"/>
+    /// for the events of one device instance. Zero when Windows refuses.</summary>
+    static unsafe IntPtr RegisterInstanceEvents(string instanceId, IntPtr context)
     {
         var filter = new CM_NOTIFY_FILTER_INSTANCE
         {
             cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER_INSTANCE>(),
             FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
-            InstanceId = instanceId,
         };
-        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+        SetInstanceId(ref filter, instanceId);
+        return CM_Register_Notification(ref filter, context, &NotifyDispatch, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
     }
 
-    /// <summary>Registers <paramref name="callback"/> for the events of every
-    /// device instance (CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES, with an
-    /// empty instance ID). Zero when Windows refuses.</summary>
-    static IntPtr RegisterAllInstanceEvents(CM_NOTIFY_CALLBACK callback)
+    /// <summary>Registers the handler whose GCHandle is <paramref name="context"/>
+    /// for the events of every device instance
+    /// (CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES, with an empty instance
+    /// ID). Zero when Windows refuses.</summary>
+    static unsafe IntPtr RegisterAllInstanceEvents(IntPtr context)
     {
         var filter = new CM_NOTIFY_FILTER_INSTANCE
         {
             cbSize = (uint)Marshal.SizeOf<CM_NOTIFY_FILTER_INSTANCE>(),
             Flags = CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES,
             FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
-            InstanceId = string.Empty,
         };
-        return CM_Register_Notification(ref filter, IntPtr.Zero, callback, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+        return CM_Register_Notification(ref filter, context, &NotifyDispatch, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
     }
 
     /// <summary>Runs <paramref name="wait"/> with <paramref name="callback"/>
-    /// registered through <paramref name="register"/>, keeping the delegate
-    /// alive for Windows and unregistering it before returning.</summary>
-    static bool WithNotification(Func<CM_NOTIFY_CALLBACK, IntPtr> register, CM_NOTIFY_CALLBACK callback, Func<bool> wait)
+    /// registered through <paramref name="register"/>, which receives the
+    /// callback's GCHandle as the registration context. The handle keeps the
+    /// callback alive and is freed only after CM_Unregister_Notification,
+    /// which waits for callbacks in flight to finish.</summary>
+    static bool WithNotification(Func<IntPtr, IntPtr> register, CM_NOTIFY_CALLBACK callback, Func<bool> wait)
     {
         var keep = GCHandle.Alloc(callback);
         IntPtr h = IntPtr.Zero;
         try
         {
-            h = register(callback);
+            h = register(GCHandle.ToIntPtr(keep));
             return wait();
         }
         finally
@@ -291,29 +334,32 @@ public static class DeviceManager
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiGetClassDevsW")]
-    static extern IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, uint Enumerator,
-        IntPtr hwndParent, uint Flags);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiGetClassDevsW", SetLastError = true)]
+    private static partial IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, uint Enumerator, IntPtr hwndParent, uint Flags);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
-        IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId, IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, EntryPoint = "SetupDiCallClassInstaller")]
-    static extern bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCallClassInstaller", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool SetupDiGetDeviceInstanceIdW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        [Out] char[] DeviceInstanceId, uint DeviceInstanceIdSize, out uint RequiredSize);
+    [LibraryImport("SetupAPI.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiGetDeviceInstanceIdW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData, [Out] char[] DeviceInstanceId, uint DeviceInstanceIdSize, out uint RequiredSize);
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    static extern bool SetupDiRemoveDevice(IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiRemoveDevice(IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
 
     const uint DIGCF_ALLCLASSES = 0x04;
     const int DIF_REMOVE = 0x05;
@@ -998,11 +1044,11 @@ public static class DeviceManager
         }
     }
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Disable_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Disable_DevNode(uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    static extern uint CM_Enable_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Enable_DevNode(uint dnDevInst, uint ulFlags);
 
     /// <summary>
     /// Restarts a device by disabling and re-enabling it. No process spawning.

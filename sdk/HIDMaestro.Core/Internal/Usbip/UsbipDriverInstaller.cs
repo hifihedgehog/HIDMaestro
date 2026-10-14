@@ -36,7 +36,7 @@ namespace HIDMaestro.Internal.Usbip;
 /// step needs, and the uninstaller with its Apps entry. It adds no GUI,
 /// SDK, symbol files, Start menu folder or desktop shortcut
 /// (<see cref="InstallerArguments"/>).</para></summary>
-internal static class UsbipDriverInstaller
+internal static partial class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
     /// <summary>The installer matching this OS. One AnyCPU assembly carries
@@ -430,17 +430,16 @@ internal static class UsbipDriverInstaller
     private const uint CM_LOCATE_DEVNODE_PHANTOM = 1;
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 1;
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
-        out uint propertyType, byte[]? buffer, ref uint bufferSize, uint flags);
-    [DllImport("cfgmgr32.dll")]
-    private static extern int CM_Get_Child(out uint child, uint parent, uint flags);
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Get_Device_IDW(uint dnDevInst, [Out] char[] buffer, int bufferLen, uint flags);
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Get_Device_ID_List_SizeW(out uint length, string? filter, uint flags);
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Get_Device_ID_ListW(string? filter, [Out] char[] buffer, uint length, uint flags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, out uint propertyType, byte[]? buffer, ref uint bufferSize, uint flags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Get_Child(out uint child, uint parent, uint flags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int CM_Get_Device_IDW(uint dnDevInst, [Out] char[] buffer, int bufferLen, uint flags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int CM_Get_Device_ID_List_SizeW(out uint length, string? filter, uint flags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int CM_Get_Device_ID_ListW(string? filter, [Out] char[] buffer, uint length, uint flags);
 
     /// <summary>Write the pinned host controller files to an
     /// administrators-only directory, verify each against its pinned hash,
@@ -857,40 +856,39 @@ internal static class UsbipDriverInstaller
         public IntPtr Reserved;
     }
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Get_DevNode_Registry_PropertyW(uint dnDevInst, uint ulProperty,
-        ref uint pulRegDataType, byte[]? Buffer, ref uint pulLength, uint ulFlags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Get_DevNode_Registry_PropertyW(uint dnDevInst, uint ulProperty, ref uint pulRegDataType, byte[]? Buffer, ref uint pulLength, uint ulFlags);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(IntPtr ClassGuid, IntPtr hwndParent);
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
-        IntPtr hwndParent, uint Flags, ref SP_DEVINFO_DATA DeviceInfoData);
+    [LibraryImport("setupapi.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId, IntPtr hwndParent, uint Flags, ref SP_DEVINFO_DATA DeviceInfoData);
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet,
-        ref SP_DEVINFO_DATA DeviceInfoData, uint Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint Property, byte[] PropertyBuffer, uint PropertyBufferSize);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
     private const uint CM_LOCATE_DEVNODE_NORMAL = 0;
     private const uint CM_SETUP_DEVNODE_READY = 0;
     private const int CR_SUCCESS = 0;
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Locate_DevNodeW(out uint pdnDevInst, string? pDeviceID, uint ulFlags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int CM_Locate_DevNodeW(out uint pdnDevInst, string? pDeviceID, uint ulFlags);
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CM_Query_And_Remove_SubTreeW(uint dnAncestor, out uint pVetoType,
-        IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Query_And_Remove_SubTreeW(uint dnAncestor, out uint pVetoType, IntPtr pszVetoName, uint ulNameLength, uint ulFlags);
 
-    [DllImport("cfgmgr32.dll")]
-    private static extern int CM_Setup_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Setup_DevNode(uint dnDevInst, uint ulFlags);
 
-    [DllImport("cfgmgr32.dll")]
-    private static extern int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("cfgmgr32.dll")]
+    private static partial int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
 
     /// <summary>Stage the bundled installer and its license notice into the
     /// protected per-version "usbip" directory (Administrators/SYSTEM-write

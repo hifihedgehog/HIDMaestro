@@ -29,7 +29,7 @@ namespace HIDMaestro.Internal.Usbip;
 /// replies carry compacted data (no inter-packet padding) followed by
 /// descriptors whose offsets must echo the submit's offsets, with
 /// actual_length equal to the sum of per-packet actual lengths.</para></summary>
-internal sealed class UsbAudioEngine : IDisposable
+internal sealed partial class UsbAudioEngine : IDisposable
 {
     /// <summary>A pending isochronous URB, parked until its due tick.</summary>
     internal sealed class PendingIso
@@ -556,16 +556,17 @@ internal sealed class UsbAudioEngine : IDisposable
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
     private const uint TIMER_ALL_ACCESS = 0x1F0003;
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period,
-        IntPtr completionRoutine, IntPtr arg, bool resume);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period, IntPtr completionRoutine, IntPtr arg, [MarshalAs(UnmanagedType.Bool)] bool resume);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForMultipleObjects(uint count, IntPtr[] handles, [MarshalAs(UnmanagedType.Bool)] bool waitAll, uint ms);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr h);
 }

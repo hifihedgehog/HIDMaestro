@@ -24,7 +24,7 @@ namespace HIDMaestro;
 /// Handlers run on the reader thread, not the consumer's UI thread. Implement
 /// your handler accordingly.</para>
 /// </summary>
-public sealed class HMController : IDisposable
+public sealed partial class HMController : IDisposable
 {
     private readonly HMContext _context;
     /// <summary>The machine-wide transport index: every section, event,
@@ -1808,16 +1808,17 @@ public sealed class HMController : IDisposable
     private const uint TIMER_ALL_ACCESS = 0x1F0003;
     private const uint WAIT_FAILED = 0xFFFFFFFF;
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period,
-        IntPtr completionRoutine, IntPtr arg, bool resume);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period, IntPtr completionRoutine, IntPtr arg, [MarshalAs(UnmanagedType.Bool)] bool resume);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForMultipleObjects(uint count, IntPtr[] handles, [MarshalAs(UnmanagedType.Bool)] bool waitAll, uint ms);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr h);
 }

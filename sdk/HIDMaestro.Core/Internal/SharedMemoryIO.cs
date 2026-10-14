@@ -27,7 +27,7 @@ namespace HIDMaestro.Internal;
 /// that grants LocalService full access, then the driver/companion
 /// OpenFileMappings them.</para>
 /// </summary>
-internal static class SharedMemoryIO
+internal static partial class SharedMemoryIO
 {
     // ── Layout constants: match driver/driver.h ──────────────────────────
     //
@@ -1190,9 +1190,8 @@ internal static class SharedMemoryIO
         return pipe;
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr CreateNamedPipeW(string name, uint openMode, uint pipeMode, uint maxInstances,
-                                                  uint outBuffer, uint inBuffer, uint defaultTimeout, IntPtr securityAttributes);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateNamedPipeW(string name, uint openMode, uint pipeMode, uint maxInstances, uint outBuffer, uint inBuffer, uint defaultTimeout, IntPtr securityAttributes);
 
     private static IntPtr CreateNamedEvent(string name)
     {
@@ -1234,39 +1233,37 @@ internal static class SharedMemoryIO
         public int bInheritHandle;
     }
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes,
-        uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateFileMappingW(IntPtr hFile, IntPtr lpAttributes, uint flProtect, uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
-        uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess, uint dwFileOffsetHigh, uint dwFileOffsetLow, UIntPtr dwNumberOfBytesToMap);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool UnmapViewOfFile(IntPtr lpBaseAddress);
 
-    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "CloseHandle")]
-    private static extern bool CloseHandle(IntPtr hObject);
+    [LibraryImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr hObject);
 
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        string StringSecurityDescriptor, uint StringSDRevision,
-        out IntPtr SecurityDescriptor, IntPtr SecurityDescriptorSize);
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string StringSecurityDescriptor, uint StringSDRevision, out IntPtr SecurityDescriptor, IntPtr SecurityDescriptorSize);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr hMem);
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr LocalFree(IntPtr hMem);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName,
-        uint dwFlags, uint dwDesiredAccess);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName, uint dwFlags, uint dwDesiredAccess);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle,
-        string lpName);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr OpenEventW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEvent(IntPtr hEvent);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetEvent(IntPtr hEvent);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 }

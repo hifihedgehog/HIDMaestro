@@ -40,7 +40,7 @@ namespace HIDMaestro.Internal.Usbip;
 /// <para>Isochronous endpoints route to <see cref="UsbAudioEngine"/>;
 /// completions come back on the pacing thread and are serialized onto the
 /// connection by the server's send lock.</para></summary>
-internal sealed class UsbipEmulatedDevice : IDisposable
+internal sealed partial class UsbipEmulatedDevice : IDisposable
 {
     public UsbDescriptorSet Descriptors { get; }
     public UsbAudioEngine Audio { get; }
@@ -1281,22 +1281,24 @@ internal sealed class UsbipEmulatedDevice : IDisposable
     private const uint TIMER_ALL_ACCESS = 0x1F0003;
     private const uint WAIT_FAILED = 0xFFFFFFFF;
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period,
-        IntPtr completionRoutine, IntPtr arg, bool resume);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period, IntPtr completionRoutine, IntPtr arg, [MarshalAs(UnmanagedType.Bool)] bool resume);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForMultipleObjects(uint count, IntPtr[] handles, [MarshalAs(UnmanagedType.Bool)] bool waitAll, uint ms);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(IntPtr handle, uint ms);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEvent(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetEvent(IntPtr h);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr h);
 }

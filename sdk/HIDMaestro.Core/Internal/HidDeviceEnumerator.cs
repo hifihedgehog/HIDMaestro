@@ -10,27 +10,24 @@ namespace HIDMaestro.Internal;
 /// HidD_* P/Invokes. Does not create any virtual devices; read-only
 /// inspection of what's physically attached.
 /// </summary>
-internal static class HidDeviceEnumerator
+internal static partial class HidDeviceEnumerator
 {
     // ── SetupAPI ────────────────────────────────────────────────
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr SetupDiGetClassDevsW(
-        ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr hDevInfo);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr hDevInfo);
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool SetupDiEnumDeviceInterfaces(
-        IntPtr hDevInfo, IntPtr devInfo, ref Guid interfaceClassGuid,
-        uint memberIndex, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiEnumDeviceInterfaces(IntPtr hDevInfo, IntPtr devInfo, ref Guid interfaceClassGuid, uint memberIndex, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData);
 
-    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool SetupDiGetDeviceInterfaceDetailW(
-        IntPtr hDevInfo, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData,
-        IntPtr deviceInterfaceDetailData, uint deviceInterfaceDetailDataSize,
-        out uint requiredSize, IntPtr deviceInfoData);
+    [LibraryImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiGetDeviceInterfaceDetailW(IntPtr hDevInfo, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData, IntPtr deviceInterfaceDetailData, uint deviceInterfaceDetailDataSize, out uint requiredSize, IntPtr deviceInfoData);
 
     private const uint DIGCF_PRESENT         = 0x02;
     private const uint DIGCF_DEVICEINTERFACE = 0x10;
@@ -46,13 +43,26 @@ internal static class HidDeviceEnumerator
 
     // ── HidD_* ──────────────────────────────────────────────────
 
-    [DllImport("hid.dll")] private static extern void HidD_GetHidGuid(out Guid guid);
-    [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_GetPreparsedData(IntPtr hidDeviceObject, out IntPtr data);
-    [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_FreePreparsedData(IntPtr data);
-    [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_GetAttributes(IntPtr hidDeviceObject, ref HIDD_ATTRIBUTES attr);
-    [DllImport("hid.dll")] private static extern bool HidD_GetProductString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
-    [DllImport("hid.dll")] private static extern bool HidD_GetManufacturerString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
-    [DllImport("hid.dll")] private static extern bool HidD_GetSerialNumberString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
+    [LibraryImport("hid.dll")]
+    private static partial void HidD_GetHidGuid(out Guid guid);
+    [LibraryImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_GetPreparsedData(IntPtr hidDeviceObject, out IntPtr data);
+    [LibraryImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_FreePreparsedData(IntPtr data);
+    [LibraryImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_GetAttributes(IntPtr hidDeviceObject, ref HIDD_ATTRIBUTES attr);
+    [LibraryImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_GetProductString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
+    [LibraryImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_GetManufacturerString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
+    [LibraryImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool HidD_GetSerialNumberString(IntPtr hidDeviceObject, byte[] buffer, uint bufferLength);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct HIDD_ATTRIBUTES
@@ -65,17 +75,18 @@ internal static class HidDeviceEnumerator
 
     // ── HidP_GetCaps (for top-level Usage/UsagePage) ────────────
 
-    [DllImport("hid.dll")] private static extern int HidP_GetCaps(IntPtr preparsedData, ref HIDP_CAPS caps);
+    [LibraryImport("hid.dll")]
+    private static partial int HidP_GetCaps(IntPtr preparsedData, ref HIDP_CAPS caps);
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct HIDP_CAPS
+    private unsafe struct HIDP_CAPS
     {
         public ushort Usage;
         public ushort UsagePage;
         public ushort InputReportByteLength;
         public ushort OutputReportByteLength;
         public ushort FeatureReportByteLength;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 17)] public ushort[] Reserved;
+        public fixed ushort Reserved[17];
         public ushort NumberLinkCollectionNodes;
         public ushort NumberInputButtonCaps;
         public ushort NumberInputValueCaps;
@@ -90,12 +101,12 @@ internal static class HidDeviceEnumerator
 
     // ── kernel32 ────────────────────────────────────────────────
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode,
-        IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr handle);
 
     private static readonly IntPtr INVALID_HANDLE = new(-1);
     private const uint FILE_SHARE_READ_WRITE = 0x3;
@@ -200,7 +211,7 @@ internal static class HidDeviceEnumerator
             {
                 try
                 {
-                    var caps = new HIDP_CAPS { Reserved = new ushort[17] };
+                    var caps = new HIDP_CAPS();
                     HidP_GetCaps(pp, ref caps);
                     dev.TopLevelUsagePage = caps.UsagePage;
                     dev.TopLevelUsage = caps.Usage;

@@ -16,7 +16,7 @@ namespace HIDMaestro.Internal;
 /// paths: xinputhid companion-only, non-xinputhid Xbox (XUSB companion), and
 /// plain HID.
 /// </summary>
-internal static class DeviceOrchestrator
+internal static partial class DeviceOrchestrator
 {
     private const string REG_BASE = @"SOFTWARE\HIDMaestro";
     private static string RegPathForIndex(int index) =>
@@ -239,45 +239,46 @@ internal static class DeviceOrchestrator
     //  P/Invoke: SetupAPI
     // ════════════════════════════════════════════════════════════════════
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    private static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiCreateDeviceInfoW")]
-    private static extern bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName,
-        ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCreateDeviceInfoW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName, ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiSetDeviceRegistryPropertyW")]
-    private static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiSetDeviceRegistryPropertyW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData, int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, EntryPoint = "SetupDiCallClassInstaller")]
-    private static extern bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCallClassInstaller", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
     // ════════════════════════════════════════════════════════════════════
     //  P/Invoke: CfgMgr32
     // ════════════════════════════════════════════════════════════════════
 
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
-        uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true)]
-    private static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true)]
-    private static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    private static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll")]
-    private static extern uint CM_Disable_DevNode(uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll")]
+    private static partial uint CM_Disable_DevNode(uint dnDevInst, uint ulFlags);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DEVPROPKEY
@@ -1886,14 +1887,16 @@ internal static class DeviceOrchestrator
     //  "cleanup" CLI command and by consumers who want a clean slate.
     // ════════════════════════════════════════════════════════════════════
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr OpenEventW(uint dwDesiredAccess, bool bInheritHandle, string lpName);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr OpenEventW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEvent(IntPtr hEvent);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetEvent(IntPtr hEvent);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr hObject);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr hObject);
 
     private const uint EVENT_MODIFY_STATE = 0x0002;
 

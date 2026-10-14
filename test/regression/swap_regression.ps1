@@ -190,6 +190,7 @@ if ($verMatch.Success) {
         # are published from the same build as this one.
         Join-Path $scriptDir '..\probes\aot_smoke\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\json_parity_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\pnp_notify_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1881,6 +1882,14 @@ function Scenario-Json-Parity {
                  -Message 'a profile reads differently through source-generated JSON than v1.12.0 read it (see probe stdout)'
 }
 
+# S77: PnP notifications reach the SDK's create and dispose waits. Without
+# them every wait still finishes, on its 50 ms re-checks, so only the count
+# taken inside the SDK's callback shows they arrive.
+function Scenario-Pnp-Notify {
+    Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' `
+                 -Message 'PnP notifications stopped reaching the SDK''s waits (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1961,7 +1970,8 @@ $scenarios = @(
     @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} },
     @{ Name = 'S74_NativeAot_Smoke';             Body = ${function:Scenario-NativeAot-Smoke} },
     @{ Name = 'S75_SingleFile_Smoke';            Body = ${function:Scenario-SingleFile-Smoke} },
-    @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} }
+    @{ Name = 'S76_Json_Parity';                 Body = ${function:Scenario-Json-Parity} },
+    @{ Name = 'S77_Pnp_Notify';                  Body = ${function:Scenario-Pnp-Notify} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

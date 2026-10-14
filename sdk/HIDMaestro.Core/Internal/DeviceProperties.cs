@@ -25,7 +25,7 @@ namespace HIDMaestro.Internal;
 /// <c>Device Parameters\ControllerIndex</c> registry value matches. Without
 /// this filter, naming controller N can clobber controller N-1's name.</para>
 /// </summary>
-internal static class DeviceProperties
+internal static partial class DeviceProperties
 {
     // ── DEVPKEY constants ────────────────────────────────────────────────
 
@@ -283,16 +283,15 @@ internal static class DeviceProperties
         public uint pid;
     }
 
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true)]
-    private static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true)]
-    private static extern uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey,
-        uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
+    private static partial uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
 }

@@ -33,7 +33,7 @@ namespace HIDMaestro.Internal.Usbip;
 ///
 /// <para>Presence of the device interface doubles as backend
 /// availability detection: no usbip-win2, no interface, no backend.</para></summary>
-internal static class VhciClient
+internal static partial class VhciClient
 {
     // include/usbip/vhci.h GUID_DEVINTERFACE_USB_HOST_CONTROLLER, renamed
     // GUID_DEVINTERFACE_USBIP_VHCI in 0.9.8.1 with the same value.
@@ -257,28 +257,24 @@ internal static class VhciClient
 
     private const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0;
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid interfaceClassGuid,
-        string? deviceId, uint flags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Get_Device_Interface_List_SizeW(out uint len, ref Guid interfaceClassGuid, string? deviceId, uint flags);
 
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint CM_Get_Device_Interface_ListW(ref Guid interfaceClassGuid, string? deviceId,
-        [Out] char[] buffer, uint bufferLen, uint flags);
+    [LibraryImport("cfgmgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Get_Device_Interface_ListW(ref Guid interfaceClassGuid, string? deviceId, [Out] char[] buffer, uint bufferLen, uint flags);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateFileW(string fileName, uint access, uint share, IntPtr sa,
-        uint creation, uint flags, IntPtr template);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateFileW(string fileName, uint access, uint share, IntPtr sa, uint creation, uint flags, IntPtr template);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool DeviceIoControl(IntPtr device, uint ioControlCode,
-        byte[]? inBuffer, uint inSize, byte[]? outBuffer, uint outSize,
-        out uint bytesReturned, IntPtr overlapped);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeviceIoControl(IntPtr device, uint ioControlCode, byte[]? inBuffer, uint inSize, byte[]? outBuffer, uint outSize, out uint bytesReturned, IntPtr overlapped);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool DeviceIoControl(IntPtr device, uint ioControlCode,
-        byte[]? inBuffer, uint inSize, IntPtr outBuffer, uint outSize,
-        out uint bytesReturned, IntPtr overlapped);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeviceIoControl(IntPtr device, uint ioControlCode, byte[]? inBuffer, uint inSize, IntPtr outBuffer, uint outSize, out uint bytesReturned, IntPtr overlapped);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr h);
 }

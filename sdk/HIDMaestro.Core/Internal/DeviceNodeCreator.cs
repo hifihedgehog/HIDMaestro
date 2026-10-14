@@ -47,7 +47,7 @@ namespace HIDMaestro.Internal;
 /// to provide a real ContainerID. Consumers that dedupe on ContainerID
 /// will treat our virtuals as individually-containerless devices.</para>
 /// </summary>
-internal static class DeviceNodeCreator
+internal static partial class DeviceNodeCreator
 {
     // T34: per-hwId DeviceOverrides write dedup. Same hwId = same override
     // path, so writing the same Removable=1 value more than once per process
@@ -460,22 +460,24 @@ internal static class DeviceNodeCreator
 
     // ── private P/Invokes ────────────────────────────────────────────────
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    private static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    private static partial IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiCreateDeviceInfoW")]
-    private static extern bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName,
-        ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCreateDeviceInfoW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName, ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiSetDeviceRegistryPropertyW")]
-    private static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiSetDeviceRegistryPropertyW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData, int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, EntryPoint = "SetupDiCallClassInstaller")]
-    private static extern bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCallClassInstaller", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
 
-    [DllImport("SetupAPI.dll", SetLastError = true)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+    [LibraryImport("SetupAPI.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
     private const int ERROR_DEVINST_ALREADY_EXISTS = unchecked((int)0xE0000207);
 
@@ -500,14 +502,14 @@ internal static class DeviceNodeCreator
 
     private const uint DIIDFLAG_NOFINISHINSTALLUI = 0x00000002;
 
-    [DllImport("newdev.dll", SetLastError = true)]
-    private static extern bool DiInstallDevice(IntPtr hwndParent, IntPtr DeviceInfoSet, IntPtr DeviceInfoData,
-        IntPtr DriverInfoData, uint Flags, out bool NeedReboot);
+    [LibraryImport("newdev.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DiInstallDevice(IntPtr hwndParent, IntPtr DeviceInfoSet, IntPtr DeviceInfoData, IntPtr DriverInfoData, uint Flags, [MarshalAs(UnmanagedType.Bool)] out bool NeedReboot);
 
-    [DllImport("SetupAPI.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "SetupDiOpenDeviceInfoW")]
-    private static extern bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId,
-        IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
+    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiOpenDeviceInfoW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetupDiOpenDeviceInfoW(IntPtr DeviceInfoSet, string DeviceInstanceId, IntPtr hwndParent, uint OpenFlags, IntPtr DeviceInfoData);
 
-    [DllImport("CfgMgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+    [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 }

@@ -20,7 +20,7 @@ namespace HIDMaestro.Internal;
 /// Interactive group needs full access on the section (it writes the
 /// haptic ring) and on the events (a waiter needs SYNCHRONIZE, which
 /// GENERIC_READ does not include).</para></summary>
-internal static class VrSharedMemory
+internal static partial class VrSharedMemory
 {
     public const string SectionName = @"Global\HIDMaestroVR";
     public const string InputEventName = @"Global\HIDMaestroVR_InputEvent";
@@ -82,38 +82,40 @@ internal static class VrSharedMemory
     private const string SectionSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
     private const string EventSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1F0003;;;IU)";
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateFileMappingW(IntPtr hFile, ref SECURITY_ATTRIBUTES attrs,
-        uint protect, uint maxHigh, uint maxLow, string name);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateFileMappingW(IntPtr hFile, ref SECURITY_ATTRIBUTES attrs, uint protect, uint maxHigh, uint maxLow, string name);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offHigh, uint offLow, UIntPtr bytes);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offHigh, uint offLow, UIntPtr bytes);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool UnmapViewOfFile(IntPtr view);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool UnmapViewOfFile(IntPtr view);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr h);
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateEventW(ref SECURITY_ATTRIBUTES attrs, bool manualReset, bool initialState, string name);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateEventW(ref SECURITY_ATTRIBUTES attrs, [MarshalAs(UnmanagedType.Bool)] bool manualReset, [MarshalAs(UnmanagedType.Bool)] bool initialState, string name);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEvent(IntPtr h);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetEvent(IntPtr h);
 
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        string sddl, uint revision, out IntPtr descriptor, out uint size);
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, out uint size);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr mem);
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr LocalFree(IntPtr mem);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SECURITY_ATTRIBUTES
     {
         public int Length;
         public IntPtr SecurityDescriptor;
-        public bool InheritHandle;
+        public int InheritHandle;   // Win32 BOOL
     }
 
     public sealed class Channel : IDisposable
@@ -210,7 +212,7 @@ internal static class VrSharedMemory
             {
                 Length = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
                 SecurityDescriptor = sd,
-                InheritHandle = false,
+                InheritHandle = 0,
             };
             IntPtr h = creator(sa);
             if (h == IntPtr.Zero)
