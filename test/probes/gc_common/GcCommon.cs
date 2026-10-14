@@ -109,6 +109,16 @@ internal static class Probe
 
     public static string Hex(ReadOnlySpan<byte> b) => Convert.ToHexString(b);
 
+    /// <summary>The nearest-rank percentile <paramref name="q"/> of the
+    /// samples, NaN for none.</summary>
+    public static double Percentile(IReadOnlyCollection<double> samples, double q)
+    {
+        if (samples.Count == 0) return double.NaN;
+        var sorted = new List<double>(samples);
+        sorted.Sort();
+        return sorted[Math.Clamp((int)Math.Ceiling(q * sorted.Count) - 1, 0, sorted.Count - 1)];
+    }
+
     /// <summary>Wait this many microseconds by spinning on the
     /// high-resolution clock. Thread.Sleep rounds to the system timer, which
     /// would bunch latency samples at a few offsets from a device's poll

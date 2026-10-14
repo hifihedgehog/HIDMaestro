@@ -64,8 +64,12 @@ internal static class Program
     static readonly ConcurrentQueue<(int Port, string Name, int Value)> s_rumble = new();
     static readonly List<string> s_measurements = new();
 
-    static int Main()
+    static int Main(string[] args)
     {
+        // "measure <runs>": the latency and rate measurements alone,
+        // repeated and pooled, for the release numbers.
+        if (args.Length == 2 && args[0] == "measure" && int.TryParse(args[1], out int runs))
+            return Measure(runs);
         Console.WriteLine("=== S83: SDL3 3.4.18 and the GameCube adapter persona ===");
         if (Probe.OtherSdkRunning()) return 2;
 
@@ -111,6 +115,58 @@ internal static class Program
         Console.WriteLine("-- measurements");
         foreach (var m in s_measurements) Console.WriteLine($"  {m}");
         return Probe.Finish("S83");
+    }
+
+    static int Measure(int runs)
+    {
+        Console.WriteLine($"=== S83 measurements, {runs} runs ===");
+        if (Probe.OtherSdkRunning()) return 2;
+        string dir = Path.Combine(AppContext.BaseDirectory, "native");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        using var controller = ctx.CreateController(ctx.GetProfile("gamecube-adapter")!);
+        Console.WriteLine($"bound {controller.BindWinUsb()}");
+        var proto = controller.DeviceProtocol!;
+        proto.HostPollInterval = proto.DescriptorPollInterval;
+        SetPorts(controller);
+        using var h = Harness.Start(Path.Combine(dir, "sdl_harness.exe"), Path.Combine(dir, "sdl-libusb"));
+        h.Ask("hint SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS 1");
+        h.Ask("init", 15_000);
+        var port1 = Joysticks(h.Ask("wait 057e 0337 4 10000", 15_000)).FirstOrDefault(j => IsAdapter(j) && j.Player == 0);
+        if (port1 == null || h.Ask($"open {port1.Id}") != "opened")
+        {
+            Console.WriteLine("SDL did not list port 1");
+            return 1;
+        }
+        var at8 = new List<double>();
+        var at1 = new List<double>();
+        var medians8 = new List<double>();
+        var medians1 = new List<double>();
+        var rates = new Dictionary<string, List<double>>();
+        for (int run = 0; run < runs; run++)
+        {
+            var s8 = LatencySamples(h, controller, port1.Id, TimeSpan.FromMilliseconds(8));
+            var s1 = LatencySamples(h, controller, port1.Id, TimeSpan.FromMilliseconds(1));
+            if (s8 == null || s1 == null) { Console.WriteLine($"run {run} lost a sample"); continue; }
+            at8.AddRange(s8);
+            at1.AddRange(s1);
+            medians8.Add(Probe.Percentile(s8, 0.5));
+            medians1.Add(Probe.Percentile(s1, 0.5));
+            foreach (var (label, hz, _) in RateValues(h, controller, port1.Id))
+            {
+                if (!rates.TryGetValue(label, out var list)) rates[label] = list = new List<double>();
+                list.Add(hz);
+            }
+        }
+        proto.HostPollInterval = proto.DescriptorPollInterval;
+        foreach (var (poll, all, medians) in new[] { (8, at8, medians8), (1, at1, medians1) })
+            Console.WriteLine(FormattableString.Invariant(
+                $"  SDL, {poll} ms host poll: submit to read p50 {Probe.Percentile(all, 0.5):F3} ms, p95 {Probe.Percentile(all, 0.95):F3} ms over {all.Count} samples; run medians {medians.DefaultIfEmpty().Min():F3} to {medians.DefaultIfEmpty().Max():F3} ms"));
+        foreach (var (label, list) in rates)
+            Console.WriteLine(FormattableString.Invariant(
+                $"  SDL, {label}: reports a second p50 {Probe.Percentile(list, 0.5):F1}, p95 {Probe.Percentile(list, 0.95):F1}, range {list.Min():F1} to {list.Max():F1} over {list.Count} runs"));
+        h.Ask("quit", 10_000);
+        return 0;
     }
 
     static void SetPorts(HMController c)
@@ -387,6 +443,25 @@ internal static class Program
     /// grid.</summary>
     static void Latency(Harness h, HMController controller, uint id, TimeSpan poll)
     {
+        var samples = LatencySamples(h, controller, id, poll);
+        double ms = poll.TotalMilliseconds;
+        bool complete = samples != null;
+        double p50 = complete ? Probe.Percentile(samples!, 0.5) : double.NaN;
+        double p95 = complete ? Probe.Percentile(samples!, 0.95) : double.NaN;
+        double max = complete ? samples!.Max() : double.NaN;
+        s_measurements.Add($"SDL, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
+        // A submit waits at most one controller read, 1.19971 ms, and one
+        // host poll. The bound adds 2 ms for the loopback, SDL's libusb read
+        // thread and Windows' timer scheduling, as S82's does.
+        double bound = ms + 1.19971 + 2;
+        Probe.Check($"SDL at a {ms} ms poll: every submit read within {bound:F1} ms", complete && max <= bound,
+            $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
+    }
+
+    /// <summary>Forty submit-to-read times in milliseconds at one host
+    /// poll, or null when SDL missed one.</summary>
+    static List<double>? LatencySamples(Harness h, HMController controller, uint id, TimeSpan poll)
+    {
         controller.DeviceProtocol!.HostPollInterval = poll;
         var port1 = controller.Ports[0];
         var i = Inputs[0];
@@ -405,18 +480,7 @@ internal static class Program
             samples.Add((long.Parse(seen[5..]) - t0) * 1000.0 / Stopwatch.Frequency);
         }
         port1.SubmitState(Pad(i.Button, HMHat.None, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
-        double ms = poll.TotalMilliseconds;
-        bool complete = samples.Count == 40;
-        samples.Sort();
-        double p50 = complete ? samples[19] : double.NaN, p95 = complete ? samples[37] : double.NaN;
-        double max = complete ? samples[^1] : double.NaN;
-        s_measurements.Add($"SDL, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
-        // A submit waits at most one controller read, 1.19971 ms, and one
-        // host poll. The bound adds 2 ms for the loopback, SDL's libusb read
-        // thread and Windows' timer scheduling, as S82's does.
-        double bound = ms + 1.19971 + 2;
-        Probe.Check($"SDL at a {ms} ms poll: every submit read within {bound:F1} ms", complete && max <= bound,
-            $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
+        return samples.Count == 40 ? samples : null;
     }
 
     /// <summary>Reports per second SDL receives, counted where the device
@@ -426,15 +490,36 @@ internal static class Program
     /// which is how many new states reach an SDL program.</summary>
     static void Rate(Harness h, HMController controller, uint id)
     {
+        var bounds = new Dictionary<string, (double Lo, double Hi)>
+        {
+            [RateCases[0].Label] = (120, 130),
+            [RateCases[1].Label] = (790, 875),
+            [RateCases[2].Label] = (950, 1010),
+        };
+        foreach (var (label, hz, states) in RateValues(h, controller, id))
+        {
+            var (lo, hi) = bounds[label];
+            s_measurements.Add($"SDL, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by SDL");
+            Probe.Check($"SDL at {label}: {lo}-{hi} reports a second", hz >= lo && hz <= hi, $"{hz:F1}");
+        }
+    }
+
+    static readonly (string Label, double Ms, int[] Connected)[] RateCases =
+    {
+        ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }),
+        ("1 ms, four ports", 1, new[] { 1, 2, 3, 4 }),
+        ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }),
+    };
+
+    /// <summary>One two-second count per case: the reports a second the
+    /// device sent and the new states a second SDL's joystick showed. Every
+    /// port is connected again after.</summary>
+    static List<(string Label, double Hz, double States)> RateValues(Harness h, HMController controller, uint id)
+    {
         var engine = controller.UsbipHandle!.Device.Protocol!;
         var proto = controller.DeviceProtocol!;
-        var cases = new (string Label, double Ms, int[] Connected, double Lo, double Hi)[]
-        {
-            ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }, 120, 130),
-            ("1 ms, four ports", 1, new[] { 1, 2, 3, 4 }, 790, 875),
-            ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }, 950, 1010),
-        };
-        foreach (var (label, ms, connected, lo, hi) in cases)
+        var results = new List<(string, double, double)>();
+        foreach (var (label, ms, connected) in RateCases)
         {
             for (int p = 0; p < 4; p++)
             {
@@ -462,10 +547,10 @@ internal static class Program
             feeder.Wait();
             double hz = (sent1 - sent0) / seconds;
             double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) / 2.0 : 0;
-            s_measurements.Add($"SDL, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by SDL");
-            Probe.Check($"SDL at {label}: {lo}-{hi} reports a second", hz >= lo && hz <= hi, $"{hz:F1}");
+            results.Add((label, hz, states));
         }
         SetPorts(controller);
+        return results;
     }
 
     static void Feed(HMController controller, CancellationToken ct)

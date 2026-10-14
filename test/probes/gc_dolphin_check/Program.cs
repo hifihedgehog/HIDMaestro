@@ -52,6 +52,10 @@ internal static class Program
         // investigation run from another process.
         if (args.Length == 2 && args[0] == "hold" && int.TryParse(args[1], out int seconds))
             return Hold(seconds);
+        // "measure <runs> [dolphin|slippi]": the latency and rate
+        // measurements alone, repeated and pooled, for the release numbers.
+        if (args.Length >= 2 && args[0] == "measure" && int.TryParse(args[1], out int runs))
+            return Measure(runs, args.Length > 2 ? args[2] : null);
         if (args.Length == 2 && args[0] == "--libusb-log" && int.TryParse(args[1], out int level))
             s_libusbLogLevel = level;
 
@@ -84,6 +88,55 @@ internal static class Program
         Console.WriteLine("-- measurements");
         foreach (var m in s_measurements) Console.WriteLine($"  {m}");
         return Probe.Finish("S82");
+    }
+
+    static int Measure(int runs, string? only)
+    {
+        Console.WriteLine($"=== S82 measurements, {runs} runs ===");
+        if (Probe.OtherSdkRunning()) return 2;
+        string dir = Path.Combine(AppContext.BaseDirectory, "native");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        using var controller = ctx.CreateController(ctx.GetProfile("gamecube-adapter")!);
+        Console.WriteLine($"bound {controller.BindWinUsb()}");
+        var proto = controller.DeviceProtocol!;
+        foreach (var flavor in new[] { "dolphin", "slippi" })
+        {
+            if (only != null && only != flavor) continue;
+            proto.HostPollInterval = proto.DescriptorPollInterval;
+            SetPorts(controller);
+            using var h = Harness.Start(Path.Combine(dir, $"gc_harness_{flavor}.exe"));
+            if (h.Ask("init", 30_000) != "detected") { Console.WriteLine($"{flavor}: not detected"); continue; }
+            Probe.WaitFor(() => h.Ask("connected 0") == "connected 1", 2000);
+            var at8 = new List<double>();
+            var at1 = new List<double>();
+            var medians8 = new List<double>();
+            var medians1 = new List<double>();
+            var rates = new Dictionary<string, List<double>>();
+            for (int run = 0; run < runs; run++)
+            {
+                var s8 = LatencySamples(h, controller, TimeSpan.FromMilliseconds(8));
+                var s1 = LatencySamples(h, controller, TimeSpan.FromMilliseconds(1));
+                if (s8 == null || s1 == null) { Console.WriteLine($"{flavor}: run {run} lost a sample"); continue; }
+                at8.AddRange(s8);
+                at1.AddRange(s1);
+                medians8.Add(Probe.Percentile(s8, 0.5));
+                medians1.Add(Probe.Percentile(s1, 0.5));
+                foreach (var (label, hz, _, _) in RateValues(h, controller))
+                {
+                    if (!rates.TryGetValue(label, out var list)) rates[label] = list = new List<double>();
+                    list.Add(hz);
+                }
+            }
+            proto.HostPollInterval = proto.DescriptorPollInterval;
+            foreach (var (poll, all, medians) in new[] { (8, at8, medians8), (1, at1, medians1) })
+                Console.WriteLine(FormattableString.Invariant(
+                    $"  {flavor}, {poll} ms host poll: submit to read p50 {Probe.Percentile(all, 0.5):F3} ms, p95 {Probe.Percentile(all, 0.95):F3} ms over {all.Count} samples; run medians {medians.DefaultIfEmpty().Min():F3} to {medians.DefaultIfEmpty().Max():F3} ms"));
+            foreach (var (label, list) in rates)
+                Console.WriteLine(FormattableString.Invariant(
+                    $"  {flavor}, {label}: reports a second p50 {Probe.Percentile(list, 0.5):F1}, p95 {Probe.Percentile(list, 0.95):F1}, range {list.Min():F1} to {list.Max():F1} over {list.Count} runs"));
+        }
+        return 0;
     }
 
     static int Hold(int seconds)
@@ -253,6 +306,25 @@ internal static class Program
     /// samples at random offsets from the poll grid.</summary>
     static void Latency(Harness h, HMController controller, string name, TimeSpan poll)
     {
+        var samples = LatencySamples(h, controller, poll);
+        double ms = poll.TotalMilliseconds;
+        bool complete = samples != null;
+        double p50 = complete ? Probe.Percentile(samples!, 0.5) : double.NaN;
+        double p95 = complete ? Probe.Percentile(samples!, 0.95) : double.NaN;
+        double max = complete ? samples!.Max() : double.NaN;
+        s_measurements.Add($"{name}, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {max:F3} ms (40 samples)");
+        // A submit waits at most one controller read, 1.19971 ms, and one
+        // host poll. The bound adds 2 ms for the loopback, the emulator's
+        // read loop and Windows' timer scheduling.
+        double bound = ms + 1.19971 + 2;
+        Probe.Check($"{name} at a {ms} ms poll: every submit read within {bound:F1} ms",
+            complete && max <= bound, $"p50 {p50:F3}, p95 {p95:F3}, max {max:F3} ms");
+    }
+
+    /// <summary>Forty submit-to-read times in milliseconds at one host
+    /// poll, or null when the emulator missed one.</summary>
+    static List<double>? LatencySamples(Harness h, HMController controller, TimeSpan poll)
+    {
         controller.DeviceProtocol!.HostPollInterval = poll;
         var port1 = controller.Ports[0];
         var i = Inputs[0];
@@ -271,17 +343,7 @@ internal static class Program
             samples.Add((long.Parse(seen[5..]) - t0) * 1000.0 / Stopwatch.Frequency);
         }
         port1.SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
-        double ms = poll.TotalMilliseconds;
-        bool complete = samples.Count == 40;
-        samples.Sort();
-        double p50 = complete ? samples[19] : double.NaN, p95 = complete ? samples[37] : double.NaN;
-        s_measurements.Add($"{name}, {ms} ms host poll: submit to read p50 {p50:F3} ms, p95 {p95:F3} ms, max {(complete ? samples[^1] : double.NaN):F3} ms (40 samples)");
-        // A submit waits at most one controller read, 1.19971 ms, and one
-        // host poll. The bound adds 2 ms for the loopback, the emulator's
-        // read loop and Windows' timer scheduling.
-        double bound = ms + 1.19971 + 2;
-        Probe.Check($"{name} at a {ms} ms poll: every submit read within {bound:F1} ms",
-            complete && samples[^1] <= bound, $"p50 {p50:F3}, p95 {p95:F3}, max {(complete ? samples[^1] : double.NaN):F3} ms");
+        return samples.Count == 40 ? samples : null;
     }
 
     /// <summary>Reports per second the emulator receives, counted where the
@@ -292,15 +354,36 @@ internal static class Program
     /// own reads-per-second figure is printed beside them.</summary>
     static void Rate(Harness h, HMController controller, string name)
     {
+        var bounds = new Dictionary<string, (double Lo, double Hi)>
+        {
+            [RateCases[0].Label] = (120, 130),
+            [RateCases[1].Label] = (790, 875),
+            [RateCases[2].Label] = (950, 1010),
+        };
+        foreach (var (label, hz, states, own) in RateValues(h, controller))
+        {
+            var (lo, hi) = bounds[label];
+            s_measurements.Add($"{name}, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by Input ({own})");
+            Probe.Check($"{name} at {label}: {lo}-{hi} reports a second", hz >= lo && hz <= hi, $"{hz:F1}");
+        }
+    }
+
+    static readonly (string Label, double Ms, int[] Connected)[] RateCases =
+    {
+        ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }),
+        ("1 ms, four ports", 1, new[] { 1, 2, 3, 4 }),
+        ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }),
+    };
+
+    /// <summary>One two-second count per case: the reports a second the
+    /// device sent, the new states a second the emulator's Input saw, and
+    /// the emulator's own figure. Every port is connected again after.</summary>
+    static List<(string Label, double Hz, double States, string Own)> RateValues(Harness h, HMController controller)
+    {
         var engine = controller.UsbipHandle!.Device.Protocol!;
         var proto = controller.DeviceProtocol!;
-        var cases = new (string Label, double Ms, int[] Connected, double Lo, double Hi)[]
-        {
-            ("8 ms, four ports", 8, new[] { 1, 2, 3, 4 }, 120, 130),
-            ("1 ms, four ports", 1, new[] { 1, 2, 3, 4 }, 790, 875),
-            ("1 ms, exactly ports 1 and 2", 1, new[] { 1, 2 }, 950, 1010),
-        };
-        foreach (var (label, ms, connected, lo, hi) in cases)
+        var results = new List<(string, double, double, string)>();
+        foreach (var (label, ms, connected) in RateCases)
         {
             for (int p = 0; p < 4; p++)
             {
@@ -328,9 +411,7 @@ internal static class Program
             feeder.Wait();
             double hz = (sent1 - sent0) / seconds;
             double states = answer != null && answer.StartsWith("changes ", StringComparison.Ordinal) ? int.Parse(answer[8..]) / 2.0 : 0;
-            string own = h.Ask("rate") ?? "";
-            s_measurements.Add($"{name}, {label}: {hz:F1} reports a second, {states:F1} new states a second seen by Input ({own})");
-            Probe.Check($"{name} at {label}: {lo}-{hi} reports a second", hz >= lo && hz <= hi, $"{hz:F1}");
+            results.Add((label, hz, states, h.Ask("rate") ?? ""));
         }
         for (int p = 0; p < 4; p++)
         {
@@ -338,6 +419,7 @@ internal static class Program
             controller.Ports[p].Connect(p == 2 ? "wireless" : "wired");
             controller.Ports[p].SubmitState(Pad(i.Button, i.Sx, i.Sy, i.Cx, i.Cy, i.L, i.R));
         }
+        return results;
     }
 
     static void Feed(HMController controller, CancellationToken ct)
