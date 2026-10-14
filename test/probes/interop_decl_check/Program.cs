@@ -3,10 +3,16 @@
 // static (offline, no device):
 //   1. No DllImport or extern declaration is left in the SDK sources. Every
 //      P/Invoke is a LibraryImport stub generated at build time.
+//   2. SetupDiGetClassDevsW's Enumerator is PCWSTR in setupapi.h, so both
+//      declarations take a pointer-sized value, not a uint.
 //
 // live (needs elevation, run through the bench): creates an Xbox 360 wired
 // controller with HIDMAESTRO_DIAG=1 and reads the SDK's own XInput slot wait
 // line, which is the only caller of the XInputGetState declaration.
+// Then it disposes the controller and requires the devnode gone within 5 s
+// (SetupDiGetClassDevsW through DifRemoveDevice), and runs the phantom sweep
+// (the other SetupDiGetClassDevsW caller), which must remove the one record
+// the dispose leaves.
 //
 // Exit 0 PASS, 1 FAIL, 2 when another program that embeds HIDMaestro runs or,
 // for static, when the SDK source tree is not beside the exe.
@@ -91,6 +97,18 @@ internal static class Program
         foreach (string f in sources) libraryImports += liRx.Matches(File.ReadAllText(f)).Count;
         Console.WriteLine($"  info: {libraryImports} LibraryImport declarations");
 
+        // 2. The Enumerator parameter is a pointer, not a uint.
+        var asm = typeof(HMContext).Assembly;
+        foreach (string typeName in new[] { "HIDMaestro.Internal.DeviceManager", "HIDMaestro.Internal.HidDeviceEnumerator" })
+        {
+            var t = asm.GetType(typeName, throwOnError: true)!;
+            var m = t.GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
+                .Single(x => x.Name.StartsWith("SetupDiGetClassDevs"));
+            var p = m.GetParameters().Single(x => x.Name!.Equals("enumerator", StringComparison.OrdinalIgnoreCase));
+            Check($"{t.Name}.{m.Name} Enumerator is pointer-sized", p.ParameterType == typeof(IntPtr),
+                  $"declared {p.ParameterType.Name}");
+        }
+
         Console.WriteLine(s_failures == 0 ? $"=== ALL PASS ({s_total}) ===" : $"=== FAIL: {s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
     }
@@ -114,6 +132,7 @@ internal static class Program
             finally { p.Dispose(); }
         }
 
+        DeviceManager.RemoveAccumulatedHmPhantoms();
         string diag = Path.Combine(Path.GetTempPath(), "HIDMaestro", "teardown_diag.log");
         long start = File.Exists(diag) ? new FileInfo(diag).Length : 0;
 
@@ -138,6 +157,15 @@ internal static class Program
         Check("the SDK's XInputGetState count sees the new slot",
               m2.Success && int.Parse(m2.Groups[2].Value) > int.Parse(m2.Groups[1].Value), wait);
 
+        string instanceId = ctrl.InstanceId ?? "";
+        ctrl.Dispose();
+        // DifRemoveDevice (SetupDiGetClassDevsW) removes the parent devnode.
+        Check("the devnode is gone within 5 s of Dispose",
+              instanceId.Length > 0 && DeviceManager.WaitForDeviceRemoval(instanceId, 5000), instanceId);
+        // Exactly the one record this run's dispose leaves behind, after a sweep that clears older ones.
+        int removed = DeviceManager.RemoveAccumulatedHmPhantoms();
+        Check("the phantom sweep (SetupDiGetClassDevsW enumeration) removes the one record this run left",
+              removed == 1, $"removed {removed}");
 
         Console.WriteLine(s_failures == 0 ? $"=== ALL PASS ({s_total}) ===" : $"=== FAIL: {s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;

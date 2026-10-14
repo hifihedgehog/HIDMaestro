@@ -335,7 +335,7 @@ public static partial class DeviceManager
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
     [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiGetClassDevsW", SetLastError = true)]
-    private static partial IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, uint Enumerator, IntPtr hwndParent, uint Flags);
+    private static partial IntPtr SetupDiGetClassDevsByRef(ref Guid ClassGuid, IntPtr Enumerator, IntPtr hwndParent, uint Flags);
 
     [LibraryImport("SetupAPI.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -405,7 +405,7 @@ public static partial class DeviceManager
 
         int removed = 0;
         Guid nullGuid = Guid.Empty;
-        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, 0, IntPtr.Zero, DIGCF_ALLCLASSES);
+        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
         if (dis == new IntPtr(-1)) return 0;
 
         try
@@ -994,7 +994,7 @@ public static partial class DeviceManager
         // Use Guid.Empty + DIGCF_ALLCLASSES to enumerate ALL devices including phantoms.
         // This is critical: a device-class-specific DevInfoSet won't find phantoms.
         Guid nullGuid = Guid.Empty;
-        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, 0, IntPtr.Zero, DIGCF_ALLCLASSES);
+        IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
         if (dis == new IntPtr(-1))
         {
             if (located)
