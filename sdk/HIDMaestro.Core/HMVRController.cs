@@ -91,7 +91,7 @@ public struct HMVRHmdPose
 ///
 /// <para>Lifecycle: <see cref="HMVR.IsSteamVRInstalled"/> and
 /// <see cref="HMVR.EnsureDriverRegistered"/> handle discovery and the
-/// one-time vrpathreg registration. Constructing this class creates the
+/// one-time OpenVR path registration. Constructing this class creates the
 /// IPC section and claims it; the driver (loaded whenever SteamVR runs)
 /// notices the claim within its bootstrap poll and registers the
 /// controllers with vrserver. Disposal releases the claim, and the driver

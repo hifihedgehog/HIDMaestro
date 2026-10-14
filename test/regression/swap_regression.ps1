@@ -1796,14 +1796,19 @@ function Scenario-Wgi-Mapping {
                  -Message 'WGI reads a virtual pad differently from the real device, or a GameInput key outlived its virtual (see probe stdout)'
 }
 
-# S68: another OpenVR driver registered under HIDMaestro's driver name.
-# OpenVR requires the name to be unique. HMVR.FindDriverNameConflicts lists
-# every other folder SteamVR can see under it. The probe points
-# VR_PATHREG_OVERRIDE at a path registry of its own, so the real one is
-# never touched, and needs neither SteamVR nor elevation.
+# S68: another OpenVR driver registered under HIDMaestro's driver name,
+# and HIDMaestro's own registration. OpenVR requires the name to be unique.
+# HMVR.FindDriverNameConflicts lists every other folder SteamVR can see
+# under it. The SDK writes the path registry itself, byte for byte as
+# SteamVR's vrpathreg.exe does, and never runs that tool. The probe points
+# VR_PATHREG_OVERRIDE at path registries of its own, so the real one is
+# never touched. Elevated, it also points discovery at a SteamVR folder
+# whose vrpathreg.exe is not a program and registers, and checks the write
+# has the user's rights and no more. It needs SteamVR stopped and restores
+# the two HKLM values it changes.
 function Scenario-Vr-Driver-Conflict {
     Invoke-Probe -Dir 'vr_driver_conflict_check' -Exe 'VrDriverConflictCheck.exe' `
-                 -Message 'a foreign OpenVR driver under the hidmaestro name went unreported, or HIDMaestro reported its own (see probe stdout)'
+                 -Message 'a foreign OpenVR driver under the hidmaestro name went unreported, HIDMaestro reported its own, or its OpenVR registration differed from vrpathreg''s bytes, ran a file from the SteamVR folder, or wrote with more than the user''s rights (see probe stdout)'
 }
 
 # S69: keyboard and mouse descriptors and packers, no devices (issue #67).

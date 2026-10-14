@@ -107,8 +107,9 @@ internal static class ProtectedStaging
         MachineClaims.NoteStaging(VersionTag);
         lock (s_lock)
         {
-            // The shared root cannot be moved aside: vrpathreg stores an
-            // absolute path into its subtree. Repair it in place.
+            // The shared root cannot be moved aside: the OpenVR path
+            // registry stores an absolute path into its subtree. Repair it
+            // in place.
             EnsureProtected(HidMaestroRoot, RootSddl, renameAside: false);
             EnsureProtected(StagingRoot, StagingSddl, renameAside: false);
             string versionDir = Path.Combine(StagingRoot, VersionTag);

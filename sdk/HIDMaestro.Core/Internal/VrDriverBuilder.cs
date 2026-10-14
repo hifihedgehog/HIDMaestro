@@ -11,19 +11,22 @@ using Microsoft.Win32;
 namespace HIDMaestro.Internal;
 
 /// <summary>Extracts the embedded OpenVR driver package and registers it
-/// with SteamVR via vrpathreg (issue #32).
+/// with SteamVR in the user's OpenVR path registry (issue #32).
 ///
 /// <para>Mirrors the established install machinery with two deliberate
 /// differences from <see cref="DriverBuilder"/>: the extract path is
 /// STABLE (<c>%ProgramData%\HIDMaestro\openvr\hidmaestro</c>) rather than
-/// the per-version staging directory, because vrpathreg stores the
+/// the per-version staging directory, because the path registry stores the
 /// absolute path and a moving target would strand the registration; and
 /// the driver DLL is NOT part of <see cref="EmbeddedManifest"/>'s hashed
-/// set, because vrpathreg is a different install mechanism from pnputil
-/// and folding it in would force HID re-deploys on VR-only bumps. The
+/// set, because the path registry is a different install mechanism from
+/// pnputil and folding it in would force HID re-deploys on VR-only bumps. The
 /// idempotence gate is its own registry value,
 /// <c>HKLM\SOFTWARE\HIDMaestro\InstalledVrManifestSha256</c>, mirroring
-/// DriverBuilder's InstalledManifestSha256.</para>
+/// DriverBuilder's InstalledManifestSha256. The gate covers the
+/// extraction only. The registration is written by
+/// <see cref="OpenVrPathRegistry"/>, never by running SteamVR's
+/// vrpathreg.exe.</para>
 ///
 /// <para>SteamVR discovery covers both install shapes: the Steam-client
 /// install (uninstall key for app 250820, then Steam library fallback)
@@ -104,10 +107,13 @@ internal static class VrDriverBuilder
         Process.GetProcessesByName("vrserver").Length > 0;
 
     /// <summary>Extract the embedded driver folder (verbatim layout) and
-    /// run <c>vrpathreg adddriver</c>. Idempotent via the content-hash
-    /// registry gate; re-runs only when the embedded payload changed.
-    /// Returns false when SteamVR is not installed. Throws on extraction
-    /// or vrpathreg failure. Requires admin for %ProgramData% + HKLM.</summary>
+    /// add it to the calling user's OpenVR path registry, as
+    /// <c>vrpathreg adddriver</c> would. The extraction is gated on the
+    /// content hash and re-runs only when the embedded payload changed. The
+    /// registration is checked on every call and written only when the
+    /// folder is missing from the list. Returns false when SteamVR is not
+    /// installed. Throws on extraction or write failure. Requires admin for
+    /// %ProgramData% + HKLM.</summary>
     public static bool EnsureDriverRegistered()
     {
         // The build's payload first: a build without the driver can never
@@ -124,18 +130,19 @@ internal static class VrDriverBuilder
             .ToArray();
 
         string payloadHash = HashPayload(asm, names);
+        bool current;
         using (var k = Registry.LocalMachine.OpenSubKey(RegKeyPath))
         {
-            if (k?.GetValue(VrManifestRegValue) as string == payloadHash &&
-                Directory.Exists(ExtractRoot))
-                return true;   // registered and current
+            current = k?.GetValue(VrManifestRegValue) as string == payloadHash &&
+                      Directory.Exists(ExtractRoot);
         }
 
-        ExtractPayload(asm, names);
-        RunVrPathReg(steamVr, "adddriver", ExtractRoot);
+        if (!current) ExtractPayload(asm, names);
+        OpenVrPathRegistry.AddDriver(ExtractRoot);
 
-        using (var k = Registry.LocalMachine.CreateSubKey(RegKeyPath))
+        if (!current)
         {
+            using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
             k.SetValue(VrManifestRegValue, payloadHash);
         }
         return true;
@@ -210,28 +217,10 @@ internal static class VrDriverBuilder
     }
 
     /// <summary>The external_drivers entries of the user's OpenVR path
-    /// registry, or none.</summary>
-    internal static System.Collections.Generic.IEnumerable<string> RegisteredExternalDrivers()
-    {
-        string? file = Environment.GetEnvironmentVariable("VR_PATHREG_OVERRIDE");
-        if (string.IsNullOrEmpty(file))
-            file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                                "openvr", "openvrpaths.vrpath");
-        var list = new System.Collections.Generic.List<string>();
-        try
-        {
-            if (!File.Exists(file)) return list;
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file),
-                new System.Text.Json.JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = System.Text.Json.JsonCommentHandling.Skip });
-            if (doc.RootElement.TryGetProperty("external_drivers", out var arr)
-                && arr.ValueKind == System.Text.Json.JsonValueKind.Array)
-                foreach (var e in arr.EnumerateArray())
-                    if (e.ValueKind == System.Text.Json.JsonValueKind.String && e.GetString() is string p)
-                        list.Add(p);
-        }
-        catch { }
-        return list;
-    }
+    /// registry, or none, read with OpenVR's own parsing rules, so the list
+    /// is the one SteamVR loads.</summary>
+    internal static System.Collections.Generic.IEnumerable<string> RegisteredExternalDrivers() =>
+        OpenVrPathRegistry.ExternalDrivers();
 
     private static string? ManifestName(Stream s)
     {
@@ -252,15 +241,13 @@ internal static class VrDriverBuilder
     }
 
     /// <summary>Unregister and clear the gate. Used by cleanup paths and
-    /// the smoke probe's teardown.</summary>
+    /// the smoke probe's teardown. The entry is removed from the user's path
+    /// registry whether or not SteamVR or the extracted folder is still
+    /// there, since a registration left behind is the thing to remove.</summary>
     public static void UnregisterDriver()
     {
-        string? steamVr = FindSteamVR();
-        if (steamVr != null && Directory.Exists(ExtractRoot))
-        {
-            try { RunVrPathReg(steamVr, "removedriver", ExtractRoot); }
-            catch { /* best-effort: a missing registration is the goal state */ }
-        }
+        try { OpenVrPathRegistry.RemoveDriver(ExtractRoot); }
+        catch { /* best-effort: a missing registration is the goal state */ }
         using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
         k.DeleteValue(VrManifestRegValue, throwOnMissingValue: false);
     }
@@ -295,28 +282,5 @@ internal static class VrDriverBuilder
             using var dst = File.Create(dest);
             src.CopyTo(dst);
         }
-    }
-
-    private static void RunVrPathReg(string steamVrDir, string verb, string driverPath)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = Path.Combine(steamVrDir, "bin", "win64", "vrpathreg.exe"),
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        psi.ArgumentList.Add(verb);
-        psi.ArgumentList.Add(driverPath);
-
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("vrpathreg failed to start");
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit(15000);
-        if (proc.ExitCode != 0)
-            throw new InvalidOperationException(
-                $"vrpathreg {verb} exited {proc.ExitCode}: {stdout} {stderr}");
     }
 }

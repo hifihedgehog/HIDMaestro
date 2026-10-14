@@ -38,8 +38,11 @@ public static class HMVR
         VrDriverBuilder.SetSteamVRPathHint(steamVrDir);
 
     /// <summary>Extract the embedded OpenVR driver to its stable
-    /// %ProgramData% home and register it with SteamVR via vrpathreg.
-    /// Idempotent (content-hash gated); hot-plugs into a running SteamVR.
+    /// %ProgramData% home and register it with SteamVR in the calling
+    /// user's OpenVR path registry, the file vrpathreg edits. The SDK writes
+    /// that file itself and runs nothing from the SteamVR folder. Idempotent:
+    /// the extraction is content-hash gated and the registration is written
+    /// only when missing. SteamVR reads the registry when it starts.
     /// Returns false when SteamVR is not installed. Requires admin.</summary>
     public static bool EnsureDriverRegistered() =>
         VrDriverBuilder.EnsureDriverRegistered();

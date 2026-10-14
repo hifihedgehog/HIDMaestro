@@ -1,0 +1,478 @@
+[
+ {
+  "name": "no file",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": null,
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "file as SteamVR leaves it",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "ew0KCSJjb25maWciIDogDQoJWw0KCQkiQzpcXFN0ZWFtVlJcXGNvbmZpZyINCgldLA0KCSJleHRlcm5hbF9kcml2ZXJzIiA6IG51bGwsDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IA0KCVsNCgkJIkM6XFxTdGVhbVZSXFxsb2dzIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiQzpcXFN0ZWFtVlIiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9",
+  "expect": "ew0KCSJjb25maWciIDogDQoJWw0KCQkiQzpcXFN0ZWFtVlJcXGNvbmZpZyINCgldLA0KCSJleHRlcm5hbF9kcml2ZXJzIiA6IA0KCVsNCgkJIkM6XFxQcm9ncmFtRGF0YVxcSElETWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIg0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IA0KCVsNCgkJIkM6XFxTdGVhbVZSXFxsb2dzIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiQzpcXFN0ZWFtVlIiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "other drivers kept in order",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxEcml2ZXJzXFxvbmUiLCJDOlxcRHJpdmVyc1xcdHdvIl0sInJ1bnRpbWUiOlsiQzpcXFN0ZWFtVlIiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcRHJpdmVyc1xcb25lIiwNCgkJIkM6XFxEcml2ZXJzXFx0d28iLA0KCQkiQzpcXFByb2dyYW1EYXRhXFxISURNYWVzdHJvXFxvcGVudnJcXGhpZG1hZXN0cm8iDQoJXSwNCgkianNvbmlkIiA6ICJ2cnBhdGhyZWciLA0KCSJsb2ciIDogbnVsbCwNCgkicnVudGltZSIgOiANCglbDQoJCSJDOlxcU3RlYW1WUiINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "already registered, compact file",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxQcm9ncmFtRGF0YVxcSElETWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIl0sImV4dHJhIjp7ImsiOjF9fQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "other case is another entry",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbImM6XFxwcm9ncmFtZGF0YVxcaGlkbWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJjOlxccHJvZ3JhbWRhdGFcXGhpZG1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyIsDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "trailing backslash is another entry",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxQcm9ncmFtRGF0YVxcSElETWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvXFwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3Ryb1xcIiwNCgkJIkM6XFxQcm9ncmFtRGF0YVxcSElETWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIg0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogbnVsbCwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "remove registered",
+  "verb": "removedriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxEcml2ZXJzXFxvbmUiLCJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyIsIkM6XFxEcml2ZXJzXFx0d28iXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcRHJpdmVyc1xcb25lIiwNCgkJIkM6XFxEcml2ZXJzXFx0d28iDQoJXSwNCgkianNvbmlkIiA6ICJ2cnBhdGhyZWciLA0KCSJsb2ciIDogbnVsbCwNCgkicnVudGltZSIgOiBudWxsLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "remove takes the first match only",
+  "verb": "removedriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxQcm9ncmFtRGF0YVxcSElETWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIiwiQzpcXFByb2dyYW1EYXRhXFxISURNYWVzdHJvXFxvcGVudnJcXGhpZG1hZXN0cm8iXSwicnVudGltZSI6WyJDOlxcU3RlYW1WUiJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIkM6XFxTdGVhbVZSIg0KCV0sDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove absent",
+  "verb": "removedriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxEcml2ZXJzXFxvbmUiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcRHJpdmVyc1xcb25lIg0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogbnVsbCwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "remove, other case stays",
+  "verb": "removedriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbImM6XFxwcm9ncmFtZGF0YVxcaGlkbWFlc3Ryb1xcb3BlbnZyXFxoaWRtYWVzdHJvIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJjOlxccHJvZ3JhbWRhdGFcXGhpZG1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove from no file",
+  "verb": "removedriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": null,
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiBudWxsLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "not json",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "bm90IGpzb24=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "empty file",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "whitespace only",
+  "verb": "adddriver",
+  "path": "C:\\ProgramData\\HIDMaestro\\openvr\\hidmaestro",
+  "seed": "ICANCiA=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcUHJvZ3JhbURhdGFcXEhJRE1hZXN0cm9cXG9wZW52clxcaGlkbWFlc3RybyINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "trailing comma in array",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIngiLF0sInJ1bnRpbWUiOlsiciJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "BOM and CRLF",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "77u/ew0KImV4dGVybmFsX2RyaXZlcnMiOlsieCJdDQp9",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4IiwNCgkJIkM6XFx5Ig0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogbnVsbCwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "comments",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "Ly8gYwp7ImV4dGVybmFsX2RyaXZlcnMiOlsieCJdIC8qIGMgKi8gLCAicnVudGltZSI6WyJyIl0gLy8gZQp9",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4IiwNCgkJIkM6XFx5Ig0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiciINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "quote starts a comment",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "Jy8gYwp7ImV4dGVybmFsX2RyaXZlcnMiOlsieCJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "comment in empty array",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIC8qYyovIF0sInJ1bnRpbWUiOlsiciJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "escapes",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImFcbmJccmNcYmRcZmVcdTAwMWZmXHUyMDI4Z1x1MDAwMGhcL2lcImpcXGtcdGwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImFcbmJccmNcYmRcZmVcdTAwMUZm4oCoZ1x1MDAwMGgvaVwialxca1x0bCINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "unicode escapes",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbIlx1MDBlOVx1MDBFOVx1ZDgzZFx1ZGUwMFx1MDA0MSJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIsOpw6nwn5iAQSINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "lone low surrogate",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbIlx1ZGMwMHgiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIu2wgHgiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "high surrogate without pair",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbIlx1ZDgwMHgiXSwibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "bad escape",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbIlxxIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "raw control bytes and CRLF in a string",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEJYgFjDQpkH2V/ZiJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImFcdGJcdTAwMDFjXG5kXHUwMDFGZX9mIg0KCV0sDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "bytes that are not UTF-8",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbIkM6XFxY6Vxc/CJdLCJleHRlcm5hbF9kcml2ZXJzIjpbIv/+Il19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSL//iIsDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIkM6XFxY6Vxc/CINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "NUL inside a string",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIngAeSJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4XHUwMDAweSIsDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "duplicate keys, last wins",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImZpcnN0Il0sInJ1bnRpbWUiOlsic2Vjb25kIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJInNlY29uZCINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "escaped key name",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW5cdTAwNzRpbWUiOlsiciJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJInIiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "text after the root",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXX0gdHJhaWxpbmc=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImEiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "second root ignored",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXX17ImxvZyI6WyJiIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImEiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "root null",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "bnVsbA==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "root array",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "WzFd",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "root string",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "InMi",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "non-string elements",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIngiXSwicnVudGltZSI6WzEsbnVsbCx0cnVlLGZhbHNlLCJzIixbXSxbIm4iXSx7fSx7ImsiOiJ2In1dfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4IiwNCgkJIkM6XFx5Ig0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiMSIsDQoJCSIiLA0KCQkidHJ1ZSIsDQoJCSJmYWxzZSIsDQoJCSJzIiwNCgkJIiIsDQoJCSIiLA0KCQkiIiwNCgkJIiINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "numbers",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbMS41LC0wLC0wLjAsMWUzLDEuMCwxLiwtLjUsMDAuNWUtMywxRTUsMC4xLDFlLTUsLTEuMjVlLTcsMC4zMDAwMDAwMDAwMDAwMDAwNCwxZTE2LDFlMTcsMWU5OTksLTFlOTk5LDFlLTQwMCw1ZS0zMjQsLV19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIjEuNSIsDQoJCSIwIiwNCgkJIi0wIiwNCgkJIjEwMDAiLA0KCQkiMSIsDQoJCSIxIiwNCgkJIi0wLjUiLA0KCQkiMC4wMDA1MDAwMDAwMDAwMDAwMDAwMSIsDQoJCSIxMDAwMDAiLA0KCQkiMC4xMDAwMDAwMDAwMDAwMDAwMSIsDQoJCSIxLjAwMDAwMDAwMDAwMDAwMDFlLTA1IiwNCgkJIi0xLjI0OTk5OTk5OTk5OTk5OTllLTA3IiwNCgkJIjAuMzAwMDAwMDAwMDAwMDAwMDQiLA0KCQkiMTAwMDAwMDAwMDAwMDAwMDAiLA0KCQkiMWUrMTciLA0KCQkiMWUrOTk5OSIsDQoJCSItMWUrOTk5OSIsDQoJCSIwIiwNCgkJIjQuOTQwNjU2NDU4NDEyNDY1NGUtMzI0IiwNCgkJIjAiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "integer limits",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbMjE0NzQ4MzY0NywyMTQ3NDgzNjQ4LDQyOTQ5NjcyOTYsOTIyMzM3MjAzNjg1NDc3NTgwNywtOTIyMzM3MjAzNjg1NDc3NTgwOCwtOTIyMzM3MjAzNjg1NDc3NTgwOSwxODQ0Njc0NDA3MzcwOTU1MTYxNSwxODQ0Njc0NDA3MzcwOTU1MTYxNiw5OTk5OTk5OTk5OTk5OTk5OTk5OV19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJIjIxNDc0ODM2NDciLA0KCQkiMjE0NzQ4MzY0OCIsDQoJCSI0Mjk0OTY3Mjk2IiwNCgkJIjkyMjMzNzIwMzY4NTQ3NzU4MDciLA0KCQkiLTkyMjMzNzIwMzY4NTQ3NzU4MDgiLA0KCQkiLTkuMjIzMzcyMDM2ODU0Nzc1OGUrMTgiLA0KCQkiMTg0NDY3NDQwNzM3MDk1NTE2MTUiLA0KCQkiMS44NDQ2NzQ0MDczNzA5NTUyZSsxOSIsDQoJCSIxZSsyMCINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "dangling exponent fails the file",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbMWVdLCJsb2ciOlsibCJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "dangling exponent sign",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbMWUrXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "special floats off",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbLUluZmluaXR5XX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "NaN off",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbTmFOXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "logic error keeps lists read before it",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSwiY29uZmlnIjp7IngiOjF9LCJsb2ciOlsibCJdLCJleHRlcm5hbF9kcml2ZXJzIjpbImQiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImEiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "empty object is an empty list",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSwiY29uZmlnIjp7fSwibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiANCglbDQoJCSJsIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiYSINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "external_drivers not an array",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjp7ImEiOiJiIn0sInJ1bnRpbWUiOlsiciJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJInIiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "lists given as scalars",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjoicyIsImNvbmZpZyI6dHJ1ZSwibG9nIjo1fQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "null list",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpudWxsLCJleHRlcm5hbF9kcml2ZXJzIjpbIngiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4IiwNCgkJIkM6XFx5Ig0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogbnVsbCwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "empty arrays",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbXSwiY29uZmlnIjpbIF0sImxvZyI6WyIiXSwiZXh0ZXJuYWxfZHJpdmVycyI6W119",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiANCglbDQoJCSIiDQoJXSwNCgkicnVudGltZSIgOiBudWxsLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "empty key, trailing comma",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIngiXSwiIjoxLH0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJ4IiwNCgkJIkM6XFx5Ig0KCV0sDQoJImpzb25pZCIgOiAidnJwYXRocmVnIiwNCgkibG9nIiA6IG51bGwsDQoJInJ1bnRpbWUiIDogbnVsbCwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "999 nested values",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW11dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dLCJsb2ciOlsibCJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiANCglbDQoJCSJsIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiIg0KCV0sDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "1000 nested values",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tdXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV0sImxvZyI6WyJsIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiANCglbDQoJCSJsIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiIg0KCV0sDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "1001 nested values fails the file",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXSwibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "quote comment after a value",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSAnLyBjCn0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "quote comment on its own line",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSwKJy8gYwoibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "quote comment after a slash comment",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSwKLy8gb25lCicvIHR3bwoibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiANCglbDQoJCSJsIg0KCV0sDQoJInJ1bnRpbWUiIDogDQoJWw0KCQkiYSINCgldLA0KCSJ2ZXJzaW9uIiA6IDENCn0="
+ },
+ {
+  "name": "quote comment after the root",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXX0KJy8gYw==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "quote C comment across lines",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXSAnKiB4CiovICwibG9nIjpbImwiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "slash comment after the root",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXX0gLy8gYw==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImEiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "unterminated string",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImFiYw==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "unterminated comment",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJydW50aW1lIjpbImEiXX0gLyogeA==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IA0KCVsNCgkJImEiDQoJXSwNCgkidmVyc2lvbiIgOiAxDQp9"
+ },
+ {
+  "name": "long list",
+  "verb": "adddriver",
+  "path": "C:\\y",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxkXFwwIiwiQzpcXGRcXDEiLCJDOlxcZFxcMiIsIkM6XFxkXFwzIiwiQzpcXGRcXDQiLCJDOlxcZFxcNSIsIkM6XFxkXFw2IiwiQzpcXGRcXDciLCJDOlxcZFxcOCIsIkM6XFxkXFw5IiwiQzpcXGRcXDEwIiwiQzpcXGRcXDExIiwiQzpcXGRcXDEyIiwiQzpcXGRcXDEzIiwiQzpcXGRcXDE0IiwiQzpcXGRcXDE1IiwiQzpcXGRcXDE2IiwiQzpcXGRcXDE3IiwiQzpcXGRcXDE4IiwiQzpcXGRcXDE5IiwiQzpcXGRcXDIwIiwiQzpcXGRcXDIxIiwiQzpcXGRcXDIyIiwiQzpcXGRcXDIzIiwiQzpcXGRcXDI0IiwiQzpcXGRcXDI1IiwiQzpcXGRcXDI2IiwiQzpcXGRcXDI3IiwiQzpcXGRcXDI4IiwiQzpcXGRcXDI5IiwiQzpcXGRcXDMwIiwiQzpcXGRcXDMxIiwiQzpcXGRcXDMyIiwiQzpcXGRcXDMzIiwiQzpcXGRcXDM0IiwiQzpcXGRcXDM1IiwiQzpcXGRcXDM2IiwiQzpcXGRcXDM3IiwiQzpcXGRcXDM4IiwiQzpcXGRcXDM5Il19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcZFxcMCIsDQoJCSJDOlxcZFxcMSIsDQoJCSJDOlxcZFxcMiIsDQoJCSJDOlxcZFxcMyIsDQoJCSJDOlxcZFxcNCIsDQoJCSJDOlxcZFxcNSIsDQoJCSJDOlxcZFxcNiIsDQoJCSJDOlxcZFxcNyIsDQoJCSJDOlxcZFxcOCIsDQoJCSJDOlxcZFxcOSIsDQoJCSJDOlxcZFxcMTAiLA0KCQkiQzpcXGRcXDExIiwNCgkJIkM6XFxkXFwxMiIsDQoJCSJDOlxcZFxcMTMiLA0KCQkiQzpcXGRcXDE0IiwNCgkJIkM6XFxkXFwxNSIsDQoJCSJDOlxcZFxcMTYiLA0KCQkiQzpcXGRcXDE3IiwNCgkJIkM6XFxkXFwxOCIsDQoJCSJDOlxcZFxcMTkiLA0KCQkiQzpcXGRcXDIwIiwNCgkJIkM6XFxkXFwyMSIsDQoJCSJDOlxcZFxcMjIiLA0KCQkiQzpcXGRcXDIzIiwNCgkJIkM6XFxkXFwyNCIsDQoJCSJDOlxcZFxcMjUiLA0KCQkiQzpcXGRcXDI2IiwNCgkJIkM6XFxkXFwyNyIsDQoJCSJDOlxcZFxcMjgiLA0KCQkiQzpcXGRcXDI5IiwNCgkJIkM6XFxkXFwzMCIsDQoJCSJDOlxcZFxcMzEiLA0KCQkiQzpcXGRcXDMyIiwNCgkJIkM6XFxkXFwzMyIsDQoJCSJDOlxcZFxcMzQiLA0KCQkiQzpcXGRcXDM1IiwNCgkJIkM6XFxkXFwzNiIsDQoJCSJDOlxcZFxcMzciLA0KCQkiQzpcXGRcXDM4IiwNCgkJIkM6XFxkXFwzOSIsDQoJCSJDOlxceSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove from three copies",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxBIiwiQzpcXEEiLCJDOlxcQSJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQSIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove first of two around another",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxBIiwiQzpcXEIiLCJDOlxcQSJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQiIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove first of two after another",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxCIiwiQzpcXEEiLCJDOlxcQSJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQiIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove first of four",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxBIiwiQzpcXEEiLCJDOlxcQiIsIkM6XFxBIiwiQzpcXEEiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQSIsDQoJCSJDOlxcQiIsDQoJCSJDOlxcQSIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove first, interleaved",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxCIiwiQzpcXEEiLCJDOlxcQiIsIkM6XFxBIl19",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQiIsDQoJCSJDOlxcQiIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "remove first of two before another",
+  "verb": "removedriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxBIiwiQzpcXEEiLCJDOlxcQiJdfQ==",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQSIsDQoJCSJDOlxcQiINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "add over two copies",
+  "verb": "adddriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxBIiwiQzpcXEEiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQSIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ },
+ {
+  "name": "add beside another duplicated",
+  "verb": "adddriver",
+  "path": "C:\\A",
+  "seed": "eyJleHRlcm5hbF9kcml2ZXJzIjpbIkM6XFxCIiwiQzpcXEIiXX0=",
+  "expect": "ew0KCSJjb25maWciIDogbnVsbCwNCgkiZXh0ZXJuYWxfZHJpdmVycyIgOiANCglbDQoJCSJDOlxcQiIsDQoJCSJDOlxcQiIsDQoJCSJDOlxcQSINCgldLA0KCSJqc29uaWQiIDogInZycGF0aHJlZyIsDQoJImxvZyIgOiBudWxsLA0KCSJydW50aW1lIiA6IG51bGwsDQoJInZlcnNpb24iIDogMQ0KfQ=="
+ }
+]
