@@ -53,10 +53,17 @@ public sealed class HMController : IDisposable
     /// <c>Global\HIDMaestroCompanionInputEvent&lt;N&gt;</c>,
     /// <c>Global\HIDMaestroInputAck&lt;N&gt;</c>, <c>Global\HIDMaestroInputAckEvent&lt;N&gt;</c>,
     /// <c>Global\HIDMaestroOutput&lt;N&gt;</c>, <c>Global\HIDMaestroOutputEvent&lt;N&gt;</c>,
-    /// <c>Global\HIDMaestroPidState&lt;N&gt;</c>
+    /// <c>Global\HIDMaestroPidState&lt;N&gt;</c>, <c>Global\HIDMaestroVersion&lt;N&gt;</c>
     /// and the owner pipe <c>\\.\pipe\HIDMaestroOwner&lt;N&gt;</c>, with N the
     /// <see cref="TransportIndex"/>.</summary>
     public IReadOnlyList<string> SectionNames => Internal.SharedMemoryIO.ObjectNames(Index);
+
+    /// <summary>The version of the HIDMaestro driver this controller runs
+    /// on, as the driver reports it in <c>Global\HIDMaestroVersion&lt;N&gt;</c>.
+    /// Null until the driver has started the device, on a driver older than
+    /// 1.13.0, which does not report one, and on a composite persona, which
+    /// runs on the USB/IP transport instead of the HIDMaestro driver.</summary>
+    public Version? DriverVersion => Internal.SharedMemoryIO.DriverVersion(Index)?.Version;
 
     /// <summary>The identity key this controller was created with. Every
     /// devnode instance id, the container id and, for USB/IP personas, the

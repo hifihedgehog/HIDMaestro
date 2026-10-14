@@ -218,6 +218,37 @@ internal static class Native
     internal struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
     [DllImport("xinput1_4.dll")] internal static extern uint XInputGetState(uint idx, out XINPUT_STATE st);
 
+    // ── The version handshake ──────────────────────────────────────────
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr OpenFileMappingW(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offHigh, uint offLow, UIntPtr bytes);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UnmapViewOfFile(IntPtr view);
+
+    /// <summary>Global\HIDMaestroVersion&lt;N&gt; as HIDMAESTRO_VERSION_INFO
+    /// (driver/driver.h) lays it out, or null when the section does not
+    /// exist.</summary>
+    internal static (int Layout, int SdkMin, int SdkMax, string Sdk, int DriverProtocol, string Driver)? VersionSection(int transport)
+    {
+        IntPtr h = OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, $@"Global\HIDMaestroVersion{transport}");
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            IntPtr v = MapViewOfFile(h, 0x0004, 0, 0, (UIntPtr)64);
+            if (v == IntPtr.Zero) return null;
+            try
+            {
+                string Ver(int at) => $"{(ushort)Marshal.ReadInt16(v, at)}.{(ushort)Marshal.ReadInt16(v, at + 2)}.{(ushort)Marshal.ReadInt16(v, at + 4)}";
+                return (Marshal.ReadInt32(v, 0), Marshal.ReadInt32(v, 4), Marshal.ReadInt32(v, 8), Ver(12),
+                        Marshal.ReadInt32(v, 20), Ver(24));
+            }
+            finally { UnmapViewOfFile(v); }
+        }
+        finally { CloseHandle(h); }
+    }
+
     // ── Registry ───────────────────────────────────────────────────────
 
     /// <summary>Owner records of programs running the SDK under test,

@@ -205,6 +205,13 @@ typedef struct _DEVICE_CONTEXT {
     UCHAR   OwnerReadByte;
     WCHAR   OwnerPipeName[64];            /* e.g. L"\\\\.\\pipe\\HIDMaestroOwner0" */
 
+    /* Version handshake (v1.13.0). The SDK creates
+     * Global\HIDMaestroVersion<N> (HIDMAESTRO_VERSION_INFO) beside the input
+     * section with its own half filled in. The driver writes its half each
+     * time it opens the input section, then lets go of the section. An SDK
+     * that predates it creates no section, and the open fails quietly. */
+    WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
+
     /* Release frames waiting for a READ_REPORT, under InputLock. */
     UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
     ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
@@ -356,6 +363,32 @@ typedef struct _HIDMAESTRO_INPUT_ACK {
     volatile LONG   ReleaseCount;    /* frames in Release, at most HIDMAESTRO_RELEASE_SLOTS */
     HIDMAESTRO_RELEASE_FRAME Release[HIDMAESTRO_RELEASE_SLOTS];
 } HIDMAESTRO_INPUT_ACK, *PHIDMAESTRO_INPUT_ACK;
+
+/* Version handshake (v1.13.0): Global\HIDMaestroVersion<N>, 64 bytes,
+ * created by the SDK. The SDK writes the first 20 bytes before the device
+ * exists. The driver writes the next 16 whenever it opens the input
+ * section: DriverVersion first, DriverProtocol last, so a reader that sees
+ * a nonzero protocol sees the version that goes with it.
+ *
+ * Protocol 1: the input and output sections, the events and the PID state,
+ *             through v1.11.0.
+ * Protocol 2: adds InputAck and the owner pipe, v1.12.0.
+ * Protocol 3: adds this section, v1.13.0.
+ * A driver keeps every older layout, so an SDK runs on any driver whose
+ * protocol is at least its SdkProtocolMin. */
+#define HIDMAESTRO_VERSION_LAYOUT    1
+#define HIDMAESTRO_DRIVER_PROTOCOL   3
+typedef struct _HIDMAESTRO_VERSION_INFO {
+    volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_VERSION_LAYOUT */
+    volatile LONG   SdkProtocolMin;      /* SDK: the oldest driver protocol it runs on */
+    volatile LONG   SdkProtocolMax;      /* SDK: the protocol it speaks */
+    USHORT          SdkVersion[4];       /* SDK: major, minor, patch, 0 */
+    volatile LONG   DriverProtocol;      /* driver: 0 until it has written its half */
+    USHORT          DriverVersion[4];    /* driver: major, minor, patch, 0 */
+    volatile LONG   DriverCapabilities;  /* driver: HIDMAESTRO_INPUT_ACK_CAP_* it supports */
+    LONG            Reserved[7];
+} HIDMAESTRO_VERSION_INFO, *PHIDMAESTRO_VERSION_INFO;
+C_ASSERT(sizeof(HIDMAESTRO_VERSION_INFO) == 64);
 #pragma pack(pop)
 
 /* Output passthrough section: written by driver/companion, read by consumer.

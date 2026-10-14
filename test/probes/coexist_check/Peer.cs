@@ -17,6 +17,8 @@
 //                               keep the driver
 //   uninstall                   remove every controller and the driver
 //   spawnchild                  start a child that inherits handles
+//   driverversion               the last controller's DriverVersion, read
+//                               for up to 2 s, or none
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 using System;
@@ -101,6 +103,17 @@ internal static class Peer
                         RemoveEverything(preserveInstall: false);
                         Reply("OK uninstall");
                         break;
+                    case "driverversion":
+                    {
+                        HMController? last;
+                        lock (s_live) last = s_live.Count > 0 ? s_live[^1] : null;
+                        string? v = null;
+                        var sw = Stopwatch.StartNew();
+                        while (last != null && (v = Get(last, "DriverVersion")) == null && sw.ElapsedMilliseconds < 2000)
+                            Thread.Sleep(20);
+                        Reply($"OK driverversion {v ?? "none"}");
+                        break;
+                    }
                     case "spawnchild":
                     {
                         // Started the way the SDK starts pnputil and hmswd:

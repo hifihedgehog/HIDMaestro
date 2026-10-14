@@ -17,6 +17,7 @@
  */
 
 #include "driver.h"
+#include "version_gen.h"   /* HM_VER_*, generated into the build directory from Directory.Build.props */
 
 /* Sony motion calibration, 34 bytes, written at offset 1 of the
  * calibration feature report (the report id occupies byte 0). Issue #43
@@ -327,6 +328,12 @@ InitInstancePaths(
         RtlCopyMemory(ctx->OwnerPipeName, prefix, sizeof(prefix));
         AppendUlongDecimal(ctx->OwnerPipeName, index, cap);
     }
+    {
+        static const WCHAR prefix[] = L"Global\\HIDMaestroVersion";
+        SIZE_T cap = sizeof(ctx->VersionMappingName) / sizeof(WCHAR);
+        RtlCopyMemory(ctx->VersionMappingName, prefix, sizeof(prefix));
+        AppendUlongDecimal(ctx->VersionMappingName, index, cap);
+    }
 
     /* Per-instance serial number. Format: "HM-CTL-<index>" zero-padded to
      * at least 4 digits so it sorts naturally. SDL3 / HIDAPI use this string
@@ -560,6 +567,7 @@ ReadConfigFromRegistry(
 /* ================================================================== */
 
 static VOID TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx);
+static VOID AnnounceVersion(_In_ PDEVICE_CONTEXT ctx);
 static VOID CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx);
 static VOID AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo);
 static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
@@ -582,7 +590,33 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     ctx->SharedMemPtr = view;
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
+    AnnounceVersion(ctx);
     return TRUE;
+}
+
+/* v1.13.0: write this driver's half of the version handshake, then let go
+ * of the section. The SDK keeps it alive. Best effort, like the InputAck
+ * open: an SDK that predates it creates no section. */
+static VOID
+AnnounceVersion(_In_ PDEVICE_CONTEXT ctx)
+{
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, ctx->VersionMappingName);
+    if (h == NULL) return;
+    PHIDMAESTRO_VERSION_INFO info = (PHIDMAESTRO_VERSION_INFO)MapViewOfFile(
+        h, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(HIDMAESTRO_VERSION_INFO));
+    if (info != NULL)
+    {
+        info->DriverVersion[0] = HM_VER_MAJOR;
+        info->DriverVersion[1] = HM_VER_MINOR;
+        info->DriverVersion[2] = HM_VER_PATCH;
+        info->DriverVersion[3] = 0;
+        InterlockedExchange(&info->DriverCapabilities,
+            (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED | HIDMAESTRO_INPUT_ACK_CAP_RELEASE));
+        MemoryBarrier();
+        InterlockedExchange(&info->DriverProtocol, HIDMAESTRO_DRIVER_PROTOCOL);
+        UnmapViewOfFile(info);
+    }
+    CloseHandle(h);
 }
 
 /* Issue #67: open the delivery acknowledgement the SDK creates beside the

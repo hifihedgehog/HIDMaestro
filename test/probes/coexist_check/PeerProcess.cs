@@ -14,6 +14,8 @@ internal sealed class PeerProcess : IDisposable
     readonly BlockingCollection<string> _lines = new();
     public string Name { get; }
     public int Pid => _p.Id;
+    /// <summary>The SDK assembly version the peer reported when it started.</summary>
+    public string SdkVersion { get; private set; } = "";
     public bool Exited => _p.HasExited;
 
     PeerProcess(string name, Process p)
@@ -47,6 +49,7 @@ internal sealed class PeerProcess : IDisposable
         var peer = new PeerProcess(name, p);
         string ready = peer.Read(30_000);
         if (!ready.StartsWith("OK ready")) throw new InvalidOperationException($"{name} did not start: {ready}");
+        peer.SdkVersion = Field(ready, "sdk") ?? "";
         Console.WriteLine($"    {name}: {ready}");
         return peer;
     }

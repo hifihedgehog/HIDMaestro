@@ -158,6 +158,43 @@ internal static class SharedMemoryIO
     // Issue #67: the server ends of each controller's owner pipe, guarded by
     // the s_inputViews lock.
     private static readonly Dictionary<int, List<IntPtr>> s_ownerPipes = new();
+    // v1.13.0: the version handshake, guarded by the s_inputViews lock.
+    private static readonly Dictionary<int, IntPtr> s_versionHandles = new();
+    private static readonly Dictionary<int, IntPtr> s_versionViews = new();
+
+    // HIDMAESTRO_VERSION_INFO (driver/driver.h), 64 bytes.
+    public const int VERSION_INFO_SIZE = 64;
+    public const int VERSION_OFFSET_LAYOUT = 0;
+    public const int VERSION_OFFSET_SDK_PROTOCOL_MIN = 4;
+    public const int VERSION_OFFSET_SDK_PROTOCOL_MAX = 8;
+    public const int VERSION_OFFSET_SDK_VERSION = 12;
+    public const int VERSION_OFFSET_DRIVER_PROTOCOL = 20;
+    public const int VERSION_OFFSET_DRIVER_VERSION = 24;
+    public const int VERSION_OFFSET_DRIVER_CAPS = 32;
+    public const int VERSION_LAYOUT = 1;
+    /// <summary>Protocol 2 is the v1.12.0 layout set, InputAck and the
+    /// owner pipe included. Protocol 3 adds the version handshake.</summary>
+    public const int SDK_PROTOCOL_MIN = 2, SDK_PROTOCOL = 3;
+
+    /// <summary>The driver's version and protocol from the handshake, or
+    /// null until a driver of protocol 3 or later has written them. A
+    /// v1.12.0 driver never does, and a USB/IP controller has no driver.</summary>
+    public static (Version Version, int Protocol)? DriverVersion(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            if (!s_versionViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero) return null;
+            int protocol = Marshal.ReadInt32(v, VERSION_OFFSET_DRIVER_PROTOCOL);
+            if (protocol == 0) return null;
+            Thread.MemoryBarrier();
+            var version = new Version(
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 0),
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 2),
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 4));
+            return (version, protocol);
+        }
+    }
+
     // HIDMAESTRO_INPUT_ACK (driver/driver.h): DeliveredSeqNo at 0, the
     // driver's capability bits at 4, then the release frames: a seqlock
     // word, a count, and HIDMAESTRO_RELEASE_SLOTS frames of a 4-byte size
@@ -275,6 +312,7 @@ internal static class SharedMemoryIO
         $@"Global\HIDMaestroOutput{controllerIndex}",
         $@"Global\HIDMaestroOutputEvent{controllerIndex}",
         $@"Global\HIDMaestroPidState{controllerIndex}",
+        $@"Global\HIDMaestroVersion{controllerIndex}",
         $@"\\.\pipe\HIDMaestroOwner{controllerIndex}",
     };
 
@@ -356,6 +394,22 @@ internal static class SharedMemoryIO
                 }
             }
             s_ownerPipes[controllerIndex] = pipes;
+
+            // v1.13.0: the version handshake (HIDMAESTRO_VERSION_INFO in
+            // driver.h). This SDK's half goes in now. The driver writes its
+            // half when it opens the input section, so the section must
+            // exist before the event below, like the acknowledgement.
+            (IntPtr vh, IntPtr vv) = CreateSection($@"Global\HIDMaestroVersion{controllerIndex}", VERSION_INFO_SIZE);
+            Marshal.Copy(new byte[VERSION_INFO_SIZE], 0, vv, VERSION_INFO_SIZE);
+            Marshal.WriteInt32(vv, VERSION_OFFSET_LAYOUT, VERSION_LAYOUT);
+            Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MIN, SDK_PROTOCOL_MIN);
+            Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MAX, SDK_PROTOCOL);
+            var sdk = typeof(SharedMemoryIO).Assembly.GetName().Version ?? new Version(0, 0, 0);
+            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 0, (short)sdk.Major);
+            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 2, (short)sdk.Minor);
+            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 4, (short)Math.Max(0, sdk.Build));
+            s_versionHandles[controllerIndex] = vh;
+            s_versionViews[controllerIndex] = vv;
 
             // Driver signaling event. Auto-reset (manual_reset=FALSE), not
             // initially set. The driver's per-device worker thread waits on
@@ -940,6 +994,10 @@ internal static class SharedMemoryIO
             if (s_ownerPipes.TryGetValue(controllerIndex, out var pipes))
                 foreach (var ph in pipes) CloseHandle(ph);
             s_ownerPipes.Remove(controllerIndex);
+            if (s_versionViews.Remove(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
+                UnmapViewOfFile(vv);
+            if (s_versionHandles.Remove(controllerIndex, out IntPtr vh) && vh != IntPtr.Zero)
+                CloseHandle(vh);
         }
         lock (s_outputViews)
         {
@@ -1006,6 +1064,12 @@ internal static class SharedMemoryIO
             foreach (var pipes in s_ownerPipes.Values)
                 foreach (var ph in pipes) CloseHandle(ph);
             s_ownerPipes.Clear();
+            foreach (var v in s_versionViews.Values)
+                if (v != IntPtr.Zero) UnmapViewOfFile(v);
+            s_versionViews.Clear();
+            foreach (var h in s_versionHandles.Values)
+                if (h != IntPtr.Zero) CloseHandle(h);
+            s_versionHandles.Clear();
         }
         lock (s_outputViews)
         {

@@ -44,6 +44,7 @@ cl.exe /nologo /W4 /GS /Gz /wd4324 ^
     "/I%KM_INC%" ^
     "/I%WDF_INC%" ^
     "/I%INC_DIR%" ^
+    "/I%OUT_DIR%" ^
     "/Fo%OUT_DIR%\\" ^
     /c "%DRIVER_DIR%\driver.c"
 

@@ -428,6 +428,9 @@ internal static class Program
                 string instNew = PeerProcess.Field(cn, "instance")!;
                 Check("E1: the new program's controller runs on the installed v1.12.0 driver",
                       Native.DriverVersionOf(instNew) == verOld, $"{Native.DriverVersionOf(instNew)} vs {verOld}");
+                string dv = nu.Send("driverversion");
+                Check("E1: the v1.12.0 driver reports no version through the handshake",
+                      dv == "OK driverversion none", dv);
                 nu.Send("stream 6 0.8 125 0");
                 var pathNew = WaitPaths(0xBEEF, 0xF0E1, 1, 10_000);
                 using var capNew = pathNew.Count == 1 ? HidCapture.Open(pathNew[0]) : null;
@@ -448,6 +451,22 @@ internal static class Program
             string cn = nu.Send("create pad F0E2 coexist-e-upgraded");
             string? ver = Ok(cn) ? Native.DriverVersionOf(PeerProcess.Field(cn, "instance")!) : null;
             Check("E2: the new controller runs on the new driver", ver != null && ver != verOld, $"{ver} (was {verOld})");
+            if (Ok(cn) && ver != null)
+            {
+                // The driver's binary and its INF come from one build, so
+                // the handshake's version is the INF's without the build
+                // number.
+                string release = string.Join('.', ver.Split('.').Take(3));
+                string dv = nu.Send("driverversion");
+                Check("E2: the new driver reports its version through the handshake",
+                      dv == $"OK driverversion {release}", $"{dv}, the devnode says {ver}");
+                var vs = Native.VersionSection(int.Parse(PeerProcess.Field(cn, "transport")!));
+                Check("E2: the handshake section carries layout 1, the SDK's protocols 2 to 3, its version and the driver's protocol 3",
+                      vs != null && vs.Value.Layout == 1 && vs.Value.SdkMin == 2 && vs.Value.SdkMax == 3
+                      && vs.Value.DriverProtocol == 3 && vs.Value.Driver == release
+                      && nu.SdkVersion.StartsWith(vs.Value.Sdk + ".", StringComparison.Ordinal),
+                      vs == null ? "no section" : $"{vs}, the peer's SDK is {nu.SdkVersion}");
+            }
         }
 
         // E3. A v1.12.0 program on a machine with the newer driver.
