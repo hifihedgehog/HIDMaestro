@@ -9,6 +9,10 @@
 //               uninstaller that exists, but not its driver package. The SDK
 //               refuses instead of running the installer, which would run
 //               that uninstaller first.
+//   C. together Two programs create their first composite at the same
+//               moment on a clean machine. One installs, the other waits for
+//               it under the deploy lock: one host controller, and both
+//               composites appear.
 //
 // The host role starts a fresh sandbox for each scenario with wsb.exe,
 // which opens no window, runs this program inside it as SYSTEM, and reports
@@ -54,7 +58,9 @@ internal static class Program
         }
         if (args.Length >= 3 && args[0] == "--in-sandbox")
             return InSandbox(args[1], args[2]);
-        return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "AB");
+        if (args.Length >= 3 && args[0] == "--create-composite")
+            return CreateComposite(args[1], args[2]);
+        return Host(args.Length > 0 ? args[0].ToUpperInvariant() : "ABC");
     }
 
     // ── Host ───────────────────────────────────────────────────────────
@@ -79,6 +85,7 @@ internal static class Program
         {
             ('A', "clean", "a clean machine"),
             ('B', "record", "an uninstall entry without the driver package"),
+            ('C', "together", "two programs' first composites at the same moment"),
         };
         foreach (var (id, name, title) in scenarios)
         {
@@ -171,6 +178,14 @@ internal static class Program
                        UninstallerPath() != null, UninstallerPath() ?? "");
             }
 
+            if (scenario == "together")
+            {
+                Together(results);
+                s_lines.Add("DONE");
+                File.WriteAllLines(Path.Combine(results, "results.txt"), s_lines);
+                return s_lines.Any(l => l.StartsWith("FAIL", StringComparison.Ordinal)) ? 1 : 0;
+            }
+
             using var ctx = new HMContext();
             ctx.LoadDefaultProfiles();
             ctx.InstallDriver();
@@ -249,6 +264,106 @@ internal static class Program
         var steady = Hid.CountReports(paths[0], 2000, Submit);
         Record("clean: input keeps arriving once the device has settled",
                steady.ReadError == 0 && steady.Reports * 2 >= steady.Ticks, steady.ToString());
+    }
+
+    // ── Two programs at once ───────────────────────────────────────────
+
+    const string GoEvent = @"Global\HIDMaestroS73Go";
+    const string DoneEvent = @"Global\HIDMaestroS73Done";
+
+    /// <summary>Two programs, each this binary with --create-composite, wait
+    /// on one event and create their first composite when it fires.</summary>
+    static void Together(string results)
+    {
+        using (var setup = new HMContext())
+        {
+            setup.LoadDefaultProfiles();
+            setup.InstallDriver();
+        }
+        using var go = new EventWaitHandle(false, EventResetMode.ManualReset, GoEvent);
+        using var done = new EventWaitHandle(false, EventResetMode.ManualReset, DoneEvent);
+        var children = new List<Process>();
+        for (int i = 0; i < 2; i++)
+        {
+            var psi = new ProcessStartInfo(Environment.ProcessPath!)
+            { UseShellExecute = false, CreateNoWindow = true };
+            psi.ArgumentList.Add("--create-composite");
+            psi.ArgumentList.Add($"together-{i}");
+            psi.ArgumentList.Add(Path.Combine(results, $"child{i}.txt"));
+            children.Add(Process.Start(psi)!);
+        }
+        // Both start the SDK and wait. The event releases them together.
+        Thread.Sleep(5000);
+        go.Set();
+
+        var sw = Stopwatch.StartNew();
+        string[] answers = new string[2];
+        while (sw.ElapsedMilliseconds < 600_000)
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                string f = Path.Combine(results, $"child{i}.txt");
+                try { if (answers[i] == null && File.Exists(f)) answers[i] = File.ReadAllText(f).Trim(); } catch { }
+            }
+            if (answers.All(a => a != null)) break;
+            Thread.Sleep(500);
+        }
+        Record("together: both programs' first composite creates", answers.All(a => a?.StartsWith("created", StringComparison.Ordinal) == true),
+               string.Join(" / ", answers.Select(a => a ?? "no answer")));
+        Record("together: usbip-win2 was installed once: one host controller",
+               HostControllers() == 1, $"{HostControllers()} host controller(s)");
+        var paths = new List<string>();
+        var wait = Stopwatch.StartNew();
+        while (paths.Count < 2 && wait.ElapsedMilliseconds < 30_000)
+        {
+            paths = Hid.Paths(0x054C, 0x0CE6);
+            if (paths.Count < 2) Thread.Sleep(250);
+        }
+        Record("together: both composites' HID interfaces appear", paths.Count == 2, $"{paths.Count} interface(s)");
+        done.Set();
+        foreach (var c in children)
+        {
+            if (!c.WaitForExit(60_000)) try { c.Kill(); } catch { }
+            c.Dispose();
+        }
+    }
+
+    /// <summary>One of the two programs: create a composite when the go
+    /// event fires, report, and keep it until the done event.</summary>
+    static int CreateComposite(string key, string answer)
+    {
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            using var go = EventWaitHandle.OpenExisting(GoEvent);
+            using var done = EventWaitHandle.OpenExisting(DoneEvent);
+            go.WaitOne(120_000);
+            HMController c;
+            try { c = ctx.CreateController(ctx.GetProfile("dualsense-composite")!, key); }
+            catch (Exception ex)
+            {
+                File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}");
+                return 1;
+            }
+            File.WriteAllText(answer, $"created {key} on transport index {c.TransportIndex}");
+            done.WaitOne(300_000);
+            c.Dispose();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            try { File.WriteAllText(answer, $"failed {ex.GetType().Name}: {ex.Message}"); } catch { }
+            return 1;
+        }
+    }
+
+    /// <summary>Host controller devnodes usbip-win2's devnode.exe made, as
+    /// pnputil lists the hardware ID of its emulated host controller.</summary>
+    static int HostControllers()
+    {
+        var r = Run("pnputil.exe", 60_000, "/enum-devices", "/deviceid", @"ROOT\USBIP_WIN2\UDE");
+        return r.Output.Split('\n').Count(l => l.TrimStart().StartsWith("Instance ID:", StringComparison.OrdinalIgnoreCase));
     }
 
     static void RecordChecks(Exception? error)

@@ -101,69 +101,87 @@ internal static partial class UsbipDriverInstaller
         {
             if (IsInstalled) return true;
 
-            // A machine can have usbip-win2 already (VIIPER and DS4Windows
-            // install the same transport) with its host controller merely
-            // not started, or left interface-less by an interrupted PnP
-            // operation. Running the installer over an existing install is
-            // the wrong repair for that: Inno uninstalls the old version
-            // first, and its driver-package removal touches the extension
-            // INF bound to every USB root hub, which re-enumerates the whole
-            // USB tree and can take many minutes. Restarting the devnode
-            // republishes the interface in seconds. Try that first, and only
-            // install when the product is genuinely absent.
-            if (IsProductInstalled())
+            // Every transport deploy holds the machine-wide deploy lock and
+            // reads the machine again under it (DriverDeploy): of two
+            // programs whose first composites arrive together, one installs
+            // and the other finds the host controller. Two installers at once
+            // would each create a host controller devnode.
+            using var deploy = DriverDeploy.Acquire();
+            try
             {
-                progress?.Invoke("Repairing the existing USB audio transport...");
-                if (TryRestartHostController(progress)) return true;
-
-                throw new InvalidOperationException(
-                    $"usbip-win2 {Version} is installed on this machine but its virtual host " +
-                    "controller is not available, and restarting the device did not recover it. " +
-                    "Reinstalling it from HIDMaestro would first uninstall the existing copy, " +
-                    "which detaches a filter driver from every USB root hub and can take several " +
-                    "minutes, so that is not done automatically. Repair or reinstall usbip-win2, " +
-                    "or reboot, and try again.");
+                if (IsInstalled) return true;
+                return InstallLocked(progress);
             }
+            finally { deploy.ReleaseMutex(); }
+        }
+    }
 
-            // The installer's own PrepareToInstall (setup.iss 504-535) runs
-            // the uninstaller of any copy whose uninstall entry it finds,
-            // before it installs anything. An entry left without its driver
-            // package would get that uninstaller run, which is the root-hub
-            // filter removal the check above exists to avoid.
-            if (InstalledUninstaller() is string uninstaller)
-                throw new InvalidOperationException(
-                    $"usbip-win2 has an uninstall entry on this machine (its uninstaller is {uninstaller}), " +
-                    "but its driver package is not in the driver store. The bundled installer would run " +
-                    "that uninstaller first, which detaches a filter driver from every USB root hub, so " +
-                    "HIDMaestro does not run it. Repair or uninstall usbip-win2 from Settings > Apps, " +
-                    "and try again.");
-
-            progress?.Invoke($"Installing USB audio transport (usbip-win2 {Version})...");
-
-            string exe = ExtractInstaller();
-            RunSilentInstall(exe);
-
-            // PnP settles the new host controller asynchronously. The
-            // driver's own device arrives quickly; the root-hub
-            // re-enumeration its filter INF triggers takes longer and does
-            // not gate us.
-            var sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
-            {
-                if (VhciClient.IsAvailable())
-                {
-                    StampOwnerHardwareId();
-                    progress?.Invoke("USB audio transport ready.");
-                    return true;
-                }
-                Thread.Sleep(250);
-            }
+    /// <summary>The install itself. The caller holds the deploy lock and has
+    /// found no host controller answering.</summary>
+    private static bool InstallLocked(Action<string>? progress)
+    {
+        // A machine can have usbip-win2 already (VIIPER and DS4Windows
+        // install the same transport) with its host controller merely
+        // not started, or left interface-less by an interrupted PnP
+        // operation. Running the installer over an existing install is
+        // the wrong repair for that: Inno uninstalls the old version
+        // first, and its driver-package removal touches the extension
+        // INF bound to every USB root hub, which re-enumerates the whole
+        // USB tree and can take many minutes. Restarting the devnode
+        // republishes the interface in seconds. Try that first, and only
+        // install when the product is genuinely absent.
+        if (IsProductInstalled())
+        {
+            progress?.Invoke("Repairing the existing USB audio transport...");
+            if (TryRestartHostController(progress)) return true;
 
             throw new InvalidOperationException(
-                $"usbip-win2 {Version} installer completed but its virtual host controller did not " +
-                "appear within the timeout. Check Device Manager for 'USBip 3.X Emulated Host " +
-                "Controller' and any pending-reboot state.");
+                $"usbip-win2 {Version} is installed on this machine but its virtual host " +
+                "controller is not available, and restarting the device did not recover it. " +
+                "Reinstalling it from HIDMaestro would first uninstall the existing copy, " +
+                "which detaches a filter driver from every USB root hub and can take several " +
+                "minutes, so that is not done automatically. Repair or reinstall usbip-win2, " +
+                "or reboot, and try again.");
         }
+
+        // The installer's own PrepareToInstall (setup.iss 504-535) runs
+        // the uninstaller of any copy whose uninstall entry it finds,
+        // before it installs anything. An entry left without its driver
+        // package would get that uninstaller run, which is the root-hub
+        // filter removal the check above exists to avoid.
+        if (InstalledUninstaller() is string uninstaller)
+            throw new InvalidOperationException(
+                $"usbip-win2 has an uninstall entry on this machine (its uninstaller is {uninstaller}), " +
+                "but its driver package is not in the driver store. The bundled installer would run " +
+                "that uninstaller first, which detaches a filter driver from every USB root hub, so " +
+                "HIDMaestro does not run it. Repair or uninstall usbip-win2 from Settings > Apps, " +
+                "and try again.");
+
+        progress?.Invoke($"Installing USB audio transport (usbip-win2 {Version})...");
+
+        string exe = ExtractInstaller();
+        RunSilentInstall(exe);
+
+        // PnP settles the new host controller asynchronously. The
+        // driver's own device arrives quickly. The root-hub
+        // re-enumeration its filter INF triggers takes longer and does
+        // not gate us.
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
+        {
+            if (VhciClient.IsAvailable())
+            {
+                StampOwnerHardwareId();
+                progress?.Invoke("USB audio transport ready.");
+                return true;
+            }
+            Thread.Sleep(250);
+        }
+
+        throw new InvalidOperationException(
+            $"usbip-win2 {Version} installer completed but its virtual host controller did not " +
+            "appear within the timeout. Check Device Manager for 'USBip 3.X Emulated Host " +
+            "Controller' and any pending-reboot state.");
     }
 
     // ── Moving a machine off the transport earlier releases installed ────
@@ -235,6 +253,9 @@ internal static partial class UsbipDriverInstaller
         {
             if (s_legacyChecked) return;
             s_legacyChecked = true;
+            // A transport deploy like the install: under the deploy lock, so
+            // two programs never force the host controller's driver at once.
+            using var deploy = DriverDeploy.Acquire();
             try { ReplaceLegacyTransport(progress); }
             catch (Exception ex)
             {
@@ -243,6 +264,7 @@ internal static partial class UsbipDriverInstaller
                 // answering still answering.
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: legacy replace stopped: {ex.GetType().Name}: {ex.Message}");
             }
+            finally { deploy.ReleaseMutex(); }
         }
     }
 

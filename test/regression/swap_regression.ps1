@@ -1851,10 +1851,12 @@ function Scenario-Protected-Staging {
 # GUI, SDK or PDB file, while the composite enumerates and carries input. A
 # machine holding usbip-win2's uninstall entry without its driver package
 # gets a refusal instead of the installer, which would run that entry's
-# uninstaller first. Exit 2 when Windows Sandbox is not available.
+# uninstaller first. Two programs whose first composites arrive together
+# install once: one host controller, both composites up. Exit 2 when Windows
+# Sandbox is not available.
 function Scenario-Usbip-Clean-Install {
     Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' `
-                 -Message 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, or ran over an existing install (see probe stdout)' -SkipCodes 2
+                 -Message 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, ran over an existing install, or ran twice for two programs at once (see probe stdout)' -SkipCodes 2
 }
 
 # The smoke apps the aot_smoke probe publishes for this machine's
