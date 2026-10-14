@@ -173,15 +173,20 @@ typedef struct _DEVICE_CONTEXT {
 
     /* Delivery acknowledgement (issue #67). The SDK pre-creates
      * Global\HIDMaestroInputAck<N> (HIDMAESTRO_INPUT_ACK) and the auto-reset
-     * Global\HIDMaestroInputAckEvent<N> beside the input section. Each time
-     * a READ_REPORT completes with a frame, the driver stores that frame's
-     * SeqNo and signals the event, so a keyboard or mouse writer can hold
-     * the next frame until the previous one has reached HID class: a
-     * click's press, a key tap and every relative delta arrive instead of
-     * being overwritten by the frame after them. Opened with the input
-     * section, best effort. An SDK that does not create them gets the
-     * latest-wins behavior every gamepad uses. Every access is under
-     * InputLock, which the read path already holds. */
+     * Global\HIDMaestroInputAckEvent<N> beside the input section. When a
+     * READ_REPORT completes with a frame, the driver notes that frame's
+     * SeqNo (AckPending). When HID class sends its next READ_REPORT, which
+     * it does only after its completion routine has put that frame in its
+     * buffer, the driver stores the SeqNo and signals the event. A keyboard
+     * or mouse writer holds the next frame until then, so a click's press,
+     * a key tap and every relative delta arrive, and arrive in order:
+     * acknowledging at completion let the next frame's completion overtake
+     * this one's on a busy machine. Opened with the input section, best
+     * effort. An SDK that does not create them gets the latest-wins
+     * behavior every gamepad uses. Every access is under InputLock, which
+     * the read path already holds. */
+    BOOLEAN AckPending;
+    ULONG   AckPendingSeqNo;
     HANDLE  InputAckMemHandle;
     volatile LONG *InputAckMemPtr;
     HANDLE  InputAckEvent;

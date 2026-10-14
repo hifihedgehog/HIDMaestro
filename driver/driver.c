@@ -617,14 +617,23 @@ CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx)
     if (ctx->InputAckEvent) { CloseHandle(ctx->InputAckEvent); ctx->InputAckEvent = NULL; }
 }
 
-/* A READ_REPORT just carried the frame with this SeqNo. Caller holds
- * InputLock. */
+/* HID class holds the frame with this SeqNo. Caller holds InputLock. */
 static VOID
 AckInputDeliveredLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
 {
     if (ctx->InputAckMemPtr == NULL) return;
     InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->DeliveredSeqNo, (LONG)seqNo);
     if (ctx->InputAckEvent) SetEvent(ctx->InputAckEvent);
+}
+
+/* A READ_REPORT just completed with the frame with this SeqNo. Its
+ * acknowledgement waits for HID class's next READ_REPORT (see AckPending in
+ * driver.h). Caller holds InputLock. */
+static VOID
+NoteFrameCompletedLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
+{
+    ctx->AckPending = TRUE;
+    ctx->AckPendingSeqNo = seqNo;
 }
 
 /* Issue #67: connect to the SDK's owner pipe and leave one read pending.
@@ -1785,15 +1794,16 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
      * SubmitStates the next frame. */
     {
         BOOLEAN servedOne = FALSE;
-        WDFREQUEST pendingRead;
+        NTSTATUS cs = STATUS_SUCCESS;
+        WDFREQUEST pendingRead = NULL;
         if (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(ctx->ManualQueue, &pendingRead))) {
             servedOne = TRUE;
-            NTSTATUS cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
-            WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
+            cs = RequestCopyFromBuffer(pendingRead, inputReport, inputSize);
         }
         /* Store for polled GET_INPUT_REPORT, and bump the seqno gate
          * so the next IOCTL_HID_READ_REPORT for this seqno completes
-         * directly (the queued ones have already been drained above). */
+         * directly (the parked one, if any, was taken above and completes
+         * below). */
         WdfWaitLockAcquire(ctx->InputLock, NULL);
         RtlCopyMemory(ctx->InputReport, inputReport, inputSize);
         ctx->InputReportSize = inputSize;
@@ -1816,9 +1826,17 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
          * the immediate-complete path advances LastDelivered itself. */
         if (servedOne) {
             ctx->LastDeliveredInputSeqNo = seqNo;
-            AckInputDeliveredLocked(ctx, seqNo);
+            NoteFrameCompletedLocked(ctx, seqNo);
         }
         WdfWaitLockRelease(ctx->InputLock);
+        /* Complete only now. HID class can send its next READ_REPORT the
+         * moment this one completes, and that read has to find AckPending
+         * set. Completing before the lock let it arrive first, find nothing
+         * to acknowledge and park, so the acknowledgement waited for a read
+         * that only the SDK's next frame would bring: the SDK sat out its
+         * full delivery timeout, most often on a busy machine. */
+        if (servedOne)
+            WdfRequestComplete(pendingRead, NT_SUCCESS(cs) ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL);
     }
 }
 
@@ -2484,6 +2502,14 @@ EvtIoDeviceControl(
 
         WdfWaitLockAcquire(ctx->InputLock, NULL);
 
+        /* HID class asks again only after its completion routine has put
+         * the last completed frame in its buffer: acknowledge that frame
+         * now, so the SDK's next one cannot overtake it (issue #67). */
+        if (ctx->AckPending) {
+            ctx->AckPending = FALSE;
+            AckInputDeliveredLocked(ctx, ctx->AckPendingSeqNo);
+        }
+
         /* Release frames the consumer's exit left queued (issue #67) go
          * first, one per read. */
         if (ctx->ReleaseNext < ctx->ReleaseCount) {
@@ -2497,7 +2523,7 @@ EvtIoDeviceControl(
             status = RequestCopyFromBuffer(Request,
                 ctx->InputReport, ctx->InputReportSize);
             ctx->LastDeliveredInputSeqNo = ctx->SharedMemSeqNo;
-            AckInputDeliveredLocked(ctx, ctx->SharedMemSeqNo);
+            NoteFrameCompletedLocked(ctx, ctx->SharedMemSeqNo);
             WdfWaitLockRelease(ctx->InputLock);
         } else {
             WdfWaitLockRelease(ctx->InputLock);
