@@ -18,6 +18,16 @@ internal sealed class PeerProcess : IDisposable
     public string SdkVersion { get; private set; } = "";
     public bool Exited => _p.HasExited;
 
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
+    const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOGPFAULTERRORBOX = 0x0002, SEM_NOOPENFILEERRORBOX = 0x8000;
+
+    /// <summary>A peer, and every process it starts, inherits this error
+    /// mode, so a crash or a loader failure ends in an exit code and never
+    /// in a dialog on the desktop. The bits already set are kept.</summary>
+    static PeerProcess() =>
+        SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
     PeerProcess(string name, Process p)
     {
         Name = name;
