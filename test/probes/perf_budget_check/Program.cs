@@ -15,7 +15,8 @@
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
-//   gate           S84: no submit path allocates
+//   gate           S84: no submit path allocates, and the census finds
+//                  what the configuration manager lists
 //
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
@@ -119,6 +120,19 @@ internal static class Program
         {
             bool flip = false;
             Measure("SubmitState, xbox-360-wired", runs, 20_000, () => { x360.SubmitState(flip ? a : b); flip = !flip; }, gate);
+#if !HM_BASE
+            // The census walks the Enum keys instead of listing every present
+            // device. With a shared-enumerator devnode and an SWD companion up,
+            // the two must find the same devnodes.
+            if (gate)
+            {
+                var walked = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodes().OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                var listed = HIDMaestro.Internal.OwnerCensus.PresentOwnedDevnodesListed().OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                Check("the census walk finds the devnodes the configuration manager lists, the Xbox 360's two among them",
+                    walked.Count >= 2 && walked.SequenceEqual(listed, StringComparer.OrdinalIgnoreCase),
+                    $"walked {string.Join(", ", walked)}; listed {string.Join(", ", listed)}");
+            }
+#endif
         }
         using (var kb = ctx.CreateController(ctx.GetProfile(Keyboard)!))
         {

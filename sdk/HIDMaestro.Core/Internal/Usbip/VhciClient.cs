@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace HIDMaestro.Internal.Usbip;
 
@@ -98,8 +99,29 @@ internal static partial class VhciClient
         return new string(buf, 0, end);
     }
 
+    // The host controller's interface path and the request layout it
+    // answered, kept once found. Looking the path up is a configuration
+    // manager call of about 150 microseconds, and the census that lists the
+    // imports runs on every create. A failed open looks the path up again,
+    // and a failed request on the kept layout probes again, so a controller
+    // reinstalled while this process runs is found anew.
+    private static string? s_path;
+    private static Layout? s_layout;
+
+    // Rows a census reads on the kept layout. With more imports than this
+    // the driver answers STATUS_BUFFER_TOO_SMALL, and the full probe reads
+    // them all.
+    private const int CensusRows = 16;
+
     private static SafeHandleWrapper Open()
     {
+        string? kept = Volatile.Read(ref s_path);
+        if (kept != null)
+        {
+            IntPtr k = CreateFileW(kept, 0xC0000000 /* GENERIC_READ|WRITE */, 0, IntPtr.Zero,
+                3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+            if (k != new IntPtr(-1)) return new SafeHandleWrapper(k);
+        }
         string path = TryGetInterfacePath()
             ?? throw new InvalidOperationException(
                 "The virtual USB host controller is not present. It ships inside HIDMaestro.Core.dll " +
@@ -108,6 +130,7 @@ internal static partial class VhciClient
             3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
         if (h == new IntPtr(-1))
             throw new Win32Exception(Marshal.GetLastWin32Error(), $"CreateFile('{path}') failed.");
+        Volatile.Write(ref s_path, path);
         return new SafeHandleWrapper(h);
     }
 
@@ -144,6 +167,16 @@ internal static partial class VhciClient
         throw new InvalidOperationException(
             "The usbip-win2 host controller accepted none of the request layouts this SDK knows " +
             $"(0.9.8.1, 0.9.8.0, 0.9.7.x). Last error 0x{lastError:X8}.");
+    }
+
+    /// <summary>GET_IMPORTED_DEVICES on one layout with room for
+    /// <paramref name="rows"/> rows.</summary>
+    private static bool TryList(IntPtr handle, Layout layout, int rows, out byte[] buf, out uint written)
+    {
+        buf = new byte[HeaderSize + layout.RowSize * rows];
+        BitConverter.GetBytes((uint)(HeaderSize + layout.RowSize)).CopyTo(buf, 0);
+        return DeviceIoControl(handle, GET_IMPORTED_DEVICES, buf, (uint)buf.Length,
+            buf, (uint)buf.Length, out written, IntPtr.Zero);
     }
 
     /// <summary>The layout the installed driver speaks, for diagnostics
@@ -222,9 +255,19 @@ internal static partial class VhciClient
         try
         {
             using var h = Open();
-            // The probe's successful call is the listing: a header of ULONG
-            // size, then one imported_device row per attached device.
-            var layout = Probe(h.Handle, out byte[] buf, out uint written);
+            // A successful call is the listing: a header of ULONG size, then
+            // one imported_device row per attached device. The kept layout
+            // goes first, with room for CensusRows rows. The probe answers
+            // when there is no kept layout, when the driver changed under it,
+            // and when more devices are attached.
+            Layout? layout = Volatile.Read(ref s_layout);
+            byte[] buf;
+            uint written;
+            if (layout == null || !TryList(h.Handle, layout, CensusRows, out buf, out written))
+            {
+                layout = Probe(h.Handle, out buf, out written);
+                Volatile.Write(ref s_layout, layout);
+            }
             int rows = written >= HeaderSize ? (int)((written - HeaderSize) / layout.RowSize) : 0;
             for (int i = 0; i < rows; i++)
             {

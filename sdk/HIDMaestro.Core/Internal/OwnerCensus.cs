@@ -62,9 +62,9 @@ internal sealed partial class OwnerCensus
         return set;
     }
 
-    /// <summary>Read the records and the present devices. Costs one
-    /// CM_Get_Device_ID_List call per enumerator root and a registry read
-    /// per HIDMaestro devnode, with no walk of phantom records.</summary>
+    /// <summary>Read the records and the present devices. Costs a read of
+    /// the Enum keys' names under ROOT and SWD, a presence check per
+    /// HIDMaestro devnode, and a registry read per present one.</summary>
     public static OwnerCensus Take()
     {
         var census = new OwnerCensus();
@@ -143,22 +143,70 @@ internal sealed partial class OwnerCensus
     /// HardwareID proves it (issue #28).</summary>
     internal static List<string> PresentOwnedDevnodes()
     {
+        // The device ids and their instances come from the Enum keys, which
+        // hold present and absent devnodes alike, and a normal
+        // CM_Locate_DevNode finds only a present one. Measured on the bench,
+        // a CM_Get_Device_ID_List call with CM_GETIDLIST_FILTER_PRESENT costs
+        // 150 microseconds or more even when it lists nothing, against about
+        // 45 for the ROOT key's names and 5 per presence check. Past 64
+        // candidate instances, absent ones piled up by programs that never
+        // swept, the walk goes back to the listings, whose cost does not
+        // grow with them.
+        var candidates = new List<(string Id, bool Exclusive)>();
+        foreach (string root in EnumRoots)
+        {
+            using var enumKey = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}");
+            if (enumKey == null) continue;
+            foreach (string device in enumKey.GetSubKeyNames())
+            {
+                bool exclusive = IsExclusiveEnumerator(device);
+                if (!exclusive && !IsSharedEnumerator(device)) continue;
+                using var deviceKey = enumKey.OpenSubKey(device);
+                if (deviceKey == null) continue;
+                foreach (string instance in deviceKey.GetSubKeyNames())
+                    candidates.Add(($@"{root}\{device}\{instance}", exclusive));
+            }
+        }
+        if (candidates.Count > 64) return PresentOwnedDevnodesListed();
+
         var list = new List<string>();
-        foreach (string root in new[] { "ROOT", "SWD" })
+        foreach (var (id, exclusive) in candidates)
+        {
+            if (!exclusive && !DeviceManager.IsHidMaestroOwned(id)) continue;
+            if (CM_Locate_DevNode(out _, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) list.Add(id);
+        }
+        return list;
+    }
+
+    private static readonly string[] EnumRoots = { "ROOT", "SWD" };
+
+    /// <summary>A device id only HIDMaestro uses.</summary>
+    private static bool IsExclusiveEnumerator(string device) =>
+        device.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+        || device.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A device id HIDMaestro shares with other software, whose
+    /// instances count when their hardware ids name HIDMaestro.</summary>
+    private static bool IsSharedEnumerator(string device) =>
+        device.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+        || device.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+        || device.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
+        || device.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
+        || device.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The same devnodes from the configuration manager's list of
+    /// present devices under each root.</summary>
+    internal static List<string> PresentOwnedDevnodesListed()
+    {
+        var list = new List<string>();
+        foreach (string root in EnumRoots)
         {
             foreach (string id in PresentDeviceIds(root))
             {
                 string[] parts = id.Split('\\');
                 if (parts.Length != 3) continue;
-                string enumerator = parts[1];
-                bool exclusive = enumerator.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                    || enumerator.StartsWith("HMCOMPANION", StringComparison.OrdinalIgnoreCase);
-                bool shared = enumerator.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                    || enumerator.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
-                    || enumerator.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
-                    || enumerator.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
-                    || enumerator.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
-                if (exclusive || (shared && DeviceManager.IsHidMaestroOwned(id)))
+                bool exclusive = IsExclusiveEnumerator(parts[1]);
+                if (exclusive || (IsSharedEnumerator(parts[1]) && DeviceManager.IsHidMaestroOwned(id)))
                     list.Add(id);
             }
         }
@@ -202,6 +250,7 @@ internal sealed partial class OwnerCensus
 
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
     private const uint CM_GETIDLIST_FILTER_PRESENT = 0x00000100;
+    private const uint CM_LOCATE_DEVNODE_NORMAL = 0x00000000;
     private const uint CR_SUCCESS = 0, CR_BUFFER_SMALL = 0x1A;
     private const uint FILE_MAP_READ = 0x0004;
 
@@ -210,6 +259,9 @@ internal sealed partial class OwnerCensus
 
     [LibraryImport("cfgmgr32.dll", EntryPoint = "CM_Get_Device_ID_ListW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial uint CM_Get_Device_ID_List(string filter, [Out] char[] buffer, uint length, uint flags);
+
+    [LibraryImport("cfgmgr32.dll", EntryPoint = "CM_Locate_DevNodeW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint CM_Locate_DevNode(out uint devInst, string deviceId, uint flags);
 
     [LibraryImport("kernel32.dll", EntryPoint = "OpenFileMappingW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial IntPtr OpenFileMapping(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, string name);

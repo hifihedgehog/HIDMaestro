@@ -51,6 +51,9 @@ internal static partial class MachineClaims
     private static string? s_ownerId;
     private static SafeFileHandle? s_ownerClaim;
     private static bool s_recordWritten;
+    // This process's start time for its record, read once: a record goes
+    // when its last controller does and comes back with the next one.
+    private static long s_startTimeUtc;
 
     /// <summary>This process's owner id, a GUID drawn once.</summary>
     internal static string OwnerId
@@ -158,10 +161,14 @@ internal static partial class MachineClaims
             using var rec = Registry.LocalMachine.CreateSubKey($@"{RecordsRoot}\{s_ownerId}");
             if (!s_recordWritten)
             {
-                using var self = Process.GetCurrentProcess();
+                if (s_startTimeUtc == 0)
+                {
+                    using var self = Process.GetCurrentProcess();
+                    s_startTimeUtc = self.StartTime.ToFileTimeUtc();
+                }
                 rec.SetValue("Pid", Environment.ProcessId, RegistryValueKind.DWord);
                 rec.SetValue("Image", Environment.ProcessPath ?? "", RegistryValueKind.String);
-                rec.SetValue("StartTime", self.StartTime.ToFileTimeUtc(), RegistryValueKind.QWord);
+                rec.SetValue("StartTime", s_startTimeUtc, RegistryValueKind.QWord);
                 rec.SetValue("SdkVersion", SdkVersion, RegistryValueKind.String);
                 s_recordWritten = true;
             }
