@@ -21,13 +21,16 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
 /// <see cref="System.Text.Json.Serialization.Metadata.JsonTypeInfo"/> from
 /// here, and there is no reflection resolver behind it, so a type missing
 /// from this list fails the build's AOT analysis instead of failing at run
-/// time in a NativeAOT or trimmed app.
+/// time in a NativeAOT or trimmed app. An enum is the exception: one without
+/// a converter in the list below still builds, and reads and writes as a
+/// number. json_parity_check (S76, check F) fails when an enum the contract
+/// reaches has none.
 ///
 /// <para>The options match the reflection-based options used through
 /// v1.12.0: camelCase property names read case-insensitively, comments and
 /// trailing commas allowed, <see cref="HMAxis"/> by its own converter, every
-/// other enum as a snake_case string, and <see cref="HMLayout"/> by the
-/// <c>kind</c> converter.</para></summary>
+/// other enum it reaches as a snake_case string (each is listed below), and
+/// <see cref="HMLayout"/> by the <c>kind</c> converter.</para></summary>
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true,

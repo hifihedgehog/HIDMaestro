@@ -155,9 +155,85 @@ internal static class Program
               ReferenceEquals(HMLayoutJsonOptions.Default, HMJsonContext.Default.Options)
               && HMLayoutJsonOptions.Default.TypeInfoResolver is HMJsonContext);
 
+        // F.
+        var contract = ContractTypes();
+        var enums = ReachableEnums(contract);
+        var uncovered = enums.Where(e => !HasConverter(e)).Select(e => e.Name).ToList();
+        Check("F: the contract reaches enums", enums.Count > 0, $"{enums.Count} enum(s) from {contract.Count} type(s): {string.Join(", ", enums.Select(e => e.Name))}");
+        Check("F: every enum the contract reaches has a converter", uncovered.Count == 0, string.Join(", ", uncovered));
+        var notSnake = enums.Where(e => HasConverter(e) && !IsSnakeCase(e)).Select(e => e.Name).ToList();
+        Check("F: each reads and writes its snake_case name", notSnake.Count == 0, string.Join(", ", notSnake));
+
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>The types the generated context has metadata for: the
+    /// JsonSerializable roots and every type the generator added beneath
+    /// them, each a JsonTypeInfo property of the context.</summary>
+    static List<Type> ContractTypes() =>
+        typeof(HMJsonContext).GetProperties()
+            .Select(p => p.PropertyType)
+            .Where(t => t.IsGenericType && t.GetGenericTypeDefinition() == typeof(JsonTypeInfo<>))
+            .Select(t => t.GetGenericArguments()[0]).ToList();
+
+    /// <summary>Every enum a contract type reads or writes: through its
+    /// public properties and fields, into nullable, array and generic
+    /// arguments and into nested SDK types, skipping what JsonIgnore skips.</summary>
+    static List<Type> ReachableEnums(IEnumerable<Type> roots)
+    {
+        var seen = new HashSet<Type>();
+        var enums = new List<Type>();
+        var work = new Stack<Type>(roots);
+        while (work.Count > 0)
+        {
+            Type t = work.Pop();
+            if (!seen.Add(t)) continue;
+            if (t.IsEnum) { enums.Add(t); continue; }
+            if (t.HasElementType) { work.Push(t.GetElementType()!); continue; }
+            if (t.IsGenericType) foreach (Type a in t.GetGenericArguments()) work.Push(a);
+            if (t.Assembly != typeof(HMContext).Assembly) continue;
+            foreach (var m in t.GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                         .Where(m => m is System.Reflection.PropertyInfo or System.Reflection.FieldInfo))
+            {
+                if (m.GetCustomAttributes(typeof(JsonIgnoreAttribute), true).Length > 0) continue;
+                work.Push(m is System.Reflection.PropertyInfo pi ? pi.PropertyType : ((System.Reflection.FieldInfo)m).FieldType);
+            }
+            // A layout kind produces any of the layout subtypes, which the
+            // context lists as roots already. Properties declared on a base
+            // are included by GetMembers.
+        }
+        return enums.OrderBy(e => e.Name, StringComparer.Ordinal).ToList();
+    }
+
+    static JsonConverter? ConverterFor(Type enumType)
+    {
+        if (enumType.GetCustomAttributes(typeof(JsonConverterAttribute), false).Length > 0) return null; // judged separately
+        return HMJsonContext.Default.Options.Converters.FirstOrDefault(c => c.CanConvert(enumType));
+    }
+
+    static bool HasConverter(Type enumType) =>
+        enumType.GetCustomAttributes(typeof(JsonConverterAttribute), false).Length > 0 || ConverterFor(enumType) != null;
+
+    /// <summary>Writes the enum's first and last value and reads each back by
+    /// its snake_case name through the context's options. The SDK's own
+    /// converters are checked by what they do, not by their type.</summary>
+    static bool IsSnakeCase(Type enumType)
+    {
+        if (enumType == typeof(HMAxis)) return true; // by its own converter, with its own names
+        try
+        {
+            foreach (object v in new[] { Enum.GetValues(enumType).GetValue(0)!, Enum.GetValues(enumType).GetValue(Enum.GetValues(enumType).Length - 1)! })
+            {
+                string json = JsonSerializer.Serialize(v, enumType, HMJsonContext.Default.Options);
+                string expected = "\"" + JsonNamingPolicy.SnakeCaseLower.ConvertName(v.ToString()!) + "\"";
+                if (json != expected) return false;
+                if (!Equals(JsonSerializer.Deserialize(json, enumType, HMJsonContext.Default.Options), v)) return false;
+            }
+            return true;
+        }
+        catch { return false; }
     }
 
     static int FirstDiff(string a, string b)
