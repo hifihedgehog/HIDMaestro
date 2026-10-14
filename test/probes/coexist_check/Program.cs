@@ -37,7 +37,21 @@
 //      the staging of versions no running program uses, a staging
 //      directory replaced by a link is moved aside rather than followed,
 //      and a temporary file a process left when it ended mid-write is
-//      removed. Battery S72 runs this section, and S71 runs A to H.
+//      removed. Battery S72 runs this section.
+//   J. A record a killed program left names a transport index and an
+//      identity that a running program holds now: a v1.12.0 program, and a
+//      program on this SDK whose own record names them too. A sweep leaves
+//      the running program's controller alone.
+//   K. A keyless program killed and started again, creating without
+//      InstallDriver: it gets the killed program's transport index and
+//      identity back.
+//   L. A program that only creates composites, killed: the next one's first
+//      create removes its record.
+//   M. A v1.11.0 program's keyed Xbox 360 controller, left when the program
+//      was killed. A create of the same key on another transport index takes
+//      its XUSB companion over, restarts it on the new index, and XInput
+//      reads the new program's input.
+//   S71 runs A to H and J to M.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -110,7 +124,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHI";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLM";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -123,6 +137,10 @@ internal static class Program
             ('G', "two composite controllers", SectionG),
             ('H', "a program killed while its child runs", SectionH),
             ('I', "staging under a protected directory", SectionI),
+            ('J', "a killed program's record and a running program's controller", SectionJ),
+            ('K', "a keyless program started again after a crash", SectionK),
+            ('L', "a killed program that only created composites", SectionL),
+            ('M', "a companion taken over on another transport index", SectionM),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -687,6 +705,165 @@ internal static class Program
             try { child?.Kill(); } catch { }
         }
     }
+
+    // ── J ──────────────────────────────────────────────────────────────
+
+    /// <summary>A record whose program has exited names an index and an
+    /// identity. A running program holds both now, so the device is the
+    /// running program's.</summary>
+    static void SectionJ()
+    {
+        const string deadId = "ffffffffffffffffffffffffffffffff";
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        {
+            Check("J: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        try
+        {
+            // J1. A v1.12.0 program on index 0 with the default identity.
+            using (var old = PeerProcess.Start("J1-v1.12.0", "v1.12.0"))
+            {
+                string co = old.Send("create pad F0F1 -");
+                if (!Ok(co) || PeerProcess.Field(co, "index") != "0") { Check("J1: the v1.12.0 program creates on index 0", false, co); return; }
+                old.Send("stream 5 0.2 125 0");
+                var path = WaitPaths(0xBEEF, 0xF0F1, 1, 10_000);
+                using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+                if (cap == null) { Check("J1: its device opens", false); return; }
+                Native.WriteDeadRecord(deadId, "HM_0000", 0);
+                using (var nu = PeerProcess.Start("J1-new"))
+                {
+                    string s = nu.Send("sweep");
+                    Thread.Sleep(1000);
+                    Check("J1: a sweep leaves the v1.12.0 program's controller, though a killed program's record names its index and identity",
+                          Ok(s) && !cap.Broken && Flows(cap) && WaitPaths(0xBEEF, 0xF0F1, 1, 1000).Count == 1,
+                          cap.Broken ? $"read error {cap.ReadError}" : s);
+                    Check("J1: and drops the killed program's record", !Native.OwnerRecords().ContainsKey(deadId));
+                }
+            }
+            Native.DeleteRecord(deadId);
+
+            // J2. A program on this SDK, whose record names the identity too.
+            using (var a = PeerProcess.Start("J2-a"))
+            {
+                string ca = a.Send("create pad F0F2 -");
+                if (!Ok(ca) || PeerProcess.Field(ca, "transport") != "0") { Check("J2: the program creates on index 0", false, ca); return; }
+                a.Send("stream 6 0.8 125 0");
+                var path = WaitPaths(0xBEEF, 0xF0F2, 1, 10_000);
+                using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+                if (cap == null) { Check("J2: its device opens", false); return; }
+                // Listed after every other record, where a record read last
+                // decided the owner.
+                Native.WriteDeadRecord(deadId, "HM_0000", 0);
+                using (var b = PeerProcess.Start("J2-b"))
+                {
+                    string s = b.Send("sweep");
+                    Thread.Sleep(1000);
+                    Check("J2: a sweep leaves the running program's controller, though a killed program's record names it too",
+                          Ok(s) && !cap.Broken && Flows(cap) && WaitPaths(0xBEEF, 0xF0F2, 1, 1000).Count == 1,
+                          cap.Broken ? $"read error {cap.ReadError}" : s);
+                }
+            }
+        }
+        finally { Native.DeleteRecord(deadId); }
+    }
+
+    // ── K ──────────────────────────────────────────────────────────────
+
+    /// <summary>A keyless program that is killed and started again, and
+    /// creates without calling InstallDriver, as a program that installs
+    /// once at setup does.</summary>
+    static void SectionK()
+    {
+        string transport;
+        using (var k1 = PeerProcess.Start("K1"))
+        {
+            string c1 = k1.Send("create pad F0F3 -");
+            if (!Ok(c1)) { Check("K: the program creates", false, c1); return; }
+            transport = PeerProcess.Field(c1, "transport")!;
+            k1.Kill();
+        }
+        Check("K: the killed program's device is still there", WaitPaths(0xBEEF, 0xF0F3, 1, 2000).Count == 1);
+        using var k2 = PeerProcess.Start("K2");
+        string c2 = k2.Send("create pad F0F3 -");
+        Check("K: started again, it creates", Ok(c2), c2);
+        Check("K: on the killed program's transport index and identity",
+              PeerProcess.Field(c2, "transport") == transport && PeerProcess.Field(c2, "key") == "index:" + transport,
+              $"transport {PeerProcess.Field(c2, "transport")}, key {PeerProcess.Field(c2, "key")}, was {transport}");
+        Check("K: and one device of that identity is present", WaitPaths(0xBEEF, 0xF0F3, 1, 5000).Count == 1);
+    }
+
+    // ── L ──────────────────────────────────────────────────────────────
+
+    static void SectionL()
+    {
+        var before = Native.HidPaths(0x054C, 0x0CE6);
+        string? ownerId;
+        using (var l1 = PeerProcess.Start("L1"))
+        {
+            string c1 = l1.Send("create composite - coexist-l");
+            var path = WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+            if (!Ok(c1) || path.Count != 1) { Check("L: the first program's composite appears", false, c1); return; }
+            ownerId = Native.OwnerRecords().Where(r => r.Value == l1.Pid).Select(r => r.Key).FirstOrDefault();
+            Check("L: it has an owner record", ownerId != null);
+            l1.Kill();
+        }
+        using var l2 = PeerProcess.Start("L2");
+        string c2 = l2.Send("create composite - coexist-l");
+        Check("L: a second program that only creates composites creates the same identity", Ok(c2), c2);
+        if (ownerId != null)
+            Check("L: its first create removes the killed program's record", !Native.OwnerRecords().ContainsKey(ownerId));
+        Check("L: one composite of that identity is present",
+              WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 1, 15_000),
+              $"{Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count()} present");
+    }
+
+    // ── M ──────────────────────────────────────────────────────────────
+
+    /// <summary>A program before v1.12.0 leaves no sign of whether it still
+    /// runs, so no sweep removes what a killed one left. A create that asks
+    /// for the same identity key takes it over. With index 0 held, as a
+    /// running program's claim holds it, the create lands on index 1, and
+    /// the companion it takes over was started on index 0.</summary>
+    static void SectionM()
+    {
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.11.0", "CoexistPeer.exe")))
+        {
+            Check("M: the v1.11.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        using (var old = PeerProcess.Start("M1-v1.11.0", "v1.11.0"))
+        {
+            string co = old.Send("create xbox - coexist-m");
+            if (!Ok(co)) { Check("M: the v1.11.0 program creates its Xbox 360 controller", false, co); return; }
+            old.Kill();
+        }
+        string? companion = Native.InterfaceList(XusbGuid, null).Select(Native.InstanceOfInterface)
+            .FirstOrDefault(id => id != null && id.StartsWith(@"SWD\HIDMAESTRO\", StringComparison.OrdinalIgnoreCase));
+        Check("M: the killed program's companion is still started", companion != null && Native.IsStarted(companion), companion ?? "none");
+
+        using (var claim = Native.HoldPipe("HIDMaestro.Index.0"))
+        {
+            Check("M: the probe holds index 0's claim", claim != null);
+            using var nu = PeerProcess.Start("M2-new");
+            string cn = nu.Send("create xbox - coexist-m");
+            Check("M: a create of the same key lands on index 1", Ok(cn) && PeerProcess.Field(cn, "transport") == "1", cn);
+            if (!Ok(cn)) return;
+            nu.Send("stream 0 0.95 125 0");
+            int slot = -1;
+            bool reads = WaitFor(() =>
+            {
+                for (uint s = 0; s < 4; s++)
+                    if (Native.XInputGetState(s, out var st) == 0 && st.Gamepad.sThumbLX > 25000 && (st.Gamepad.wButtons & 0x1000) != 0)
+                    { slot = (int)s; return true; }
+                return false;
+            }, 10_000);
+            Check("M: XInput reads the new program's input through the companion it took over", reads,
+                  reads ? $"slot {slot}" : "no XInput slot carries it");
+        }
+    }
+
+    static readonly Guid XusbGuid = new("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
 
     // ── I ──────────────────────────────────────────────────────────────
 

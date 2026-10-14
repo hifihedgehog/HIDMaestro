@@ -973,6 +973,22 @@ internal static partial class DeviceOrchestrator
         return xusbInstId;
     }
 
+    /// <summary>Remove the XUSB companion of <paramref name="token"/> when
+    /// it is present on another transport index. Its driver reads the index
+    /// when it starts, and a restart cannot reach it while a process that
+    /// called XInput holds it open, as this one does after its first Xbox
+    /// create: Windows does not stop a device with an open handle. A removal
+    /// takes it down, and the create makes it again on the new index.</summary>
+    private static void RemoveCompanionOnOtherIndex(string token, int controllerIndex)
+    {
+        string id = $@"SWD\HIDMAESTRO\{token}";
+        if (CM_Locate_DevNodeW(out _, id, 0) != 0) return;
+        int prior = OwnerCensus.ReadControllerIndex(id);
+        if (prior < 0 || prior == controllerIndex) return;
+        LogDiag($"    companion {id} is on index {prior}; removing it before this create on {controllerIndex}");
+        DeviceManager.RemoveDevice(id, timeoutMs: 30_000, forceFallbacks: true);
+    }
+
     /// <summary>Scan both <c>SWD\{enumerator}</c> (new) and <c>ROOT\{enumerator}</c>
     /// (legacy) for a live device whose Device Parameters\ControllerIndex
     /// matches the requested index. Returns the instance ID or null.</summary>
@@ -1220,6 +1236,11 @@ internal static partial class DeviceOrchestrator
         try {
         using var _total = new TimingScope(controllerIndex, profile.Id, "TOTAL");
 
+        // A companion an earlier life of this identity left on another
+        // index goes before the slot count, so the count does not include it.
+        if (profile.RequiresXusbCompanion)
+            RemoveCompanionOnOtherIndex(identity.Token, controllerIndex);
+
         // Snapshot XInput slot count BEFORE any setup so the post-setup wait
         // can detect the new claim. Sony / generic profiles get -1 (skip).
         // Perf audit 2026-07-21: gate on the XInput-participating shapes,
@@ -1244,7 +1265,8 @@ internal static partial class DeviceOrchestrator
 
         // Once-per-session cleanup, for a program that creates without
         // calling InstallDriver first: the devices and ledger holds of
-        // programs that have exited. A running program's devices, in this
+        // programs that have exited. HMContext runs it before the lease, so
+        // here it finds it done. A running program's devices, in this
         // process or another, are never touched, and the phantom-record
         // cleanup runs in the background behind OwnerSweep.CreateGate.
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.ghost_cleanup"))

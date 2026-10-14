@@ -61,14 +61,27 @@ internal sealed class ControllerLease : IDisposable
             HashSet<int> used = census.IndicesInUse();
             // A device of this identity that a dead or unknown owner left
             // is about to be reclaimed by this create, so its index does not
-            // block.
+            // block, unless another device or a live program has that index
+            // too. The create lands on it first: the identity's companion
+            // and sections then keep the index they had.
+            int reclaimed = -1;
             if (keyedIdentity != null)
                 foreach (var g in census.Devices)
-                    if (string.Equals(g.Key, keyedIdentity.Token, StringComparison.OrdinalIgnoreCase)
-                        && g.Owner is not (OwnerCensus.Owner.Live or OwnerCensus.Owner.LiveLegacy or OwnerCensus.Owner.Self))
-                        used.Remove(g.ControllerIndex);
+                {
+                    if (!string.Equals(g.Key, keyedIdentity.Token, StringComparison.OrdinalIgnoreCase)
+                        || g.Owner is OwnerCensus.Owner.Live or OwnerCensus.Owner.LiveLegacy or OwnerCensus.Owner.Self
+                        || g.ControllerIndex < 0)
+                        continue;
+                    int k = g.ControllerIndex;
+                    bool shared = census.Devices.Any(o => !ReferenceEquals(o, g) && o.ControllerIndex == k)
+                        || census.ForeignImportIndices.Contains(k)
+                        || census.Records.Any(r => r.Live && r.Controllers.Any(c => c.TransportIndex == k));
+                    if (shared) continue;
+                    used.Remove(k);
+                    reclaimed = k;
+                }
 
-            foreach (int n in Candidates(slot))
+            foreach (int n in Candidates(reclaimed >= 0 ? reclaimed : slot))
             {
                 if (used.Contains(n)) continue;
                 SafeFileHandle? indexClaim = MachineClaims.TryClaim(MachineClaims.IndexPipeName(n));
@@ -113,12 +126,13 @@ internal sealed class ControllerLease : IDisposable
         }
     }
 
-    /// <summary>Slot first, so a lone program keeps its numbers, then upward.</summary>
-    private static IEnumerable<int> Candidates(int slot)
+    /// <summary>The preferred index first, the slot or a reclaimed
+    /// identity's, so a lone program keeps its numbers, then upward.</summary>
+    private static IEnumerable<int> Candidates(int first)
     {
-        yield return slot;
+        yield return first;
         for (int n = 0; n < 4096; n++)
-            if (n != slot) yield return n;
+            if (n != first) yield return n;
     }
 
     /// <summary>A v1.12.0 program takes no identity claim. Its device of

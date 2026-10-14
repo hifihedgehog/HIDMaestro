@@ -11,9 +11,13 @@ namespace HIDMaestro.Internal;
 /// on this and on nothing else.
 ///
 /// <para>A present device belongs to the record that lists its identity
-/// token or its transport index. A record is live while its owner claim is
-/// held (<see cref="MachineClaims"/>). A present device no record lists was
-/// made by a program before v1.13.0:</para>
+/// token or its transport index, a live record before a dead one. A record
+/// is live while its owner claim is held (<see cref="MachineClaims"/>). A
+/// dead record names a device only while no running program holds the
+/// device's transport index or identity: an index or identity outlives the
+/// program that had it, and a program started since, of any version, may
+/// have taken it. A present device no record names was made by a program
+/// before v1.13.0, or belongs to one started since:</para>
 /// <list type="bullet">
 /// <item>its index's v1.12.0 owner pipe <c>HIDMaestroOwner&lt;N&gt;</c> is
 /// held: a live v1.12.0 program;</item>
@@ -75,8 +79,9 @@ internal sealed partial class OwnerCensus
         foreach (var r in census.Records)
             foreach (var c in r.Controllers)
             {
-                byToken[c.Token] = r;
-                if (c.TransportIndex >= 0 && (r.Live || !byIndex.ContainsKey(c.TransportIndex))) byIndex[c.TransportIndex] = r;
+                if (!byToken.TryGetValue(c.Token, out var t) || (r.Live && !t.Live)) byToken[c.Token] = r;
+                if (c.TransportIndex >= 0 && (!byIndex.TryGetValue(c.TransportIndex, out var i) || (r.Live && !i.Live)))
+                    byIndex[c.TransportIndex] = r;
             }
 
         var groups = new Dictionary<string, (int Index, List<string> Ids)>(StringComparer.OrdinalIgnoreCase);
@@ -96,12 +101,10 @@ internal sealed partial class OwnerCensus
             MachineClaims.OwnerRecord? rec = null;
             if (!key.StartsWith('#')) byToken.TryGetValue(key, out rec);
             if (rec == null && g.Index >= 0) byIndex.TryGetValue(g.Index, out rec);
-            Owner owner;
-            if (rec != null) owner = rec.Self ? Owner.Self : rec.Live ? Owner.Live : Owner.Dead;
-            else if (g.Index < 0) owner = Owner.Unknown;
-            else if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(g.Index))) owner = Owner.LiveLegacy;
-            else if (SectionExists($@"Global\HIDMaestroInputAck{g.Index}")) owner = Owner.DeadLegacy;
-            else owner = Owner.Unknown;
+            if (rec is { Live: false } && HeldByLiveProgram(key, g.Index)) rec = null;
+            Owner owner = rec != null
+                ? rec.Self ? Owner.Self : rec.Live ? Owner.Live : Owner.Dead
+                : ByLegacySigns(g.Index);
             census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec));
         }
 
@@ -125,13 +128,40 @@ internal sealed partial class OwnerCensus
     {
         string name = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
         int index = ReadControllerIndex(instanceId);
+        bool token = DeviceIdentity.IsIdentityToken(name);
+        bool dead = false;
         foreach (var r in MachineClaims.ReadAll())
         {
             bool listed = r.Controllers.Any(c =>
                 string.Equals(c.Token, name, StringComparison.OrdinalIgnoreCase)
-                || (index >= 0 && c.TransportIndex == index && !DeviceIdentity.IsIdentityToken(name)));
-            if (listed) return r.Self ? Owner.Self : r.Live ? Owner.Live : Owner.Dead;
+                || (index >= 0 && c.TransportIndex == index && !token));
+            if (!listed) continue;
+            if (r.Live) return r.Self ? Owner.Self : Owner.Live;
+            dead = true;
         }
+        if (dead && !HeldByLiveProgram(token ? name : "#", index)) return Owner.Dead;
+        return ByLegacySigns(index);
+    }
+
+    /// <summary>Whether a running program holds a transport index or an
+    /// identity token now: its v1.12.0 owner pipe, which every release from
+    /// v1.12.0 holds for a live controller, or this release's index or
+    /// identity claim.</summary>
+    private static bool HeldByLiveProgram(string key, int index)
+    {
+        if (index >= 0
+            && (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))
+                || MachineClaims.IsHeld(MachineClaims.IndexPipeName(index))))
+            return true;
+        return !key.StartsWith('#') && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(key));
+    }
+
+    /// <summary>The owner of a device no record names, from what a program
+    /// before v1.13.0 leaves: its owner pipe while it runs, and the
+    /// acknowledgement section its driver keeps after a v1.12.0 program
+    /// ends.</summary>
+    private static Owner ByLegacySigns(int index)
+    {
         if (index < 0) return Owner.Unknown;
         if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return Owner.LiveLegacy;
         if (SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;

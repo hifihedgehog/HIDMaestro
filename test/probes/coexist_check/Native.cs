@@ -266,6 +266,38 @@ internal static class Native
         return d;
     }
 
+    /// <summary>A record the way a killed program on this SDK leaves it:
+    /// no ownership claim, and one controller entry.</summary>
+    internal static void WriteDeadRecord(string ownerId, string token, int transportIndex)
+    {
+        using var r = Registry.LocalMachine.CreateSubKey($@"SOFTWARE\HIDMaestroOwners\{ownerId}");
+        r.SetValue("Pid", 0, RegistryValueKind.DWord);
+        r.SetValue("Image", "coexist_check, a killed program's record", RegistryValueKind.String);
+        r.SetValue("StartTime", 0L, RegistryValueKind.QWord);
+        r.SetValue("SdkVersion", "1.13.0", RegistryValueKind.String);
+        using var c = r.CreateSubKey($@"Controllers\{token}");
+        c.SetValue("TransportIndex", transportIndex, RegistryValueKind.DWord);
+        c.SetValue("Backend", "umdf", RegistryValueKind.String);
+        c.SetValue("Profile", "coexist-dead", RegistryValueKind.String);
+    }
+
+    internal static void DeleteRecord(string ownerId) =>
+        Registry.LocalMachine.DeleteSubKeyTree($@"SOFTWARE\HIDMaestroOwners\{ownerId}", throwOnMissingSubKey: false);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateNamedPipeW(string name, uint openMode, uint pipeMode,
+        uint maxInstances, uint outSize, uint inSize, uint timeout, IntPtr sa);
+
+    /// <summary>A pipe the way a running program's claim holds its name:
+    /// the first and only instance. Null when the name is taken.</summary>
+    internal static Microsoft.Win32.SafeHandles.SafeFileHandle? HoldPipe(string name)
+    {
+        var h = CreateNamedPipeW(@"\\.\pipe\" + name, 0x00000001 | 0x00080000, 0x00000008, 1, 0, 0, 0, IntPtr.Zero);
+        if (!h.IsInvalid) return h;
+        h.Dispose();
+        return null;
+    }
+
     internal static bool LedgerHolds(string kind, string name)
     {
         using var k = Registry.LocalMachine.OpenSubKey($@"SOFTWARE\HIDMaestroRegistryLedger\{kind}\{name}");

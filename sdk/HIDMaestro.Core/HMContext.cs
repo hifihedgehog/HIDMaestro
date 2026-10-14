@@ -429,6 +429,13 @@ public sealed class HMContext : IDisposable
             HMBuildInfo.ThrowIfMissing(HMPayload.Driver,
                 $"Profile '{profile.Id}' runs on the UMDF2 driver.");
 
+        // What programs that have exited left goes first, once per
+        // process, before this create claims anything: a keyless program
+        // restarted after a crash gets its index and identity back, and a
+        // program that only creates composites clears what a killed one
+        // left as well.
+        Internal.OwnerSweep.SessionSweepOnce();
+
         var lease = Internal.ControllerLease.Acquire(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         try
