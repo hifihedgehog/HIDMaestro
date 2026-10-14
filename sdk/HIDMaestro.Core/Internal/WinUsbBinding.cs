@@ -171,31 +171,69 @@ DeviceName = ""{deviceName}""
                 $"The device on vhci port {handle.VhciPort} did not appear within 10 s.");
         WaitInstalled(instanceId, TimeoutScale.Apply(10_000));
 
+        // The package goes into the driver store first, under this lock
+        // alone, since adding it the first time takes seconds.
+        string? published = null;
         lock (s_lock)
         {
             var (service, inf) = DriverOf(instanceId, phantom: false);
-            if (IsLibusbService(service)) return HMWinUsbBinding.AlreadyBound;
-            if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
-
-            string published = EnsurePackage(package);
-
-            // Recorded before the devnode changes, so a crash between the
-            // two leaves a record whose restore finds the devnode as it was.
-            RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
-            InstallOn(instanceId, published);
-
-            // WinUSB is bound once the devnode reports its service and the
-            // interface libusb opens.
-            var until = Environment.TickCount64 + TimeoutScale.Apply(10_000);
-            while (Environment.TickCount64 < until)
+            if (IsLibusbService(service))
             {
-                var (s, _) = DriverOf(instanceId, phantom: false);
-                if (string.Equals(s, "WINUSB", StringComparison.OrdinalIgnoreCase) && IsStarted(instanceId))
-                    return HMWinUsbBinding.Bound;
-                Thread.Sleep(20);
+                if (!IsOurPackage(inf)) return HMWinUsbBinding.AlreadyBound;
             }
-            throw new InvalidOperationException($"WinUSB did not start on {instanceId} within 10 s.");
+            else
+            {
+                if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
+                published = EnsurePackage(package);
+            }
         }
+
+        // The ledger's machine-wide lock, then this one: the order a
+        // restore takes them in (RegistryLedger.Sweep, then Restore). The
+        // other order deadlocked a bind against a restore on another
+        // thread, and held every program's ledger work with them.
+        using (var ledger = RegistryLedger.AcquireLock())
+        {
+            try
+            {
+                lock (s_lock)
+                {
+                    // Read again: a restore may have run between the two locks.
+                    var (service, inf) = DriverOf(instanceId, phantom: false);
+                    if (IsLibusbService(service))
+                    {
+                        // On one of HIDMaestro's own packages, which a killed
+                        // program's binding leaves until a sweep puts the
+                        // devnode back. This controller holds it from here,
+                        // so no sweep moves it while the controller lives.
+                        if (IsOurPackage(inf))
+                            RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
+                        return HMWinUsbBinding.AlreadyBound;
+                    }
+                    if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
+                    published ??= EnsurePackage(package);
+
+                    // Recorded before the devnode changes, so a crash between
+                    // the two leaves a record whose restore finds the devnode
+                    // as it was.
+                    RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
+                    InstallOn(instanceId, published);
+                }
+            }
+            finally { ledger.ReleaseMutex(); }
+        }
+
+        // WinUSB is bound once the devnode reports its service and the
+        // interface libusb opens.
+        var until = Environment.TickCount64 + TimeoutScale.Apply(10_000);
+        while (Environment.TickCount64 < until)
+        {
+            var (s, _) = DriverOf(instanceId, phantom: false);
+            if (string.Equals(s, "WINUSB", StringComparison.OrdinalIgnoreCase) && IsStarted(instanceId))
+                return HMWinUsbBinding.Bound;
+            Thread.Sleep(20);
+        }
+        throw new InvalidOperationException($"WinUSB did not start on {instanceId} within 10 s.");
     }
 
     /// <summary>Put a devnode the ledger recorded back on the driver Windows

@@ -18,10 +18,15 @@
 //    bound itself.
 //  - dispose leaves no ledger hold, and the gone devnode gets the flag.
 //  - five create-bind-dispose cycles, each binding on the first call.
+//  - a bind while another thread restores under the ledger's lock: the
+//    bind waits for the lock and finishes, where taking the two locks in
+//    the other order deadlocked both threads.
 //  - a program killed while bound: an adapter that arrives on the same
 //    instance before any reclaim finds WinUSB, as after Zadig, and the
 //    reclaim puts it back on input.inf. When the reclaim comes first, the
-//    arrival gets input.inf.
+//    arrival gets input.inf. When the arrival binds, BindWinUsb finds it
+//    already bound and holds it, a sweep leaves it on WinUSB, and its
+//    dispose puts it back.
 //
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
 // HIDMaestro is running.
@@ -51,8 +56,10 @@ internal static class Program
 
         BindAndRank(ctx, gc);
         Cycles(ctx, gc);
+        LockOrder(ctx, gc);
         Crash(ctx, gc, reclaimFirst: false);
         Crash(ctx, gc, reclaimFirst: true);
+        Crash(ctx, gc, reclaimFirst: false, bindArrival: true);
 
         Console.WriteLine("-- afterward");
         Probe.Check("no WinUSB hold left in the ledger", RegistryLedger.HeldWinUsbDevnodes().Count == 0,
@@ -141,13 +148,67 @@ internal static class Program
         Probe.Check("no hold left after them", RegistryLedger.HeldWinUsbDevnodes().Count == 0);
     }
 
+    // ── The ledger's lock and the binding's ─────────────────────────────
+
+    /// <summary>A restore holds the ledger's machine-wide lock and then takes
+    /// the binding's lock (RegistryLedger.Sweep, WinUsbBinding.Restore). A
+    /// bind on another thread must not hold the binding's lock while it
+    /// waits for the ledger's.</summary>
+    static void LockOrder(HMContext ctx, HMProfile gc)
+    {
+        Console.WriteLine("-- a bind while another thread restores under the ledger's lock");
+        using var a = ctx.CreateController(gc, "s81-lock-order");
+        string? id = Arrived(a);
+        Probe.Check("the adapter arrives", id != null, id ?? "");
+        if (id == null) return;
+
+        using var held = new ManualResetEventSlim();
+        var restorer = new Thread(() =>
+        {
+            var ledger = RegistryLedger.AcquireLock();
+            try
+            {
+                held.Set();
+                // Long enough for the bind to reach the ledger.
+                Thread.Sleep(1500);
+                WinUsbBinding.Restore(@"USB\VID_057E&PID_0337\S81_NOT_PRESENT");
+            }
+            finally { ledger.ReleaseMutex(); ledger.Dispose(); }
+        }) { IsBackground = true };
+        restorer.Start();
+        held.Wait(10_000);
+
+        HMWinUsbBinding? bound = null;
+        string error = "";
+        var binder = new Thread(() =>
+        {
+            try { bound = a.BindWinUsb(); }
+            catch (Exception ex) { error = ex.Message; }
+        }) { IsBackground = true };
+        binder.Start();
+        bool restored = restorer.Join(20_000);
+        bool finished = binder.Join(20_000);
+        Probe.Check("the restore finishes while the bind waits for the ledger", restored);
+        Probe.Check("the bind finishes after it and binds WinUSB", finished && bound == HMWinUsbBinding.Bound,
+            finished ? $"{bound} {error}" : "both threads still waiting after 20 s");
+        if (!restored || !finished)
+        {
+            // The two threads hold the machine-wide ledger lock between them.
+            // Ending the process is the only way to give it back.
+            Probe.Finish("S81");
+            Environment.Exit(1);
+        }
+    }
+
     // ── A killed owner ──────────────────────────────────────────────────
 
-    static void Crash(HMContext ctx, HMProfile gc, bool reclaimFirst)
+    static void Crash(HMContext ctx, HMProfile gc, bool reclaimFirst, bool bindArrival = false)
     {
         Console.WriteLine(reclaimFirst
             ? "-- a program killed while bound, then a reclaim before the next arrival"
-            : "-- a program killed while bound, and an arrival before any reclaim");
+            : bindArrival
+                ? "-- a program killed while bound, and an arrival before any reclaim that binds"
+                : "-- a program killed while bound, and an arrival before any reclaim");
         using var child = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "child")
         {
             RedirectStandardOutput = true,
@@ -187,7 +248,7 @@ internal static class Program
         // A stand-in for a real adapter: same serial, so the same instance,
         // and an identity of its own, so its create reclaims nothing. This
         // process swept once already, at its first create.
-        using (var standIn = ctx.CreateController(gc, reclaimFirst ? "s81-after-reclaim" : "s81-before-reclaim"))
+        using (var standIn = ctx.CreateController(gc, reclaimFirst ? "s81-after-reclaim" : bindArrival ? "s81-binds" : "s81-before-reclaim"))
         {
             string? arrived = Arrived(standIn);
             Probe.Check("the stand-in arrives on the same instance", string.Equals(arrived, id, StringComparison.OrdinalIgnoreCase), arrived ?? "");
@@ -198,6 +259,19 @@ internal static class Program
                     $"{Devnodes.Service(id)}");
                 Probe.Check("and the flag is spent", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) == 0);
             }
+            else if (bindArrival)
+            {
+                Probe.Check("before any reclaim it finds WinUSB", Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", 10_000),
+                    $"{Devnodes.Service(id)}");
+                var again = standIn.BindWinUsb();
+                Probe.Check("BindWinUsb finds it already bound", again == HMWinUsbBinding.AlreadyBound, $"{again}");
+                Probe.Check("and the ledger holds it for this controller",
+                    RegistryLedger.HeldWinUsbDevnodes().Contains(id, StringComparer.OrdinalIgnoreCase));
+                RegistryLedger.PruneDead();
+                Thread.Sleep(3000);
+                Probe.Check("a sweep drops the dead holder and leaves it on WinUSB",
+                    Devnodes.Service(id) == "WINUSB" && Devnodes.Status(id) is { Problem: 0 }, $"{Devnodes.Service(id)}");
+            }
             else
             {
                 Probe.Check("before any reclaim it finds WinUSB, as an instance Zadig bound would",
@@ -207,6 +281,9 @@ internal static class Program
                     Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb", 15_000), $"{Devnodes.Service(id)}");
             }
         }
+        if (bindArrival)
+            Probe.Check("its dispose flags the gone devnode for reinstall", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
+                $"ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X}");
         Probe.Check("no hold left", RegistryLedger.HeldWinUsbDevnodes().Count == 0, string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
         // The child's controller record and its import: the orphan-safe
         // cleanup takes what a dead program left.

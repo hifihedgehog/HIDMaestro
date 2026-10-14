@@ -98,6 +98,12 @@ internal static class RegistryLedger
         return m;
     }
 
+    /// <summary>The ledger's machine-wide lock, held by the calling thread
+    /// until it calls <c>ReleaseMutex</c>, for a caller that must take it
+    /// before a lock of its own. The ledger's own calls inside it take it
+    /// again on the same thread, which a mutex allows.</summary>
+    internal static Mutex AcquireLock() => Acquire();
+
     // ── GameInput mapping ────────────────────────────────────────────────
 
     /// <summary>Write the GameInput table for a controller whose profile
@@ -469,8 +475,9 @@ internal static class RegistryLedger
 
     /// <summary><paramref name="waitGoneMs"/>: how long a WinUSB entry's
     /// devnode gets to leave after its controller's detach. A teardown
-    /// releases right after the detach, and a devnode that is gone needs
-    /// nothing but the reinstall flag it already carries.</summary>
+    /// releases right after the detach. A devnode that is gone needs only
+    /// the reinstall flag <see cref="WinUsbBinding.Restore"/> sets on it,
+    /// which installs it by rank when it next arrives.</summary>
     private static void RestoreEntry(RegistryKey kindKey, string kind, string name, int waitGoneMs)
     {
         try
