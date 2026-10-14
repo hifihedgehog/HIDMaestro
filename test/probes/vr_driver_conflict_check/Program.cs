@@ -265,6 +265,46 @@ internal static class Program
               caught == null ? "no exception" : caught.GetType().Name + " / " + caught.InnerException?.GetType().Name);
         Check("and the file is as it was", File.ReadAllBytes(file).AsSpan().SequenceEqual(before));
 
+        // A file that exists but cannot be read is left alone. vrpathreg
+        // would treat it as empty and write over it, losing the runtime,
+        // config and log paths. A deny-read ACE leaves the replace itself
+        // allowed, so only the read decides.
+        File.WriteAllBytes(file, compact);
+        removeCall(path);
+        before = File.ReadAllBytes(file);
+        var me = WindowsIdentity.GetCurrent().User!;
+        var info = new FileInfo(file);
+        var denyRead = new FileSystemAccessRule(me, FileSystemRights.ReadData, AccessControlType.Deny);
+        var acl = info.GetAccessControl();
+        acl.AddAccessRule(denyRead);
+        info.SetAccessControl(acl);
+        caught = null;
+        try { addCall(path); }
+        catch (Exception e) { caught = e; }
+        finally
+        {
+            acl = info.GetAccessControl();
+            acl.RemoveAccessRuleSpecific(denyRead);
+            info.SetAccessControl(acl);
+        }
+        Check("a registry file that cannot be read is not written over",
+              File.ReadAllBytes(file).AsSpan().SequenceEqual(before));
+        Check("and the failure is InvalidOperationException with the cause inside",
+              caught is InvalidOperationException { InnerException: UnauthorizedAccessException },
+              caught == null ? "no exception" : caught.GetType().Name + " / " + caught.InnerException?.GetType().Name);
+
+        // Held open with no sharing at all: neither the read nor the write
+        // gets through, and the file is untouched.
+        caught = null;
+        using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            try { addCall(path); }
+            catch (Exception e) { caught = e; }
+        }
+        Check("a file held open exclusively is left alone, with InvalidOperationException",
+              caught is InvalidOperationException && File.ReadAllBytes(file).AsSpan().SequenceEqual(before),
+              caught == null ? "no exception" : caught.GetType().Name + " / " + caught.InnerException?.GetType().Name);
+
         Check("no temporary file is left beside it",
               Directory.GetFiles(dir).Select(Path.GetFileName).SequenceEqual(new[] { "openvrpaths.vrpath" }),
               string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));
