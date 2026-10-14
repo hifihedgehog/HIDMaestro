@@ -183,6 +183,9 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\kbm_offline_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\kbm_live_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\coexist_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        # The copy that runs inside Windows Sandbox is published from the same
+        # build into sandbox\, so this one's freshness is that one's too.
+        Join-Path $scriptDir '..\probes\usbip_install_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
     )
     # Canonical SDK output for the content-hash check. Source tree only:
     # a release bundle carries no sdk/ build output, and the version
@@ -1835,6 +1838,18 @@ function Scenario-Protected-Staging {
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2
 }
 
+# S73: the usbip-win2 install on a clean machine, in Windows Sandbox started
+# without a window. A composite create on a machine without usbip-win2 runs
+# the bundled installer and leaves no Start menu folder, desktop shortcut,
+# GUI, SDK or PDB file, while the composite enumerates and carries input. A
+# machine holding usbip-win2's uninstall entry without its driver package
+# gets a refusal instead of the installer, which would run that entry's
+# uninstaller first. Exit 2 when Windows Sandbox is not available.
+function Scenario-Usbip-Clean-Install {
+    Invoke-Probe -Dir 'usbip_install_check' -Exe 'UsbipInstallCheck.exe' `
+                 -Message 'the bundled usbip-win2 install left a shortcut, Start menu folder, GUI, SDK or PDB file, broke the composite, or ran over an existing install (see probe stdout)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -1911,7 +1926,8 @@ $scenarios = @(
     @{ Name = 'S69_Kbm_Descriptors';             Body = ${function:Scenario-Kbm-Descriptors} },
     @{ Name = 'S70_Kbm_Raw_Input';               Body = ${function:Scenario-Kbm-Raw-Input} },
     @{ Name = 'S71_Coexistence';                 Body = ${function:Scenario-Coexistence} },
-    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} }
+    @{ Name = 'S72_Protected_Staging';           Body = ${function:Scenario-Protected-Staging} },
+    @{ Name = 'S73_Usbip_Clean_Install';         Body = ${function:Scenario-Usbip-Clean-Install} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

@@ -1,6 +1,6 @@
 ﻿# HIDMaestro Probes
 
-Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S70. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
+Diagnostic and gate probes. The first ten come from the [WGI Silent Sink investigation (2026-04)](../../docs/investigations/wgi-silent-sink-2026-04/finding.md). The rest are release gates that `test/regression/swap_regression.ps1` invokes as scenarios S24 through S73. Each probe answers a specific "does API X reach device Y with value Z" question for gamepad input/haptic dispatch on Windows. Preserved here as a reusable toolkit for future HIDMaestro profile work or Windows build regressions.
 
 The probes in the table below target HIDMaestro virtuals by default and work against physical Xbox-family controllers too. Many of the later gate probes are pure encoder or schema checks that create no device at all. Build artifacts (`bin/`, `obj/`, `.pdb`, `.ilk`) are not committed; run `dotnet build` (C#) or the `build_*.cmd` script (C++) to produce executables.
 
@@ -23,6 +23,8 @@ The probes in the table below target HIDMaestro virtuals by default and work aga
 | "Does a keyboard or mouse reach Raw Input as its kind, and does every report arrive?" | [kbm_live_check](kbm_live_check/): `--key-diag <profile>`, `--wheel-diag <profile>` and `--leds-diag` for one device at a time |
 | "Where does a keyboard or mouse descriptor put each field?" | [kbm_offline_check](kbm_offline_check/): no device |
 | "Is another OpenVR driver registered under HIDMaestro's driver name?" | [vr_driver_conflict_check](vr_driver_conflict_check/) |
+| "Do two programs that embed HIDMaestro leave each other's controllers, driver and staging alone?" | [coexist_check](coexist_check/): sections A to H are S71, section I is S72. Each program is a peer process, and older releases run as peers built against their own HIDMaestro.Core.dll |
+| "What does the bundled usbip-win2 install leave on a clean machine, and does it run over an existing one?" | [usbip_install_check](usbip_install_check/): runs itself inside Windows Sandbox, started without a window. S73 |
 
 ## Near-duplicates and when to use which
 

@@ -30,7 +30,12 @@ namespace HIDMaestro.Internal.Usbip;
 /// usbip-win2's extension INF matches the generic USB 3.0 root-hub
 /// hardware ID, PnP re-enumerates the root hubs once during install,
 /// which momentarily interrupts USB devices. That happens once per
-/// machine, on the first composite controller ever created.</para></summary>
+/// machine, on the first composite controller ever created.</para>
+///
+/// <para>The install takes the drivers, the VC++ runtime their installer
+/// step needs, and the uninstaller with its Apps entry. It adds no GUI,
+/// SDK, symbol files, Start menu folder or desktop shortcut
+/// (<see cref="InstallerArguments"/>).</para></summary>
 internal static class UsbipDriverInstaller
 {
     public const string Version = "0.9.8.1";
@@ -102,6 +107,19 @@ internal static class UsbipDriverInstaller
                     "minutes, so that is not done automatically. Repair or reinstall usbip-win2, " +
                     "or reboot, and try again.");
             }
+
+            // The installer's own PrepareToInstall (setup.iss 504-535) runs
+            // the uninstaller of any copy whose uninstall entry it finds,
+            // before it installs anything. An entry left without its driver
+            // package would get that uninstaller run, which is the root-hub
+            // filter removal the check above exists to avoid.
+            if (InstalledUninstaller() is string uninstaller)
+                throw new InvalidOperationException(
+                    $"usbip-win2 has an uninstall entry on this machine (its uninstaller is {uninstaller}), " +
+                    "but its driver package is not in the driver store. The bundled installer would run " +
+                    "that uninstaller first, which detaches a filter driver from every USB root hub, so " +
+                    "HIDMaestro does not run it. Repair or uninstall usbip-win2 from Settings > Apps, " +
+                    "and try again.");
 
             progress?.Invoke($"Installing USB audio transport (usbip-win2 {Version})...");
 
@@ -550,6 +568,74 @@ internal static class UsbipDriverInstaller
         catch { return false; }
     }
 
+    /// <summary>usbip-win2's uninstall entry, from its <c>AppId</c>.</summary>
+    private const string UninstallEntryKey =
+        @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1";
+
+    /// <summary>The uninstaller usbip-win2's setup would run before it
+    /// installs, or null when it would run none. A port of the script's
+    /// <c>GetInstalledUninstallString</c> (setup.iss 433-502): the first
+    /// <c>UninstallString</c> found in the 64-bit view of HKLM, then the
+    /// 32-bit view, then HKCU, read unexpanded as Inno Setup's
+    /// <c>RegQueryStringValue</c> reads it (REG_SZ or REG_EXPAND_SZ,
+    /// Shared.CommonFunc.pas 912-924), the executable's path taken out of it
+    /// quoted or not, and kept only if that file exists.</summary>
+    internal static string? InstalledUninstaller()
+    {
+        string? value = null;
+        foreach (var (hive, view) in new[]
+                 {
+                     (Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64),
+                     (Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry32),
+                     (Microsoft.Win32.RegistryHive.CurrentUser, Microsoft.Win32.RegistryView.Default),
+                 })
+        {
+            try
+            {
+                using var root = Microsoft.Win32.RegistryKey.OpenBaseKey(hive, view);
+                using var key = root.OpenSubKey(UninstallEntryKey);
+                if (key?.GetValue("UninstallString", null, Microsoft.Win32.RegistryValueOptions.DoNotExpandEnvironmentNames) is string s)
+                {
+                    value = s;
+                    break;
+                }
+            }
+            catch { }
+        }
+        if (value == null) return null;
+        string path = UninstallerPathOf(value);
+        return path.Length > 0 && File.Exists(path) ? path : null;
+    }
+
+    /// <summary>The executable's path in an UninstallString, taken out the
+    /// way the script does it (setup.iss 446-499).</summary>
+    internal static string UninstallerPathOf(string uninstallString)
+    {
+        string u = uninstallString.Trim();
+        if (u.Length == 0) return "";
+        if (u[0] == '"')
+        {
+            u = u[1..];
+            int q = u.IndexOf('"');
+            return q >= 0 ? u[..q] : u;
+        }
+        if (File.Exists(u)) return u;
+
+        // Unquoted with arguments: the rightmost ".exe" whose prefix names an
+        // existing file, else the rightmost ".exe", else the first word.
+        string lower = u.ToLowerInvariant();
+        int at = -1;
+        for (int i = lower.Length - 4; i >= 0; i--)
+        {
+            if (string.CompareOrdinal(lower, i, ".exe", 0, 4) != 0) continue;
+            if (File.Exists(u[..(i + 4)].Trim())) { at = i; break; }
+            if (at < 0) at = i;
+        }
+        if (at >= 0) return u[..(at + 4)].Trim();
+        int space = u.IndexOf(' ');
+        return space >= 0 ? u[..space] : u;
+    }
+
     /// <summary>Restart the vhci devnode so it republishes its device
     /// interface. This is the cheap repair for an installed-but-unusable
     /// transport, and it never touches the root-hub filter INF.
@@ -847,8 +933,32 @@ internal static class UsbipDriverInstaller
         return exePath;
     }
 
-    /// <summary>Run the Inno Setup installer silently. The flags are the
-    /// upstream installer's own: no UI, no message boxes, no reboot.</summary>
+    /// <summary>The installer's command line: no UI, no message boxes, no
+    /// reboot, and the smallest set it allows. Checked against the compiled
+    /// script inside both pinned installers (innounp 2.71.1) and the source
+    /// at tag v.0.9.8.1 (userspace/innosetup/setup.iss):
+    /// <list type="bullet">
+    /// <item><c>/COMPONENTS=main,client</c> deselects <c>gui</c>, <c>sdk</c>
+    /// and <c>pdb</c>, which the default type, <c>full</c>, installs (lines
+    /// 126-131). <c>client</c> is the drivers themselves: the filter and the
+    /// host controller (lines 176-177).</item>
+    /// <item><c>/TASKS=vcredist</c> keeps only the VC++ runtime, which
+    /// <c>devnode.exe</c>, the program that installs the host controller,
+    /// imports (MSVCP140.dll, VCRUNTIME140.dll). <c>desktopicon</c> goes,
+    /// along with <c>gui</c> (line 166).</item>
+    /// <item><c>/NOICONS</c> checks "Don't create a Start Menu folder", the
+    /// only switch that drops the uninstall shortcut <c>main</c> creates
+    /// (line 135). It applies because the script sets
+    /// <c>AllowNoIcons=yes</c>.</item>
+    /// <item><c>/NORESTART</c> because the script sets
+    /// <c>AlwaysRestart=yes</c> (line 112), and a very silent setup without
+    /// it "will reboot without asking".</item>
+    /// </list></summary>
+    internal const string InstallerArguments =
+        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS=main,client /TASKS=vcredist /NOICONS";
+
+    /// <summary>Run the Inno Setup installer silently with
+    /// <see cref="InstallerArguments"/>.</summary>
     private static void RunSilentInstall(string exePath)
     {
         // Point-of-use check: the staged installer still matches the pinned
@@ -857,7 +967,7 @@ internal static class UsbipDriverInstaller
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
-            Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            Arguments = InstallerArguments,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(exePath)!,
