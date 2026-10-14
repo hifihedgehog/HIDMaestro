@@ -34,6 +34,7 @@ internal static partial class MachineClaims
     private const string ControllersKey = "Controllers";
 
     internal static string OwnerPipeName(string ownerId) => $"HIDMaestro.Owner.{ownerId}";
+    internal static string IndexPipeName(int transportIndex) => $"HIDMaestro.Index.{transportIndex}";
     internal static string IdentityPipeName(string token) => $"HIDMaestro.Identity.{token}";
 
     /// <summary>The v1.12.0 owner pipe of a transport index. A v1.12.0

@@ -1,5 +1,12 @@
 // Two or more programs that embed HIDMaestro on one machine.
 //
+//   A. Two programs create a controller with no identity key. Each gets
+//      its own transport index and identity, and in one capture window
+//      each device carries only its own program's input.
+//   C. A second program runs InstallDriver and a create while the first
+//      streams. The first program's devnodes, XInput slot, WGI entry and
+//      Raw Input entry stay as they were, and its frame gaps stay within
+//      its own one-program 99th percentile.
 //   D. A program killed with TerminateProcess. The next sweep of a live
 //      program, or the start of a new one, removes the killed program's
 //      devices and releases its registry ledger holds, and leaves the live
@@ -85,6 +92,8 @@ internal static class Program
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
+            ('A', "two programs with no identity key", SectionA),
+            ('C', "a second program starts while the first streams", SectionC),
             ('D', "a killed program's devices", SectionD),
             ('G', "two composite controllers", SectionG),
             ('H', "a program killed while its child runs", SectionH),
@@ -138,6 +147,152 @@ internal static class Program
 
     static string Show(List<(string Buttons, uint X)> p) =>
         p.Count == 0 ? "(no reports)" : string.Join(", ", p.Take(4).Select(t => $"buttons {t.Buttons} X {t.X}")) + (p.Count > 4 ? $" (+{p.Count - 4})" : "");
+
+    // ── A ──────────────────────────────────────────────────────────────
+
+    static void SectionA()
+    {
+        using var p1 = PeerProcess.Start("A1");
+        using var p2 = PeerProcess.Start("A2");
+        string i1 = p1.Send("install");
+        string c1 = p1.Send("create pad F0D0 -");
+        p1.Send("stream 0 0.25 125 0");
+        string i2 = p2.Send("install");
+        string c2 = p2.Send("create pad F0D1 -");
+        p2.Send("stream 1 0.75 125 0");
+        Check("A: both programs install and create", Ok(i1) && Ok(c1) && Ok(i2) && Ok(c2));
+        Check("A: the two controllers have different transport indices",
+              Ok(c1) && Ok(c2) && PeerProcess.Field(c1, "transport") != PeerProcess.Field(c2, "transport"),
+              $"{PeerProcess.Field(c1, "transport")} and {PeerProcess.Field(c2, "transport")}");
+        Check("A: the two controllers have different identities and devnodes",
+              Ok(c1) && Ok(c2) && PeerProcess.Field(c1, "key") != PeerProcess.Field(c2, "key")
+              && PeerProcess.Field(c1, "instance") != PeerProcess.Field(c2, "instance"),
+              $"{PeerProcess.Field(c1, "key")} {PeerProcess.Field(c1, "instance")} and {PeerProcess.Field(c2, "key")} {PeerProcess.Field(c2, "instance")}");
+
+        var path1 = WaitPaths(0xBEEF, 0xF0D0, 1, 10_000);
+        var path2 = WaitPaths(0xBEEF, 0xF0D1, 1, 10_000);
+        Check("A: both devices are present", path1.Count == 1 && path2.Count == 1, $"{path1.Count} and {path2.Count} interfaces");
+        if (path1.Count != 1 || path2.Count != 1) return;
+        using var cap1 = HidCapture.Open(path1[0]);
+        using var cap2 = HidCapture.Open(path2[0]);
+        if (cap1 == null || cap2 == null) { Check("A: both devices open", false); return; }
+        Thread.Sleep(300);
+        long from = cap1.Mark();
+        Thread.Sleep(1000);
+        long to = cap1.Mark();
+        var pat1 = Patterns(cap1, from, to);
+        var pat2 = Patterns(cap2, from, to);
+        Check("A: device 1 carries one pattern in the window", pat1.Count == 1, Show(pat1));
+        Check("A: device 2 carries one pattern in the window", pat2.Count == 1, Show(pat2));
+        if (pat1.Count == 1 && pat2.Count == 1)
+            Check("A: each device carries its own program's input",
+                  pat1[0].Buttons != pat2[0].Buttons && pat1[0].Buttons != "none" && pat2[0].Buttons != "none" && pat1[0].X < pat2[0].X,
+                  $"device 1 {Show(pat1)}, device 2 {Show(pat2)}");
+    }
+
+    // ── C ──────────────────────────────────────────────────────────────
+
+    static void SectionC()
+    {
+        var wgiBefore = RawGameController.RawGameControllers.Select(r => r.NonRoamableId).ToHashSet();
+        using var p1 = PeerProcess.Start("C1");
+        p1.Send("install");
+        string cx = p1.Send("create xbox - coexist-c-xbox");
+        string cp = p1.Send("create pad F0D3 coexist-c-pad");
+        if (!Ok(cx) || !Ok(cp)) { Check("C: the first program creates an Xbox 360 pad and a HID pad", false, $"{cx} / {cp}"); return; }
+        p1.Send("stream 3 0.95 250 1");
+        string instX = PeerProcess.Field(cx, "instance")!, instP = PeerProcess.Field(cp, "instance")!;
+        var padPath = WaitPaths(0xBEEF, 0xF0D3, 1, 10_000);
+        int slot = -1;
+        WaitFor(() =>
+        {
+            for (uint s = 0; s < 4; s++)
+                if (Native.XInputGetState(s, out var st) == 0 && st.Gamepad.sThumbLX > 25000) { slot = (int)s; return true; }
+            return false;
+        }, 10_000);
+        string? wgiId = null;
+        WaitFor(() =>
+        {
+            wgiId = RawGameController.RawGameControllers
+                .Where(r => r.HardwareVendorId == 0x045E && r.HardwareProductId == 0x028E && !wgiBefore.Contains(r.NonRoamableId))
+                .Select(r => r.NonRoamableId).FirstOrDefault();
+            return wgiId != null;
+        }, 10_000);
+        if (padPath.Count != 1 || slot < 0 || wgiId == null)
+        {
+            Check("C: the first program's pads appear on HID, XInput and WGI", false, $"hid {padPath.Count}, xinput slot {slot}, wgi {wgiId ?? "none"}");
+            return;
+        }
+        var raw = Native.RawInputDevices().Where(d => string.Equals(d.Name, padPath[0], StringComparison.OrdinalIgnoreCase)).ToList();
+        var treeX = Native.Subtree(instX);
+        var treeP = Native.Subtree(instP);
+        using var cap = HidCapture.Open(padPath[0]);
+        if (cap == null) { Check("C: the HID pad opens", false); return; }
+
+        // Watch the XInput slot and WGI for the whole run.
+        int xinputMisses = 0;
+        var wgiRemoved = new List<string>();
+        void OnRemoved(object? s, RawGameController r) { lock (wgiRemoved) wgiRemoved.Add(r.NonRoamableId); }
+        RawGameController.RawGameControllerRemoved += OnRemoved;
+        bool watching = true;
+        var watch = new Thread(() =>
+        {
+            while (watching)
+            {
+                if (Native.XInputGetState((uint)slot, out var st) != 0 || st.Gamepad.sThumbLX < 25000) Interlocked.Increment(ref xinputMisses);
+                Thread.Sleep(5);
+            }
+        }) { IsBackground = true };
+        watch.Start();
+        try
+        {
+            Thread.Sleep(500);
+            long a1 = cap.Mark();
+            Thread.Sleep(5000);
+            long a1End = cap.Mark();
+
+            using var p2 = PeerProcess.Start("C2");
+            long during = cap.Mark();
+            string i2 = p2.Send("install");
+            string c2 = p2.Send("create pad F0D4 coexist-c-second");
+            Thread.Sleep(500);
+            long duringEnd = cap.Mark();
+            Check("C: the second program installs and creates", Ok(i2) && Ok(c2), $"{i2} / {c2}");
+
+            long a2 = cap.Mark();
+            Thread.Sleep(5000);
+            long a2End = cap.Mark();
+
+            double p99a1 = HidCapture.Percentile(HidCapture.Gaps(cap.Since(a1, a1End)), 0.99);
+            double p99d = HidCapture.Percentile(HidCapture.Gaps(cap.Since(during, duringEnd)), 0.99);
+            double p99a2 = HidCapture.Percentile(HidCapture.Gaps(cap.Since(a2, a2End)), 0.99);
+            double noise = Math.Max(0.5, Math.Abs(p99a1 - p99a2));
+            Check("C: the first program's frame gaps stay within its own one-program p99 while the second starts",
+                  p99d <= Math.Max(p99a1, p99a2) + noise,
+                  FormattableString.Invariant($"p99 alone {p99a1:F2} ms, during {p99d:F2} ms, alone after {p99a2:F2} ms, allowance {noise:F2} ms"));
+
+            var treeX2 = Native.Subtree(instX);
+            var treeP2 = Native.Subtree(instP);
+            Check("C: the first program's devnodes are unchanged and started",
+                  treeX2.SequenceEqual(treeX, StringComparer.OrdinalIgnoreCase) && treeP2.SequenceEqual(treeP, StringComparer.OrdinalIgnoreCase)
+                  && treeX.Concat(treeP).All(Native.IsStarted));
+            Check("C: the first program's HID handle never failed", !cap.Broken, cap.Broken ? $"read error {cap.ReadError}" : "");
+            Check("C: the first program's XInput slot never dropped", Volatile.Read(ref xinputMisses) == 0, $"{xinputMisses} misses at slot {slot}");
+            bool wgiStill = RawGameController.RawGameControllers.Any(r => r.NonRoamableId == wgiId);
+            lock (wgiRemoved)
+                Check("C: the first program's WGI entry stayed", wgiStill && !wgiRemoved.Contains(wgiId!), wgiRemoved.Count > 0 ? $"removed: {string.Join(", ", wgiRemoved)}" : "");
+            var raw2 = Native.RawInputDevices().Where(d => string.Equals(d.Name, padPath[0], StringComparison.OrdinalIgnoreCase)).ToList();
+            Check("C: the first program's Raw Input entry kept its handle",
+                  raw.Count == 1 && raw2.Count == 1 && raw[0].Handle == raw2[0].Handle,
+                  $"before {raw.Count}, after {raw2.Count}");
+        }
+        finally
+        {
+            watching = false;
+            watch.Join(500);
+            RawGameController.RawGameControllerRemoved -= OnRemoved;
+        }
+    }
 
     // ── D ──────────────────────────────────────────────────────────────
 
@@ -230,12 +385,13 @@ internal static class Program
         Process? child = null;
         try
         {
+            string transport;
             using (var p1 = PeerProcess.Start("H1"))
             {
                 p1.Send("install");
                 string c1 = p1.Send("create pad F0D8 coexist-h");
                 if (!Ok(c1)) { Check("H: the parent program creates", false, c1); return; }
-                string transport = PeerProcess.Field(c1, "transport")!;
+                transport = PeerProcess.Field(c1, "transport")!;
                 string sc = p1.Send("spawnchild");
                 if (int.TryParse(PeerProcess.Field(sc, "pid"), out int childPid)) child = Process.GetProcessById(childPid);
                 string? ownerId = Native.OwnerRecords().Where(r => r.Value == p1.Pid).Select(r => r.Key).FirstOrDefault();
@@ -252,6 +408,10 @@ internal static class Program
             p2.Send("install");
             string c2 = p2.Send("create pad F0D8 coexist-h");
             Check("H: another program takes the same identity at once", Ok(c2), c2);
+            if (Ok(c2))
+                Check("H: and the transport index the killed program had",
+                      PeerProcess.Field(c2, "transport") == transport,
+                      $"{PeerProcess.Field(c2, "transport")}, was {transport}");
             if (Ok(c2))
             {
                 p2.Send("stream 0 0.5 125 0");

@@ -27,8 +27,36 @@ namespace HIDMaestro;
 public sealed class HMController : IDisposable
 {
     private readonly HMContext _context;
+    /// <summary>The machine-wide transport index: every section, event,
+    /// pipe and registry key of this controller is named with it, and the
+    /// driver reads it. Internal code says Index for it.</summary>
     internal int Index { get; }
+    /// <summary>The slot within the owning context, which
+    /// <see cref="HMContext.CreateControllerAt(int, HMProfile)"/> names.</summary>
+    internal int Slot { get; }
     internal string? InstanceId { get; }
+    internal Internal.ControllerLease? Lease { get; }
+
+    /// <summary>The machine-wide index this controller's shared sections,
+    /// events, owner pipe and registry key are named with, and the
+    /// <c>ControllerIndex</c> the driver reads. A program running alone gets
+    /// the slot number here, as every release before 1.13.0 did. When another
+    /// program on the machine already uses that index, the controller gets the
+    /// lowest free one instead, so the value can differ between runs. Native
+    /// writers that open the sections themselves read the names from
+    /// <see cref="SectionNames"/>.</summary>
+    public int TransportIndex => Index;
+
+    /// <summary>The kernel object names this controller's shared memory
+    /// contract uses, in the order the input path creates them:
+    /// <c>Global\HIDMaestroInput&lt;N&gt;</c>, <c>Global\HIDMaestroInputEvent&lt;N&gt;</c>,
+    /// <c>Global\HIDMaestroCompanionInputEvent&lt;N&gt;</c>,
+    /// <c>Global\HIDMaestroInputAck&lt;N&gt;</c>, <c>Global\HIDMaestroInputAckEvent&lt;N&gt;</c>,
+    /// <c>Global\HIDMaestroOutput&lt;N&gt;</c>, <c>Global\HIDMaestroOutputEvent&lt;N&gt;</c>,
+    /// <c>Global\HIDMaestroPidState&lt;N&gt;</c>
+    /// and the owner pipe <c>\\.\pipe\HIDMaestroOwner&lt;N&gt;</c>, with N the
+    /// <see cref="TransportIndex"/>.</summary>
+    public IReadOnlyList<string> SectionNames => Internal.SharedMemoryIO.ObjectNames(Index);
 
     /// <summary>The identity key this controller was created with. Every
     /// devnode instance id, the container id and, for USB/IP personas, the
@@ -401,9 +429,18 @@ public sealed class HMController : IDisposable
     // 14-byte Marshal.Copy entirely. ~60-80 instructions saved per frame.
     private readonly bool _packsGipBuffer;
 
-    internal HMController(HMContext context, int index, HMProfile profile, string? instanceId,
+    internal HMController(HMContext context, int slot, Internal.ControllerLease lease, HMProfile profile, string? instanceId,
                           Internal.Usbip.UsbipBackendHandle? usbipHandle = null,
                           string? identityKey = null)
+        : this(context, lease.TransportIndex, profile, instanceId, usbipHandle, identityKey)
+    {
+        Slot = slot;
+        Lease = lease;
+    }
+
+    private HMController(HMContext context, int index, HMProfile profile, string? instanceId,
+                         Internal.Usbip.UsbipBackendHandle? usbipHandle,
+                         string? identityKey)
     {
         _context = context;
         Index = index;

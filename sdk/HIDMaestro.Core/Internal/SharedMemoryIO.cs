@@ -158,7 +158,6 @@ internal static class SharedMemoryIO
     // Issue #67: the server ends of each controller's owner pipe, guarded by
     // the s_inputViews lock.
     private static readonly Dictionary<int, List<IntPtr>> s_ownerPipes = new();
-
     // HIDMAESTRO_INPUT_ACK (driver/driver.h): DeliveredSeqNo at 0, the
     // driver's capability bits at 4, then the release frames: a seqlock
     // word, a count, and HIDMAESTRO_RELEASE_SLOTS frames of a 4-byte size
@@ -264,6 +263,21 @@ internal static class SharedMemoryIO
         try { pump.Thread.Join(TimeoutScale.Apply(500)); } catch { }
     }
 
+    /// <summary>Every kernel object name one controller's contract uses,
+    /// for <see cref="HMController.SectionNames"/>.</summary>
+    public static IReadOnlyList<string> ObjectNames(int controllerIndex) => new[]
+    {
+        $@"Global\HIDMaestroInput{controllerIndex}",
+        $@"Global\HIDMaestroInputEvent{controllerIndex}",
+        $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}",
+        $@"Global\HIDMaestroInputAck{controllerIndex}",
+        $@"Global\HIDMaestroInputAckEvent{controllerIndex}",
+        $@"Global\HIDMaestroOutput{controllerIndex}",
+        $@"Global\HIDMaestroOutputEvent{controllerIndex}",
+        $@"Global\HIDMaestroPidState{controllerIndex}",
+        $@"\\.\pipe\HIDMaestroOwner{controllerIndex}",
+    };
+
     /// <summary>Returns the view pointer for the controller's INPUT section,
     /// creating the section on first call. Thread-safe via per-call lock
     /// callers can issue concurrent EnsureInputMapping requests for distinct
@@ -318,11 +332,28 @@ internal static class SharedMemoryIO
             // completes, which is how the driver learns to let go of the
             // keys and buttons this process held. Best effort: without it
             // the device keeps its last report until it is removed.
+            //
+            // The first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE.
+            // A v1.12.0 program holds this name for the index it uses and
+            // takes no claim, so failing here means one started on this index
+            // after the claim was checked. Both would write these sections,
+            // so the create stops instead.
             var pipes = new List<IntPtr>();
             for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
             {
-                IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}");
-                if (ph != INVALID_HANDLE_VALUE) pipes.Add(ph);
+                IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}", first: k == 0);
+                if (ph != INVALID_HANDLE_VALUE) { pipes.Add(ph); continue; }
+                if (k == 0 && Marshal.GetLastPInvokeError() is ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY)
+                {
+                    UnmapViewOfFile(av); CloseHandle(ah);
+                    if (s_inputAckEvents.Remove(controllerIndex, out IntPtr aev)) CloseHandle(aev);
+                    s_inputAckHandles.Remove(controllerIndex); s_inputAckViews.Remove(controllerIndex);
+                    if (s_companionInputEvents.Remove(controllerIndex, out IntPtr c)) CloseHandle(c);
+                    UnmapViewOfFile(view); CloseHandle(h);
+                    throw new HMResourceInUseException(
+                        $"Transport index {controllerIndex} is in use by a running program built on HIDMaestro 1.12.0, which started on it during this create. Create the controller again.",
+                        $"transport index {controllerIndex}", null);
+                }
             }
             s_ownerPipes[controllerIndex] = pipes;
 
@@ -1054,12 +1085,16 @@ internal static class SharedMemoryIO
     private const uint PIPE_ACCESS_OUTBOUND = 0x00000002;
     private const uint PIPE_TYPE_BYTE = 0x00000000;
     private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
+    private const uint FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
+    private const int ERROR_ACCESS_DENIED = 5, ERROR_PIPE_BUSY = 231;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
     /// <summary>One instance of the owner pipe. The SDK never writes to it
     /// and never reads from it: its only job is to close when this process
-    /// does.</summary>
-    private static IntPtr CreateOwnerPipe(string name)
+    /// does. Every instance keeps v1.12.0's access mode, type, instance
+    /// count and timeout, which all instances of one pipe must share, so a
+    /// v1.12.0 driver connects to it unchanged.</summary>
+    private static IntPtr CreateOwnerPipe(string name, bool first)
     {
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(OwnerPipeSddl, 1, out IntPtr sd, IntPtr.Zero))
             return INVALID_HANDLE_VALUE;
@@ -1070,17 +1105,25 @@ internal static class SharedMemoryIO
             bInheritHandle = 0,
         };
         IntPtr saPtr = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+        IntPtr pipe;
+        int error;
         try
         {
             Marshal.StructureToPtr(sa, saPtr, false);
-            return CreateNamedPipeW(name, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+            pipe = CreateNamedPipeW(name, PIPE_ACCESS_OUTBOUND | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+                                    PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
                                     (uint)OWNER_PIPE_INSTANCES, 0, 0, 0, saPtr);
+            error = Marshal.GetLastPInvokeError();
         }
         finally
         {
             Marshal.FreeHGlobal(saPtr);
             LocalFree(sd);
         }
+        // The frees above run P/Invokes of their own. The caller reads the
+        // create's error, so it is put back last.
+        Marshal.SetLastPInvokeError(error);
+        return pipe;
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

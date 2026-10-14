@@ -37,6 +37,12 @@ internal sealed partial class OwnerCensus
     public List<MachineClaims.OwnerRecord> Records { get; } = new();
     public List<DeviceGroup> Devices { get; } = new();
 
+    /// <summary>Transport indices of USB/IP imports in the SDK's port range
+    /// whose server port no v1.13.0 record names: a program built on an
+    /// older SDK whose composite has no devnode of its own to record the
+    /// index. The bus id <c>1-&lt;N+1&gt;</c> carries it.</summary>
+    public HashSet<int> ForeignImportIndices { get; } = new();
+
     public IEnumerable<MachineClaims.OwnerRecord> DeadRecords => Records.Where(r => !r.Live);
     public bool AnyUnknown => Devices.Any(d => d.Owner == Owner.Unknown);
 
@@ -49,7 +55,7 @@ internal sealed partial class OwnerCensus
     /// whoever owns it.</summary>
     public HashSet<int> IndicesInUse()
     {
-        var set = new HashSet<int>();
+        var set = new HashSet<int>(ForeignImportIndices);
         foreach (var d in Devices) if (d.ControllerIndex >= 0) set.Add(d.ControllerIndex);
         foreach (var r in Records)
             if (r.Live) foreach (var c in r.Controllers) if (c.TransportIndex >= 0) set.Add(c.TransportIndex);
@@ -97,6 +103,18 @@ internal sealed partial class OwnerCensus
             else if (SectionExists($@"Global\HIDMaestroInputAck{g.Index}")) owner = Owner.DeadLegacy;
             else owner = Owner.Unknown;
             census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec));
+        }
+
+        var recordedPorts = new HashSet<int>();
+        foreach (var r in census.Records)
+            if (r.UsbipPort > 0) recordedPorts.Add(r.UsbipPort);
+        foreach (var row in Usbip.VhciClient.GetImportedDevices())
+        {
+            if (row.Host != "127.0.0.1" || !int.TryParse(row.Service, out int port)) continue;
+            if (port < Usbip.UsbipServer.BasePort || port >= Usbip.UsbipServer.BasePort + Usbip.UsbipServer.PortRange) continue;
+            if (recordedPorts.Contains(port)) continue;
+            if (row.BusId.StartsWith("1-", StringComparison.Ordinal) && int.TryParse(row.BusId.AsSpan(2), out int dev) && dev >= 1)
+                census.ForeignImportIndices.Add(dev - 1);
         }
         return census;
     }

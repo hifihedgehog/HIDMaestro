@@ -14,8 +14,12 @@ namespace HIDMaestro;
 ///
 /// <para><b>Lifecycle:</b> create one <see cref="HMContext"/> at app startup,
 /// dispose at shutdown. Disposing the context disposes every controller it
-/// owns. Multiple contexts in one process are supported but not encouraged
-/// (they share the same controller-index pool).</para>
+/// owns. Each context numbers its controllers in slots of its own, and
+/// <see cref="CreateControllerAt(int, HMProfile)"/> names a slot. Every
+/// controller also holds a machine-wide transport index
+/// (<see cref="HMController.TransportIndex"/>), so several contexts in one
+/// process, and several programs that embed HIDMaestro on one machine, run
+/// side by side without sharing a section.</para>
 ///
 /// <para><b>Driver install:</b> the UMDF2 driver and its XUSB companion are
 /// embedded as resources inside this assembly. On first run on a given
@@ -36,6 +40,9 @@ public sealed class HMContext : IDisposable
 {
     private readonly object _lock = new();
     private readonly Dictionary<int, HMController> _controllers = new();
+    // Slots a create in flight has taken, so two threads creating at once
+    // never pick the same one.
+    private readonly HashSet<int> _pendingSlots = new();
     private readonly List<HMProfile> _profiles = new();
     private readonly Dictionary<string, HMProfile> _profilesById = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
@@ -343,8 +350,13 @@ public sealed class HMContext : IDisposable
     /// Programs that store a binding against a device path or a serial
     /// keep it across those lives.
     ///
-    /// <para>A null or empty key uses the controller index, which is what
-    /// <see cref="CreateController(HMProfile)"/> does. The form
+    /// <para>A null or empty key uses the controller's transport index (see
+    /// <see cref="HMController.TransportIndex"/>), which is what
+    /// <see cref="CreateController(HMProfile)"/> does. That index is the
+    /// slot number when no other program on the machine uses it, so a
+    /// keyless controller's index and default identity can differ between
+    /// runs when other programs that embed HIDMaestro are running. Pass a
+    /// key for paths that must stay put. The form
     /// <c>index:&lt;N&gt;</c> is reserved for that default: it names the
     /// identity of index N wherever it is passed. Two live controllers
     /// in one context cannot share a key; dispose the first before creating
@@ -362,39 +374,41 @@ public sealed class HMContext : IDisposable
             throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
         ThrowIfDisposed();
 
-        // Allocate the next free controller index. Linear scan from 0, no
+        // The lowest slot free in this context. Linear scan from 0, no
         // upper bound on the SDK side. XInput's 4-slot limit only constrains
         // Xbox-family profiles (xbox-360-wired, xbox-series-xs-bt, etc.);
         // non-XInput profiles can run beyond 4 simultaneously.
-        int index;
+        int slot;
         lock (_lock)
         {
-            index = 0;
-            while (_controllers.ContainsKey(index)) index++;
+            slot = 0;
+            while (_controllers.ContainsKey(slot) || _pendingSlots.Contains(slot)) slot++;
+            _pendingSlots.Add(slot);
         }
-        var identity = Internal.DeviceIdentity.Resolve(identityKey, index);
-        ThrowIfIdentityInUse(identity);
-        return CreateRecorded(index, profile, identity);
+        try
+        {
+            ThrowIfKeyInUse(identityKey, slot);
+            return CreateAtSlot(slot, profile, identityKey);
+        }
+        finally { lock (_lock) _pendingSlots.Remove(slot); }
     }
 
-    /// <summary>The backend's create, with the controller listed in this
-    /// process's owner record before any PnP work and dropped again if the
-    /// create fails. A record whose owner claim is gone tells every other
-    /// program what a dead program left behind.</summary>
-    private HMController CreateRecorded(int index, HMProfile profile, Internal.DeviceIdentity identity)
+    /// <summary>The machine-wide half of a create: the lease on a transport
+    /// index, taken before any PnP work, then the backend's create on it.</summary>
+    private HMController CreateAtSlot(int slot, HMProfile profile, string? identityKey)
     {
-        Internal.MachineClaims.AddController(identity.Token, index,
+        var lease = Internal.ControllerLease.Acquire(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         try
         {
             // Issue #39: composite USB personas run on the USB/IP backend,
-            // never on UMDF2, which can only present the single HID interface
-            // and would silently drop the three USB Audio Class interfaces
-            // the profile promises. The backend's transport is bundled and
-            // deploys itself on first use, so this path needs no precondition
-            // from the consumer. The UMDF2 path below is untouched.
+            // never on UMDF2, which can only present the single HID
+            // interface and would silently drop the three USB Audio Class
+            // interfaces the profile promises. The backend's transport is
+            // bundled and deploys itself on first use, so this path needs no
+            // precondition from the consumer.
             if (profile.RequiresUsbipBackend)
-                return CreateUsbipController(index, profile, identity);
+                return CreateUsbipController(slot, lease, profile);
 
             // The driver INF lives next to the driver binaries in the repo's
             // build/ directory. This will move to embedded-resource extraction
@@ -406,39 +420,43 @@ public sealed class HMContext : IDisposable
             try
             {
                 instanceId = Internal.DeviceOrchestrator.SetupController(
-                    index, profile.Inner, infPath, identity);
+                    lease.TransportIndex, profile.Inner, infPath, lease.Identity);
             }
             catch
             {
                 // Best-effort cleanup of any partial state, then rethrow.
-                try { Internal.DeviceOrchestrator.TeardownController(index, null); } catch { }
+                try { Internal.DeviceOrchestrator.TeardownController(lease.TransportIndex, null); } catch { }
                 throw;
             }
             if (instanceId != null)
-                Internal.MachineClaims.SetControllerValue(identity.Token, "InstanceId", instanceId);
+                Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "InstanceId", instanceId);
 
-            var controller = new HMController(this, index, profile, instanceId, identityKey: identity.Key);
-            lock (_lock) _controllers[index] = controller;
+            var controller = new HMController(this, slot, lease, profile, instanceId, identityKey: lease.Identity.Key);
+            lock (_lock) _controllers[slot] = controller;
             return controller;
         }
         catch
         {
-            Internal.MachineClaims.RemoveController(identity.Token);
+            lease.Dispose();
             throw;
         }
     }
 
-    /// <summary>Two live controllers with one key would race for the same
-    /// devnode instance ids. Refuse the second before any PnP work.</summary>
-    private void ThrowIfIdentityInUse(Internal.DeviceIdentity identity)
+    /// <summary>Two live controllers of this context with one key would
+    /// race for the same devnode instance ids. Refuse the second before any
+    /// PnP work. A keyless controller's identity follows its transport
+    /// index, which no two live controllers share.</summary>
+    private void ThrowIfKeyInUse(string? identityKey, int slot)
     {
+        if (string.IsNullOrWhiteSpace(identityKey)) return;
+        string key = Internal.DeviceIdentity.ForKey(identityKey!, slot).Key;
         lock (_lock)
         {
             foreach (var live in _controllers.Values)
             {
-                if (string.Equals(live.IdentityKey, identity.Key, StringComparison.Ordinal))
+                if (string.Equals(live.IdentityKey, key, StringComparison.Ordinal))
                     throw new InvalidOperationException(
-                        $"Identity key '{identity.Key}' is in use by the live controller at index {live.Index}. Dispose it first.");
+                        $"Identity key '{key}' is in use by the live controller at slot {live.Slot}. Dispose it first.");
             }
         }
     }
@@ -447,15 +465,16 @@ public sealed class HMContext : IDisposable
     // pre-creates the per-index shared sections and events, attaches
     // through usbip-win2's vhci, and the HMController then binds to the
     // same sections it always does. No PnP, no INF, no driver install.
-    private HMController CreateUsbipController(int index, HMProfile profile, Internal.DeviceIdentity identity)
+    private HMController CreateUsbipController(int slot, Internal.ControllerLease lease, HMProfile profile)
     {
+        int index = lease.TransportIndex;
         Internal.Usbip.UsbipBackendHandle handle =
-            Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, identity);
+            Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
         try
         {
-            Internal.MachineClaims.SetControllerValue(identity.Token, "VhciPort", handle.VhciPort);
-            var controller = new HMController(this, index, profile, instanceId: null, handle, identity.Key);
-            lock (_lock) _controllers[index] = controller;
+            Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "VhciPort", handle.VhciPort);
+            var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
+            lock (_lock) _controllers[slot] = controller;
             return controller;
         }
         catch
@@ -466,20 +485,23 @@ public sealed class HMContext : IDisposable
         }
     }
 
-    /// <summary>Create a controller pinned to a specific index. Used by live
-    /// profile-switching workflows where the consumer wants to dispose the
-    /// existing controller at index N and replace it with one running a
-    /// different profile while keeping the same N. The index must be free
-    /// (the previous controller at that index must already be disposed).</summary>
-    /// <exception cref="InvalidOperationException">If the index is already
-    /// in use by another live controller.</exception>
+    /// <summary>Create a controller pinned to a specific slot of this
+    /// context. Used by live profile-switching workflows where the consumer
+    /// wants to dispose the existing controller at slot N and replace it with
+    /// one running a different profile while keeping the same N. The slot
+    /// must be free in this context (the previous controller at that slot
+    /// must already be disposed). The controller's transport index is N when
+    /// no other program on the machine uses N, and otherwise the lowest free
+    /// index (see <see cref="HMController.TransportIndex"/>).</summary>
+    /// <exception cref="InvalidOperationException">If the slot is already
+    /// in use by another live controller of this context.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile) => CreateControllerAt(index, profile, null);
 
-    /// <summary>Create a controller pinned to a specific index with a
+    /// <summary>Create a controller pinned to a specific slot with a
     /// durable identity key. See <see cref="CreateController(HMProfile, string)"/>
-    /// for what the key does. A null or empty key uses the index.</summary>
-    /// <exception cref="InvalidOperationException">If the index or the key
-    /// is already in use by another live controller.</exception>
+    /// for what the key does. A null or empty key uses the transport index.</summary>
+    /// <exception cref="InvalidOperationException">If the slot or the key
+    /// is already in use by another live controller of this context.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -490,17 +512,17 @@ public sealed class HMContext : IDisposable
 
         lock (_lock)
         {
-            if (_controllers.ContainsKey(index))
+            if (_controllers.ContainsKey(index) || _pendingSlots.Contains(index))
                 throw new InvalidOperationException(
                     $"Controller index {index} is already in use. Dispose the existing controller first.");
+            _pendingSlots.Add(index);
         }
-        var identity = Internal.DeviceIdentity.Resolve(identityKey, index);
-        ThrowIfIdentityInUse(identity);
-
-        // Issue #39: same backend routing as CreateController. Live-swap
-        // consumers can pin a composite persona to an index like any
-        // other profile.
-        return CreateRecorded(index, profile, identity);
+        try
+        {
+            ThrowIfKeyInUse(identityKey, index);
+            return CreateAtSlot(index, profile, identityKey);
+        }
+        finally { lock (_lock) _pendingSlots.Remove(index); }
     }
 
     /// <summary>All currently-live controllers owned by this context.</summary>
@@ -570,31 +592,29 @@ public sealed class HMContext : IDisposable
 
     internal void OnControllerDisposing(HMController controller)
     {
-        lock (_lock) _controllers.Remove(controller.Index);
-
-        // Issue #39: usbip-backend controllers have no PnP devnode and no
-        // driver binding. Teardown is detach-from-vhci plus the shared
-        // sections; running the UMDF2 PnP teardown would sweep for devices
-        // that never existed.
-        if (controller.UsbipHandle != null)
-        {
-            try { controller.UsbipHandle.Dispose(); } catch { }
-            try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
-            Internal.MachineClaims.RemoveController(
-                Internal.DeviceIdentity.Resolve(controller.IdentityKey, controller.Index).Token);
-            return;
-        }
+        lock (_lock) _controllers.Remove(controller.Slot);
 
         try
         {
+            // Issue #39: usbip-backend controllers have no PnP devnode and no
+            // driver binding. Teardown is detach-from-vhci plus the shared
+            // sections; running the UMDF2 PnP teardown would sweep for devices
+            // that never existed.
+            if (controller.UsbipHandle != null)
+            {
+                try { controller.UsbipHandle.Dispose(); } catch { }
+                try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
+                return;
+            }
+
             Internal.DeviceOrchestrator.TeardownController(
                 controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
         }
         finally
         {
-            // The entry goes once the devices it names are gone.
-            Internal.MachineClaims.RemoveController(
-                Internal.DeviceIdentity.Resolve(controller.IdentityKey, controller.Index).Token);
+            // The index goes back to the machine, and the record entry with
+            // it, only once the devices they name are gone.
+            controller.Lease?.Dispose();
         }
     }
 
