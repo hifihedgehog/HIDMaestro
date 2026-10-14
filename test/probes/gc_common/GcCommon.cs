@@ -25,8 +25,11 @@ internal static class GcReal
 
     // The same descriptor as usbip-win2 v0.9.8.1 hands a full-speed device's
     // on to Windows, which it presents at high speed: each interrupt
-    // bInterval of 8 ms becomes 7, 2^(7-1) microframes, the same 8 ms
-    // (drivers/ude/wsk_receive.cpp to_high_speed_interval, patch_config).
+    // bInterval of 8 ms becomes 7, 2^(7-1) = 64 microframes, 8 ms by the
+    // arithmetic (drivers/ude/wsk_receive.cpp to_high_speed_interval,
+    // patch_config). Microsoft's table gives a high-speed bInterval of 7 a
+    // 32-microframe period on a scheduled bus, but nothing is scheduled
+    // here: the persona's own grid sets the rate (docs/design/v1.13.0.md).
     public static readonly byte[] ConfigurationDescriptorAtHighSpeed = Convert.FromHexString(
         "09022900010100E0FA" + "090400000203000000" + "09211001000122D600" +
         "07058103250007" + "07050203050007");
