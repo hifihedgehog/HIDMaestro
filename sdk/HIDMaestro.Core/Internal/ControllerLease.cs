@@ -92,24 +92,34 @@ internal sealed class ControllerLease : IDisposable
                     if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(n))) continue;
 
                     DeviceIdentity identity;
-                    SafeFileHandle? idClaim;
                     if (keyedIdentity != null)
                     {
                         identity = DeviceIdentity.ForKey(identityKey!, n);
-                        idClaim = identityClaim;
                     }
                     else
                     {
                         identity = DeviceIdentity.ForIndex(n);
-                        idClaim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(identity.Token));
-                        if (idClaim == null) continue;   // someone passed "index:N" explicitly
-                        if (LiveLegacyHolds(census, identity.Token)) { idClaim.Dispose(); continue; }
+                        // Held in identityClaim like a keyed one from here,
+                        // so the finally below releases it on every exit
+                        // that does not hand it to the lease.
+                        identityClaim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(identity.Token));
+                        if (identityClaim == null) continue;   // someone passed "index:N" explicitly
+                        if (LiveLegacyHolds(census, identity.Token)) { identityClaim.Dispose(); identityClaim = null; continue; }
                     }
 
-                    MachineClaims.AddController(identity.Token, n, backend, profileId);
+                    try { MachineClaims.AddController(identity.Token, n, backend, profileId); }
+                    catch
+                    {
+                        // A write that failed partway leaves part of the
+                        // entry. This create holds the identity's claim, so
+                        // no live controller has an entry under its token.
+                        MachineClaims.RemoveController(identity.Token);
+                        throw;
+                    }
+                    var lease = new ControllerLease(n, identity, indexClaim, identityClaim!);
                     keep = true;
                     identityClaim = null;   // owned by the lease from here
-                    return new ControllerLease(n, identity, indexClaim, idClaim!);
+                    return lease;
                 }
                 finally
                 {

@@ -68,7 +68,9 @@
 //   T. A set a deploy left incomplete, this build's XUSB package gone and
 //      its main package installed: InstallDriver adds the missing package,
 //      and an Xbox 360 controller, which needs it, creates.
-//   S71 runs A to H and J to T.
+//   U. A create that fails after it claimed an index and an identity
+//      gives both back. SectionU.cs has the detail.
+//   S71 runs A to H and J to U.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -84,7 +86,7 @@ using System.Threading;
 using Microsoft.Win32;
 using Windows.Gaming.Input;
 
-internal static class Program
+internal static partial class Program
 {
     static int s_total, s_failures;
 
@@ -142,7 +144,7 @@ internal static class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRST";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTU";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -166,6 +168,7 @@ internal static class Program
             ('R', "staging a running program uses", SectionR),
             ('S', "two deploys in one program", SectionS),
             ('T', "a driver set a deploy left incomplete", SectionT),
+            ('U', "a create that fails after its claims", SectionU),
         };
         foreach (var (id, title, body) in sections)
         {
