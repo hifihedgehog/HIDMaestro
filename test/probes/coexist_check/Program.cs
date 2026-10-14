@@ -70,7 +70,9 @@
 //      and an Xbox 360 controller, which needs it, creates.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
-//   S71 runs A to H and J to U.
+//   V. Re-attach attempts a killed composite program leaves, when another
+//      program takes its USB/IP server port. SectionV.cs has the detail.
+//   S71 runs A to H and J to V.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -144,7 +146,7 @@ internal static partial class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTU";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUV";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
@@ -169,6 +171,7 @@ internal static partial class Program
             ('S', "two deploys in one program", SectionS),
             ('T', "a driver set a deploy left incomplete", SectionT),
             ('U', "a create that fails after its claims", SectionU),
+            ('V', "re-attach attempts a killed composite program leaves", SectionV),
         };
         foreach (var (id, title, body) in sections)
         {

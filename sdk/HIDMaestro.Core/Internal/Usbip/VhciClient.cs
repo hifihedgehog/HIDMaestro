@@ -231,20 +231,59 @@ internal static partial class VhciClient
     }
 
     /// <summary>Cancel the driver's background re-attach attempts for one
-    /// exact location. Safe to call when none exist.</summary>
-    public static void StopAttachAttempts(string host, int port, string busid)
+    /// exact location. Safe to call when none exist. Returns how many it
+    /// canceled, or -1 when no host controller answered.</summary>
+    public static int StopAttachAttempts(string host, int port, string busid) =>
+        StopAttachAttempts(host, new[] { (port, busid) });
+
+    /// <summary>The same for several locations on one handle. The driver
+    /// keys an attempt by the hash of host, port and bus id and cancels by
+    /// that exact hash (persistent.cpp reattach_req_remove), so every
+    /// location is one request. It reports what it canceled in the
+    /// request's last field, <c>int count</c> (vhci.h
+    /// stop_attach_attempts, the same in all three tags).</summary>
+    public static int StopAttachAttempts(string host, IReadOnlyCollection<(int Port, string BusId)> locations)
     {
+        if (locations.Count == 0) return 0;
         try
         {
             using var h = Open();
-            var layout = Probe(h.Handle, out _, out _);
+            Layout layout = Volatile.Read(ref s_layout) ?? Keep(Probe(h.Handle, out _, out _));
+            bool probed = false;
             var buf = new byte[layout.StopSize];
-            BitConverter.GetBytes((uint)layout.StopSize).CopyTo(buf, 0);
-            WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
-            DeviceIoControl(h.Handle, STOP_ATTACH_ATTEMPTS, buf, (uint)buf.Length,
-                buf, (uint)buf.Length, out _, IntPtr.Zero);
+            int total = 0;
+            foreach (var (port, busid) in locations)
+            {
+                if (!TryStop(h.Handle, layout, buf, host, port, busid))
+                {
+                    // A kept layout the driver no longer speaks fails the
+                    // size check. Probe once and try again.
+                    if (probed) continue;
+                    probed = true;
+                    layout = Keep(Probe(h.Handle, out _, out _));
+                    buf = new byte[layout.StopSize];
+                    if (!TryStop(h.Handle, layout, buf, host, port, busid)) continue;
+                }
+                total += BitConverter.ToInt32(buf, layout.StopSize - 4);
+            }
+            return total;
         }
-        catch { /* cleanup path; absence of the driver is fine */ }
+        catch { return -1; /* cleanup path; absence of the driver is fine */ }
+    }
+
+    private static Layout Keep(Layout layout)
+    {
+        Volatile.Write(ref s_layout, layout);
+        return layout;
+    }
+
+    private static bool TryStop(IntPtr handle, Layout layout, byte[] buf, string host, int port, string busid)
+    {
+        Array.Clear(buf);
+        BitConverter.GetBytes((uint)layout.StopSize).CopyTo(buf, 0);
+        WriteLocation(buf, HeaderSize + layout.BusIdOffset, busid, port.ToString(), host);
+        return DeviceIoControl(handle, STOP_ATTACH_ATTEMPTS, buf, (uint)buf.Length,
+            buf, (uint)buf.Length, out _, IntPtr.Zero);
     }
 
     /// <summary>Rows from GET_IMPORTED_DEVICES: (port, busid, service,

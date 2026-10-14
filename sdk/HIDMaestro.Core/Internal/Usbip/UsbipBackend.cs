@@ -39,6 +39,10 @@ internal static class UsbipBackend
         SweepStaleOnce(server.Port);
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
+        // A re-attach attempt left for this location by a server that held
+        // the port before would import the device the moment it is
+        // registered, and this create's own attach would then find it busy.
+        VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
         server.Register(device);
         try
         {
@@ -86,7 +90,9 @@ internal static class UsbipBackend
     /// <summary>Plug out every import in the SDK's port range whose server
     /// no longer listens, and cancel the re-attach attempts against those
     /// ports. Covers programs of every version: a v1.12.0 server listens the
-    /// same way.</summary>
+    /// same way. This process's own port counts as gone for the attempts:
+    /// whatever the driver keeps against it was left by the program that
+    /// held the port before.</summary>
     internal static void DetachImportsOfDeadServers()
     {
         try
@@ -101,15 +107,19 @@ internal static class UsbipBackend
                 if (port == own || listening.Contains(port)) continue;
                 VhciClient.Detach(row.Port);
             }
+            var locations = new List<(int, string)>();
             for (int port = UsbipServer.BasePort; port < UsbipServer.BasePort + UsbipServer.PortRange; port++)
             {
-                if (port == own || listening.Contains(port)) continue;
-                for (int devnum = 1; devnum <= 8; devnum++)
-                    VhciClient.StopAttachAttempts("127.0.0.1", port, $"1-{devnum}");
+                if (port != own && listening.Contains(port)) continue;
+                foreach (string busId in s_legacyBusIds) locations.Add((port, busId));
             }
+            VhciClient.StopAttachAttempts("127.0.0.1", locations);
         }
         catch { /* best-effort recovery */ }
     }
+
+    // The bus ids a server before v1.13.0 canceled in its own sweep.
+    private static readonly string[] s_legacyBusIds = { "1-1", "1-2", "1-3", "1-4", "1-5", "1-6", "1-7", "1-8" };
 
     /// <summary>One dead program's composite: its import, found by the
     /// server port and bus id it was attached with, and the re-attach
@@ -121,11 +131,15 @@ internal static class UsbipBackend
         {
             if (!VhciClient.IsAvailable()) return;
             string busId = $"1-{transportIndex + 1}";
-            if (ListeningLoopbackPorts().Contains(serverPort)) return;   // the port has a new, live server
-            foreach (var row in VhciClient.GetImportedDevices())
-                if (row.Host == "127.0.0.1" && row.Service == serverPort.ToString() && row.BusId == busId
-                    && (vhciPort <= 0 || row.Port == vhciPort))
-                    VhciClient.Detach(row.Port);
+            // A port with a listener has a new, live server, whose imports
+            // stay. The attempts go all the same: canceling one never
+            // touches an import, and this record is the last thing that
+            // names the location.
+            if (!ListeningLoopbackPorts().Contains(serverPort))
+                foreach (var row in VhciClient.GetImportedDevices())
+                    if (row.Host == "127.0.0.1" && row.Service == serverPort.ToString() && row.BusId == busId
+                        && (vhciPort <= 0 || row.Port == vhciPort))
+                        VhciClient.Detach(row.Port);
             VhciClient.StopAttachAttempts("127.0.0.1", serverPort, busId);
         }
         catch { }

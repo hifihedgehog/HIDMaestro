@@ -8,6 +8,8 @@
 //   create pad <pid> <key|->    a custom gamepad, VID BEEF and this PID
 //   create xbox - <key|->       xbox-360-wired
 //   create composite - <key|->  dualsense-composite (USB/IP)
+//   createat <slot> <kind> <pid|->  CreateControllerAt(slot, profile), the
+//                               same kinds as create, no identity key
 //   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
 //                               button <btn> held, X at <x>, and with
 //                               ramp 1, X stepping by one count a frame
@@ -77,13 +79,7 @@ internal static class Peer
                     case "create":
                     {
                         s_ctx ??= NewContext();
-                        HMProfile profile = a[1] switch
-                        {
-                            "pad" => Pad(Convert.ToUInt16(a[2], 16)),
-                            "xbox" => s_ctx.GetProfile("xbox-360-wired")!,
-                            "composite" => s_ctx.GetProfile("dualsense-composite")!,
-                            _ => throw new ArgumentException(a[1]),
-                        };
+                        HMProfile profile = Profile(s_ctx, a[1], a[2]);
                         string? key = a.Length > 3 && a[3] != "-" ? a[3] : null;
                         var sw = Stopwatch.StartNew();
                         HMController c = s_ctx.CreateController(profile, key);
@@ -92,6 +88,18 @@ internal static class Peer
                         string index = Get(c, "Index") ?? "?";
                         Reply($"OK create index={index} transport={Get(c, "TransportIndex") ?? index} " +
                               $"instance={Get(c, "InstanceId") ?? "none"} key={c.IdentityKey} ms={ms}");
+                        break;
+                    }
+                    case "createat":
+                    {
+                        s_ctx ??= NewContext();
+                        HMProfile profile = Profile(s_ctx, a[2], a[3]);
+                        var sw = Stopwatch.StartNew();
+                        HMController c = s_ctx.CreateControllerAt(int.Parse(a[1], CultureInfo.InvariantCulture), profile);
+                        long ms = sw.ElapsedMilliseconds;
+                        lock (s_live) s_live.Add(c);
+                        string index = Get(c, "Index") ?? "?";
+                        Reply($"OK createat index={index} transport={Get(c, "TransportIndex") ?? index} key={c.IdentityKey} ms={ms}");
                         break;
                     }
                     case "stream":
@@ -212,6 +220,14 @@ internal static class Peer
         StopStream();
         return 0;
     }
+
+    static HMProfile Profile(HMContext ctx, string kind, string pid) => kind switch
+    {
+        "pad" => Pad(Convert.ToUInt16(pid, 16)),
+        "xbox" => ctx.GetProfile("xbox-360-wired")!,
+        "composite" => ctx.GetProfile("dualsense-composite")!,
+        _ => throw new ArgumentException(kind),
+    };
 
     /// <summary>A gamepad nothing else on a machine has: VID BEEF, one stick, eight buttons.</summary>
     public static HMProfile Pad(ushort pid) =>
