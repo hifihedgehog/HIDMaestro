@@ -75,10 +75,10 @@
 //      a running program's own composite losing its connection.
 //      SectionV.cs has the detail.
 //   X. Machine-wide names a program that is not elevated creates first:
-//      the deploy lock, the registry ledger's lock and the claim pipes.
-//      Each is created by a thread of this probe that impersonates such a
-//      program, and HIDMaestro's create and sweep neither wait on them nor
-//      take them for a running program's. SectionX.cs.
+//      the deploy lock, the registry ledger's lock, the claim pipes, and a
+//      transport index's events and sections. Each is created by a thread
+//      of this probe that impersonates such a program, and HIDMaestro's
+//      deploy, sweep and create neither hang nor use it. SectionX.cs.
 //   S71 runs A to H, J to V and X.
 //
 // Each program is a peer process (this binary with --peer, or the same

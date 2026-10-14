@@ -1163,7 +1163,8 @@ internal static partial class SharedMemoryIO
     private const uint PIPE_TYPE_BYTE = 0x00000000;
     private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
     private const uint FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
-    private const int ERROR_ACCESS_DENIED = 5, ERROR_PIPE_BUSY = 231;
+    private const int ERROR_FILE_NOT_FOUND = 2, ERROR_ACCESS_DENIED = 5, ERROR_PIPE_BUSY = 231, ERROR_ALREADY_EXISTS = 183;
+    private const uint READ_CONTROL = 0x00020000;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
     /// <summary>One instance of the owner pipe. The SDK never writes to it
@@ -1222,10 +1223,12 @@ internal static partial class SharedMemoryIO
         Marshal.StructureToPtr(sa, saPtr, false);
 
         IntPtr ev;
+        int error;
         try
         {
             // dwFlags = 0 → auto-reset, not initially set.
-            ev = CreateEventExW(saPtr, name, 0, EVENT_MODIFY_STATE | SYNCHRONIZE);
+            ev = CreateEventExW(saPtr, name, 0, EVENT_MODIFY_STATE | SYNCHRONIZE | READ_CONTROL);
+            error = Marshal.GetLastPInvokeError();
         }
         finally
         {
@@ -1234,8 +1237,67 @@ internal static partial class SharedMemoryIO
         }
 
         if (ev == IntPtr.Zero)
-            throw new Win32Exception();
+            throw new Win32Exception(error);
+        // An event that already existed came from a controller of this index
+        // before, unless a program that is not elevated made it first, after
+        // the transport allocator looked (ForeignObjectAt). Its maker could
+        // wait on it and take the signals meant for the driver.
+        if (error == ERROR_ALREADY_EXISTS && !IsAdministrative(ev))
+        {
+            CloseHandle(ev);
+            throw new HMResourceInUseException(
+                $"{name} was created by a program that is not elevated, so a controller cannot use it. Create the controller again: it takes another transport index.",
+                name, null);
+        }
         return ev;
+    }
+
+    private static bool IsAdministrative(IntPtr handle)
+    {
+        using var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, ownsHandle: false);
+        return ObjectOwner.IsAdministrative(h);
+    }
+
+    // A transport index's named sections and events, by the part of the
+    // name before the index. The driver creates StopEvent and OutputEvent,
+    // the SDK the rest.
+    private static readonly string[] IndexSections = { "Input", "InputAck", "Output", "PidState", "Version" };
+    private static readonly string[] IndexEvents = { "InputEvent", "CompanionInputEvent", "InputAckEvent", "OutputEvent", "StopEvent" };
+
+    /// <summary>The first of a transport index's named sections and events
+    /// that a program that is not elevated made, or null when it made none.
+    /// Any local program can create a <c>Global\</c> event, or take a
+    /// section's name with an object of another kind, before HIDMaestro
+    /// does, and keep it. The driver and the SDK would then signal and wait
+    /// on objects that program holds, or fail to create theirs. The
+    /// transport allocator skips such an index. An object that exists and
+    /// opens as its own kind with an owner of SYSTEM, Administrators or
+    /// LocalService is one a controller of the index left
+    /// (<see cref="ObjectOwner"/>).</summary>
+    internal static string? ForeignObjectAt(int controllerIndex)
+    {
+        foreach (string kind in IndexSections)
+        {
+            string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
+            if (!Acceptable(OpenFileMappingW(READ_CONTROL, false, name))) return name;
+        }
+        foreach (string kind in IndexEvents)
+        {
+            string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
+            if (!Acceptable(OpenEventW(READ_CONTROL, false, name))) return name;
+        }
+        return null;
+    }
+
+    /// <summary>An open that found nothing, or found an object of the
+    /// expected kind owned by SYSTEM, Administrators or LocalService. An
+    /// open refused for access or for the kind of object counts as made by
+    /// someone else.</summary>
+    private static bool Acceptable(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return Marshal.GetLastPInvokeError() == ERROR_FILE_NOT_FOUND;
+        try { return IsAdministrative(handle); }
+        finally { CloseHandle(handle); }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1269,6 +1331,9 @@ internal static partial class SharedMemoryIO
 
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial IntPtr CreateEventExW(IntPtr lpEventAttributes, string lpName, uint dwFlags, uint dwDesiredAccess);
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr OpenFileMappingW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);
 
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial IntPtr OpenEventW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);

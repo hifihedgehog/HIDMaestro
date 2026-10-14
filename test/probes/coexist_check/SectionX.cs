@@ -29,6 +29,8 @@ internal static partial class Program
         SectionX2();
         Clean();
         SectionX3();
+        Clean();
+        SectionX4();
     }
 
     /// <summary>The deploy lock.</summary>
@@ -142,6 +144,87 @@ internal static partial class Program
         Check("X3: nothing the squatter made is left", !Native.PipeExists(index0) && !Native.PipeExists(identity));
     }
 
+    /// <summary>A transport index's events and sections.</summary>
+    static void SectionX4()
+    {
+        // An event the driver would wait on, created first with a DACL that
+        // lets its creator wait on it too.
+        const string inputEvent = @"Global\HIDMaestroInputEvent0";
+        var sq = new Squatter(s => s.Event(inputEvent));
+        try
+        {
+            Check($"X4: a program that is not elevated creates {inputEvent}", sq.Holds(inputEvent), sq.Describe());
+            using var p = PeerProcess.Start("X4a");
+            p.Send("install");
+            string c = p.Send("create pad F0E5 -");
+            Check("X4: a keyless create succeeds and leaves transport index 0", Ok(c) && PeerProcess.Field(c, "transport") != "0", c);
+            if (Ok(c))
+            {
+                p.Send("stream 0 0.5 125 0");
+                int taken = 0;
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 1000)
+                    if (Native.WaitForSingleObject(sq.Handle(inputEvent), 50) == 0) taken++;
+                p.Send("stopstream");
+                Check("X4: the squatter's event carries none of the controller's input signals", taken == 0, $"it took {taken} in 1 s");
+            }
+        }
+        finally { sq.Dispose(); }
+        Check("X4: nothing the squatter made is left", Native.OpenEventW(Native.SYNCHRONIZE, false, inputEvent) == IntPtr.Zero);
+        Clean();
+
+        // A section's name taken by another kind of object, which a program
+        // that cannot create a Global\ section can still do.
+        const string inputSection = @"Global\HIDMaestroInput0";
+        sq = new Squatter(s => s.Mutex(inputSection, hold: false));
+        try
+        {
+            Check($"X4: a program that is not elevated creates a mutex named {inputSection}", sq.Holds(inputSection), sq.Describe());
+            using var p = PeerProcess.Start("X4b");
+            p.Send("install");
+            string c = p.Send("create pad F0E6 -");
+            Check("X4: a keyless create succeeds on another transport index", Ok(c) && PeerProcess.Field(c, "transport") != "0", c);
+        }
+        finally { sq.Dispose(); }
+        Check("X4: nothing the squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, inputSection) == IntPtr.Zero);
+        Clean();
+
+        // A live controller's own objects, made by the SDK and the driver,
+        // all have an owner the transport allocator accepts, and stay
+        // acceptable once the controller is gone.
+        using (var p = PeerProcess.Start("X4c"))
+        {
+            p.Send("install");
+            string c = p.Send("create pad F0E7 -");
+            string? t = PeerProcess.Field(c, "transport");
+            Check("X4: a keyless create on a clean machine takes transport index 0", Ok(c) && t == "0", c);
+            if (!Ok(c) || t == null) return;
+            p.Send("stream 0 0.5 125 0");
+            Thread.Sleep(500);
+            var owners = new List<string>();
+            bool all = true;
+            foreach (var (n, section) in IndexObjects(int.Parse(t)))
+            {
+                string o = Native.OwnerOf(n, section);
+                owners.Add($"{n.Substring(7)} {o}");
+                if (o != "absent" && !Native.AdministrativeSid(o)) all = false;
+            }
+            Check("X4: every object of a live controller is owned by SYSTEM, Administrators or LocalService", all, string.Join(", ", owners));
+            p.Send("stopstream");
+            p.Send("dispose");
+            string again = p.Send("create pad F0E7 -");
+            Check("X4: the next keyless create gets transport index 0 back", Ok(again) && PeerProcess.Field(again, "transport") == t, again);
+        }
+    }
+
+    static IEnumerable<(string Name, bool Section)> IndexObjects(int index)
+    {
+        foreach (string s in new[] { "Input", "InputAck", "Output", "PidState", "Version" })
+            yield return ($@"Global\HIDMaestro{s}{index}", true);
+        foreach (string e in new[] { "InputEvent", "CompanionInputEvent", "InputAckEvent", "OutputEvent", "StopEvent" })
+            yield return ($@"Global\HIDMaestro{e}{index}", false);
+    }
+
     /// <summary>DeviceIdentity's token for a key: HM_ and the first eight
     /// bytes of the key's tagged SHA-256, big-endian.</summary>
     static string IdentityToken(string key)
@@ -210,6 +293,15 @@ internal static partial class Program
             if (Native.WaitForSingleObject(h, 0) == 0) _owned.Add(h);
         }
 
+        public void Event(string name)
+        {
+            IntPtr sa = Native.Sa(OpenToAll);
+            IntPtr h = Native.CreateEventW(sa, false, false, name);
+            _errors[name] = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            Native.FreeSa(sa);
+            if (h != IntPtr.Zero) _handles[name] = h;
+        }
+
         public void Pipe(string name)
         {
             var h = Native.CreatePipe(name, out int error);
@@ -224,6 +316,8 @@ internal static partial class Program
                 || (_handles.TryGetValue(name, out IntPtr h) && (!_toHold.Contains(name) || _owned.Contains(h))));
 
         public int Error(string name) => _errors.TryGetValue(name, out int e) ? e : -1;
+
+        public IntPtr Handle(string name) => _handles.TryGetValue(name, out IntPtr h) ? h : IntPtr.Zero;
 
         public string Describe() =>
             _failure != null ? $"{_failure.GetType().Name}: {_failure.Message}"

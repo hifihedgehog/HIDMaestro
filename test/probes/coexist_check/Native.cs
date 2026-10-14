@@ -527,13 +527,19 @@ internal static class Native
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr CreateMutexW(IntPtr sa, bool initialOwner, string name);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr CreateEventW(IntPtr sa, bool manualReset, bool initialState, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr OpenMutexW(uint access, bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(IntPtr h, uint ms);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool ReleaseMutex(IntPtr h);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr sd, IntPtr size);
+    [DllImport("advapi32.dll")]
+    static extern uint GetSecurityInfo(IntPtr h, int type, uint info, out IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr sd);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr mem);
-    internal const uint SYNCHRONIZE = 0x00100000;
+    internal const uint SYNCHRONIZE = 0x00100000, READ_CONTROL = 0x00020000;
 
     /// <summary>SECURITY_ATTRIBUTES for an SDDL string, freed by the caller
     /// with <see cref="FreeSa"/>.</summary>
@@ -553,6 +559,28 @@ internal static class Native
         LocalFree(Marshal.ReadIntPtr(sa, IntPtr.Size));
         Marshal.FreeHGlobal(sa);
     }
+
+    /// <summary>The owner of a named event or section as a SID string, or
+    /// "absent", or "error N" when it exists and does not open for
+    /// READ_CONTROL as that kind of object.</summary>
+    internal static string OwnerOf(string name, bool section)
+    {
+        IntPtr h = section ? OpenFileMappingW(READ_CONTROL, false, name) : OpenEventW(READ_CONTROL, false, name);
+        if (h == IntPtr.Zero)
+        {
+            int e = Marshal.GetLastWin32Error();
+            return e == ERROR_FILE_NOT_FOUND ? "absent" : $"error {e}";
+        }
+        try
+        {
+            if (GetSecurityInfo(h, 6, 1, out IntPtr owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out IntPtr sd) != 0) return "unreadable";
+            try { return new System.Security.Principal.SecurityIdentifier(owner).Value; }
+            finally { LocalFree(sd); }
+        }
+        finally { CloseHandle(h); }
+    }
+
+    internal static bool AdministrativeSid(string sid) => sid is "S-1-5-18" or "S-1-5-19" or "S-1-5-32-544";
 
     internal static bool LedgerHolds(string kind, string name)
     {

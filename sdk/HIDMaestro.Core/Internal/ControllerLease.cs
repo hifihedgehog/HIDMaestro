@@ -16,10 +16,11 @@ namespace HIDMaestro.Internal;
 /// machine, so a program running alone gets the numbers it always got, and
 /// the lowest free index otherwise. An index is free when its claim can be
 /// taken, no v1.12.0 program holds its owner pipe, no present device records
-/// it, and no USB/IP import of a program without an owner record uses it.
-/// Whether its input section exists says nothing: the driver host of a
-/// removed device can hold a section after the removal, until a process
-/// that called XInput on the device polls XInput again or exits.</para>
+/// it, no USB/IP import of a program without an owner record uses it, and
+/// none of its named sections and events was made by a program that is not
+/// elevated. Whether its input section exists says nothing: the driver host
+/// of a removed device can hold a section after the removal, until a
+/// process that called XInput on the device polls XInput again or exits.</para>
 /// </summary>
 internal sealed class ControllerLease : IDisposable
 {
@@ -90,6 +91,11 @@ internal sealed class ControllerLease : IDisposable
                 try
                 {
                     if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(n))) continue;
+                    if (SharedMemoryIO.ForeignObjectAt(n) is { } squatted)
+                    {
+                        DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted} was made by a program that is not elevated");
+                        continue;
+                    }
 
                     DeviceIdentity identity;
                     if (keyedIdentity != null)
