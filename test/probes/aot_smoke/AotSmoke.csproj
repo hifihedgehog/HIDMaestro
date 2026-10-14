@@ -36,7 +36,13 @@
        compiler passes. The SDK's own build turns the same codes into errors
        (aot-analyzers.globalconfig), so a warning here comes from the app, a
        reference the SDK does not analyze, or a publish step. -->
+  <!-- A publish whose compile, trim and NativeAOT steps are current skips them
+       and prints none of their warnings, so the gate would pass on the second
+       build with the offending call still in the source. Each app's
+       intermediate directory is deleted first, which makes every publish run
+       those steps again. -->
   <Target Name="PublishSmokeApps" AfterTargets="Build" Condition="'$(HMSmokePublish)' != 'true'">
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\obj\$(Configuration)\%(HMSmokeApp.Identity)" />
     <Exec EnvironmentVariables="PATH=$(_HMSmokePath)" ConsoleToMSBuild="true" Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r %(HMSmokeApp.Rid) %(HMSmokeApp.Args) -p:HMSmokePublish=true -p:IntermediateOutputPath=obj\$(Configuration)\%(HMSmokeApp.Identity)\ -o &quot;$(OutDir)%(HMSmokeApp.Identity)&quot; --nologo -v:quiet">
       <Output TaskParameter="ConsoleOutput" ItemName="_HMSmokeOutput" />
     </Exec>
