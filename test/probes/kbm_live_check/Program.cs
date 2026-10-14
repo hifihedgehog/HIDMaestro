@@ -156,6 +156,21 @@ internal static class Program
         return IntPtr.Zero;
     }
 
+    /// <summary>"2x120 4x31 -2x200": each run of equal values and its length.</summary>
+    static string Runs(IEnumerable<int> values)
+    {
+        var parts = new List<string>();
+        int? cur = null; int n = 0;
+        foreach (int v in values)
+        {
+            if (v == cur) { n++; continue; }
+            if (cur is int c) parts.Add($"{c}x{n}");
+            cur = v; n = 1;
+        }
+        if (cur is int last) parts.Add($"{last}x{n}");
+        return string.Join(" ", parts);
+    }
+
     /// <summary>Wait for a device's X deltas to stop arriving, and return
     /// how many came, their sum and the highest running total.</summary>
     static (int Count, long Sum, long Peak) Settle(RawInputSink sink, IntPtr device, int expectCount, int timeoutMs)
@@ -450,6 +465,14 @@ internal static class Program
         {
             var (c, s, pk) = Settle(sink, devs[i], 500, 6000);
             Check($"mouse {i + 1}: every count arrived, 500 out and back", pk == 500 && s == 0, $"{c} messages, peak {pk}, sum {s}");
+            if (pk != 500 || s != 0)
+            {
+                // What arrived, as runs of equal deltas, and what any mouse
+                // outside the test did in the same window.
+                Console.WriteLine("    deltas: " + Runs(sink.Mice.Where(m => m.Device == devs[i]).Select(m => m.X)));
+                var others = sink.Mice.Where(m => !devs.Contains(m.Device) && (m.X != 0 || m.Y != 0)).ToList();
+                Console.WriteLine($"    other mice: {others.Count} moves, X sum {others.Sum(m => (long)m.X)}");
+            }
         }
 
         Console.WriteLine("\n== A, again: the same keys in reverse order ==");
