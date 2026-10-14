@@ -51,7 +51,7 @@ public sealed class HMDriverVersionException : InvalidOperationException
         : base($"The installed HIDMaestro driver {installed} is older than {minimum}, the oldest this SDK runs on, " +
                $"and it cannot be replaced while these use it: {string.Join("; ", blockers)}. " +
                "Close those programs, or remove their controllers with " +
-               "HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything), and call InstallDriver again.")
+               "HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true), and call InstallDriver again.")
     {
         InstalledVersion = installed;
         MinimumVersion = minimum;

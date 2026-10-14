@@ -210,7 +210,7 @@ public sealed partial class HMController : IDisposable
 
     // v1.3.5: vendor-blob output encoder state. Allocated lazily on the
     // first EncodeOutput call so consumers that never call it (input-only
-    // virtuals, output-via-OnOutputReceived consumers) skip the dictionary
+    // virtuals, output-via-OutputReceived consumers) skip the dictionary
     // alloc. Holds rolling counters for output direction: Sony BT effect
     // output's btTag increments stride-16 per write or real firmware drops
     // the packet.

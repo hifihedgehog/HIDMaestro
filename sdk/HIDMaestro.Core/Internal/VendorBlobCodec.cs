@@ -698,7 +698,7 @@ internal static class VendorBlobCodec
     // ── Decoder: bytes → parsed fields ────────────────────────────────────
 
     /// <summary>Decode a byte buffer into a parsed-field dictionary per the
-    /// spec. Used by HMController.OnOutputReceived to surface incoming output
+    /// spec. Used by HMController.OutputPollLoop to surface incoming output
     /// reports as named values to consumers via the OutputDecoded event.</summary>
     public static (Dictionary<string, object> fields, bool crcValid) Decode(
         ExtendedReportSpec spec,

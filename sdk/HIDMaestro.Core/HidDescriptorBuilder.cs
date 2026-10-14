@@ -431,7 +431,7 @@ public sealed class HidDescriptorBuilder
     /// outside the standard sticks-and-triggers layout: throttle sliders,
     /// rudders, separate brake/throttle/clutch pedals, steering wheels,
     /// flight-stick rudder pedals, etc. The matching <see cref="HMAxis"/>
-    /// becomes addressable via <see cref="HMGamepadState.ExtraAxes"/> at
+    /// becomes addressable via <see cref="HMGamepadState.Axes"/> at
     /// runtime.
     ///
     /// <para><c>bits</c> must be a multiple of 8 to keep the report byte-aligned

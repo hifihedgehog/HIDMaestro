@@ -122,7 +122,7 @@ public sealed class HMProfile
 
 
     /// <summary>Every analog axis the descriptor declares, addressable by
-    /// HID usage via <see cref="HMGamepadState.ExtraAxes"/>. Empty list
+    /// HID usage via <see cref="HMGamepadState.Axes"/>. Empty list
     /// when the profile has no descriptor or no recognized axes. Stable
     /// across repeated calls: the underlying layout is parsed once and
     /// cached.</summary>

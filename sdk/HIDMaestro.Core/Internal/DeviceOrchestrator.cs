@@ -354,7 +354,7 @@ internal static partial class DeviceOrchestrator
     //                  did not dispose
     //
     //   3. RemoveEverything
-    //        Trigger:  RemoveAllVirtualControllers(HMCleanupScope.Everything)
+    //        Trigger:  RemoveAllVirtualControllers(HMCleanupScope.Everything, bool)
     //        Scope:    every HIDMaestro device, import and ledger entry on
     //                  the machine, whoever made it. The pre-1.13.0 sweep.
     //

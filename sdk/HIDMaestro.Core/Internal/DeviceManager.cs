@@ -568,7 +568,7 @@ public static partial class DeviceManager
                     {
                         OwnerCensus.Owner.Unknown =>
                             "a program built on HIDMaestro older than 1.12.0, which may still be running. " +
-                            "If it is not, remove the device with HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything)",
+                            "If it is not, remove the device with HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true)",
                         OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
                         _ => "a running program",
                     };

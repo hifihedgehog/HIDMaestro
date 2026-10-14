@@ -5,6 +5,11 @@
 //      P/Invoke is a LibraryImport stub generated at build time.
 //   2. SetupDiGetClassDevsW's Enumerator is PCWSTR in setupapi.h, so both
 //      declarations take a pointer-sized value, not a uint.
+//   3. Every "Type.Member" and "Type.Method(args)" an SDK string, comment or
+//      XML doc names resolves in the built assembly, and a call with
+//      arguments matches an overload that takes that many, under those names.
+//      A message that names a call which does not compile sends a program to
+//      write code that cannot build.
 //
 // live (needs elevation, run through the bench): creates an Xbox 360 wired
 // controller with HIDMAESTRO_DIAG=1 and reads the SDK's own XInput slot wait
@@ -109,8 +114,98 @@ internal static class Program
                   $"declared {p.ParameterType.Name}");
         }
 
+        // 3. Every named member exists, with an overload of the named shape.
+        var types = new Dictionary<string, Type>();
+        foreach (var t in asm.GetTypes())
+            if (!t.IsNested && !types.ContainsKey(t.Name)) types[t.Name] = t;
+
+        var rx = new Regex(@"(?<![\w.])(?<type>HM[A-Za-z0-9]+|DeviceOrchestrator|DeviceManager|OwnerSweep)\.(?<member>[A-Za-z_]\w*)(?<call>\((?<args>[^()\r\n]*)\))?");
+        var bad = new List<string>();
+        int named = 0;
+        const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static
+                               | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+        foreach (string f in sources)
+        {
+            string[] lines = File.ReadAllLines(f);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                foreach (Match m in rx.Matches(lines[i]))
+                {
+                    if (!types.TryGetValue(m.Groups["type"].Value, out var type)) continue;
+                    string member = m.Groups["member"].Value;
+                    // "DeviceOrchestrator.cs:889" names a file. "Pressure*" names a family.
+                    if (member == "cs") continue;
+                    int after = m.Index + m.Length;
+                    if (!m.Groups["call"].Success && after < lines[i].Length && lines[i][after] == '*') continue;
+                    var found = type.GetMember(member, all);
+                    named++;
+                    string where = $"{Path.GetRelativePath(sdk, f)}:{i + 1}";
+                    if (found.Length == 0) { bad.Add($"{where}  {m.Value}  (no such member)"); continue; }
+                    if (!m.Groups["call"].Success) continue;
+                    var methods = found.OfType<MethodBase>().ToList();
+                    if (methods.Count == 0) continue;
+                    var argList = SplitArgs(m.Groups["args"].Value.Trim());
+                    var argNames = argList.Select(a => Regex.Match(a, @"^([A-Za-z_]\w*)\s*:(?!:)"))
+                                          .Where(x => x.Success).Select(x => x.Groups[1].Value).ToList();
+                    bool ok = methods.Any(mb =>
+                    {
+                        var ps = mb.GetParameters();
+                        int required = ps.Count(p => !p.IsOptional);
+                        if (argList.Count < required || argList.Count > ps.Length) return false;
+                        if (!argNames.All(n => ps.Any(p => p.Name == n))) return false;
+                        for (int a = 0; a < argList.Count && a < ps.Length; a++)
+                        {
+                            var want = InferType(argList[a], types);
+                            if (want != null && !(Nullable.GetUnderlyingType(ps[a].ParameterType) ?? ps[a].ParameterType).IsAssignableFrom(want))
+                                return false;
+                        }
+                        return true;
+                    });
+                    if (!ok) bad.Add($"{where}  {m.Value}  (no overload takes {argList.Count} argument(s)"
+                                     + (argNames.Count > 0 ? $" named {string.Join(",", argNames)}" : "") + ")");
+                }
+            }
+        }
+        Console.WriteLine($"  info: {named} Type.Member names checked");
+        foreach (string b in bad) Console.WriteLine("    " + b);
+        Check("every method or property an SDK message names exists as written", bad.Count == 0, $"{bad.Count} unresolved");
+
         Console.WriteLine(s_failures == 0 ? $"=== ALL PASS ({s_total}) ===" : $"=== FAIL: {s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    // The type an argument names: a literal, an enum member, or (in a cref) a type name.
+    // Null when the text says nothing certain, which skips the type check.
+    static Type? InferType(string arg, Dictionary<string, Type> types)
+    {
+        arg = Regex.Replace(arg, @"^[A-Za-z_]\w*\s*:(?!:)\s*", "");
+        if (arg is "true" or "false" or "bool") return typeof(bool);
+        if (arg == "byte") return typeof(byte);
+        if (arg == "int") return typeof(int);
+        if (arg == "ushort") return typeof(ushort);
+        if (arg == "uint") return typeof(uint);
+        if (arg == "string") return typeof(string);
+        if (types.TryGetValue(arg, out var t)) return t;
+        var m = Regex.Match(arg, @"^(HM\w+)\.\w+$");
+        if (m.Success && types.TryGetValue(m.Groups[1].Value, out var e) && e.IsEnum) return e;
+        return null;
+    }
+
+    // Top-level comma split that ignores commas inside <>, () and [].
+    static List<string> SplitArgs(string text)
+    {
+        var res = new List<string>();
+        if (text.Length == 0) return res;
+        int depth = 0, start = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c is '<' or '(' or '[') depth++;
+            else if (c is '>' or ')' or ']') depth--;
+            else if (c == ',' && depth == 0) { res.Add(text[start..i].Trim()); start = i + 1; }
+        }
+        res.Add(text[start..].Trim());
+        return res;
     }
 
     static int Live()

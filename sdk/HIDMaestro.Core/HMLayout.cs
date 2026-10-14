@@ -263,10 +263,8 @@ public sealed record HMSimpleStick
 /// exposes, surfaced via <see cref="HMProfile.Triggers"/>. Variable count:
 /// typical gamepad has 2 (LT/RT), a 3-pedal sim set has 3 (gas/brake/clutch),
 /// a handbrake has 1, a HOTAS may have throttle + twist rudder + slider.
-/// The first two entries are also reachable via the encoder's
-/// <see cref="HMGamepadState.LeftTrigger"/> / <see cref="HMGamepadState.RightTrigger"/>
-/// slots; additional triggers are encoder-reachable only via
-/// <see cref="HMGamepadState.ExtraAxes"/>.</summary>
+/// Every entry is driven the same way, through
+/// <see cref="HMGamepadState.Axes"/> keyed by the entry's axis.</summary>
 public sealed record HMSimpleTrigger
 {
     public HMAxis Axis { get; init; }

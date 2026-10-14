@@ -120,7 +120,7 @@ public class HidReportBuilder
     /// Generic Desktop (page 0x01) and Simulation Controls (page 0x02).
     /// Keyed by the encoded (page &lt;&lt; 8 | usage) pair so consumers can
     /// drive any descriptor-declared axis via
-    /// <see cref="HMGamepadState.ExtraAxes"/> regardless of whether it
+    /// <see cref="HMGamepadState.Axes"/> regardless of whether it
     /// also lands in a semantic slot. First field wins on duplicate
     /// usages: matches the <c>??=</c> behavior of the semantic
     /// classifier.</summary>
@@ -602,7 +602,7 @@ public class HidReportBuilder
             // Switch (0x39): Hat is its own input shape with the
             // descriptor's HatSwitch field handling, not part of the
             // analog-axis encoder pass. HMAxis.Hat exists for layout
-            // references (HMHatBinding.axis) but doesn't get registered
+            // references (HMHatBinding.Axis) but doesn't get registered
             // into AxisFields.
             if ((f.UsagePage == 0x01 || f.UsagePage == 0x02)
                 && !(f.UsagePage == 0x01 && f.Usage == 0x39))

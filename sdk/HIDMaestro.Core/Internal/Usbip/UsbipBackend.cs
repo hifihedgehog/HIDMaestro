@@ -166,7 +166,7 @@ internal static class UsbipBackend
     /// <para>A composite persona is a USB device behind the emulated host
     /// controller, and by design it carries no HIDMAESTRO token anywhere
     /// on its own devnode (#42). The device sweep in
-    /// <c>DeviceOrchestrator.RemoveAllVirtualControllers</c> walks the ROOT
+    /// <c>DeviceOrchestrator.RemoveEverything</c> walks the ROOT
     /// and SWD enumerators looking for exactly that token, so it can never
     /// see a composite: an SDK consumer that created one and exited left
     /// the device enumerated behind it.</para>

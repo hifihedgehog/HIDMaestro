@@ -397,7 +397,7 @@ public sealed class ControllerProfile
         return bytes;
     }
 
-    // v1.3.0 T10: lazy-cached parsed HidReportBuilder. HMController.ctor
+    // v1.3.0 T10: lazy-cached parsed HidReportBuilder. The HMController constructor
     // calls HidReportBuilder.Parse(descriptor, axisMap) on every
     // CreateController, which walks the descriptor byte-by-byte building
     // InputFields + ResolveSemantics + ApplyAxisMap. Same descriptor +
