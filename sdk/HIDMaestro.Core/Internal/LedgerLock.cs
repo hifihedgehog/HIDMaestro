@@ -9,8 +9,6 @@ namespace HIDMaestro.Internal;
 /// The machine-wide lock over the registry keys HIDMaestro shares with real
 /// devices: <see cref="RegistryLedger"/> and <see cref="OemNameOverrideStore"/>.
 /// Held by the calling thread until it calls <see cref="ReleaseMutex"/>.
-/// The ledger's own calls inside it take it again on the same thread, which
-/// both mutexes allow.
 ///
 /// <para>The lock is the mutex <see cref="MutexObject"/> in
 /// <see cref="AdminNamespace"/>, which a program that is not elevated can
@@ -25,9 +23,7 @@ namespace HIDMaestro.Internal;
 /// than the bound. A process pays that wait once: when it ran out, later
 /// acquisitions wait only a short bound that still covers a v1.12.0 write,
 /// until one takes the mutex or finds it owned by SYSTEM or Administrators
-/// again. An acquisition nested inside one on the same thread that went on
-/// without the mutex does not wait at all: its outer scope already writes
-/// without it.</para>
+/// again.</para>
 ///
 /// <para>Three ways remain for this process to write while a v1.12.0
 /// program holds the mutex:</para>
@@ -75,16 +71,6 @@ internal sealed partial class LedgerLock : IDisposable
     // acquisition, not five seconds each.
     private static volatile bool s_legacyHeldByOther;
 
-    // How many acquisitions this thread holds, and whether the outermost one
-    // went on without the legacy mutex. A nested acquisition inside such a
-    // scope skips the legacy mutex: waiting for it would serialize nothing,
-    // since the scope around it already writes without it. An outer scope
-    // that holds the legacy mutex takes it again at once, mutexes being
-    // recursive per thread.
-    [ThreadStatic] private static int t_depth;
-    [ThreadStatic] private static bool t_withoutLegacy;
-    private bool _counted;
-
     private LedgerLock(Mutex m) => _lock = m;
 
     /// <summary>Take the lock. An abandoned mutex is acquired: the ledger
@@ -118,14 +104,8 @@ internal sealed partial class LedgerLock : IDisposable
             m.Dispose();
             throw;
         }
-        var l = new LedgerLock(m) { _counted = true };
-        bool outermost = ++t_depth == 1;
-        try
-        {
-            if (outermost || !t_withoutLegacy) l.TakeLegacy(until);
-            else DeviceOrchestrator.LogDiag($"    ledger: nested in a scope that went on without {LegacyMutexName}, not waited for");
-            if (outermost) t_withoutLegacy = !l._legacyHeld;
-        }
+        var l = new LedgerLock(m);
+        try { l.TakeLegacy(until); }
         catch
         {
             l.ReleaseMutex();
@@ -229,11 +209,6 @@ internal sealed partial class LedgerLock : IDisposable
         {
             ReleaseMutexNative(_legacy);
             _legacyHeld = false;
-        }
-        if (_counted)
-        {
-            _counted = false;
-            if (--t_depth == 0) t_withoutLegacy = false;
         }
         _lock.ReleaseMutex();
     }
