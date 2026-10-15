@@ -116,6 +116,13 @@ internal static class OemNameOverrideStore
     public static void Release(ushort vid, ushort pid)
     {
         string vidPid = FormatVidPid(vid, pid);
+        // Nothing recorded for this device is nothing to restore. The read
+        // is HKLM-read-only, so this returns without the lock and without
+        // elevation, as it did before the lock moved behind an elevation
+        // check. Only a device with a pending record reaches the lock, and
+        // restoring it needs elevation anyway.
+        using (var pending = Registry.LocalMachine.OpenSubKey(PendingEntryPath(vidPid), writable: false))
+            if (pending is null) return;
         using var mutex = AcquireMutex();
         try { RestoreFromPendingStore(vidPid); }
         finally { mutex.ReleaseMutex(); }
@@ -123,6 +130,12 @@ internal static class OemNameOverrideStore
 
     public static int RecoverOrphans()
     {
+        // No pending records is 0, without the lock and without elevation,
+        // as before the lock moved behind an elevation check. A process
+        // that calls this at startup before it elevates gets 0, not a throw,
+        // when nothing is pending.
+        using (var probe = Registry.LocalMachine.OpenSubKey(PendingRoot, writable: false))
+            if (probe is null || probe.SubKeyCount == 0) return 0;
         using var mutex = AcquireMutex();
         try
         {
