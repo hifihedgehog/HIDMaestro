@@ -511,20 +511,32 @@ internal static class OwnerSweep
     {
         var removed = new List<string>();
         try { DeviceManager.RemoveOrphanHidChildren(removed); } catch { }
+        return OrphansGone(removed);
+    }
+
+    /// <summary>The wait for each orphaned HID child a sweep removed, then
+    /// <see cref="AllGone"/> over them. An orphan is a HID id the sweep
+    /// uninstalled, so its record has to go too.</summary>
+    internal static bool OrphansGone(List<string> removed)
+    {
         foreach (string id in removed)
-            DeviceManager.WaitRemovalComplete(id, uninstalls: false, TimeoutScale.Apply(OrphanRemovalWaitMs));
+            DeviceManager.WaitRemovalComplete(id, uninstalls: true, TimeoutScale.Apply(OrphanRemovalWaitMs));
         return AllGone(removed);
     }
 
     /// <summary>True when every removal has finished, by the SDK's one test
     /// of a finished removal (<see cref="DeviceManager.WaitRemovalComplete"/>),
-    /// asked once per id.</summary>
-    private static bool AllGone(List<string> ids)
+    /// asked per id with the short budget of a removal that has already run
+    /// (DeviceManager.QuickRemovalMs): a devnode still in the tree gets that
+    /// long for its REMOVED notification. A software device's record is not
+    /// asked for, since SwDeviceClose keeps it.</summary>
+    internal static bool AllGone(List<string> ids)
     {
         bool gone = true;
         foreach (string id in ids)
         {
-            if (DeviceManager.WaitRemovalComplete(id, uninstalls: false, budgetMs: 0)) continue;
+            if (DeviceManager.WaitRemovalComplete(id, uninstalls: !DeviceManager.KeepsRecord(id),
+                    TimeoutScale.Apply(DeviceManager.QuickRemovalMs))) continue;
             DeviceOrchestrator.LogDiag($"    {id} is still in the device tree");
             gone = false;
         }

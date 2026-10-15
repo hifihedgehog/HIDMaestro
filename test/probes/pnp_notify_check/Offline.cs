@@ -253,6 +253,22 @@ internal static class Offline
         finally { s.End(); }
     }
 
+    /// <summary>OwnerSweep's wait on what a sweep removed, for one id whose
+    /// removal the sequence plays from the call: the orphaned HID
+    /// children's wait (<paramref name="orphans"/>) or AllGone.</summary>
+    static (bool Gone, long Ms) Swept(Sequence s, string id, bool orphans)
+    {
+        s.Hook();
+        try
+        {
+            s.Begin();
+            var ids = new List<string> { id };
+            bool gone = orphans ? OwnerSweep.OrphansGone(ids) : OwnerSweep.AllGone(ids);
+            return (gone, s.Now);
+        }
+        finally { s.End(); }
+    }
+
     static bool Within(long ms, long from) => ms >= from && ms < from + Slack;
 
     internal static int Run()
@@ -371,6 +387,23 @@ internal static class Offline
         var w11 = Complete(new Sequence { LeavesTree = 50, RecordGoneAt = null, RemovedAt = 150 }, uninstalls: false, 5000);
         Check("WaitRemovalComplete on a software device that keeps its record: out at 50, REMOVED at 150 -> finished at 150",
               w11.Done && Within(w11.Ms, 150), $"{w11.Done} at {w11.Ms} ms");
+        Check("an SWD id keeps its record, a ROOT or HID id does not",
+              DeviceManager.KeepsRecord(@"SWD\HIDMAESTRO\HM_0000") && !DeviceManager.KeepsRecord(@"ROOT\HIDCLASS\HM_0000")
+              && !DeviceManager.KeepsRecord(@"HID\VID_054C&PID_0CE6\1&2&0&0000"));
+
+        // The sweeps' and the exit's waits on what they removed, AllGone and
+        // the orphaned HID children's wait, are the removal test. A NORMAL
+        // locate alone passes a devnode out of the tree whose removal is
+        // still going.
+        var ag1 = Swept(new Sequence { OutOfTreeBefore = true, RecordGoneAt = 300 }, @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0000", orphans: true);
+        Check("orphan wait: a HID child out of the tree whose record goes at 300 -> gone at 300, not before",
+              ag1.Gone && Within(ag1.Ms, 300), $"{ag1.Gone} at {ag1.Ms} ms");
+        var ag2 = Swept(new Sequence { LeavesTree = 100, RemovedAt = 150, RecordGoneAt = 150 }, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK", orphans: false);
+        Check("AllGone: a ROOT devnode out of the tree at 100, REMOVED and its record gone at 150 -> gone at 150",
+              ag2.Gone && Within(ag2.Ms, 150), $"{ag2.Gone} at {ag2.Ms} ms");
+        var ag3 = Swept(new Sequence { OutOfTreeBefore = true, RecordGoneAt = null }, @"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK", orphans: false);
+        Check("AllGone: a software device out of the tree with its record kept -> gone at once",
+              ag3.Gone && ag3.Ms < 50, $"{ag3.Gone} at {ag3.Ms} ms");
 
         // The registration gate.
         var sG1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };

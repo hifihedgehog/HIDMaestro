@@ -1169,6 +1169,13 @@ public static partial class DeviceManager
         return watch.WaitWithin(uninstalls, budgetMs) != RemovalOutcome.NotGone;
     }
 
+    /// <summary>Whether an id names a software device, whose record
+    /// SwDeviceClose keeps: the <c>uninstalls</c> argument of
+    /// <see cref="WaitRemovalComplete"/> is false for these and true for
+    /// the ROOT and HID ids the SDK removes.</summary>
+    internal static bool KeepsRecord(string instanceId) =>
+        instanceId.StartsWith(@"SWD\", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The identity claim of the controller a phantom belongs to:
     /// its own token, or for a HID child its parent's. Null with
     /// <paramref name="heldElsewhere"/> false for a phantom older than
