@@ -72,9 +72,10 @@
 //        not count, and a sweep removes the device.
 //    Y15. The driver's values carry a key write time out of the range a
 //        FILETIME converts to. The census completes instead of throwing.
-//    Y16. A running program lets go of its input event, and the driver, past
-//        its idle handle reset, waits for that event to come back. The
-//        program is then killed. The driver records its owner pipe closed
+//    Y16. A running program lets go of its input event and sends input
+//        through its controller, whose own copy of the handle is now
+//        closed. The driver, past its idle handle reset, waits for that
+//        event to come back. The program is then killed. The driver records its owner pipe closed
 //        while it waits, as it does while input flows.
 //    Y17. A program's gamepad companion outlives it, the driver having
 //        recorded its watch ended. A v1.12.0 program then creates the same
@@ -383,6 +384,13 @@ internal static partial class Program
         Check("Y16: the driver's watch connects", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000), Y.ShowWatch(inst));
         string drop = p.Send($"dropinputevent {t}");
         Check("Y16: the program lets go of its input event", PeerProcess.Field(drop, "closed") == "1", drop);
+        // HMController keeps its own copy of the handle value and signals it
+        // on each frame. Send frames through it, so a copy that still held
+        // the event would keep the object alive and fail the next check.
+        p.Send("stream 1 0.5 125 0");
+        Thread.Sleep(100);
+        string sent = p.Send("stopstream");
+        Check("Y16: the program sends input after the drop", int.TryParse(PeerProcess.Field(sent, "n"), out int n) && n > 0, sent);
         // Eight idle 500 ms waits, then the driver closes the last handle and
         // waits for the event to come back.
         string input = $@"Global\HIDMaestroInputEvent{t}";
