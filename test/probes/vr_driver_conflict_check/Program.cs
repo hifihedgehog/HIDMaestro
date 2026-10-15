@@ -22,7 +22,11 @@
 // SteamVR discovery at a folder whose vrpathreg.exe is not a program and
 // registers, then, for the elevated half of a split token, checks the write
 // carries the user's rights and no more and leaves the calling thread as it
-// found it. It restores the two HKLM values it changes. Exit 0 PASS / 1 FAIL.
+// found it. It restores the two HKLM values it changes, removes the driver
+// folder it extracted when there was none before, and first repairs a
+// SteamVR hint a killed run left pointing at its own fake folder. While
+// SteamVR runs, section 4 is skipped. Exit 0 PASS, 1 FAIL, 2 when section 4
+// was skipped and everything else passed.
 
 using System;
 using System.Collections.Generic;
@@ -62,6 +66,7 @@ internal static class Program
         // instead of showing a dialog.
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
+        RepairLeftoverHint();
         string root = Path.Combine(Path.GetTempPath(), "hm-vr-conflict-" + Guid.NewGuid().ToString("N"));
         string? saved = Environment.GetEnvironmentVariable("VR_PATHREG_OVERRIDE");
         try
@@ -81,8 +86,34 @@ internal static class Program
         Console.WriteLine($"  this machine's own registry: {(live.Count == 0 ? "no conflict" : string.Join(", ", live))}");
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
-        return s_failures == 0 ? 0 : 1;
+        return s_failures != 0 ? 1 : s_skipped ? 2 : 0;
     }
+
+    static bool s_skipped;
+
+    /// <summary>A run killed inside section 4 leaves the HKLM SteamVRPath
+    /// hint pointing at its own fake folder under the temp directory, whose
+    /// vrpathreg.exe discovery would keep returning. Remove such a hint: the
+    /// SDK finds SteamVR again without it.</summary>
+    static void RepairLeftoverHint()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro", writable: IsAdmin());
+        if (k?.GetValue("SteamVRPath") is not string hint) return;
+        string temp = Path.GetFullPath(Path.GetTempPath());
+        bool ours = hint.StartsWith(temp, StringComparison.OrdinalIgnoreCase)
+                    && hint.Contains("hm-vr-conflict-", StringComparison.OrdinalIgnoreCase)
+                    && hint.EndsWith("FakeSteamVR", StringComparison.OrdinalIgnoreCase);
+        if (!ours) return;
+        if (!IsAdmin())
+        {
+            Console.WriteLine($"  a killed run left the SteamVRPath hint at {hint}. Run elevated to remove it.");
+            return;
+        }
+        k!.DeleteValue("SteamVRPath", throwOnMissingValue: false);
+        Console.WriteLine($"  removed the SteamVRPath hint a killed run left at {hint}");
+    }
+
+    static bool IsAdmin() => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
     // ── 1. Name conflicts ───────────────────────────────────────────────
 
@@ -324,7 +355,10 @@ internal static class Program
         }
         if (HMVR.IsSteamVRRunning)
         {
-            Check("SteamVR is stopped, so the driver folder can be refreshed", false, "vrserver is running");
+            // The driver folder cannot be refreshed under a running SteamVR,
+            // and this machine's own SteamVR is not the probe's to stop.
+            Console.WriteLine("  [SKIP] section 4: SteamVR is running on this machine");
+            s_skipped = true;
             return;
         }
         PlantedTool(root);
@@ -362,6 +396,9 @@ internal static class Program
         using var k = Registry.LocalMachine.CreateSubKey(Key);
         object? savedHint = k.GetValue(Hint);
         object? savedGate = k.GetValue(Gate);
+        // Deleting the gate makes registration extract the driver. A machine
+        // that never had the folder gets it back to absent afterward.
+        bool hadDriver = Directory.Exists(ExtractRoot);
         try
         {
             k.SetValue(Hint, fake);
@@ -383,9 +420,13 @@ internal static class Program
         {
             if (savedHint != null) k.SetValue(Hint, savedHint); else k.DeleteValue(Hint, throwOnMissingValue: false);
             if (savedGate != null) k.SetValue(Gate, savedGate); else k.DeleteValue(Gate, throwOnMissingValue: false);
+            if (!hadDriver)
+                try { Directory.Delete(ExtractRoot, recursive: true); } catch (DirectoryNotFoundException) { }
         }
         Check("the HKLM hint and gate are back as they were",
               Equals(k.GetValue(Hint), savedHint) && Equals(k.GetValue(Gate), savedGate));
+        Check("the driver folder is as it was before the run", Directory.Exists(ExtractRoot) == hadDriver,
+              hadDriver ? "it was there" : "it was not there");
     }
 
     /// <summary>The elevated half of a split token writes the user's file

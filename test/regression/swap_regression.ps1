@@ -1804,11 +1804,13 @@ function Scenario-Wgi-Mapping {
 # VR_PATHREG_OVERRIDE at path registries of its own, so the real one is
 # never touched. Elevated, it also points discovery at a SteamVR folder
 # whose vrpathreg.exe is not a program and registers, and checks the write
-# has the user's rights and no more. It needs SteamVR stopped and restores
-# the two HKLM values it changes.
+# has the user's rights and no more and leaves the calling thread as it
+# found it. It restores the two HKLM values it changes, and skips that part
+# (exit 2) while SteamVR runs.
 function Scenario-Vr-Driver-Conflict {
     Invoke-Probe -Dir 'vr_driver_conflict_check' -Exe 'VrDriverConflictCheck.exe' `
-                 -Message 'a foreign OpenVR driver under the hidmaestro name went unreported, HIDMaestro reported its own, or its OpenVR registration differed from vrpathreg''s bytes, ran a file from the SteamVR folder, or wrote with more than the user''s rights (see probe stdout)'
+                 -Message 'a foreign OpenVR driver under the hidmaestro name went unreported, HIDMaestro reported its own, or its OpenVR registration differed from vrpathreg''s bytes, ran a file from the SteamVR folder, or wrote with more than the user''s rights (see probe stdout)' `
+                 -SkipCodes 2
 }
 
 # S69: keyboard and mouse descriptors and packers, no devices (issue #67).
