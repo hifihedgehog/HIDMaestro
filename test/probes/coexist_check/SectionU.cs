@@ -255,10 +255,29 @@ internal static partial class Program
         Check("U: its devices are present and its configuration written", oldDevices.Count >= 2 && configThere,
               $"{string.Join(",", oldDevices)}, {config} {configThere}");
 
+        // The v1.12.0 controller's input frame and acknowledgement, at rest
+        // after a burst of input. The refused create must write neither.
+        string inputName = $@"Global\HIDMaestroInput{t}", ackName = $@"Global\HIDMaestroInputAck{t}";
+        old.Send("stream 0 0.7 60 0");
+        Thread.Sleep(500);
+        old.Send("stopstream");
+        Thread.Sleep(300);
+        byte[]? inBefore = Native.SectionBytes(inputName, InputSectionSize);
+        byte[]? ackBefore = Native.SectionBytes(ackName, AckSectionSize);
+        Check("U: the v1.12.0 controller's input section carries its frame",
+              inBefore != null && inBefore.Any(x => x != 0), inBefore == null ? "absent" : inBefore.Any(x => x != 0) ? "" : "all zero");
+
         string f7 = a.Send("go", 120_000);
         Check("U: the waiting create is refused as in use",
               !Ok(f7) && f7.Contains("HMResourceInUseException", StringComparison.Ordinal), f7);
         Thread.Sleep(2000);
+        byte[]? inAfter = Native.SectionBytes(inputName, InputSectionSize);
+        byte[]? ackAfter = Native.SectionBytes(ackName, AckSectionSize);
+        Check($"U: the refused create left {inputName} as it was",
+              inBefore != null && inAfter != null && inBefore.SequenceEqual(inAfter), FirstDifference(inBefore, inAfter));
+        Check($"U: and {ackName}",
+              ackBefore != null && ackAfter != null && ackBefore.SequenceEqual(ackAfter),
+              FirstDifference(ackBefore, ackAfter) + (ackBefore != null && ackBefore.All(x => x == 0) ? ", all zero before" : ""));
         var gone = oldDevices.Where(d => !Native.IsPresent(d)).ToList();
         Check("U: the v1.12.0 program's devices are all still present", gone.Count == 0,
               gone.Count == 0 ? "" : "gone: " + string.Join(",", gone));
@@ -311,6 +330,18 @@ internal static partial class Program
     sealed class Handle(IntPtr h) : IDisposable
     {
         public void Dispose() => Native.CloseHandle(h);
+    }
+
+    // HIDMAESTRO_SHARED_INPUT and the acknowledgement section (driver.h):
+    // 362 bytes, and 16 bytes of header with eight 84-byte release slots.
+    const int InputSectionSize = 362, AckSectionSize = 16 + 8 * 84;
+
+    static string FirstDifference(byte[]? before, byte[]? after)
+    {
+        if (before == null || after == null) return $"before {(before == null ? "absent" : "read")}, after {(after == null ? "absent" : "read")}";
+        for (int i = 0; i < before.Length; i++)
+            if (before[i] != after[i]) return $"byte {i}: 0x{before[i]:X2} then 0x{after[i]:X2}";
+        return "";
     }
 
     static bool Close(RegistryKey k)

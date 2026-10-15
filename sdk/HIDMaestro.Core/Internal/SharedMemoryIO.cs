@@ -333,9 +333,41 @@ internal static partial class SharedMemoryIO
                 return existing;
 
             string name = $@"Global\HIDMaestroInput{controllerIndex}";
-            (IntPtr h, IntPtr view) = CreateSection(name, SHARED_INPUT_SIZE);
+            IntPtr h = IntPtr.Zero, view = IntPtr.Zero;
             try
             {
+                // Issue #67: the owner pipe. The driver connects and keeps a
+                // read pending that never gets data. Windows closes these ends
+                // when this process ends, however it ends, and the read
+                // completes, which is how the driver learns to let go of the
+                // keys and buttons this process held. Best effort: without it
+                // the device keeps its last report until it is removed.
+                //
+                // The first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE.
+                // A v1.12.0 program holds this name for the index it uses and
+                // takes no claim, so failing here means one started on this index
+                // after the claim was checked. Both would write these sections,
+                // so the create stops instead, and before it writes anything:
+                // a section of this name that exists can be that program's,
+                // and the zeroing below would wipe its frame, its
+                // acknowledgement and its release frames.
+                var pipes = new List<IntPtr>();
+                for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
+                {
+                    IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}", first: k == 0);
+                    if (ph != INVALID_HANDLE_VALUE) { pipes.Add(ph); continue; }
+                    if (k == 0 && Marshal.GetLastPInvokeError() is ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY)
+                    {
+                        // The catch below releases what this call made.
+                        throw new HMResourceInUseException(
+                            $"Transport index {controllerIndex} is in use by a running program built on HIDMaestro 1.12.0, which started on it during this create. Create the controller again.",
+                            $"transport index {controllerIndex}", null);
+                    }
+                }
+                s_ownerPipes[controllerIndex] = pipes;
+
+                (h, view) = CreateSection(name, SHARED_INPUT_SIZE);
+
                 // Zero-init: pagefile-backed sections start zero already, but we
                 // explicitly write SeqNo=0 so a stale section from a previous
                 // run (under the same name) doesn't carry forward a non-zero
@@ -369,33 +401,6 @@ internal static partial class SharedMemoryIO
                 s_inputAckHandles[controllerIndex] = ah;
                 s_inputAckViews[controllerIndex] = av;
                 s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
-
-                // Issue #67: the owner pipe. The driver connects and keeps a
-                // read pending that never gets data. Windows closes these ends
-                // when this process ends, however it ends, and the read
-                // completes, which is how the driver learns to let go of the
-                // keys and buttons this process held. Best effort: without it
-                // the device keeps its last report until it is removed.
-                //
-                // The first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE.
-                // A v1.12.0 program holds this name for the index it uses and
-                // takes no claim, so failing here means one started on this index
-                // after the claim was checked. Both would write these sections,
-                // so the create stops instead.
-                var pipes = new List<IntPtr>();
-                for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
-                {
-                    IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}", first: k == 0);
-                    if (ph != INVALID_HANDLE_VALUE) { pipes.Add(ph); continue; }
-                    if (k == 0 && Marshal.GetLastPInvokeError() is ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY)
-                    {
-                        // The catch below releases what this call made.
-                        throw new HMResourceInUseException(
-                            $"Transport index {controllerIndex} is in use by a running program built on HIDMaestro 1.12.0, which started on it during this create. Create the controller again.",
-                            $"transport index {controllerIndex}", null);
-                    }
-                }
-                s_ownerPipes[controllerIndex] = pipes;
 
                 // v1.13.0: the version handshake (HIDMAESTRO_VERSION_INFO in
                 // driver.h). This SDK's half goes in now. The driver writes its
@@ -436,8 +441,8 @@ internal static partial class SharedMemoryIO
                 // the input section, and the other objects would keep the
                 // index's names alive in this process.
                 ReleaseInputExtrasLocked(controllerIndex);
-                UnmapViewOfFile(view);
-                CloseHandle(h);
+                if (view != IntPtr.Zero) UnmapViewOfFile(view);
+                if (h != IntPtr.Zero) CloseHandle(h);
                 throw;
             }
         }

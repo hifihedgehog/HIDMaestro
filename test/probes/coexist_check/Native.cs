@@ -249,6 +249,27 @@ internal static class Native
         finally { CloseHandle(h); }
     }
 
+    /// <summary>The first <paramref name="size"/> bytes of a named section,
+    /// or null when it does not exist.</summary>
+    internal static byte[]? SectionBytes(string name, int size)
+    {
+        IntPtr h = OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, name);
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            IntPtr v = MapViewOfFile(h, 0x0004, 0, 0, (UIntPtr)size);
+            if (v == IntPtr.Zero) return null;
+            try
+            {
+                var bytes = new byte[size];
+                Marshal.Copy(v, bytes, 0, size);
+                return bytes;
+            }
+            finally { UnmapViewOfFile(v); }
+        }
+        finally { CloseHandle(h); }
+    }
+
     /// <summary>Whether any process holds a handle to the named section.
     /// A section exists while one handle to it is open.</summary>
     internal static bool SectionExists(string name)
