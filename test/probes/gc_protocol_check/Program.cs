@@ -80,8 +80,8 @@ internal static class Program
 
             Console.WriteLine("-- the model");
             Probe.Check("four ports", ports.Count == 4, $"{ports.Count}");
-            Probe.Check("connections empty, wired, wireless, wirelessReceiverOnly",
-                ports.Connections.SequenceEqual(new[] { "empty", "wired", "wireless", "wirelessReceiverOnly" }),
+            Probe.Check("connections empty, wired, wireless, wirelessNotCommunicating",
+                ports.Connections.SequenceEqual(new[] { "empty", "wired", "wireless", "wirelessNotCommunicating" }),
                 string.Join(", ", ports.Connections));
             Probe.Check("one flag, rumblePower, on", ports.Flags.Names.SequenceEqual(new[] { "rumblePower" }) && ports.Flags["rumblePower"]);
             Probe.Check("one output per port, rumble", ports.OutputNames.SequenceEqual(new[] { "rumble" }));
