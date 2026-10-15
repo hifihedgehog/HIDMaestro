@@ -85,10 +85,11 @@
 //        adoption asks for is refused while the probe holds the HID child
 //        open. The driver watches the new program's pipe, the census reads
 //        its controller as a running program's, and a sweep leaves it.
-//    Y18. The same, with the v1.12.0 program streaming input without a
-//        pause from the moment its create returns, inside the driver's idle
-//        window, so the driver never maps the input section again. The
-//        driver watches the new program's pipe all the same.
+//    Y18. The same, with the dead program streaming input until it is
+//        killed, so the driver's idle window starts at the kill, and the
+//        v1.12.0 program streaming without a pause from the moment its
+//        create returns, inside that window. The driver never maps the input
+//        section again, and watches the new program's pipe all the same.
 //    Y19. Y13's squatter, holding the acknowledgement section as well, and
 //        then the dead program's device is added again, so a new driver
 //        context starts with no values. The section still carries the
@@ -456,6 +457,11 @@ internal static partial class Program
             var path = WaitPaths(0x045E, 0x0B00, 1, 10_000);
             cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
             Check($"{y}: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
+            // The driver's idle window counts from the last input, not from
+            // the kill. With the dead program streaming until it dies, the
+            // kill starts a full window of eight 500 ms waits, so a program
+            // that attaches and streams inside it gets no recycle and no map.
+            if (stream) p.Send("stream 1 0.5 250 1");
             p.Kill();
         }
         var killed = Stopwatch.StartNew();
@@ -466,8 +472,8 @@ internal static partial class Program
             string second = old.Send("create xinputhid - coexist-y-adopter-2");
             if (stream)
             {
-                // At once, before the driver's eight idle 500 ms waits end.
-                // Each frame wakes the worker, so it never recycles and never
+                // At once, before the window the kill started ends. Each
+                // frame wakes the worker, so it never recycles and never
                 // maps the section again.
                 old.Send("stream 1 0.5 250 1");
                 Check($"{y}: the program attaches and streams inside the driver's idle window",
