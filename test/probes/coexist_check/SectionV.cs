@@ -27,18 +27,21 @@
 //         imports the first one again on a new port. The first program's
 //         record names the new port, and its dispose removes its own
 //         composite and leaves the other program's.
-//      5. A running program's composite loses its connection, and the
-//         program's own sweep runs before the host controller's re-attach:
-//         the composite comes back. It loses it again and the program
-//         disposes it, and then again and the program exits without
-//         disposing it: each time no attempt for it is left.
-//      6. Another program's listener that answers a device-list request
-//         slowly, or claims more devices than a server exports, holds a
-//         query no longer than its one-second deadline and gets no list.
+//      5. A running program's composite, on bus id 1-1, loses its
+//         connection: its record's vhci port goes to 0, and the program's
+//         own sweep runs before the host controller's re-attach and the
+//         composite comes back. It loses it again and the program disposes
+//         it, and then again and the program exits without disposing it:
+//         each time no attempt for it is left.
+//      6. Another program's listener that never answers a device-list
+//         request, answers it slowly, or claims more devices than a server
+//         exports, holds a query no longer than its one-second deadline and
+//         gets no list.
 //         A program on this SDK is killed with composites on indices 9 to
 //         12, and a listener that never answers takes its port. A sweep
-//         asks that listener once, not once per composite, and keeps the
-//         killed program's record, the one thing naming those attempts.
+//         asks that listener once, not once per composite, leaves the
+//         attempts, and keeps the killed program's record, the one thing
+//         naming them.
 //         Once the listener is gone the next sweep cancels them and
 //         removes the record.
 //      7. Two programs each run a GameCube adapter. The first one's
@@ -342,6 +345,11 @@ internal static partial class Program
         string bus = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
         int port = RecordUsbipPort(p.Pid);
         touched.Add((port, bus));
+        // The program's own sweep cancels 1-1 to 1-8 on its port, a server
+        // before v1.13.0 having left no record. Only on one of those does
+        // the comeback check tell a sweep that leaves the program's exports
+        // from one that does not.
+        Check("V5: the composite has bus id 1-1, which the own-port sweep would cancel", bus == "1-1", bus);
         bool Attached() => Vhci.Imported().Any(r => r.Port == port && r.BusId == bus);
 
         bool Drop(string when)
@@ -354,6 +362,9 @@ internal static partial class Program
 
         if (!Drop("a first time")) return;
         var dropped = Stopwatch.StartNew();
+        int recorded = -1;
+        Check("V5: its record's vhci port goes to 0 with the drop",
+              WaitFor(() => (recorded = RecordVhciPort(p.Pid)) == 0, 3000), $"record {recorded}");
         string s = p.Send("sweep");
         Check("V5: the program's own sweep runs", Ok(s), s);
         Check($"V5: its composite {port}/{bus} comes back",
@@ -384,6 +395,12 @@ internal static partial class Program
         const int probePort = UsbipBasePort - 2;
         using (var q = PeerProcess.Start("V6-query"))
         {
+            using (new FakeServer(probePort, FakeServer.Kind.Silent))
+            {
+                string r = q.Send($"exports {probePort}");
+                Check("V6: a listener that never answers gets no list, within the deadline",
+                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < 2000, r);
+            }
             using (new FakeServer(probePort, FakeServer.Kind.Trickle))
             {
                 string r = q.Send($"exports {probePort}");
@@ -428,6 +445,9 @@ internal static partial class Program
             long ms = sw.ElapsedMilliseconds;
             Check("V6: a sweep asks the silent listener on the killed program's port once, not once per composite",
                   Ok(r) && ms < 2500, $"{r}, {ms} ms for {buses.Count} composites");
+            int kept = Vhci.Stop("127.0.0.1", port, buses[0]);
+            Check($"V6: the sweep leaves the attempt for {buses[0]}, since the listener did not say what it exports",
+                  kept == 1, $"{kept} canceled by the probe");
             Check("V6: and keeps the killed program's record, which names the attempts it left",
                   ownerId != null && Native.OwnerRecords().ContainsKey(ownerId));
         }
