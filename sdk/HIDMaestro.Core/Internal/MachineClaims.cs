@@ -391,45 +391,84 @@ internal static partial class MachineClaims
     internal static List<OwnerRecord> ReadAll()
     {
         var list = new List<OwnerRecord>();
+        RegistryKey? root = null;
+        string[] ids;
         try
         {
-            using var root = Registry.LocalMachine.OpenSubKey(RecordsRoot);
+            root = Registry.LocalMachine.OpenSubKey(RecordsRoot);
             if (root == null) return list;
-            foreach (string id in root.GetSubKeyNames())
+            ids = root.GetSubKeyNames();
+        }
+        catch (Exception e) when (IsRegistryFailure(e))
+        {
+            root?.Dispose();
+            return list;
+        }
+        using (root)
+        {
+            foreach (string id in ids)
             {
-                using var rec = root.OpenSubKey(id);
-                if (rec == null) continue;
-                var controllers = new List<ControllerEntry>();
-                using (var cs = rec.OpenSubKey(ControllersKey))
+                // Another program's sweep deletes a dead record at any
+                // moment, and the next query on a key deleted under an open
+                // handle throws. That costs the record being deleted and
+                // no other: a record this walk skipped could be a running
+                // program's, which RemoveOrphaned would then not see.
+                try
                 {
-                    if (cs != null)
-                        foreach (string token in cs.GetSubKeyNames())
-                        {
-                            using var c = cs.OpenSubKey(token);
-                            if (c == null) continue;
-                            controllers.Add(new ControllerEntry(token,
-                                c.GetValue("TransportIndex") is int ti ? ti : -1,
-                                c.GetValue("Backend") as string ?? "umdf",
-                                c.GetValue("Profile") as string,
-                                c.GetValue("InstanceId") as string));
-                        }
+                    if (ReadRecord(root, id) is { } r) list.Add(r);
                 }
-                bool self = string.Equals(id, s_ownerId, StringComparison.OrdinalIgnoreCase);
-                list.Add(new OwnerRecord(id,
-                    rec.GetValue("Pid") is int pid ? pid : 0,
-                    rec.GetValue("Image") as string,
-                    rec.GetValue("StartTime") is long st ? st : 0,
-                    rec.GetValue("SdkVersion") as string,
-                    rec.GetValue("UsbipPort") is int up ? up : 0,
-                    self || IsHeld(OwnerPipeName(id)),
-                    self,
-                    controllers,
-                    rec.GetValue("StagingTag") as string));
+                catch (Exception e) when (IsRegistryFailure(e)) { }
             }
         }
-        catch { }
         return list;
     }
+
+    /// <summary>Called in <see cref="ReadAll"/> once a record's Controllers
+    /// key is open, before its entries are listed. Coexistence probe section
+    /// W sets it through reflection to delete the record there, as another
+    /// program's sweep can. Null outside the probe.</summary>
+    internal static Action<string>? AfterRecordOpened;
+
+    private static OwnerRecord? ReadRecord(RegistryKey root, string id)
+    {
+        using var rec = root.OpenSubKey(id);
+        if (rec == null) return null;
+        var controllers = new List<ControllerEntry>();
+        using (var cs = rec.OpenSubKey(ControllersKey))
+        {
+            AfterRecordOpened?.Invoke(id);
+            if (cs != null)
+                foreach (string token in cs.GetSubKeyNames())
+                {
+                    using var c = cs.OpenSubKey(token);
+                    if (c == null) continue;
+                    controllers.Add(new ControllerEntry(token,
+                        c.GetValue("TransportIndex") is int ti ? ti : -1,
+                        c.GetValue("Backend") as string ?? "umdf",
+                        c.GetValue("Profile") as string,
+                        c.GetValue("InstanceId") as string));
+                }
+        }
+        bool self = string.Equals(id, s_ownerId, StringComparison.OrdinalIgnoreCase);
+        return new OwnerRecord(id,
+            rec.GetValue("Pid") is int pid ? pid : 0,
+            rec.GetValue("Image") as string,
+            rec.GetValue("StartTime") is long st ? st : 0,
+            rec.GetValue("SdkVersion") as string,
+            rec.GetValue("UsbipPort") is int up ? up : 0,
+            self || IsHeld(OwnerPipeName(id)),
+            self,
+            controllers,
+            rec.GetValue("StagingTag") as string);
+    }
+
+    /// <summary>What RegistryKey throws when a key cannot be read:
+    /// SecurityException from OpenSubKey on access denied, and from the
+    /// queries IOException on any other error, a key deleted under an open
+    /// handle included, and UnauthorizedAccessException on access denied
+    /// (RegistryKey.cs, Win32Error).</summary>
+    private static bool IsRegistryFailure(Exception e) =>
+        e is System.IO.IOException or System.Security.SecurityException or UnauthorizedAccessException;
 
     /// <summary>The live record holding an identity token, for naming the
     /// owner in a refusal. Null when no live record lists it.</summary>

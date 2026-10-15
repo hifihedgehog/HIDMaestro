@@ -91,6 +91,13 @@
 //      killed program's port taken over, sweeps beside live programs, and
 //      a running program's own composite losing its connection.
 //      SectionV.cs has the detail.
+//   W. Sweeps, owner records and the exit handler against programs
+//      running beside them: a record deleted while another program reads
+//      the records, a device no record names whose claims a running
+//      program holds, a sweep whose create of another program lands
+//      between its census and its removal, a v1.12.0 program's later
+//      creates, a lease nothing references, and an exit while a create is
+//      in flight. SectionW.cs has the detail.
 //   X. Machine-wide names a program that is not elevated creates first:
 //      the deploy lock, the registry ledger's lock, the claim pipes, and a
 //      transport index's events and sections. Each is created by a thread
@@ -115,7 +122,7 @@
 //      claim during a sweep, the test certificate under the deploy lock, a
 //      bind whose devnode leaves, and a dispose during a bind.
 //      SectionZ.cs has the detail.
-//   S71 runs A to H, J to V, X, Y and Z.
+//   S71 runs A to H and J to Z.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -190,7 +197,7 @@ internal static partial class Program
         Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVXYZ";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         // X8 churns devices with v1.12.0 code and runs only inside lane T's
         // sandbox. Named anywhere else, the whole run stops here, before
         // any cleanup, deploy or section touches the machine.
@@ -232,6 +239,7 @@ internal static partial class Program
             ('T', "a driver set a deploy left incomplete", SectionT),
             ('U', "a create that fails after its claims", SectionU),
             ('V', "re-attach attempts a killed composite program leaves", SectionV),
+            ('W', "sweeps, owner records and the exit handler", SectionW),
             ('X', "machine-wide names a program that is not elevated creates first", SectionX),
             ('Y', "the driver's events and a faked v1.12.0 owner pipe", SectionY),
             ('Z', "the transport's install and repair, the machine-wide locks and the WinUSB binding", SectionZ),

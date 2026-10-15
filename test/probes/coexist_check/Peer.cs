@@ -69,6 +69,10 @@
 //   outputs on                  note the Stopwatch timestamp of every
 //                               OutputReceived on the live controllers
 //   outputs                     reply with those timestamps, t=a,b,...
+//   readallrace                 write three owner records of a killed
+//                               program, delete the first while the SDK's
+//                               MachineClaims.ReadAll reads it, and reply
+//                               listed=<how many of the other two it read>
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
 //   staleport <n>               set the last controller's remembered vhci
@@ -523,6 +527,9 @@ internal static class Peer
                               : $"OK releases on={((bool)read.Invoke(null, new object[] { int.Parse(a[1]) })! ? 1 : 0)}");
                         break;
                     }
+                    case "readallrace":
+                        Reply(ReadAllRace());
+                        break;
                     case "threads":
                         Reply($"OK threads n={CountThreads(a[1])}");
                         break;
@@ -709,6 +716,53 @@ internal static class Peer
             parts.Add($"{Get(g, "Key")}|{Get(g, "ControllerIndex")}|{Get(g, "Owner")}|watch={watch}");
         }
         return parts.Count == 0 ? "OK census" : "OK census " + string.Join(' ', parts);
+    }
+
+    /// <summary>Three records the way a killed program on this SDK leaves
+    /// them, read by the SDK's MachineClaims.ReadAll while its
+    /// AfterRecordOpened hook deletes the first, as another program's sweep
+    /// deletes a dead record. The ids sort after any GUID's, in this order.</summary>
+    static string ReadAllRace()
+    {
+        var claims = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.MachineClaims");
+        var hook = claims?.GetField("AfterRecordOpened", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+        var readAll = claims?.GetMethod("ReadAll", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+        if (hook == null || readAll == null) return "ERR readallrace no MachineClaims.ReadAll hook";
+        const string root = @"SOFTWARE\HIDMaestroOwners";
+        string[] ids = { "ffffffffffffffffffffffffffff0001", "ffffffffffffffffffffffffffff0002", "ffffffffffffffffffffffffffff0003" };
+        for (int i = 0; i < ids.Length; i++)
+        {
+            using var r = Microsoft.Win32.Registry.LocalMachine.CreateSubKey($@"{root}\{ids[i]}");
+            r.SetValue("Pid", 0, Microsoft.Win32.RegistryValueKind.DWord);
+            r.SetValue("SdkVersion", "1.13.0", Microsoft.Win32.RegistryValueKind.String);
+            using var c = r.CreateSubKey($@"Controllers\HM_COEXISTW{i}");
+            c.SetValue("TransportIndex", 4000 + i, Microsoft.Win32.RegistryValueKind.DWord);
+            c.SetValue("Backend", "umdf", Microsoft.Win32.RegistryValueKind.String);
+        }
+        bool deleted = false;
+        hook.SetValue(null, (Action<string>)(id =>
+        {
+            if (deleted || id != ids[0]) return;
+            deleted = true;
+            Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree($@"{root}\{ids[0]}", throwOnMissingSubKey: false);
+        }));
+        int listed = 0;
+        try
+        {
+            foreach (object r in (System.Collections.IEnumerable)readAll.Invoke(null, null)!)
+                if (Get(r, "OwnerId") is string id && (id == ids[1] || id == ids[2])) listed++;
+        }
+        finally
+        {
+            hook.SetValue(null, null);
+            foreach (string id in ids)
+                Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree($@"{root}\{id}", throwOnMissingSubKey: false);
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(root);
+            bool empty = k != null && k.SubKeyCount == 0 && k.ValueCount == 0;
+            k?.Close();
+            if (empty) Microsoft.Win32.Registry.LocalMachine.DeleteSubKey(root, throwOnMissingSubKey: false);
+        }
+        return $"OK readallrace listed={listed} deleted={(deleted ? 1 : 0)}";
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
