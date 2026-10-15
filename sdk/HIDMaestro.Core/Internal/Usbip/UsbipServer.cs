@@ -133,11 +133,60 @@ internal sealed class UsbipServer : IDisposable
             try { client = _listener.AcceptSocket(); }
             catch { break; }
             client.NoDelay = true;
+            // Any local program can connect. Each connection holds a thread
+            // only until its handshake deadline, and past MaxHandshakes in
+            // their handshake at once a new one is closed here, without a
+            // thread, unless the host controller opened it. The driver
+            // connects once per attach it runs, and runs them one at a time
+            // (vhci_ioctl.cpp, the sequential default queue), so a flood
+            // from user mode never turns an import away.
+            if (Interlocked.Increment(ref _handshakes) > MaxHandshakes && !IsHostController(client))
+            {
+                Interlocked.Decrement(ref _handshakes);
+                try { client.Close(); } catch { }
+                continue;
+            }
             var conn = new Connection(this, client);
             lock (_connections) _connections.Add(conn);
             var t = new Thread(conn.Run) { IsBackground = true, Name = "HMUsbipConn" };
             t.Start();
         }
+    }
+
+    /// <summary>How long a connection has to finish its handshake, the
+    /// device list it asks for or the import reply it waits for, before the
+    /// server closes it. The host controller sends its import request as
+    /// soon as it connects (vhci_ioctl.cpp connected, import_remote_device,
+    /// send_req_import). An imported connection may then sit idle for as
+    /// long as the device does, so the deadline ends with the
+    /// handshake.</summary>
+    internal const int HandshakeDeadlineMs = 5000;
+
+    /// <summary>Connections in their handshake at once before the server
+    /// closes new ones from user mode as they arrive.</summary>
+    internal const int MaxHandshakes = 16;
+
+    private int _handshakes;
+
+    /// <summary>Test-only. The probes that play the host controller over
+    /// loopback in process (usbip_server_check among them) own their
+    /// sockets in this process. Set,
+    /// it admits a connection this process owns as it admits the host
+    /// controller's. A program in another process cannot set it, and it
+    /// admits no connection another process owns.</summary>
+    internal static volatile bool AdmitImportsFromThisProcess;
+
+    /// <summary>Whether the host controller opened this connection: its
+    /// client end is owned by the System process (see
+    /// <see cref="TcpConnectionOwner"/>). Only that connection may import a
+    /// device, since an import carries the device's input, a keyboard
+    /// persona's typed keys included, and an import from anywhere else
+    /// would also turn the host controller's own away ST_DEV_BUSY.</summary>
+    private static bool IsHostController(Socket client)
+    {
+        int pid = TcpConnectionOwner.OfPeer(client);
+        return pid == TcpConnectionOwner.SystemProcessId
+            || (AdmitImportsFromThisProcess && pid == Environment.ProcessId);
     }
 
     private UsbipEmulatedDevice? Find(string busid)
@@ -186,10 +235,40 @@ internal sealed class UsbipServer : IDisposable
         private readonly object _sendLock = new();
         private UsbipEmulatedDevice? _device;
 
+        // The handshake's deadline. The timer closes the socket only while
+        // the connection is still in its handshake, and whichever of the
+        // timer and the handshake moves the phase first decides.
+        private const int InHandshake = 0, Answered = 1, Expired = 2;
+        private int _phase;
+        private readonly Timer _deadline;
+        // 1 while the connection counts toward the server's handshakes.
+        private int _counted = 1;
+
         public Connection(UsbipServer server, Socket socket)
         {
             _server = server;
             _socket = socket;
+            _deadline = new Timer(static s => ((Connection)s!).Expire(), this, HandshakeDeadlineMs, Timeout.Infinite);
+        }
+
+        private void Expire()
+        {
+            if (Interlocked.CompareExchange(ref _phase, Expired, InHandshake) == InHandshake) Close();
+        }
+
+        /// <summary>End the handshake: the deadline no longer applies. False
+        /// when the deadline came first and closed the socket.</summary>
+        private bool LeaveHandshake()
+        {
+            bool left = Interlocked.CompareExchange(ref _phase, Answered, InHandshake) == InHandshake;
+            _deadline.Dispose();
+            Uncount();
+            return left;
+        }
+
+        private void Uncount()
+        {
+            if (Interlocked.Exchange(ref _counted, 0) == 1) Interlocked.Decrement(ref _server._handshakes);
         }
 
         public void Close()
@@ -219,12 +298,23 @@ internal sealed class UsbipServer : IDisposable
                 ReadExactly(busidBuf);
                 string busid = UsbipProtocol.ReadFixedUtf8(busidBuf);
 
-                var device = _server.Find(busid);
                 Span<byte> reply = stackalloc byte[8 + UsbipProtocol.UsbipUsbDeviceSize];
+                if (!IsHostController(_socket))
+                {
+                    // ST_NA, before the bus id is looked up, so the answer
+                    // says nothing about what this server exports.
+                    UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StNa);
+                    Send(reply[..8]);
+                    return;
+                }
+
+                var device = _server.Find(busid);
                 if (device == null)
                 {
                     UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StNodev);
                     Send(reply[..8]);
+                    // The wait for the controller's close has its own bound.
+                    LeaveHandshake();
                     CancelAttempt(busid);
                     return;
                 }
@@ -248,6 +338,7 @@ internal sealed class UsbipServer : IDisposable
                 UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StOk);
                 WriteDeviceBlock(reply[8..], device);
                 Send(reply);
+                if (!LeaveHandshake()) return;
 
                 TrackVhciPort(device);
                 CommandLoop(device);
@@ -258,6 +349,8 @@ internal sealed class UsbipServer : IDisposable
             }
             finally
             {
+                _deadline.Dispose();
+                Uncount();
                 _device?.DetachConnection(this);
                 _server.OnConnectionClosed(this);
                 Close();

@@ -103,6 +103,8 @@ internal static partial class Program
         // transfer, to %TEMP%\HIDMaestro	eardown_diag.log. Set before the
         // SDK reads it.
         if (args.Contains("--diag")) Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", "1");
+        // The probe plays the host controller from this process.
+        UsbipServer.AdmitImportsFromThisProcess = true;
         Console.WriteLine("=== Switch 2 Pro Controller composite persona (issue #66) ===");
 
         using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())

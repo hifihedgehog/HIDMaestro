@@ -59,8 +59,11 @@ internal static partial class Program
 
     static int Main(string[] args)
     {
+        // The probe plays the host controller from this process.
+        UsbipServer.AdmitImportsFromThisProcess = true;
         if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
         if (args.Length >= 1 && args[0] == "--held-pump") return HeldPumpChild();
+        if (args.Length >= 1 && args[0] == "offline") return OfflineOnly();
 
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
         // An exception that escapes a connection thread ends the process.
@@ -97,6 +100,7 @@ internal static partial class Program
             {
                 RunAll(server, device, profile, outFrames, controlWrites);
                 Handshake(server, device);
+                OwnerLookup();
                 ThrowingHandlers();
             }
             finally

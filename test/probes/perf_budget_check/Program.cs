@@ -94,6 +94,10 @@ internal static class Program
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
+#if !HM_BASE
+        // The usbip mode plays the host controller from this process.
+        UsbipServer.AdmitImportsFromThisProcess = true;
+#endif
         if (OtherSdkRunning()) return 2;
 
         Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");

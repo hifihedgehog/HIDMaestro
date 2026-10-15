@@ -37,7 +37,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
-internal static class Program
+internal static partial class Program
 {
     static int s_total, s_failures;
 
@@ -140,6 +140,8 @@ internal static class Program
                   && FindEndpoint(DataFlow.Capture, "Wireless Controller") == null);
         }
 
+        ImportPastFullHandshakes(ctx);
+
         // ── Sweep while still holding a live controller (issues #44, #45) ──
         // This could not be tested until #45 was fixed. Sweeping unmaps every
         // shared view the process owns, and a live controller's output poll
@@ -195,6 +197,8 @@ internal static class Program
             string? hidPath = null;
             for (int i = 0; i < 100 && hidPath == null; i++) { Thread.Sleep(100); hidPath = FindHidDevicePath(0x054C, 0x0CE6); }
             Check("HID interface enumerated (VID_054C&PID_0CE6)", hidPath != null, hidPath ?? "not found");
+
+            ImportConnectionOwner();
 
             MMDevice? render = null, capture = null;
             for (int i = 0; i < 150 && (render == null || capture == null); i++)
