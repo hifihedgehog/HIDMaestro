@@ -65,6 +65,10 @@
 //        and input event open and creates the owner pipe after the kill. The
 //        driver does not reconnect its watch, so the census reads the device
 //        gone and a sweep removes it.
+//    Y16. A running program lets go of its input event, and the driver, past
+//        its idle handle reset, waits for that event to come back. The
+//        program is then killed. The driver records its owner pipe closed
+//        while it waits, as it does while input flows.
 //    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
 //        while its SDK holds the earlier driver's OutputEvent. The probe
 //        writes 31 output reports 100 ms apart and times each one to the
@@ -107,6 +111,7 @@ internal static partial class Program
             SectionYReused(user);
             SectionYLegacyEvents(user, installed);
             SectionYHeldSection(user);
+            SectionYWatchWhileWaiting();
         }
         finally { Y.CloseHandle(user); }
     }
@@ -287,6 +292,36 @@ internal static partial class Program
             if (ev != IntPtr.Zero) Y.CloseHandle(ev);
             pipe?.Dispose();
         }
+    }
+
+    /// <summary>Y16. An owner pipe that closes while the driver waits for
+    /// the input event.</summary>
+    static void SectionYWatchWhileWaiting()
+    {
+        Clean();
+        using var p = PeerProcess.Start("Y-waiting");
+        string cp = p.Send("create pad F1FD coexist-y-waiting");
+        if (!Ok(cp)) { Check("Y16: a program creates", false, cp); return; }
+        string inst = PeerProcess.Field(cp, "instance")!;
+        int t = int.Parse(PeerProcess.Field(cp, "transport")!);
+        Check("Y16: the driver's watch connects", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000), Y.ShowWatch(inst));
+        string drop = p.Send($"dropinputevent {t}");
+        Check("Y16: the program lets go of its input event", PeerProcess.Field(drop, "closed") == "1", drop);
+        // Eight idle 500 ms waits, then the driver closes the last handle and
+        // waits for the event to come back.
+        string input = $@"Global\HIDMaestroInputEvent{t}";
+        bool gone = WaitFor(() =>
+        {
+            IntPtr e = Y.OpenEventW(Y.SYNCHRONIZE, false, input);
+            if (e == IntPtr.Zero) return true;
+            Y.CloseHandle(e);
+            return false;
+        }, 12_000);
+        Check($"Y16: past the driver's idle reset, {input} is gone", gone);
+        Check("Y16: the watch stays connected while the program runs", Y.WatchValues(inst) is { Connected: 1 }, Y.ShowWatch(inst));
+        p.Kill();
+        bool recorded = WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 3000);
+        Check("Y16: the driver records the closed pipe while it waits for the input event", recorded, Y.ShowWatch(inst));
     }
 
     /// <summary>Y10. Values that name a process created after them.</summary>

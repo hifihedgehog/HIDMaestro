@@ -2068,6 +2068,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
          * StopEvent is checked on every 200 ms tick so teardown stays
          * responsive even when the SDK hasn't started up yet. */
         while (ctx->InputDataEvent == NULL) {
+            /* Process a pipe close here too: a watch that
+             * connected on an earlier map must not sit stale while the
+             * worker waits for the input event to come back. */
+            if (ctx->OwnerReadEvent != NULL
+                && WaitForSingleObject(ctx->OwnerReadEvent, 0) == WAIT_OBJECT_0)
+                OwnerGone(ctx);
             HANDLE ev = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE,
                                    ctx->InputEventName);
             if (ev != NULL) {
@@ -2083,7 +2089,11 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 break;
             }
             {
-                DWORD rc1 = WaitForSingleObject(ctx->StopEvent, 200);
+                /* Wait on the owner read too while it is open, so a pipe
+                 * close during bootstrap is handled at once.
+                 * The next loop turn runs OwnerGone above. */
+                HANDLE boot[2] = { ctx->StopEvent, ctx->OwnerReadEvent };
+                DWORD rc1 = WaitForMultipleObjects(ctx->OwnerReadEvent ? 2 : 1, boot, FALSE, 200);
                 /* Issue #38: the FLAG is the authoritative exit
                  * condition, checked on EVERY wake including timeouts.
                  * The signal alone cannot be trusted in either
@@ -2103,6 +2113,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                     if (ctx->TearingDown)
                         return 0;
                 }
+                /* WAIT_OBJECT_0 + 1 is the owner read, run at the top of
+                 * the next turn. */
             }
         }
 

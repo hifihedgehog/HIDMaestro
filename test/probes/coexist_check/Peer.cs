@@ -46,6 +46,9 @@
 //                               the SDK does (SharedMemoryIO.TryOpenOutputEvent),
 //                               wait on it without blocking, and signal its
 //                               StopEvent as the SDK's sweep does
+//   dropinputevent <index>      close this program's handle to the index's
+//                               input event, as a program that let go of
+//                               it would, and keep the owner pipe open
 //   census                      the SDK's census of present devices, one
 //                               token|index|owner|watch per device group
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
@@ -414,6 +417,19 @@ internal static class Peer
                     case "sdkevents":
                         Reply(SdkEvents(int.Parse(a[1])));
                         break;
+                    case "dropinputevent":
+                    {
+                        var events = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO")
+                            ?.GetField("s_inputEvents", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as Dictionary<int, IntPtr>;
+                        if (events == null) { Reply("ERR dropinputevent no SharedMemoryIO.s_inputEvents"); break; }
+                        int i = int.Parse(a[1], CultureInfo.InvariantCulture);
+                        // The entry is zeroed so the SDK's own cleanup does
+                        // not close the handle a second time.
+                        bool closed = events.TryGetValue(i, out IntPtr ev) && ev != IntPtr.Zero && CloseHandle(ev);
+                        if (closed) events[i] = IntPtr.Zero;
+                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)}");
+                        break;
+                    }
                     case "census":
                         Reply(Census());
                         break;
