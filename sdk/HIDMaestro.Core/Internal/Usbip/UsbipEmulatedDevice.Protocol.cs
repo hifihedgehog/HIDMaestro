@@ -263,10 +263,12 @@ internal sealed partial class UsbipEmulatedDevice
         if (p.GetStatusFromDescriptor && bmRequestType == 0x80 && bRequest == 0x00) // GET_STATUS, device (USB 2.0 9.4.5)
         {
             // Bit 0 is the self-powered bit the configuration declares. Bit
-            // 1, remote wakeup, reads clear: UdeCx completes
-            // SET_FEATURE(DEVICE_REMOTE_WAKEUP) itself and never forwards it
-            // to usbip-win2 (Microsoft Learn, "Write a UDE client driver"),
-            // so the device never sees the host arm it.
+            // 1, remote wakeup, reads clear, because the device never sees
+            // the host arm it: SET_FEATURE(DEVICE_REMOTE_WAKEUP) does not
+            // reach the server (measured). Which layer above usbip-win2
+            // completes it no source shows, so that part is inference.
+            // usbip-win2 learns of the arming only as d0_exit's wake
+            // setting, which it does not send on (drivers/ude/device.cpp).
             Span<byte> d = stackalloc byte[2];
             d[0] = (byte)(p.SelfPowered ? 0x01 : 0x00);
             d[1] = 0x00;

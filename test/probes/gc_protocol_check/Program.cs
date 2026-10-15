@@ -10,9 +10,10 @@
 // report 0x11 raises each port's own rumble event, behind handlers that
 // throw too. 0x12 replies with each
 // port's origin, 0x14 replies and stops, a short 0x11, 0x16 and 0x17 stall the
-// reports until the next 0x13, other command bytes are ignored, SET_REPORT
-// works as the OUT endpoint does, and 0x15 stops the adapter answering until
-// a port reset. A transfer with no room for the next packet babbles.
+// reports until the next 0x13, other command bytes are ignored, a SET_REPORT
+// is one command, GET_REPORT answers the requested report ID alone, a reply
+// that finds one waiting is dropped, and 0x15 stops the adapter answering
+// until a port reset. A transfer with no room for the next packet babbles.
 // GET_STATUS answers the configuration's self-powered bit. At a 1 ms host
 // poll the adapter answers only when it has read its controllers since its
 // last report: every 1.19971 ms, or every 0.9995 ms with controllers in
@@ -140,12 +141,14 @@ internal static class Program
         var sp = s_usb.Control(0x21, 0x0B, 0x0001, 0, 0, Array.Empty<byte>(), out int spErr);
         Probe.Check("SET_PROTOCOL succeeds", sp != null, $"error {spErr}");
         CheckStatus("GET_STATUS: self-powered, as bmAttributes 0xE0 declares", "0100");
-        // UdeCx completes SET_FEATURE(DEVICE_REMOTE_WAKEUP) itself and never
-        // forwards it to usbip-win2 (Microsoft Learn, "Write a UDE client
-        // driver"), so the device never sees the host arm it.
+        // The device never sees the host arm remote wakeup: the request does
+        // not reach the server (measured). No source shows which layer above
+        // usbip-win2 completes it, and usbip-win2 learns of the arming only
+        // as d0_exit's wake setting, which it does not send on (v0.9.8.1
+        // drivers/ude/device.cpp).
         var set = s_usb.Control(0x00, 0x03, 0x0001, 0, 0, Array.Empty<byte>(), out int setErr);
         Probe.Check("SET_FEATURE(DEVICE_REMOTE_WAKEUP) succeeds", set != null, $"error {setErr}");
-        CheckStatus("GET_STATUS: remote wakeup still clear, since UdeCx keeps the request", "0100");
+        CheckStatus("GET_STATUS: remote wakeup still clear, since the device never sees the arming", "0100");
         Send(0x12);
         var origins = Read(150);
         Probe.Check("0x12 replies 0x22 and zero origins while not polling",

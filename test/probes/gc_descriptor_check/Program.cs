@@ -11,10 +11,12 @@
 // the real adapter's (GcCommon.cs, docs/design/v1.13.0.md):
 //  - what the persona serves, from the USB/IP device's own descriptor set.
 //  - what Windows enumerates, through the hub the device sits on, before
-//    any driver loads. usbip-win2 presents every device at high speed and,
-//    for a full-speed one, rewrites each interrupt bInterval to the same
-//    period in microframes on every full configuration read (v0.9.8.1
-//    drivers/ude/wsk_receive.cpp patch_config and to_high_speed_interval):
+//    any driver loads. usbip-win2 gives UdeCx the device's own speed, full
+//    here (v0.9.8.1 drivers/ude/device.cpp to_udex_speed), and the hub
+//    reports it at high speed, as USBHUB3 treats every UDE device. For a
+//    device below high speed usbip-win2 rewrites each interrupt bInterval
+//    to the same period in microframes on every full configuration read
+//    (drivers/ude/wsk_receive.cpp patch_config and to_high_speed_interval):
 //    8 ms becomes bInterval 7. That is the one difference allowed.
 //  - what libusb reads, through WinUSB once BindWinUsb has bound it: the
 //    strings, the report descriptor and the stalls. usbhub3 forwards no
@@ -822,7 +824,7 @@ internal static class Program
         using var hub = HubPort.ForDevice(id);
         Probe.Check("its hub port opens", hub != null);
         if (hub == null) return;
-        Probe.Check("usbip-win2 presents it at high speed, as every device it carries", hub.Speed() == 2, $"speed {hub.Speed()}");
+        Probe.Check("the hub reports it at high speed, as USBHUB3 treats every UDE device", hub.Speed() == 2, $"speed {hub.Speed()}");
         var dev = hub.GetDescriptor(0x01, 0, 0, 255);
         Probe.Check("device descriptor", dev != null && dev.AsSpan().SequenceEqual(GcReal.DeviceDescriptor), Show(dev));
         var cfg = hub.GetDescriptor(0x02, 0, 0, 255);

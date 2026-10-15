@@ -142,10 +142,11 @@ public sealed class DeviceProtocolSpec
 
     /// <summary>GET_STATUS for the device: <c>"descriptor"</c> answers the
     /// self-powered bit the configuration's bmAttributes declares. The
-    /// remote-wakeup bit reads clear, because UdeCx completes
-    /// SET_FEATURE(DEVICE_REMOTE_WAKEUP) itself and the device never sees the
-    /// host arm it. Without this, GET_STATUS answers self-powered whatever
-    /// the configuration says, as every persona before it did.</summary>
+    /// remote-wakeup bit reads clear, because the device never sees the host
+    /// arm it: the request does not reach the server (measured), and
+    /// usbip-win2 sends nothing on for the wake setting it learns at
+    /// suspend. Without this, GET_STATUS answers self-powered
+    /// whatever the configuration says, as every persona before it did.</summary>
     [JsonPropertyName("getStatus")]
     public string? GetStatus { get; set; }
 
