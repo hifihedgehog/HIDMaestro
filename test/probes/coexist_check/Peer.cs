@@ -76,6 +76,12 @@
 //   classify <instance>         the SDK's owner check of one devnode
 //                               (OwnerCensus.Classify), which a create runs
 //                               on a rival before it removes it
+//   droplease <key|->           take a transport index and identity the
+//                               way a create does (ControllerLease.Acquire),
+//                               keep no reference to the lease, collect
+//                               garbage, and reply token=<t> transport=<n>
+//                               and control=<1 when an unreferenced claim
+//                               taken beside it was closed by the collection>
 //   readallrace                 write three owner records of a killed
 //                               program, delete the first while the SDK's
 //                               MachineClaims.ReadAll reads it, and reply
@@ -549,6 +555,9 @@ internal static class Peer
                         Reply(m == null ? "ERR classify no OwnerCensus.Classify" : $"OK classify owner={m.Invoke(null, new object[] { a[1] })}");
                         break;
                     }
+                    case "droplease":
+                        Reply(DropLease(a[1] == "-" ? null : a[1]));
+                        break;
                     case "readallrace":
                         Reply(ReadAllRace());
                         break;
@@ -739,6 +748,47 @@ internal static class Peer
         }
         return parts.Count == 0 ? "OK census" : "OK census " + string.Join(' ', parts);
     }
+
+    /// <summary>A lease nothing references, then a full collection. A claim
+    /// taken beside it and dropped the same way is the control: it shows the
+    /// collection closed what nothing keeps.</summary>
+    static string DropLease(string? key)
+    {
+        var asm = typeof(HMContext).Assembly;
+        var acquire = asm.GetType("HIDMaestro.Internal.ControllerLease")
+            ?.GetMethod("Acquire", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        var claim = asm.GetType("HIDMaestro.Internal.MachineClaims")
+            ?.GetMethod("TryClaim", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        if (acquire == null || claim == null) return "ERR droplease no ControllerLease.Acquire";
+        const string control = @"ProtectedPrefix\Administrators\HIDMaestro.Probe.W7";
+        string taken = TakeAndDrop(acquire, claim, key, control);
+        if (taken.StartsWith("ERR", StringComparison.Ordinal)) return taken;
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        bool controlClosed = !WaitNamedPipeHeld(control);
+        return $"OK droplease {taken} control={(controlClosed ? 1 : 0)}";
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static string TakeAndDrop(MethodInfo acquire, MethodInfo claim, string? key, string control)
+    {
+        if (claim.Invoke(null, new object[] { control }) == null) return "ERR droplease the control claim is taken";
+        object lease = acquire.Invoke(null, new object?[] { 0, key, "umdf", "coexist-w7" })!;
+        object identity = lease.GetType().GetProperty("Identity")!.GetValue(lease)!;
+        return $"token={identity.GetType().GetProperty("Token")!.GetValue(identity)} transport={lease.GetType().GetProperty("TransportIndex")!.GetValue(lease)}";
+    }
+
+    static bool WaitNamedPipeHeld(string name)
+    {
+        if (WaitNamedPipeW(@"\\.\pipe\" + name, 1)) return true;
+        return System.Runtime.InteropServices.Marshal.GetLastWin32Error() != 2 /*ERROR_FILE_NOT_FOUND*/;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern bool WaitNamedPipeW(string name, uint timeout);
 
     /// <summary>Three records the way a killed program on this SDK leaves
     /// them, read by the SDK's MachineClaims.ReadAll while its

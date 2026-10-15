@@ -395,11 +395,16 @@ public sealed class HMContext : IDisposable
     /// keeps the identity and refreshes the descriptor.</para></summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="HMResourceInUseException">A live controller on this
-    /// machine, in this program or another, holds the key, or the key is
+    /// <exception cref="HMResourceInUseException">A create whose key another
+    /// program's cleanup holds, while it removes a device a closed program
+    /// left under that key, first waits up to 120 seconds for that cleanup.
+    /// Thrown when a live controller on this machine, in this program or
+    /// another, holds the key, and, before any wait, when the key is
     /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
-    /// HIDMaestro 1.12.0 runs, which gives that identity to its own
-    /// controller on index N.</exception>
+    /// HIDMaestro 1.12.0 has a controller present, since that program gives
+    /// the identity to its own controller on index N. A controller of a
+    /// context this process dropped without disposing holds its key until
+    /// the process exits.</exception>
     /// <exception cref="InvalidOperationException">Driver install failed or
     /// device node creation failed.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
@@ -537,11 +542,16 @@ public sealed class HMContext : IDisposable
     /// for what the key does. A null or empty key uses the transport index.</summary>
     /// <exception cref="InvalidOperationException">If the slot is already
     /// in use by another live controller of this context.</exception>
-    /// <exception cref="HMResourceInUseException">A live controller on this
-    /// machine, in this program or another, holds the key, or the key is
+    /// <exception cref="HMResourceInUseException">A create whose key another
+    /// program's cleanup holds, while it removes a device a closed program
+    /// left under that key, first waits up to 120 seconds for that cleanup.
+    /// Thrown when a live controller on this machine, in this program or
+    /// another, holds the key, and, before any wait, when the key is
     /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
-    /// HIDMaestro 1.12.0 runs, which gives that identity to its own
-    /// controller on index N.</exception>
+    /// HIDMaestro 1.12.0 has a controller present, since that program gives
+    /// the identity to its own controller on index N. A controller of a
+    /// context this process dropped without disposing holds its key until
+    /// the process exits.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -695,7 +705,11 @@ public sealed class HMContext : IDisposable
     }
 
     /// <summary>Disposes every controller this context owns and frees its
-    /// resources. Safe to call multiple times.
+    /// resources. Safe to call multiple times. A context dropped without
+    /// Dispose keeps its controllers' devices, transport indices and identity
+    /// keys until the process exits: a create of one of those keys in this
+    /// process throws <see cref="HMResourceInUseException"/> until then, and
+    /// the SDK removes the devices as the process exits.
     ///
     /// <para>Per-controller teardown blocks 5-11s waiting on Windows PnP's
     /// synchronous DIF_REMOVE (xinputhid filter unload for BT, XUSB companion

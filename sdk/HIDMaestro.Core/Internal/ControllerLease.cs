@@ -34,12 +34,24 @@ internal sealed class ControllerLease : IDisposable
     private SafeFileHandle? _identityClaim;
     private int _released;
 
+    // Every lease until its Dispose. The claims are SafeFileHandles, which
+    // garbage collection closes. Only the controller holds its lease, and a
+    // controller whose output mapping failed has no thread that keeps it
+    // reachable, so a program that drops its context without disposing it
+    // would lose the claims while the devices and the record entry stay,
+    // and another program could take the identity and remove them. So a
+    // context dropped without Dispose keeps its controllers' claims until the
+    // process exits, and a create of the same identity key in this process
+    // throws HMResourceInUseException until then.
+    private static readonly HashSet<ControllerLease> s_live = new();
+
     private ControllerLease(int transportIndex, DeviceIdentity identity, SafeFileHandle indexClaim, SafeFileHandle identityClaim)
     {
         TransportIndex = transportIndex;
         Identity = identity;
         _indexClaim = indexClaim;
         _identityClaim = identityClaim;
+        lock (s_live) s_live.Add(this);
     }
 
     /// <summary>Take a transport index and an identity for a controller at
@@ -258,12 +270,13 @@ internal sealed class ControllerLease : IDisposable
         if (claim == null)
         {
             var holder = MachineClaims.LiveHolderOf(identity.Token);
-            string who = holder == null ? "a running program"
-                : holder.Self ? "a live controller of this process"
-                : MachineClaims.Describe(holder);
-            throw new HMResourceInUseException(
-                $"Identity key '{key}' is in use by {who}. Dispose that controller first, or create this one with another key.",
-                $"identity key '{key}'", holder);
+            string message = holder is { Self: true }
+                ? $"Identity key '{key}' is in use by a controller of this process. Dispose that controller first. " +
+                  "A controller whose context was dropped without Dispose keeps its key until this process exits: " +
+                  "create this one with another key, or dispose the context before dropping it."
+                : $"Identity key '{key}' is in use by {(holder == null ? "a running program" : MachineClaims.Describe(holder))}. " +
+                  "Dispose that controller first, or create this one with another key.";
+            throw new HMResourceInUseException(message, $"identity key '{key}'", holder);
         }
         foreach (var g in census.Devices)
         {
@@ -312,5 +325,6 @@ internal sealed class ControllerLease : IDisposable
         _identityClaim = null;
         _indexClaim?.Dispose();
         _indexClaim = null;
+        lock (s_live) s_live.Remove(this);
     }
 }

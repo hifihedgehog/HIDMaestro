@@ -26,6 +26,10 @@
 //    W6. A v1.12.0 program with no controller at the moment leaves no sign,
 //        so its next create lands on the index a program on this SDK took.
 //        The new program's exit still removes only its own device.
+//    W7. A lease nothing references, the way a controller whose output
+//        mapping failed holds it once its program drops the context without
+//        disposing it. After a garbage collection that closes a claim
+//        nothing references, the lease's claims are still held.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -53,6 +57,8 @@ internal static partial class Program
             Clean();
             SectionWLegacyIdle();
         }
+        Clean();
+        SectionWLease();
     }
 
     /// <summary>W1.</summary>
@@ -197,6 +203,17 @@ internal static partial class Program
         Check("W6: its exit handler removes its device", WaitFor(() => !Native.IsPresent(instNew), 15_000));
         Thread.Sleep(500);
         Check("W6: and leaves the v1.12.0 program's device on the same index", Native.IsStarted(instOld), instOld);
+    }
+
+    /// <summary>W7.</summary>
+    static void SectionWLease()
+    {
+        using var p = PeerProcess.Start("W7");
+        string r = p.Send("droplease coexist-w7");
+        if (!Ok(r)) { Check("W7: the program takes a lease and drops it", false, r); return; }
+        Check("W7: the collection closes a claim nothing references", PeerProcess.Field(r, "control") == "1", r);
+        Check("W7: the dropped lease's identity claim is still held", Native.ClaimExists($"HIDMaestro.Identity.{PeerProcess.Field(r, "token")}"), r);
+        Check("W7: and its transport index claim", Native.ClaimExists($"HIDMaestro.Index.{PeerProcess.Field(r, "transport")}"), r);
     }
 
     static bool ConfigExists(string transport)
