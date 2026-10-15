@@ -868,6 +868,11 @@ internal static class Program
         try
         {
             using var w = new UsbipWire(server.Port, device.BusId);
+            // The server then looks for the host controller's port of this
+            // import every 25 ms, 200 times, since no host controller plugs
+            // this one in (UsbipServer's TrackVhciPort). The runs below fall
+            // inside that time, so they count its lookups too.
+            long imported = Stopwatch.GetTimestamp();
             start?.Invoke(w);
             IntPtr view = SharedMemoryIO.EnsureInputMapping(UsbipIndex);
             IntPtr evt = SharedMemoryIO.GetInputEvent(UsbipIndex);
@@ -912,6 +917,7 @@ internal static class Program
             while (warm.ElapsedMilliseconds < 1500);
             Thread.Sleep(500);
 
+            double firstRunAt = (Stopwatch.GetTimestamp() - imported) / (double)Stopwatch.Frequency;
             for (int run = 0; run < runs; run++)
             {
                 long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
@@ -926,6 +932,8 @@ internal static class Program
             Report($"USB/IP {name}: bytes the process allocated per frame", bytesPerFrame, runs, $", most in one run of {frames} frames {worst}");
             Report($"USB/IP {name}: frame written to the host's reply, microseconds", new List<double>(times[..timed]), runs, "");
             Report($"USB/IP {name}: lock contentions per frame", contentions, runs, "");
+            Console.WriteLine(FormattableString.Invariant(
+                $"  USB/IP {name}: the runs took {firstRunAt:F1} s to {(Stopwatch.GetTimestamp() - imported) / (double)Stopwatch.Frequency:F1} s after the import"));
             // Every run carries an allocation a frame makes, so the median
             // run is zero only when no frame allocates. The runtime's tiered
             // recompilation adds a few dozen bytes to an odd run, and none

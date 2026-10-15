@@ -260,6 +260,102 @@ internal static partial class VhciClient
         return 0;
     }
 
+    /// <summary>The vhci port of one exact location's import, looked up as
+    /// often as a caller polls without allocating: the location's bytes are
+    /// encoded once, the listing goes into one buffer kept across lookups,
+    /// and the rows are compared as bytes. The device is opened for each
+    /// lookup and closed after it, as <see cref="FindLocation"/> does, since
+    /// the driver's interface opens exclusively. One instance is used on one
+    /// thread at a time.</summary>
+    internal sealed class LocationLookup
+    {
+        private readonly byte[] _busId;
+        private readonly byte[] _service;
+        private readonly byte[] _host;
+        private byte[]? _buf;
+        // No host controller answered the first lookup: the ones after it
+        // return at once.
+        private bool _absent;
+
+        public LocationLookup(string host, int port, string busid)
+        {
+            _host = Encoding.UTF8.GetBytes(host);
+            _service = Encoding.UTF8.GetBytes(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            _busId = Encoding.UTF8.GetBytes(busid);
+        }
+
+        /// <summary>The port, or 0 when nothing is imported there or no
+        /// host controller answers.</summary>
+        public int Find()
+        {
+            if (_absent) return 0;
+            string? path = Volatile.Read(ref s_path);
+            if (path == null)
+            {
+                // The first lookup in this process finds the interface path,
+                // which Open keeps.
+                try { Open().Dispose(); }
+                catch { _absent = true; return 0; }
+                path = Volatile.Read(ref s_path);
+                if (path == null) return 0;
+            }
+            IntPtr h = CreateFileW(path, 0xC0000000 /* GENERIC_READ|WRITE */, 0, IntPtr.Zero,
+                3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+            if (h == new IntPtr(-1))
+            {
+                // A reinstalled controller has a new path. Look it up next
+                // time.
+                Interlocked.CompareExchange(ref s_path, null, path);
+                return 0;
+            }
+            try
+            {
+                Layout? layout = Volatile.Read(ref s_layout);
+                var buf = _buf;
+                uint written = 0;
+                bool listed = false;
+                if (layout != null)
+                {
+                    if (buf == null || buf.Length < HeaderSize + layout.RowSize * CensusRows)
+                        _buf = buf = new byte[HeaderSize + layout.RowSize * CensusRows];
+                    BitConverter.TryWriteBytes(buf, (uint)(HeaderSize + layout.RowSize));
+                    listed = DeviceIoControl(h, GET_IMPORTED_DEVICES, buf, (uint)buf.Length,
+                        buf, (uint)buf.Length, out written, IntPtr.Zero);
+                }
+                if (!listed)
+                {
+                    // No kept layout, a driver changed under it, or more
+                    // imports than the buffer holds: the probe's full-size
+                    // listing, kept for the lookups after this one.
+                    layout = Keep(Probe(h, out buf, out written));
+                    _buf = buf;
+                }
+                int rows = written >= HeaderSize ? (int)((written - HeaderSize) / layout!.RowSize) : 0;
+                for (int i = 0; i < rows; i++)
+                {
+                    int off = HeaderSize + i * layout!.RowSize;
+                    int port = BitConverter.ToInt32(buf!, off);
+                    int at = off + layout.BusIdOffset;
+                    if (port >= 1
+                        && Field(buf.AsSpan(at, BusIdSize)).SequenceEqual(_busId)
+                        && Field(buf.AsSpan(at + BusIdSize, ServiceSize)).SequenceEqual(_service)
+                        && Field(buf.AsSpan(at + BusIdSize + ServiceSize, HostSize)).SequenceEqual(_host))
+                        return port;
+                }
+                return 0;
+            }
+            catch { return 0; /* best-effort, as GetImportedDevices is */ }
+            finally { CloseHandle(h); }
+        }
+
+        /// <summary>A NUL-terminated field's bytes, as ReadUtf8 reads it.</summary>
+        private static ReadOnlySpan<byte> Field(ReadOnlySpan<byte> field)
+        {
+            int end = field.IndexOf((byte)0);
+            return end < 0 ? field : field[..end];
+        }
+    }
+
     /// <summary>Cancel the driver's background re-attach attempts for one
     /// exact location. Safe to call when none exist. Returns how many it
     /// canceled, or -1 when no host controller answered.</summary>

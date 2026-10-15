@@ -262,9 +262,12 @@ internal sealed class UsbipServer : IDisposable
             {
                 try
                 {
+                    // Polled while the device's frames flow, so each lookup
+                    // allocates nothing. The loop ends at the first find.
+                    var lookup = new VhciClient.LocationLookup("127.0.0.1", _server.Port, device.BusId);
                     for (int i = 0; i < 200 && device.IsClaimedBy(this); i++)
                     {
-                        int port = VhciClient.FindLocation("127.0.0.1", _server.Port, device.BusId);
+                        int port = lookup.Find();
                         if (port > 0)
                         {
                             device.SetVhciPortFor(this, port);
