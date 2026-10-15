@@ -110,6 +110,7 @@ internal static class Program
 
         Recreate(ctx, gc, before);
         IdleFrames(ctx, before);
+        LatencyHookDisposes(ctx, gc, before);
         return Probe.Finish("S80");
     }
 
@@ -750,9 +751,48 @@ internal static class Program
             Send(0x13);
             Probe.Check("reports after 0x13", Read(150)?.Length == 37);
         }
+        DisposeBesideSubmit(controller);
     }
 
-    // ── Idle frames ─────────────────────────────────────────────────────
+    /// <summary>Dispose while another thread holds the submit lock, as a
+    /// port submit does between its in-lock check and its write. Dispose
+    /// marks the controller disposed under that lock, so it waits for the
+    /// holder before it marks anything or tears anything down, and a submit
+    /// after it is refused.</summary>
+    static void DisposeBesideSubmit(HMController controller)
+    {
+        Console.WriteLine("-- Dispose beside a submit");
+        var disposedField = typeof(HMController).GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var held = new ManualResetEventSlim();
+        var release = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            lock (controller.SubmitLock)
+            {
+                held.Set();
+                release.Wait(10_000);
+            }
+        }) { IsBackground = true };
+        holder.Start();
+        held.Wait(5000);
+        var disposer = new Thread(() => controller.Dispose()) { IsBackground = true };
+        disposer.Start();
+        Thread.Sleep(200);
+        bool markedWhileHeld = (bool)disposedField.GetValue(controller)!;
+        bool aliveWhileHeld = disposer.IsAlive;
+        release.Set();
+        holder.Join(5000);
+        bool finished = disposer.Join(30_000);
+        Probe.Check("while a thread holds the submit lock, Dispose waits and has not marked the controller disposed",
+            !markedWhileHeld && aliveWhileHeld, $"marked {markedWhileHeld}, still running {aliveWhileHeld}");
+        Probe.Check("and finishes once it is released", finished && (bool)disposedField.GetValue(controller)!);
+        bool refused;
+        try { controller.Ports[0].SubmitState(default); refused = false; }
+        catch (ObjectDisposedException) { refused = true; }
+        Probe.Check("a port submit after Dispose is refused", refused);
+    }
+
+    // ── Idle frames, and a Dispose beside a submit ──────────────────────
 
     /// <summary>A copy of the profile that streams idle frames every 4 ms.
     /// The pump repeats the ports' report as it stands, so a port the
@@ -799,6 +839,40 @@ internal static class Program
         {
             controller?.Dispose();
             System.IO.Directory.Delete(dir, recursive: true);
+        }
+        Probe.Check("the device leaves with the controller",
+            Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000));
+    }
+
+    // ── A latency hook that disposes ────────────────────────────────────
+
+    /// <summary>OnSubmitLatencyMicros runs consumer code. A handler that
+    /// hands Dispose to another thread and waits for it must find the
+    /// submit lock free, or Dispose waits on the submit that waits on
+    /// Dispose.</summary>
+    static void LatencyHookDisposes(HMContext ctx, HMProfile gc, List<string> before)
+    {
+        Console.WriteLine("-- a latency hook that disposes from another thread");
+        Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000);
+        var controller = ctx.CreateController(gc);
+        bool joined = false, called = false;
+        controller.OnSubmitLatencyMicros = _ =>
+        {
+            if (called) return;
+            called = true;
+            var disposer = new Thread(() => controller.Dispose()) { IsBackground = true };
+            disposer.Start();
+            joined = disposer.Join(5000);
+        };
+        try
+        {
+            controller.SubmitState(new HMGamepadState { Axes = Centered() });
+            Probe.Check("the hook ran, and Dispose on another thread finished inside it", called && joined,
+                $"called {called}, joined {joined}");
+        }
+        finally
+        {
+            controller.Dispose();
         }
         Probe.Check("the device leaves with the controller",
             Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000));

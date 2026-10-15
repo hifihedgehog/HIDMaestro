@@ -308,8 +308,12 @@ public sealed partial class HMController : IDisposable
     /// <summary>Optional diagnostic: invoked at the end of every successful
     /// <see cref="SubmitState"/> with the elapsed microseconds. Wire this
     /// when investigating per-frame submit latency (e.g. issue #21 USB
-    /// stalls). Called inline on the caller's thread; keep the handler
-    /// short: log to a ring buffer or counter, don't block.</summary>
+    /// stalls). Called inline on the caller's thread once the submit is
+    /// done, with no SDK lock held, so a handler may dispose a controller.
+    /// Two submits on different threads can run the handler at the same
+    /// time, so a handler that keeps state must synchronize it. Keep the
+    /// handler short: log to a ring buffer or counter, and don't
+    /// block.</summary>
     public Action<long>? OnSubmitLatencyMicros { get; set; }
 
     // PID FFB state section. Lazy: created on the first PublishPid* call so
@@ -693,30 +697,38 @@ public sealed partial class HMController : IDisposable
     {
         ThrowIfDisposed();
 
+        var latency = OnSubmitLatencyMicros;
+        long micros;
         // Every submit path writes the shared section under _submitLock.
         // The section is a single-writer seqlock: two threads writing one
         // controller's frames at once could publish a frame mixed from both.
         lock (_submitLock)
         {
+            ThrowIfDisposed();
             AwaitPreviousDelivery();
-            SubmitStateCore(in state);
+            micros = SubmitStateCore(in state, timed: latency != null);
             NoteFrameWritten();
-            if (_idleThread == null) return;
-            // Remembered for the idle pump, and the timestamp is what
-            // keeps the pump from competing with a live consumer.
-            _lastSubmitted = state;
-            _lastSubmitWasRaw = false;
-            Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            if (_idleThread != null)
+            {
+                // Remembered for the idle pump, and the timestamp is what
+                // keeps the pump from competing with a live consumer.
+                _lastSubmitted = state;
+                _lastSubmitWasRaw = false;
+                Volatile.Write(ref _lastSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            }
         }
+        // Consumer code runs with no SDK lock held: a handler that disposes
+        // this controller, on this thread or another, finds the lock free.
+        if (latency != null) latency(micros);
     }
 
-    private void SubmitStateCore(in HMGamepadState state, bool consumerCall = true)
+    /// <summary>Encode and write one state. Returns the microseconds it took
+    /// when <paramref name="timed"/>, the caller's own submit timed for
+    /// <see cref="OnSubmitLatencyMicros"/>, else 0. Caller holds
+    /// _submitLock.</summary>
+    private long SubmitStateCore(in HMGamepadState state, bool timed = false)
     {
-        // The latency hook times the caller's own submits, so an idle repeat
-        // leaves it alone and never runs consumer code under _submitLock.
-        var latency = consumerCall ? OnSubmitLatencyMicros : null;
-        long startTicks = latency != null
-            ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        long startTicks = timed ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
         ResolveSimpleSlots(in state, out double mlx, out double mly, out double mrx,
                            out double mry, out double mlt, out double mrt);
@@ -726,12 +738,7 @@ public sealed partial class HMController : IDisposable
         {
             Ports.SubmitLocked(0, in state, direct: false,
                 (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt);
-            if (latency != null)
-            {
-                long portElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-                latency(portElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
-            }
-            return;
+            return ElapsedMicros(startTicks);
         }
 
         // Switch Pro protocol path (issue #33): pack the wire-format 0x30
@@ -749,12 +756,7 @@ public sealed partial class HMController : IDisposable
                 _inputView, _inputEvent, ref _inputSeqNo,
                 _switchBodyBuffer!, SwitchProPacker.BodySize, null);
 
-            if (latency != null)
-            {
-                long swElapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-                latency(swElapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
-            }
-            return;
+            return ElapsedMicros(startTicks);
         }
 
         // Switch 2 Pro protocol path (issue #66): pack the state body. The
@@ -772,12 +774,7 @@ public sealed partial class HMController : IDisposable
                 dataOffset: 0,
                 extendedData: _switch2BodyBuffer!, extendedLen: Switch2ProPacker.BodySize);
 
-            if (latency != null)
-            {
-                long s2Elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-                latency(s2Elapsed * 1_000_000L / System.Diagnostics.Stopwatch.Frequency);
-            }
-            return;
+            return ElapsedMicros(startTicks);
         }
 
         byte[] report;
@@ -958,13 +955,11 @@ public sealed partial class HMController : IDisposable
                 companionEvent: _companionInputEvent);
         }
 
-        if (latency != null)
-        {
-            long elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-            long micros = elapsedTicks * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
-            latency(micros);
-        }
+        return ElapsedMicros(startTicks);
     }
+
+    private static long ElapsedMicros(long startTicks) => startTicks == 0 ? 0
+        : (System.Diagnostics.Stopwatch.GetTimestamp() - startTicks) * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>The six simple-slot values (left stick X/Y, right stick X/Y,
     /// LT, RT) every encoder starts from, resolved from
@@ -1119,6 +1114,7 @@ public sealed partial class HMController : IDisposable
 
         lock (_submitLock)
         {
+            ThrowIfDisposed();
             AwaitPreviousDelivery();
             SubmitRawReportCore(report);
             NoteFrameWritten();
@@ -1232,6 +1228,7 @@ public sealed partial class HMController : IDisposable
 
         lock (_submitLock)
         {
+            ThrowIfDisposed();
             AwaitPreviousDelivery();
             SubmitRawExtendedReportCore(report);
             NoteFrameWritten();
@@ -1299,6 +1296,7 @@ public sealed partial class HMController : IDisposable
         var packer = KbmPacker();
         lock (_submitLock)
         {
+            ThrowIfDisposed();
             var buffers = _kbmBuffers ??= new KeyboardMouseBuffers();
             var frames = packer.PackMouse(in state, ref _lastExtraButtons, ref _extraButtonsSent, buffers);
             for (int i = 0; i < frames.Count; i++)
@@ -1319,7 +1317,10 @@ public sealed partial class HMController : IDisposable
         ThrowIfDeviceBuildsReports();
         var packer = KbmPacker();
         lock (_submitLock)
+        {
+            ThrowIfDisposed();
             WriteKbmFrame(packer.PackKeyboard(modifiers, keys, _kbmBuffers ??= new KeyboardMouseBuffers()));
+        }
     }
 
     /// <summary>Send one consumer-control report with these usages held
@@ -1333,7 +1334,10 @@ public sealed partial class HMController : IDisposable
         ThrowIfDeviceBuildsReports();
         var packer = KbmPacker();
         lock (_submitLock)
+        {
+            ThrowIfDisposed();
             WriteKbmFrame(packer.PackConsumer(usages, _kbmBuffers ??= new KeyboardMouseBuffers()));
+        }
     }
 
     private KeyboardMousePacker KbmPacker() =>
@@ -1604,7 +1608,7 @@ public sealed partial class HMController : IDisposable
             else
             {
                 var st = _lastSubmitted;
-                SubmitStateCore(in st, consumerCall: false);
+                SubmitStateCore(in st);
             }
         }
     }
@@ -1976,7 +1980,11 @@ public sealed partial class HMController : IDisposable
         // Issue #67: a key or button still held goes up before the device
         // goes away, as it would if the hardware were unplugged.
         try { SendReleaseFrames(); } catch { }
-        _disposed = true;
+        // Under the submit lock, so a submit that passed its in-lock check
+        // has finished writing before anything below unmaps the section,
+        // and every later one sees the controller disposed. No path holds
+        // this lock while it calls Dispose.
+        lock (_submitLock) _disposed = true;
         // Idle frames stop before the output pump, so no repeat can
         // land on a section this Dispose is about to unmap.
         try { _idleCts.Cancel(); } catch { }
