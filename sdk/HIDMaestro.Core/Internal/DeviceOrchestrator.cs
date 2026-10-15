@@ -378,8 +378,10 @@ internal static partial class DeviceOrchestrator
     //                  returns without waiting for it to end, and a create
     //                  of this process and (3) wait behind it: one pass
     //                  over the phantoms, their uninstalls, at most
-    //                  UninstallWaitBudgetMs of waiting after them, and
-    //                  two interface passes that do not wait. A first call
+    //                  UninstallWaitBudgetMs of waiting in all, for the
+    //                  PnP lock before each uninstall and for Windows
+    //                  after it, and two interface passes that do not
+    //                  wait. A first call
     //                  made while the process exits (ProcessExitSignal)
     //                  runs it on the calling thread instead. Under .NET a
     //                  program in which no code that refers to the SDK ran

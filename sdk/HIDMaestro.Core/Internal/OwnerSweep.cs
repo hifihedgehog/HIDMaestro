@@ -551,7 +551,8 @@ internal static class OwnerSweep
     /// back until it is done: a create, and the uninstall-grade cleanup,
     /// wait while it runs, through one pass over the phantoms, their
     /// uninstalls, at most <see cref="UninstallWaitBudgetMs"/> of waiting
-    /// after them, and two interface passes that do not wait. After each
+    /// in all, for the PnP lock before each uninstall and for Windows after
+    /// it, and two interface passes that do not wait. After each
     /// uninstall it waits, still holding the gate and the phantom's identity
     /// claim, until Windows no longer knows the id
     /// (<see cref="UninstallWait"/>), so neither this process's next create
@@ -628,7 +629,7 @@ internal static class OwnerSweep
             var sw = Stopwatch.StartNew();
             var wait = new UninstallWait();
             int phantoms = 0;
-            try { phantoms = DeviceManager.RemoveAccumulatedHmPhantoms(id => wait.Wait(id), () => s_exiting); } catch { }
+            try { phantoms = DeviceManager.RemoveAccumulatedHmPhantoms(id => wait.Wait(id), () => s_exiting, wait.Lock); } catch { }
             // The interface entries of real devices: nothing of them stands
             // in for a device under the probe.
             if (DeviceManager.PhantomSource == null)
@@ -694,6 +695,21 @@ internal static class OwnerSweep
         internal sealed record Report(int Removed, long TotalMs, int Ids, long WaitedMs, int Unsettled);
 
         public Report Summary(int removed, long totalMs) => new(removed, totalMs, Ids, WaitedMs, Unsettled);
+
+        /// <summary>The PnP lock for one uninstall, waited for out of the
+        /// run's budget, which every uninstall of the SDK holds. Null when
+        /// another program held it past what is left: the phantom stays
+        /// for the next run.</summary>
+        public DeviceManager.PnpLockHold? Lock()
+        {
+            long start = Stopwatch.GetTimestamp();
+            int left = (int)Math.Max(0, _budget - WaitedMs);
+            var hold = DeviceManager.TryHoldPnpLock(left);
+            _waitedTicks += Stopwatch.GetTimestamp() - start;
+            if (hold == null)
+                DeviceOrchestrator.LogDiag($"    another program held the PnP lock past the cleanup's {_budget} ms of waiting; a phantom waits for the next run");
+            return hold;
+        }
 
         /// <summary>Wait until Windows no longer knows
         /// <paramref name="instanceId"/>, with what is left of the run's

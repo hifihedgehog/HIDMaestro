@@ -65,9 +65,24 @@ internal static partial class Program
 
     static int SdkConst(string type, string name) => (int)SdkType(type).GetField(name, AnyStatic)!.GetRawConstantValue()!;
 
-    static void SetSource(IEnumerable<(string, Func<bool>)>? phantoms) =>
+    static void SetSource(IEnumerable<(string, Func<bool>)>? phantoms)
+    {
         SdkType("DeviceManager").GetField("PhantomSource", AnyStatic)!.SetValue(null,
             phantoms == null ? null : (Func<IEnumerable<(string Id, Func<bool> Uninstall)>>)(() => phantoms));
+        // Each uninstall holds the PnP lock, which lives in an
+        // administrators-only namespace. With no device and no elevation a
+        // lock of this process stands in, when the SDK has one.
+        SdkType("DeviceManager").GetField("PnpLockHook", AnyStatic)?.SetValue(null,
+            phantoms == null ? null : (Func<IDisposable>)(() => new StandInLock()));
+    }
+
+    /// <summary>The stand-in for the PnP lock: one process-wide monitor.</summary>
+    sealed class StandInLock : IDisposable
+    {
+        static readonly object s_gate = new();
+        public StandInLock() => Monitor.Enter(s_gate);
+        public void Dispose() => Monitor.Exit(s_gate);
+    }
 
     static void SetLocate(Func<string, bool>? locate) =>
         SdkType("DeviceManager").GetField("RemovalLocate", AnyStatic)!.SetValue(null, locate);

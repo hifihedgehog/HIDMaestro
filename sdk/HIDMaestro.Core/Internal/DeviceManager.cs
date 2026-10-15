@@ -364,6 +364,11 @@ public static partial class DeviceManager
     internal static Func<string, Action, IDisposable?>? RemovedHook;
     /// <inheritdoc cref="LocateHook"/>
     internal static Func<uint, uint>? InstallQueueHook;
+    /// <summary>Stands in for the machine-wide PnP lock
+    /// (<see cref="AcquirePnpLock"/>): taking it returns what releases it.
+    /// Set by the probes that run the SDK's PnP paths with no device, null
+    /// outside them.</summary>
+    internal static Func<IDisposable>? PnpLockHook;
 
     static uint Locate(string instanceId, uint flags) =>
         LocateHook?.Invoke(instanceId, flags) ?? CM_Locate_DevNodeW(out _, instanceId, flags);
@@ -674,19 +679,25 @@ public static partial class DeviceManager
     const int PnpLockWaitMs = 600_000;
 
     /// <summary>Take the machine-wide PnP lock, held by the calling thread
-    /// until it calls <c>ReleaseMutex</c>. Every registration of a devnode the
-    /// SDK makes holds it from its gate through its registration
-    /// (<see cref="DeviceNodeCreator.CreateDeviceNode"/> through
-    /// DIF_REGISTERDEVICE, a software device's create through SwDeviceCreate),
-    /// and every removal it makes through <see cref="RemoveDevice"/> and the
-    /// HID orphan sweep (<see cref="RemoveOrphanHidChildren"/>) holds it from
-    /// the removal call through the removal test. So no program of this
-    /// release registers a devnode while another removes one, and two
-    /// removals do not overlap. A thread that
-    /// holds it can take it again: a create's gate removes a prior life
-    /// through RemoveDevice. An abandoned lock is taken: the gate and the
-    /// removal test look at the devnode again whatever the last holder
-    /// left.
+    /// until it calls <c>ReleaseMutex</c>.
+    ///
+    /// <para>Held by: each devnode registration the SDK makes, from its
+    /// gate through DIF_REGISTERDEVICE (<see cref="DeviceNodeCreator.CreateDeviceNode"/>)
+    /// or SwDeviceCreate (the two software companions), and each removal
+    /// and uninstall the SDK makes, from its call through its removal test:
+    /// <see cref="RemoveDevice"/> (with its children, its fallbacks and
+    /// hmswd.exe's close), each orphan of <see cref="RemoveOrphanHidChildren"/>
+    /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>.</para>
+    ///
+    /// <para>Not held by, so not ordered against them: a USB/IP import's
+    /// attach and detach, a WinUSB bind or restore, the usbip-win2 host
+    /// controller's repair, and any program built on HIDMaestro before
+    /// v1.13.0.</para>
+    ///
+    /// <para>A thread that holds it can take it again: a create's gate
+    /// removes a prior life through RemoveDevice. An abandoned lock is taken:
+    /// the gate and the removal test look at the devnode again whatever the
+    /// last holder left.</para>
     ///
     /// <para>Lock order: the deploy lock, then the WinUSB devnode lock, then
     /// this one, then the staging lock. WinUsbBinding.RemovePackage removes a
@@ -722,19 +733,53 @@ public static partial class DeviceManager
     internal sealed class PnpLockHold : IDisposable
     {
         private Mutex? _mutex;
-        internal PnpLockHold(Mutex mutex) => _mutex = mutex;
+        private IDisposable? _hooked;
+        internal PnpLockHold(Mutex? mutex, IDisposable? hooked)
+        {
+            _mutex = mutex;
+            _hooked = hooked;
+        }
 
         public void Dispose()
         {
-            if (_mutex == null) return;
-            _mutex.ReleaseMutex();
-            _mutex.Dispose();
-            _mutex = null;
+            if (_mutex != null)
+            {
+                _mutex.ReleaseMutex();
+                _mutex.Dispose();
+                _mutex = null;
+            }
+            _hooked?.Dispose();
+            _hooked = null;
         }
     }
 
     /// <inheritdoc cref="PnpLockHold"/>
-    internal static PnpLockHold HoldPnpLock() => new(AcquirePnpLock());
+    internal static PnpLockHold HoldPnpLock() =>
+        PnpLockHook is { } hook ? new(null, hook()) : new(AcquirePnpLock(), null);
+
+    /// <summary><see cref="HoldPnpLock"/> that gives up after
+    /// <paramref name="timeoutMs"/> (already scaled) and returns null. An
+    /// abandoned lock is taken, as AcquirePnpLock takes it.</summary>
+    internal static PnpLockHold? TryHoldPnpLock(int timeoutMs)
+    {
+        if (PnpLockHook is { } hook) return new(null, hook());
+        var m = new Mutex(false, AdminNamespace.Name(PnpMutexObject));
+        try
+        {
+            if (!m.WaitOne(Math.Max(0, timeoutMs)))
+            {
+                m.Dispose();
+                return null;
+            }
+        }
+        catch (AbandonedMutexException) { }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        return new(m, null);
+    }
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
@@ -791,9 +836,13 @@ public static partial class DeviceManager
     /// <paramref name="afterUninstall"/> runs under the phantom's claim
     /// after each successful uninstall and says whether Windows has finished
     /// with the id. Once <paramref name="stop"/> answers true, no further
-    /// phantom is uninstalled.
+    /// phantom is uninstalled. <paramref name="holdLock"/> takes the PnP lock
+    /// for each uninstall, null when its budget ran out first, and the
+    /// phantom is then left for the next run. Without it the lock is waited
+    /// for as any removal waits.
     /// </summary>
-    internal static int RemoveAccumulatedHmPhantoms(Func<string, bool>? afterUninstall = null, Func<bool>? stop = null)
+    internal static int RemoveAccumulatedHmPhantoms(Func<string, bool>? afterUninstall = null, Func<bool>? stop = null,
+                                                    Func<PnpLockHold?>? holdLock = null)
     {
         int removed = 0;
         var source = PhantomSource;
@@ -802,7 +851,7 @@ public static partial class DeviceManager
             foreach (var (id, uninstall) in source())
             {
                 if (stop?.Invoke() == true) break;
-                if (IsHmInstance(id) && RemovePhantom(id, uninstall, afterUninstall)) removed++;
+                if (IsHmInstance(id) && RemovePhantom(id, uninstall, afterUninstall, holdLock)) removed++;
             }
             return removed;
         }
@@ -837,7 +886,7 @@ public static partial class DeviceManager
                     if (!IsHmInstance(instanceId)) continue;
                     if (stop?.Invoke() == true) break;
                     IntPtr data = devInfoHandle.AddrOfPinnedObject();
-                    if (RemovePhantom(instanceId, () => SetupDiRemoveDevice(dis, data), afterUninstall))
+                    if (RemovePhantom(instanceId, () => SetupDiRemoveDevice(dis, data), afterUninstall, holdLock))
                         removed++;
                 }
             }
@@ -879,14 +928,26 @@ public static partial class DeviceManager
         return IsHidMaestroOwned(iid);
     }
 
-    /// <summary>Uninstall one HIDMaestro phantom under its owner's claim,
-    /// and run <paramref name="afterUninstall"/> inside that claim once the
-    /// uninstall succeeded. True when it was uninstalled.</summary>
-    private static bool RemovePhantom(string instanceId, Func<bool> uninstall, Func<string, bool>? afterUninstall)
+    /// <summary>Uninstall one HIDMaestro phantom under the PnP lock and its
+    /// owner's claim, and run <paramref name="afterUninstall"/> inside both
+    /// once the uninstall succeeded, or the removal test when there is no
+    /// callback. True when it was uninstalled.</summary>
+    private static bool RemovePhantom(string instanceId, Func<bool> uninstall, Func<string, bool>? afterUninstall,
+                                      Func<PnpLockHold?>? holdLock)
     {
         // Skip PRESENT devnodes. Only sweep PHANTOMs to guarantee
         // we never disturb a live controller.
         if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
+            return false;
+
+        // Every uninstall of a HIDMaestro devnode holds the PnP lock through
+        // its removal test, so this pass cannot free a devnode while another
+        // program registers one: the uninstall pass that ran just before
+        // both crashing registrations of 2026-10-14 and 10-15. The cleanup
+        // waits for the lock within its own budget (holdLock). A phantom
+        // back in the tree since the check above is left alone.
+        using var pnp = holdLock != null ? holdLock() : HoldPnpLock();
+        if (pnp == null || CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
             return false;
 
         // The claim of the identity the phantom belongs to is held across
@@ -915,8 +976,10 @@ public static partial class DeviceManager
             DeviceOrchestrator.LogDiag($"    phantom uninstall returned {uninstalled}: {instanceId}");
             if (!uninstalled) return false;
             // Still under the claim, so no create of this release registers
-            // the id until the callback returns.
-            settled = afterUninstall?.Invoke(instanceId) ?? true;
+            // the id until the callback returns. A phantom is out of the tree,
+            // so its record decides and no REMOVED registration is opened.
+            settled = afterUninstall?.Invoke(instanceId)
+                      ?? WaitRemovalComplete(instanceId, uninstalls: true, QuickRemovalMs);
             return true;
         }
         finally

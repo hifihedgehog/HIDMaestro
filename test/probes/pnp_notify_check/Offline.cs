@@ -347,6 +347,16 @@ internal static class Offline
               g8.Gate == DeviceManager.RegistrationGate.Allowed && s8.Registrations == 0,
               $"{g8.Gate}, {s8.Registrations} registration(s)");
 
+        // The source of the SDK beside the probe: every call that registers,
+        // removes or uninstalls a devnode is under the PnP lock.
+        var outside = LockCoverage.Violations(out int sites);
+        if (outside == null)
+            Console.WriteLine("  info: the SDK source is not beside the probe, so the lock coverage check did not run");
+        else
+            Check("every call that registers, removes or uninstalls a devnode is under the PnP lock",
+                  outside.Count == 0 && sites > 0,
+                  outside.Count == 0 ? $"{sites} call sites" : string.Join(" | ", outside));
+
         int locates, cancels;
         lock (s_flags)
         {
