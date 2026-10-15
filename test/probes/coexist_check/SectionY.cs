@@ -36,6 +36,11 @@
 //        driver, and a v1.11.0 program, which makes no owner pipe, leaves
 //        none: the census never reads a previous device's watch as this
 //        one's.
+//    Y7. A v1.12.0 program on the installed driver is killed. Past the
+//        driver's idle handle reset, about 4 s, the driver still holds the
+//        index's Global\HIDMaestroInputAck<N>, so the census reads the
+//        device as a v1.12.0 program's that has exited, and a sweep
+//        removes it.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -60,11 +65,53 @@ internal static partial class Program
         IntPtr user = Y.UserToken(out string why);
         Check("Y: the user's medium-integrity token is at hand", user != IntPtr.Zero, why);
         if (user == IntPtr.Zero) return;
-        string? installed;
-        try { installed = SectionYBody(user); }
+        try
+        {
+            string? installed = SectionYBody(user);
+            if (installed == null) return;
+            // Programs before v1.13.0 take index 0 whatever runs, so these
+            // run alone.
+            SectionYStale(installed);
+            SectionYAckKept(installed);
+        }
         finally { Y.CloseHandle(user); }
-        // A v1.11.0 program takes index 0 whatever runs, so it runs alone.
-        if (installed != null) SectionYStale(installed);
+    }
+
+    /// <summary>Y7. The acknowledgement section of a killed v1.12.0
+    /// program's device on the installed driver.</summary>
+    static void SectionYAckKept(string installed)
+    {
+        string inst, tok;
+        int t;
+        using (var old = PeerProcess.Start("Y-v1.12.0-killed", "v1.12.0"))
+        {
+            string co = old.Send("create pad F1F6 coexist-y-ack");
+            if (!Ok(co)) { Check("Y7: the v1.12.0 program creates", false, co); return; }
+            inst = PeerProcess.Field(co, "instance")!;
+            t = int.Parse(PeerProcess.Field(co, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            bool moved = Y.InstallBestStoreDriver(inst)
+                         && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+                         && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } v && v.Pid == old.Pid, 10_000);
+            Check("Y7: the v1.12.0 program's controller runs on the installed driver, which watches its pipe", moved,
+                  $"{Native.DriverVersionOf(inst)}, installed {installed}, {Y.ShowWatch(inst)}");
+            if (!moved) return;
+            old.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        // Eight idle 500 ms waits reset the driver's handles. Seven seconds
+        // covers it and the reopen attempts after it.
+        Thread.Sleep(7000);
+        string section = $@"Global\HIDMaestroInputAck{t}";
+        Check($"Y7: past the driver's idle reset, {section} still exists", Native.SectionExists(section));
+        using var nu = PeerProcess.Start("Y-sweeper");
+        string? entry = Y.CensusEntry(nu.Send("census"), tok);
+        Check("Y7: the census reads the device as an exited v1.12.0 program's",
+              entry?.Split('|')[2] == "DeadLegacy", entry ?? "no entry");
+        string sw = nu.Send("sweep");
+        WaitFor(() => tree.All(Native.IsGone), 5000);
+        Check("Y7: a sweep removes it", Ok(sw) && tree.Count > 0 && tree.All(Native.IsGone),
+              string.Join(", ", tree.Where(d => !Native.IsGone(d))));
     }
 
     /// <summary>Y6. A previous device's values on the instance.</summary>

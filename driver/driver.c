@@ -2190,11 +2190,15 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
             if (!ctx->SwitchProtocol) {
                 if (ctx->SharedMemPtr)    { UnmapViewOfFile(ctx->SharedMemPtr);    ctx->SharedMemPtr = NULL; }
                 if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle);     ctx->SharedMemHandle = NULL; }
-                /* The acknowledgement follows the input section: reopened
-                 * with it by TryOpenSharedMapping. */
-                WdfWaitLockAcquire(ctx->InputLock, NULL);
-                CloseInputAckLocked(ctx);
-                WdfWaitLockRelease(ctx->InputLock);
+                /* The acknowledgement stays mapped until the device goes.
+                 * Its section is how the SDK's census tells a v1.12.0
+                 * program that has exited from one older than v1.12.0
+                 * (OwnerCensus.ByLegacySigns), so it must outlive the
+                 * program for as long as the device exists. The name stays
+                 * bound to this object while the driver holds it, so the
+                 * next SDK on this index opens the same section, and
+                 * TryOpenSharedMapping maps it again with the input
+                 * section. */
             }
             /* Also reset cached seqno so the fresh mapping's first read
              * (even if it happens to land on a SeqNo matching our previous
