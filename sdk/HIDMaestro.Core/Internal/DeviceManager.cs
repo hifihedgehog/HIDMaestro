@@ -799,7 +799,9 @@ public static partial class DeviceManager
                 {
                     var psi = new System.Diagnostics.ProcessStartInfo
                     {
-                        FileName = "pnputil.exe",
+                        // From System32, never a pnputil.exe in the
+                        // application's or the current directory.
+                        FileName = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe"),
                         Arguments = $"/remove-device \"{instanceId}\"",
                         UseShellExecute = false,
                         RedirectStandardOutput = true,

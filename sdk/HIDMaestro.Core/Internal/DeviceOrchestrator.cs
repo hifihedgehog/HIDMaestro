@@ -301,11 +301,14 @@ internal static partial class DeviceOrchestrator
     //  Process helper (silent: no Console output)
     // ════════════════════════════════════════════════════════════════════
 
-    private static (int exitCode, string output) RunProcess(string fileName, string args, int timeoutMs = 30_000)
+    /// <summary>Run a program from System32 by its file name. The full path
+    /// keeps CreateProcess from finding a program of that name in the
+    /// application's or the current directory first.</summary>
+    private static (int exitCode, string output) RunProcess(string systemTool, string args, int timeoutMs = 30_000)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = fileName, Arguments = args,
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), systemTool), Arguments = args,
             UseShellExecute = false, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true
         };

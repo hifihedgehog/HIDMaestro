@@ -350,6 +350,9 @@ internal static partial class UsbipDriverInstaller
         psi.ArgumentList.Add(UdeHardwareId);
         using (var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start hmswd.exe."))
         {
+            // Drained as it comes, so hmswd never blocks on a full pipe
+            // while this waits for it to exit.
+            var stderr = p.StandardError.ReadToEndAsync();
             if (!p.WaitForExit(TimeoutScale.Apply(90_000)))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
@@ -358,7 +361,7 @@ internal static partial class UsbipDriverInstaller
             }
             if (p.ExitCode != 0 && p.ExitCode != 3010)
                 throw new InvalidOperationException(
-                    $"hmswd force-driver returned {p.ExitCode}: {p.StandardError.ReadToEnd().Trim()}");
+                    $"hmswd force-driver returned {p.ExitCode}: {(stderr.Wait(TimeoutScale.Apply(5_000)) ? stderr.Result.Trim() : "")}");
             DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   driver update returned {p.ExitCode} in {sw.ElapsedMilliseconds} ms.");
         }
 
@@ -556,26 +559,10 @@ internal static partial class UsbipDriverInstaller
         return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
     }
 
-    private static int RunPnputil(string arguments)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "pnputil.exe",
-            Arguments = arguments,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi);
-        if (p == null) return -1;
-        p.StandardOutput.ReadToEnd();
-        if (!p.WaitForExit(TimeoutScale.Apply(60_000)))
-        {
-            try { p.Kill(entireProcessTree: true); } catch { }
-            return -2;
-        }
-        return p.ExitCode;
-    }
+    /// <summary>pnputil from System32, through the same runner as every
+    /// other pnputil call: its output drained as it comes, so the timeout
+    /// holds when pnputil hangs.</summary>
+    private static int RunPnputil(string arguments) => PnputilHelper.Run(arguments, timeoutMs: 60_000).exitCode;
 
     /// <summary>True when usbip-win2's driver package is already in the
     /// driver store, whether or not its host controller is currently
@@ -585,22 +572,7 @@ internal static partial class UsbipDriverInstaller
     {
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "pnputil.exe",
-                Arguments = "/enum-drivers",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true,
-            };
-            using var p = Process.Start(psi);
-            if (p == null) return false;
-            string output = p.StandardOutput.ReadToEnd();
-            if (!p.WaitForExit(TimeoutScale.Apply(30_000)))
-            {
-                try { p.Kill(entireProcessTree: true); } catch { }
-                return false;
-            }
+            var (_, output) = PnputilHelper.Run("/enum-drivers", timeoutMs: 30_000);
             return output.Contains("usbip2_ude.inf", StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
