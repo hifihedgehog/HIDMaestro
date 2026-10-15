@@ -775,14 +775,16 @@ public sealed class HMContext : IDisposable
     /// process throws <see cref="HMResourceInUseException"/> until then, and
     /// the SDK removes the devices as the process exits.
     ///
-    /// <para>Per-controller teardown blocks 5-11s waiting on Windows PnP's
-    /// synchronous DIF_REMOVE (xinputhid filter unload for BT, XUSB companion
-    /// teardown for non-xinputhid Xbox). The dispose calls run on parallel
-    /// threads, but every devnode removal holds a machine-wide lock that
-    /// every registration and removal of a program built on this release
-    /// holds, so the removals run one at a time, in this program and across
+    /// <para>A controller's teardown waits for Windows to remove its
+    /// devnodes, and for an Xbox controller bound to xinputhid (an Xbox
+    /// Series controller over Bluetooth) also for that filter to unload,
+    /// which takes the longest. The dispose calls run on parallel threads,
+    /// but every devnode removal holds a machine-wide lock that every
+    /// registration and removal of a program built on this release holds,
+    /// so the removals run one at a time, in this program and across
     /// programs, and the wall clock is about the sum of the controllers'
-    /// removals.</para>
+    /// removals rather than the longest one. Another program's create or
+    /// removal waits that long too.</para>
     ///
     /// <para>Called from a controller's event handler, it disposes that
     /// controller on the handler's own thread, so the controller's Dispose

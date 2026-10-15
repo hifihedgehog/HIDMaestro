@@ -2,9 +2,11 @@
 // devnode a controller owns, when it left the device tree (the first failed
 // CM_LOCATE_DEVNODE_NORMAL locate), when its DEVICEINSTANCEREMOVED
 // notification arrived, and when its PHANTOM record went, against the start
-// of Dispose, and the whole Dispose. It uses only what master 238bd2b already
-// has, so the same binary times that build's SDK when its HIDMaestro.Core.dll
-// is put beside it.
+// of Dispose, and the whole Dispose. "measure4" disposes four controllers of
+// one profile together instead, as HMContext.Dispose does, and times the
+// whole dispose and each controller's. It uses only what master 238bd2b
+// already has, so the same binary times that build's SDK when its
+// HIDMaestro.Core.dll is put beside it.
 //
 // Creates and removes devices and needs elevation: run it through the bench,
 // never by hand. Exit 0 when every cycle ran, 1 when one failed, 2 when
@@ -236,5 +238,51 @@ internal static unsafe partial class Measure
             ? "=== every cycle ran, and every devnode left the tree and got its REMOVED ==="
             : $"=== {failed} cycle(s) failed, {missing} devnode(s) without a departure or a REMOVED ===");
         return failed == 0 && missing == 0 ? 0 : 1;
+    }
+
+    /// <summary>Per profile type, <paramref name="count"/> controllers of
+    /// one profile created, then disposed together through
+    /// DisposeControllersInParallel, the path HMContext.Dispose takes: the
+    /// whole dispose and each controller's own, over
+    /// <paramref name="cycles"/> cycles. Exit 1 when a create failed.</summary>
+    internal static int RunBatch(int cycles, int count = 4)
+    {
+        Console.WriteLine($"=== Dispose of {count} controllers together per profile type, {cycles} cycles each ===");
+        double ms = 1000.0 / Stopwatch.Frequency;
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        ctx.InstallDriver();
+        int failed = 0;
+        foreach (string profileId in new[] { "dualsense", "xbox-360-wired", "xbox-series-xs-bt" })
+        {
+            var profile = ctx.GetProfile(profileId)!;
+            var whole = new List<double>();
+            var each = new List<double>();
+            for (int i = 0; i < cycles; i++)
+            {
+                var controllers = new List<HMController>();
+                try
+                {
+                    for (int k = 0; k < count; k++)
+                        controllers.Add(ctx.CreateController(profile, $"pnp-notify-measure-{k}"));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  [FAIL] {profileId} cycle {i}: create {controllers.Count + 1} threw {ex.GetType().Name}: {ex.Message}");
+                    failed++;
+                    ctx.DisposeControllersInParallel(controllers);
+                    continue;
+                }
+                long t0 = Stopwatch.GetTimestamp();
+                ctx.DisposeControllersInParallel(controllers, (_, elapsedMs) => { lock (each) each.Add(elapsedMs); });
+                whole.Add((Stopwatch.GetTimestamp() - t0) * ms);
+            }
+            Console.WriteLine($"  {profileId}");
+            Console.WriteLine($"    Dispose of {count} together       {Stats(whole)}");
+            Console.WriteLine($"    each controller's Dispose   {Stats(each)}");
+        }
+        Console.WriteLine();
+        Console.WriteLine(failed == 0 ? "=== every cycle ran ===" : $"=== {failed} cycle(s) failed ===");
+        return failed == 0 ? 0 : 1;
     }
 }

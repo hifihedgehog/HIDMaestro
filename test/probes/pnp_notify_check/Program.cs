@@ -22,8 +22,9 @@
 //
 // "offline" runs the removal test's and the registration gate's decisions on
 // recorded sequences instead (Offline.cs): no device, no elevation, no PnP
-// call. "cost" times them against an id that does not exist (Cost.cs), and
-// "measure [cycles]" times Dispose per profile type on live devices
+// call. "cost" times them against an id that does not exist (Cost.cs),
+// "measure [cycles]" times Dispose per profile type on live devices, and
+// "measure4 [cycles]" times four controllers of each type disposed together
 // (Measure.cs, elevated, through the bench only).
 using System;
 using System.Diagnostics;
@@ -77,7 +78,7 @@ internal static class Program
         if (mode == "offline") return Offline.Run();
         if (mode == "cost") return Cost.Run(args.Length > 1 ? int.Parse(args[1]) : 200);
 
-        Console.WriteLine(mode == "measure" ? "=== Dispose timing ===" : "=== PnP notifications reach the SDK's waits ===");
+        Console.WriteLine(mode is "measure" or "measure4" ? "=== Dispose timing ===" : "=== PnP notifications reach the SDK's waits ===");
         foreach (var p in Process.GetProcesses())
         {
             try
@@ -95,6 +96,7 @@ internal static class Program
         }
 
         if (mode == "measure") return Measure.Run(args.Length > 1 ? int.Parse(args[1]) : 30);
+        if (mode == "measure4") return Measure.RunBatch(args.Length > 1 ? int.Parse(args[1]) : 30);
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
