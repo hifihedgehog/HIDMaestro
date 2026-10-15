@@ -24,23 +24,35 @@
 // instance when no other adapter is present, on input.inf's HID driver,
 // failing with Code 10.
 //
+// The malformed part copies gamecube-adapter with one mistake each and checks
+// that the device model refuses every copy at create, before anything
+// machine-wide, with an InvalidOperationException naming the profile, the
+// JSON path and the limit broken: an unknown field type or semantic, a field
+// wider than its block or report, a report larger than the extended lane, a
+// command rule longer than the OUT endpoint's packets, a null where a value
+// belongs, and their siblings.
+//
 // Members newer than b4d29d9 are reached by reflection, so the probe builds
 // against b4d29d9 and fails there at run time.
 //
-// Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
-// HIDMaestro is running.
+// "--offline" runs the catalog and malformed parts alone, which create no
+// device and need no elevation. Otherwise requires elevation. Exit 0 PASS,
+// 1 FAIL, 2 when another program that embeds HIDMaestro is running.
 using System;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Json.Nodes;
 using HIDMaestro;
 
 internal static class Program
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-    static int Main()
+    static int Main(string[] args)
     {
+        bool offline = args.Contains("--offline");
         Console.WriteLine("=== S79: the GameCube adapter persona's descriptors ===");
         if (Probe.OtherSdkRunning()) return 2;
 
@@ -77,6 +89,9 @@ internal static class Program
             joypadRd.AsSpan().SequenceEqual(GcReal.JoypadOsReportDescriptor), $"{joypadRd.Length} bytes");
 
         CheckCatalogCompiles(ctx);
+        CheckMalformedRefused(ctx);
+        if (offline) return Probe.Finish("S79");
+        CheckCreateRefusedFirst(ctx);
 
         Console.WriteLine("-- device");
         if (gc == null || !gc.IsDeployable)
@@ -151,6 +166,411 @@ internal static class Program
             catch (TargetInvocationException ex) { failures.Append($" {p.Id}: {ex.InnerException?.Message}"); }
         }
         Probe.Check($"every catalog profile compiles as a device model ({count})", failures.Length == 0, failures.ToString());
+    }
+
+    /// <summary>One mistake each in a copy of gamecube-adapter, and the text
+    /// its refusal must carry after the profile's name.</summary>
+    static readonly (string Name, Action<JsonObject> Break, string Expect)[] s_malformed =
+    {
+        // An unknown field type or semantic.
+        ("a port field of an unknown type",
+            j => PortField(j, 2)["type"] = "uint8-axes",
+            "extendedReport.ports.fields[2].type 'uint8-axes' is not a field type"),
+        ("a port field with an unknown semantic",
+            j => PortField(j, 2)["semantic"] = "leftStickZ",
+            "extendedReport.ports.fields[2] ('uint8-axis').semantic 'leftStickZ' names no value the SDK has"),
+        ("a report field of an unknown type",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axes"}"""),
+            "extendedReport.fields[0].type 'uint8-axes' is not a field type"),
+        ("a report field with an unknown semantic",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"int16-le","semantic":"gyroPitchh"}"""),
+            "extendedReport.fields[0] ('int16-le').semantic 'gyroPitchh' names no value the SDK has"),
+        ("a bitfield naming an unknown flag",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"bitfield","bits":"0-1","buttons":["batteryChraging"]}"""),
+            "extendedReport.fields[0] ('bitfield').buttons[0] 'batteryChraging' is not a flag"),
+        ("a button name the SDK cannot express, named with the profile",
+            j => PortField(j, 0)["buttons"]![0] = "Turbo",
+            "extendedReport.ports: Button name 'Turbo' at index 0 of the button mask at byte 1 resolves to no HMButton"),
+        ("an armOn trigger of an unknown type",
+            j => In(j)["armOn"] = Arr("""{"type":"featureWrit","reportId":"0x05"}"""),
+            "extendedReport.armOn[0].type 'featureWrit' is not one of featureWrite, outputWrite, featureRead"),
+
+        // A field wider than its block or report.
+        ("a uint16 on a port block's last byte",
+            j => PortField(j, 7)["type"] = "uint16-trigger",
+            "extendedReport.ports.fields[7] ('uint16-trigger') at bytes 8-9 runs past the 9-byte port block"),
+        ("a uint16 that ends past the block's data bytes",
+            j =>
+            {
+                Ports(j)["data"] = "1-7";
+                Ports(j)["fields"]!.AsArray().RemoveAt(7);
+                PortField(j, 6)["type"] = "uint16-trigger";
+            },
+            "extendedReport.ports.fields[6] ('uint16-trigger') at bytes 7-8 is outside the block's data bytes 1-7"),
+        ("an output port field read past its 1-byte block",
+            j => OutPortField(j, 0)["type"] = "uint16-le",
+            "extendedOutputReport.ports.fields[0] ('uint16-le') at bytes 0-1 runs past the 1-byte port block"),
+        ("an output field past the report's end",
+            j => Out(j)["fields"] = Arr("""{"byte":4,"type":"uint16-le","semantic":"x"}"""),
+            "extendedOutputReport.fields[0] ('uint16-le') at bytes 4-5 runs past the 5-byte report"),
+        ("a report field with no byte",
+            j => In(j)["fields"] = Arr("""{"type":"uint8-axis","semantic":"leftStickX"}"""),
+            "extendedReport.fields[0] ('uint8-axis') needs byte"),
+        ("a bytes range that does not parse",
+            j => Out(j)["fields"] = Arr("""{"bytes":"2","type":"bytes-passthrough","semantic":"x"}"""),
+            "extendedOutputReport.fields[0].bytes \"2\" is not a range"),
+        ("a bytes range that runs backward",
+            j => Out(j)["fields"] = Arr("""{"bytes":"4-2","type":"bytes-passthrough","semantic":"x"}"""),
+            "extendedOutputReport.fields[0].bytes \"4-2\" is not a range"),
+        ("a CRC destination that is not four bytes",
+            j => In(j)["fields"] = Arr("""{"bytes":"1-2","type":"crc32-le","scope":{"prefix":[],"from":0,"to":30}}"""),
+            "extendedReport.fields[0] ('crc32-le').bytes \"1-2\" must name the four bytes the CRC is written to"),
+        ("an rgb24 field of two bytes",
+            j => Out(j)["fields"] = Arr("""{"bytes":"1-2","type":"rgb24","semantic":"lightbar"}"""),
+            "extendedOutputReport.fields[0] ('rgb24').bytes \"1-2\" must name three bytes"),
+        ("a CRC with no scope",
+            j => In(j)["fields"] = Arr("""{"bytes":"1-4","type":"crc32-le"}"""),
+            "extendedReport.fields[0] ('crc32-le') needs scope"),
+        ("a CRC scope that starts past the report",
+            j => In(j)["fields"] = Arr("""{"bytes":"1-4","type":"crc32-le","scope":{"prefix":[],"from":40,"to":50}}"""),
+            "extendedReport.fields[0] ('crc32-le').scope 40-50 does not start inside the 37-byte report"),
+        ("an output field past the output ring's 256 data bytes",
+            j => { Out(j)["size"] = 300; Out(j)["fields"] = Arr("""{"byte":280,"type":"uint8","semantic":"x"}"""); },
+            "extendedOutputReport.fields[0] ('uint8') at bytes 280-280 ends past byte 256"),
+        ("bits on a type that reads whole bytes",
+            j => PortField(j, 2)["bits"] = "0-3",
+            "extendedReport.ports.fields[2] ('uint8-axis').bits: this type reads whole bytes"),
+        ("bits past a single byte",
+            j => OutPortField(j, 0)["bits"] = "0-9",
+            "extendedOutputReport.ports.fields[0] ('uint8').bits \"0-9\" reaches bit 9. This type holds bits 0 to 7"),
+        ("bits that do not parse",
+            j => PortField(j, 0)["bits"] = "4",
+            "extendedReport.ports.fields[0].bits \"4\" is not a range"),
+        ("more buttons than bits",
+            j => PortField(j, 0)["bits"] = "0-3",
+            "extendedReport.ports.fields[0] ('button-mask') names 8 buttons for bits 0-3, which hold 4"),
+        ("a button mask with no buttons",
+            j => PortField(j, 1).Remove("buttons"),
+            "extendedReport.ports.fields[1] ('button-mask') needs buttons"),
+        ("a report ID that is not hex",
+            j => In(j)["reportId"] = "0xZZ",
+            "extendedReport.reportId \"0xZZ\" is not a hex byte"),
+        ("an output report of no bytes",
+            j => { Out(j).Remove("ports"); Out(j)["size"] = 0; },
+            "extendedOutputReport.size 0 must be 1 or more"),
+        ("a port count that wraps an int",
+            j =>
+            {
+                // 2^30 blocks of 4 bytes wrap an int to 0, which "fits".
+                j.Remove("extendedOutputReport");
+                var ports = Ports(j);
+                ports["count"] = 1 << 30;
+                ports["stride"] = 4;
+                ports["data"] = "1-3";
+                ports["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftStickX"}""");
+                Rule(j, 2)["reply"]![1]!["bytes"] = "1-3";
+            },
+            "extendedReport.ports: 1073741824 ports of 4 bytes from offset 1 do not fit a 37-byte report"),
+
+        // A report larger than the extended lane, or than what carries it.
+        ("a ports report larger than the extended lane",
+            j => In(j)["size"] = 81,
+            "extendedReport.size 81 is larger than the 80 bytes the extended report lane carries"),
+        ("an output report whose ports pass the output ring's slot",
+            j => { Out(j)["size"] = 300; OutPorts(j)["stride"] = 70; },
+            "extendedOutputReport.ports end at byte 281. An output report reaches the SDK with at most 256 bytes after its report ID"),
+        ("an output report whose ports pass the OUT endpoint's packet",
+            j => { Out(j)["size"] = 9; OutPorts(j)["stride"] = 2; },
+            "extendedOutputReport.ports end at byte 9, past the 5-byte packets usbConfiguration.protocol.commands.endpoint 0x02 delivers"),
+        ("more ports than the protocol tracks",
+            j =>
+            {
+                j.Remove("extendedOutputReport");
+                In(j)["size"] = 67;
+                var ports = Ports(j);
+                ports["count"] = 33;
+                ports["stride"] = 2;
+                ports["data"] = "1-1";
+                ports["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftStickX"}""");
+                Rule(j, 2)["reply"]![1]!["bytes"] = "1-1";
+            },
+            "extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
+
+        // A command rule longer than the OUT endpoint's packets.
+        ("a rule match longer than a packet",
+            j => Rule(j, 0)["match"] = "110000000000",
+            "usbConfiguration.protocol.commands.rules[0].match is 6 bytes, longer than the 5-byte packets endpoint 0x02 delivers"),
+        ("a rule minLength longer than a packet",
+            j => Rule(j, 0)["minLength"] = 6,
+            "usbConfiguration.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
+
+        // A null where a value belongs.
+        ("a null match",
+            j => Rule(j, 3)["match"] = null,
+            "usbConfiguration.protocol.commands.rules[3].match is missing"),
+        ("a null in a while list",
+            j => Protocol(j)["input"]!["while"] = Arr("\"polling\"", "null"),
+            "usbConfiguration.protocol.input.while holds null where a state name belongs"),
+        ("a null halt.while",
+            j => Protocol(j)["halt"]!["while"] = null,
+            "usbConfiguration.protocol.halt.while names no state"),
+        ("a null reply part",
+            j => Rule(j, 2)["reply"] = Arr("""{"hex":"22"}""", "null"),
+            "usbConfiguration.protocol.commands.rules[2].reply[1] is null"),
+        ("a null rule",
+            j => Protocol(j)["commands"]!["rules"] = Arr("null"),
+            "usbConfiguration.protocol.commands.rules[0] is null"),
+        ("null rules",
+            j => Protocol(j)["commands"]!["rules"] = null,
+            "usbConfiguration.protocol.commands.rules is null"),
+        ("a null state",
+            j => Protocol(j)["state"]![0] = null,
+            "usbConfiguration.protocol.state[0] is null"),
+        ("null state",
+            j => Protocol(j)["state"] = null,
+            "usbConfiguration.protocol.state is null"),
+        ("a null input endpoint",
+            j => Protocol(j)["input"]!["endpoint"] = null,
+            "usbConfiguration.protocol.input.endpoint is missing"),
+        ("a null portsConnected",
+            j => Protocol(j)["input"]!["clock"]!["sourcePollRules"]![0]!["portsConnected"] = null,
+            "usbConfiguration.protocol.input.clock.sourcePollRules[0].portsConnected is null"),
+        ("a null connection value",
+            j => Ports(j)["status"]!["connections"]![1]!["value"] = null,
+            "extendedReport.ports.status.connections[1].value is missing"),
+        ("a null connection",
+            j => Ports(j)["status"]!["connections"]![2] = null,
+            "extendedReport.ports.status.connections[2] is null"),
+        ("null connections",
+            j => Ports(j)["status"]!["connections"] = null,
+            "extendedReport.ports.status declares no connections"),
+        ("a null flag",
+            j => Ports(j)["status"]!["flags"] = Arr("null"),
+            "extendedReport.ports.status.flags[0] is null"),
+        ("a null snapshot",
+            j => Ports(j)["snapshots"] = Arr("null"),
+            "extendedReport.ports.snapshots[0] is null"),
+        ("null port fields",
+            j => Ports(j)["fields"] = null,
+            "extendedReport.ports.fields is null"),
+        ("a null port field",
+            j => Ports(j)["fields"]![3] = null,
+            "extendedReport.ports.fields[3] is null"),
+    };
+
+    /// <summary>Copies that must still compile, as they did at af1e3d4,
+    /// because the codec writes them correctly: its defined fallbacks and
+    /// the bounds it clamps.</summary>
+    static readonly (string Name, Action<JsonObject> Change)[] s_accepted =
+    {
+        ("an unaltered copy of gamecube-adapter", j => { }),
+        ("a CRC scope past the report's end, which the codec stops at the end",
+            j => In(j)["fields"] = Arr("""{"bytes":"1-4","type":"crc32-le","scope":{"prefix":[],"from":0,"to":99}}""")),
+        ("touchpad-finger with no semantic, finger 0",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger"}""")),
+        ("touchpad-finger with another semantic, finger 0",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger","semantic":"touchpad"}""")),
+        ("stick12-pair with no semantic, the left stick",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"stick12-pair"}""")),
+        ("uint8-axis with no semantic, the center",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis"}""")),
+        ("uint8-axis with an empty semantic, the center",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":""}""")),
+        ("an output CRC with no place in a report past the ring, read at the received end",
+            j => { Out(j)["size"] = 300; Out(j)["fields"] = Arr("""{"type":"crc32-le","scope":{"prefix":[],"from":0,"to":20}}"""); }),
+        ("uint8-axis naming another type's value, the center",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftTrigger"}""")),
+        ("int16-axis with no semantic, the center",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"int16-axis"}""")),
+        ("uint16-le with no semantic, zero",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint16-le"}""")),
+        ("an output button mask of 16 bits",
+            j => Out(j)["fields"] = Arr(WideMask)),
+    };
+
+    const string WideMask = """{"byte":1,"bits":"0-15","type":"button-mask","semantic":"held","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","LeftStick","RightStick","Guide","_","_","_","_","_"]}""";
+
+    /// <summary>CreateController refuses a malformed profile before it
+    /// claims anything: no claim pipe, no owner record and no devnode
+    /// appear. The copy is one af1e3d4 accepted and created.</summary>
+    static void CheckCreateRefusedFirst(HMContext ctx)
+    {
+        Console.WriteLine("-- a create refuses a malformed profile first");
+        int index = Array.FindIndex(s_malformed, c => c.Name == "a rule match longer than a packet");
+        string id = $"s79-malformed-{index}";
+        var profile = ctx.GetProfile(id);
+        if (profile == null)
+        {
+            Probe.Check("CreateController refuses a malformed profile", false, $"{id} is not loaded");
+            return;
+        }
+        var pipes = ClaimPipes();
+        var records = OwnerRecords();
+        var devnodes = Devnodes.PresentAdapters();
+        string outcome;
+        HMController? created = null;
+        try
+        {
+            created = ctx.CreateController(profile);
+            outcome = "created";
+        }
+        catch (Exception ex)
+        {
+            outcome = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        try
+        {
+            Probe.Check("CreateController refuses a malformed profile, naming it",
+                outcome.StartsWith($"InvalidOperationException: Profile '{id}': usbConfiguration.protocol.commands.rules[0].match", StringComparison.Ordinal),
+                outcome);
+            // Read before any dispose. A device a create made arrives
+            // asynchronously, so give it the time the device part gives a
+            // real create.
+            if (created != null)
+                Probe.WaitFor(() => Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), 10_000);
+            var pipesAfter = ClaimPipes();
+            Probe.Check("no claim pipe appeared", pipesAfter.SetEquals(pipes),
+                string.Join(" ", pipesAfter.Except(pipes)));
+            var recordsAfter = OwnerRecords();
+            Probe.Check("no owner record changed", recordsAfter.SetEquals(records),
+                string.Join(" ", recordsAfter.Except(records)));
+            var devnodesAfter = Devnodes.PresentAdapters();
+            Probe.Check("no devnode appeared", !devnodesAfter.Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(),
+                string.Join(" ", devnodesAfter.Except(devnodes, StringComparer.OrdinalIgnoreCase)));
+        }
+        finally
+        {
+            if (created != null)
+            {
+                created.Dispose();
+                Probe.WaitFor(() => !Devnodes.PresentAdapters().Except(devnodes, StringComparer.OrdinalIgnoreCase).Any(), 10_000);
+            }
+        }
+    }
+
+    /// <summary>The claim pipes that exist now: HIDMaestro.Owner, .Index
+    /// and .Identity.</summary>
+    static System.Collections.Generic.HashSet<string> ClaimPipes()
+        => new(Directory.GetFiles(@"\\.\pipe\")
+            .Select(Path.GetFileName)
+            .Where(n => n != null && n.StartsWith("HIDMaestro.", StringComparison.OrdinalIgnoreCase))!);
+
+    /// <summary>Every key, value name and value under the owner records.</summary>
+    static System.Collections.Generic.HashSet<string> OwnerRecords()
+    {
+        var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var root = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        void Walk(Microsoft.Win32.RegistryKey key, string path)
+        {
+            seen.Add(path);
+            foreach (var v in key.GetValueNames())
+                seen.Add($"{path}:{v}={key.GetValue(v)}");
+            foreach (var sub in key.GetSubKeyNames())
+            {
+                using var child = key.OpenSubKey(sub);
+                if (child != null) Walk(child, $"{path}\\{sub}");
+            }
+        }
+        if (root != null) Walk(root, "HIDMaestroOwners");
+        return seen;
+    }
+
+    static JsonObject In(JsonObject j) => j["extendedReport"]!.AsObject();
+    static JsonObject Out(JsonObject j) => j["extendedOutputReport"]!.AsObject();
+    static JsonObject Ports(JsonObject j) => In(j)["ports"]!.AsObject();
+    static JsonObject OutPorts(JsonObject j) => Out(j)["ports"]!.AsObject();
+    static JsonObject PortField(JsonObject j, int i) => Ports(j)["fields"]![i]!.AsObject();
+    static JsonObject OutPortField(JsonObject j, int i) => OutPorts(j)["fields"]![i]!.AsObject();
+    static JsonObject Protocol(JsonObject j) => j["usbConfiguration"]!["protocol"]!.AsObject();
+    static JsonObject Rule(JsonObject j, int i) => Protocol(j)["commands"]!["rules"]![i]!.AsObject();
+    static JsonArray Arr(params string[] items) => JsonNode.Parse("[" + string.Join(",", items) + "]")!.AsArray();
+
+    /// <summary>Each malformed copy of gamecube-adapter is refused by the
+    /// check a create runs before it takes anything machine-wide, with an
+    /// InvalidOperationException that names the profile, the JSON path and
+    /// the limit. No device is created.</summary>
+    static void CheckMalformedRefused(HMContext ctx)
+    {
+        Console.WriteLine("-- malformed profiles are refused");
+        var inner = typeof(HMProfile).GetProperty("Inner", Any);
+        var validate = inner?.PropertyType.GetMethod("ValidateDeviceModel", Any);
+        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
+        if (inner == null || validate == null || name == null)
+        {
+            Probe.Check("the device model check and gamecube-adapter's JSON are present", false,
+                validate == null ? "ValidateDeviceModel is absent" : "gamecube-adapter.json is not embedded");
+            return;
+        }
+        string json;
+        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
+        using (var reader = new StreamReader(stream))
+            json = reader.ReadToEnd();
+
+        string dir = Path.Combine(Path.GetTempPath(), "hm-s79-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            for (int i = 0; i < s_malformed.Length; i++)
+            {
+                var j = JsonNode.Parse(json)!.AsObject();
+                j["id"] = $"s79-malformed-{i}";
+                s_malformed[i].Break(j);
+                File.WriteAllText(Path.Combine(dir, $"s79-malformed-{i}.json"), j.ToJsonString());
+            }
+            // The positive controls: copies the codec writes correctly.
+            for (int i = 0; i < s_accepted.Length; i++)
+            {
+                var j = JsonNode.Parse(json)!.AsObject();
+                j["id"] = $"s79-accepted-{i}";
+                s_accepted[i].Change(j);
+                File.WriteAllText(Path.Combine(dir, $"s79-accepted-{i}.json"), j.ToJsonString());
+            }
+
+            // The context the catalog came from, so the check starts no
+            // second context. The copies' ids are their own.
+            ctx.LoadProfilesFromDirectory(dir);
+            for (int i = 0; i < s_accepted.Length; i++)
+            {
+                var p = ctx.GetProfile($"s79-accepted-{i}");
+                string result = "accepted";
+                if (p == null) result = "did not load";
+                else
+                {
+                    try { validate.Invoke(inner.GetValue(p), null); }
+                    catch (TargetInvocationException ex) { result = $"{ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}"; }
+                }
+                Probe.Check($"compiles: {s_accepted[i].Name}", result == "accepted", result);
+            }
+            for (int i = 0; i < s_malformed.Length; i++)
+            {
+                var (title, _, expect) = s_malformed[i];
+                string id = $"s79-malformed-{i}";
+                var p = ctx.GetProfile(id);
+                if (p == null)
+                {
+                    Probe.Check($"refused: {title}", false, "the profile did not load");
+                    continue;
+                }
+                string want = $"Profile '{id}': {expect}";
+                try
+                {
+                    validate.Invoke(inner.GetValue(p), null);
+                    Probe.Check($"refused: {title}", false, "accepted");
+                }
+                catch (TargetInvocationException ex)
+                {
+                    var e = ex.InnerException!;
+                    Probe.Check($"refused: {title}",
+                        e.GetType() == typeof(InvalidOperationException) && e.Message.StartsWith(want, StringComparison.Ordinal),
+                        $"{e.GetType().Name}: {e.Message}");
+                }
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     /// <summary>The bytes the persona serves, from the USB/IP device's own

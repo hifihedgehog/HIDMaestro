@@ -239,8 +239,8 @@ public sealed class ControllerProfile
     /// naming the JSON path.</summary>
     internal void ValidatePorts()
     {
-        var input = PortLayout.Of(ExtendedReport, $"Profile '{Id}': extendedReport");
-        var output = PortLayout.Of(ExtendedOutputReport, $"Profile '{Id}': extendedOutputReport");
+        var input = PortLayout.Of(ExtendedReport, $"Profile '{Id}': extendedReport", output: false);
+        var output = PortLayout.Of(ExtendedOutputReport, $"Profile '{Id}': extendedOutputReport", output: true);
         if (output == null) return;
         if (input == null)
             throw new InvalidOperationException(
@@ -248,7 +248,80 @@ public sealed class ControllerProfile
         if (output.Count != input.Count)
             throw new InvalidOperationException(
                 $"Profile '{Id}': extendedOutputReport.ports.count {output.Count} differs from extendedReport.ports.count {input.Count}.");
+        // A report whose ports end past the output ring's data bytes never
+        // reaches the ports whole.
+        int extent = output.BlockAt(output.Count);
+        if (extent - 1 > OutputRingData)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': extendedOutputReport.ports end at byte {extent}. An output report reaches the SDK " +
+                $"with at most {OutputRingData} bytes after its report ID.");
         output.PrepareOutput($"Profile '{Id}': extendedOutputReport");
+    }
+
+    /// <summary>The output ring keeps a report's first byte apart and holds
+    /// at most this many bytes after it, on both transports (driver.h
+    /// HIDMAESTRO_OUTPUT_SLOT_DATA_CAP).</summary>
+    private const int OutputRingData = SharedMemoryIO.OUTPUT_SLOT_SIZE - SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA;
+
+    /// <summary>v1.13.0: check the profile's vendor-blob reports, the top
+    /// level of <see cref="ExtendedReport"/> and <see cref="ExtendedOutputReport"/>,
+    /// with the field rules <see cref="VendorBlobProgram.Check"/> applies to
+    /// port blocks. An input report the SDK sends must fit the shared
+    /// section's extended lane, which carries it whole or not at all.</summary>
+    private void ValidateExtendedReports()
+    {
+        CheckExtendedReport(ExtendedReport, "extendedReport", output: false);
+        CheckExtendedReport(ExtendedOutputReport, "extendedOutputReport", output: true);
+        var input = ExtendedReport;
+        bool sent = input != null && (input.AlwaysArmed || input.Ports != null || input.ArmOn is { Count: > 0 });
+        if (sent && input!.Size > SharedMemoryIO.EXTENDED_DATA_CAPACITY)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': extendedReport.size {input.Size} is larger than the {SharedMemoryIO.EXTENDED_DATA_CAPACITY} " +
+                "bytes the extended report lane carries.");
+    }
+
+    private void CheckExtendedReport(ExtendedReportSpec? spec, string name, bool output)
+    {
+        if (spec == null) return;
+        string where = $"Profile '{Id}': {name}";
+        try { _ = spec.ReportIdByte; }
+        catch (Exception e) when (e is FormatException or OverflowException)
+        {
+            throw new InvalidOperationException($"{where}.reportId \"{spec.ReportId}\" is not a hex byte.");
+        }
+        if (spec.Size < 1)
+            throw new InvalidOperationException($"{where}.size {spec.Size} must be 1 or more, the report ID's byte included.");
+        if (spec.ArmOn != null)
+        {
+            for (int i = 0; i < spec.ArmOn.Count; i++)
+            {
+                var t = spec.ArmOn[i] ?? throw new InvalidOperationException($"{where}.armOn[{i}] is null.");
+                // The types the output thread arms on (HMController's reader).
+                if (t.Type is not ("featureWrite" or "outputWrite" or "featureRead"))
+                    throw new InvalidOperationException(
+                        $"{where}.armOn[{i}].type '{t.Type}' is not one of featureWrite, outputWrite, featureRead.");
+                try { _ = t.ReportIdByte; }
+                catch (Exception e) when (e is FormatException or OverflowException)
+                {
+                    throw new InvalidOperationException($"{where}.armOn[{i}].reportId \"{t.ReportId}\" is not a hex byte.");
+                }
+            }
+        }
+        VendorBlobProgram.Check(spec, spec.Size, where, output, portBlock: false);
+        if (!output) return;
+        // A field that ends past the ring's data bytes is never in the
+        // report the SDK decodes. A CRC with no declared place is read at
+        // the end of the report as received, wherever that is.
+        var prog = VendorBlobProgram.Get(spec);
+        for (int i = 0; i < prog.Fields.Length; i++)
+        {
+            if (prog.Fields[i].Op == VendorBlobProgram.FieldOp.Crc32 && prog.Fields[i].CrcDst < 0) continue;
+            var (lo, hi) = VendorBlobProgram.Extent(in prog.Fields[i], spec.Size);
+            if (hi > OutputRingData)
+                throw new InvalidOperationException(
+                    $"{where}.fields[{i}] ('{prog.Fields[i].Src.Type}') at bytes {lo}-{hi} ends past byte {OutputRingData}. " +
+                    $"An output report reaches the SDK with at most {OutputRingData} bytes after its report ID.");
+        }
     }
 
     /// <summary>v1.13.0: compile everything the profile declares about its
@@ -258,6 +331,7 @@ public sealed class ControllerProfile
     /// profile is refused with nothing to undo.</summary>
     internal void ValidateDeviceModel()
     {
+        ValidateExtendedReports();
         ValidatePorts();
         var cfg = UsbConfiguration;
         if (cfg?.Protocol == null && cfg?.WinUsb == null) return;

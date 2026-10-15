@@ -48,12 +48,14 @@ internal sealed class PortLayout
     /// compiles and caches them as it does a report's.</summary>
     public ExtendedReportSpec FieldSpec { get; }
 
-    private PortLayout(PortsSpec spec, int reportSize, string where)
+    private PortLayout(PortsSpec spec, int reportSize, string where, bool output)
     {
         Count = spec.Count;
         Offset = spec.Offset;
         Stride = spec.Stride;
-        if (Count < 1 || Stride < 1 || Offset < 0 || Offset + Count * Stride > reportSize)
+        // Long arithmetic, so a count or stride large enough to wrap an int
+        // cannot pass for one that fits.
+        if (Count < 1 || Stride < 1 || Offset < 0 || Offset + (long)Count * Stride > reportSize)
             throw new InvalidOperationException(
                 $"{where}.ports: {Count} ports of {Stride} bytes from offset {Offset} do not fit a {reportSize}-byte report.");
 
@@ -62,13 +64,13 @@ internal sealed class PortLayout
             StatusByte = spec.Status.Byte;
             if (StatusByte < 0 || StatusByte >= Stride)
                 throw new InvalidOperationException($"{where}.ports.status.byte {StatusByte} is outside the {Stride}-byte block.");
-            if (spec.Status.Connections.Count == 0)
+            if (spec.Status.Connections == null || spec.Status.Connections.Count == 0)
                 throw new InvalidOperationException($"{where}.ports.status declares no connections. The first is the empty port.");
             _connectionNames = new string[spec.Status.Connections.Count];
             _connectionValues = new byte[spec.Status.Connections.Count];
             for (int i = 0; i < _connectionNames.Length; i++)
             {
-                var c = spec.Status.Connections[i];
+                var c = Need(spec.Status.Connections[i], $"{where}.ports.status.connections[{i}]");
                 _connectionNames[i] = RequireName(c.Name, $"{where}.ports.status.connections[{i}]");
                 _connectionValues[i] = ParseByte(c.Value, $"{where}.ports.status.connections[{i}].value");
             }
@@ -80,6 +82,7 @@ internal sealed class PortLayout
             _flagDefaults = new bool[flags.Count];
             for (int i = 0; i < flags.Count; i++)
             {
+                Need(flags[i], $"{where}.ports.status.flags[{i}]");
                 _flagNames[i] = RequireName(flags[i].Name, $"{where}.ports.status.flags[{i}]");
                 _flagValues[i] = ParseByte(flags[i].Value, $"{where}.ports.status.flags[{i}].value");
                 _flagDefaults[i] = flags[i].Default;
@@ -119,6 +122,7 @@ internal sealed class PortLayout
         _snapshots = new string[snaps.Count];
         for (int i = 0; i < snaps.Count; i++)
         {
+            Need(snaps[i], $"{where}.ports.snapshots[{i}]");
             _snapshots[i] = RequireName(snaps[i].Name, $"{where}.ports.snapshots[{i}]");
             if (!string.Equals(snaps[i].On, "connect", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{where}.ports.snapshots[{i}].on \"{snaps[i].On}\": only \"connect\" is defined.");
@@ -127,27 +131,23 @@ internal sealed class PortLayout
         }
         RequireUnique(_snapshots, $"{where}.ports.snapshots");
 
-        for (int i = 0; i < spec.Fields.Count; i++)
+        FieldSpec = new ExtendedReportSpec { ReportId = "", Size = Stride, Fields = spec.Fields! };
+        // Compile and check now, so an unknown type, a button name the SDK
+        // cannot express, or a field wider than the bytes left for it fails
+        // here, at create, with the rest.
+        VendorBlobProgram.Check(FieldSpec, Stride, $"{where}.ports", output, portBlock: true);
+        var prog = VendorBlobProgram.Get(FieldSpec);
+        for (int i = 0; i < prog.Fields.Length; i++)
         {
-            var f = spec.Fields[i];
-            int lo = f.Byte ?? -1, hi = lo;
-            if (f.Bytes != null)
-            {
-                // The codec reads only "lo-hi" here, so anything else would
-                // leave the field silently unwritten.
-                if (!VendorBlobProgram.TryParseByteRange(f.Bytes, out lo, out hi))
-                    throw new InvalidOperationException(
-                        $"{where}.ports.fields[{i}].bytes \"{f.Bytes}\" is not a range such as \"3-8\".");
-            }
-            if (lo < 0 || hi < lo || hi >= Stride || (DataLo >= 0 && (lo < DataLo || hi > DataHi))
-                || (StatusByte >= lo && StatusByte <= hi))
+            ref readonly var f = ref prog.Fields[i];
+            // Every byte the field writes, by its type's width, against the
+            // block's data bytes and its status byte.
+            var (lo, hi) = VendorBlobProgram.Extent(in f, Stride);
+            if ((DataLo >= 0 && (lo < DataLo || hi > DataHi)) || (StatusByte >= lo && StatusByte <= hi))
                 throw new InvalidOperationException(
-                    $"{where}.ports.fields[{i}] ('{f.Semantic ?? f.Type}') at bytes {lo}-{hi} is outside the block's data bytes.");
+                    $"{where}.ports.fields[{i}] ('{f.Src.Type}') at bytes {lo}-{hi} is outside the block's " +
+                    (DataLo >= 0 ? $"data bytes {DataLo}-{DataHi}." : $"bytes other than the status byte {StatusByte}."));
         }
-        FieldSpec = new ExtendedReportSpec { ReportId = "", Size = Stride, Fields = spec.Fields };
-        // Compile now, so a button name the SDK cannot express or a
-        // malformed field fails here, at create, with the rest.
-        VendorBlobProgram.Get(FieldSpec);
     }
 
     /// <summary>Names of the block's output fields, from their semantics,
@@ -221,11 +221,11 @@ internal sealed class PortLayout
 
     /// <summary>The compiled layout of <paramref name="spec"/>'s ports, or
     /// null when it has none. Built once per spec.</summary>
-    public static PortLayout? Of(ExtendedReportSpec? spec, string where)
+    public static PortLayout? Of(ExtendedReportSpec? spec, string where, bool output)
     {
         if (spec?.Ports == null) return null;
         if (spec.PortLayoutCache is PortLayout cached) return cached;
-        var built = new PortLayout(spec.Ports, spec.Size, where);
+        var built = new PortLayout(spec.Ports, spec.Size, where, output);
         spec.PortLayoutCache = built;
         return built;
     }
@@ -268,8 +268,10 @@ internal sealed class PortLayout
     public bool HoldsController(byte status)
         => _connectionValues.Length > 0 && (byte)(status & ~_flagMask) != _connectionValues[0];
 
-    internal static byte ParseByte(string hex, string where)
+    internal static byte ParseByte(string? hex, string where)
     {
+        if (hex == null)
+            throw new InvalidOperationException($"{where} is missing. It takes a hex byte such as \"0x10\".");
         string s = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex[2..] : hex;
         if (!byte.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b))
             throw new InvalidOperationException($"{where} \"{hex}\" is not a hex byte.");
@@ -283,6 +285,9 @@ internal sealed class PortLayout
         if (parts.Length == 1 && int.TryParse(parts[0], out lo)) { hi = lo; return true; }
         return parts.Length == 2 && int.TryParse(parts[0], out lo) && int.TryParse(parts[1], out hi);
     }
+
+    private static T Need<T>(T? value, string where) where T : class
+        => value ?? throw new InvalidOperationException($"{where} is null.");
 
     private static string RequireName(string name, string where)
     {

@@ -23,7 +23,8 @@ internal sealed class VendorBlobProgram
     /// <summary>Field type, numeric. One value per wire-format family the
     /// codec understands; <see cref="FieldOp.Unknown"/> preserves the
     /// string implementation's silent-no-op contract for unrecognized
-    /// type strings.</summary>
+    /// type strings in the codec. Since v1.13.0 a create refuses a profile
+    /// that declares one (<see cref="Check"/>).</summary>
     public enum FieldOp : byte
     {
         Unknown = 0,
@@ -389,6 +390,180 @@ internal sealed class VendorBlobProgram
         }
         return new VendorBlobProgram(fields, decodeCount);
     }
+
+    /// <summary>v1.13.0: refuse a field the codec would skip, cut short or
+    /// read past the end of its report, rather than let it compile into a
+    /// field that is silently never written or that throws on the first
+    /// report. Runs where a create compiles the device model, before
+    /// anything machine-wide. <paramref name="size"/> is the report's bytes,
+    /// or a port block's. <paramref name="output"/> is true for a report the
+    /// host writes, whose semantics are names rather than SDK sources.
+    /// <paramref name="portBlock"/> is true for a port block, and an output
+    /// port block's single-byte fields <see cref="PortLayout.ReadOutput"/>
+    /// reads through their bits. Throws <see cref="InvalidOperationException"/>
+    /// naming <paramref name="where"/>, the field and the limit.</summary>
+    internal static void Check(ExtendedReportSpec spec, int size, string where, bool output, bool portBlock)
+    {
+        if (spec.Fields == null)
+            throw new InvalidOperationException($"{where}.fields is null. Leave it out, or give an empty list, for no fields.");
+        for (int i = 0; i < spec.Fields.Count; i++)
+            if (spec.Fields[i] == null)
+                throw new InvalidOperationException($"{where}.fields[{i}] is null.");
+        VendorBlobProgram prog;
+        // Compile's own refusals name the field but not the profile.
+        try { prog = Get(spec); }
+        catch (InvalidOperationException e) { throw new InvalidOperationException($"{where}: {e.Message}", e); }
+        for (int i = 0; i < prog.Fields.Length; i++)
+        {
+            ref readonly var f = ref prog.Fields[i];
+            var src = f.Src;
+            // Messages are built only on the throw path, so a profile that
+            // passes costs no strings.
+            if (f.Op == FieldOp.Unknown)
+                throw new InvalidOperationException(
+                    $"{where}.fields[{i}].type '{src.Type}' is not a field type: {string.Join(", ", s_typeNames)}.");
+            if (src.Bytes != null && (!TryParseByteRange(src.Bytes, out int bytesLo, out int bytesHi) || bytesHi < bytesLo))
+                throw new InvalidOperationException($"{where}.fields[{i}].bytes \"{src.Bytes}\" is not a range such as \"3-8\".");
+            if (src.Bits != null)
+            {
+                if (!TryParseBitRange(src.Bits, out _, out _) || f.BitLo < 0 || f.BitHi < f.BitLo)
+                    throw new InvalidOperationException($"{where}.fields[{i}].bits \"{src.Bits}\" is not a range such as \"0-3\".");
+                bool honored = f.Op is FieldOp.Bitfield or FieldOp.Battery or FieldOp.HatOctant or FieldOp.ButtonMask
+                    || (output && portBlock && f.Op is FieldOp.U8Const or FieldOp.U8Axis or FieldOp.U8Trigger);
+                if (!honored)
+                    throw new InvalidOperationException($"{where}.fields[{i}] ('{src.Type}').bits: this type reads whole bytes and ignores bits.");
+                int maxBit = f.Op == FieldOp.ButtonMask ? 63 : 7;
+                if (f.BitHi > maxBit)
+                    throw new InvalidOperationException(
+                        $"{where}.fields[{i}] ('{src.Type}').bits \"{src.Bits}\" reaches bit {f.BitHi}. This type holds bits 0 to {maxBit}.");
+            }
+
+            var (lo, hi) = Extent(in f, size);
+            if (lo < 0)
+                throw new InvalidOperationException(
+                    UsesRange(f.Op)
+                        ? $"{where}.fields[{i}] ('{src.Type}') needs bytes, a range such as \"3-8\"."
+                        : $"{where}.fields[{i}] ('{src.Type}') needs byte, the offset it is written at.");
+            if (f.Op == FieldOp.Rgb24 && f.RangeHi - f.RangeLo != 2)
+                throw new InvalidOperationException($"{where}.fields[{i}] ('{src.Type}').bytes \"{src.Bytes}\" must name three bytes, red, green and blue.");
+            if (f.Op == FieldOp.Crc32 && f.RangeLo >= 0 && f.RangeHi - f.RangeLo != 3)
+                throw new InvalidOperationException($"{where}.fields[{i}] ('{src.Type}').bytes \"{src.Bytes}\" must name the four bytes the CRC is written to.");
+            if (hi >= size)
+                throw new InvalidOperationException(
+                    $"{where}.fields[{i}] ('{src.Type}') at bytes {lo}-{hi} runs past the {size}-byte {(portBlock ? "port block" : "report")}.");
+
+            if (f.Op == FieldOp.Crc32)
+            {
+                if (src.Scope == null)
+                    throw new InvalidOperationException($"{where}.fields[{i}] ('{src.Type}') needs scope, the bytes the CRC covers.");
+                // The codec stops the scope at the buffer's end, so a scope
+                // that runs past the report covers the report's tail. One that
+                // starts past it covers no report byte at all.
+                if (src.Scope.From < 0 || src.Scope.To < src.Scope.From || src.Scope.From >= size)
+                    throw new InvalidOperationException(
+                        $"{where}.fields[{i}] ('{src.Type}').scope {src.Scope.From}-{src.Scope.To} does not start inside the {size}-byte report.");
+            }
+            if (f.Op == FieldOp.ButtonMask || f.Op == FieldOp.Bitfield)
+            {
+                if (src.Buttons == null || src.Buttons.Count == 0)
+                    throw new InvalidOperationException($"{where}.fields[{i}] ('{src.Type}') needs buttons, one name per bit.");
+                int width = f.BitHi - f.BitLo + 1;
+                if (src.Buttons.Count > width)
+                    throw new InvalidOperationException(
+                        $"{where}.fields[{i}] ('{src.Type}') names {src.Buttons.Count} buttons for bits {f.BitLo}-{f.BitHi}, which hold {width}.");
+                if (f.Op == FieldOp.Bitfield)
+                {
+                    for (int j = 0; j < src.Buttons.Count; j++)
+                    {
+                        string name = src.Buttons[j];
+                        if (f.FlagKinds![j] == FlagNone && !string.IsNullOrEmpty(name) && name != "_")
+                            throw new InvalidOperationException(
+                                $"{where}.fields[{i}] ('{src.Type}').buttons[{j}] '{name}' is not a flag: batteryCharging, batteryFull, " +
+                                "micMuted, headphonesConnected, cableConnected. Use \"_\" for a bit that is deliberately unused.");
+                    }
+                }
+            }
+
+            // An input semantic that names nothing the SDK has is a typo the
+            // encoder would turn into its fallback. A missing semantic, or one
+            // that names another type's value, keeps the type's defined
+            // fallback: the axis center, a zero, the left stick, finger 0.
+            if (!output && !string.IsNullOrEmpty(src.Semantic) && f.Source == SrcOp.None && Sources(f.Op) is string[] allowed)
+                throw new InvalidOperationException(
+                    $"{where}.fields[{i}] ('{src.Type}').semantic '{src.Semantic}' names no value the SDK has. " +
+                    $"This type reads {string.Join(", ", allowed)}.");
+        }
+    }
+
+    // The type strings Compile reads, for the message that refuses another.
+    private static readonly string[] s_typeNames =
+    {
+        "uint8", "uint8-axis", "uint8-trigger", "uint8-rolling", "uint8-pressure", "uint8-battery",
+        "int16-le", "int16-axis", "int16-pad", "int16-pad-or-stick", "uint16-le", "uint16-trigger",
+        "uint16-pressure", "uint10-be", "ds3-battery", "uint32-le", "uint32-rolling", "touchpad-finger",
+        "bitfield", "hat-octant", "button-mask", "rgb24", "bytes-passthrough", "bytes-zero", "crc32-le",
+        "stick12-pair",
+    };
+
+    private static bool UsesRange(FieldOp op)
+        => op is FieldOp.Rgb24 or FieldOp.BytesPassthrough or FieldOp.BytesZero;
+
+    /// <summary>The bytes a field writes in a report of
+    /// <paramref name="size"/> bytes, as <see cref="VendorBlobCodec"/>
+    /// writes them, or (-1, -1) when the field declares no place.</summary>
+    internal static (int Lo, int Hi) Extent(in CompiledField f, int size)
+    {
+        switch (f.Op)
+        {
+            case FieldOp.Rgb24:
+            case FieldOp.BytesPassthrough:
+            case FieldOp.BytesZero:
+                return f.RangeLo < 0 ? (-1, -1) : (f.RangeLo, f.RangeHi);
+            case FieldOp.Crc32:
+            {
+                // Without a declared place the codec writes the last four
+                // bytes of the report.
+                int dst = f.CrcDst >= 0 ? f.CrcDst : size - 4;
+                return dst < 0 ? (-1, -1) : (dst, dst + 3);
+            }
+        }
+        if (f.B < 0) return (-1, -1);
+        int width = f.Op switch
+        {
+            FieldOp.I16 or FieldOp.I16Axis or FieldOp.I16Pad or FieldOp.I16PadOrStick
+                or FieldOp.U16 or FieldOp.U16Trigger or FieldOp.U16Pressure or FieldOp.U10BE => 2,
+            FieldOp.Stick12Pair => 3,
+            FieldOp.U32 or FieldOp.U32Rolling or FieldOp.TouchpadFinger => 4,
+            FieldOp.ButtonMask => f.BitHi / 8 + 1,
+            _ => 1,
+        };
+        return (f.B, f.B + width - 1);
+    }
+
+    /// <summary>The semantics an input field of type <paramref name="op"/>
+    /// takes its value from, as the encoder's source switch reads them, or
+    /// null for a type whose semantic is only a name. Touchpad-finger is not
+    /// listed: Compile maps every semantic but touchpadFinger1 to finger
+    /// 0.</summary>
+    private static string[]? Sources(FieldOp op) => op switch
+    {
+        FieldOp.U8Axis or FieldOp.I16Axis => s_stickAxes,
+        FieldOp.U8Trigger or FieldOp.U16Trigger => s_triggers,
+        FieldOp.I16 or FieldOp.U10BE => s_motion,
+        FieldOp.U16 or FieldOp.U32 => s_timestamp,
+        FieldOp.Stick12Pair => s_sticks,
+        FieldOp.I16Pad or FieldOp.I16PadOrStick => s_pads,
+        FieldOp.U16Pressure => s_padPressures,
+        _ => null,
+    };
+
+    private static readonly string[] s_stickAxes = { "leftStickX", "leftStickY", "rightStickX", "rightStickY" };
+    private static readonly string[] s_triggers = { "leftTrigger", "rightTrigger" };
+    private static readonly string[] s_motion = { "gyroPitch", "gyroYaw", "gyroRoll", "accelX", "accelY", "accelZ" };
+    private static readonly string[] s_timestamp = { "sensorTimestamp" };
+    private static readonly string[] s_sticks = { "leftStick", "rightStick" };
+    private static readonly string[] s_pads = { "leftPadX", "leftPadY", "rightPadX", "rightPadY" };
+    private static readonly string[] s_padPressures = { "leftPadPressure", "rightPadPressure" };
 
     internal static bool TryParseBitRange(string? bits, out int lo, out int hi)
     {

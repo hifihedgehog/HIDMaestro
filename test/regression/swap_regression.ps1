@@ -1910,7 +1910,11 @@ function Scenario-Build-Info {
 }
 
 # S79: the Wii U GameCube adapter persona's bytes. Every catalog profile
-# compiles as a device model, the three 057E:0337 profiles carry the
+# compiles as a device model, and copies of the persona with one mistake
+# each (an unknown field type or semantic, a field wider than its block, a
+# report past the extended lane, a rule longer than a packet, a null) are
+# refused before anything machine-wide with a message naming the profile,
+# the JSON path and the limit. The three 057E:0337 profiles carry the
 # corrected descriptors and one Full, and the persona's device,
 # configuration, string and report descriptors are a real WUP-028's as the
 # persona serves them, as Windows enumerates them before any driver loads,

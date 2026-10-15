@@ -46,8 +46,8 @@ public sealed class HMPortSet : IReadOnlyList<HMPort>
     {
         _controller = controller;
         profile.ValidatePorts();
-        _in = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport");
-        _out = PortLayout.Of(profile.ExtendedOutputReport, $"Profile '{profile.Id}': extendedOutputReport");
+        _in = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport", output: false);
+        _out = PortLayout.Of(profile.ExtendedOutputReport, $"Profile '{profile.Id}': extendedOutputReport", output: true);
         Flags = new HMPortFlags(this, _in);
         if (_in == null)
         {

@@ -30,6 +30,7 @@ internal readonly struct StateCondition
 internal sealed class CompiledProtocol
 {
     public const int MaxStates = 64;
+    public const int MaxPorts = 32;
 
     public string ProfileId { get; }
     public string[] StateNames { get; }
@@ -110,23 +111,30 @@ internal sealed class CompiledProtocol
         const string root = "usbConfiguration.protocol";
 
         // State.
+        if (spec.State == null)
+            throw Fail($"{root}.state is null. Give an empty list for a device with no state.");
         if (spec.State.Count > MaxStates)
             throw Fail($"{root}.state declares {spec.State.Count} states. The limit is {MaxStates}.");
         StateNames = new string[spec.State.Count];
         ulong initial = 0;
         for (int i = 0; i < spec.State.Count; i++)
         {
-            string name = spec.State[i].Name;
+            var entry = spec.State[i] ?? throw Fail($"{root}.state[{i}] is null.");
+            string name = entry.Name;
             if (string.IsNullOrWhiteSpace(name) || name.StartsWith('!'))
                 throw Fail($"{root}.state[{i}] needs a name that does not start with '!'.");
             if (Array.IndexOf(StateNames, name, 0, i) >= 0)
                 throw Fail($"{root}.state names '{name}' twice.");
             StateNames[i] = name;
-            if (spec.State[i].Initial) initial |= 1UL << i;
+            if (entry.Initial) initial |= 1UL << i;
         }
         InitialState = initial;
 
-        Ports = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport");
+        Ports = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport", output: false);
+        // The engine keeps the ports that hold a controller as bits of a
+        // uint, and a poll rule names them the same way.
+        if (Ports != null && Ports.Count > MaxPorts)
+            throw Fail($"extendedReport.ports.count {Ports.Count}: a device with a protocol has at most {MaxPorts} ports.");
         SnapshotNames = Ports != null ? new List<string>(Ports.Snapshots).ToArray() : Array.Empty<string>();
         ReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
         ReportSize = profile.ExtendedReport?.Size ?? profile.GetOrBuildReportBuilder().InputReportByteSize;
@@ -156,6 +164,8 @@ internal sealed class CompiledProtocol
                 for (int i = 0; i < rules.Count; i++)
                 {
                     string at = $"{root}.input.clock.sourcePollRules[{i}]";
+                    if (rules[i] == null) throw Fail($"{at} is null.");
+                    if (rules[i].PortsConnected == null) throw Fail($"{at}.portsConnected is null.");
                     if (Ports == null)
                         throw Fail($"{at}.portsConnected needs extendedReport.ports.");
                     if (!(rules[i].PeriodMs > 0))
@@ -188,9 +198,27 @@ internal sealed class CompiledProtocol
             if (CommandPacketSize == 0)
                 throw Fail($"{root}.commands.endpoint 0x{CommandEndpoint:X2} has a wMaxPacketSize of 0.");
             CommandsFromSetReport = spec.Commands.SetReport;
+            if (spec.Commands.Rules == null)
+                throw Fail($"{root}.commands.rules is null. Give an empty list for a device that ignores every command.");
             Rules = new Rule[spec.Commands.Rules.Count];
             for (int i = 0; i < Rules.Length; i++)
-                Rules[i] = CompileRule(spec.Commands.Rules[i], $"{root}.commands.rules[{i}]");
+            {
+                string at = $"{root}.commands.rules[{i}]";
+                Rules[i] = CompileRule(spec.Commands.Rules[i] ?? throw Fail($"{at} is null."), at);
+            }
+
+            // A host's output report reaches the device a packet at a time,
+            // and the ports read each packet as a report of its own. When
+            // both ways a host sends the HID interface an output report, its
+            // interrupt OUT endpoint and SET_REPORT(Output), are commands,
+            // ports that end past one packet are never read.
+            var outPorts = PortLayout.Of(profile.ExtendedOutputReport, $"Profile '{profile.Id}': extendedOutputReport", output: true);
+            bool everyOutputIsCommands = CommandsFromSetReport
+                && descriptors.Endpoints[CommandEndpoint].InterfaceNumber == descriptors.HidInterfaceNumber;
+            if (everyOutputIsCommands && outPorts != null && outPorts.BlockAt(outPorts.Count) > CommandPacketSize)
+                throw Fail(
+                    $"extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
+                    $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers.");
         }
         else
         {
@@ -206,7 +234,7 @@ internal sealed class CompiledProtocol
         // Halt.
         if (spec.Halt != null)
         {
-            if (spec.Halt.While.Count == 0)
+            if (spec.Halt.While == null || spec.Halt.While.Count == 0)
                 throw Fail($"{root}.halt.while names no state, so the device would never answer.");
             HasHalt = true;
             HaltWhile = Condition(spec.Halt.While, $"{root}.halt.while");
@@ -267,6 +295,15 @@ internal sealed class CompiledProtocol
             throw Fail($"{at}: minLength {rule.MinLength} and maxLength {r.MaxLength} admit no packet.");
         if (rule.MaxLength < rule.Match.Length)
             throw Fail($"{at}.maxLength {rule.MaxLength} is shorter than its {rule.Match.Length}-byte match.");
+        // Commands arrive as packets of the OUT endpoint's wMaxPacketSize,
+        // so a rule that needs more bytes than one packet holds never
+        // matches.
+        if (rule.Match.Length > CommandPacketSize)
+            throw Fail($"{at}.match is {rule.Match.Length} bytes, longer than the {CommandPacketSize}-byte packets " +
+                       $"endpoint 0x{CommandEndpoint:X2} delivers, so it never matches.");
+        if (rule.MinLength > CommandPacketSize)
+            throw Fail($"{at}.minLength {rule.MinLength} is longer than the {CommandPacketSize}-byte packets " +
+                       $"endpoint 0x{CommandEndpoint:X2} delivers, so it never matches.");
         if (r.Set != null)
         {
             foreach (var kv in r.Set)
@@ -282,8 +319,8 @@ internal sealed class CompiledProtocol
             int length = 0;
             for (int i = 0; i < parts.Length; i++)
             {
-                var p = r.Reply[i];
                 string pat = $"{at}.reply[{i}]";
+                var p = r.Reply[i] ?? throw Fail($"{pat} is null.");
                 int kinds = (p.Hex != null ? 1 : 0) + (p.State != null ? 1 : 0) + (p.Snapshot != null ? 1 : 0);
                 if (kinds != 1)
                     throw Fail($"{pat} must give exactly one of hex, state and snapshot.");
@@ -330,6 +367,7 @@ internal sealed class CompiledProtocol
         ulong mask = 0, value = 0;
         foreach (var raw in names)
         {
+            if (raw == null) throw Fail($"{at} holds null where a state name belongs.");
             bool negated = raw.StartsWith('!');
             int bit = StateBit(negated ? raw[1..] : raw, at);
             ulong b = 1UL << bit;
@@ -352,7 +390,7 @@ internal sealed class CompiledProtocol
 
     private byte Endpoint(UsbDescriptorSet d, string hex, string at, bool wantIn)
     {
-        byte address = PortLayout.ParseByte(hex, at);
+        byte address = PortLayout.ParseByte(hex, $"Profile '{ProfileId}': {at}");
         if (!d.Endpoints.TryGetValue(address, out var ep))
             throw Fail($"{at} 0x{address:X2} is not an endpoint of the configuration descriptor.");
         if (ep.TransferType != 3 || ep.IsIn != wantIn)
@@ -360,8 +398,9 @@ internal sealed class CompiledProtocol
         return address;
     }
 
-    private byte[] Hex(string text, string at)
+    private byte[] Hex(string? text, string at)
     {
+        if (text == null) throw Fail($"{at} is missing. It takes hex bytes such as \"11\".");
         string s = text.Replace(" ", "", StringComparison.Ordinal);
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
         try { return Convert.FromHexString(s); }
