@@ -8,10 +8,10 @@
 //    once more after its input pump started. Each time the create leaves
 //    no claim pipe, no device, no record entry and no section, the program
 //    keeps running, and the same identity creates again at once, in the
-//    same program and in another. Last, a v1.12.0
-//    program starts an Xbox 360 controller on the index while a create waits
-//    before its mapping: the create is refused, and the v1.12.0 program's
-//    devices and configuration stay.
+//    same program and in another. Last, a v1.12.0 program starts an Xbox
+//    360 controller on the index while a create waits before its mapping:
+//    the create is refused, and the v1.12.0 program's devices,
+//    configuration and sections stay as they were.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -139,19 +139,25 @@ internal static partial class Program
               string.Join(",", Entries(controllers)));
         WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
 
-        // The input mapping's last step creates the input event. An event
-        // of that name owned by Administrators, as HIDMaestro's own are, so
-        // the transport allocator keeps the index, but open to nobody for
-        // signaling fails that step after the input section exists.
-        string section = $@"Global\HIDMaestroInput{t}";
-        bool sectionGone = WaitFor(() => !Native.SectionExists(section), 10_000);
-        Check($"U: before the next create nothing holds {section}", sectionGone);
+        // The input mapping's last step creates the input event. The probe
+        // holds an event of that name that Administrators own, as they own
+        // HIDMaestro's, so the transport allocator keeps the index. The
+        // event grants nobody the right to signal or wait on it, so the
+        // create's open of it is refused after every other object of the
+        // mapping exists. Only index t carries the event, so the denial in
+        // the reply shows the create reached index t and failed there.
+        bool clear5 = WaitFor(() => InputObjectsPresent(t, output: false).Count == 0, 10_000);
+        Check($"U: before the next create no object of index {t}'s input mapping exists", clear5,
+              string.Join(",", InputObjectsPresent(t, output: false)));
         string f5;
         using (LockedEvent($@"Global\HIDMaestroInputEvent{t}"))
             f5 = a.Send("create pad F1B0 -");
-        Check("U: a create whose input event cannot be made fails", !Ok(f5), f5);
-        if (sectionGone)
-            Check($"U: after it, no handle to {section} is open", !Native.SectionExists(section));
+        bool denied5 = !Ok(f5) && f5.Contains("Access is denied", StringComparison.Ordinal);
+        Check($"U: a create on index {t} is refused at its input event", denied5, f5);
+        Check("U: the program still runs after it", Ok(a.Send("alive")));
+        var left5 = InputObjectsPresent(t, output: false);
+        Check($"U: after it, no object of index {t}'s input mapping is open", denied5 && clear5 && left5.Count == 0,
+              denied5 ? string.Join(",", left5) : "the create did not fail at the input event");
         UnclaimedAndUnrecorded("U: after it", baseline, controllers, entriesChecked: true);
         string r5 = a.Send("create pad F1B0 -");
         Check($"U: a retry in the failed program takes transport index {t}",
@@ -161,18 +167,26 @@ internal static partial class Program
 
         // A composite's device emulator maps the index's sections, which
         // holds the index's v1.12.0 owner pipe, then creates its output
-        // doorbell. The same locked event under the doorbell's name fails
-        // that step.
+        // doorbell. The same kind of locked event under the doorbell's name
+        // fails that step.
         var before = Native.HidPaths(0x054C, 0x0CE6);
         string c4 = a.Send("create composite - -");
         if (!Ok(c4)) { Check("U: the program creates a composite", false, c4); return; }
         string tc = PeerProcess.Field(c4, "transport")!;
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+        bool clear4 = WaitFor(() => InputObjectsPresent(tc, output: true).Count == 0, 10_000);
+        Check($"U: before the next composite no section or event of index {tc} exists", clear4,
+              string.Join(",", InputObjectsPresent(tc, output: true)));
         string f4;
         using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}"))
             f4 = a.Send("create composite - -");
-        Check("U: a composite whose device emulator fails is refused", !Ok(f4), f4);
+        bool denied4 = !Ok(f4) && f4.Contains("Access is denied", StringComparison.Ordinal);
+        Check($"U: a composite on index {tc} is refused at its output doorbell", denied4, f4);
+        Check("U: the program still runs after it", Ok(a.Send("alive")));
+        var left4 = InputObjectsPresent(tc, output: true);
+        Check($"U: after it, no section or event of index {tc} is open", denied4 && clear4 && left4.Count == 0,
+              denied4 ? string.Join(",", left4) : "the create did not fail at the output doorbell");
         UnclaimedAndUnrecorded("U: after the failed composite", baseline, controllers, entriesChecked: true);
         using (var b = PeerProcess.Start("U4"))
         {
@@ -192,7 +206,8 @@ internal static partial class Program
         // reads the input section, and the failed create unmaps it.
         Check("U: the next composite's emulator is set to fail after its pump starts", Ok(a.Send("failpump")));
         string f6 = a.Send("create composite - -");
-        Check("U: a composite whose emulator fails after its pump starts is refused", !Ok(f6), f6);
+        Check("U: a composite whose emulator fails after its pump starts is refused",
+              !Ok(f6) && f6.Contains("failpump:", StringComparison.Ordinal), f6);
         // Every composite of this program is disposed, so any input pump
         // left is the failed one's, whatever index it took.
         string pumps = a.Send("threads HMUsbipInput_");
@@ -320,11 +335,39 @@ internal static partial class Program
     {
         IntPtr sa = Native.Sa("O:BAD:P(A;;0x00020000;;;WD)");
         IntPtr h;
-        try { h = Native.CreateEventW(sa, false, false, name); }
+        int error;
+        try
+        {
+            h = Native.CreateEventW(sa, false, false, name);
+            error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        }
         finally { Native.FreeSa(sa); }
         if (h == IntPtr.Zero)
-            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error(), $"could not create {name}");
+            throw new System.ComponentModel.Win32Exception(error, $"could not create {name}");
+        // ERROR_ALREADY_EXISTS: the handle is to an event someone else made,
+        // which this descriptor did not lock.
+        if (error == 183)
+        {
+            Native.CloseHandle(h);
+            throw new InvalidOperationException($"{name} already exists, so the probe cannot lock it");
+        }
         return new Handle(h);
+    }
+
+    /// <summary>The objects of an index's input mapping that exist, and
+    /// with <paramref name="output"/> its output section: what a failed
+    /// create must close (SharedMemoryIO.ReleaseInputExtrasLocked and
+    /// DestroyController). The owner pipe is in <see cref="ClaimPipes"/>.</summary>
+    static List<string> InputObjectsPresent(string index, bool output)
+    {
+        var present = new List<string>();
+        var sections = new List<string> { "Input", "InputAck", "Version" };
+        if (output) sections.Add("Output");
+        foreach (var k in sections)
+            if (Native.SectionExists($@"Global\HIDMaestro{k}{index}")) present.Add($"HIDMaestro{k}{index}");
+        foreach (var k in new[] { "CompanionInputEvent", "InputAckEvent" })
+            if (Native.OwnerOf($@"Global\HIDMaestro{k}{index}", section: false) != "absent") present.Add($"HIDMaestro{k}{index}");
+        return present;
     }
 
     sealed class Handle(IntPtr h) : IDisposable
