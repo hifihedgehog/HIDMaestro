@@ -664,7 +664,19 @@ internal static class RegistryLedger
     /// (<see cref="RestoreWinUsbEntries"/>), and take the lock again on their
     /// own: up to twice per entry and once for the empty keys. With the name
     /// marked by the long wait, that is up to (2N+1) waits of the short bound
-    /// (<see cref="LedgerLock"/>, 500 ms scaled) after the long one.</summary>
+    /// (<see cref="LedgerLock"/>, 500 ms scaled) after the long one.
+    ///
+    /// <para>That bound is the wait for v1.12.0's mutex alone. The wait for
+    /// the ledger's own mutex has none of it: this program's follow-up
+    /// threads (<see cref="FollowUp"/>) take that mutex too, one scope at a
+    /// time, with 250 ms between laps. Each scope holds it for a few registry
+    /// reads and its own wait for v1.12.0's mutex: the short bound once the
+    /// name is marked, up to 5 s scaled before that, and up to its 30 s
+    /// scaled bound against an owner read as SYSTEM or Administrators. The
+    /// per-entry acquisitions give up
+    /// after <see cref="RestoreLedgerTimeoutMs"/> (30 s scaled) and leave the
+    /// entry for the next sweep. The first acquisition and the one for the
+    /// empty keys wait with no bound of their own.</para></summary>
     internal static void Release(IEnumerable<int> controllerIndices) =>
         Sweep(controllerIndices.Select(HolderName).ToArray());
 
