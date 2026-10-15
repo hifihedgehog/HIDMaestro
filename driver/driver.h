@@ -207,14 +207,6 @@ typedef struct _DEVICE_CONTEXT {
     UCHAR   OwnerReadByte;
     WCHAR   OwnerPipeName[64];            /* e.g. L"\\\\.\\pipe\\HIDMaestroOwner0" */
 
-    /* Set once the watch has ended (OwnerGone). The pipe the SDK held is
-     * closed, and any server on that name now is a different program, so
-     * the watch is never reconnected in this device context. A new program
-     * on the index gets a fresh context whose ForgetOwnerWatch clears the
-     * values. Without this a program that took the name after the owner
-     * died was recorded as a connected owner on the next handle recycle. */
-    BOOLEAN OwnerWatchEnded;
-
     /* Version handshake (v1.13.0). The SDK creates
      * Global\HIDMaestroVersion<N> (HIDMAESTRO_VERSION_INFO) beside the input
      * section with its own half filled in. The driver writes its half each
@@ -362,6 +354,12 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
  * seqlock, odd while the SDK rewrites the frames. */
 #define HIDMAESTRO_INPUT_ACK_CAP_DELIVERED  0x00000001u
 #define HIDMAESTRO_INPUT_ACK_CAP_RELEASE    0x00000002u  /* owner pipe is watched */
+/* Driver state, not a capability. The driver sets it in Capabilities when
+ * the owner watch it held ends (OwnerGone) and connects a watch only while
+ * it is clear. A program that starts on the index creates this section and
+ * zeroes it, which clears the bit. A program that is not elevated can only
+ * open the section for reading, so it cannot. No SDK tests this bit. */
+#define HIDMAESTRO_INPUT_ACK_WATCH_ENDED    0x80000000u
 #pragma pack(push, 1)
 typedef struct _HIDMAESTRO_RELEASE_FRAME {
     ULONG           Size;

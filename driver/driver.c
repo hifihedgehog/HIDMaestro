@@ -661,10 +661,18 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     ctx->InputAckEvent = ev;
     /* The release bit says the owner watch is connected. The watch stays
      * open across a reset of the worker's handles, which maps this section
-     * again, so the bit is announced again with it. */
-    InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)view)->Capabilities,
-                        (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED
-                               | (ctx->OwnerPipe != NULL ? HIDMAESTRO_INPUT_ACK_CAP_RELEASE : 0)));
+     * again, so the bit is announced again with it. The ended marker is
+     * kept: only a program that zeroes the section clears it. */
+    {
+        volatile LONG *caps = &((PHIDMAESTRO_INPUT_ACK)view)->Capabilities;
+        LONG old, want;
+        do {
+            old = *caps;
+            want = (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED
+                          | (ctx->OwnerPipe != NULL ? HIDMAESTRO_INPUT_ACK_CAP_RELEASE : 0)
+                          | ((ULONG)old & HIDMAESTRO_INPUT_ACK_WATCH_ENDED));
+        } while (InterlockedCompareExchange(caps, want, old) != old);
+    }
     WdfWaitLockRelease(ctx->InputLock);
 }
 
@@ -803,10 +811,26 @@ RecordOwnerGone(_In_ PDEVICE_CONTEXT ctx)
 static VOID
 TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 {
-    /* The watch connects once per device context. Once it has ended the
-     * SDK's pipe is closed for good, so a server answering that name now is
-     * another program, not this device's owner. */
-    if (ctx->OwnerWatchEnded || ctx->OwnerPipe != NULL) return;
+    if (ctx->OwnerPipe != NULL) return;
+    /* Connect only beside an acknowledgement section whose ended marker
+     * (HIDMAESTRO_INPUT_ACK_WATCH_ENDED) is clear. Every SDK with an owner
+     * pipe creates and zeroes that section when it sets up the index, so a
+     * program that starts on the index clears the marker. Once a watch has
+     * ended, a server answering the name with no new program behind it is
+     * another process, not this device's owner. The marker lives in the section,
+     * not in the device context, so it holds across a re-add of the device
+     * while anything keeps the section open, and a context that outlives
+     * its program (a companion another program adopts when its restart is
+     * refused) still watches the next program. */
+    {
+        BOOLEAN allowed;
+        WdfWaitLockAcquire(ctx->InputLock, NULL);
+        allowed = ctx->InputAckMemPtr != NULL
+            && (((ULONG)((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities
+                 & HIDMAESTRO_INPUT_ACK_WATCH_ENDED) == 0);
+        WdfWaitLockRelease(ctx->InputLock);
+        if (!allowed) return;
+    }
     HANDLE p = CreateFileW(ctx->OwnerPipeName, GENERIC_READ, 0, NULL,
                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (p == INVALID_HANDLE_VALUE) return;
@@ -859,13 +883,15 @@ static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
     CloseOwnerWatch(ctx);
-    ctx->OwnerWatchEnded = TRUE;
     RecordOwnerGone(ctx);
 
     WdfWaitLockAcquire(ctx->InputLock, NULL);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
     ULONG count = 0;
     if (ack != NULL) {
+        /* The watch connects only beside this section, so it is mapped
+         * here. Mark the watch ended in it (TryOpenOwnerWatch). */
+        InterlockedOr(&ack->Capabilities, (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
         /* Seqlock read. Every version the SDK writes is a set of release
          * frames, so after four torn reads the last copy is still safe to
          * send: at worst an absolute pointer keeps a slightly older

@@ -11,6 +11,7 @@
 //   create xbox - <key|->       xbox-360-wired
 //   create composite - <key|->  dualsense-composite (USB/IP)
 //   create gc - <key|->         gamecube-adapter (USB/IP)
+//   create xinputhid - <key|->  xbox-elite-v2, a gamepad companion
 //   createat <slot> <kind> <pid|->  CreateControllerAt(slot, profile), the
 //                               same kinds as create, no identity key
 //   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
@@ -501,6 +502,7 @@ internal static class Peer
         "composite" => ctx.GetProfile("dualsense-composite")!,
         "gc" => ctx.GetProfile("gamecube-adapter")!,
         "ds4" => ctx.GetProfile("dualshock-4-v2")!,
+        "xinputhid" => ctx.GetProfile("xbox-elite-v2")!,
         _ => throw new ArgumentException(kind),
     };
 
