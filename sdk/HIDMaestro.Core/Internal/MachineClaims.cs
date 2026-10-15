@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
@@ -78,6 +79,12 @@ internal static partial class MachineClaims
 
     private static readonly object s_lock = new();
     private static string? s_ownerId;
+    // Written after s_ownerId with Volatile.Write and read outside s_lock
+    // with Volatile.Read, so a thread that sees the claim sees the id too.
+    // Ordinary reads of the two may be reordered (Memory-model.md, in the
+    // dotnet runtime), and on ARM64 a thread racing the first claim would
+    // read the claim and a null id, and take its own record for another
+    // program's.
     private static SafeFileHandle? s_ownerClaim;
     private static bool s_recordWritten;
     // This process's start time for its record, read once: a record goes
@@ -103,7 +110,7 @@ internal static partial class MachineClaims
     /// Administrators enabled, for a cause not read (<see cref="RefusedClaim"/>).</exception>
     internal static void EnsureOwner()
     {
-        if (s_ownerClaim != null)
+        if (Volatile.Read(ref s_ownerClaim) != null)
         {
             if (!s_recordWritten) TryWriteRecord();
             return;
@@ -121,7 +128,7 @@ internal static partial class MachineClaims
             if (h == null)
                 throw RefusedClaim(Marshal.GetLastPInvokeError());
             s_ownerId = id;
-            s_ownerClaim = h;
+            Volatile.Write(ref s_ownerClaim, h);
             OwnerSweep.RegisterExitCleanup();
             TryWriteRecordLocked();
         }
@@ -267,13 +274,18 @@ internal static partial class MachineClaims
         return Marshal.GetLastPInvokeError() != ERROR_FILE_NOT_FOUND;
     }
 
+    // Published with Volatile.Write once the structure it points to is
+    // written, and read outside s_lock with Volatile.Read, for the reason
+    // s_ownerClaim is: a pointer is no object reference, so its plain
+    // store orders nothing before it.
     private static IntPtr s_claimSa;
 
     /// <summary>The claim pipes' SECURITY_ATTRIBUTES, built once and kept
     /// for the life of the process.</summary>
     private static IntPtr ClaimSecurityAttributes()
     {
-        if (s_claimSa != IntPtr.Zero) return s_claimSa;
+        IntPtr published = Volatile.Read(ref s_claimSa);
+        if (published != IntPtr.Zero) return published;
         lock (s_lock)
         {
             if (s_claimSa != IntPtr.Zero) return s_claimSa;
@@ -286,7 +298,7 @@ internal static partial class MachineClaims
                 lpSecurityDescriptor = sd,
                 bInheritHandle = 0,
             }, sa, false);
-            s_claimSa = sa;
+            Volatile.Write(ref s_claimSa, sa);
             return sa;
         }
     }
@@ -404,6 +416,8 @@ internal static partial class MachineClaims
             root?.Dispose();
             return list;
         }
+        // The id is this process's once its claim exists.
+        string? selfId = Volatile.Read(ref s_ownerClaim) != null ? s_ownerId : null;
         using (root)
         {
             foreach (string id in ids)
@@ -415,7 +429,7 @@ internal static partial class MachineClaims
                 // program's, which RemoveOrphaned would then not see.
                 try
                 {
-                    if (ReadRecord(root, id) is { } r) list.Add(r);
+                    if (ReadRecord(root, id, selfId) is { } r) list.Add(r);
                 }
                 catch (Exception e) when (IsRegistryFailure(e)) { }
             }
@@ -429,7 +443,7 @@ internal static partial class MachineClaims
     /// program's sweep can. Null outside the probe.</summary>
     internal static Action<string>? AfterRecordOpened;
 
-    private static OwnerRecord? ReadRecord(RegistryKey root, string id)
+    private static OwnerRecord? ReadRecord(RegistryKey root, string id, string? selfId)
     {
         using var rec = root.OpenSubKey(id);
         if (rec == null) return null;
@@ -449,7 +463,7 @@ internal static partial class MachineClaims
                         c.GetValue("InstanceId") as string));
                 }
         }
-        bool self = string.Equals(id, s_ownerId, StringComparison.OrdinalIgnoreCase);
+        bool self = string.Equals(id, selfId, StringComparison.OrdinalIgnoreCase);
         return new OwnerRecord(id,
             rec.GetValue("Pid") is int pid ? pid : 0,
             rec.GetValue("Image") as string,
