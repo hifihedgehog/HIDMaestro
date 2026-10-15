@@ -336,6 +336,20 @@ static HANDLE CreateHostEvent(BOOL manualReset, BOOL takeOverNullDacl, LPCWSTR n
     return ev;
 }
 
+/* Create the output doorbell if there is none yet. Two threads call this:
+ * an output IOCTL opening the mapping (the XUSB queue dispatches in
+ * parallel) and the input pump. The handle is published only if the field
+ * is still NULL, so a second creator closes its own handle instead of
+ * leaking one. PublishOutput reads NULL or the handle, nothing else. */
+static VOID TryCreateDoorbell(PCOMPANION_CTX ctx)
+{
+    if (ctx->OutputSignalEvent != NULL) return;
+    HANDLE ev = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
+    if (ev != NULL
+        && InterlockedCompareExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev, NULL) != NULL)
+        CloseHandle(ev);
+}
+
 /* Open the per-controller output section. The test app pre-creates it with
  * a permissive SDDL; we just attach. WUDFHost runs as LocalService and
  * cannot create Global\ sections itself (no SeCreateGlobalPrivilege).
@@ -373,11 +387,11 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
      * ordering between the two hosts doesn't matter. The event object's
      * lifetime is the device session (unlike the SDK-recreated section),
      * so a live handle is kept across the 500-write mapping recycles and
-     * only re-attempted while NULL. Non-fatal, an unusable name included:
-     * on failure PublishOutput skips the signal and the SDK's safety
-     * timeout drains the ring. */
-    if (ctx->OutputSignalEvent == NULL)
-        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
+     * only re-attempted while NULL, here and by the input pump on a steady
+     * input stream (CompanionInputPumpProc). Non-fatal, an unusable name
+     * included: on failure PublishOutput skips the signal and the SDK's
+     * safety timeout drains the ring. */
+    TryCreateDoorbell(ctx);
 
     ctx->OutputMemHandle = h;
     MemoryBarrier();
@@ -767,6 +781,7 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
 {
     WDFDEVICE device = (WDFDEVICE)param;
     PCOMPANION_CTX ctx = GetCompanionCtx(device);
+    ULONG doorbellTick = 0;
 
     for (;;) {
         if (ctx->CompanionInputEvent == NULL) {
@@ -783,6 +798,13 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
         DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 2000);
         if (rc == WAIT_OBJECT_0)
             return 0;
+        /* A doorbell this device could not make, while a program held its
+         * name, is retried on a steady input stream every 256 frames and
+         * on each 2 s idle wake, as the main driver's worker does. Output
+         * writes alone retry it only every 500 publishes. */
+        if (ctx->OutputSignalEvent == NULL
+            && (rc != WAIT_OBJECT_0 + 1 || (++doorbellTick & 0xFF) == 0))
+            TryCreateDoorbell(ctx);
         if (rc == WAIT_OBJECT_0 + 1) {
             CompanionPumpOnce(ctx);
             continue;

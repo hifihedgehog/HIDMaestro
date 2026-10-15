@@ -237,8 +237,8 @@ typedef struct _DEVICE_CONTEXT {
      * published so the SDK's reader can block instead of polling every
      * 8 ms. NULL when creation failed; publish simply skips the signal
      * and an event-less SDK falls back to its poll cadence. While NULL the
-     * worker tries again each time it maps the input section
-     * (TryOpenSharedMapping). */
+     * worker tries again each time it maps the input section, on each idle
+     * timeout and every 256 frames (TryCreateDoorbell). */
     HANDLE  OutputSignalEvent;
 
     /* Multi-instance: controller index (0, 1, 2, 3) */

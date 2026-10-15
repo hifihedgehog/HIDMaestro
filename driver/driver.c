@@ -577,6 +577,23 @@ static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
 static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
 static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
+static VOID TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx);
+
+/* Create the output doorbell if there is none yet, and publish it for
+ * PublishOutput. EvtDeviceAdd may have found the name unusable, held by an
+ * object no driver host made under a DACL, and that object can be gone now.
+ * The field only ever goes from NULL to a handle while the device runs, and
+ * InterlockedExchangePointer is a full barrier, so a reader on the I/O
+ * queue's threads sees NULL (skip the signal) or the handle. Worker thread
+ * only. Cheap and skipped once the doorbell exists. */
+static VOID
+TryCreateDoorbell(_In_ PDEVICE_CONTEXT ctx)
+{
+    if (ctx->OutputSignalEvent != NULL) return;
+    HANDLE ev = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
+    if (ev != NULL)
+        InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
+}
 
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
@@ -594,17 +611,7 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
     AnnounceVersion(ctx);
-    /* The output doorbell, again while there is none: EvtDeviceAdd found the
-     * name unusable, held by an object no driver host made under a DACL,
-     * and that object may be gone now. The companion retries the same way
-     * on each mapping open. Published with a barrier for PublishOutput,
-     * which runs on the I/O queue's threads and only ever sees NULL or the
-     * handle. */
-    if (ctx->OutputSignalEvent == NULL) {
-        HANDLE ev = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
-        if (ev != NULL)
-            InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
-    }
+    TryCreateDoorbell(ctx);
     return TRUE;
 }
 
@@ -2109,6 +2116,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
          * but writes to a view the driver isn't reading from anymore. */
         ULONG staleWakeups = 0;
         ULONG idleTimeouts = 0;
+        ULONG doorbellTick = 0;
         BOOLEAN recycle = FALSE;
 
         for (;;) {
@@ -2153,6 +2161,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
+                /* A doorbell the device could not make at start, held then
+                 * by a program's object, is retried on a steady input
+                 * stream too, not only on a recycle. A Switch Pro device
+                 * never recycles its mapping, and a streaming consumer never
+                 * idles into one. */
+                if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
+                    TryCreateDoorbell(ctx);
                 ULONG prevSeq = ctx->SharedMemSeqNo;
                 ProcessSharedInput(ctx);
                 if (ctx->SharedMemSeqNo == prevSeq) {
@@ -2177,6 +2192,8 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * timeouts (~4 s): stale-handle recovery after an SDK restart
              * still converges within 4 s, and the signaled-but-stale case
              * keeps its own 250-wakeup counter above. */
+            if (ctx->OutputSignalEvent == NULL)
+                TryCreateDoorbell(ctx);
             if (rc == WAIT_TIMEOUT && ++idleTimeouts < 8)
                 continue;
 

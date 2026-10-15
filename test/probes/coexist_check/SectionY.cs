@@ -19,8 +19,8 @@
 //        user's OutputEvent. XInput still reads the controller's input. The
 //        program's own output reader does not wait on the user's event, so
 //        rumble reaches it on the 8 ms poll. Once the user's names are gone,
-//        the driver makes its own OutputEvent at its next handle reset, and
-//        the SDK opens it.
+//        and while the program still streams input, the driver makes its
+//        own OutputEvent, and the reader waits on it again.
 //    Y3. A program on this SDK is killed, and the user creates
 //        \\.\pipe\HIDMaestroOwner<N> on its index. The driver had recorded
 //        the program as its owner pipe's server and then recorded it gone,
@@ -603,18 +603,27 @@ internal static partial class Program
             waiter.Join();
             Check("Y2: rumble never signals the user's OutputEvent", wakes == 0, $"{wakes} wakes");
 
-            // The user lets go of both names. With the input stopped, the
-            // driver resets its handles after eight idle 500 ms waits.
+            // The user lets go of both names while the program keeps
+            // streaming input. The driver retries its doorbell on a steady
+            // stream too, and the reader, polling, opens it within 64 polls.
             Y.CloseHandle(stopSquat);
             stopSquat = IntPtr.Zero;
             Y.CloseHandle(outputSquat);
             outputSquat = IntPtr.Zero;
-            p.Send("stopstream");
             string output = $@"Global\HIDMaestroOutputEvent{t}";
             bool own = WaitFor(() => Y.HostOnlyDacl(Y.EventSddl(output)), 10_000);
-            Check($"Y2: the driver then makes its own {output}", own, Y.EventSddl(output) ?? "none");
-            string sdkAfter = p.Send($"sdkevents {t}");
-            Check("Y2: and the SDK opens it", PeerProcess.Field(sdkAfter, "output") == "1", sdkAfter);
+            Check($"Y2: while input streams, the driver makes its own {output}", own, Y.EventSddl(output) ?? "none");
+            // The XUSB companion, which publishes the rumble, retries its own
+            // handle within 256 input frames (about 2 s at 125 Hz), and the
+            // reader opens the event within 64 polls.
+            Thread.Sleep(3000);
+            OutputTiming after = TimeOutputs(p, rumble, 30, 60);
+            Console.WriteLine($"    Y2 output latency on the driver's event: {after.Shown}");
+            Check("Y2: and the program's reader waits on it: p95 under 2 ms",
+                  after.AllArrived && after.P95 < 2, after.Shown);
+            var stopRumble = new Y.XINPUT_VIBRATION();
+            Y.XInputSetState((uint)slot, ref stopRumble);
+            p.Send("stopstream");
             p.Send("dispose");
         }
         finally
