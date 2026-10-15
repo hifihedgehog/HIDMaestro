@@ -69,8 +69,21 @@ internal static partial class ObjectOwner
         finally { LocalFree(sd); }
     }
 
+    /// <summary>Whether the object has a DACL. A NULL DACL, which admits
+    /// everyone, reads back as none, the same as no DACL at all. The handle
+    /// needs READ_CONTROL. False when the DACL cannot be read.</summary>
+    internal static bool HasDacl(SafeHandle handle)
+    {
+        uint r = GetSecurityInfoDacl(handle, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+            IntPtr.Zero, IntPtr.Zero, out IntPtr dacl, IntPtr.Zero, out IntPtr sd);
+        if (r != 0) return false;
+        LocalFree(sd);
+        return dacl != IntPtr.Zero;
+    }
+
     private const int SE_KERNEL_OBJECT = 6;
     private const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+    private const uint DACL_SECURITY_INFORMATION = 0x00000004;
     private const int WinLocalSystemSid = 22;
     private const int WinLocalServiceSid = 23;
     private const int WinBuiltinAdministratorsSid = 26;
@@ -78,6 +91,10 @@ internal static partial class ObjectOwner
     [LibraryImport("advapi32.dll")]
     private static partial uint GetSecurityInfo(SafeHandle handle, int objectType, uint securityInfo,
         out IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr securityDescriptor);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "GetSecurityInfo")]
+    private static partial uint GetSecurityInfoDacl(SafeHandle handle, int objectType, uint securityInfo,
+        IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr securityDescriptor);
 
     [LibraryImport("advapi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

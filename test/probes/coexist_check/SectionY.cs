@@ -17,7 +17,8 @@
 //        of an Xbox 360 controller took its transport index and before its
 //        device exists. The controller's driver takes neither: the StopEvent
 //        stays signaled, and rumble sent through XInput never signals the
-//        user's OutputEvent. XInput still reads the controller's input.
+//        user's OutputEvent. XInput still reads the controller's input. The
+//        SDK does not open the user's OutputEvent either.
 //    Y3. A program on this SDK is killed, and the user creates
 //        \\.\pipe\HIDMaestroOwner<N> on its index. The driver had recorded
 //        the program as its owner pipe's server and then recorded it gone,
@@ -414,6 +415,8 @@ internal static partial class Program
             Y.XInputSetState((uint)slot, ref stopVib);
             waiter.Join();
             Check("Y2: rumble never signals the user's OutputEvent", wakes == 0, $"{wakes} wakes");
+            string sdkOpen = p.Send($"sdkevents {t}");
+            Check("Y2: the SDK does not open the user's OutputEvent either", PeerProcess.Field(sdkOpen, "output") == "0", sdkOpen);
             p.Send("dispose");
         }
         finally

@@ -454,11 +454,23 @@ internal static partial class SharedMemoryIO
     /// installed driver signals per published packet and the reader can
     /// block on it; failure means an older driver and the caller keeps
     /// the 8 ms poll cadence. Returns IntPtr.Zero when absent. The caller
-    /// owns the returned handle.</summary>
+    /// owns the returned handle.
+    ///
+    /// <para>Any program can create a <c>Global\</c> event, and the
+    /// driver uses an existing one only when a driver host or an elevated
+    /// program made it under a DACL (driver.c CreateHostEvent). The driver
+    /// never signals one that fails the same test, so the reader keeps the
+    /// poll cadence instead of waiting on it.</para></summary>
     public static IntPtr TryOpenOutputEvent(int controllerIndex)
     {
-        return OpenEventW(SYNCHRONIZE, false,
+        IntPtr ev = OpenEventW(SYNCHRONIZE | READ_CONTROL, false,
             $@"Global\HIDMaestroOutputEvent{controllerIndex}");
+        if (ev == IntPtr.Zero) return ev;
+        using (var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(ev, ownsHandle: false))
+            if (ObjectOwner.IsOwnedByAdmin(h, allowLocalService: true) && ObjectOwner.HasDacl(h))
+                return ev;
+        CloseHandle(ev);
+        return IntPtr.Zero;
     }
 
     /// <summary>Companion input doorbell handle for
