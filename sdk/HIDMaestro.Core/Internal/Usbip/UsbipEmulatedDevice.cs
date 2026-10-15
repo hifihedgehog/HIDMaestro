@@ -118,6 +118,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly object _lifetimeLock = new();
     private bool _protocolWakeClosed;
     private bool _streamWakeClosed;
+    // The input pump's wait handle, closed by the pump as it ends.
+    private bool _inputWakeClosed;
     // Set under _publishLock: nothing writes the output section after
     // Dispose.
     private bool _outputClosed;
@@ -422,6 +424,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
         finally
         {
+            // Under the lock, so StopAndRelease never sets a closed handle.
+            lock (_lifetimeLock) _inputWakeClosed = true;
             if (_inputWaitEvent != IntPtr.Zero) CloseHandle(_inputWaitEvent);
         }
     }
@@ -1543,7 +1547,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// <summary>Stop every thread this device started and close what it
     /// opened. Dispose ends here, and so does a constructor that throws
     /// partway, so every field may still be unset. Each loop checks
-    /// <c>_stop</c> after a wait of at most 500 ms.
+    /// <c>_stop</c> after a wait of at most 500 ms, and each wait is woken
+    /// here, so Dispose waits for none of them to time out.
     ///
     /// <para>The controller unmaps the sections once Dispose returns, so
     /// nothing here waits on the connection, and no thread reads or writes
@@ -1562,12 +1567,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // Inside the lifetime lock, so a second Dispose racing this one
             // returns only once nothing can write the output section.
             lock (_publishLock) _outputClosed = true;
+            // The input pump waits up to 500 ms for a frame and sees _stop
+            // only when it wakes. Wake it now, as the clocks are woken
+            // below, so Dispose does not wait out its timeout. It ends while
+            // the audio engine stops.
+            if (!_inputWakeClosed && _inputWaitEvent != IntPtr.Zero) SetEvent(_inputWaitEvent);
         }
         Audio?.Dispose();
         if (_inputThread is { } input)
             try { input.Join(joinMs); } catch { }
         else if (_inputWaitEvent != IntPtr.Zero)
+        {
+            lock (_lifetimeLock) _inputWakeClosed = true;
             CloseHandle(_inputWaitEvent);
+        }
         WakeStreamClock();
         if (_streamThread is { } stream)
             try { stream.Join(joinMs); } catch { }

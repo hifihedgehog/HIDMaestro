@@ -1500,11 +1500,12 @@ function Scenario-Usbip-Server-Protocol {
                      -Message ('the USB/IP audio engine regressed offline: a wake event, event or timer left open at Dispose or when a thread does not start, ' +
                                'an exception thrown to the connection when its event thread does not start, a stale IsStreaming, ' +
                                'a change made before Dispose not raised, more than one waiting write per control, ' +
-                               'a failed start missing from the diagnostic log, or its event thread not counted as its own (see probe stdout)')
+                               'a failed start missing from the diagnostic log, its event thread not counted as its own, ' +
+                               'or a Dispose that waits out the input pump (see probe stdout)')
     } catch { $failed += $_.Exception.Message }
     try {
         Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
-                     -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, or the import handshake), see probe stdout'
+                     -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, the import handshake, or a Dispose slower than 250 ms at p95), see probe stdout'
     } catch { $failed += $_.Exception.Message }
     if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }

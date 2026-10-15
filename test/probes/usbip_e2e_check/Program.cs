@@ -155,7 +155,11 @@ internal static partial class Program
         // thread, where the audio engine's Dispose skips the join of the
         // pump the handler holds. On a pool thread it would wait 500 ms.
         Console.WriteLine("\n-- A FramesReceived handler that disposes its controller and another --");
-        double setMs = AudioHandlerDispose(ctx, viaContext: false, setMs: 0);
+        // The context check below compares its time with this run's. The
+        // same steps run once first, untimed, so neither timed run pays
+        // their first use.
+        AudioHandlerDispose(ctx, HandlerDispose.WarmUp, setMs: 0);
+        double setMs = AudioHandlerDispose(ctx, HandlerDispose.Set, setMs: 0);
 
         // ── Sweep while still holding a live controller (issues #44, #45) ──
         // This could not be tested until #45 was fixed. Sweeping unmaps every
@@ -205,7 +209,7 @@ internal static partial class Program
         // Last, since it disposes the context: the same handler calls
         // HMContext.Dispose.
         Console.WriteLine("\n-- A FramesReceived handler that disposes the context --");
-        AudioHandlerDispose(ctx, viaContext: true, setMs);
+        AudioHandlerDispose(ctx, HandlerDispose.Context, setMs);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -407,31 +411,45 @@ internal static partial class Program
         }
     }
 
+    enum HandlerDispose { WarmUp, Set, Context }
+
     /// <summary>A GameCube adapter and a DualSense composite, both on the
     /// USB/IP backend. A tone plays to the composite's speaker, and its
     /// first FramesReceived handler call disposes both, through
-    /// DisposeControllersInParallel or through HMContext.Dispose. The set
-    /// dispose reports the thread that disposed each controller, which must
-    /// be the handler's for its own. HMContext.Dispose reports none, so its
-    /// call from the handler must take no more than 250 ms longer than the
-    /// set dispose's (<paramref name="setMs"/>): a pool thread that took the
-    /// composite would wait 500 ms for the pump. Each device's input pump
-    /// waits up to 500 ms for a frame and sees Dispose only when it wakes,
-    /// so a thread sets both devices' input events every millisecond until
-    /// the call returns. Both runs then time the same work, with no wait of
-    /// a random length in either. Returns the handler's call time in ms, or
-    /// NaN when it never ran.</summary>
-    static double AudioHandlerDispose(HMContext ctx, bool viaContext, double setMs)
+    /// DisposeControllersInParallel or through HMContext.Dispose.
+    ///
+    /// <para>The warm-up runs the set dispose's steps untimed, so the timed
+    /// runs after it do not pay the first use of that path: its JIT, the
+    /// pool's first threads, the first orphan sweep and the first teardown
+    /// of a streaming endpoint. The set dispose reports the thread that
+    /// disposed each controller, which must be the handler's for its own.
+    /// HMContext.Dispose reports none, so its call from the handler must
+    /// take no more than 250 ms longer than the set dispose's
+    /// (<paramref name="setMs"/>): a pool thread that took the composite
+    /// would wait 500 ms for the pump. Dispose wakes each device's input
+    /// pump, so neither run carries a wait of a random length.</para>
+    ///
+    /// <para>Each run ends once the composite's HID device and both its
+    /// audio endpoints are gone, polled up to 10 s, so the next run cannot
+    /// find this run's endpoint while Windows removes it. Returns the
+    /// handler's call time in ms, or NaN when it never ran.</para></summary>
+    static double AudioHandlerDispose(HMContext ctx, HandlerDispose mode, double setMs)
     {
+        bool viaContext = mode == HandlerDispose.Context;
+        string what = mode == HandlerDispose.WarmUp ? "the warm-up" : viaContext ? "HMContext.Dispose" : "DisposeControllersInParallel";
+        // A composite an earlier section left, or one Windows is still
+        // removing, would hand this run its endpoint.
+        Check($"{what}: no earlier composite or endpoint is left", WaitCompositeGone());
         var gc = ctx.CreateController(ctx.GetProfile("gamecube-adapter")!);
         var ds = ctx.CreateController(ctx.GetProfile("dualsense-composite")!);
         var set = new[] { gc, ds };
         MMDevice? render = null;
         for (int i = 0; i < 150 && render == null; i++) { Thread.Sleep(100); render = FindEndpoint(DataFlow.Render, "Wireless Controller"); }
-        Check("the composite's render endpoint appears", render != null);
+        Check($"{what}: the composite's render endpoint appears", render != null);
         if (render == null)
         {
             if (viaContext) ctx.Dispose(); else ctx.DisposeControllersInParallel(set);
+            WaitCompositeGone();
             return double.NaN;
         }
 
@@ -439,21 +457,6 @@ internal static partial class Program
         long started = 0, finished = 0;
         Exception? thrown = null;
         using var returned = new ManualResetEventSlim();
-
-        // The probe's own handles keep the two events open after the SDK
-        // closes its handles at Dispose.
-        var indexOf = typeof(HMController).GetProperty("Index", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var inputEvents = set
-            .Select(c => OpenEventW(EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroInputEvent{(int)indexOf.GetValue(c)!}"))
-            .ToArray();
-        Check("both devices' input events open", inputEvents.All(h => h != IntPtr.Zero));
-        var waker = new Thread(() =>
-        {
-            while (!returned.Wait(1))
-                foreach (var h in inputEvents)
-                    if (h != IntPtr.Zero) SetEvent(h);
-        }) { IsBackground = true, Name = "S45 input waker" };
-        waker.Start();
         ds.UsbAudio!.Output.FramesReceived += (_, _) =>
         {
             if (Interlocked.Exchange(ref fired, 1) != 0) return;
@@ -483,33 +486,56 @@ internal static partial class Program
             Console.WriteLine($"  [note] playback ended with {ex.GetType().Name}");
         }
         bool ran = returned.Wait(30_000);
-        if (!ran) returned.Set();
-        waker.Join();
-        foreach (var h in inputEvents)
-            if (h != IntPtr.Zero) CloseHandle(h);
         if (Volatile.Read(ref fired) == 0)
         {
-            Check("the composite's FramesReceived handler ran", false, "no PCM reached it");
+            Check($"{what}: the composite's FramesReceived handler ran", false, "no PCM reached it");
             if (viaContext) ctx.Dispose(); else ctx.DisposeControllersInParallel(set);
+            WaitCompositeGone();
             return double.NaN;
         }
         double ms = (finished - started) * 1000.0 / Stopwatch.Frequency;
-        Thread.Sleep(2500);
-        bool gone = FindHidDevicePath(0x054C, 0x0CE6) == null;
-        if (viaContext)
+        bool gone = WaitCompositeGone();
+        string detail = $"{ms:F0} ms, own disposed on {(ownThread == handlerThread ? "the handler's thread" : ownThread == 0 ? "no thread" : "another thread")}, " +
+                        $"threw {thrown?.GetType().Name ?? "nothing"}, composite and its endpoints gone {gone}";
+        switch (mode)
         {
-            Check("a FramesReceived handler calling HMContext.Dispose returns, and takes no more than 250 ms beyond the set dispose",
-                  ran && thrown == null && gone && !double.IsNaN(setMs) && ms < setMs + 250,
-                  $"{ms:F0} ms, set dispose {setMs:F0} ms, threw {thrown?.GetType().Name ?? "nothing"}, composite gone {gone}");
-        }
-        else
-        {
-            Check("a FramesReceived handler calling DisposeControllersInParallel disposes its own controller on its own thread",
-                  ran && thrown == null && gone && ownThread == handlerThread,
-                  $"{ms:F0} ms, own disposed on {(ownThread == handlerThread ? "the handler's thread" : ownThread == 0 ? "no thread" : "another thread")}, " +
-                  $"threw {thrown?.GetType().Name ?? "nothing"}, composite gone {gone}");
+            case HandlerDispose.WarmUp:
+                Check("the warm-up's handler disposed both, and the composite and its endpoints went",
+                      ran && thrown == null && gone, detail);
+                break;
+            case HandlerDispose.Set:
+                Check("a FramesReceived handler calling DisposeControllersInParallel disposes its own controller on its own thread",
+                      ran && thrown == null && gone && ownThread == handlerThread, detail);
+                break;
+            default:
+                Check("a FramesReceived handler calling HMContext.Dispose returns, and takes no more than 250 ms beyond the set dispose",
+                      ran && thrown == null && gone && !double.IsNaN(setMs) && ms < setMs + 250,
+                      $"{ms:F0} ms, set dispose {setMs:F0} ms, threw {thrown?.GetType().Name ?? "nothing"}, composite and its endpoints gone {gone}");
+                break;
         }
         return ms;
+    }
+
+    /// <summary>Polls until the composite's HID device and its render and
+    /// capture endpoints are gone, the condition the teardown section
+    /// checks after its sleep, up to 10 s.</summary>
+    static bool WaitCompositeGone()
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            if (FindHidDevicePath(0x054C, 0x0CE6) == null && !EndpointPresent(DataFlow.Render) && !EndpointPresent(DataFlow.Capture))
+                return true;
+            Thread.Sleep(100);
+        }
+        return false;
+
+        // The endpoint FindEndpoint returns is a COM object. Each poll
+        // releases it at once rather than at finalization.
+        static bool EndpointPresent(DataFlow flow)
+        {
+            using var d = FindEndpoint(flow, "Wireless Controller");
+            return d != null;
+        }
     }
 
     static string? FindEndpointIdAnyState(DataFlow flow, string nameContains, out DeviceState state)
@@ -1105,8 +1131,4 @@ internal static partial class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(IntPtr h, byte[] buf, int len, out int read, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr OpenEventW(uint access, bool inherit, string name);
-    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetEvent(IntPtr h);
-    const uint EVENT_MODIFY_STATE = 0x0002;
 }
