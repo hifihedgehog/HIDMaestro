@@ -58,11 +58,11 @@ internal static partial class Cost
         Report("removal test: REMOVED registration, locates, unregister", runs, () =>
         {
             using var w = DeviceManager.RemovalWatch.Start(Id);
-            w.IsComplete(uninstalls: true);
+            w.Wait(uninstalls: true, 0);
         });
         Report("install queue: CMP_WaitNoPendingInstallEvents(30000), idle", runs, () => CMP_WaitNoPendingInstallEvents(30_000));
         Report("gate: removal test and install queue, absent id", runs, () =>
-            DeviceManager.AwaitRegistrationGate(Id, () => true, timeoutMs: 5000, installWaitMs: DeviceManager.InstallQueueWaitMs));
+            DeviceManager.AwaitRegistrationGate(Id, () => DeviceManager.RemovalOutcome.Removed, installWaitMs: DeviceManager.InstallQueueWaitMs));
         string name = @"Local\HIDMaestro.PnpNotifyCheck.Cost." + Environment.ProcessId;
         Report("mutex stand-in: open, wait, release, close", runs, () =>
         {

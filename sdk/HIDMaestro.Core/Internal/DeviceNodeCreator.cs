@@ -144,20 +144,19 @@ internal static partial class DeviceNodeCreator
         // is still around (a prior life's crash residue, or a phantom whose
         // teardown timed out) is removed first; a record that is not ours
         // is a hard stop, because claiming it would mutate a foreign device
-        // (issue #28). The gate registers the name again only once its last
-        // removal has passed the removal test and Windows has no device
-        // install pending (DeviceManager.AwaitRegistrationGate).
+        // (issue #28). The gate registers the name again only once its prior
+        // life is gone by its removal test and Windows has no device install
+        // pending (DeviceManager.AwaitRegistrationGate).
         var gate = DeviceManager.AwaitRegistrationGate(instId, () =>
         {
             if (!DeviceManager.IsHidMaestroOwned(instId))
             {
                 DeviceOrchestrator.LogDiag($"      {instId} exists and is not HIDMaestro-owned; refusing to claim it");
-                return false;
+                return null;
             }
             DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
-            DeviceManager.RemoveDevice(instId, timeoutMs: 120_000, forceFallbacks: true);
-            return true;
-        }, timeoutMs: 120_000, installWaitMs: DeviceManager.InstallQueueWaitMs);
+            return DeviceManager.RemovePriorLife(instId, timeoutMs: 120_000);
+        }, installWaitMs: DeviceManager.InstallQueueWaitMs);
         if (gate == DeviceManager.RegistrationGate.Refused)
             return new Result(false, null);
 

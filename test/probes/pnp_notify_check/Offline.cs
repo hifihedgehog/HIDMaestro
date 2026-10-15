@@ -29,9 +29,7 @@ internal static class Offline
 
     const string Id = @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_OFFLINE";
 
-    // How long the SDK waits for REMOVED once a devnode and its record are
-    // gone.
-    const long RemovedBoundMs = 2000;
+    const long RemovedBoundMs = DeviceManager.RemovedBoundMs;
 
     // A finished wait is seen within one 50 ms re-check of its last change.
     // This bound only catches a wait that does not end.
@@ -160,15 +158,16 @@ internal static class Offline
     /// <summary>A removal issued while the devnode is in the tree: the
     /// watch is started first, as RemoveDevice starts it before its removal
     /// call, then the sequence begins.</summary>
-    static (bool Done, long Ms) WatchedRemoval(Sequence s, bool uninstalls, int budgetMs)
+    static (DeviceManager.RemovalOutcome Outcome, long Ms) WatchedRemoval(Sequence s, bool uninstalls, int budgetMs,
+                                                                          int removedMs = DeviceManager.RemovedBoundMs)
     {
         s.Hook();
         try
         {
             using var watch = DeviceManager.RemovalWatch.Start(Id);
             s.Begin();
-            bool done = watch.Wait(uninstalls, budgetMs);
-            return (done, s.Now);
+            var outcome = watch.Wait(uninstalls, budgetMs, removedMs);
+            return (outcome, s.Now);
         }
         finally { s.End(); }
     }
@@ -184,10 +183,14 @@ internal static class Offline
             var gate = DeviceManager.AwaitRegistrationGate(Id, () =>
             {
                 removals++;
-                if (!owned) return false;
+                if (!owned) return null;
+                // As DeviceManager.RemovePriorLife does it: the watch
+                // registers before the removal starts, and its test is the
+                // one wait.
+                using var watch = DeviceManager.RemovalWatch.Start(Id);
                 if (removalBegins) s.Begin();
-                return true;
-            }, timeoutMs: 5000, installWaitMs: installWaitMs);
+                return watch.Wait(uninstalls: true, 5000);
+            }, installWaitMs: installWaitMs);
             return (gate, s.Now, removals);
         }
         finally { s.End(); }
@@ -201,51 +204,85 @@ internal static class Offline
 
         // The decision itself, at the sequence's event times: a devnode that
         // was present when the wait registered, removed by an uninstall.
-        bool At(long t) => DeviceManager.RemovalComplete(new DeviceManager.RemovalObservation(
-            presentAtStart: true, registered: true, removedDelivered: t >= 200, inTree: t < 0, record: t < 300), uninstalls: true);
+        const DeviceManager.RemovalOutcome Removed = DeviceManager.RemovalOutcome.Removed;
+        const DeviceManager.RemovalOutcome Pending = DeviceManager.RemovalOutcome.Pending;
+        const DeviceManager.RemovalOutcome GoneWithout = DeviceManager.RemovalOutcome.GoneWithoutRemoved;
+        const DeviceManager.RemovalOutcome NotGone = DeviceManager.RemovalOutcome.NotGone;
+        DeviceManager.RemovalOutcome At(long t, bool overdue = false) => DeviceManager.RemovalComplete(new DeviceManager.RemovalObservation(
+            presentAtStart: true, registered: true, removedDelivered: t >= 200, inTree: t < 0, record: t < 300), uninstalls: true, overdue);
         var answers = new[] { 0L, 199, 200, 299, 300 };
-        string table = string.Join(", ", Array.ConvertAll(answers, t => $"{t} ms {(At(t) ? "complete" : "pending")}"));
-        Check("the decision: complete only once REMOVED has arrived and the PHANTOM record is gone",
-              !At(0) && !At(199) && !At(200) && !At(299) && At(300), table);
+        string table = string.Join(", ", Array.ConvertAll(answers, t => $"{t} ms {At(t)}"));
+        Check("the decision: removed only once REMOVED has arrived and the PHANTOM record is gone",
+              At(0) == Pending && At(199) == Pending && At(200) == Pending && At(299) == Pending && At(300) == Removed, table);
+
+        // Without the notification: gone only by what the locates prove, and
+        // only once its bound has passed. Out of the tree with the record
+        // still there is never gone, however late.
+        var noNote = new DeviceManager.RemovalObservation(presentAtStart: true, registered: true, removedDelivered: false, inTree: false, record: false);
+        var recordLeft = new DeviceManager.RemovalObservation(presentAtStart: true, registered: true, removedDelivered: false, inTree: false, record: true);
+        var cameLater = new DeviceManager.RemovalObservation(presentAtStart: false, registered: false, removedDelivered: false, inTree: false, record: false);
+        var dNoNote = DeviceManager.RemovalComplete(noNote, uninstalls: true, removedOverdue: false);
+        var dNoNoteLate = DeviceManager.RemovalComplete(noNote, uninstalls: true, removedOverdue: true);
+        var dRecord = DeviceManager.RemovalComplete(recordLeft, uninstalls: true, removedOverdue: true);
+        var dSoftware = DeviceManager.RemovalComplete(recordLeft, uninstalls: false, removedOverdue: true);
+        var dAbsent = DeviceManager.RemovalComplete(cameLater, uninstalls: true, removedOverdue: false);
+        Check("the decision: gone without REMOVED only past its bound, a record left by an uninstall never gone, an absent devnode removed at once",
+              dNoNote == Pending && dNoNoteLate == GoneWithout && dRecord == Pending && dSoftware == GoneWithout && dAbsent == Removed,
+              $"{dNoNote}, {dNoNoteLate}, {dRecord}, {dSoftware}, {dAbsent}");
+
+        // A fast removal confirms within its own budget, whatever its caller
+        // passed: a teardown's surviving child passes 120 s, the full cleanup
+        // 3 or 5 s.
+        int f120 = DeviceManager.ParentRemovalBudget(fast: true, 120_000);
+        int f3 = DeviceManager.ParentRemovalBudget(fast: true, 3000);
+        int f1 = DeviceManager.ParentRemovalBudget(fast: true, 1000);
+        int s120 = DeviceManager.ParentRemovalBudget(fast: false, 120_000);
+        Check("budgets: a fast removal waits at most QuickRemovalMs, a SetupDiRemoveDevice or close removal its caller's budget",
+              f120 == DeviceManager.QuickRemovalMs && f3 == DeviceManager.QuickRemovalMs && f1 == 1000 && s120 == 120_000,
+              $"fast 120000 -> {f120}, fast 3000 -> {f3}, fast 1000 -> {f1}, not fast 120000 -> {s120}");
 
         // The waits, through the SDK's own loop.
         var w1 = WatchedRemoval(new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 }, uninstalls: true, 5000);
-        Check("removal: out of the tree at 0, REMOVED at 200, record gone at 300 -> complete at 300",
-              w1.Done && Within(w1.Ms, 300), $"returned {w1.Done} at {w1.Ms} ms");
+        Check("removal: out of the tree at 0, REMOVED at 200, record gone at 300 -> removed at 300",
+              w1.Outcome == Removed && Within(w1.Ms, 300), $"{w1.Outcome} at {w1.Ms} ms");
 
         var w2 = WatchedRemoval(new Sequence { LeavesTree = 0, RecordGoneAt = 100, RemovedAt = 200 }, uninstalls: true, 5000);
-        Check("removal: record gone at 100 before REMOVED at 200 -> complete at 200",
-              w2.Done && Within(w2.Ms, 200), $"returned {w2.Done} at {w2.Ms} ms");
+        Check("removal: record gone at 100 before REMOVED at 200 -> removed at 200",
+              w2.Outcome == Removed && Within(w2.Ms, 200), $"{w2.Outcome} at {w2.Ms} ms");
 
         var w3 = WatchedRemoval(new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = null }, uninstalls: false, 5000);
-        Check("removal that keeps its record (SwDeviceClose): REMOVED at 200 -> complete at 200",
-              w3.Done && Within(w3.Ms, 200), $"returned {w3.Done} at {w3.Ms} ms");
+        Check("removal that keeps its record (SwDeviceClose): REMOVED at 200 -> removed at 200",
+              w3.Outcome == Removed && Within(w3.Ms, 200), $"{w3.Outcome} at {w3.Ms} ms");
 
         var w4 = WatchedRemoval(new Sequence { LeavesTree = 50, RecordGoneAt = 150, RemovedAt = null, RefuseRegistration = true },
                                 uninstalls: true, 5000);
-        Check("removal whose REMOVED registration Windows refused: the tree stands in -> complete at 150 (record)",
-              w4.Done && Within(w4.Ms, 150), $"returned {w4.Done} at {w4.Ms} ms");
+        Check("removal whose REMOVED registration Windows refused: the tree stands in -> removed at 150 (record)",
+              w4.Outcome == Removed && Within(w4.Ms, 150), $"{w4.Outcome} at {w4.Ms} ms");
 
         var w5 = WatchedRemoval(new Sequence { AbsentBefore = true }, uninstalls: true, 5000);
-        Check("removal of an id with no devnode and no record -> complete at once",
-              w5.Done && w5.Ms < 50, $"returned {w5.Done} at {w5.Ms} ms");
+        Check("removal of an id with no devnode and no record -> removed at once",
+              w5.Outcome == Removed && w5.Ms < 50, $"{w5.Outcome} at {w5.Ms} ms");
 
-        var w6 = WatchedRemoval(new Sequence { LeavesTree = 0, RecordGoneAt = 50, RemovedAt = null }, uninstalls: true, 400);
-        Check("removal whose REMOVED never arrives -> not complete when the 400 ms budget ends",
-              !w6.Done && w6.Ms >= 400, $"returned {w6.Done} at {w6.Ms} ms");
+        var w6 = WatchedRemoval(new Sequence { LeavesTree = 0, RecordGoneAt = 50, RemovedAt = null }, uninstalls: true, 5000, removedMs: 300);
+        Check("removal whose REMOVED never arrives, record gone at 50 -> gone without it when its 300 ms bound ends, at 350",
+              w6.Outcome == GoneWithout && Within(w6.Ms, 350), $"{w6.Outcome} at {w6.Ms} ms");
+
+        var w6b = WatchedRemoval(new Sequence { LeavesTree = 0, RecordGoneAt = null, RemovedAt = 100 }, uninstalls: true, 400);
+        Check("removal that uninstalls but whose record never goes -> not gone when the 400 ms budget ends",
+              w6b.Outcome == NotGone && Within(w6b.Ms, 400), $"{w6b.Outcome} at {w6b.Ms} ms");
 
         var s7 = new Sequence { LeavesTree = 100, RemovedAt = 250, RecordGoneAt = 300 };
         s7.Hook();
-        bool w7Done;
+        DeviceManager.RemovalOutcome w7;
         try
         {
             s7.Begin();
-            w7Done = DeviceManager.WaitForDeviceRemoval(Id, uninstalls: true, timeoutMs: 5000);
+            w7 = DeviceManager.WaitForDeviceRemoval(Id, uninstalls: true, timeoutMs: 5000);
         }
         finally { s7.End(); }
         long w7Ms = s7.Clock.ElapsedMilliseconds;
-        Check("WaitForDeviceRemoval on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> 300",
-              w7Done && Within(w7Ms, 300), $"returned {w7Done} at {w7Ms} ms");
+        Check("WaitForDeviceRemoval on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> removed at 300",
+              w7 == Removed && Within(w7Ms, 300), $"{w7} at {w7Ms} ms");
 
         // The registration gate.
         var g1 = Gate(new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 });
