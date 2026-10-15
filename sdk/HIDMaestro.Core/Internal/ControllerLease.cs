@@ -125,9 +125,13 @@ internal sealed class ControllerLease : IDisposable
             // for an object nothing about whose maker was read.
             int squattedCount = 0, unreadCount = 0;
             string? firstOwnerRead = null, firstNotOurs = null, firstUnread = null;
+            int floorAtStart = floor;
             foreach (int n in Candidates(reclaimed >= floor ? reclaimed : floor + slot, floor))
             {
                 if (used.Contains(n)) continue;
+                // A v1.12.0 program seen only after a wait below raised the
+                // floor: no index under it is taken from then on.
+                if (floor > floorAtStart && n < floor) continue;
                 SafeFileHandle? indexClaim = MachineClaims.TryClaim(MachineClaims.IndexPipeName(n));
                 if (indexClaim == null) continue;
                 bool keep = false;
@@ -157,7 +161,34 @@ internal sealed class ControllerLease : IDisposable
                         // Held in identityClaim like a keyed one from here,
                         // so the finally below releases it on every exit
                         // that does not hand it to the lease.
-                        identityClaim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(identity.Token));
+                        string identityName = MachineClaims.IdentityPipeName(identity.Token);
+                        identityClaim = MachineClaims.TryClaim(identityName);
+                        // A sweep holds this claim while it removes what the
+                        // identity left (a dead program's group, a phantom,
+                        // an orphaned HID child), and no live record lists
+                        // the token then. That claim is waited for, as a keyed
+                        // create waits for it, rather than moving to the next
+                        // index: the index decides a keyless controller's
+                        // identity, so moving on would give it another one.
+                        if (identityClaim == null && (identityClaim = ClaimAfterSweep(identity.Token, identityName)) != null)
+                        {
+                            // The wait can last 120 s, so what index n was
+                            // checked against above is read again: a v1.12.0
+                            // program that started on n in the meantime, before
+                            // its device appeared, holds n's owner pipe, and
+                            // one anywhere raises the floor.
+                            census = OwnerCensus.Take();
+                            floor = Math.Max(floor, Floor(census));
+                            if ((n < floor && floor > floorAtStart)
+                                || MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(n))
+                                || SharedMemoryIO.ForeignObjectAt(n) != null)
+                            {
+                                DeviceOrchestrator.LogDiag($"    transport index {n} skipped after the wait for a sweep: a v1.12.0 program or another object holds it now");
+                                identityClaim.Dispose();
+                                identityClaim = null;
+                                continue;
+                            }
+                        }
                         if (identityClaim == null) continue;   // someone passed "index:N" explicitly
                         if (LiveLegacyHolds(census, identity.Token)) { identityClaim.Dispose(); identityClaim = null; continue; }
                     }
