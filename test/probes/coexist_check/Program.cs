@@ -192,6 +192,7 @@ internal static partial class Program
             Peer.Extra = PeerZ.Run;
             return Peer.Run();
         }
+        if (args.Length > 0 && args[0] == "phantomclaims") return PhantomClaims();
         // Every process the probe starts is a peer with no window, and a
         // loader failure in one returns an exit code, never a dialog.
         Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace HIDMaestro.Internal;
 
@@ -450,13 +451,20 @@ public static partial class DeviceManager
                     if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
                         continue;
 
-                    // A phantom whose identity another program holds is that
-                    // program's create in flight: its record exists before
-                    // its devnode starts.
-                    string instName = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
-                    if (DeviceIdentity.IsIdentityToken(instName)
-                        && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(instName)))
-                        continue;
+                    // The claim of the identity the phantom belongs to is
+                    // held across the uninstall. A create of this release
+                    // takes that claim before it registers a devnode, so it
+                    // cannot register this id during SetupDiRemoveDevice.
+                    // That covers Windows' removal only if the call has
+                    // finished it when it returns, which is not verified.
+                    // A phantom whose claim another program holds is that
+                    // program's create in flight, and is left. The test
+                    // above does not find a devnode in the process of being
+                    // removed, so one with no claim to take (a name older
+                    // than identity tokens, a HID child whose parent cannot
+                    // be found) still reaches the uninstall.
+                    using SafeFileHandle? claim = ClaimPhantomOwner(instanceId, out bool heldElsewhere);
+                    if (heldElsewhere) continue;
 
                     if (SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
                         removed++;
@@ -476,6 +484,55 @@ public static partial class DeviceManager
             DeviceOrchestrator.LogDiag($"    RemoveAccumulatedHmPhantoms: removed {removed} HIDMaestro phantom(s)");
         return removed;
     }
+
+    /// <summary>The identity claim of the controller a phantom belongs to:
+    /// its own token, or for a HID child its parent's. Null with
+    /// <paramref name="heldElsewhere"/> false for a phantom older than
+    /// identity tokens, which no create of this release registers again.
+    /// A v1.12.0 program takes no claim, so a default token's phantom
+    /// counts as held while a v1.12.0 program holds that index's owner
+    /// pipe.</summary>
+    private static SafeFileHandle? ClaimPhantomOwner(string instanceId, out bool heldElsewhere)
+    {
+        heldElsewhere = false;
+        string? token = OwnerToken(instanceId);
+        if (token == null && instanceId.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase))
+        {
+            string[] parts = instanceId.Split('\\');
+            string? parent = parts.Length == 3 ? GetRegistryParentId(@"SYSTEM\CurrentControlSet\Enum\HID", parts[1], parts[2]) : null;
+            if (parent != null) token = OwnerToken(parent);
+        }
+        if (token == null) return null;
+        if (token.Length == DeviceIdentity.TokenPrefix.Length + 4
+            && int.TryParse(token.AsSpan(DeviceIdentity.TokenPrefix.Length), System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture, out int index)
+            && MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index)))
+        {
+            heldElsewhere = true;
+            return null;
+        }
+        SafeFileHandle? claim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(token));
+        heldElsewhere = claim == null;
+        return claim;
+
+        static string? OwnerToken(string id)
+        {
+            string name = id.Substring(id.LastIndexOf('\\') + 1);
+            return DeviceIdentity.IsIdentityToken(name) ? name : null;
+        }
+    }
+
+    /// <summary>Whether a devnode of this instance id is configured in the
+    /// device tree. A phantom is not, and neither is a device in the process
+    /// of being removed: CM_Locate_DevNode finds that one only with
+    /// CM_LOCATE_DEVNODE_CANCELREMOVE, which cancels the removal. So false
+    /// here does not prove a removal has finished.</summary>
+    internal static bool IsLive(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
+
+    /// <summary>The instance ids of a present devnode's direct children,
+    /// none when it is not present.</summary>
+    internal static List<string> ChildIdsOf(string instanceId) =>
+        CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == CR_SUCCESS ? GetAllChildDeviceIds(devInst) : new List<string>();
 
     /// <summary>
     /// Returns true when the PnP devnode at <paramref name="instanceId"/> carries
@@ -1172,7 +1229,7 @@ public static partial class DeviceManager
     ///: so it correctly catches every flavor of HM child without name-
     /// pattern brittleness.
     /// </summary>
-    public static int RemoveOrphanHidChildren()
+    public static int RemoveOrphanHidChildren(ICollection<string>? removedIds = null)
     {
         int removed = 0;
         const string enumHidPath = @"SYSTEM\CurrentControlSet\Enum\HID";
@@ -1231,6 +1288,7 @@ public static partial class DeviceManager
                     // Parent is gone: remove the orphan silently. Caller
                     // gets the count for whatever observability it wants.
                     DifRemoveDevice(hidInstanceId);
+                    removedIds?.Add(hidInstanceId);
                     removed++;
                 }
             }

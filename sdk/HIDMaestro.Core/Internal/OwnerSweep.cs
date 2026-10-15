@@ -168,12 +168,27 @@ internal static class OwnerSweep
         if (groups.Count > 0)
         {
             DeviceOrchestrator.SignalStopEvents(groups.Where(g => g.ControllerIndex >= 0).Select(g => g.ControllerIndex).ToHashSet());
-            foreach (var g in groups)
+            int unsettled = 0;
+            RemoveGroups(groups, g =>
             {
-                RemoveGroup(g);
-                if (g.ControllerIndex >= 0) DeviceOrchestrator.DeleteInstanceConfig(g.ControllerIndex);
+                bool settled = false;
+                try
+                {
+                    settled = RemoveGroup(g);
+                    if (settled && g.ControllerIndex >= 0) DeviceOrchestrator.DeleteInstanceConfig(g.ControllerIndex);
+                }
+                finally { if (!settled) unsettled++; }
+            });
+            if (!RemoveOrphanChildren()) unsettled++;
+            // Once the process is gone, its claims are free, and a create of
+            // another program could register an id Windows is still removing.
+            // The record keeps the device a dead owner's, which the next
+            // sweep removes under its claims.
+            if (unsettled > 0)
+            {
+                DeviceOrchestrator.LogDiag("    exit: a device is still in the device tree, so the record stays for the next sweep");
+                return;
             }
-            try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
         }
         // Every controller's holds go in one release, which takes the ledger
         // lock once, so a squatted legacy mutex costs this exit one wait, not
@@ -205,7 +220,8 @@ internal static class OwnerSweep
     /// can create on the same index or identity, and the devnode it makes
     /// has the instance id of the dead one. So the sweep takes each group's
     /// index and identity claims before it acts on the group, and keeps them
-    /// until the group's devices and its index's configuration are gone. A
+    /// until every group it removes and every orphaned HID child it removes
+    /// after them is out of the device tree, or that wait has ended. A
     /// create on this release takes both claims before it writes the index's
     /// configuration or makes a devnode (ControllerLease), so no create can
     /// land on a group the sweep holds, and a group whose claims another
@@ -225,6 +241,12 @@ internal static class OwnerSweep
 
         var claims = new GroupClaims();
         var targets = new List<OwnerCensus.DeviceGroup>();
+        // The dead records of groups whose removal was not confirmed. Each
+        // stays, as the exit handler keeps its own, so the device is still a
+        // dead owner's to the next sweep: without a record and once its
+        // driver lets go of the acknowledgement section, the census reads it
+        // as Unknown, which no sweep removes.
+        var keepRecords = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             foreach (var group in candidates)
@@ -236,14 +258,29 @@ internal static class OwnerSweep
             if (targets.Count > 0)
             {
                 DeviceOrchestrator.SignalStopEvents(targets.Where(t => t.ControllerIndex >= 0).Select(t => t.ControllerIndex).ToHashSet());
-                foreach (var group in targets)
+                int unsettled = 0;
+                RemoveGroups(targets, group =>
                 {
-                    ReclaimGroup(group, liveIndices);
-                    claims.Release(group);
-                }
-                try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
+                    bool settled = false;
+                    try { settled = ReclaimGroup(group, liveIndices); }
+                    finally
+                    {
+                        if (!settled)
+                        {
+                            unsettled++;
+                            if (group.Record != null) keepRecords.Add(group.Record.OwnerId);
+                        }
+                    }
+                });
+                if (!RemoveOrphanChildren()) unsettled++;
+                if (unsettled > 0)
+                    DeviceOrchestrator.LogDiag($"    reclaim: {unsettled} removal(s) not confirmed, left to the next sweep");
             }
         }
+        // Released only here, after every group's removal and the orphan HID
+        // children's: a HID child's id follows from its parent's, so a parent
+        // registered again while one of its old children is still being
+        // removed brings back that child's id too.
         finally { claims.ReleaseAll(); }
 
         var usbip = new Usbip.UsbipBackend.SweepView();
@@ -256,7 +293,7 @@ internal static class OwnerSweep
             // A composite whose attempt was left, because a listener on its
             // port did not say what it exports, is named by this record
             // alone, so the record stays for the next sweep.
-            if (settled) MachineClaims.DeleteRecord(rec.OwnerId);
+            if (settled && !keepRecords.Contains(rec.OwnerId)) MachineClaims.DeleteRecord(rec.OwnerId);
         }
         Usbip.UsbipBackend.DetachImportsOfDeadServers(usbip);
 
@@ -265,21 +302,25 @@ internal static class OwnerSweep
     }
 
     /// <summary>A dead owner's group, under its claims: its devices, then
-    /// its index's configuration when no other present device and no live
-    /// record uses the index. A v1.12.0 program that started on the index
-    /// since the claims were taken holds its owner pipe, and keeps both.</summary>
-    private static void ReclaimGroup(OwnerCensus.DeviceGroup group, HashSet<int> liveIndices)
+    /// its index's configuration when they are out of the device tree and no
+    /// other present device and no live record uses the index. A v1.12.0
+    /// program that started on the index since the claims were taken holds
+    /// its owner pipe, and keeps both. The check before the removal only
+    /// reads that pipe (WaitNamedPipe), so it can skip a removal and never
+    /// starts one. Returns false when a removal was not confirmed.</summary>
+    private static bool ReclaimGroup(OwnerCensus.DeviceGroup group, HashSet<int> liveIndices)
     {
         int index = group.ControllerIndex;
         if (OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
         {
             DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {index}: a v1.12.0 program holds the index now");
-            return;
+            return true;
         }
         DeviceOrchestrator.LogDiag($"    reclaim {group.Owner} {group.Key} index {index}: {string.Join(", ", group.InstanceIds)}");
-        RemoveGroup(group);
+        if (!RemoveGroup(group)) return false;
         if (index >= 0 && !liveIndices.Contains(index) && !OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
             DeviceOrchestrator.DeleteInstanceConfig(index);
+        return true;
     }
 
     /// <summary>The index and identity claims a sweep holds on the groups
@@ -324,12 +365,6 @@ internal static class OwnerSweep
             }
         }
 
-        public void Release(OwnerCensus.DeviceGroup group)
-        {
-            lock (_lock)
-                foreach (string name in Names(group)) ReleaseLocked(name);
-        }
-
         public void ReleaseAll()
         {
             lock (_lock)
@@ -356,15 +391,72 @@ internal static class OwnerSweep
         }
     }
 
-    /// <summary>One controller's devnodes, the main node first so its
-    /// children cascade, then whatever companion is left.</summary>
-    private static void RemoveGroup(OwnerCensus.DeviceGroup group)
+    /// <summary>Each group is one controller's own devnodes and index,
+    /// removed one group after another, and a group that throws is logged
+    /// and does not stop the others.</summary>
+    private static void RemoveGroups(List<OwnerCensus.DeviceGroup> groups, Action<OwnerCensus.DeviceGroup> remove)
     {
+        foreach (var g in groups)
+        {
+            try { remove(g); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    removing {g.Key} threw {ex.GetType().Name}"); }
+        }
+    }
+
+    /// <summary>One controller's devnodes, the main node first so its
+    /// children cascade, then whatever companion is left. Returns true once
+    /// none of them and none of the children they had is in the device
+    /// tree.</summary>
+    private static bool RemoveGroup(OwnerCensus.DeviceGroup group)
+    {
+        var removed = new List<string>();
         foreach (string id in group.InstanceIds.OrderBy(id => id.StartsWith(@"ROOT\", StringComparison.OrdinalIgnoreCase) ? 0 : 1))
         {
-            try { DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true); }
+            removed.Add(id);
+            try
+            {
+                removed.AddRange(DeviceManager.ChildIdsOf(id));
+                DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true);
+            }
             catch (Exception ex) { DeviceOrchestrator.LogDiag($"    reclaim RemoveDevice({id}) threw {ex.GetType().Name}"); }
         }
+        return AllGone(removed);
+    }
+
+    /// <summary>How long a sweep or the exit handler waits for each orphaned
+    /// HID child it removed to leave the device tree.</summary>
+    private const int OrphanRemovalWaitMs = 10_000;
+
+    /// <summary>The HID orphan sweep, then a wait for each child it removed,
+    /// since its removal does not wait. Returns true once none of them is
+    /// in the device tree.</summary>
+    private static bool RemoveOrphanChildren()
+    {
+        var removed = new List<string>();
+        try { DeviceManager.RemoveOrphanHidChildren(removed); } catch { }
+        foreach (string id in removed)
+            try { DeviceManager.WaitForDeviceRemoval(id, TimeoutScale.Apply(OrphanRemovalWaitMs)); } catch { }
+        return AllGone(removed);
+    }
+
+    /// <summary>True when no id is configured in the device tree. That is
+    /// the strongest test the SDK has for a finished removal, and it misses a
+    /// removal still in progress (<see cref="DeviceManager.IsLive"/>).</summary>
+    private static bool AllGone(List<string> ids)
+    {
+        bool gone = true;
+        foreach (string id in ids)
+        {
+            bool live;
+            try { live = DeviceManager.IsLive(id); }
+            catch { live = true; }
+            if (live)
+            {
+                DeviceOrchestrator.LogDiag($"    {id} is still in the device tree");
+                gone = false;
+            }
+        }
+        return gone;
     }
 
     private static int s_phantomCleanupStarted;
