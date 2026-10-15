@@ -401,8 +401,9 @@ internal static partial class Program
         int t = int.Parse(PeerProcess.Field(cp, "transport")!);
         Check("Y16: the driver's watch connects", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000), Y.ShowWatch(inst));
         string drop = p.Send($"dropinputevent {t}");
-        Check("Y16: the program lets go of its input event, and its controller signals an unnamed event instead",
-              PeerProcess.Field(drop, "closed") == "1" && PeerProcess.Field(drop, "swapped") == "1", drop);
+        Check("Y16: the program lets go of its input event, and its controller holds a different, unnamed event instead",
+              PeerProcess.Field(drop, "closed") == "1" && PeerProcess.Field(drop, "swapped") == "1"
+              && PeerProcess.Field(drop, "verified") == "1" && PeerProcess.Field(drop, "distinct") == "1", drop);
         // Frames now signal a live handle that is not the index's event. A
         // program whose frames still reached that event would wake the
         // driver each time, keep it from its idle reset, and fail the

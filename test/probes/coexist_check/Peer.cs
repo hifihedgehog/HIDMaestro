@@ -53,7 +53,9 @@
 //                               Each controller on the index keeps its own
 //                               copy of the handle value and signals it per
 //                               frame, so that copy is pointed at a new
-//                               unnamed event: swapped=<controllers>
+//                               unnamed event, made before the close so its
+//                               value differs: swapped=<controllers>,
+//                               verified=<copies read back>, distinct=0|1
 //   droppedsignal               whether a frame signaled that unnamed
 //                               event since the last ask: signaled=0|1
 //   census                      the SDK's census of present devices, one
@@ -430,24 +432,31 @@ internal static class Peer
                             ?.GetField("s_inputEvents", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as Dictionary<int, IntPtr>;
                         if (events == null) { Reply("ERR dropinputevent no SharedMemoryIO.s_inputEvents"); break; }
                         int i = int.Parse(a[1], CultureInfo.InvariantCulture);
+                        // The new event exists before the SDK's handle is
+                        // closed, so it cannot take that handle's value, and
+                        // a signal on it can only come from a controller
+                        // that now holds it.
+                        IntPtr fresh = CreateEventW(IntPtr.Zero, false, false, null);
                         // The entry is zeroed so the SDK's own cleanup does
                         // not close the handle a second time.
                         bool closed = events.TryGetValue(i, out IntPtr ev) && ev != IntPtr.Zero && CloseHandle(ev);
                         if (closed) events[i] = IntPtr.Zero;
                         var copy = typeof(HMController).GetField("_inputEvent", BindingFlags.NonPublic | BindingFlags.Instance);
-                        int swapped = 0;
-                        if (closed && copy != null)
+                        int swapped = 0, verified = 0;
+                        if (closed && copy != null && fresh != IntPtr.Zero)
                         {
-                            if (s_dropped == IntPtr.Zero) s_dropped = CreateEventW(IntPtr.Zero, false, false, null);
+                            s_dropped = fresh;
                             lock (s_live)
                                 foreach (var c in s_live)
                                     if (Get(c, "TransportIndex") == a[1] || Get(c, "Index") == a[1])
                                     {
-                                        copy.SetValue(c, s_dropped);
+                                        copy.SetValue(c, fresh);
                                         swapped++;
+                                        if (copy.GetValue(c) is IntPtr now && now == fresh) verified++;
                                     }
                         }
-                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)} swapped={swapped}");
+                        else if (fresh != IntPtr.Zero) CloseHandle(fresh);
+                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)} swapped={swapped} verified={verified} distinct={(fresh != IntPtr.Zero && fresh != ev ? 1 : 0)}");
                         break;
                     }
                     case "droppedsignal":
