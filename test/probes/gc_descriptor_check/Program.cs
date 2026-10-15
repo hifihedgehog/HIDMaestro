@@ -259,6 +259,19 @@ internal static class Program
         ("an output report of no bytes",
             j => { Out(j).Remove("ports"); Out(j)["size"] = 0; },
             "extendedOutputReport.size 0 must be 1 or more"),
+        // Connections that cannot be told apart. Each of these created at
+        // a7e5015, and the first Connect or submit threw
+        // IndexOutOfRangeException or showed a port as empty.
+        ("a status block with only the empty connection",
+            j => Ports(j)["status"]!["connections"] = Arr("""{"name":"empty","value":"0x00"}"""),
+            "extendedReport.ports.status declares 1 connection. The first is the empty port, and a port needs a second to hold a controller"),
+        ("a connection whose value repeats another's",
+            j => Ports(j)["status"]!["connections"]![3]!["value"] = "0x10",
+            "extendedReport.ports.status.connections[3].value 0x10 repeats connections[1]'s. Each connection needs its own status bits"),
+        ("a connection whose value is the empty port's",
+            j => Ports(j)["status"]!["connections"]![1]!["value"] = "0x00",
+            "extendedReport.ports.status.connections[1].value 0x00 is the empty port's, connections[0]'s, so a port holding it would read as empty"),
+
         ("a port count that wraps an int",
             j =>
             {

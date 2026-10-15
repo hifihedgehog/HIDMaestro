@@ -66,6 +66,9 @@ internal sealed class PortLayout
                 throw new InvalidOperationException($"{where}.ports.status.byte {StatusByte} is outside the {Stride}-byte block.");
             if (spec.Status.Connections == null || spec.Status.Connections.Count == 0)
                 throw new InvalidOperationException($"{where}.ports.status declares no connections. The first is the empty port.");
+            if (spec.Status.Connections.Count == 1)
+                throw new InvalidOperationException(
+                    $"{where}.ports.status declares 1 connection. The first is the empty port, and a port needs a second to hold a controller.");
             _connectionNames = new string[spec.Status.Connections.Count];
             _connectionValues = new byte[spec.Status.Connections.Count];
             for (int i = 0; i < _connectionNames.Length; i++)
@@ -92,6 +95,21 @@ internal sealed class PortLayout
             foreach (byte v in _connectionValues)
                 if ((v & _flagMask) != 0)
                     throw new InvalidOperationException($"{where}.ports.status: a connection shares bits with a flag.");
+            // A status byte tells its connection by value alone, the flags
+            // aside, and no connection carries a flag's bits. So each value
+            // differs from every other, the empty port's included, or a
+            // port's connection could not be read back from its report.
+            for (int i = 1; i < _connectionValues.Length; i++)
+            {
+                for (int k = 0; k < i; k++)
+                {
+                    if (_connectionValues[i] != _connectionValues[k]) continue;
+                    string at = $"{where}.ports.status.connections[{i}].value 0x{_connectionValues[i]:X2}";
+                    throw new InvalidOperationException(k == 0
+                        ? $"{at} is the empty port's, connections[0]'s, so a port holding it would read as empty."
+                        : $"{at} repeats connections[{k}]'s. Each connection needs its own status bits.");
+                }
+            }
         }
         else
         {

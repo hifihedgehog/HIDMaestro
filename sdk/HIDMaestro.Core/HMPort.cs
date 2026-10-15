@@ -201,9 +201,11 @@ public sealed class HMPortSet : IReadOnlyList<HMPort>
     /// <summary>Caller holds the submit lock.</summary>
     private void SetConnectionLocked(int port, int connection)
     {
-        _connection[port] = connection;
+        // The status byte first: the port records a connection only once
+        // the report shows it.
         int block = _in!.BlockAt(port);
         _report[block + _in.StatusByte] = _in.Status(connection, _flags);
+        _connection[port] = connection;
         // An empty port's data bytes are zero.
         if (connection == 0) ClearData(block);
     }
