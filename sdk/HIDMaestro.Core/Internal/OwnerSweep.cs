@@ -124,22 +124,34 @@ internal static class OwnerSweep
     }
 
     /// <summary>The exit handler's bound on its waits for work it does not
-    /// control: the join of the phantom cleanup and the wait for a create in
-    /// flight, both within this one budget. What follows is waited out, as
-    /// Dispose waits it out. Each RemoveDevice of this process's devices ends
-    /// within its own bound (up to 120 s an id with its fallbacks), and so do
-    /// the orphan HID children's waits. The wait for a WinUSB bind in
-    /// progress ends when the bind ends, since its DiInstallDevice takes no
-    /// timeout. The ledger release's WinUSB restores wait for the WinUSB
-    /// devnode lock and end when their restores end. A bound on the removal
-    /// would leave devices present after the program is gone, since one
-    /// xinputhid controller takes seconds to remove (HMContext.Dispose).
-    /// The phantom cleanup's own waiting budget is half of this one
-    /// (<see cref="UninstallWaitBudgetMs"/>), and once the handler starts
-    /// the cleanup begins no further uninstall, so the join outlasts the
-    /// cleanup unless one uninstall call alone runs past the rest of the
-    /// budget.</summary>
-    private const int ExitWaitMs = 10_000;
+    /// control: the join of the phantom cleanup, the wait for a create in
+    /// flight and every wait of the removal for the PnP lock another program
+    /// holds, all within this one budget. A take of the lock that does not
+    /// get it in what is left ends the removal and keeps the record, as a
+    /// kill does. Only the time spent waiting for another program's hold of
+    /// the lock is charged, never the removal's own work under it nor a wait
+    /// behind another removal of this process. Once the process is exiting,
+    /// the same 10 s, one budget for the whole process, bounds the program's
+    /// own takes of the lock on threads with no bound of their own
+    /// (DeviceManager.HoldPnpLock). What follows under the lock is waited
+    /// out, as Dispose waits it out. Each RemoveDevice of this process's
+    /// devices ends within its own bound (up to 120 s an id with its
+    /// fallbacks), and so do the orphan HID children's waits. The wait for a
+    /// WinUSB bind in progress ends when the bind ends, since its
+    /// DiInstallDevice takes no timeout. The ledger
+    /// release's WinUSB restores wait for the WinUSB devnode lock and end
+    /// when their restores end. The removal's own work has no bound, since
+    /// one xinputhid controller takes seconds to remove (HMContext.Dispose)
+    /// and a bound there would leave devices present after the program is
+    /// gone. A removal queued behind another thread of this process whose
+    /// one hold of the lock lasts longer than this scope's whole bound is
+    /// refused as if that hold were stuck, and keeps the record
+    /// (DeviceManager.TakePnpLock). The phantom cleanup's own
+    /// waiting budget is half of this one (<see cref="UninstallWaitBudgetMs"/>),
+    /// and once the handler starts the cleanup begins no further uninstall,
+    /// so the join outlasts the cleanup unless one uninstall call alone runs
+    /// past the rest of the budget.</summary>
+    internal const int ExitWaitMs = 10_000;
 
     /// <summary>Set when the exit handler starts: the phantom cleanup then
     /// begins no further uninstall.</summary>
@@ -159,7 +171,7 @@ internal static class OwnerSweep
     /// the dead record. A device the removal does not confirm gone keeps the
     /// record the same way.
     ///
-    /// <para>Three exits therefore leave the process's devices present until
+    /// <para>Four exits therefore leave the process's devices present until
     /// a program built on this release next sweeps. In the first, a create
     /// still holds the gate's read side at the bound, on another thread,
     /// waiting in ControllerLease for another program's sweep (up to 120 s)
@@ -168,7 +180,10 @@ internal static class OwnerSweep
     /// inside a create calls Environment.Exit, and the handler on the
     /// finalizer thread waits for that thread's read side until the bound.
     /// Under NativeAOT that exit runs the handler on the creating thread,
-    /// which sees its own read side and gives up at once.</para></summary>
+    /// which sees its own read side and gives up at once. In the fourth,
+    /// another program holds the PnP lock, which every removal takes, past
+    /// what is left of the bound (DeviceManager.BoundPnpLockWaits), and the
+    /// removal stops at the group it was on.</para></summary>
     private static void RemoveOwnDevicesAtExit()
     {
         var clock = Stopwatch.StartNew();
@@ -208,7 +223,10 @@ internal static class OwnerSweep
             // DeleteOwnRecord, so a create after this handler, on another
             // thread or in a handler that runs after it, writes the record's
             // header again.
-            if (RemoveOwnDevicesAtExitGated()) MachineClaims.DeleteOwnRecord();
+            bool done;
+            using (DeviceManager.BoundPnpLockWaits(Remaining()))
+                done = RemoveOwnDevicesAtExitGated();
+            if (done) MachineClaims.DeleteOwnRecord();
         }
         finally { CreateGate.ExitWriteLock(); }
     }
@@ -470,7 +488,11 @@ internal static class OwnerSweep
 
     /// <summary>Each group is one controller's own devnodes and index,
     /// removed one group after another, and a group that throws is logged
-    /// and does not stop the others.</summary>
+    /// and does not stop the others. A group the PnP lock's bound refuses
+    /// (RemoveGroup) does not stop them either: the next takes the lock
+    /// again. During the exit a spent budget refuses it at once unless the
+    /// lock is free, and outside it each group waits up to ten
+    /// minutes.</summary>
     private static void RemoveGroups(List<OwnerCensus.DeviceGroup> groups, Action<OwnerCensus.DeviceGroup> remove)
     {
         foreach (var g in groups)
@@ -495,6 +517,14 @@ internal static class OwnerSweep
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
                 DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true);
             }
+            catch (DeviceManager.PnpLockBusyException)
+            {
+                // A take's bound on its wait for the lock ran out: the exit's,
+                // or ten minutes outside the exit. The group, and the record
+                // that names it, stay for the next sweep.
+                DeviceOrchestrator.LogDiag($"    the PnP lock was held past this take's bound, so {id} stays for the next sweep");
+                return false;
+            }
             catch (Exception ex) { DeviceOrchestrator.LogDiag($"    reclaim RemoveDevice({id}) threw {ex.GetType().Name}: {ex.Message}"); }
         }
         return AllGone(removed);
@@ -510,7 +540,13 @@ internal static class OwnerSweep
     private static bool RemoveOrphanChildren()
     {
         var removed = new List<string>();
-        try { DeviceManager.RemoveOrphanHidChildren(removed); } catch { }
+        try { DeviceManager.RemoveOrphanHidChildren(removed); }
+        catch (DeviceManager.PnpLockBusyException)
+        {
+            DeviceOrchestrator.LogDiag("    the PnP lock was held past this take's bound, so the orphaned HID children stay for the next sweep");
+            return false;
+        }
+        catch { }
         return OrphansGone(removed);
     }
 
@@ -709,18 +745,20 @@ internal static class OwnerSweep
 
         public Report Summary(int removed, long totalMs) => new(removed, totalMs, Ids, WaitedMs, Unsettled);
 
-        /// <summary>The PnP lock for one uninstall, waited for out of the
-        /// run's budget, which every uninstall of the SDK holds. Null when
-        /// another program held it past what is left: the phantom stays
-        /// for the next run.</summary>
+        /// <summary>The PnP lock for one uninstall, which every uninstall of
+        /// the SDK holds. Waiting for another program's hold comes out of
+        /// the run's budget, and a wait behind this process's own hold does
+        /// not. Null when another program held it past what is left, or,
+        /// during the exit, when one hold of this process's own lasted
+        /// longer than what was left when it asked: the phantom stays for
+        /// the next run.</summary>
         public DeviceManager.PnpLockHold? Lock()
         {
-            long start = Stopwatch.GetTimestamp();
             int left = (int)Math.Max(0, _budget - WaitedMs);
-            var hold = DeviceManager.TryHoldPnpLock(left);
-            _waitedTicks += Stopwatch.GetTimestamp() - start;
+            var hold = DeviceManager.TryHoldPnpLock(left, out long waited);
+            _waitedTicks += waited;
             if (hold == null)
-                DeviceOrchestrator.LogDiag($"    another program held the PnP lock past the cleanup's {_budget} ms of waiting; a phantom waits for the next run");
+                DeviceOrchestrator.LogDiag($"    the PnP lock did not come within the {left} ms left of the cleanup's waiting: another program held it that long, or, during the exit, one hold of this process's own outlasted it. A phantom waits for the next run");
             return hold;
         }
 

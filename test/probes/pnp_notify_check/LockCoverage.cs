@@ -231,7 +231,7 @@ internal static class LockCoverage
     /// <summary>The number of registry writes the check lists.</summary>
     internal static int RegistryWriteCount => RegistryWrites.Length;
 
-    const string LockMethod = "internal static Mutex AcquirePnpLock()";
+    const string LockMethod = "internal static Mutex? AcquirePnpLock(int timeoutMs)";
 
     // Two slashes, built so this file's own text carries no comment marker
     // inside a string.

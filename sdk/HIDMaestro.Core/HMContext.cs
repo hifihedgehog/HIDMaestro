@@ -221,6 +221,13 @@ public sealed class HMContext : IDisposable
     /// exits, and a program that is killed has them removed by the next
     /// sweep of any program on the machine.</para>
     ///
+    /// <para>Each device it removes, and each interface registration it
+    /// deletes for a device that is gone, waits for the machine-wide lock
+    /// that programs built on this release hold while they register or
+    /// remove a device, for up to ten minutes, or once the process is
+    /// exiting within the exit's 10 seconds. With nothing to remove it takes
+    /// no lock.</para>
+    ///
     /// <para>The records Windows keeps of removed devices, shown only with
     /// hidden devices, go with a cleanup that runs once per process on a
     /// background thread: the first of <see cref="InstallDriver"/>, the
@@ -518,6 +525,7 @@ public sealed class HMContext : IDisposable
     {
         var lease = Internal.ControllerLease.Acquire(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
+        bool keepLease = false;
         try
         {
             // Issue #39: composite USB personas run on the USB/IP backend,
@@ -530,6 +538,7 @@ public sealed class HMContext : IDisposable
                 return CreateUsbipController(slot, lease, profile);
 
             string? instanceId = null;
+            long refused = Internal.DeviceManager.LockTakesRefusedHere;
             try
             {
                 instanceId = Internal.DeviceOrchestrator.SetupController(
@@ -554,12 +563,16 @@ public sealed class HMContext : IDisposable
                 // The devices go before the lease below gives their index
                 // and identity back to the machine.
                 try { Internal.DeviceOrchestrator.TeardownController(lease.TransportIndex, instanceId); } catch { }
+                // A create cut short by the exit's bound on the PnP lock keeps
+                // its lease, as a dispose does, so the record names what it
+                // made for the next sweep.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused) keepLease = true;
                 throw;
             }
         }
         catch
         {
-            lease.Dispose();
+            if (!keepLease) lease.Dispose();
             throw;
         }
     }
@@ -703,6 +716,7 @@ public sealed class HMContext : IDisposable
     internal void OnControllerDisposing(HMController controller)
     {
         lock (_lock) _controllers.Remove(controller.Slot);
+        bool keepLease = false;
 
         try
         {
@@ -723,14 +737,27 @@ public sealed class HMContext : IDisposable
                 return;
             }
 
-            Internal.DeviceOrchestrator.TeardownController(
-                controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
+            long refused = Internal.DeviceManager.LockTakesRefusedHere;
+            try
+            {
+                Internal.DeviceOrchestrator.TeardownController(
+                    controller.Index, controller.InstanceId, skipOrphanSweep: _batchDisposing);
+            }
+            finally
+            {
+                // A teardown during the process's exit that another program's
+                // hold of the PnP lock cut short left devices present. The
+                // lease, and so the record's entry for them, stays until the
+                // process ends, and the next sweep removes them through it.
+                if (Internal.DeviceManager.LockTakesRefusedHere != refused)
+                    keepLease = true;
+            }
         }
         finally
         {
             // The index and identity go back to the machine only once the
             // devices they name are gone.
-            controller.Lease?.Dispose();
+            if (!keepLease) controller.Lease?.Dispose();
         }
     }
 
@@ -785,6 +812,26 @@ public sealed class HMContext : IDisposable
     /// programs, and the wall clock is about the sum of the controllers'
     /// removals rather than the longest one. Another program's create or
     /// removal waits that long too.</para>
+    ///
+    /// <para>Called while the process exits, from the program's own
+    /// ProcessExit handler, the removals wait for another program's hold of
+    /// that lock within one 10 s budget the process shares, as the SDK's own
+    /// exit does. This program's removals queue for the lock one at a time
+    /// without counting against it, unless one of them holds the lock longer
+    /// than the whole 10 s, which refuses the removal queued behind it as if
+    /// that hold were stuck: an xinputhid controller's removal can take that
+    /// long. Threads that wait together spend the budget once. A controller
+    /// whose removal the budget cuts short keeps its
+    /// devices, its identity and its entry in the program's record. The
+    /// runtime runs ProcessExit handlers one after another in the order they
+    /// were added, and the SDK adds its own at the program's first create,
+    /// InstallDriver or cleanup. When the program added its handler before
+    /// that, the SDK's handler runs next and removes such a controller,
+    /// waiting for the lock within its own 10 s. When the program added its
+    /// handler later, when another program holds the lock past those 10 s
+    /// too, or when the SDK was loaded in a load context that unloads, the
+    /// devices stay until the process's claims close and a program built on
+    /// this release next sweeps.</para>
     ///
     /// <para>Called from a controller's event handler, it disposes that
     /// controller on the handler's own thread, so the controller's Dispose

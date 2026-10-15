@@ -1874,6 +1874,11 @@ internal static partial class DeviceOrchestrator
             // kernel doesn't block forever.
             var parentSw = Stopwatch.StartNew();
             bool parentRemoved = false;
+            // This catch and the teardown's others below log every failure and
+            // go on, a PnpLockBusyException included. During the exit the
+            // refusal is counted (DeviceManager.LockTakesRefusedHere) and the
+            // lease stays. Outside it, each later RemoveDevice here waits for
+            // the lock again, up to ten minutes for each child and candidate.
             try { parentRemoved = DeviceManager.RemoveDevice(instanceId!, timeoutMs: 120_000, forceFallbacks: true); }
             catch (Exception ex) { LogDiag($"    parent RemoveDevice EXCEPTION: {ex.Message}"); }
             LogDiag($"    parent RemoveDevice({instanceId}) returned {parentRemoved} after {parentSw.ElapsedMilliseconds}ms");
@@ -2265,11 +2270,17 @@ internal static partial class DeviceOrchestrator
                         if (DeviceManager.IsHidMaestroOwned(instId))
                             DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (ex is not DeviceManager.PnpLockBusyException)
                     {
                         // A staging failure arrives as InvalidOperationException,
                         // UnauthorizedAccessException or IOException. Any of them
                         // leaves this device and the walk goes on to the next.
+                        // The PnP lock held past its bound stops this walk, as
+                        // every device's removal would wait for it again. It
+                        // stops this walk only: the SWD walk, the HID orphans
+                        // and each interface class catch it on their own and
+                        // take the lock again, so with a frozen holder the
+                        // cleanup still waits once for each of them.
                         LogDiag($"    sweep RemoveDevice({instId}) refused: {ex.GetType().Name}: {ex.Message}");
                     }
                 }

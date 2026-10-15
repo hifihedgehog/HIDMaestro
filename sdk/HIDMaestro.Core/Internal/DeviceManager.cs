@@ -375,10 +375,16 @@ public static partial class DeviceManager
     /// <inheritdoc cref="LocateHook"/>
     internal static Func<uint, uint>? InstallQueueHook;
     /// <summary>Stands in for the machine-wide PnP lock
-    /// (<see cref="AcquirePnpLock"/>): taking it returns what releases it.
-    /// Set by the probes that run the SDK's PnP paths with no device, null
-    /// outside them.</summary>
+    /// (<see cref="AcquirePnpLock"/>) behind the in-process gate: taking it
+    /// returns what releases it. Set by the probes that run the SDK's PnP
+    /// paths with no device, null outside them.</summary>
     internal static Func<IDisposable>? PnpLockHook;
+    /// <summary>Stands in for a bounded wait for the machine-wide PnP lock
+    /// behind the in-process gate, ahead of <see cref="PnpLockHook"/>: the
+    /// timeout in ms to what releases it, or null when it was not free in
+    /// time. pnp_notify_check's offline part sets it with
+    /// <see cref="PnpLockHook"/>. Null outside it.</summary>
+    internal static Func<int, IDisposable?>? PnpLockTryHook;
 
     static uint Locate(string instanceId, uint flags)
     {
@@ -864,8 +870,11 @@ public static partial class DeviceManager
     /// nests the other.</summary>
     const int PnpLockWaitMs = 600_000;
 
-    /// <summary>Take the machine-wide PnP lock, held by the calling thread
-    /// until it calls <c>ReleaseMutex</c>.
+    /// <summary>Wait up to <paramref name="timeoutMs"/> for the machine-wide
+    /// PnP lock, held by the calling thread until it calls
+    /// <c>ReleaseMutex</c>. Null when the wait ran out. Taken only through
+    /// <see cref="HoldPnpLock"/> and <see cref="TryHoldPnpLock"/>, behind
+    /// this process's in-process gate.
     ///
     /// <para>Held by: each devnode registration the SDK makes, from its
     /// gate's last checks (<see cref="EnterRegistrationGate"/>) through
@@ -959,6 +968,14 @@ public static partial class DeviceManager
     /// lock is taken: the gate and the removal test look at the devnode
     /// again whatever the last holder left.</para>
     ///
+    /// <para>Threads of this process take it through an in-process gate
+    /// first (<see cref="HoldPnpLock"/>), one at a time, so one thread at a
+    /// time waits for another program's hold, and a bound on the waits
+    /// counts only that wait, never this process's own holds. A wait behind
+    /// this process's own hold has no bound, except once the process is
+    /// exiting, when a wait behind one hold is bounded by the full size of
+    /// the take's bound (<see cref="TakePnpLock"/>).</para>
+    ///
     /// <para>Lock order: the deploy lock, then this one, then the staging
     /// lock. A full deploy takes this lock for its pnputil install with the
     /// deploy lock held. Under this lock the SDK stages hmswd.exe
@@ -971,60 +988,8 @@ public static partial class DeviceManager
     /// teardown gate come before it.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
-    internal static Mutex AcquirePnpLock()
+    internal static Mutex? AcquirePnpLock(int timeoutMs)
     {
-        var m = new Mutex(false, AdminNamespace.Name(PnpMutexObject));
-        try
-        {
-            if (!m.WaitOne(TimeoutScale.Apply(PnpLockWaitMs)))
-                throw new InvalidOperationException(
-                    "Another program held HIDMaestro's machine-wide PnP lock for ten minutes.");
-        }
-        catch (AbandonedMutexException) { }
-        catch
-        {
-            m.Dispose();
-            throw;
-        }
-        return m;
-    }
-
-    /// <summary><see cref="AcquirePnpLock"/> as a scope: disposing it
-    /// releases the lock, once, so a caller can let it go early and leave
-    /// the end of the scope to a no-op.</summary>
-    internal sealed class PnpLockHold : IDisposable
-    {
-        private Mutex? _mutex;
-        private IDisposable? _hooked;
-        internal PnpLockHold(Mutex? mutex, IDisposable? hooked)
-        {
-            _mutex = mutex;
-            _hooked = hooked;
-        }
-
-        public void Dispose()
-        {
-            if (_mutex != null)
-            {
-                _mutex.ReleaseMutex();
-                _mutex.Dispose();
-                _mutex = null;
-            }
-            _hooked?.Dispose();
-            _hooked = null;
-        }
-    }
-
-    /// <inheritdoc cref="PnpLockHold"/>
-    internal static PnpLockHold HoldPnpLock() =>
-        PnpLockHook is { } hook ? new(null, hook()) : new(AcquirePnpLock(), null);
-
-    /// <summary><see cref="HoldPnpLock"/> that gives up after
-    /// <paramref name="timeoutMs"/> (already scaled) and returns null. An
-    /// abandoned lock is taken, as AcquirePnpLock takes it.</summary>
-    internal static PnpLockHold? TryHoldPnpLock(int timeoutMs)
-    {
-        if (PnpLockHook is { } hook) return new(null, hook());
         var m = new Mutex(false, AdminNamespace.Name(PnpMutexObject));
         try
         {
@@ -1040,7 +1005,339 @@ public static partial class DeviceManager
             m.Dispose();
             throw;
         }
-        return new(m, null);
+        return m;
+    }
+
+    /// <summary>A hold of the PnP lock: the in-process gate and the
+    /// machine-wide lock. Disposing it releases both, once, so a caller can
+    /// let it go early and leave the end of the scope to a no-op. Disposed
+    /// on the thread that took it, as the mutex requires: on another thread
+    /// the gate's Monitor.Exit throws and the gate stays held for good. No
+    /// SDK path does that.</summary>
+    internal sealed class PnpLockHold : IDisposable
+    {
+        private IDisposable? _machine;
+        internal PnpLockHold(IDisposable machine) => _machine = machine;
+
+        public void Dispose()
+        {
+            if (_machine is not { } machine) return;
+            _machine = null;
+            try { machine.Dispose(); }
+            finally { Monitor.Exit(s_pnpGate); }
+        }
+    }
+
+    /// <summary>The machine-wide lock's mutex as a scope.</summary>
+    private sealed class MutexHold : IDisposable
+    {
+        private readonly Mutex _mutex;
+        internal MutexHold(Mutex mutex) => _mutex = mutex;
+
+        public void Dispose()
+        {
+            _mutex.ReleaseMutex();
+            _mutex.Dispose();
+        }
+    }
+
+    /// <summary>The in-process gate in front of the machine-wide lock.
+    /// Threads of this process queue on it, and only its holder waits for
+    /// the machine-wide lock. Re-entrant, as the lock is. A wait here behind
+    /// this process's own hold counts against no bound: the holder's work
+    /// under the lock ends within its own removal or registration
+    /// bounds.</summary>
+    private static readonly object s_pnpGate = new();
+
+    /// <summary>How often a thread queued on the gate looks at its bound.</summary>
+    private const int GateSliceMs = 10;
+
+    /// <summary>How many times a thread has entered the gate, so a thread
+    /// queued behind it can tell one hold from the next.</summary>
+    private static long s_gateHolds;
+
+    private static readonly object s_otherWaitLock = new();
+    private static long s_otherWaitTicks;
+    private static long s_otherWaitSince;
+
+    /// <summary>The process's clock of waits for another program: the ticks
+    /// the gate's holder has spent waiting for the machine-wide lock, the
+    /// wait in progress included. One thread waits for it at a time, so the
+    /// clock runs no faster than the wall clock however many threads
+    /// queue.</summary>
+    internal static long OtherProgramWaitTicks() => OtherProgramWaitTicks(out _);
+
+    /// <inheritdoc cref="OtherProgramWaitTicks()"/>
+    /// <param name="waitingTicks">How long the wait in progress has lasted,
+    /// 0 when none is.</param>
+    private static long OtherProgramWaitTicks(out long waitingTicks)
+    {
+        lock (s_otherWaitLock)
+        {
+            waitingTicks = s_otherWaitSince != 0 ? System.Diagnostics.Stopwatch.GetTimestamp() - s_otherWaitSince : 0;
+            return s_otherWaitTicks + waitingTicks;
+        }
+    }
+
+    /// <summary>The machine-wide lock, or a probe's stand-in, waited for up
+    /// to <paramref name="timeoutMs"/> on the process's clock of waits for
+    /// another program. Called by the gate's holder only.</summary>
+    private static IDisposable? WaitMachineLock(int timeoutMs)
+    {
+        lock (s_otherWaitLock) s_otherWaitSince = Math.Max(1, System.Diagnostics.Stopwatch.GetTimestamp());
+        try
+        {
+            if (PnpLockTryHook is { } tryHook) return tryHook(timeoutMs);
+            if (PnpLockHook is { } hook) return hook();
+            return AcquirePnpLock(timeoutMs) is { } m ? new MutexHold(m) : null;
+        }
+        finally
+        {
+            lock (s_otherWaitLock)
+            {
+                s_otherWaitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s_otherWaitSince;
+                s_otherWaitSince = 0;
+            }
+        }
+    }
+
+    /// <summary>Take the gate, then the machine-wide lock.
+    /// <paramref name="leftTicks"/> gives what is left of the caller's bound
+    /// once this take has seen so many ticks of the process waiting for
+    /// another program, and <paramref name="boundTicks"/> is that bound's
+    /// full size. The take waits behind this process's own holds as long as
+    /// they last outside the exit, and gives up once waiting for another
+    /// program has used up what is left: at the gate, while the holder in
+    /// front waits for one, or at the machine-wide lock. A take whose bound
+    /// is spent still gets the lock when it is free at its turn, during the
+    /// exit too as long as no hold in front of it outlasts the full bound.
+    /// <paramref name="seenTicks"/> is that waiting. Null when it gave
+    /// up.
+    ///
+    /// <para>Once the process is exiting (<see cref="ProcessExitSignal"/>),
+    /// a wait behind one hold of this process's own is bounded too, by the
+    /// bound's full size, and not charged to it: a removal or a registration
+    /// holds the lock through synchronous SetupAPI and CfgMgr calls
+    /// (DIF_REMOVE, SetupDiRemoveDevice, CM_Uninstall_DevNode,
+    /// DIF_REGISTERDEVICE, CM_Disable_DevNode) that take no timeout, so no
+    /// bound of the removal itself caps the hold, and one stuck call would
+    /// otherwise keep the exit waiting for as long as it lasts. The wait is
+    /// measured from the hold in front, less the part that holder spends
+    /// waiting for another program, which the bound counts already, so a
+    /// queue of this process's removals, each shorter than the full bound,
+    /// is waited out whole, whatever is left of the bound. A single hold of
+    /// this process's own that outlasts the full bound refuses the take
+    /// queued behind it, whether stuck or a removal that slow: with the
+    /// exit's 10 s, an xinputhid parent's removal, whose filter unload can
+    /// take that long (DeviceOrchestrator.TeardownController). A take this
+    /// bound refuses counts as refused (<see cref="HoldPnpLock"/>), so the
+    /// record keeps its controller for the next sweep. Outside the exit, a
+    /// wait behind this process's own hold has no bound.</para></summary>
+    private static PnpLockHold? TakePnpLock(Func<long, long> leftTicks, long boundTicks, out long seenTicks)
+    {
+        long freq = System.Diagnostics.Stopwatch.Frequency;
+        long from = OtherProgramWaitTicks();
+        long holdSeen = Volatile.Read(ref s_gateHolds);
+        long behindSince = System.Diagnostics.Stopwatch.GetTimestamp(), seenAtBehind = 0;
+        bool gated = false;
+        try
+        {
+            while (!(gated = Monitor.TryEnter(s_pnpGate, GateSliceMs)))
+            {
+                // Only while the holder in front waits for another program:
+                // a wait that has lasted a millisecond is a hold, not a take
+                // of a free lock. Its own work is waited out. A holder that
+                // is descheduled for over a millisecond between starting its
+                // wait and WaitOne returning on a free lock reads as another
+                // program's hold here: a queued take whose bound is spent and
+                // that polls in that moment gives up although the lock comes
+                // free at once, and the clock counts that time as another
+                // program's. Small, and only near a spent bound.
+                long seen = OtherProgramWaitTicks(out long waiting) - from;
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                long hold = Volatile.Read(ref s_gateHolds);
+                if (hold != holdSeen)
+                {
+                    holdSeen = hold;
+                    behindSince = now;
+                    seenAtBehind = seen;
+                }
+                // The wait behind this hold, less the part the holder spent
+                // waiting for another program, which the clock counts.
+                long ownBehind = now - behindSince - (seen - seenAtBehind);
+                if ((waiting >= freq / 1000 && leftTicks(seen) <= 0)
+                    || (ProcessExitSignal.Raised && ownBehind >= boundTicks))
+                {
+                    seenTicks = seen;
+                    return null;
+                }
+            }
+            Interlocked.Increment(ref s_gateHolds);
+            long left = Math.Max(0, leftTicks(OtherProgramWaitTicks() - from));
+            // Rounded up, so the wait never ends a millisecond short of its bound.
+            var machine = WaitMachineLock((int)Math.Min(int.MaxValue, (left * 1000 + freq - 1) / freq));
+            seenTicks = OtherProgramWaitTicks() - from;
+            if (machine == null) return null;
+            gated = false;   // released with the hold
+            return new PnpLockHold(machine);
+        }
+        finally
+        {
+            if (gated) Monitor.Exit(s_pnpGate);
+        }
+    }
+
+    /// <summary>Take the PnP lock as a scope (<see cref="PnpLockHold"/>).
+    /// Waits for another program's hold within the bound of this thread's
+    /// scope (<see cref="BoundPnpLockWaits"/>), or once the process is
+    /// exiting within the exit's budget, and throws
+    /// <see cref="PnpLockBusyException"/> when it runs out. Otherwise waits
+    /// for another program for up to ten minutes, then throws the same.
+    /// Waits behind this process's own holds are never counted. Once the
+    /// process is exiting a wait behind one such hold is bounded by the
+    /// bound's full size (<see cref="TakePnpLock"/>), and outside the exit
+    /// it has no bound.</summary>
+    internal static PnpLockHold HoldPnpLock()
+    {
+        if ((t_lockBudget ?? ExitLockBudget()) is { } budget)
+        {
+            var hold = TakePnpLock(budget.LeftTicks, budget.Ticks, out long seen);
+            budget.Charge(seen);
+            if (hold != null) return hold;
+            t_lockTakesRefused++;
+            throw new PnpLockBusyException(
+                "HIDMaestro's machine-wide PnP lock was held past this exit's bound on its waits for it.");
+        }
+        // A take refused here is not counted (t_lockTakesRefused), so a
+        // dispose this ten-minute timeout cuts short gives its lease back,
+        // and its devices stay present without the record entry that named
+        // them.
+        long wait = (long)TimeoutScale.Apply(PnpLockWaitMs) * System.Diagnostics.Stopwatch.Frequency / 1000;
+        return TakePnpLock(seen => wait - seen, wait, out _)
+               ?? throw new PnpLockBusyException(
+                   "Another program held HIDMaestro's machine-wide PnP lock for ten minutes.");
+    }
+
+    /// <summary>A take of the PnP lock found another program holding it past
+    /// the take's bound: the thread's scope (<see cref="BoundPnpLockWaits"/>),
+    /// the process's exit, or ten minutes. An InvalidOperationException, as
+    /// the ten-minute timeout was before these bounds, so a sweep that
+    /// catches a device's failure and goes on can tell a lock that does not
+    /// come, which stops it, from that one device's failure.</summary>
+    internal sealed class PnpLockBusyException : InvalidOperationException
+    {
+        internal PnpLockBusyException(string message) : base(message) { }
+    }
+
+    /// <summary>A bound on the time spent waiting for another program's hold
+    /// of the PnP lock. Only those waits are charged, never the work done
+    /// while the lock is held nor a wait behind this process's own hold, so a
+    /// long removal of this process's own leaves the next take its share. A
+    /// thread's budget is charged with what each of its takes saw. The
+    /// exit's budget, which every thread shares, is charged by the process's
+    /// clock of such waits since it was made, so threads that wait together
+    /// spend it once.</summary>
+    internal sealed class LockWaitBudget
+    {
+        private readonly long _ticks;
+        private readonly long _sharedFrom;
+        private long _spentTicks;
+
+        /// <summary>The bound's full size.</summary>
+        internal long Ticks => _ticks;
+
+        internal LockWaitBudget(int budgetMs, bool shared = false)
+        {
+            _ticks = (long)Math.Max(0, budgetMs) * System.Diagnostics.Stopwatch.Frequency / 1000;
+            _sharedFrom = shared ? OtherProgramWaitTicks() : -1;
+        }
+
+        /// <summary>What is left once the take in progress has seen
+        /// <paramref name="seenTicks"/> of waiting for another program.</summary>
+        internal long LeftTicks(long seenTicks) => _sharedFrom >= 0
+            ? _ticks - (OtherProgramWaitTicks() - _sharedFrom)
+            : _ticks - Interlocked.Read(ref _spentTicks) - seenTicks;
+
+        /// <summary>Charge a thread's budget with what a finished take saw.
+        /// The shared budget follows the clock instead.</summary>
+        internal void Charge(long seenTicks)
+        {
+            if (_sharedFrom < 0) Interlocked.Add(ref _spentTicks, Math.Max(0, seenTicks));
+        }
+    }
+
+    /// <summary>The bound of this thread's takes, set by
+    /// <see cref="BoundPnpLockWaits"/>, or null.</summary>
+    [ThreadStatic] private static LockWaitBudget? t_lockBudget;
+
+    /// <summary>Takes of the PnP lock this thread made that the bound
+    /// refused. A dispose compares it before and after its teardown.</summary>
+    [ThreadStatic] private static long t_lockTakesRefused;
+
+    /// <inheritdoc cref="t_lockTakesRefused"/>
+    internal static long LockTakesRefusedHere => t_lockTakesRefused;
+
+    private static LockWaitBudget? s_exitLockBudget;
+
+    /// <summary>Once the process has begun to exit (<see cref="ProcessExitSignal"/>),
+    /// one budget of the exit handler's size (OwnerSweep.ExitWaitMs) for every
+    /// take on a thread with no bound of its own: a program that disposes or
+    /// cleans up from its own exit handler waits for another program's hold
+    /// as long as the SDK's own exit does, and no longer. Its removals queue
+    /// behind each other on the in-process gate uncounted, and the budget
+    /// follows the process's clock of waits for another program, so several
+    /// threads waiting at once spend it once. The signal also
+    /// holds once a load context other than the default that loaded the SDK
+    /// has begun to unload, and the budget then bounds that SDK's takes the
+    /// same way. Null before.</summary>
+    private static LockWaitBudget? ExitLockBudget()
+    {
+        if (!ProcessExitSignal.Raised) return null;
+        return Volatile.Read(ref s_exitLockBudget)
+               ?? Interlocked.CompareExchange(ref s_exitLockBudget,
+                      new LockWaitBudget(TimeoutScale.Apply(OwnerSweep.ExitWaitMs), shared: true), null)
+               ?? s_exitLockBudget!;
+    }
+
+    /// <summary>Bound the time this thread spends waiting for another
+    /// program's hold of the PnP lock in <see cref="HoldPnpLock"/> until the
+    /// scope ends, all its takes together, to <paramref name="budgetMs"/>
+    /// (already scaled). Only those waits count, not the work done under the
+    /// lock nor a wait behind this process's own hold. A take that does not
+    /// get the lock in what is left throws <see cref="PnpLockBusyException"/>.
+    /// The exit handler sets it, so another program's hold of the lock
+    /// cannot keep the process in its exit. Dispose the scope on the thread
+    /// that made it.</summary>
+    internal static IDisposable BoundPnpLockWaits(int budgetMs)
+    {
+        var previous = t_lockBudget;
+        t_lockBudget = new LockWaitBudget(budgetMs);
+        return new LockWaitBound(previous);
+    }
+
+    private sealed class LockWaitBound : IDisposable
+    {
+        private readonly LockWaitBudget? _previous;
+        private bool _done;
+        internal LockWaitBound(LockWaitBudget? previous) => _previous = previous;
+        public void Dispose()
+        {
+            if (_done) return;
+            _done = true;
+            t_lockBudget = _previous;
+        }
+    }
+
+    /// <summary><see cref="HoldPnpLock"/> that gives up once it has waited
+    /// <paramref name="timeoutMs"/> (already scaled) for another program's
+    /// hold, and returns null. Waits behind this process's own holds are not
+    /// counted, and once the process is exiting a wait behind one such hold
+    /// is bounded by <paramref name="timeoutMs"/> (<see cref="TakePnpLock"/>). <paramref name="waitedTicks"/> is the waiting it counted. An
+    /// abandoned lock is taken, as AcquirePnpLock takes it.</summary>
+    internal static PnpLockHold? TryHoldPnpLock(int timeoutMs, out long waitedTicks)
+    {
+        long bound = (long)Math.Max(0, timeoutMs) * System.Diagnostics.Stopwatch.Frequency / 1000;
+        return TakePnpLock(seen => bound - seen, bound, out waitedTicks);
     }
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
@@ -1505,10 +1802,13 @@ public static partial class DeviceManager
     /// (<see cref="SwdDeviceFactory.Remove"/>). Thrown under the PnP lock
     /// before any wait for the removal, with the device left in
     /// place.</exception>
+    /// <exception cref="PnpLockBusyException">Another program held the PnP
+    /// lock past this take's bound (<see cref="HoldPnpLock"/>). Nothing was
+    /// removed.</exception>
     public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false)
     {
-        if (CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS &&
-            CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS)
+        if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS &&
+            Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
             return true;
 
         using var pnp = HoldPnpLock();
@@ -2198,10 +2498,12 @@ public static partial class DeviceManager
                 }
             }
         }
-        catch
+        catch (Exception ex) when (ex is not PnpLockBusyException)
         {
             // Defensive: a single bad HID child node shouldn't abort the
-            // overall sweep. Caller still gets the removed count.
+            // overall sweep. Caller still gets the removed count. A lock
+            // take past its thread's bound goes to the caller, which keeps
+            // its record for the next sweep.
         }
 
         return removed;

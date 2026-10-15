@@ -1,4 +1,4 @@
-// The removal test's and the registration gate's decisions, fed recorded
+﻿// The removal test's and the registration gate's decisions, fed recorded
 // sequences. No device, no elevation and no PnP call: every locate, REMOVED
 // registration and install-queue wait the SDK makes here goes through
 // DeviceManager's hooks, which answer from a sequence on one clock.
@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 using HIDMaestro.Internal;
@@ -307,6 +308,10 @@ internal static class Offline
 
     static bool Within(long ms, long from) => ms >= from && ms < from + Slack;
 
+    // A semaphore's timed wait can end a timer tick before its time on the
+    // Stopwatch, so a bound's end is checked to within it.
+    const long TimerSlack = 20;
+
     const int WaitTimeoutHr = unchecked((int)0x80070102);
 
     /// <summary>SwdDeviceFactory's create attempts on one id, each answered
@@ -396,11 +401,694 @@ internal static class Offline
         }
     }
 
+    /// <summary>A removal on a thread whose PnP lock waits are bounded,
+    /// as the exit handler bounds them, while another thread holds the lock
+    /// for <paramref name="heldMs"/> (0: nobody holds it). The lock is a
+    /// stand-in that honors timeouts. Returns what the removal threw, how
+    /// long it took, and how many removal calls it made.</summary>
+    static (Exception? Thrown, long Ms, int Removals) BoundedRemoval(int boundMs, int heldMs, bool orphan)
+    {
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        bool childRecord = true;
+        DeviceManager.LocateHook = (id, flags) =>
+            id == OrphanChild && flags == CM_LOCATE_DEVNODE_PHANTOM && childRecord || id == Id ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        using var held = new ManualResetEventSlim(false);
+        var holder = new Thread(() =>
+        {
+            standIn.Wait();
+            held.Set();
+            Thread.Sleep(heldMs);
+            standIn.Release();
+        }) { IsBackground = true };
+        if (heldMs > 0)
+        {
+            holder.Start();
+            held.Wait();
+        }
+        int removals = 0;
+        Exception? thrown = null;
+        long ms = 0;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using (DeviceManager.BoundPnpLockWaits(boundMs))
+            {
+                if (orphan)
+                    DeviceManager.RemoveOrphanHidChild(OrphanChild, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        removals++;
+                        childRecord = false;
+                        return true;
+                    });
+                else
+                    DeviceManager.RemoveDevice(Id, timeoutMs: 1000);
+            }
+        }
+        catch (Exception ex) { thrown = ex; }
+        finally
+        {
+            ms = sw.ElapsedMilliseconds;
+            if (heldMs > 0) holder.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (thrown, ms, removals);
+    }
+
     sealed class Released : IDisposable
     {
         readonly Action _a;
         public Released(Action a) => _a = a;
         public void Dispose() => _a();
+    }
+
+    /// <summary>Two orphan removals on a thread whose PnP lock waits are
+    /// bounded to <paramref name="boundMs"/>: the first one's own work under
+    /// the lock takes <paramref name="workMs"/> with no other holder, then
+    /// another thread holds the lock for <paramref name="otherHoldMs"/> and
+    /// the second removal takes it. The case the round 4 review showed: a
+    /// bound that counted the work left the second take nothing.</summary>
+    static (Exception? Thrown, int Removals, long SecondMs) WorkThenWait(int boundMs, int workMs, int otherHoldMs)
+    {
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        const string C1 = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0001", C2 = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0002";
+        bool rec1 = true, rec2 = true;
+        DeviceManager.LocateHook = (id, flags) =>
+            flags == CM_LOCATE_DEVNODE_PHANTOM && (id == C1 && rec1 || id == C2 && rec2) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        int removals = 0;
+        Exception? thrown = null;
+        long second = -1;
+        Thread? other = null;
+        try
+        {
+            using (DeviceManager.BoundPnpLockWaits(boundMs))
+            {
+                DeviceManager.RemoveOrphanHidChild(C1, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                {
+                    removals++;
+                    Thread.Sleep(workMs);
+                    rec1 = false;
+                    return true;
+                });
+                using var holding = new ManualResetEventSlim(false);
+                other = new Thread(() =>
+                {
+                    standIn.Wait();
+                    holding.Set();
+                    Thread.Sleep(otherHoldMs);
+                    standIn.Release();
+                }) { IsBackground = true };
+                other.Start();
+                holding.Wait();
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    DeviceManager.RemoveOrphanHidChild(C2, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        removals++;
+                        rec2 = false;
+                        return true;
+                    });
+                }
+                finally { second = sw.ElapsedMilliseconds; }
+            }
+        }
+        catch (Exception ex) { thrown = ex; }
+        finally
+        {
+            other?.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (thrown, removals, second);
+    }
+
+    /// <summary>An orphan removal on a thread with no bound of its own,
+    /// with the process's exit signal set or not, while another thread holds
+    /// the lock for <paramref name="heldMs"/>: a program that disposes from
+    /// its own exit handler. The exit budget is set to
+    /// <paramref name="exitBudgetMs"/> in place of the exit's 10 s, and both
+    /// go back once the removal ends.</summary>
+    static (Exception? Thrown, long Ms, int Removals, long Refused) InExit(bool exiting, int exitBudgetMs, int heldMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        bool childRecord = true;
+        DeviceManager.LocateHook = (id, flags) =>
+            id == OrphanChild && flags == CM_LOCATE_DEVNODE_PHANTOM && childRecord ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        using var held = new ManualResetEventSlim(false);
+        var holder = new Thread(() =>
+        {
+            standIn.Wait();
+            held.Set();
+            Thread.Sleep(heldMs);
+            standIn.Release();
+        }) { IsBackground = true };
+        holder.Start();
+        held.Wait();
+        int removals = 0;
+        Exception? thrown = null;
+        long refused0 = DeviceManager.LockTakesRefusedHere, ms = 0;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            if (exiting)
+            {
+                budget.SetValue(null, new DeviceManager.LockWaitBudget(exitBudgetMs, shared: true));
+                raised.SetValue(null, true);
+            }
+            DeviceManager.RemoveOrphanHidChild(OrphanChild, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+            {
+                removals++;
+                childRecord = false;
+                return true;
+            });
+        }
+        catch (Exception ex) { thrown = ex; }
+        finally
+        {
+            ms = sw.ElapsedMilliseconds;
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            holder.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (thrown, ms, removals, DeviceManager.LockTakesRefusedHere - refused0);
+    }
+
+    /// <summary>Orphan removals of this process on <paramref name="threads"/>
+    /// threads at once, none with a bound of its own, the exit signal set and
+    /// the exit's budget at <paramref name="exitBudgetMs"/>: a program that
+    /// disposes several controllers in its own exit handler, each teardown on
+    /// a thread of its own. Each removal does <paramref name="workMs"/> of
+    /// its own work under the lock. Another program holds the lock first for
+    /// up to <paramref name="otherHoldMs"/>, let go once the removals end (0:
+    /// no other program). Returns the removals, the refusals and how long
+    /// each thread took.</summary>
+    static (int Removed, int Refused, long[] Ms) ConcurrentInExit(int threads, int exitBudgetMs, int workMs, int otherHoldMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        string[] kids = Enumerable.Range(0, threads).Select(i => $@"HID\PNP_NOTIFY_CHECK\1&7e57&0&{20 + i:D4}").ToArray();
+        var records = new HashSet<string>(kids);
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        using var held = new ManualResetEventSlim(false);
+        using var letGo = new ManualResetEventSlim(false);
+        Thread? other = null;
+        int removed = 0, refused = 0;
+        var ms = new long[threads];
+        try
+        {
+            if (otherHoldMs > 0)
+            {
+                other = new Thread(() =>
+                {
+                    standIn.Wait();
+                    held.Set();
+                    letGo.Wait(otherHoldMs);
+                    standIn.Release();
+                }) { IsBackground = true };
+                other.Start();
+                held.Wait();
+            }
+            budget.SetValue(null, new DeviceManager.LockWaitBudget(exitBudgetMs, shared: true));
+            raised.SetValue(null, true);
+            using var start = new Barrier(threads);
+            var workers = Enumerable.Range(0, threads).Select(i => new Thread(() =>
+            {
+                start.SignalAndWait();
+                var sw = Stopwatch.StartNew();
+                long refused0 = DeviceManager.LockTakesRefusedHere;
+                try
+                {
+                    DeviceManager.RemoveOrphanHidChild(kids[i], @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        Thread.Sleep(workMs);
+                        lock (records) records.Remove(kids[i]);
+                        Interlocked.Increment(ref removed);
+                        return true;
+                    });
+                }
+                catch (DeviceManager.PnpLockBusyException) { }
+                ms[i] = sw.ElapsedMilliseconds;
+                if (DeviceManager.LockTakesRefusedHere != refused0) Interlocked.Increment(ref refused);
+            }) { IsBackground = true }).ToList();
+            workers.ForEach(t => t.Start());
+            workers.ForEach(t => t.Join());
+        }
+        finally
+        {
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            letGo.Set();
+            other?.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (removed, refused, ms);
+    }
+
+    /// <summary>An orphan removal inside the exit handler's own bound of
+    /// <paramref name="boundMs"/>, while another thread of this process is
+    /// in front of it: with <paramref name="otherHoldMs"/> 0, that thread
+    /// holds the lock for <paramref name="ownWorkMs"/> of its own removal.
+    /// Otherwise another program holds the lock for up to
+    /// <paramref name="otherHoldMs"/>, and the thread in front, with no bound
+    /// of its own, waits for it before its removal. Returns what the bounded
+    /// removal threw, how long it took, and whether each removal
+    /// happened.</summary>
+    static (Exception? Thrown, long Ms, bool Bounded, bool InFront) BoundBehindOwnThread(int boundMs, int ownWorkMs, int otherHoldMs)
+    {
+        using var standIn = new SemaphoreSlim(1, 1);
+        using var inMachineWait = new ManualResetEventSlim(false);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms =>
+        {
+            inMachineWait.Set();
+            return standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        };
+        const string A = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0031", B = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0032";
+        var records = new HashSet<string> { A, B };
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        using var held = new ManualResetEventSlim(false);
+        using var letGo = new ManualResetEventSlim(false);
+        using var working = new ManualResetEventSlim(false);
+        bool bounded = false, inFront = false;
+        Exception? thrown = null;
+        long ms = 0;
+        Thread? other = null;
+        var front = new Thread(() => DeviceManager.RemoveOrphanHidChild(A, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+        {
+            working.Set();
+            Thread.Sleep(ownWorkMs);
+            lock (records) records.Remove(A);
+            inFront = true;
+            return true;
+        })) { IsBackground = true };
+        try
+        {
+            if (otherHoldMs > 0)
+            {
+                other = new Thread(() =>
+                {
+                    standIn.Wait();
+                    held.Set();
+                    letGo.Wait(otherHoldMs);
+                    standIn.Release();
+                }) { IsBackground = true };
+                other.Start();
+                held.Wait();
+                front.Start();
+                inMachineWait.Wait();
+            }
+            else
+            {
+                front.Start();
+                working.Wait();
+            }
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                using (DeviceManager.BoundPnpLockWaits(boundMs))
+                    DeviceManager.RemoveOrphanHidChild(B, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        lock (records) records.Remove(B);
+                        bounded = true;
+                        return true;
+                    });
+            }
+            catch (Exception ex) { thrown = ex; }
+            ms = sw.ElapsedMilliseconds;
+        }
+        finally
+        {
+            letGo.Set();
+            other?.Join();
+            front.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (thrown, ms, bounded, inFront);
+    }
+
+    /// <summary>The exit's shared budget spent once by threads that wait
+    /// together: with the exit signal set and a budget of
+    /// <paramref name="exitBudgetMs"/>, <paramref name="threads"/> removals
+    /// of this process at once behind another program's hold of
+    /// <paramref name="firstHoldMs"/>, then one more removal behind another
+    /// hold of <paramref name="laterHoldMs"/>. Returns how many of the first
+    /// removed, whether the later one did, and how long it took.</summary>
+    static (int First, bool Later, long LaterMs) SharedBudgetLater(int threads, int exitBudgetMs, int firstHoldMs, int laterHoldMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        string[] kids = Enumerable.Range(0, threads + 1).Select(i => $@"HID\PNP_NOTIFY_CHECK\1&7e57&0&{40 + i:D4}").ToArray();
+        var records = new HashSet<string>(kids);
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        var holders = new List<Thread>();
+        void OtherHolds(int ms)
+        {
+            using var held = new ManualResetEventSlim(false);
+            var t = new Thread(() =>
+            {
+                standIn.Wait();
+                held.Set();
+                Thread.Sleep(ms);
+                standIn.Release();
+            }) { IsBackground = true };
+            holders.Add(t);
+            t.Start();
+            held.Wait();
+        }
+        bool Remove(string kid)
+        {
+            try
+            {
+                DeviceManager.RemoveOrphanHidChild(kid, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                {
+                    lock (records) records.Remove(kid);
+                    return true;
+                });
+                return true;
+            }
+            catch (DeviceManager.PnpLockBusyException) { return false; }
+        }
+        int first = 0;
+        bool later = false;
+        long laterMs = -1;
+        try
+        {
+            OtherHolds(firstHoldMs);
+            budget.SetValue(null, new DeviceManager.LockWaitBudget(exitBudgetMs, shared: true));
+            raised.SetValue(null, true);
+            using var start = new Barrier(threads);
+            var workers = Enumerable.Range(0, threads).Select(i => new Thread(() =>
+            {
+                start.SignalAndWait();
+                if (Remove(kids[i])) Interlocked.Increment(ref first);
+            }) { IsBackground = true }).ToList();
+            workers.ForEach(t => t.Start());
+            workers.ForEach(t => t.Join());
+            OtherHolds(laterHoldMs);
+            var sw = Stopwatch.StartNew();
+            later = Remove(kids[threads]);
+            laterMs = sw.ElapsedMilliseconds;
+        }
+        finally
+        {
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            holders.ForEach(t => t.Join());
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (first, later, laterMs);
+    }
+
+    /// <summary>With the exit signal set and a budget of
+    /// <paramref name="exitBudgetMs"/>: one removal of this process waits
+    /// behind another program's hold of <paramref name="otherHoldMs"/>,
+    /// which spends that much of the budget or all of it, and once that hold
+    /// has ended <paramref name="threads"/> removals of this process at once
+    /// each do <paramref name="workMs"/> of work under the lock. Returns
+    /// whether the first removed, and how many of the others removed and
+    /// were refused.</summary>
+    static (bool First, int Removed, int Refused) SpentThenOwnInExit(int exitBudgetMs, int otherHoldMs, int threads, int workMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        string[] kids = Enumerable.Range(0, threads + 1).Select(i => $@"HID\PNP_NOTIFY_CHECK\1&7e57&0&{80 + i:D4}").ToArray();
+        var records = new HashSet<string>(kids);
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        bool Remove(string kid, int work)
+        {
+            try
+            {
+                DeviceManager.RemoveOrphanHidChild(kid, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                {
+                    Thread.Sleep(work);
+                    lock (records) records.Remove(kid);
+                    return true;
+                });
+                return true;
+            }
+            catch (DeviceManager.PnpLockBusyException) { return false; }
+        }
+        using var held = new ManualResetEventSlim(false);
+        var other = new Thread(() =>
+        {
+            standIn.Wait();
+            held.Set();
+            Thread.Sleep(otherHoldMs);
+            standIn.Release();
+        }) { IsBackground = true };
+        bool first = false;
+        int removed = 0, refused = 0;
+        try
+        {
+            budget.SetValue(null, new DeviceManager.LockWaitBudget(exitBudgetMs, shared: true));
+            raised.SetValue(null, true);
+            other.Start();
+            held.Wait();
+            first = Remove(kids[0], 0);
+            other.Join();
+            using var start = new Barrier(threads);
+            var workers = Enumerable.Range(1, threads).Select(i => new Thread(() =>
+            {
+                start.SignalAndWait();
+                if (Remove(kids[i], workMs)) Interlocked.Increment(ref removed);
+                else Interlocked.Increment(ref refused);
+            }) { IsBackground = true }).ToList();
+            workers.ForEach(t => t.Start());
+            workers.ForEach(t => t.Join());
+        }
+        finally
+        {
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            if (other.IsAlive) other.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (first, removed, refused);
+    }
+
+    /// <summary>Two removals inside one bound of <paramref name="boundMs"/>
+    /// outside the exit: the first behind another thread of this process
+    /// that holds the lock <paramref name="ownWorkMs"/> for its removal, the
+    /// second behind another program's hold of <paramref name="otherHoldMs"/>.
+    /// Returns whether each removed and how long the second took.</summary>
+    static (bool First, bool Second, long SecondMs) BoundAfterOwnHold(int boundMs, int ownWorkMs, int otherHoldMs)
+    {
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        const string F = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0050", A = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0051", B = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0052";
+        var records = new HashSet<string> { F, A, B };
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        using var working = new ManualResetEventSlim(false);
+        bool first = false, second = false;
+        long secondMs = -1;
+        Thread? other = null;
+        var front = new Thread(() => DeviceManager.RemoveOrphanHidChild(F, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+        {
+            working.Set();
+            Thread.Sleep(ownWorkMs);
+            lock (records) records.Remove(F);
+            return true;
+        })) { IsBackground = true };
+        try
+        {
+            front.Start();
+            working.Wait();
+            using (DeviceManager.BoundPnpLockWaits(boundMs))
+            {
+                try
+                {
+                    DeviceManager.RemoveOrphanHidChild(A, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        lock (records) records.Remove(A);
+                        return true;
+                    });
+                    first = true;
+                }
+                catch (DeviceManager.PnpLockBusyException) { }
+                using var held = new ManualResetEventSlim(false);
+                other = new Thread(() =>
+                {
+                    standIn.Wait();
+                    held.Set();
+                    Thread.Sleep(otherHoldMs);
+                    standIn.Release();
+                }) { IsBackground = true };
+                other.Start();
+                held.Wait();
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    DeviceManager.RemoveOrphanHidChild(B, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                    {
+                        lock (records) records.Remove(B);
+                        return true;
+                    });
+                    second = true;
+                }
+                catch (DeviceManager.PnpLockBusyException) { }
+                secondMs = sw.ElapsedMilliseconds;
+            }
+        }
+        finally
+        {
+            other?.Join();
+            front.Join();
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (first, second, secondMs);
+    }
+
+    /// <summary>A removal with no bound of its own, the exit signal set and
+    /// the exit's budget at <paramref name="exitBudgetMs"/>, behind another
+    /// thread of this process that holds the lock <paramref name="ownHoldMs"/>
+    /// for its removal, a call stuck under the lock. No other program holds
+    /// it. Returns what the queued removal threw, how long it took, whether
+    /// it removed, its refusals, and whether the one in front removed.</summary>
+    static (Exception? Thrown, long Ms, bool Removed, long Refused, bool InFront) StuckOwnHoldInExit(int exitBudgetMs, int ownHoldMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        using var standIn = new SemaphoreSlim(1, 1);
+        DeviceManager.PnpLockHook = () => { standIn.Wait(); return new Released(() => standIn.Release()); };
+        DeviceManager.PnpLockTryHook = ms => standIn.Wait(ms) ? new Released(() => standIn.Release()) : null;
+        const string F = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0055", Q = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0056";
+        var records = new HashSet<string> { F, Q };
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (records) return flags == CM_LOCATE_DEVNODE_PHANTOM && records.Contains(id) ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        using var working = new ManualResetEventSlim(false);
+        bool removed = false, inFront = false;
+        Exception? thrown = null;
+        long ms = 0, refused0 = DeviceManager.LockTakesRefusedHere;
+        var front = new Thread(() => DeviceManager.RemoveOrphanHidChild(F, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+        {
+            working.Set();
+            Thread.Sleep(ownHoldMs);
+            lock (records) records.Remove(F);
+            inFront = true;
+            return true;
+        })) { IsBackground = true };
+        try
+        {
+            budget.SetValue(null, new DeviceManager.LockWaitBudget(exitBudgetMs, shared: true));
+            raised.SetValue(null, true);
+            front.Start();
+            working.Wait();
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                DeviceManager.RemoveOrphanHidChild(Q, @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT", () =>
+                {
+                    lock (records) records.Remove(Q);
+                    removed = true;
+                    return true;
+                });
+            }
+            catch (Exception ex) { thrown = ex; }
+            ms = sw.ElapsedMilliseconds;
+        }
+        finally
+        {
+            front.Join();
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.LocateHook = null;
+        }
+        return (thrown, ms, removed, DeviceManager.LockTakesRefusedHere - refused0, inFront);
+    }
+
+    /// <summary>The phantom cleanup a first call starts while the process
+    /// exits, which runs on the calling thread
+    /// (OwnerSweep.StartPhantomCleanupOnce): two phantoms, each uninstall
+    /// taking <paramref name="workMs"/> under the PnP lock, the stand-in lock
+    /// free. Returns the bound each take of the lock asked for, -1 for a take
+    /// with no bound, and how many phantoms the run removed.</summary>
+    static (List<int> Takes, int Removed) PhantomCleanupInExit(int workMs)
+    {
+        var raised = typeof(ProcessExitSignal).GetField("s_raised", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var budget = typeof(DeviceManager).GetField("s_exitLockBudget", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var started = typeof(OwnerSweep).GetField("s_phantomCleanupStarted", BindingFlags.NonPublic | BindingFlags.Static)!;
+        object? startedBefore = started.GetValue(null);
+        var takes = new List<int>();
+        DeviceManager.PnpLockHook = () => { lock (takes) takes.Add(-1); return new Released(() => { }); };
+        DeviceManager.PnpLockTryHook = ms => { lock (takes) takes.Add(ms); return new Released(() => { }); };
+        Func<bool> uninstall = () => { Thread.Sleep(workMs); return true; };
+        DeviceManager.PhantomSource = () => new (string, Func<bool>)[]
+        {
+            (@"ROOT\HIDMAESTRO_PNP_NOTIFY_CHECK\0001", uninstall),
+            (@"ROOT\HIDMAESTRO_PNP_NOTIFY_CHECK\0002", uninstall),
+        };
+        DeviceManager.RemovalLocate = _ => false;
+        try
+        {
+            started.SetValue(null, 0);
+            budget.SetValue(null, null);
+            raised.SetValue(null, true);
+            OwnerSweep.StartPhantomCleanupOnce();
+            lock (takes) return (new List<int>(takes), OwnerSweep.LastPhantomCleanup?.Removed ?? -1);
+        }
+        finally
+        {
+            raised.SetValue(null, false);
+            budget.SetValue(null, null);
+            started.SetValue(null, startedBefore);
+            DeviceManager.PnpLockHook = null;
+            DeviceManager.PnpLockTryHook = null;
+            DeviceManager.PhantomSource = null;
+            DeviceManager.RemovalLocate = null;
+        }
     }
 
     internal static int Run()
@@ -754,6 +1442,101 @@ internal static class Offline
                   $"claim taken {lease != null}, removed {o6.Removed}, {o6.Removals} removal(s), under the lock {o6.RemovedUnderLock}, claim still held {kept}");
         }
         finally { MachineClaims.CreateClaimHook = null; }
+
+        // The exit's removals take the PnP lock within the exit's bound:
+        // another program's hold, here another thread's, ends them and the
+        // record stays for the next sweep, instead of keeping the process in
+        // its exit for as long as the hold lasts.
+        var b1 = BoundedRemoval(boundMs: 300, heldMs: 3000, orphan: true);
+        Check("exit: another thread holds the PnP lock for 3 s -> the orphan's removal gives up when the exit's 300 ms bound ends, removing nothing",
+              b1.Thrown is DeviceManager.PnpLockBusyException && b1.Ms >= 300 - TimerSlack && b1.Ms < 300 + Slack && b1.Removals == 0,
+              $"{b1.Thrown?.GetType().Name ?? "nothing thrown"} after {b1.Ms} ms, {b1.Removals} removal(s)");
+        var b2 = BoundedRemoval(boundMs: 300, heldMs: 3000, orphan: false);
+        Check("exit: another thread holds the PnP lock for 3 s -> RemoveDevice gives up when the exit's 300 ms bound ends",
+              b2.Thrown is DeviceManager.PnpLockBusyException && b2.Ms >= 300 - TimerSlack && b2.Ms < 300 + Slack,
+              $"{b2.Thrown?.GetType().Name ?? "nothing thrown"} after {b2.Ms} ms");
+        var b3 = BoundedRemoval(boundMs: 300, heldMs: 0, orphan: true);
+        Check("exit: the PnP lock free -> the orphan is removed within the bound",
+              b3.Thrown == null && b3.Removals == 1 && b3.Ms < 300,
+              $"{b3.Thrown?.GetType().Name ?? "nothing thrown"} after {b3.Ms} ms, {b3.Removals} removal(s)");
+        // Only the waits for another program's hold count against the bound,
+        // never the exit's own removals under the lock.
+        var b4 = WorkThenWait(boundMs: 300, workMs: 400, otherHoldMs: 50);
+        Check("exit: a 300 ms bound, 400 ms of the exit's own removal under the lock, then a 50 ms hold -> the second removal waits for it and removes",
+              b4.Thrown == null && b4.Removals == 2 && b4.SecondMs < 300,
+              $"{b4.Thrown?.GetType().Name ?? "nothing thrown"}, {b4.Removals} removal(s), the second take after {b4.SecondMs} ms");
+        // A program's own dispose or cleanup inside its exit handler waits
+        // for the lock within the exit's budget too, and says so.
+        var b5 = InExit(exiting: true, exitBudgetMs: 300, heldMs: 3000);
+        Check("exit signal: another thread holds the PnP lock for 3 s -> a removal with no bound of its own gives up when the 300 ms exit budget ends, counted as refused",
+              b5.Thrown is DeviceManager.PnpLockBusyException && b5.Ms >= 300 - TimerSlack && b5.Ms < 300 + Slack && b5.Removals == 0 && b5.Refused == 1,
+              $"{b5.Thrown?.GetType().Name ?? "nothing thrown"} after {b5.Ms} ms, {b5.Removals} removal(s), {b5.Refused} refused");
+        var b6 = InExit(exiting: false, exitBudgetMs: 300, heldMs: 500);
+        Check("no exit signal: another thread holds the PnP lock for 500 ms -> the removal waits for it and removes",
+              b6.Thrown == null && b6.Removals == 1 && b6.Ms >= 500 - TimerSlack && b6.Refused == 0,
+              $"{b6.Thrown?.GetType().Name ?? "nothing thrown"} after {b6.Ms} ms, {b6.Removals} removal(s)");
+        // The phantom cleanup a first call runs on its own thread during the
+        // exit takes the lock for each uninstall out of its own budget of
+        // waits, never with the 600 s of a take with no bound, and its
+        // uninstalls under the lock are not charged.
+        int cleanupBudget = TimeoutScale.Apply(OwnerSweep.UninstallWaitBudgetMs);
+        var b7 = PhantomCleanupInExit(workMs: 400);
+        Check($"exit signal: the phantom cleanup on the calling thread takes the PnP lock for each phantom within its {cleanupBudget} ms of waiting, 400 ms of uninstall under the lock not charged",
+              b7.Removed == 2 && b7.Takes.Count == 2 && b7.Takes.All(ms => ms >= 0 && ms <= cleanupBudget)
+              && b7.Takes[1] >= cleanupBudget - 100,
+              $"{b7.Removed} removed, takes bounded at [{string.Join(", ", b7.Takes.Select(ms => ms < 0 ? "none" : ms + " ms"))}]");
+        // A bound counts only the waits for another program's hold: b9, b12 and
+        // the two-take check after them show a wait behind this process's own
+        // hold left out, b11 and b10 another program's wait counted, and the
+        // shared-budget check that threads waiting together spend the exit's
+        // budget once. b8 and the stuck-hold check show the exit's bound on a
+        // wait behind one hold of this process's own, and the three checks
+        // after the stuck-hold check that it is the bound's full size, not what
+        // is left of it, measured less the holder's wait for another program.
+        var b8 = ConcurrentInExit(threads: 3, exitBudgetMs: 300, workMs: 200, otherHoldMs: 0);
+        Check("exit signal: three removals of this process at once, 200 ms each under the lock, a 300 ms exit budget, no other program -> all three removed, none refused",
+              b8.Removed == 3 && b8.Refused == 0,
+              $"{b8.Removed} removed, {b8.Refused} refused, the threads took [{string.Join(", ", b8.Ms)}] ms");
+        var b9 = BoundBehindOwnThread(boundMs: 300, ownWorkMs: 500, otherHoldMs: 0);
+        Check("a 300 ms bound outside the exit, another thread of this process holding the lock 500 ms for its removal -> waits for it uncounted and removes",
+              b9.Thrown == null && b9.Bounded && b9.InFront && b9.Ms >= 500 - TimerSlack,
+              $"{b9.Thrown?.GetType().Name ?? "nothing thrown"} after {b9.Ms} ms, removed {b9.Bounded}, the one in front {b9.InFront}");
+        var b12 = BoundBehindOwnThread(boundMs: 0, ownWorkMs: 300, otherHoldMs: 0);
+        Check("a spent bound outside the exit, another thread of this process holding the lock 300 ms for its removal -> gets the lock free at its turn and removes",
+              b12.Thrown == null && b12.Bounded && b12.InFront,
+              $"{b12.Thrown?.GetType().Name ?? "nothing thrown"} after {b12.Ms} ms, removed {b12.Bounded}, the one in front {b12.InFront}");
+        var b10 = ConcurrentInExit(threads: 3, exitBudgetMs: 300, workMs: 0, otherHoldMs: 3000);
+        Check("exit signal: another program holds the lock for 3 s, three removals of this process at once, a 300 ms exit budget -> all three refused at about 300 ms, not one after another",
+              b10.Removed == 0 && b10.Refused == 3 && b10.Ms.All(ms => ms >= 300 - TimerSlack && ms < 300 + Slack),
+              $"{b10.Removed} removed, {b10.Refused} refused, after [{string.Join(", ", b10.Ms)}] ms");
+        var b11 = BoundBehindOwnThread(boundMs: 300, ownWorkMs: 0, otherHoldMs: 3000);
+        Check("a 300 ms bound, behind a thread of this process that waits for another program's 3 s hold -> refused at about 300 ms, that wait counted",
+              b11.Thrown is DeviceManager.PnpLockBusyException && !b11.Bounded && b11.InFront && b11.Ms >= 300 - TimerSlack && b11.Ms < 300 + Slack,
+              $"{b11.Thrown?.GetType().Name ?? "nothing thrown"} after {b11.Ms} ms, removed {b11.Bounded}, the one in front {b11.InFront}");
+        var bW = BoundAfterOwnHold(boundMs: 300, ownWorkMs: 500, otherHoldMs: 50);
+        Check("a 300 ms bound outside the exit, a take behind this process's own 500 ms removal, then a take behind another program's 50 ms hold -> both remove, the bound still whole",
+              bW.First && bW.Second && bW.SecondMs >= 50 - TimerSlack && bW.SecondMs < 50 + Slack,
+              $"first removed {bW.First}, second removed {bW.Second} after {bW.SecondMs} ms");
+        var bS = SharedBudgetLater(threads: 3, exitBudgetMs: 300, firstHoldMs: 200, laterHoldMs: 50);
+        Check("exit signal: three takes at once behind another program's 200 ms hold, a 300 ms exit budget, then a fourth behind a 50 ms hold -> all four remove, the budget spent once",
+              bS.First == 3 && bS.Later,
+              $"{bS.First} of 3 removed, the fourth {(bS.Later ? "removed" : "refused")} after {bS.LaterMs} ms");
+        var bX = StuckOwnHoldInExit(exitBudgetMs: 300, ownHoldMs: 1500);
+        Check("exit signal: a 300 ms exit budget, behind a thread of this process stuck 1.5 s under the lock -> refused at about 300 ms and counted, the record kept",
+              bX.Thrown is DeviceManager.PnpLockBusyException && !bX.Removed && bX.Refused == 1 && bX.InFront && bX.Ms >= 300 - TimerSlack && bX.Ms < 300 + Slack,
+              $"{bX.Thrown?.GetType().Name ?? "nothing thrown"} after {bX.Ms} ms, removed {bX.Removed}, {bX.Refused} refused, the one in front {bX.InFront}");
+        var bD1 = SpentThenOwnInExit(exitBudgetMs: 300, otherHoldMs: 400, threads: 3, workMs: 100);
+        Check("exit signal: a 300 ms exit budget spent behind another program's hold, then three removals of this process at once, 100 ms each -> all three removed",
+              !bD1.First && bD1.Removed == 3 && bD1.Refused == 0,
+              $"the spending take {(bD1.First ? "removed" : "refused")}, then {bD1.Removed} removed, {bD1.Refused} refused");
+        var bD2 = SpentThenOwnInExit(exitBudgetMs: 500, otherHoldMs: 300, threads: 2, workMs: 400);
+        Check("exit signal: a 500 ms exit budget with 200 ms left, then two removals of this process of 400 ms each -> both removed, a hold shorter than the full bound waited out",
+              bD2.First && bD2.Removed == 2 && bD2.Refused == 0,
+              $"the spending take {(bD2.First ? "removed" : "refused")}, then {bD2.Removed} removed, {bD2.Refused} refused");
+        var bM = ConcurrentInExit(threads: 2, exitBudgetMs: 300, workMs: 100, otherHoldMs: 250);
+        Check("exit signal: a 300 ms exit budget, two removals of this process at once behind another program's 250 ms hold, 100 ms each -> both removed, the holder's wait not counted twice",
+              bM.Removed == 2 && bM.Refused == 0,
+              $"{bM.Removed} removed, {bM.Refused} refused, the threads took [{string.Join(", ", bM.Ms)}] ms");
 
         int locates, cancels;
         lock (s_flags)
