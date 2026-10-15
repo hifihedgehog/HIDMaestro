@@ -50,15 +50,16 @@ internal static partial class Program
     }
 
     /// <summary>The USB/IP loopback port ranges taken first. With the first
-    /// range held, a composite persona's server takes a port of the second
+    /// range held, composite personas' servers take ports of the second
     /// range, which sits below the dynamic port range like the first. With
-    /// both held it still creates, on an OS-assigned port its owner record
-    /// names. That program is then killed, and the vhci driver starts a
-    /// re-attach attempt against the port (usbip-win2 device.cpp detach,
-    /// start_attach_attempts). A sweep by another program must cancel it:
-    /// the record is the only thing that names the port, and the sweep
-    /// deletes it. Section V part 8 covers the cleanup that removes
-    /// everything in the same state.</summary>
+    /// both held they still create, on OS-assigned ports their owner
+    /// records name. In each case two such programs are killed, and the
+    /// vhci driver starts a re-attach attempt against each one's location
+    /// (usbip-win2 device.cpp detach, start_attach_attempts). The probe
+    /// cancels the second's attempt itself, which shows the driver started
+    /// one, then another program sweeps, and the first's attempt must be
+    /// gone. Section V part 8 covers the cleanup that removes everything in
+    /// the OS-assigned state.</summary>
     static void SectionX7()
     {
         const int basePort = 18509, secondPort = 28509, range = 16;
@@ -68,44 +69,65 @@ internal static partial class Program
             held.AddRange(HoldPorts(basePort, range));
             Check($"X7: the probe holds the first USB/IP port range {basePort}..{basePort + range - 1}", held.Count == range, $"{held.Count} of {range} bound");
             if (held.Count != range) return;
-            using (var p = PeerProcess.Start("X7-second"))
-            {
-                p.Send("install");
-                string c = p.Send("create composite - coexist-x7s");
-                string? recorded = Ok(c) ? Native.RecordValue(p.Pid, "UsbipPort") : null;
-                bool inSecond = int.TryParse(recorded, out int sp) && sp >= secondPort && sp < secondPort + range;
-                Check($"X7: with the first range held, a composite's server takes a port of {secondPort}..{secondPort + range - 1}", inSecond,
-                      $"{c}, recorded port {recorded ?? "none"}");
-            }
+            X7KillTwoAndSweep("second range", "coexist-x7s", port => port >= secondPort && port < secondPort + range);
             Clean();
 
             var second = HoldPorts(secondPort, range);
             held.AddRange(second);
             Check($"X7: the probe holds the second range {secondPort}..{secondPort + range - 1} too", second.Count == range, $"{second.Count} of {range} bound");
             if (second.Count != range) return;
-            int port = 0;
-            string busId = "";
-            using (var a = PeerProcess.Start("X7-killed"))
-            {
-                a.Send("install");
-                string c = a.Send("create composite - coexist-x7");
-                Check("X7: a composite persona still creates with both ranges taken", Ok(c), c);
-                if (!Ok(c)) return;
-                busId = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
-                string? recorded = Native.RecordValue(a.Pid, "UsbipPort");
-                bool outside = int.TryParse(recorded, out port)
-                    && (port < basePort || port >= basePort + range) && (port < secondPort || port >= secondPort + range);
-                Check("X7: its server bound a port outside both ranges, recorded in its owner record", outside, $"recorded port {recorded ?? "none"}");
-                if (!outside) return;
-                a.Kill();
-            }
-            WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
-            using (var b = PeerProcess.Start("X7-sweeper"))
-                Check("X7: another program runs a sweep", Ok(b.Send("sweep")));
-            int left = Vhci.Stop("127.0.0.1", port, busId);
-            Check($"X7: the sweep canceled the killed program's attempt for {port}/{busId}", left == 0, $"{left} canceled by the probe");
+            X7KillTwoAndSweep("OS-assigned", "coexist-x7",
+                port => (port < basePort || port >= basePort + range) && (port < secondPort || port >= secondPort + range));
         }
         finally { foreach (var l in held) try { l.Stop(); } catch { } }
+    }
+
+    /// <summary>Two programs with a composite each on ports
+    /// <paramref name="expected"/> accepts, both killed. The second one's
+    /// re-attach attempt, canceled by the probe, is the positive control.
+    /// After a sweep by a third program, the first one's attempt must be
+    /// gone.</summary>
+    static void X7KillTwoAndSweep(string label, string key, Func<int, bool> expected)
+    {
+        var locations = new List<(int Port, string BusId)>();
+        var peers = new List<PeerProcess>();
+        try
+        {
+            for (int k = 0; k < 2; k++)
+            {
+                var p = PeerProcess.Start($"X7-{label}-{k}");
+                peers.Add(p);
+                p.Send("install");
+                string c = p.Send($"create composite - {key}{k}");
+                string? recorded = Ok(c) ? Native.RecordValue(p.Pid, "UsbipPort") : null;
+                bool onExpected = int.TryParse(recorded, out int port) && expected(port);
+                Check($"X7 ({label}): program {k + 1} creates a composite on a port its owner record names",
+                      Ok(c) && onExpected, $"{c}, recorded port {recorded ?? "none"}");
+                if (!Ok(c) || !onExpected) return;
+                locations.Add((port, "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1)));
+            }
+            foreach (var p in peers) p.Kill();
+            foreach (var (port, _) in locations)
+                WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+
+            var (controlPort, controlBus) = locations[1];
+            int control = Vhci.Stop("127.0.0.1", controlPort, controlBus);
+            Check($"X7 ({label}): the driver started a re-attach attempt for a killed program ({controlPort}/{controlBus})",
+                  control >= 1, $"{control} canceled by the probe");
+
+            using (var s = PeerProcess.Start($"X7-{label}-sweeper"))
+                Check($"X7 ({label}): another program runs a sweep", Ok(s.Send("sweep")));
+            var (port0, bus0) = locations[0];
+            int left = Vhci.Stop("127.0.0.1", port0, bus0);
+            Check($"X7 ({label}): the sweep canceled the other killed program's attempt ({port0}/{bus0})",
+                  left == 0, $"{left} canceled by the probe");
+        }
+        finally
+        {
+            foreach (var p in peers) p.Dispose();
+            // Whatever the result, no attempt is left for later runs.
+            foreach (var (port, busId) in locations) Vhci.Stop("127.0.0.1", port, busId);
+        }
     }
 
     static List<TcpListener> HoldPorts(int first, int count)
