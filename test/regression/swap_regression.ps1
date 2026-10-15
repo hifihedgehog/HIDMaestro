@@ -1490,8 +1490,9 @@ function Scenario-Usb-Composite-Schema {
                  -Message 'a composite persona no longer matches its hardware dump, or a composite leaked into the UMDF2 path (see probe stdout)'
 }
 
-# S43 runs the probe twice: its audio engine checks on their own, which
-# need no device, then the protocol against a live import. Both runs
+# S43 runs the probe twice: the checks that need no device (the audio
+# engine, the connection owner lookup and the location match), then the
+# protocol against a live import. Both runs
 # always run, and a failure of either is reported.
 function Scenario-Usbip-Server-Protocol {
     $failed = @()
@@ -1501,7 +1502,8 @@ function Scenario-Usbip-Server-Protocol {
                                'an exception thrown to the connection when its event thread does not start, a stale IsStreaming, ' +
                                'a change made before Dispose not raised, more than one waiting write per control, ' +
                                'a failed start missing from the diagnostic log, its event thread not counted as its own, ' +
-                               'or a Dispose that waits out the input pump (see probe stdout)')
+                               'a Dispose that waits out the input pump, a wrong connection owner, ' +
+                               'or an import service string matched to the wrong port (see probe stdout)')
     } catch { $failed += $_.Exception.Message }
     try {
         Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `

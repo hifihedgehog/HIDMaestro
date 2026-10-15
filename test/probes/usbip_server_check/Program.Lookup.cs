@@ -1,8 +1,9 @@
 // Two checks that need no elevation and create no device, which the
-// `offline` argument runs alone: the owner lookup the server admits an
-// import by, while other connections open and close as fast as threads can
-// make them and once the peer has closed, and the match of an import's
-// service string to a port that the sweeps detach by.
+// `--offline` argument runs with the audio engine's checks: the owner
+// lookup the server admits an import by, while other connections open and
+// close as fast as threads can make them and once the peer has closed, and
+// the match of an import's service string to a port that the sweeps detach
+// by.
 
 using System;
 using System.Collections.Generic;
@@ -15,15 +16,6 @@ using HIDMaestro.Internal.Usbip;
 
 internal static partial class Program
 {
-    static int OfflineOnly()
-    {
-        Console.WriteLine("=== USB/IP server: owner lookup and location match ===");
-        OwnerLookup();
-        LocationMatch();
-        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
-        return s_failures == 0 ? 0 : 1;
-    }
-
     static void OwnerLookup()
     {
         Console.WriteLine("\n-- Connection owner lookup --");

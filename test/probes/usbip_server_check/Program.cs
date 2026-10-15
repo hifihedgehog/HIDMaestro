@@ -31,7 +31,8 @@
 //     control while a handler blocks, every handle closed and nothing
 //     thrown to the connection when a thread does not start, a change
 //     queued then raised at Dispose, its event thread known as its own),
-//     and the device's input pump woken at Dispose, timed over 30 runs
+//     the device's input pump woken at Dispose, timed over 30 runs, and
+//     the connection owner lookup and location match of Program.Lookup.cs
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -78,7 +79,6 @@ internal static partial class Program
         UsbipServer.AdmitImportsFromThisProcess = true;
         if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
         if (args.Length >= 1 && args[0] == "--held-pump") return HeldPumpChild();
-        if (args.Length >= 1 && args[0] == "offline") return OfflineOnly();
         if (args.Length >= 1 && args[0] == "--offline") return Offline();
 
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
@@ -124,8 +124,6 @@ internal static partial class Program
             {
                 RunAll(server, device, profile, outFrames, controlWrites);
                 Handshake(server, device);
-                OwnerLookup();
-                LocationMatch();
                 ThrowingHandlers();
                 PortLookup();
                 SlowHandlers(ctx, server);
@@ -971,7 +969,7 @@ internal static partial class Program
     /// the way the connection's reader drives them.</summary>
     static int Offline()
     {
-        Console.WriteLine("=== USB/IP audio engine, offline ===");
+        Console.WriteLine("=== USB/IP audio engine, owner lookup and location match, offline ===");
         SetErrorMode(QuietErrorMode);
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -1191,6 +1189,11 @@ internal static partial class Program
         }
 
         InputPumpWakeOffline();
+
+        // The server's connection owner lookup and the location match the
+        // sweeps detach by, which need no device either (Program.Lookup.cs).
+        OwnerLookup();
+        LocationMatch();
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
