@@ -17,14 +17,16 @@
 // and which Gamepad field moved. `--absent` deletes the profile's GameInput
 // key first, so the same pad can be read both ways. `--sweep` judges every
 // deployable non-Xbox profile. `--legacy` writes the table HIDMaestro wrote
-// through v1.11.0 first, which is how the scope of #1056 was measured.
+// through v1.11.0 first, which is how the scope of #1056 was measured. From
+// v1.12.0 a create replaces or removes that table
+// (DeviceOrchestrator.ApplyGameInputMapping), so on this SDK no pad reads
+// through it.
 //
 // Requires elevation.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using HIDMaestro;
 using Microsoft.Win32;
@@ -102,18 +104,6 @@ internal static class Program
             if (XInputGetState(i, out var s) == 0)
                 parts.Add($"slot{i} LX {s.LX} LY {s.LY} RX {s.RX} RY {s.RY} LT {s.LT} RT {s.RT} btn {s.Buttons:X4}");
         return parts.Count == 0 ? "no slot connected" : string.Join(" | ", parts);
-    }
-
-    static void MarkOverrideWritten(ushort vid, ushort pid)
-    {
-        // The SDK writes the override once per VID:PID per process. Putting
-        // the pair in its cache first makes this process skip the write.
-        var t = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceOrchestrator")!;
-        var f = t.GetField("s_gameInputRegistryWritten", BindingFlags.NonPublic | BindingFlags.Static);
-        if (f?.GetValue(null) is HashSet<uint> set)
-            lock (set) set.Add(((uint)vid << 16) | pid);
-        // Builds from v1.12.0 on write no override for a catalog profile, so
-        // there is nothing to suppress.
     }
 
     /// <summary>The custom profile PadForge builds: two sticks, two
@@ -202,12 +192,10 @@ internal static class Program
         if (mode == "absent")
         {
             Registry.LocalMachine.DeleteSubKeyTree(keyPath, false);
-            MarkOverrideWritten(vid, pid);
         }
         else if (mode == "legacy")
         {
             WriteLegacyOverride(vid, pid, string.Equals(profile.TriggerMode, "combined", StringComparison.OrdinalIgnoreCase));
-            MarkOverrideWritten(vid, pid);
         }
         if (!WaitGone(vid, pid, 6000))
         {
@@ -459,7 +447,6 @@ internal static class Program
         if (absent)
         {
             try { Registry.LocalMachine.DeleteSubKeyTree($@"{OverrideRoot}\{keyName}", false); } catch { }
-            MarkOverrideWritten(vid, pid);
         }
 
         using var pad = ctx.CreateController(profile);
