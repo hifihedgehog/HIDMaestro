@@ -569,11 +569,15 @@ public static class DriverBuilder
         // XUSB companion (setup class System so Windows.Gaming.Input.dll does
         // not classify it as a second WGI Gamepad; xinput1_4 discovery scans
         // the {EC87F1E3} interface class directly so it still finds it).
+        // /install reinstalls every present devnode the package matches,
+        // another program's controllers and their HID children included, so
+        // it runs under the PnP lock, after the deploy lock the caller holds.
         foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
         {
             string path = Path.Combine(dir, inf);
             if (!File.Exists(path)) continue;
-            Run(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: 30_000);
+            using (DeviceManager.HoldPnpLock())
+                Run(pnputil, $"/add-driver \"{path}\" /install", timeoutMs: 30_000);
             // pnputil /add-driver does not support /format, so its rc and output
             // are locale- and version-keyed and unreliable for success detection
             // (see issue #17). The authoritative success signal is the post-

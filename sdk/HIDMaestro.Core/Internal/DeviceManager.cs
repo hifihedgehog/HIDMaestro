@@ -874,12 +874,80 @@ public static partial class DeviceManager
     /// and uninstall the SDK makes, from its call through its removal test:
     /// <see cref="RemoveDevice"/> (with its children, its fallbacks and
     /// hmswd.exe's close), each orphan of <see cref="RemoveOrphanHidChildren"/>
-    /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>.</para>
+    /// and each phantom of <see cref="RemoveAccumulatedHmPhantoms"/>. Also
+    /// held by a full driver deploy's pnputil /add-driver /install, which
+    /// reinstalls every present devnode the package matches, other
+    /// programs' controllers and their HID children included, by the bus
+    /// type pass of every create (DeviceOrchestrator.SetBusTypeGuidUsb),
+    /// which writes a property on every present HIDMaestro devnode on the
+    /// machine and on its first child, by the ghost XUSB interface sweep
+    /// from its presence check through its disable of a phantom, and by the
+    /// restart of ROOT\XNACOMPOSITE\0000 that a create of a profile without
+    /// the upper filter makes when that devnode is HIDMaestro's
+    /// (DeviceNodeCreator.CreateDeviceNode): since issue #60 that devnode
+    /// belongs to a program built before v1.8.0 or is residue, never to
+    /// the create. That take comes after the create's devnode is registered
+    /// and its driver installed, and when it throws (ten minutes of another
+    /// program's hold, or the exit's bound) it fails the create, whose
+    /// cleanup removes what it made.</para>
     ///
-    /// <para>Not held by, so not ordered against them: a USB/IP import's
-    /// attach and detach, a WinUSB bind or restore, the usbip-win2 host
-    /// controller's repair, and any program built on HIDMaestro before
-    /// v1.13.0.</para>
+    /// <para>Not held by these, so not ordered against them. pnp_notify_check's
+    /// source check lists each of their calls and fails on one made anywhere
+    /// else outside the lock. Under the hypothesis this lock rests on (a
+    /// removal of a HIDClass devnode overlapping Windows' event delivery for
+    /// the same device), those in the first list touch only a controller's
+    /// own devnodes, residue, or no HIDClass devnode. Those in the second
+    /// are exposure the lock does not cover.</para>
+    /// <list type="bullet">
+    /// <item>The naming writes on a controller's own devnodes after its
+    /// registration's hold (DeviceProperties). Its identity claim keeps
+    /// other programs' removals off them.</item>
+    /// <item>RestartDevice's CM_Disable_DevNode and CM_Enable_DevNode, on a
+    /// controller's own devnodes in every other call the SDK makes. They
+    /// take the devnode's children out of the tree and bring them back, and
+    /// create or delete no record. RestartDevice is public, and a program's
+    /// own call of it takes no lock.</item>
+    /// <item>The driver package removal's pnputil /delete-driver /uninstall
+    /// /force, under the deploy lock, run once the census shows no device
+    /// and no other live program, so what it uninstalls is residue.</item>
+    /// <item>The usbip-win2 host controller's repair. Its
+    /// CM_Query_And_Remove_SubTreeW on the vhci root runs only when no host
+    /// controller answers and starting it failed, when no import has a
+    /// subtree, before CM_Setup_DevNode and CM_Reenumerate_DevNode bring it
+    /// back.</item>
+    /// <item>The usbip-win2 installer's own ROOT\USB devnode, the host
+    /// controller's hardware id stamp and a WinUSB restore's
+    /// CONFIGFLAG_REINSTALL, written on a devnode that has left. None is a
+    /// HIDClass devnode.</item>
+    /// </list>
+    /// <list type="bullet">
+    /// <item>A USB/IP import's attach and detach, the vhci plugin and
+    /// plugout requests. Plug and Play enumerates and removes the import's
+    /// HIDClass children after each.</item>
+    /// <item>The transport driver update: hmswd.exe force-driver on the host
+    /// controller, under the deploy lock, which restarts every import's
+    /// subtree. Run only on a transport swap.</item>
+    /// <item>A WinUSB bind, DiInstallDevice on the device, which takes its
+    /// HID collections away. Only a persona that declares a WinUSB binding
+    /// makes one.</item>
+    /// <item>A registration's DiInstallDevice, which runs once its hold has
+    /// ended, on the controller's own devnode. Its HID child is linked into
+    /// the HIDClass list by Plug and Play after the hold, with no lock: the
+    /// lock covers the parent's registration, not its children's.</item>
+    /// <item>Any program built on HIDMaestro before v1.13.0.</item>
+    /// </list>
+    ///
+    /// <para>Direct registry writes to devnode keys hold the lock where they
+    /// decide on a devnode they do not own: the interface-class cleanup
+    /// (DeviceOrchestrator.RemoveOwnedInterfaceEntries) and the ghost XUSB
+    /// sweep. The rest are on a controller's own devnode: the orphan
+    /// instance key a ROOT registration deletes and the ParentIdPrefix it
+    /// writes, both inside its registration's hold, a gamepad companion's
+    /// ParentIdPrefix after its registration, the ControllerIndex value in
+    /// Device Parameters and the HID parent's UpperFilters. The Everything
+    /// cleanup deletes every HIDMaestro instance's Device Parameters after
+    /// its removals, since it removes every program's devices by
+    /// design.</para>
     ///
     /// <para>One hold is one removal or one registration, never both: a
     /// registration's gate removes what it must, each removal in a hold of
@@ -891,14 +959,16 @@ public static partial class DeviceManager
     /// lock is taken: the gate and the removal test look at the devnode
     /// again whatever the last holder left.</para>
     ///
-    /// <para>Lock order: the deploy lock, then the WinUSB devnode lock, then
-    /// this one, then the staging lock. WinUsbBinding.RemovePackage removes a
-    /// devnode that has left with the first two held. Under this lock the
-    /// SDK stages hmswd.exe (SwdDeviceFactory) and takes no other
-    /// machine-wide lock. The registry ledger's lock and the transport
-    /// install's lock are never held with it. In process,
-    /// <see cref="OwnerSweep.CreateGate"/> and a controller's teardown gate
-    /// come before it.</para></summary>
+    /// <para>Lock order: the deploy lock, then this one, then the staging
+    /// lock. A full deploy takes this lock for its pnputil install with the
+    /// deploy lock held. Under this lock the SDK stages hmswd.exe
+    /// (SwdDeviceFactory), which takes the staging lock, and tries identity
+    /// claims, which never wait, and takes no other machine-wide lock. The
+    /// WinUSB devnode and follow-up locks, the registry ledger's lock and
+    /// the transport lock are never held with it: none of their holders
+    /// registers, removes or reinstalls a devnode through the SDK. In
+    /// process, <see cref="OwnerSweep.CreateGate"/> and a controller's
+    /// teardown gate come before it.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
     internal static Mutex AcquirePnpLock()

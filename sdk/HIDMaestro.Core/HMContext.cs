@@ -230,8 +230,8 @@ public sealed class HMContext : IDisposable
     /// cleanup wait for it to end: one pass over the records, their
     /// uninstalls, at most 5 seconds of waiting in all, for the machine-wide
     /// PnP lock before each uninstall and for Windows to let the record go
-    /// after it, and two passes over interface registrations that do not
-    /// wait. The ones left go with
+    /// after it, and two passes over interface registrations that wait for
+    /// the lock within those 5 seconds. The ones left go with
     /// the next process's first cleanup. When the runtime has already begun
     /// process exit, which the SDK learns from
     /// <c>AssemblyLoadContext.Default.Unloading</c>, raised before

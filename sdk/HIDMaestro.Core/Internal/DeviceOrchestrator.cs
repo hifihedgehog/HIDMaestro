@@ -380,8 +380,8 @@ internal static partial class DeviceOrchestrator
     //                  over the phantoms, their uninstalls, at most
     //                  UninstallWaitBudgetMs of waiting in all, for the
     //                  PnP lock before each uninstall and for Windows
-    //                  after it, and two interface passes that do not
-    //                  wait. A first call
+    //                  after it, and two interface passes that wait for
+    //                  the lock within the same budget. A first call
     //                  made while the process exits (ProcessExitSignal)
     //                  runs it on the calling thread instead. Under .NET a
     //                  program in which no code that refers to the SDK ran
@@ -426,7 +426,7 @@ internal static partial class DeviceOrchestrator
     /// A present HIDMaestro devnode is a running program's controller, or
     /// the reclaim has just removed it, so only the explicit uninstall-grade
     /// sweep passes false.</param>
-    internal static void RemoveOwnedInterfaceEntries(bool phantomOnly)
+    internal static void RemoveOwnedInterfaceEntries(bool phantomOnly, Func<DeviceManager.PnpLockHold?>? holdLock = null)
     {
         foreach (var guid in new[] {
             "{ec87f1e3-c13b-4100-b5f7-8b84d54260cb}",
@@ -460,8 +460,12 @@ internal static partial class DeviceOrchestrator
                     if (guidStart > 0) devPath = devPath.Substring(0, guidStart);
                     devPath = devPath.Replace("##?#", string.Empty);
                     devPath = devPath.Replace('#', '\\');
-                    if (phantomOnly && (exclusivelyOurs || sharedShape)
-                        && CM_Locate_DevNodeW(out _, devPath, 0) == 0)
+                    if (!exclusivelyOurs && !sharedShape) continue;
+                    // A present devnode and an entry not shown to be ours are
+                    // left without taking the lock, which is the safe side,
+                    // so a call with nothing to delete waits for no other
+                    // program.
+                    if (phantomOnly && CM_Locate_DevNodeW(out _, devPath, 0) == 0)
                         continue;
                     if (!isOurDevice && sharedShape)
                     {
@@ -474,11 +478,17 @@ internal static partial class DeviceOrchestrator
                         catch { recordExists = true; }
                         isOurDevice = !recordExists || DeviceManager.IsHidMaestroOwned(devPath);
                     }
-
-                    if (isOurDevice)
-                    {
-                        try { classKey.DeleteSubKeyTree(subName); } catch { }
-                    }
+                    if (!isOurDevice) continue;
+                    // The presence check again and the delete under the PnP
+                    // lock, so a create of this release cannot make the
+                    // devnode present in between: its registration holds the
+                    // same lock. A devnode whose lock did not come is left
+                    // for the next run.
+                    using var pnp = holdLock != null ? holdLock() : DeviceManager.HoldPnpLock();
+                    if (pnp == null) continue;
+                    if (phantomOnly && CM_Locate_DevNodeW(out _, devPath, 0) == 0)
+                        continue;
+                    try { classKey.DeleteSubKeyTree(subName); } catch { }
                 }
             }
             catch { }
@@ -495,8 +505,16 @@ internal static partial class DeviceOrchestrator
     /// occupied. Before v1.13.0 this also disabled present devnodes that had
     /// a problem or had not started yet, which is what another program's
     /// controller looks like in the middle of its create. A present
-    /// devnode of a dead program is removed outright by the reclaim.</summary>
-    internal static void RemoveGhostXusbInterfaces()
+    /// devnode of a dead program is removed outright by the reclaim.
+    ///
+    /// <para>Each devnode's presence check, disable and registry cleanup
+    /// run under the PnP lock, so a create of this release cannot make it
+    /// present in between: its SwDeviceCreate holds the same lock. A
+    /// devnode already present is left without the lock. The lock comes
+    /// from <paramref name="holdLock"/> when given (the phantom cleanup's
+    /// budgeted wait), and a devnode whose lock did not come is left for the
+    /// next run.</para></summary>
+    internal static void RemoveGhostXusbInterfaces(Func<DeviceManager.PnpLockHold?>? holdLock = null)
     {
         try
         {
@@ -537,7 +555,12 @@ internal static partial class DeviceOrchestrator
                 catch { continue; }
                 if (!hasXinputHid) continue;
 
-                // Present: a running program's device, never touched here.
+                // Present: a running program's device, never touched here,
+                // and left without taking the lock. What looks absent is
+                // looked at again under it.
+                if (CM_Locate_DevNodeW(out _, devPath, 0) == 0) continue;
+                using var pnp = holdLock != null ? holdLock() : DeviceManager.HoldPnpLock();
+                if (pnp == null) continue;
                 if (CM_Locate_DevNodeW(out _, devPath, 0) == 0) continue;
                 if (CM_Locate_DevNodeW(out uint devInst, devPath, CM_LOCATE_DEVNODE_PHANTOM) != 0) continue;
 
@@ -1181,6 +1204,12 @@ internal static partial class DeviceOrchestrator
             pid = 21 // DEVPKEY_Device_BusTypeGuid
         };
         byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
+
+        // Every present HIDMaestro devnode on the machine gets the write,
+        // another program's included, with its first child, a HIDClass
+        // devnode. Under the PnP lock, so no locate and write lands on a
+        // devnode another program of this release is removing.
+        using var pnp = DeviceManager.HoldPnpLock();
 
         // T11: trimmed list. The dynamic VID_*/HIDMAESTRO* scan below
         // (lines 1156+) covers VID_045E&PID_02FF&IG_00, VID_045E&PID_0B13&IG_00,

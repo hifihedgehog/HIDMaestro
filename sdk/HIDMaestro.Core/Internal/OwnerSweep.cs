@@ -564,7 +564,8 @@ internal static class OwnerSweep
     /// wait while it runs, through one pass over the phantoms, their
     /// uninstalls, at most <see cref="UninstallWaitBudgetMs"/> of waiting
     /// in all, for the PnP lock before each uninstall and for Windows after
-    /// it, and two interface passes that do not wait. After each
+    /// it, and two interface passes that wait for the lock within the same
+    /// budget. After each
     /// uninstall it waits, still holding the gate and the phantom's identity
     /// claim, until Windows no longer knows the id
     /// (<see cref="UninstallWait"/>), so neither this process's next create
@@ -646,8 +647,8 @@ internal static class OwnerSweep
             // in for a device under the probe.
             if (DeviceManager.PhantomSource == null)
             {
-                try { DeviceOrchestrator.RemoveGhostXusbInterfaces(); } catch { }
-                try { DeviceOrchestrator.RemoveOwnedInterfaceEntries(phantomOnly: true); } catch { }
+                try { DeviceOrchestrator.RemoveGhostXusbInterfaces(wait.Lock); } catch { }
+                try { DeviceOrchestrator.RemoveOwnedInterfaceEntries(phantomOnly: true, wait.Lock); } catch { }
             }
             LastPhantomCleanup = wait.Summary(phantoms, sw.ElapsedMilliseconds);
             DeviceOrchestrator.LogDiag($"    phantom cleanup: {phantoms} removed in {sw.ElapsedMilliseconds}ms, " +

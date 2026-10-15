@@ -397,11 +397,24 @@ internal static partial class DeviceNodeCreator
             // XnaComposite (legacy XInput path) needs an explicit restart to
             // load. Issue #28 (v1.3.16): ROOT\XNACOMPOSITE\0000 may belong
             // to a third-party legacy XInput shim: only restart it when
-            // its HardwareID proves HM ownership.
+            // its HardwareID proves HM ownership. Since issue #60 a create
+            // names its ROOT devnode by identity token, so 0000 is not this
+            // create's: it is a program's built before v1.8.0, possibly
+            // running, or residue. Its disable takes its HID children out of
+            // the tree, so the restart holds the PnP lock, after this
+            // registration's hold has ended, and only for a 0000 that is
+            // present (RestartDevice looks again under the lock). That take
+            // can fail the create: it throws PnpLockBusyException once
+            // another program has held the lock for ten minutes, or during
+            // the exit past the exit's bound, after this devnode is
+            // registered and its driver installed, and the create's cleanup
+            // then removes what it made.
             if (!profile.UsesUpperFilter
-                && DeviceManager.IsHidMaestroOwned(@"ROOT\XNACOMPOSITE\0000"))
+                && DeviceManager.IsHidMaestroOwned(@"ROOT\XNACOMPOSITE\0000")
+                && CM_Locate_DevNodeW(out _, @"ROOT\XNACOMPOSITE\0000", 0) == 0)
             {
-                DeviceManager.RestartDevice(@"ROOT\XNACOMPOSITE\0000");
+                using (DeviceManager.HoldPnpLock())
+                    DeviceManager.RestartDevice(@"ROOT\XNACOMPOSITE\0000");
             }
 
             // Wait for the HID interface to arrive: this is what the Phase 1 loop

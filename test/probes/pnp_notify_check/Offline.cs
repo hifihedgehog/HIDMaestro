@@ -621,14 +621,18 @@ internal static class Offline
               $"{g8.Gate}, {s8.Registrations} registration(s)");
 
         // The source of the SDK beside the probe: every call that registers,
-        // removes or uninstalls a devnode is under the PnP lock.
+        // removes or uninstalls a devnode is under the PnP lock, and every
+        // call that changes devnodes outside it is a listed exclusion the
+        // lock's doc comment names.
         var outside = LockCoverage.Violations(out int sites);
         if (outside == null)
             Console.WriteLine("  info: the SDK source is not beside the probe, so the lock coverage check did not run");
         else
-            Check("every call that registers, removes or uninstalls a devnode is under the PnP lock",
+            Check("every call or registry write that changes a devnode is under the PnP lock, and each one outside it is a named exclusion",
                   outside.Count == 0 && sites > 0,
-                  outside.Count == 0 ? $"{sites} call sites" : string.Join(" | ", outside));
+                  outside.Count == 0
+                      ? $"{sites} call sites, {LockCoverage.ExclusionCount} exclusions, {LockCoverage.RegistryWriteCount} registry writes listed"
+                      : string.Join(" | ", outside));
 
         // Under the lock nothing is removed and nothing waited for: what came
         // back sends the gate round again, without the lock.
