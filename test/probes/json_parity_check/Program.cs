@@ -12,6 +12,12 @@
 //   C. A layout kind still matches in any letter case and with or without
 //      underscores, as it did, and an unknown kind is still refused.
 //   D. HMLayoutJsonOptions.Default is the source-generated options.
+//   G. Every type the profile model can deserialize has source-generated
+//      metadata in HMJsonContext, found by walking the model types
+//      themselves (ControllerProfile and every HMLayout subclass, through
+//      their public properties) and not the catalog or the context. A type
+//      the context misses still builds, and the loaders drop the profiles
+//      that use it without a word.
 //   E. A key the JSON leaves out keeps the record's initializer, in nested
 //      records too: a trigger's Stages stays 1 and a rotary encoder's Role
 //      stays Dial.
@@ -164,9 +170,57 @@ internal static class Program
         var notSnake = enums.Where(e => HasConverter(e) && !IsSnakeCase(e)).Select(e => e.Name).ToList();
         Check("F: each reads and writes its snake_case name", notSnake.Count == 0, string.Join(", ", notSnake));
 
+        // G.
+        var model = ModelTypes();
+        var missing = model.Where(t => HMJsonContext.Default.GetTypeInfo(t) == null).Select(t => t.Name).ToList();
+        Check("G: the model walk reaches the layouts", model.Contains(typeof(HMRemoteLayout)) && model.Contains(typeof(ControllerProfile)),
+              $"{model.Count} type(s)");
+        Check("G: every type the profile model can deserialize has generated metadata", missing.Count == 0, string.Join(", ", missing));
+
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>Every non-enum SDK type a profile can deserialize into:
+    /// ControllerProfile and each concrete HMLayout subclass as roots, then
+    /// the types of every public property and field and of every non-public
+    /// member marked JsonInclude, into nullable, array and generic arguments,
+    /// skipping what JsonIgnore skips. A reachable SDK class that has
+    /// subclasses brings each one in, since a converter can produce any of
+    /// them. Taken from the model, not from HMJsonContext.</summary>
+    static List<Type> ModelTypes()
+    {
+        var sdk = typeof(HMContext).Assembly;
+        var all = sdk.GetTypes();
+        var roots = new List<Type> { typeof(ControllerProfile), typeof(HMLayout) };
+        roots.AddRange(all.Where(t => !t.IsAbstract && t.IsSubclassOf(typeof(HMLayout))));
+        var seen = new HashSet<Type>();
+        var found = new List<Type>();
+        var work = new Stack<Type>(roots);
+        const System.Reflection.BindingFlags Flags = System.Reflection.BindingFlags.Public
+            | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        while (work.Count > 0)
+        {
+            Type t = work.Pop();
+            if (!seen.Add(t)) continue;
+            if (t.HasElementType) { work.Push(t.GetElementType()!); continue; }
+            if (t.IsGenericType) foreach (Type a in t.GetGenericArguments()) work.Push(a);
+            if (t.Assembly != sdk || t.IsEnum || t.IsGenericType) continue;
+            found.Add(t);
+            foreach (Type sub in all.Where(x => !x.IsAbstract && x.IsSubclassOf(t))) work.Push(sub);
+            foreach (var m in t.GetMembers(Flags).Where(m => m is System.Reflection.PropertyInfo or System.Reflection.FieldInfo))
+            {
+                bool include = m.GetCustomAttributes(typeof(JsonIncludeAttribute), true).Length > 0;
+                bool isPublic = m is System.Reflection.PropertyInfo p0
+                    ? p0.GetMethod?.IsPublic == true || p0.SetMethod?.IsPublic == true
+                    : ((System.Reflection.FieldInfo)m).IsPublic;
+                if (!isPublic && !include) continue;
+                if (m.GetCustomAttributes(typeof(JsonIgnoreAttribute), true).Length > 0) continue;
+                work.Push(m is System.Reflection.PropertyInfo pi ? pi.PropertyType : ((System.Reflection.FieldInfo)m).FieldType);
+            }
+        }
+        return found.OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
     }
 
     /// <summary>The types the generated context has metadata for: the
