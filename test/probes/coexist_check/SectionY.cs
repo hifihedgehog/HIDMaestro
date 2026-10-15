@@ -61,6 +61,10 @@
 //        the controller is on the installed driver, signaling that handle
 //        does not disturb the controller, because the new driver refused the
 //        object and runs an unnamed StopEvent.
+//    Y13. A program that is not elevated holds a dead program's input section
+//        and input event open and creates the owner pipe after the kill. The
+//        driver does not reconnect its watch, so the census reads the device
+//        gone and a sweep removes it.
 //    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
 //        while its SDK holds the earlier driver's OutputEvent. The probe
 //        writes 31 output reports 100 ms apart and times each one to the
@@ -102,6 +106,7 @@ internal static partial class Program
             SectionYPreSquat(user, installed);
             SectionYReused(user);
             SectionYLegacyEvents(user, installed);
+            SectionYHeldSection(user);
         }
         finally { Y.CloseHandle(user); }
     }
@@ -229,6 +234,59 @@ internal static partial class Program
         bool gone = WaitFor(() => tree.All(Native.IsGone), 30_000);
         Console.WriteLine(FormattableString.Invariant($"    Y11 removal: sweep reply {sw.ElapsedMilliseconds} ms after it was sent, devices gone {(gone ? "yes" : "no")}"));
         Check("Y11: the killed program's controller is removed", Ok(s) && gone, $"{sw.ElapsedMilliseconds} ms");
+    }
+
+    /// <summary>Y13. A dead program's input section and event held open, and
+    /// the owner pipe taken, must not revive the device.</summary>
+    static void SectionYHeldSection(IntPtr user)
+    {
+        Clean();
+        string inst, tok;
+        int t;
+        using (var p = PeerProcess.Start("Y-held"))
+        {
+            string cp = p.Send("create pad F1FA coexist-y-held");
+            if (!Ok(cp)) { Check("Y13: a program creates", false, cp); return; }
+            inst = PeerProcess.Field(cp, "instance")!;
+            t = int.Parse(PeerProcess.Field(cp, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            p.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        // The medium thread keeps the dead program's input section and event
+        // alive, so the driver's worker can reach Phase 2 and recycle, and
+        // creates the owner pipe. On the pre-fix driver the recycle
+        // reconnected the watch to this pipe and recorded it connected.
+        IntPtr sec = Y.AsUser(user, () => Y.HoldSection($@"Global\HIDMaestroInput{t}"));
+        // READ_CONTROL is within the Everyone read the SDK's event grants, so
+        // a medium user may hold it. The right does not matter: any handle
+        // keeps the object alive so the driver's Phase 1 can open it again.
+        IntPtr ev = Y.AsUser(user, () => Y.OpenEventW(Y.READ_CONTROL, false, $@"Global\HIDMaestroInputEvent{t}"));
+        var pipe = Y.AsUser(user, () => Y.FakeOwnerPipe(t));
+        Check("Y13: the user holds the dead program's section, event and pipe",
+              sec != IntPtr.Zero && ev != IntPtr.Zero && pipe != null,
+              $"section {sec != IntPtr.Zero}, event {ev != IntPtr.Zero}, pipe {pipe != null}");
+        try
+        {
+            // Past the worker's eight idle 500 ms waits, so a pre-fix driver
+            // has recycled and reconnected the watch.
+            Thread.Sleep(7000);
+            using var nu = PeerProcess.Start("Y-held-sweeper");
+            string? entry = Y.CensusEntry(nu.Send("census"), tok);
+            Check("Y13: the census does not count the held pipe as a running program's",
+                  entry != null && entry.Split('|')[2] is "Dead" or "DeadLegacy", entry ?? "no entry");
+            nu.Send("sweep");
+            WaitFor(() => tree.All(Native.IsGone), 5000);
+            Check("Y13: a sweep removes the dead program's devices", tree.Count > 0 && tree.All(Native.IsGone),
+                  string.Join(", ", tree.Where(d => !Native.IsGone(d))));
+        }
+        finally
+        {
+            if (sec != IntPtr.Zero) Y.CloseHandle(sec);
+            if (ev != IntPtr.Zero) Y.CloseHandle(ev);
+            pipe?.Dispose();
+        }
     }
 
     /// <summary>Y10. Values that name a process created after them.</summary>
@@ -935,6 +993,9 @@ internal static partial class Program
 
         internal const uint EVENT_MODIFY_STATE = 0x0002, SYNCHRONIZE = 0x00100000, READ_CONTROL = 0x00020000;
         internal const uint EVENT_ALL_ACCESS = 0x1F0003;
+
+        /// <summary>A held FILE_MAP_READ handle to a named section, or zero.</summary>
+        internal static IntPtr HoldSection(string name) => OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, name);
         const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         const uint TOKEN_DUPLICATE = 0x0002, TOKEN_IMPERSONATE = 0x0004, TOKEN_QUERY = 0x0008;
         const uint OWNER_SECURITY_INFORMATION = 0x1, DACL_SECURITY_INFORMATION = 0x4;

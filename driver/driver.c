@@ -796,7 +796,10 @@ RecordOwnerGone(_In_ PDEVICE_CONTEXT ctx)
 static VOID
 TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 {
-    if (ctx->OwnerPipe != NULL) return;
+    /* The watch connects once per device context. Once it has ended the
+     * SDK's pipe is closed for good, so a server answering that name now is
+     * another program, not this device's owner. */
+    if (ctx->OwnerWatchEnded || ctx->OwnerPipe != NULL) return;
     HANDLE p = CreateFileW(ctx->OwnerPipeName, GENERIC_READ, 0, NULL,
                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (p == INVALID_HANDLE_VALUE) return;
@@ -849,6 +852,7 @@ static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
     CloseOwnerWatch(ctx);
+    ctx->OwnerWatchEnded = TRUE;
     RecordOwnerGone(ctx);
 
     WdfWaitLockAcquire(ctx->InputLock, NULL);
