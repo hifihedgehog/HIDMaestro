@@ -50,6 +50,9 @@
 //                               token|index|owner|watch per device group
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
 //                               read behind HMController.ReleasesOnConsumerExit
+//   outputs on                  note the Stopwatch timestamp of every
+//                               OutputReceived on the live controllers
+//   outputs                     reply with those timestamps, t=a,b,...
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
 //   staleport <n>               set the last controller's remembered vhci
@@ -87,6 +90,7 @@ internal static class Peer
     static Thread? s_streamer;
     static volatile bool s_streaming;
     static readonly List<double> s_intervals = new();
+    static readonly List<long> s_outputTimes = new();
 
     public static int Run()
     {
@@ -413,6 +417,21 @@ internal static class Peer
                     case "census":
                         Reply(Census());
                         break;
+                    case "outputs":
+                        if (a.Length > 1 && a[1] == "on")
+                        {
+                            lock (s_live)
+                                foreach (var c in s_live)
+                                    c.OutputReceived += (_, _) => { lock (s_outputTimes) s_outputTimes.Add(Stopwatch.GetTimestamp()); };
+                            Reply("OK outputs on");
+                        }
+                        else
+                        {
+                            long[] t;
+                            lock (s_outputTimes) t = s_outputTimes.ToArray();
+                            Reply($"OK outputs n={t.Length} t={string.Join(',', t)}");
+                        }
+                        break;
                     case "releases":
                     {
                         var read = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO")
@@ -465,6 +484,7 @@ internal static class Peer
         "xbox" => ctx.GetProfile("xbox-360-wired")!,
         "composite" => ctx.GetProfile("dualsense-composite")!,
         "gc" => ctx.GetProfile("gamecube-adapter")!,
+        "ds4" => ctx.GetProfile("dualshock-4-v2")!,
         _ => throw new ArgumentException(kind),
     };
 

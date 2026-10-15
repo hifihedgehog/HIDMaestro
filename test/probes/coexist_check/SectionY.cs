@@ -9,10 +9,9 @@
 //        event's DACL admits SYSTEM, Administrators and LocalService only.
 //        The program, and a v1.12.0 program, still open both the way their
 //        SDKs do. A v1.12.0 program's controller moved to the installed
-//        driver gets the same StopEvent. Its OutputEvent stays the object
-//        the earlier driver made, with no DACL, for as long as the program
-//        holds it, and the new driver does not take that object. Both
-//        programs' input keeps flowing.
+//        driver gets the same StopEvent. Its OutputEvent, which the program
+//        still holds from the earlier driver, gets the same DACL (Y11).
+//        Both programs' input keeps flowing.
 //    Y2. The user creates both names, the StopEvent signaled, after a create
 //        of an Xbox 360 controller took its transport index and before its
 //        device exists. The controller's driver takes neither: the StopEvent
@@ -55,6 +54,12 @@
 //    Y10. The driver's values name a process created after they were
 //        written, as a reused process id would, and the user holds the
 //        killed program's pipe name: the sweep removes the devices.
+//    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
+//        while its SDK holds the earlier driver's OutputEvent. The probe
+//        writes 31 output reports 100 ms apart and times each one to the
+//        program's OutputReceived. Then it kills the program and times the
+//        sweep that removes the device. The user still cannot open the
+//        OutputEvent, and every output arrives within 20 ms.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -89,6 +94,7 @@ internal static partial class Program
             SectionYAckKept(installed);
             SectionYPreSquat(user, installed);
             SectionYReused(user);
+            SectionYLegacyEvents(user, installed);
         }
         finally { Y.CloseHandle(user); }
     }
@@ -125,6 +131,76 @@ internal static partial class Program
         Check("Y9: a sweep leaves the running program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
               string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
         Check("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
+    }
+
+    /// <summary>Y11. Output latency and removal time of a v1.12.0 program's
+    /// controller moved onto the installed driver.</summary>
+    static void SectionYLegacyEvents(IntPtr user, string installed)
+    {
+        Clean();
+        string inst;
+        int t;
+        using (var old = PeerProcess.Start("Y-v1.12.0-ds4", "v1.12.0"))
+        {
+            string co = old.Send("create ds4 - coexist-y-ds4");
+            if (!Ok(co)) { Check("Y11: the v1.12.0 program creates a DualShock 4", false, co); return; }
+            inst = PeerProcess.Field(co, "instance")!;
+            t = int.Parse(PeerProcess.Field(co, "transport")!);
+            Check("Y11: its output reader is subscribed", Ok(old.Send("outputs on")));
+            bool moved = Y.InstallBestStoreDriver(inst)
+                         && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+                         && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
+            Check("Y11: the controller moves to the installed driver", moved, $"{Native.DriverVersionOf(inst)}, installed {installed}");
+            if (!moved) return;
+            string output = $@"Global\HIDMaestroOutputEvent{t}";
+            int err = Y.AsUser(user, () => Y.OpenError(Y.SYNCHRONIZE, output));
+            Check($"Y11: the user cannot open {output}", err == Y.ERROR_ACCESS_DENIED, Y.Win32(err) + ", " + (Y.EventSddl(output) ?? "none"));
+
+            string? hid = Native.Subtree(inst).Skip(1).SelectMany(c => Native.InterfaceList(Native.HidGuid, c)).FirstOrDefault();
+            if (hid == null) { Check("Y11: the controller's HID interface is present", false); return; }
+            IntPtr h = Native.CreateFileW(hid, 0x40000000 /*GENERIC_WRITE*/, 3, IntPtr.Zero, 3 /*OPEN_EXISTING*/, 0, IntPtr.Zero);
+            if (h == Native.INVALID) { Check("Y11: the controller's HID interface opens for writing", false); return; }
+            var sent = new List<long>();
+            try
+            {
+                for (int i = 0; i < 31; i++)
+                {
+                    var report = new byte[32];
+                    report[0] = 0x05;
+                    report[1] = 0x07;
+                    report[4] = (byte)(i * 8);
+                    report[6] = (byte)i;
+                    sent.Add(Stopwatch.GetTimestamp());
+                    Y.WriteFile(h, report, report.Length, out _, IntPtr.Zero);
+                    Thread.Sleep(100);
+                }
+            }
+            finally { Native.CloseHandle(h); }
+            Thread.Sleep(600);
+            string reply = old.Send("outputs");
+            var got = (PeerProcess.Field(reply, "t") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).OrderBy(x => x).ToList();
+            var ms = new List<double>();
+            for (int i = 0; i < sent.Count; i++)
+            {
+                long end = i + 1 < sent.Count ? sent[i + 1] : long.MaxValue;
+                long hit = got.FirstOrDefault(x => x >= sent[i] && x < end);
+                ms.Add(hit == 0 ? double.NaN : (hit - sent[i]) * 1000.0 / Stopwatch.Frequency);
+            }
+            var arrived = ms.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
+            double P(double q) => arrived.Count == 0 ? double.NaN : arrived[Math.Min(arrived.Count - 1, (int)(arrived.Count * q))];
+            string shown = FormattableString.Invariant($"first {ms[0]:F1} ms, p50 {P(0.5):F1} ms, p95 {P(0.95):F1} ms, max {(arrived.Count == 0 ? double.NaN : arrived[^1]):F1} ms, {arrived.Count}/{ms.Count} arrived");
+            Console.WriteLine($"    Y11 output latency: {shown}");
+            Check("Y11: every output arrives within 20 ms", arrived.Count == ms.Count && arrived[^1] < 20, shown);
+            old.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        Thread.Sleep(1000);
+        using var nu = PeerProcess.Start("Y-ds4-sweeper");
+        var sw = Stopwatch.StartNew();
+        string s = nu.Send("sweep");
+        bool gone = WaitFor(() => tree.All(Native.IsGone), 30_000);
+        Console.WriteLine(FormattableString.Invariant($"    Y11 removal: sweep reply {sw.ElapsedMilliseconds} ms after it was sent, devices gone {(gone ? "yes" : "no")}"));
+        Check("Y11: the killed program's controller is removed", Ok(s) && gone, $"{sw.ElapsedMilliseconds} ms");
     }
 
     /// <summary>Y10. Values that name a process created after them.</summary>
@@ -792,6 +868,8 @@ internal static partial class Program
         static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string instanceId, IntPtr hwnd, uint flags, IntPtr data);
         [DllImport("newdev.dll", SetLastError = true)]
         static extern bool DiInstallDevice(IntPtr hwnd, IntPtr set, IntPtr data, IntPtr driver, uint flags, out bool needReboot);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool WriteFile(IntPtr h, byte[] buf, int n, out int written, IntPtr overlapped);
         [DllImport("xinput1_4.dll")] internal static extern uint XInputSetState(uint idx, ref XINPUT_VIBRATION v);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern IntPtr OpenEventW(uint access, bool inherit, string name);

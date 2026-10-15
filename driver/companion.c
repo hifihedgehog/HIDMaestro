@@ -267,10 +267,11 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
 }
 
 /* The output doorbell's descriptor and its check on an existing object,
- * as driver.c's CreateHostEvent: SYSTEM, Administrators and LocalService,
- * and an object that exists already is used only when it has a DACL and
- * one of those three owns it. NULL when the name is unusable or the create
- * fails. */
+ * as driver.c's CreateHostEvent: SYSTEM, Administrators and LocalService.
+ * An object that exists already is used when one of those three owns it
+ * under a DACL, or LocalService or SYSTEM owns it under the NULL DACL a
+ * driver before v1.13.0 gave it, which is then replaced with the
+ * descriptor above. NULL when the name is unusable or the create fails. */
 static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
 
 static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
@@ -278,7 +279,7 @@ static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
     PSECURITY_DESCRIPTOR sd = NULL;
     SECURITY_ATTRIBUTES sa;
     HANDLE ev;
-    BOOL existed;
+    BOOL usable = FALSE;
 
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             g_HostEventSddl, SDDL_REVISION_1, &sd, NULL))
@@ -287,28 +288,46 @@ static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
     ev = CreateEventW(&sa, manualReset, FALSE, name);
-    existed = ev != NULL && GetLastError() == ERROR_ALREADY_EXISTS;
-    LocalFree(sd);
-    if (!existed)
+    if (ev == NULL || GetLastError() != ERROR_ALREADY_EXISTS) {
+        LocalFree(sd);
         return ev;
+    }
 
     {
         PSID owner = NULL;
         PACL dacl = NULL;
         PSECURITY_DESCRIPTOR found = NULL;
-        BOOL hostMade = FALSE;
         if (GetSecurityInfo(ev, SE_KERNEL_OBJECT,
                             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                             &owner, NULL, &dacl, NULL, &found) == ERROR_SUCCESS) {
-            hostMade = owner != NULL && dacl != NULL
-                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid)
-                    || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+            BOOL hostOwner = owner != NULL
+                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid));
+            BOOL adminOwner = owner != NULL && IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
+            if (dacl != NULL) {
+                usable = hostOwner || adminOwner;
+            } else if (hostOwner) {
+                /* A driver before v1.13.0 made it with a NULL DACL, and a
+                 * program still holds it, the SDK's output reader most
+                 * often. A program that is not elevated cannot own an
+                 * object as LocalService or SYSTEM. The owner's account may
+                 * always rewrite the DACL, so this host, which runs as that
+                 * account, gives the object the descriptor above. Handles
+                 * opened before keep their access. No new one can be
+                 * opened by a program that is not elevated. */
+                PACL ours = NULL;
+                BOOL present = FALSE, defaulted = FALSE;
+                usable = GetSecurityDescriptorDacl(sd, &present, &ours, &defaulted) && present && ours != NULL
+                    && SetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                                       DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                       NULL, NULL, ours, NULL) == ERROR_SUCCESS;
+            }
             LocalFree(found);
         }
-        if (!hostMade) {
-            CloseHandle(ev);
-            ev = NULL;
-        }
+    }
+    LocalFree(sd);
+    if (!usable) {
+        CloseHandle(ev);
+        ev = NULL;
     }
     return ev;
 }

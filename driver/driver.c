@@ -2303,19 +2303,19 @@ static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)
 /* Create the named event, or open it when a host made it first: the other
  * host of the same controller, or an earlier device context on the same
  * index. Any program can create a Global\ event, so one that exists already
- * is used only when it has a DACL and its owner is LocalService, SYSTEM or
- * Administrators, owners a program that is not elevated cannot give an
- * object. The SDK judges these two names by the same owners
- * (ObjectOwner.IsOwnedByAdmin). An event an older driver made has no DACL
- * and is not used either. NULL when the name is unusable or the create
- * fails. */
+ * is used only when its owner is one a program that is not elevated cannot
+ * give an object: LocalService, SYSTEM or Administrators with a DACL, or
+ * LocalService or SYSTEM with the NULL DACL a driver before v1.13.0 gave
+ * it, which this host then replaces with its own. The SDK's reader applies
+ * the same rule (SharedMemoryIO.TryOpenOutputEvent). NULL when the name is
+ * unusable or the create fails. */
 static HANDLE
 CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name)
 {
     PSECURITY_DESCRIPTOR sd = NULL;
     SECURITY_ATTRIBUTES sa;
     HANDLE ev;
-    BOOL existed;
+    BOOL usable = FALSE;
 
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             g_HostEventSddl, SDDL_REVISION_1, &sd, NULL))
@@ -2324,28 +2324,46 @@ CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name)
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
     ev = CreateEventW(&sa, manualReset, FALSE, name);
-    existed = ev != NULL && GetLastError() == ERROR_ALREADY_EXISTS;
-    LocalFree(sd);
-    if (!existed)
+    if (ev == NULL || GetLastError() != ERROR_ALREADY_EXISTS) {
+        LocalFree(sd);
         return ev;
+    }
 
     {
         PSID owner = NULL;
         PACL dacl = NULL;
         PSECURITY_DESCRIPTOR found = NULL;
-        BOOL hostMade = FALSE;
         if (GetSecurityInfo(ev, SE_KERNEL_OBJECT,
                             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                             &owner, NULL, &dacl, NULL, &found) == ERROR_SUCCESS) {
-            hostMade = owner != NULL && dacl != NULL
-                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid)
-                    || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+            BOOL hostOwner = owner != NULL
+                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid));
+            BOOL adminOwner = owner != NULL && IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
+            if (dacl != NULL) {
+                usable = hostOwner || adminOwner;
+            } else if (hostOwner) {
+                /* A driver before v1.13.0 made it with a NULL DACL, and a
+                 * program still holds it, the SDK's output reader most
+                 * often. A program that is not elevated cannot own an
+                 * object as LocalService or SYSTEM. The owner's account may
+                 * always rewrite the DACL, so this host, which runs as that
+                 * account, gives the object the descriptor above. Handles
+                 * opened before keep their access. No new one can be
+                 * opened by a program that is not elevated. */
+                PACL ours = NULL;
+                BOOL present = FALSE, defaulted = FALSE;
+                usable = GetSecurityDescriptorDacl(sd, &present, &ours, &defaulted) && present && ours != NULL
+                    && SetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                                       DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                       NULL, NULL, ours, NULL) == ERROR_SUCCESS;
+            }
             LocalFree(found);
         }
-        if (!hostMade) {
-            CloseHandle(ev);
-            ev = NULL;
-        }
+    }
+    LocalFree(sd);
+    if (!usable) {
+        CloseHandle(ev);
+        ev = NULL;
     }
     return ev;
 }

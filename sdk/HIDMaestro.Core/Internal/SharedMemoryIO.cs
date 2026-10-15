@@ -456,9 +456,10 @@ internal static partial class SharedMemoryIO
     /// the 8 ms poll cadence. Returns IntPtr.Zero when absent. The caller
     /// owns the returned handle.
     ///
-    /// <para>Any program can create a <c>Global\</c> event, and the
-    /// driver uses an existing one only when a driver host or an elevated
-    /// program made it under a DACL (driver.c CreateHostEvent). The driver
+    /// <para>Any program can create a <c>Global\</c> event. The driver
+    /// uses an existing one only when a driver host or an elevated program
+    /// made it under a DACL, or a driver host made it under the NULL DACL a
+    /// driver before v1.13.0 gave it (driver.c CreateHostEvent). The driver
     /// never signals one that fails the same test, so the reader keeps the
     /// poll cadence instead of waiting on it.</para></summary>
     public static IntPtr TryOpenOutputEvent(int controllerIndex)
@@ -467,7 +468,7 @@ internal static partial class SharedMemoryIO
             $@"Global\HIDMaestroOutputEvent{controllerIndex}");
         if (ev == IntPtr.Zero) return ev;
         using (var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(ev, ownsHandle: false))
-            if (ObjectOwner.IsOwnedByAdmin(h, allowLocalService: true) && ObjectOwner.HasDacl(h))
+            if (ObjectOwner.HasDacl(h) ? ObjectOwner.IsOwnedByAdmin(h, allowLocalService: true) : ObjectOwner.IsOwnedByService(h))
                 return ev;
         CloseHandle(ev);
         return IntPtr.Zero;

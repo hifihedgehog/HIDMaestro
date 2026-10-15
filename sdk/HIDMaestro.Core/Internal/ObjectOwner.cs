@@ -69,6 +69,18 @@ internal static partial class ObjectOwner
         finally { LocalFree(sd); }
     }
 
+    /// <summary>Whether the object's owner is SYSTEM or LocalService, the
+    /// accounts a driver host runs as. The handle needs READ_CONTROL. False
+    /// when the owner cannot be read.</summary>
+    internal static bool IsOwnedByService(SafeHandle handle)
+    {
+        uint r = GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+            out IntPtr owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out IntPtr sd);
+        if (r != 0) return false;
+        try { return IsWellKnownSid(owner, WinLocalSystemSid) || IsWellKnownSid(owner, WinLocalServiceSid); }
+        finally { LocalFree(sd); }
+    }
+
     /// <summary>Whether the object has a DACL. A NULL DACL, which admits
     /// everyone, reads back as none, the same as no DACL at all. The handle
     /// needs READ_CONTROL. False when the DACL cannot be read.</summary>
