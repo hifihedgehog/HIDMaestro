@@ -212,7 +212,16 @@ internal sealed partial class OwnerCensus
     private static bool LegacyPipeLive(int index, Func<IReadOnlyList<string>> members)
     {
         if (!MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return false;
-        bool? ackEnded = AckWatchEnded(index);
+        // The driver sets the ended marker before it writes OwnerConnected 0,
+        // so the marker is read after the values, never before: a marker
+        // read first could be clear only because the watch ended in between.
+        bool ackRead = false;
+        bool? ackEnded = null;
+        bool? AckEnded()
+        {
+            if (!ackRead) { ackEnded = AckWatchEnded(index); ackRead = true; }
+            return ackEnded;
+        }
         string? gone = null;
         foreach (string id in members())
         {
@@ -225,7 +234,7 @@ internal sealed partial class OwnerCensus
                 // means a program has zeroed the section since, so the
                 // value describes the program before it and the rule below
                 // decides.
-                if (ackEnded == false) continue;
+                if (AckEnded() == false) continue;
                 gone ??= "the watch ended";
                 continue;
             }
@@ -256,9 +265,10 @@ internal sealed partial class OwnerCensus
         // or with the ended marker set (a v1.13.0 driver saw the watch end
         // and no program has started on the index since), the pipe and the
         // input section are a squatter's hold on a dead program's objects.
-        if (ackEnded != false)
+        bool? ended = AckEnded();
+        if (ended != false)
         {
-            DeviceOrchestrator.LogDiag(ackEnded == null
+            DeviceOrchestrator.LogDiag(ended == null
                 ? $"    the v1.12.0 owner pipe of transport index {index} is held with no acknowledgement section: a squatter, not a running program"
                 : $"    the v1.12.0 owner pipe of transport index {index} is held after the driver saw its watch end, and no program has started on it since");
             return false;
