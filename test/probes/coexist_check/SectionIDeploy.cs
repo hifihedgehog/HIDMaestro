@@ -14,12 +14,13 @@
 //        lock, replies once the prune is done, and its directory then holds
 //        its payload. The other build is this SDK with another payload hash.
 //   I10  %ProgramData%\HIDMaestro as an upgrade finds it: created by an
-//        elevated administrator, so owned by that user's own SID under
-//        Windows' default owner policy (Native.UserOwnerToken), with the
-//        OpenVR driver's file held open as SteamVR holds it. The SDK takes
-//        the root over in place and stages, and nothing is moved. Then a
-//        root a program that is not elevated created (Native.MediumToken):
-//        taken over in place too.
+//        elevated program, so owned by Administrators with the DACL it
+//        inherits, and the OpenVR driver's file held open as SteamVR holds
+//        it. The SDK resets it where it is and stages, and nothing is
+//        moved. A root a program that is not elevated created
+//        (Native.MediumToken) is moved aside, and hmswd.exe stages under
+//        the new, protected root. The same root with a file under it held
+//        open cannot move, and is refused rather than reset.
 //   I11  The OpenVR driver's folder present and its files gone: a
 //        registration extracts them again at the path SteamVR has
 //        registered. Skipped where SteamVR is not installed.
@@ -175,23 +176,23 @@ internal static partial class Program
             try { Directory.Move(root, saved); setAside = true; }
             catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is set aside for the section", false, e.Message); return; }
 
-            // I10a. The upgrade case: a root an elevated v1.12.0 made, owned
-            // by the administrator's own SID under Windows' default owner
-            // policy, with the OpenVR driver loaded by SteamVR, which holds
-            // its file open.
+            // I10a. The upgrade case: a root an elevated program created, so
+            // owned by Administrators with the DACL it inherits from
+            // %ProgramData%, and the OpenVR driver's file held open under it
+            // as SteamVR holds it.
             string dllDir = Path.Combine(root, "openvr", "hidmaestro", "bin", "win64");
-            string made = CreateUnder(Native.UserOwnerToken(), dllDir);
+            Directory.CreateDirectory(dllDir);
             string? why = Native.WhyWritableByOthers(root);
-            Check("I10: an elevated administrator's process creates %ProgramData%\\HIDMaestro, owned by its own SID",
-                  made == "created" && why != null && why.StartsWith("owner", StringComparison.Ordinal), $"{made}; {why ?? "protected"}");
+            Check("I10: an elevated program's %ProgramData%\\HIDMaestro is owned by Administrators and not protected",
+                  why != null && !why.StartsWith("owner", StringComparison.Ordinal), why ?? "protected");
             string dll = Path.Combine(dllDir, "driver_hidmaestro.dll");
             File.WriteAllBytes(dll, new byte[] { 0x4D, 0x5A });
             using (var loaded = new FileStream(dll, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var p = PeerProcess.Start("I10a"))
             {
                 string r = p.Send("stagingdir");
-                Check("I10: with a file under it held open, the driver still stages", Ok(r), r);
-                Check("I10: %ProgramData%\\HIDMaestro is taken over in place, Administrators/SYSTEM-write-only",
+                Check("I10: with a file under it held open, the driver stages", Ok(r), r);
+                Check("I10: the root is reset where it is, Administrators/SYSTEM-write-only",
                       Native.WhyWritableByOthers(root) == null, Native.WhyWritableByOthers(root) ?? "");
                 Check("I10: the held file is still at its path", File.Exists(dll) && loaded.CanRead, dll);
             }
@@ -202,19 +203,41 @@ internal static partial class Program
             Directory.Delete(Path.Combine(root, "openvr"), true);
             SectionI11(root);
 
-            // I10b. A root a program that is not elevated created.
+            // I10b. A root a program that is not elevated created: moved
+            // aside, and the SWD helper an SWD create runs is staged under
+            // the new, protected root.
             Directory.Delete(root, true);
-            made = CreateUnder(Native.MediumToken(), root);
+            string made = CreateUnder(Native.MediumToken(), root);
             why = Native.WhyWritableByOthers(root);
-            Check("I10: a program that is not elevated creates %ProgramData%\\HIDMaestro",
+            Check("I10: a program that is not elevated creates %ProgramData%\\HIDMaestro, owned by its user",
                   made == "created" && why != null && why.StartsWith("owner", StringComparison.Ordinal), $"{made}; {why ?? "protected"}");
             using (var p = PeerProcess.Start("I10b"))
             {
+                string r = p.Send("swdhelper");
+                string? swd = Ok(r) ? StagingPath(r) : null;
+                var asides = Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").Where(a => !asideBefore.Contains(a)).ToList();
+                Check("I10: that root is moved aside, not reset where it is", asides.Count == 1, string.Join(", ", asides));
+                Check("I10: the new root is Administrators/SYSTEM-write-only",
+                      Native.WhyWritableByOthers(root) == null, Native.WhyWritableByOthers(root) ?? "");
+                Check("I10: and hmswd.exe stages under it, in a protected directory",
+                      swd != null && swd.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                      && File.Exists(swd) && Native.WhyWritableByOthers(Path.GetDirectoryName(swd)!) == null, r);
+            }
+
+            // I10c. The same root with a file under it held open, so it
+            // cannot be moved: refused, and left as it was.
+            Directory.Delete(root, true);
+            made = CreateUnder(Native.MediumToken(), Path.Combine(root, "held"));
+            string heldFile = Path.Combine(root, "held", "file");
+            File.WriteAllText(heldFile, "held");
+            using (var holding = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var p = PeerProcess.Start("I10c"))
+            {
                 string r = p.Send("stagingdir");
-                Check("I10: the driver stages, and the root is taken over in place",
-                      Ok(r) && Native.WhyWritableByOthers(root) == null, $"{r}; {Native.WhyWritableByOthers(root) ?? "protected"}");
-                Check("I10: and its staging directory is Administrators/SYSTEM-write-only",
-                      StagingPath(r) is string dir && Native.WhyWritableByOthers(dir) == null, r);
+                string? whyAfter = Native.WhyWritableByOthers(root);
+                Check("I10: a root its user owns that cannot be moved is refused, not reset where it is",
+                      !Ok(r) && r.Contains(root, StringComparison.OrdinalIgnoreCase) && whyAfter != null && whyAfter.StartsWith("owner", StringComparison.Ordinal),
+                      $"{made}; {r}; {whyAfter ?? "protected"}");
             }
         }
         finally
@@ -222,7 +245,7 @@ internal static partial class Program
             if (setAside)
             {
                 // Everything under these was made in this section, by the
-                // impersonating threads, this probe or the SDK under test.
+                // impersonating thread, this probe or the SDK under test.
                 try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (Exception e) { Console.WriteLine($"    could not remove the section's root: {e.Message}"); }
                 foreach (string aside in Directory.GetDirectories(programData, "HIDMaestro.untrusted-*"))
                     if (!asideBefore.Contains(aside))

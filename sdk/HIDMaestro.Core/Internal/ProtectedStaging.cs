@@ -29,24 +29,28 @@ namespace HIDMaestro.Internal;
 /// non-administrator could write is repaired. A staging directory,
 /// <c>Staging</c> included, is moved aside and recreated. The shared root,
 /// which the OpenVR driver also lives under, and the OpenVR driver's folders
-/// are never moved: SteamVR maps the driver's files from there, and a
-/// directory holding a mapped file cannot be renamed. They are taken over in
-/// place instead, owner set to Administrators and the protected DACL
-/// written, which also covers a root v1.12.0 created, owned by the elevated
-/// user's own SID under Windows' default owner policy.</para>
+/// are reset where they are when SYSTEM or Administrators own them, as they
+/// do when an elevated program created them, v1.12.0 included: SteamVR maps
+/// the driver's files from there, and a directory holding a mapped file
+/// cannot be renamed. One anyone else owns, or that lets anyone else change
+/// its DACL or owner or delete it or its entries, is moved aside like a
+/// staging directory, and refused when it cannot move. Its owner keeps
+/// WRITE_DAC ("An object's owner implicitly has WRITE_DAC access to the
+/// object", Owner of a New Object on Learn), and a principal granted those
+/// rights keeps them, through a handle opened before any reset ("the
+/// requested access is compared to the granted access",
+/// ObReferenceObjectByHandle on Learn).</para>
 ///
-/// <para>A reset leaves one thing behind: a handle a program opened with
-/// WRITE_DAC before it, which keeps that access ("the requested access is
-/// compared to the granted access", ObReferenceObjectByHandle on Learn). Its
-/// holder can change the root's DACL again and, through that, rename the
-/// root's entries. So every use of staged files runs inside a
+/// <para>The elevated uses of staged files run inside a
 /// <see cref="Pin"/>: each directory from the root down to the one in use is
 /// held open without delete sharing, which no rename or delete of those
-/// directories can get past, and is checked again after it is held. A swap
-/// made between two uses is found at the next one and moved aside. Every
-/// staged file's SHA-256 is checked against the embedded resource after it
-/// is written and again under the pin, before each use, so a file that does
-/// not match the bytes shipped inside HIDMaestro.Core.dll never runs.</para>
+/// directories can get past, and is checked again once held, and the file
+/// is checked against its SHA-256 under the pin. The signing tools, the
+/// driver package and the OpenVR extraction take one. A change made
+/// between two uses is found at the next one. Every staged file's SHA-256 is
+/// checked against the embedded or pinned hash after it is written and
+/// again under the pin, so a file that does not match the bytes HIDMaestro
+/// ships never runs.</para>
 ///
 /// <para>Lock order. The staging lock (<see cref="StagingMutexObject"/>) is
 /// a leaf. It is taken under the deploy lock (a deploy's prune, every
@@ -94,6 +98,10 @@ internal static partial class ProtectedStaging
 
     private static readonly SecurityIdentifier SystemSid = new(WellKnownSidType.LocalSystemSid, null);
     private static readonly SecurityIdentifier AdminsSid = new(WellKnownSidType.BuiltinAdministratorsSid, null);
+    // NT SERVICE\TrustedInstaller, the service SID Windows derives from the
+    // service name.
+    private static readonly SecurityIdentifier TrustedInstallerSid =
+        new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
 
     // Everything beyond read, execute and synchronize. A non-admin principal
     // granted any of these can change what later runs elevated.
@@ -113,17 +121,14 @@ internal static partial class ProtectedStaging
     ///
     /// <para>Invariant: nothing the elevated SDK runs, loads or hands to
     /// pnputil, signtool or inf2cat may live directly under this root or
-    /// under the OpenVR folders. The root and those folders are repaired in
-    /// place (<see cref="Repair.InPlace"/>), so a program that opened one
-    /// with WRITE_DAC before the repair keeps that access, and a pin blocks
-    /// a rename or delete but not a change made through such a handle. Only
-    /// the staging tree, <see cref="StagingRoot"/> and below, is moved aside
-    /// when it is not protected, which leaves no stale handle on it. Every
-    /// file the elevated SDK uses is therefore staged there through
-    /// <see cref="DirFor"/>. The OpenVR files are loaded only by SteamVR,
-    /// which runs without elevation. A new file that the elevated SDK uses
-    /// goes under <see cref="DirFor"/>, never next to the OpenVR
-    /// folders.</para></summary>
+    /// under the OpenVR folders. Those may be reset where they are
+    /// (<see cref="Repair.InPlace"/>), which a pin does not make up for: a
+    /// pin blocks a rename or delete, not a change of the DACL itself. Every
+    /// file the elevated SDK uses is staged under <see cref="StagingRoot"/>
+    /// through <see cref="DirFor"/>, and used under a <see cref="Pin"/>. The
+    /// OpenVR files are loaded only by SteamVR, which runs without elevation.
+    /// A new file that the elevated SDK uses goes under <see cref="DirFor"/>,
+    /// never next to the OpenVR folders.</para></summary>
     internal static string HidMaestroRoot => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HIDMaestro");
 
@@ -153,12 +158,12 @@ internal static partial class ProtectedStaging
         }
         lock (s_lock)
         {
-            // The shared root is taken over in place, never moved: the
-            // OpenVR path registry stores an absolute path into its subtree,
-            // and SteamVR may hold the driver's files open. That is safe only
-            // while nothing the elevated SDK uses lives directly under it
-            // (the invariant on HidMaestroRoot). Pin closes what a stale
-            // handle on it could do while staged files are used.
+            // The shared root is reset where it is when SYSTEM or
+            // Administrators own it: the OpenVR path registry stores an
+            // absolute path into its subtree, and SteamVR may hold the
+            // driver's files open. A root anyone else owns is moved aside.
+            // Nothing the elevated SDK uses lives directly under it (the
+            // invariant on HidMaestroRoot).
             EnsureProtected(HidMaestroRoot, RootSddl, Repair.InPlace);
             EnsureProtected(StagingRoot, StagingSddl, Repair.MoveAside);
             string versionDir = Path.Combine(StagingRoot, VersionTag);
@@ -172,11 +177,12 @@ internal static partial class ProtectedStaging
 
     /// <summary>A directory under <c>%ProgramData%\HIDMaestro</c> outside
     /// the staging tree, such as the OpenVR driver's, whose absolute path is
-    /// stored elsewhere and whose files SteamVR may hold open, so it cannot
-    /// move. The root and every level down to <paramref name="relative"/> are
-    /// taken over in place: owner Administrators and the root's DACL,
-    /// Administrators/SYSTEM-write-only and user-readable. A level that is a
-    /// reparse point is refused. Requires elevation.</summary>
+    /// stored elsewhere and whose files SteamVR may hold open. The root and
+    /// every level down to <paramref name="relative"/> get the root's DACL,
+    /// Administrators/SYSTEM-write-only and user-readable: reset where they
+    /// are when SYSTEM or Administrators own them, and otherwise moved aside,
+    /// or refused when they cannot move (<see cref="Repair.InPlace"/>).
+    /// Requires elevation.</summary>
     internal static string SharedDir(string relative)
     {
         lock (s_lock)
@@ -556,12 +562,18 @@ internal static partial class ProtectedStaging
     {
         /// <summary>Moved aside and made again, or, when it cannot be moved,
         /// reset in place unless that would leave a stale handle with
-        /// WRITE_DAC (<see cref="IsHostile"/>). The staging tree.</summary>
+        /// WRITE_DAC or DELETE (<see cref="HostileReason"/>). The staging
+        /// tree.</summary>
         MoveAside,
-        /// <summary>Taken over where it is: owner Administrators and the
-        /// protected DACL. A reparse point is refused. The shared root and
-        /// the OpenVR folders, whose paths are stored elsewhere and whose
-        /// files SteamVR may hold open.</summary>
+        /// <summary>Reset where it is when SYSTEM or Administrators own it
+        /// and no other principal may change its DACL or owner or delete it
+        /// or its entries (<see cref="InPlaceRepairAllowed"/>), and otherwise moved aside as
+        /// <see cref="MoveAside"/> does, refused when it cannot move. The
+        /// shared root and the OpenVR folders, whose paths are stored
+        /// elsewhere and whose files SteamVR may hold open: an elevated
+        /// program creates them owned by Administrators, so the in-place
+        /// arm covers them, and a directory anyone else owns leaves its
+        /// owner WRITE_DAC through a handle opened before any reset.</summary>
         InPlace,
     }
 
@@ -570,15 +582,14 @@ internal static partial class ProtectedStaging
         if (Directory.Exists(dir))
         {
             if (IsProtected(dir)) return;
-            if (repair == Repair.InPlace)
+            if (repair == Repair.InPlace && InPlaceRepairAllowed(dir))
             {
-                // Setting security on a reparse point would set it on the
-                // target instead.
-                if (IsReparsePoint(dir))
-                    throw new InvalidOperationException(
-                        $"{dir} is a reparse point. HIDMaestro will not use files under it.");
-                // A program that opened it with WRITE_DAC before this keeps
-                // that access. Pin covers the uses that follow.
+                // Owned by SYSTEM or Administrators, with no other principal
+                // allowed to change its DACL or owner or to delete it or its
+                // entries: only the DACL is wrong, as on a root an elevated
+                // v1.12.0 created, which SteamVR may hold files under. No
+                // principal but those can open it with WRITE_DAC now, so it
+                // is reset where it is.
                 Reset(dir, sddl);
                 return;
             }
@@ -590,8 +601,8 @@ internal static partial class ProtectedStaging
             // through a handle it already holds, and the directory is moved
             // aside instead, wherever it sits. A move renames the directory
             // entry itself, a reparse point included.
-            bool hostile = IsHostile(dir);
-            if (TryMoveAside(dir))
+            string? hostile = HostileReason(dir);
+            if (TryMoveAside(dir, out string moveError))
             {
                 CreateProtected(dir, sddl);
                 return;
@@ -599,10 +610,8 @@ internal static partial class ProtectedStaging
             // Setting security on a reparse point would set it on the target
             // instead, and a hostile directory keeps its handles: neither is
             // used at all.
-            if (hostile)
-                throw new InvalidOperationException(
-                    $"{dir} is a reparse point, or a principal other than Administrators and SYSTEM owns it or may change its permissions, " +
-                    "and it could not be moved aside. HIDMaestro will not stage files under it.");
+            if (hostile != null)
+                throw new InvalidOperationException(Refusal(dir, hostile, moveError));
             // A move that could not be done, and only the DACL is wrong: no
             // principal but Administrators and SYSTEM can have opened it for
             // WRITE_DAC or WRITE_OWNER. Reset owner and DACL in place. The
@@ -613,32 +622,76 @@ internal static partial class ProtectedStaging
         CreateProtected(dir, sddl);
     }
 
-    /// <summary>True when a reset in place cannot make the directory safe:
-    /// it is a reparse point, or its owner is not Administrators or SYSTEM,
-    /// or another principal is granted the right to change its DACL or owner.
+    /// <summary>True when an <see cref="Repair.InPlace"/> directory may be
+    /// reset where it is: a plain directory owned by SYSTEM or
+    /// Administrators that grants no principal but SYSTEM, Administrators
+    /// and TrustedInstaller the right to change its DACL or owner, or to
+    /// delete it or its entries. No other program can then hold a handle
+    /// that keeps such access across the reset.</summary>
+    internal static bool InPlaceRepairAllowed(string dir) => HostileReason(dir) == null;
+
+    /// <summary>The rights that disqualify a reset in place when anyone but
+    /// SYSTEM, Administrators or TrustedInstaller holds them: WRITE_DAC,
+    /// WRITE_OWNER, DELETE and FILE_DELETE_CHILD. A handle opened with any
+    /// of them keeps it after the DACL changes.</summary>
+    private const FileSystemRights HostileRights =
+        FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership |
+        FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles;
+
+    /// <summary>Why a reset in place cannot make the directory safe, or null
+    /// when it can: it is a reparse point, its owner is not Administrators or
+    /// SYSTEM, or another principal holds one of <see cref="HostileRights"/>.
     /// Such a principal may hold a handle with that access open across the
     /// reset.</summary>
-    private static bool IsHostile(string dir)
+    private static string? HostileReason(string dir)
     {
         try
         {
-            if (IsReparsePoint(dir)) return true;
+            if (IsReparsePoint(dir))
+                return "is a reparse point, which would send what HIDMaestro writes there wherever it points";
             var security = new DirectoryInfo(dir).GetAccessControl();
             var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner == null || (!owner.Equals(AdminsSid) && !owner.Equals(SystemSid)))
-                return true;
+            if (owner == null)
+                return "has no owner HIDMaestro can read, so HIDMaestro cannot tell who may change it";
+            if (!owner.Equals(AdminsSid) && !owner.Equals(SystemSid))
+                return $"is owned by {NameOf(owner)}, not Administrators or SYSTEM, " +
+                       "and an owner keeps the right to change its permissions through any handle it opened before a repair";
             foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
             {
                 if (rule.AccessControlType != AccessControlType.Allow) continue;
-                if ((rule.FileSystemRights & (FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership)) == 0) continue;
-                if (rule.IdentityReference is SecurityIdentifier sid && (sid.Equals(AdminsSid) || sid.Equals(SystemSid)))
+                if ((rule.FileSystemRights & HostileRights) == 0) continue;
+                if (rule.IdentityReference is SecurityIdentifier sid
+                    && (sid.Equals(AdminsSid) || sid.Equals(SystemSid) || sid.Equals(TrustedInstallerSid)))
                     continue;
-                return true;
+                return $"lets {NameOf(rule.IdentityReference)} change its permissions or owner, or delete it or its contents, " +
+                       "and a handle opened with that right keeps it after a repair";
             }
-            return false;
+            return null;
         }
-        catch { return true; }
+        catch (Exception e) { return $"could not have its security read ({e.Message.TrimEnd('.')}), so HIDMaestro cannot tell who may change it"; }
     }
+
+    private static string NameOf(IdentityReference id)
+    {
+        try { return id.Translate(typeof(NTAccount)).Value; }
+        catch { return id.Value; }
+    }
+
+    /// <summary>The text of the refusal a staging throws for a directory it
+    /// can neither reset in place nor move aside.</summary>
+    internal static string Refusal(string dir, string reason, string moveError) =>
+        $"{dir} {reason}. It could not be moved aside ({moveError}), so HIDMaestro will not stage files under it. " +
+        "Close the programs using files under it, SteamVR among them, then try again. " +
+        "Once they are closed, deleting the folder from an elevated prompt also clears it.";
+
+    /// <summary>The text of the refusal a staging throws for a directory
+    /// another program created, for a reason <see cref="HostileReason"/>
+    /// gives, between HIDMaestro's check that it was missing and its own
+    /// creation of it.</summary>
+    internal static string RaceRefusal(string dir, string reason) =>
+        $"{dir} was created by another program while HIDMaestro was creating it, and it {reason}. " +
+        "HIDMaestro will not stage files under it. Close that program, then try again. " +
+        "Once it is closed, deleting the folder from an elevated prompt also clears it.";
 
     private static bool IsReparsePoint(string dir)
     {
@@ -661,9 +714,8 @@ internal static partial class ProtectedStaging
         // EnsureProtected moves such a directory aside. Otherwise the reset
         // leaves it protected.
         if (IsProtected(dir)) return;
-        if (IsHostile(dir))
-            throw new InvalidOperationException(
-                $"{dir} was created by a principal other than Administrators and SYSTEM while HIDMaestro created it. HIDMaestro will not stage files under it.");
+        if (HostileReason(dir) is string reason)
+            throw new InvalidOperationException(RaceRefusal(dir, reason));
         Reset(dir, sddl);
     }
 
@@ -674,16 +726,21 @@ internal static partial class ProtectedStaging
         new DirectoryInfo(dir).SetAccessControl(security);
     }
 
-    private static bool TryMoveAside(string dir)
+    private static bool TryMoveAside(string dir, out string error)
     {
         try
         {
             string aside = dir + ".untrusted-" + Guid.NewGuid().ToString("N");
             Directory.Move(dir, aside);
             DeviceOrchestrator.LogDiag($"ProtectedStaging: moved an unprotected {Path.GetFileName(dir)} aside to {Path.GetFileName(aside)}.");
+            error = "";
             return true;
         }
-        catch { return false; }
+        catch (Exception e)
+        {
+            error = e.Message.TrimEnd('.');
+            return false;
+        }
     }
 
     /// <summary>True when the directory is a plain directory, not a reparse

@@ -1866,10 +1866,14 @@ function Scenario-Coexistence {
 # %ProgramData%\HIDMaestro\Staging in directories only Administrators and
 # SYSTEM can write, a planted writable staging tree is repaired before use,
 # and a staged file with the right length but the wrong bytes is replaced
-# from the embedded copy. Section I of the coexistence probe.
+# from the embedded copy. Section I of the coexistence probe, then its
+# offline checks: whether a directory may be reset where it is, and the
+# refusal of one that may not be and cannot move.
 function Scenario-Protected-Staging {
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'offline' -Tag 'staging-offline' `
+                 -Message 'the offline staging checks failed (see probe stdout)'
 }
 
 # S73: the usbip-win2 install on a clean machine, in Windows Sandbox started

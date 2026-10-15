@@ -41,9 +41,10 @@
 //      removed or changed, is restored before its next deploy. A deploy's
 //      prune never removes the staging another build's program reaches
 //      while the prune runs. A %ProgramData%\HIDMaestro an upgrade finds,
-//      owned by an administrator's own SID with an OpenVR file held open,
-//      or made by a program that is not elevated, is taken over in place,
-//      and the OpenVR driver's files come back at their registered path.
+//      owned by Administrators with an OpenVR file held open, is reset
+//      where it is, one a program that is not elevated made is moved aside,
+//      or refused when it cannot move, and the OpenVR driver's files come
+//      back at their registered path.
 //      SectionIDeploy.cs has the detail. Battery S72 runs this section.
 //   J. A record a killed program left names a transport index and an
 //      identity that a running program holds now: a v1.12.0 program, and a
@@ -126,7 +127,7 @@
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
-// elevation. Exit 0 PASS / 1 FAIL / 2 when another program that embeds
+// elevation, except "offline", which runs the checks in Offline.cs. Exit 0 PASS / 1 FAIL / 2 when another program that embeds
 // HIDMaestro is running.
 using System;
 using System.Collections.Generic;
@@ -187,6 +188,7 @@ internal static partial class Program
     static int Main(string[] args)
     {
         if (IsPlanted()) return Planted(args);
+        if (args.Length > 0 && args[0] == "offline") return Offline();
         if (args.Length > 0 && args[0] == "--peer")
         {
             Peer.Extra = PeerZ.Run;
