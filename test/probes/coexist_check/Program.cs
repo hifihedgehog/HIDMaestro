@@ -106,7 +106,16 @@
 //      not elevated, and an owner pipe such a program makes for a killed
 //      program's index keeps none of its devices. SectionY.cs has the
 //      detail.
-//   S71 runs A to H, J to V, X and Y.
+//   Z. pnputil from System32 and a runner that returns at its timeout,
+//      transport work under a lock of its own with its progress raised
+//      outside it, a timed-out repair that keeps the lock, the legacy check
+//      without the lock, the wait for a running usbip-win2 installer, the
+//      registry ledger's lock free during a WinUSB restore, the WinUSB
+//      package under the deploy lock, a binding that follows a re-import, a
+//      claim during a sweep, the test certificate under the deploy lock, a
+//      bind whose devnode leaves, and a dispose during a bind.
+//      SectionZ.cs has the detail.
+//   S71 runs A to H, J to V, X, Y and Z.
 //
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
@@ -170,13 +179,18 @@ internal static partial class Program
 
     static int Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "--peer") return Peer.Run();
+        if (IsPlanted()) return Planted(args);
+        if (args.Length > 0 && args[0] == "--peer")
+        {
+            Peer.Extra = PeerZ.Run;
+            return Peer.Run();
+        }
         // Every process the probe starts is a peer with no window, and a
         // loader failure in one returns an exit code, never a dialog.
         Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVXY";
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVXYZ";
         // X8 churns devices with v1.12.0 code and runs only inside lane T's
         // sandbox. Named anywhere else, the whole run stops here, before
         // any cleanup, deploy or section touches the machine.
@@ -220,6 +234,7 @@ internal static partial class Program
             ('V', "re-attach attempts a killed composite program leaves", SectionV),
             ('X', "machine-wide names a program that is not elevated creates first", SectionX),
             ('Y', "the driver's events and a faked v1.12.0 owner pipe", SectionY),
+            ('Z', "the transport's install and repair, the machine-wide locks and the WinUSB binding", SectionZ),
         };
         foreach (var (id, title, body) in sections)
         {
@@ -641,7 +656,7 @@ internal static partial class Program
     }
 
     /// <summary>The SDK's own driver package with a DriverVer above this
-    /// SDK's version, catalogued and signed the way the SDK does it, then
+    /// SDK's version, cataloged and signed the way the SDK does it, then
     /// installed. Returns the version Windows reports for it.</summary>
     static string InstallNewerDriver()
     {

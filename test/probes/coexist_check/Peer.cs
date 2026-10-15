@@ -109,6 +109,21 @@ internal static class Peer
     static readonly List<double> s_intervals = new();
     static readonly List<long> s_outputTimes = new();
 
+    /// <summary>The departing-devnode rule (WinUsbBinding.DepartingDevnodeRule)
+    /// below which bindwinusb refuses to bind.</summary>
+    const int BindRule = 6;
+
+    /// <summary>Commands this file does not know, for a section whose own
+    /// file only the current SDK's probe compiles (SectionZ.cs). Returns
+    /// the reply, or null for an unknown command.</summary>
+    public static Func<string[], string?>? Extra { get; set; }
+
+    /// <summary>The controller this program created last, or null.</summary>
+    public static HMController? Last()
+    {
+        lock (s_live) return s_live.Count > 0 ? s_live[^1] : null;
+    }
+
     public static int Run()
     {
         Reply($"OK ready pid={Environment.ProcessId} sdk={typeof(HMContext).Assembly.GetName().Version}");
@@ -418,6 +433,11 @@ internal static class Peer
                         lock (s_live) last = s_live.Count > 0 ? s_live[^1] : null;
                         var m = last?.GetType().GetMethod("BindWinUsb", Type.EmptyTypes);
                         if (m == null) { Reply("ERR bindwinusb no method"); break; }
+                        // A bind on an SDK below the departing-devnode rule
+                        // can change a devnode on its way out at dispose.
+                        object? rule = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.WinUsbBinding")
+                            ?.GetField("DepartingDevnodeRule", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
+                        if (rule is not int r || r < BindRule) { Reply($"ERR bindwinusb the SDK's departing-devnode rule is {rule ?? "none"}, below {BindRule}"); break; }
                         Reply($"OK bindwinusb {m.Invoke(last, null)}");
                         break;
                     }
@@ -522,7 +542,7 @@ internal static class Peer
                         Reply("OK exit");
                         return 0;
                     default:
-                        Reply($"ERR unknown {a[0]}");
+                        Reply(Extra?.Invoke(a) ?? $"ERR unknown {a[0]}");
                         break;
                 }
             }
