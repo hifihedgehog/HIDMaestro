@@ -112,7 +112,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // closed handle, and a late call from the connection never sets a
     // closed event. No lock is held across consumer code, so Dispose never
     // waits for a handler on the connection's thread. It waits for one on
-    // the audio pump (OutFrames) only through that pump's bounded join.
+    // the audio pump (OutFrames) or the audio event thread (ControlChanged,
+    // StreamingChanged) only through that thread's bounded join, 500 ms
+    // each, so up to a second when both hold a handler.
     private readonly object _lifetimeLock = new();
     private bool _protocolWakeClosed;
     private bool _streamWakeClosed;

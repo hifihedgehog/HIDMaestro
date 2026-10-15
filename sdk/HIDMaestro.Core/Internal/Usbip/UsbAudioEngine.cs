@@ -110,12 +110,15 @@ internal sealed partial class UsbAudioEngine : IDisposable
     public event Action<ReadOnlyMemory<byte>>? OutFrames;
 
     /// <summary>Raised when the host selects an alternate setting on a
-    /// streaming interface: (interfaceNumber, altSetting).</summary>
+    /// streaming interface: (interfaceNumber, altSetting). Raised on the
+    /// engine's event thread, in order with <see cref="ControlChanged"/>.</summary>
     public event Action<byte, byte>? AltSettingChanged;
 
     /// <summary>Raised when the host writes a UAC control:
     /// (unitId, selector, channel, rawValue). Selector 1 is Mute,
-    /// 2 is Volume, per UAC1 Feature Unit control selectors.</summary>
+    /// 2 is Volume, per UAC1 Feature Unit control selectors. Raised on the
+    /// engine's event thread, in order with
+    /// <see cref="AltSettingChanged"/>.</summary>
     public event Action<byte, byte, byte, short>? ControlChanged;
 
     // UAC1 feature-unit control state, keyed by (unitId, selector, channel).
@@ -148,10 +151,33 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private long _nextInferCheck;                       // pump thread only
     private readonly List<byte> _inferClosing = new(4); // pump thread only
 
-    // AltSettingChanged reports the current setting, never a stale one:
-    // the raise re-reads the state under its own lock, and a value equal to
-    // the last one raised is not raised again.
-    private readonly object _altEventLock = new();
+    // The control and stream events wait here, in the order the changes
+    // happened, for the engine's event thread, which raises them. A
+    // consumer's handler runs there, so one that blocks stalls no transfer:
+    // the connection's reader takes the host's commands and the pump paces
+    // the audio as before. Guarded by _lock. The queue holds structs, so an
+    // event allocates nothing once it has grown. The thread starts with the
+    // first event and closes its own wake event as it ends. Dispose closes
+    // the wake event of an engine whose thread never started. A change
+    // queued before Dispose is still raised.
+    private readonly struct AudioEvent
+    {
+        public readonly bool IsControl;
+        public readonly byte A, B, C;   // a control's unit, selector and channel, or a stream's interface and alternate setting
+        public readonly short Value;
+        public AudioEvent(bool isControl, byte a, byte b, byte c, short value)
+        {
+            IsControl = isControl; A = a; B = b; C = c; Value = value;
+        }
+    }
+
+    private readonly Queue<AudioEvent> _events = new();
+    private Thread? _eventThread;
+    private readonly AutoResetEvent _eventWake = new(false);
+    private bool _eventWakeClosed;
+
+    // The alternate setting last raised per interface, so a setting equal
+    // to the last one is not raised again. The event thread's alone.
     private readonly Dictionary<byte, byte> _altRaised = new();
 
     public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete)
@@ -235,7 +261,6 @@ internal sealed partial class UsbAudioEngine : IDisposable
     public void SubmitIso(PendingIso urb)
     {
         long now = Stopwatch.GetTimestamp();
-        bool opened = false;
         lock (_lock)
         {
             // After Dispose the pump has ended, or is ending and closing its
@@ -259,12 +284,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 {
                     _altSetting[iface] = urb.AltSetting;
                     _inferredOpen.Add(iface);
-                    opened = true;
+                    QueueAltLocked(iface, urb.AltSetting);
                 }
             }
             _wake.Set();
         }
-        if (opened) RaiseAltChanged(urb.InterfaceNumber);
     }
 
     /// <summary>Remove a pending URB by seqnum (CMD_UNLINK). Returns true
@@ -326,26 +350,77 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 _outCursor = 0;
                 _inCursor = 0;
             }
+            QueueAltLocked(interfaceNumber, altSetting);
         }
-        RaiseAltChanged(interfaceNumber);
     }
 
-    private void RaiseAltChanged(byte interfaceNumber)
+    /// <summary>Queue a stream state change for the event thread. Caller
+    /// holds <see cref="_lock"/>.</summary>
+    private void QueueAltLocked(byte interfaceNumber, byte altSetting)
+        => QueueEventLocked(new AudioEvent(false, interfaceNumber, altSetting, 0, 0));
+
+    /// <summary>Caller holds <see cref="_lock"/>. After Dispose nothing is
+    /// raised.</summary>
+    private void QueueEventLocked(in AudioEvent e)
     {
-        if (_stop) return;
-        lock (_altEventLock)
+        if (_stop || _eventWakeClosed) return;
+        _events.Enqueue(e);
+        if (_eventThread == null)
         {
-            byte alt;
-            lock (_lock) alt = _altSetting.TryGetValue(interfaceNumber, out var a) ? a : (byte)0;
-            if (_altRaised.TryGetValue(interfaceNumber, out var last) && last == alt) return;
-            _altRaised[interfaceNumber] = alt;
-            AltSettingChanged?.Invoke(interfaceNumber, alt);
+            var events = new Thread(EventLoop)
+            {
+                IsBackground = true,
+                Name = "HMUsbipAudioEvents",
+            };
+            events.Start();
+            _eventThread = events;
+        }
+        _eventWake.Set();
+    }
+
+    /// <summary>The event thread: raises each queued event in order, and
+    /// ends at Dispose once the queue is empty.</summary>
+    private void EventLoop()
+    {
+        try
+        {
+            while (true)
+            {
+                AudioEvent e;
+                bool any;
+                lock (_lock)
+                {
+                    // Each change the host made before Dispose is raised,
+                    // then the thread ends.
+                    any = _events.TryDequeue(out e);
+                    if (!any && _stop) return;
+                }
+                if (!any)
+                {
+                    _eventWake.WaitOne(250);
+                    continue;
+                }
+                if (e.IsControl)
+                {
+                    ControlChanged?.Invoke(e.A, e.B, e.C, e.Value);
+                }
+                else if (!_altRaised.TryGetValue(e.A, out var last) || last != e.B)
+                {
+                    _altRaised[e.A] = e.B;
+                    AltSettingChanged?.Invoke(e.A, e.B);
+                }
+            }
+        }
+        finally
+        {
+            lock (_lock) _eventWakeClosed = true;
+            _eventWake.Dispose();
         }
     }
 
     /// <summary>Close each inferred stream whose traffic stopped. Runs on
     /// the pump thread, which must not wait on a consumer's handler, so
-    /// the closes are raised from the thread pool.</summary>
+    /// the closes go to the event thread.</summary>
     private void CloseIdleInferredStreams(long now)
     {
         _inferClosing.Clear();
@@ -361,12 +436,8 @@ internal sealed partial class UsbAudioEngine : IDisposable
             {
                 _inferredOpen.Remove(iface);
                 _altSetting[iface] = 0;
+                QueueAltLocked(iface, 0);
             }
-        }
-        foreach (var iface in _inferClosing)
-        {
-            byte closed = iface;
-            ThreadPool.QueueUserWorkItem(_ => RaiseAltChanged(closed));
         }
     }
 
@@ -481,8 +552,8 @@ internal sealed partial class UsbAudioEngine : IDisposable
         {
             if (!_controlCur.ContainsKey((unitId, selector, channel))) return false;
             _controlCur[(unitId, selector, channel)] = value;
+            QueueEventLocked(new AudioEvent(true, unitId, selector, channel, value));
         }
-        ControlChanged?.Invoke(unitId, selector, channel, value);
         return true;
     }
 
@@ -618,17 +689,41 @@ internal sealed partial class UsbAudioEngine : IDisposable
         lock (_lock) ReturnUrbLocked(p);
     }
 
-    /// <summary>Stops the pump. It closes its own handles as it ends. A
-    /// second call returns.</summary>
+    /// <summary>Stops the pump and the event thread. Each closes its own
+    /// handles as it ends, and the event thread first raises what is
+    /// queued. An engine that never raised an event has no event thread,
+    /// and its wake event is closed here. Each join gives up after 500 ms,
+    /// so a handler still running holds Dispose up that long at most. A
+    /// second call returns. Called from a handler on either thread, it does
+    /// not wait for that thread.</summary>
     public void Dispose()
     {
+        Thread? events;
         lock (_lock)
         {
             if (_stop) return;
             _stop = true;
             _wake.Set();
+            events = _eventThread;
+            if (!_eventWakeClosed)
+            {
+                if (events != null)
+                {
+                    _eventWake.Set();
+                }
+                else
+                {
+                    // No thread will ever wait on it. The queue starts no
+                    // thread after _stop.
+                    _eventWakeClosed = true;
+                    _eventWake.Dispose();
+                }
+            }
         }
-        try { _thread.Join(500); } catch { }
+        if (Thread.CurrentThread != _thread)
+            try { _thread.Join(500); } catch { }
+        if (events != null && Thread.CurrentThread != events)
+            try { events.Join(500); } catch { }
     }
 
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;

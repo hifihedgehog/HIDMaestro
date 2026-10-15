@@ -1490,7 +1490,11 @@ function Scenario-Usb-Composite-Schema {
                  -Message 'a composite persona no longer matches its hardware dump, or a composite leaked into the UMDF2 path (see probe stdout)'
 }
 
+# S43 runs the probe twice: its audio engine checks on their own, which
+# need no device, then the protocol against a live import.
 function Scenario-Usbip-Server-Protocol {
+    Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' -Arguments '--offline' -Tag 'offline' `
+                 -Message 'the USB/IP audio engine leaked its wake event, reported a stale IsStreaming, dropped a change queued before Dispose, or kept more than one waiting write per control (see probe stdout)'
     Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
                  -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, or the import handshake; see probe stdout)'
 }

@@ -19,8 +19,15 @@
 //   - a throwing handler on any public audio event, each in a child
 //     process: the handler after it still runs and the connection still
 //     answers
+//   - a ControlChanged or StreamingChanged handler that blocks stalls no
+//     transfer, and the events still arrive in the order the host sent
+//     them
 //   - the import's port lookup goes on after failed lookups of the host
 //     controller's interface
+//   - "--offline", which needs no elevation and no device: the audio
+//     engine's event thread, driven in process as the connection drives it
+//     (its wake event closed at Dispose, queued events raised at Dispose,
+//     IsStreaming current while a handler blocks)
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -66,6 +73,7 @@ internal static partial class Program
         if (args.Length >= 2 && args[0] == "--throwing") return ThrowingChild(args[1]);
         if (args.Length >= 1 && args[0] == "--held-pump") return HeldPumpChild();
         if (args.Length >= 1 && args[0] == "offline") return OfflineOnly();
+        if (args.Length >= 1 && args[0] == "--offline") return Offline();
 
         Console.WriteLine("=== USB/IP server protocol (issue #39) ===");
         // An exception that escapes a connection thread ends the process.
@@ -106,6 +114,7 @@ internal static partial class Program
                 LocationMatch();
                 ThrowingHandlers();
                 PortLookup();
+                SlowHandlers(ctx, server);
             }
             finally
             {
@@ -772,6 +781,103 @@ internal static partial class Program
         }
     }
 
+    // ── Audio handlers that block ───────────────────────────────────────
+
+    /// <summary>A ControlChanged or StreamingChanged handler that blocks,
+    /// on a DualSense composite's public audio object, while the host goes
+    /// on: an interrupt IN read with a frame behind it must still be
+    /// answered, as a real pad answers its IN endpoint whatever the host's
+    /// audio app does. Before this release both events ran on the
+    /// connection's one command thread, so the read was not even taken in
+    /// until the handler returned. Then the order of the events the host
+    /// caused.</summary>
+    static void SlowHandlers(HMContext ctx, UsbipServer server)
+    {
+        Console.WriteLine("\n-- audio handlers that block --");
+        const int SlowIndex = 61;
+        var profile = ctx.GetProfile("dualsense-composite")!.Inner;
+        foreach (string which in new[] { "ControlChanged", "StreamingChanged" })
+        {
+            var device = new UsbipEmulatedDevice(profile, SlowIndex);
+            server.Register(device);
+            var audio = new HMUsbAudio(profile, device);
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            void Block() { entered.Set(); release.Wait(5000); }
+            if (which == "ControlChanged") audio.ControlChanged += (_, _) => Block();
+            else audio.Output.StreamingChanged += (_, _) => Block();
+            try
+            {
+                using var cl = new Client(server.Port);
+                cl.SendImport(device.BusId);
+                cl.ReadExactly(8);
+                cl.ReadExactly(312);
+                cl.ControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());
+                if (which == "ControlChanged")
+                    cl.SendControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 });   // SET_CUR(volume)
+                else
+                    cl.SendControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());         // SET_INTERFACE(1, alt 1)
+                bool inHandler = entered.Wait(2000);
+
+                IntPtr view = SharedMemoryIO.EnsureInputMapping(SlowIndex);
+                IntPtr evt = SharedMemoryIO.GetInputEvent(SlowIndex);
+                uint seqNo = ReadSeqNoBase(view);
+                uint read = cl.NextSeq();
+                cl.SendSubmitInterruptIn(read, 4, 64);
+                var data = MakePattern(63, 0x31);
+                SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, data, 63, null);
+                var reply = System.Threading.Tasks.Task.Run(() => cl.ReadRet(read));
+                bool answered = reply.Wait(1000);
+                bool stillBlocked = !release.IsSet;
+                release.Set();
+                if (!answered) reply.Wait(5000);
+                Check($"a blocking {which} handler leaves the device answering its interrupt IN endpoint",
+                      inHandler && answered && stillBlocked,
+                      inHandler ? (answered ? "answered while the handler blocked" : "no answer while the handler blocked") : "the handler never ran");
+            }
+            finally
+            {
+                release.Set();
+                server.Unregister(device);
+                device.Dispose();
+                SharedMemoryIO.DestroyController(SlowIndex);
+            }
+        }
+
+        // The order: the speaker stream opened, three volume writes, the
+        // stream parked, as the host sent them.
+        {
+            var device = new UsbipEmulatedDevice(profile, SlowIndex);
+            server.Register(device);
+            var audio = new HMUsbAudio(profile, device);
+            var order = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            audio.ControlChanged += (_, e) => order.Enqueue($"volume {e.RawValue}");
+            audio.Output.StreamingChanged += (_, on) => order.Enqueue(on ? "open" : "parked");
+            try
+            {
+                using var cl = new Client(server.Port);
+                cl.SendImport(device.BusId);
+                cl.ReadExactly(8);
+                cl.ReadExactly(312);
+                cl.ControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());
+                cl.ControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());
+                foreach (short v in new short[] { -4096, -2048, -1024 })
+                    cl.ControlOut(0x21, 0x01, 0x0200, 0x0200, new[] { (byte)v, (byte)(v >> 8) });
+                cl.ControlOut(0x01, 0x0B, 0x0000, 0x0001, Array.Empty<byte>());
+                string want = "open, volume -4096, volume -2048, volume -1024, parked";
+                WaitUntil(() => order.Count >= 5, 2000);
+                string got = string.Join(", ", order);
+                Check("the audio events arrive in the order the host caused them", got == want, got);
+            }
+            finally
+            {
+                server.Unregister(device);
+                device.Dispose();
+                SharedMemoryIO.DestroyController(SlowIndex);
+            }
+        }
+    }
+
     // ── The import's port lookup ────────────────────────────────────────
 
     /// <summary>Two failed lookups of the host controller's interface path
@@ -799,6 +905,71 @@ internal static partial class Program
         if (!found) pathField.SetValue(null, kept);
         Check("after two failed interface lookups the port lookup finds the interface again",
               found, found ? $"after {calls} lookups" : "not after 40 lookups");
+    }
+
+    // ── Offline: the audio engine's event thread ────────────────────────
+
+    /// <summary>The audio engine on its own, with no device, no section
+    /// and no connection: its thread and handles, and its events, driven
+    /// the way the connection's reader drives them.</summary>
+    static int Offline()
+    {
+        Console.WriteLine("=== USB/IP audio engine, offline ===");
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var ds = ctx.GetProfile("dualsense-composite")!.Inner;
+        var gc = ctx.GetProfile("gamecube-adapter")!.Inner;
+        var wakeField = typeof(UsbAudioEngine).GetField("_eventWake", Private)!;
+        var eventsThread = typeof(UsbAudioEngine).GetField("_eventThread", Private)!;
+        UsbAudioEngine.IsoCompletion none = (_, _, _) => { };
+        static byte[] Volume(short v) => new[] { (byte)v, (byte)(v >> 8) };
+
+        // An engine that never raised an event, as on every USB/IP device
+        // with no audio, closes its wake event at Dispose.
+        {
+            var engine = new UsbAudioEngine(gc, none);
+            var wake = (AutoResetEvent)wakeField.GetValue(engine)!;
+            engine.Dispose();
+            Check("an audio engine with no event closes its wake event at Dispose",
+                  wake.SafeWaitHandle.IsClosed, wake.SafeWaitHandle.IsClosed ? "" : "still open");
+        }
+
+        // A stream opened and parked while a handler blocks, then Dispose:
+        // IsStreaming follows the host at once, and both changes are still
+        // raised once the handler returns.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            var audio = new HMUsbAudio(ds, engine);
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var raised = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            audio.ControlChanged += (_, e) =>
+            {
+                raised.Enqueue($"volume {e.RawValue}");
+                if (!entered.IsSet) { entered.Set(); release.Wait(5000); }
+            };
+            audio.Output.StreamingChanged += (_, on) => raised.Enqueue(on ? "open" : "parked");
+            engine.HandleUacSet(2, 2, 0, Volume(-4096));
+            bool blocked = entered.Wait(2000);
+            engine.SetAltSetting(1, 1);
+            bool streaming = audio.Output.IsStreaming;
+            engine.SetAltSetting(1, 0);
+            bool parked = !audio.Output.IsStreaming;
+            Check("IsStreaming follows the host at once while an audio handler blocks",
+                  blocked && streaming && parked, $"handler blocking {blocked}, open {streaming}, parked {parked}");
+            engine.Dispose();
+            release.Set();
+            var thread = (Thread?)eventsThread.GetValue(engine);
+            bool ended = WaitUntil(() => thread == null || !thread.IsAlive, 3000);
+            var wake = (AutoResetEvent)wakeField.GetValue(engine)!;
+            string got = string.Join(", ", raised);
+            Check("changes queued before Dispose are still raised, then the event thread ends and closes its wake event",
+                  got == "volume -4096, open, parked" && ended && wake.SafeWaitHandle.IsClosed,
+                  $"{got}, ended {ended}, wake closed {wake.SafeWaitHandle.IsClosed}");
+        }
+
+        Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
+        return s_failures == 0 ? 0 : 1;
     }
 
     static (int Code, string Line) RunChild(string which) => RunChild($"--throwing {which}", null);
@@ -880,14 +1051,17 @@ internal static partial class Program
             {
                 case "control":
                     cl.ControlOut(0x21, 0x01, 0x0200, 0x0200, new byte[] { 0x00, 0xF0 });
+                    SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= 1, 3000);
                     break;
                 case "speaker-streaming":
                     cl.ControlOut(0x01, 0x0B, 0x0001, 0x0001, Array.Empty<byte>());
                     cl.ControlOut(0x01, 0x0B, 0x0000, 0x0001, Array.Empty<byte>());
+                    SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= 2, 3000);
                     break;
                 case "microphone-streaming":
                     cl.ControlOut(0x01, 0x0B, 0x0001, 0x0002, Array.Empty<byte>());
                     cl.ControlOut(0x01, 0x0B, 0x0000, 0x0002, Array.Empty<byte>());
+                    SpinWait.SpinUntil(() => Volatile.Read(ref seen) >= 2, 3000);
                     break;
                 case "frames":
                 {
@@ -902,7 +1076,7 @@ internal static partial class Program
                 case "inferred-close":
                 {
                     // No SET_INTERFACE: the traffic opens the stream, and the
-                    // engine closes it from the thread pool once it stops.
+                    // engine closes it once the traffic stops.
                     uint o1 = cl.NextSeq(), o2 = cl.NextSeq();
                     cl.SendSubmitIsoOut(o1, 1, new byte[P * B], P, B);
                     cl.SendSubmitIsoOut(o2, 1, new byte[P * B], P, B);

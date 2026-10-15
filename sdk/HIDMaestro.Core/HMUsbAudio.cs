@@ -19,9 +19,11 @@ namespace HIDMaestro;
 /// streams it to whatever is recording, silence when the buffer runs
 /// dry).</para>
 ///
-/// <para>All events fire on the backend's pacing thread. Handlers must
-/// be quick and thread-safe, same contract as
-/// <see cref="HMController.OutputReceived"/>.</para></summary>
+/// <para>FramesReceived fires on the audio pump, which paces the stream,
+/// so its handlers must be quick, the same contract as
+/// <see cref="HMController.OutputReceived"/>. ControlChanged and both
+/// StreamingChanged events fire on the device's audio event thread, in the
+/// order the host made the changes. Handlers must be thread-safe.</para></summary>
 public sealed class HMUsbAudio
 {
     /// <summary>The render direction: speaker plus haptic channels.</summary>
@@ -32,14 +34,23 @@ public sealed class HMUsbAudio
 
     /// <summary>Raised when the host writes a UAC control (volume or mute
     /// on either feature unit). Windows drives these from the volume
-    /// mixer and the recording control panel. Raised on the device's USB/IP
-    /// connection thread. An exception a handler throws is caught and
-    /// dropped, and the host's request still completes.</summary>
+    /// mixer and the recording control panel. Raised on the device's audio
+    /// event thread, in the order the host made the changes, together with
+    /// the streams' StreamingChanged. A handler that takes its time delays
+    /// the events after it and no transfer: the device goes on answering
+    /// the host. A change the host made before the controller is disposed
+    /// is still raised, after Dispose returns if a handler is still running
+    /// then. Dispose waits for a running handler 500 ms at most. An
+    /// exception a handler throws is caught and dropped.</summary>
     public event EventHandler<HMAudioControlChangedEventArgs>? ControlChanged;
 
     private readonly Dictionary<byte, string> _unitFunctions = new();
 
-    internal HMUsbAudio(ControllerProfile profile, UsbipEmulatedDevice device)
+    internal HMUsbAudio(ControllerProfile profile, UsbipEmulatedDevice device) : this(profile, device.Audio)
+    {
+    }
+
+    internal HMUsbAudio(ControllerProfile profile, UsbAudioEngine engine)
     {
         var cfg = profile.UsbConfiguration!;
 
@@ -55,19 +66,19 @@ public sealed class HMUsbAudio
             }
         }
 
-        Output = new HMAudioOutput(outStream, outIface);
-        Microphone = new HMMicrophoneInput(inStream, inIface, device.Audio);
+        Output = new HMAudioOutput(outStream, outIface, engine);
+        Microphone = new HMMicrophoneInput(inStream, inIface, engine);
 
         foreach (var ctl in cfg.AudioControls ?? new List<UsbAudioControlSpec>())
             _unitFunctions[ctl.UnitId] = ctl.Function;
 
-        device.Audio.OutFrames += pcm => Output.RaiseFrames(pcm);
-        device.Audio.AltSettingChanged += (iface, alt) =>
+        engine.OutFrames += pcm => Output.RaiseFrames(pcm);
+        engine.AltSettingChanged += (iface, alt) =>
         {
             if (iface == outIface) Output.SetStreaming(alt != 0);
             else if (iface == inIface) Microphone.SetStreaming(alt != 0);
         };
-        device.Audio.ControlChanged += (unit, selector, channel, raw) =>
+        engine.ControlChanged += (unit, selector, channel, raw) =>
         {
             var handler = ControlChanged;
             if (handler == null) return;
@@ -104,8 +115,11 @@ public sealed class HMAudioOutput
     /// SET_INTERFACE to a streaming alternate setting until the one that
     /// parks it. On a transport that never forwards SET_INTERFACE
     /// (usbip-win2 0.9.8.1 beside an older filter driver), true from the
-    /// first isochronous transfer until the transfers stop.</summary>
-    public bool IsStreaming { get; private set; }
+    /// first isochronous transfer until the transfers stop. It reads the
+    /// device's state, so it changes the moment the host's request does,
+    /// before <see cref="StreamingChanged"/> reports the change if an
+    /// earlier audio handler is still running.</summary>
+    public bool IsStreaming => _engine.GetAltSetting(_interfaceNumber) != 0;
 
     /// <summary>Interleaved 16-bit little-endian PCM for one paced
     /// window (typically a few milliseconds). The memory is only valid
@@ -116,25 +130,36 @@ public sealed class HMAudioOutput
 
     /// <summary>Raised when the host opens or parks the stream. Where the
     /// transport never forwards SET_INTERFACE, the close is raised within
-    /// about half a second of the last isochronous transfer. An exception a
-    /// handler throws is caught and dropped.</summary>
+    /// about half a second of the last isochronous transfer. Raised on the
+    /// device's audio event thread, in order with
+    /// <see cref="HMUsbAudio.ControlChanged"/>, so it can come after
+    /// <see cref="IsStreaming"/> has changed. A change the host made before
+    /// the controller is disposed is still raised, after Dispose returns if
+    /// a handler is still running then. An exception a handler throws is
+    /// caught and dropped.</summary>
     public event Action<HMAudioOutput, bool>? StreamingChanged;
 
-    internal HMAudioOutput(UsbAudioStreamSpec? stream, byte interfaceNumber)
+    private readonly UsbAudioEngine _engine;
+    private readonly byte _interfaceNumber;
+    // The state last raised, on the audio event thread alone.
+    private bool _raised;
+
+    internal HMAudioOutput(UsbAudioStreamSpec? stream, byte interfaceNumber, UsbAudioEngine engine)
     {
         Channels = stream?.Channels ?? 0;
         SampleRateHz = stream?.SampleRateHz ?? 0;
         BitsPerSample = stream?.BitsPerSample ?? 0;
         ChannelRoles = stream?.ChannelRoles?.ToArray() ?? Array.Empty<string>();
-        _ = interfaceNumber;
+        _engine = engine;
+        _interfaceNumber = interfaceNumber;
     }
 
     internal void RaiseFrames(ReadOnlyMemory<byte> pcm) => EventRaise.Each(FramesReceived, this, pcm, nameof(FramesReceived));
 
     internal void SetStreaming(bool streaming)
     {
-        if (IsStreaming == streaming) return;
-        IsStreaming = streaming;
+        if (_raised == streaming) return;
+        _raised = streaming;
         EventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
@@ -151,7 +176,7 @@ public sealed class HMMicrophoneInput
 
     /// <summary>True while the host has the capture stream open, by the
     /// same rule as <see cref="HMAudioOutput.IsStreaming"/>.</summary>
-    public bool IsStreaming { get; private set; }
+    public bool IsStreaming => _engine.GetAltSetting(_interfaceNumber) != 0;
 
     /// <summary>Raised when the host opens or parks the capture stream,
     /// by the same rule as <see cref="HMAudioOutput.StreamingChanged"/>. An
@@ -159,6 +184,9 @@ public sealed class HMMicrophoneInput
     public event Action<HMMicrophoneInput, bool>? StreamingChanged;
 
     private readonly UsbAudioEngine _engine;
+    private readonly byte _interfaceNumber;
+    // The state last raised, on the audio event thread alone.
+    private bool _raised;
 
     internal HMMicrophoneInput(UsbAudioStreamSpec? stream, byte interfaceNumber, UsbAudioEngine engine)
     {
@@ -166,7 +194,7 @@ public sealed class HMMicrophoneInput
         SampleRateHz = stream?.SampleRateHz ?? 0;
         BitsPerSample = stream?.BitsPerSample ?? 0;
         _engine = engine;
-        _ = interfaceNumber;
+        _interfaceNumber = interfaceNumber;
     }
 
     /// <summary>Append interleaved 16-bit little-endian PCM at the
@@ -180,8 +208,8 @@ public sealed class HMMicrophoneInput
 
     internal void SetStreaming(bool streaming)
     {
-        if (IsStreaming == streaming) return;
-        IsStreaming = streaming;
+        if (_raised == streaming) return;
+        _raised = streaming;
         EventRaise.Each(StreamingChanged, this, streaming, nameof(StreamingChanged));
     }
 }
