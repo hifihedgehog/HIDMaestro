@@ -192,7 +192,7 @@ internal static partial class Program
         // positive control is an attempt the probe starts there, whose
         // first try comes 30 s after it.
         var seen = new List<string>();
-        using (var squat = new Squatter(port, seen))
+        using (var squat = new AttemptListener(port, seen))
         {
             touched.Add((port, "1-99"));
             Vhci.Attach("127.0.0.1", port, "1-99");
@@ -210,14 +210,14 @@ internal static partial class Program
 
     /// <summary>A USB/IP server that exports nothing: it answers every
     /// import with ST_NODEV and notes the bus id asked for.</summary>
-    sealed class Squatter : IDisposable
+    sealed class AttemptListener : IDisposable
     {
         readonly System.Net.Sockets.TcpListener _listener;
         readonly Thread _thread;
         readonly List<string> _seen;
         volatile bool _stop;
 
-        public Squatter(int port, List<string> seen)
+        public AttemptListener(int port, List<string> seen)
         {
             _seen = seen;
             _listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
