@@ -1980,8 +1980,9 @@ function Scenario-GameCube-Sdl {
 # configuration manager lists, also over Enum keys it cannot read (scratch
 # keys under HKCU, denied, deleted or gone).
 # Then a USB/IP device's frames on each of its three send paths, the input
-# pump, a protocol's poll clock and the Switch 2 Pro's report clock, with no
-# allocation in the median run.
+# pump, a protocol's poll clock and the Switch 2 Pro's report clock, and a
+# DualSense composite's output and audio transfers, with no allocation in
+# the median run.
 function Scenario-Perf-Budget {
     Invoke-Probe -Dir 'perf_budget_check' -Exe 'PerfBudgetCheck.exe' -Arguments 'gate' -Tag 'gate' `
                  -Message 'a submit path allocated or the census missed a devnode (see probe stdout)' -SkipCodes 2

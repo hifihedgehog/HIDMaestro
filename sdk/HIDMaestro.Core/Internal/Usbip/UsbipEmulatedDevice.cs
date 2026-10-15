@@ -182,7 +182,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private readonly FeatureStubTable? _stubs;
     private byte _lastFeatureMessage;
     private int _lastFeatureParam = -1;
-    private byte[]? _lastFeaturePayload;
+    // The last such SET_REPORT's data, copied in place: the reader's buffer
+    // it arrived in is reused for the next transfer.
+    private byte[] _lastFeaturePayload = Array.Empty<byte>();
+    private int _lastFeatureLength;
 
     // Switch 2 Pro Controller persona (issue #66). Non-null exactly for
     // 057E:2069: the command responder behind the vendor interface's bulk
@@ -627,8 +630,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// <summary>A CMD_SUBMIT. One the connection's reader passed in while
     /// Dispose ran goes unanswered, and the reader ends the connection at
     /// the next one (<see cref="IsDisposed"/>).</summary>
-    public void HandleSubmit(in UsbipProtocol.CommandHeader cmd, byte[]? outPayload,
-                             (uint Offset, uint Length)[]? isoPackets)
+    public void HandleSubmit(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload,
+                             ReadOnlySpan<(uint Offset, uint Length)> isoPackets)
     {
         if (_stop) return;
         if (cmd.Ep == 0)
@@ -653,16 +656,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
         if (ep.TransferType == 1) // isochronous → audio engine
         {
-            var urb = new UsbAudioEngine.PendingIso
-            {
-                Seqnum = cmd.Seqnum,
-                IsIn = cmd.IsIn,
-                TransferBufferLength = cmd.TransferBufferLength,
-                Packets = isoPackets ?? Array.Empty<(uint, uint)>(),
-                OutPayload = outPayload,
-                InterfaceNumber = ep.InterfaceNumber,
-                AltSetting = ep.AltSetting,
-            };
+            // The engine's own URB, since the packets and data arrived in the
+            // reader's reused buffers and the URB waits for its due tick.
+            var urb = Audio.RentUrb(isoPackets.Length, cmd.IsIn ? 0 : outPayload.Length);
+            urb.Seqnum = cmd.Seqnum;
+            urb.IsIn = cmd.IsIn;
+            urb.TransferBufferLength = cmd.TransferBufferLength;
+            urb.InterfaceNumber = ep.InterfaceNumber;
+            urb.AltSetting = ep.AltSetting;
+            isoPackets.CopyTo(urb.Packets);
+            if (!cmd.IsIn) outPayload.CopyTo(urb.OutPayload);
             Audio.SubmitIso(urb);
             return;
         }
@@ -710,16 +713,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // commands.
             if (_engine != null && epAddr == _engine.Protocol.CommandEndpoint)
             {
-                ProtocolSubmitOut(cmd.Seqnum, outPayload ?? Array.Empty<byte>());
+                ProtocolSubmitOut(cmd.Seqnum, outPayload);
                 return;
             }
 
             // Interrupt OUT: a full output report, Report ID first when the
             // descriptor declares IDs. Same split as driver.c WRITE_REPORT.
-            var payload = outPayload ?? Array.Empty<byte>();
+            var payload = outPayload;
             byte rid = payload.Length > 0 ? payload[0] : (byte)0;
             PublishOutput(SourceHidOutput, rid,
-                payload.Length > 0 ? payload.AsSpan(1) : ReadOnlySpan<byte>.Empty);
+                payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty);
             SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
             return;
         }
@@ -742,7 +745,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 return;
             }
 
-            var command = outPayload ?? Array.Empty<byte>();
+            var command = outPayload;
             bool started;
             // Under the report lock, so a report built before this command
             // is on the wire before the command's own answer. A host that
@@ -991,7 +994,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     // ── Control transfers ────────────────────────────────────────────────
 
-    private void HandleControl(in UsbipProtocol.CommandHeader cmd, byte[]? outPayload)
+    private void HandleControl(in UsbipProtocol.CommandHeader cmd, ReadOnlySpan<byte> outPayload)
     {
         Span<byte> setup = stackalloc byte[8];
         BitConverter.TryWriteBytes(setup, cmd.Setup);
@@ -1105,9 +1108,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             else
             {
                 bool ok = bRequest == 0x01 // SET_CUR
-                    && Audio.HandleUacSet(unitId, selector, channel,
-                        outPayload ?? Array.Empty<byte>());
-                if (ok) SendRetSubmit(cmd.Seqnum, 0, outPayload?.Length ?? 0, null);
+                    && Audio.HandleUacSet(unitId, selector, channel, outPayload);
+                if (ok) SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
                 else SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
             }
             return;
@@ -1132,7 +1134,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 else
                 {
-                    SendRetSubmit(cmd.Seqnum, 0, outPayload?.Length ?? 0, null);
+                    SendRetSubmit(cmd.Seqnum, 0, outPayload.Length, null);
                 }
                 return;
             }
@@ -1163,7 +1165,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     }
 
     private void HandleHidClassRequest(in UsbipProtocol.CommandHeader cmd, byte bRequest,
-        ushort wValue, ushort wLength, bool deviceToHost, byte[]? outPayload,
+        ushort wValue, ushort wLength, bool deviceToHost, ReadOnlySpan<byte> outPayload,
         bool primaryInterface = true)
     {
         byte reportType = (byte)(wValue >> 8); // 1 input, 2 output, 3 feature
@@ -1225,7 +1227,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             {
                 // The protocol reads the data stage as it reads its command
                 // endpoint, report ID first.
-                var payload = outPayload ?? Array.Empty<byte>();
+                var payload = outPayload;
                 ProtocolHandleCommands(payload);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
@@ -1235,9 +1237,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 return;
             case 0x09 when !deviceToHost: // SET_REPORT
             {
-                var payload = outPayload ?? Array.Empty<byte>();
+                var payload = outPayload;
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
-                var data = payload.Length > 0 ? payload.AsSpan(1) : ReadOnlySpan<byte>.Empty;
+                var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
                 // A protocol whose feature reports carry no report id (the
                 // Steam Deck's) answers the NEXT GET_REPORT according to
                 // the message this write opened. MessageByte says where
@@ -1254,7 +1256,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // ID_GET_STRING_ATTRIBUTE does.
                     int paramAt = _stubs.MessageByte + 2;
                     _lastFeatureParam = payload.Length > paramAt ? payload[paramAt] : -1;
-                    _lastFeaturePayload = payload;
+                    if (_lastFeaturePayload.Length < payload.Length)
+                        _lastFeaturePayload = new byte[payload.Length];
+                    payload.CopyTo(_lastFeaturePayload);
+                    _lastFeatureLength = payload.Length;
                 }
                 PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
@@ -1286,7 +1291,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         if (_stubs != null)
         {
             byte key = _stubs.MatchesLastMessage ? _lastFeatureMessage : reportId;
-            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength, _lastFeaturePayload);
+            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength,
+                _lastFeaturePayload.AsSpan(0, _lastFeatureLength));
             if (declared != null)
             {
                 // A protocol riding report ids answers with the id it was
@@ -1523,7 +1529,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     /// <summary>Completion callback from the audio engine's pacing thread.
     /// Builds the isochronous RET_SUBMIT per the 0.9.7.5 receive rules.</summary>
-    private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, byte[]? inCompacted, int perPacketActual)
+    private void CompleteIsoOnWire(UsbAudioEngine.PendingIso p, ReadOnlySpan<byte> inCompacted, int perPacketActual)
     {
         var c = _connection;
         if (c == null) return;

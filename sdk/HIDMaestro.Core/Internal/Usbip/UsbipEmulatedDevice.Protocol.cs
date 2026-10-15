@@ -135,7 +135,7 @@ internal sealed partial class UsbipEmulatedDevice
             WakeProtocolClock();
     }
 
-    private void ProtocolSubmitOut(uint seqnum, byte[] payload)
+    private void ProtocolSubmitOut(uint seqnum, ReadOnlySpan<byte> payload)
     {
         ProtocolHandleCommands(payload);
         SendRetSubmit(seqnum, 0, payload.Length, null);

@@ -31,14 +31,19 @@ namespace HIDMaestro.Internal.Usbip;
 /// actual_length equal to the sum of per-packet actual lengths.</para></summary>
 internal sealed partial class UsbAudioEngine : IDisposable
 {
-    /// <summary>A pending isochronous URB, parked until its due tick.</summary>
+    /// <summary>A pending isochronous URB, parked until its due tick. The
+    /// engine keeps spent ones and hands them out again
+    /// (<see cref="RentUrb"/>), so their arrays are at least as long as the
+    /// counts say.</summary>
     internal sealed class PendingIso
     {
         public uint Seqnum;
         public bool IsIn;
         public int TransferBufferLength;
         public (uint Offset, uint Length)[] Packets = Array.Empty<(uint, uint)>();
-        public byte[]? OutPayload;      // OUT only: the PCM the host sent
+        public int PacketCount;
+        public byte[] OutPayload = Array.Empty<byte>();     // OUT only: the PCM the host sent
+        public int OutLength;
         public long DueTick;            // Stopwatch timestamp when the last packet's window closes
         public int FrameAtCompletion;   // virtual frame counter value to report
         public byte InterfaceNumber;    // the streaming interface the endpoint belongs to
@@ -53,7 +58,20 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private readonly IntPtr[] _waitPair = new IntPtr[2];
     private volatile bool _stop;
 
-    private readonly Action<PendingIso, byte[]?, int> _complete;
+    /// <summary>Puts a completed URB on the wire: IN, the compacted data
+    /// and each packet's actual length. Called on the pump thread. The data
+    /// is the pump's own buffer, valid for the call.</summary>
+    internal delegate void IsoCompletion(PendingIso urb, ReadOnlySpan<byte> inData, int perPacketActual);
+
+    private readonly IsoCompletion _complete;
+
+    // Spent URBs, handed out again by RentUrb, and the pump's microphone
+    // buffer, so a transfer allocates nothing once they have grown to the
+    // host's sizes. Spare URBs are guarded by _lock. The buffer is the
+    // pump's alone.
+    private readonly Stack<PendingIso> _spareUrbs = new();
+    private const int MaxSpareUrbs = 64;
+    private byte[] _micOut = Array.Empty<byte>();
 
     // Stream cursors, one per direction, in Stopwatch ticks. Zero means
     // "no stream in flight; next URB re-anchors to now".
@@ -136,7 +154,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private readonly object _altEventLock = new();
     private readonly Dictionary<byte, byte> _altRaised = new();
 
-    public UsbAudioEngine(ControllerProfile profile, Action<PendingIso, byte[]?, int> complete)
+    public UsbAudioEngine(ControllerProfile profile, IsoCompletion complete)
     {
         _complete = complete;
 
@@ -188,6 +206,28 @@ internal sealed partial class UsbAudioEngine : IDisposable
 
     // ── Submission (called from the connection reader thread) ────────────
 
+    /// <summary>A URB to fill and submit, with room for
+    /// <paramref name="packets"/> packets and <paramref name="outLength"/>
+    /// bytes of OUT data.</summary>
+    public PendingIso RentUrb(int packets, int outLength)
+    {
+        PendingIso? urb = null;
+        lock (_lock)
+            if (_spareUrbs.Count > 0) urb = _spareUrbs.Pop();
+        urb ??= new PendingIso();
+        if (urb.Packets.Length < packets) urb.Packets = new (uint, uint)[packets];
+        if (urb.OutPayload.Length < outLength) urb.OutPayload = new byte[outLength];
+        urb.PacketCount = packets;
+        urb.OutLength = outLength;
+        return urb;
+    }
+
+    /// <summary>Caller holds <see cref="_lock"/>.</summary>
+    private void ReturnUrbLocked(PendingIso urb)
+    {
+        if (_spareUrbs.Count < MaxSpareUrbs) _spareUrbs.Push(urb);
+    }
+
     /// <summary>Queue an isochronous URB. Due time comes from the per-
     /// direction stream cursor: each packet advances the cursor one
     /// service interval; a cursor in the past re-anchors to now (stream
@@ -200,10 +240,14 @@ internal sealed partial class UsbAudioEngine : IDisposable
         {
             // After Dispose the pump has ended, or is ending and closing its
             // event.
-            if (_stop) return;
+            if (_stop)
+            {
+                ReturnUrbLocked(urb);
+                return;
+            }
             ref long cursor = ref urb.IsIn ? ref _inCursor : ref _outCursor;
             if (cursor < now - 50 * TicksPerMs) cursor = now; // (re)anchor
-            cursor += urb.Packets.Length * TicksPerMs;
+            cursor += urb.PacketCount * TicksPerMs;
             urb.DueTick = cursor;
             _pending.Add(urb);
 
@@ -234,6 +278,7 @@ internal sealed partial class UsbAudioEngine : IDisposable
             {
                 if (_pending[i].Seqnum == seqnum)
                 {
+                    ReturnUrbLocked(_pending[i]);
                     _pending.RemoveAt(i);
                     return true;
                 }
@@ -246,7 +291,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
     /// sent; the socket is going away.</summary>
     public void Clear()
     {
-        lock (_lock) _pending.Clear();
+        lock (_lock)
+        {
+            foreach (var urb in _pending) ReturnUrbLocked(urb);
+            _pending.Clear();
+        }
     }
 
     // ── Alternate settings ───────────────────────────────────────────────
@@ -538,9 +587,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
             // Fill each packet from the microphone ring, compacted per the
             // protocol. Baseline one service interval per packet; underrun
             // fills silence so the stream never starves usbaudio.
-            int per = Math.Min(_micBytesPerInterval, p.Packets.Length > 0 ? (int)p.Packets[0].Length : _micBytesPerInterval);
+            int per = Math.Min(_micBytesPerInterval, p.PacketCount > 0 ? (int)p.Packets[0].Length : _micBytesPerInterval);
             if (per <= 0) per = _micBytesPerInterval;
-            var data = new byte[per * p.Packets.Length];
+            int length = per * p.PacketCount;
+            if (_micOut.Length < length) _micOut = new byte[length];
+            var data = _micOut.AsSpan(0, length);
             lock (_lock)
             {
                 int buffered = (_micHead - _micTail + _micRing.Length) % _micRing.Length;
@@ -552,17 +603,19 @@ internal sealed partial class UsbAudioEngine : IDisposable
                     data[i] = _micRing[_micTail];
                     _micTail = (_micTail + 1) % _micRing.Length;
                 }
-                // Remainder stays zero: silence.
+                // The rest is silence.
+                data[take..].Clear();
             }
             _complete(p, data, per);
         }
         else
         {
-            var payload = p.OutPayload;
-            if (payload != null && payload.Length > 0)
-                OutFrames?.Invoke(payload);
-            _complete(p, null, 0);
+            if (p.OutLength > 0)
+                OutFrames?.Invoke(new ReadOnlyMemory<byte>(p.OutPayload, 0, p.OutLength));
+            _complete(p, ReadOnlySpan<byte>.Empty, 0);
         }
+        // Sent, and no list holds it: the URB goes back for the next submit.
+        lock (_lock) ReturnUrbLocked(p);
     }
 
     /// <summary>Stops the pump. It closes its own handles as it ends. A

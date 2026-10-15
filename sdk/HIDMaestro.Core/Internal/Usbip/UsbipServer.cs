@@ -362,6 +362,12 @@ internal sealed class UsbipServer : IDisposable
             Send(buf);
         }
 
+        // The reader's buffers for a submit's OUT data and isochronous
+        // packets, grown to the host's sizes and reused, so a transfer
+        // allocates nothing. Every use of them ends inside HandleSubmit.
+        private byte[] _outData = Array.Empty<byte>();
+        private (uint Offset, uint Length)[] _isoPackets = Array.Empty<(uint, uint)>();
+
         private void CommandLoop(UsbipEmulatedDevice device)
         {
             var header = new byte[UsbipProtocol.HeaderSize];
@@ -377,8 +383,8 @@ internal sealed class UsbipServer : IDisposable
 
                 if (cmd.Command == UsbipProtocol.CmdSubmit)
                 {
-                    byte[]? payload = null;
-                    (uint, uint)[]? iso = null;
+                    Span<byte> payload = default;
+                    Span<(uint Offset, uint Length)> iso = default;
 
                     bool isIsoch = cmd.NumberOfPackets != UsbipProtocol.NumberOfPacketsNonIsoch;
                     if (isIsoch && (cmd.NumberOfPackets < 0 || cmd.NumberOfPackets > UsbipProtocol.MaxIsoPackets))
@@ -386,7 +392,9 @@ internal sealed class UsbipServer : IDisposable
 
                     if (!cmd.IsIn && cmd.TransferBufferLength > 0)
                     {
-                        payload = new byte[cmd.TransferBufferLength];
+                        if (_outData.Length < cmd.TransferBufferLength)
+                            _outData = new byte[cmd.TransferBufferLength];
+                        payload = _outData.AsSpan(0, cmd.TransferBufferLength);
                         ReadExactly(payload);
                     }
                     if (isIsoch)
@@ -396,7 +404,8 @@ internal sealed class UsbipServer : IDisposable
                         try
                         {
                             ReadExactly(descs.AsSpan(0, n * UsbipProtocol.IsoDescriptorSize));
-                            iso = new (uint, uint)[n];
+                            if (_isoPackets.Length < n) _isoPackets = new (uint, uint)[n];
+                            iso = _isoPackets.AsSpan(0, n);
                             for (int i = 0; i < n; i++)
                                 iso[i] = UsbipProtocol.ReadIsoDescriptor(
                                     descs.AsSpan(i * UsbipProtocol.IsoDescriptorSize));
@@ -444,17 +453,17 @@ internal sealed class UsbipServer : IDisposable
         /// of per-packet actuals. OUT: descriptors only, actual_length
         /// echoing the transfer buffer length. Wire rules from usbip-win2
         /// 0.9.7.5 wsk_receive.cpp fill_isoc_data / prepare_wsk_mdl.</summary>
-        public void SendRetSubmitIso(UsbAudioEngine.PendingIso p, byte[]? inCompacted, int perPacketActual)
+        public void SendRetSubmitIso(UsbAudioEngine.PendingIso p, ReadOnlySpan<byte> inCompacted, int perPacketActual)
         {
-            int n = p.Packets.Length;
-            int dataLen = p.IsIn ? (inCompacted?.Length ?? 0) : 0;
+            int n = p.PacketCount;
+            int dataLen = p.IsIn ? inCompacted.Length : 0;
             int total = UsbipProtocol.HeaderSize + dataLen + n * UsbipProtocol.IsoDescriptorSize;
             var buf = ArrayPool<byte>.Shared.Rent(total);
             try
             {
                 int actual = p.IsIn ? perPacketActual * n : p.TransferBufferLength;
                 UsbipProtocol.WriteRetSubmit(buf, p.Seqnum, 0, actual, p.FrameAtCompletion, n, 0);
-                if (dataLen > 0) inCompacted!.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
+                if (dataLen > 0) inCompacted.CopyTo(buf.AsSpan(UsbipProtocol.HeaderSize));
                 int d = UsbipProtocol.HeaderSize + dataLen;
                 for (int i = 0; i < n; i++)
                 {

@@ -100,9 +100,9 @@ internal sealed class FeatureStubTable
     /// truncated to what the host asked for. Null when the table has no
     /// entry, which stalls, as a real device does for a message it does not
     /// implement.</summary>
-    public byte[]? Lookup(byte key, ushort wLength) => Lookup(key, -1, wLength, null);
+    public byte[]? Lookup(byte key, ushort wLength) => Lookup(key, -1, wLength, default);
 
-    public byte[]? Lookup(byte key, int param, ushort wLength) => Lookup(key, param, wLength, null);
+    public byte[]? Lookup(byte key, int param, ushort wLength) => Lookup(key, param, wLength, default);
 
     /// <summary>The answer for a message and the parameter it carried. An
     /// entry declared for that exact parameter wins; otherwise the entry
@@ -110,13 +110,13 @@ internal sealed class FeatureStubTable
     /// that takes no parameter.</summary>
     /// <param name="written">The message the host wrote, for an entry that
     /// answers by echoing it.</param>
-    public byte[]? Lookup(byte key, int param, ushort wLength, byte[]? written)
+    public byte[]? Lookup(byte key, int param, ushort wLength, ReadOnlySpan<byte> written)
     {
         if (!_reports.TryGetValue((key, param), out var entry)
             && !_reports.TryGetValue((key, -1), out entry)) return null;
         var full = new byte[entry.Size];
-        var body = entry.Echo && written != null && written.Length > 0 ? written : entry.Data;
-        Array.Copy(body, full, Math.Min(body.Length, full.Length));
+        ReadOnlySpan<byte> body = entry.Echo && written.Length > 0 ? written : entry.Data;
+        body[..Math.Min(body.Length, full.Length)].CopyTo(full);
         // Issue #62. Answer with the build Steam currently ships, so its
         // updater sees a unit that has already taken the update it offers.
         if (entry.StampKey != null && _steamStamp(entry.StampKey) is uint current)

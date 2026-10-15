@@ -24,10 +24,12 @@
 //   usbip [runs]   a USB/IP device's frames, from the input section to the
 //                  host's reply, on each of its three send paths: bytes the
 //                  process allocated per frame, the time, and lock
-//                  contentions. Then the protocol engine's lock per frame,
-//                  beside an uncontended lock alone
+//                  contentions. Then a DualSense composite's output and
+//                  audio transfers: bytes per transfer. Then the protocol
+//                  engine's lock per frame, beside an uncontended lock alone
 //   gate           S84: no submit path allocates, a USB/IP device's send
-//                  paths included, the codec path, consumer
+//                  paths and its output and audio transfers included, the
+//                  codec path, consumer
 //                  usages, a keyboard's raw reports and an absolute pointer
 //                  included, a long mouse movement leaves 16 frames kept,
 //                  the census's own walk completes and finds what the
@@ -848,6 +850,7 @@ internal static class Program
             inEp: 1, readLength: 64, frame: body, extended: true, queueEveryOther: false,
             start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x03, 0x91, 0x00, 0x0D, 0x00, 0x08, 0x00, 0x00,
                                                               0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF })), gate);
+        UsbipTransfers(server, ctx.GetProfile(Composite)!.Inner, runs, gate);
 #if !HM_BASE
         var gcProfile = ctx.GetProfile(GameCube)!.Inner;
         var gcReport = new byte[37];
@@ -954,6 +957,77 @@ internal static class Program
         }
     }
 
+    /// <summary>A DualSense composite's transfers from the host: an output
+    /// report on the interrupt OUT endpoint (rumble and the light bar), ten
+    /// packets of speaker PCM on the isochronous OUT endpoint and ten of
+    /// microphone on the isochronous IN endpoint, each set completed before
+    /// the next, on the audio pump's 1 ms pacing. A consumer takes the
+    /// speaker's PCM as HMUsbAudio does. Counted per transfer, three a
+    /// set.</summary>
+    static void UsbipTransfers(UsbipServer server, ControllerProfile profile, int runs, bool gate)
+    {
+        const string name = "output and audio transfers, " + Composite;
+        const int Sets = 25, Packets = 10, SpeakerPacket = 392, MicPacket = 196;
+        var device = new UsbipEmulatedDevice(profile, UsbipIndex);
+        server.Register(device);
+        int heard = 0;
+        device.Audio.OutFrames += _ => heard++;
+        try
+        {
+            using var w = new UsbipWire(server.Port, device.BusId);
+            long imported = Stopwatch.GetTimestamp();
+            var output = new byte[48];
+            output[0] = 0x02;   // DualSense USB output report
+            var pcm = new byte[Packets * SpeakerPacket];
+
+            void Transfers()
+            {
+                for (int i = 0; i < Sets; i++)
+                {
+                    output[4] = (byte)i;
+                    pcm[0] = (byte)i;
+                    w.WaitFor(w.SubmitOut(3, output));
+                    uint speaker = w.SubmitIsoOut(1, pcm, Packets, SpeakerPacket);
+                    uint mic = w.SubmitIsoIn(2, Packets, MicPacket);
+                    w.WaitForBoth(speaker, mic);
+                }
+            }
+
+            var warm = Stopwatch.StartNew();
+            do Transfers();
+            while (warm.ElapsedMilliseconds < 1500);
+            Thread.Sleep(500);
+
+            double firstRunAt = (Stopwatch.GetTimestamp() - imported) / (double)Stopwatch.Frequency;
+            var perTransfer = new List<double>(runs);
+            long worst = 0;
+            for (int run = 0; run < runs; run++)
+            {
+                long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
+                Transfers();
+                long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
+                worst = Math.Max(worst, bytes);
+                perTransfer.Add((double)bytes / (Sets * 3));
+            }
+            Report($"USB/IP {name}: bytes the process allocated per transfer", perTransfer, runs, $", most in one run of {Sets * 3} transfers {worst}");
+            Console.WriteLine(FormattableString.Invariant(
+                $"  USB/IP {name}: the runs took {firstRunAt:F1} s to {(Stopwatch.GetTimestamp() - imported) / (double)Stopwatch.Frequency:F1} s after the import, {heard} speaker windows heard"));
+            if (gate)
+            {
+                var sorted = perTransfer.OrderBy(x => x).ToList();
+                double median = sorted[sorted.Count / 2];
+                Check($"USB/IP {name}: a transfer allocates nothing", median == 0,
+                      $"median run {median * Sets * 3:F0} bytes, worst {worst}, over {runs} runs of {Sets * 3} transfers");
+            }
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(UsbipIndex);
+        }
+    }
+
 #if !HM_BASE
     /// <summary>What the protocol engine's lock costs a frame: SetReport,
     /// the one call a frame makes into the engine, timed whole on one
@@ -997,7 +1071,8 @@ internal static class Program
     {
         readonly Socket _s;
         readonly byte[] _header = new byte[48];
-        readonly byte[] _data = new byte[1024];
+        readonly byte[] _data = new byte[8192];
+        readonly byte[] _descs = new byte[16 * 64];
         uint _seq = 1;
 
         public UsbipWire(int port, string busId)
@@ -1022,7 +1097,7 @@ internal static class Program
             return s;
         }
 
-        void Submit(uint seq, bool isIn, uint ep, int length)
+        void Submit(uint seq, bool isIn, uint ep, int length, int packets = -1)
         {
             Array.Clear(_header);
             BinaryPrimitives.WriteUInt32BigEndian(_header, 1);                  // CMD_SUBMIT
@@ -1030,7 +1105,7 @@ internal static class Program
             BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(12), isIn ? 1u : 0u);
             BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(16), ep);
             BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(24), length);
-            BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(32), -1);       // not isochronous
+            BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(32), packets);  // -1: not isochronous
             Send(_header);
         }
 
@@ -1049,21 +1124,72 @@ internal static class Program
             return s;
         }
 
+        /// <summary>Isochronous OUT: the data, then one descriptor a
+        /// packet.</summary>
+        public uint SubmitIsoOut(uint ep, ReadOnlySpan<byte> data, int packets, int perPacket)
+        {
+            uint s = Next(false);
+            Submit(s, false, ep, data.Length, packets);
+            Send(data);
+            SendDescriptors(packets, perPacket);
+            return s;
+        }
+
+        public uint SubmitIsoIn(uint ep, int packets, int perPacket)
+        {
+            uint s = Next(true);
+            Submit(s, true, ep, packets * perPacket, packets);
+            SendDescriptors(packets, perPacket);
+            return s;
+        }
+
+        void SendDescriptors(int packets, int perPacket)
+        {
+            var d = _descs.AsSpan(0, packets * 16);
+            d.Clear();
+            for (int i = 0; i < packets; i++)
+            {
+                BinaryPrimitives.WriteInt32BigEndian(d[(i * 16)..], i * perPacket);       // offset
+                BinaryPrimitives.WriteInt32BigEndian(d[(i * 16 + 4)..], perPacket);       // length
+            }
+            Send(d);
+        }
+
         /// <summary>Read replies up to <paramref name="seq"/>'s and return
         /// its status.</summary>
         public int WaitFor(uint seq)
         {
             while (true)
             {
-                Receive(_header);
-                if (BinaryPrimitives.ReadUInt32BigEndian(_header) != 3)
-                    throw new InvalidOperationException("a reply that is not RET_SUBMIT");
-                uint got = BinaryPrimitives.ReadUInt32BigEndian(_header.AsSpan(4));
-                int status = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(20));
-                int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
-                if ((got & 1) == 1 && actual > 0) Receive(_data.AsSpan(0, actual));
-                if (got == seq) return status;
+                if (ReadReply(out int status) == seq) return status;
             }
+        }
+
+        /// <summary>Read replies until both seqnums have answered, in either
+        /// order.</summary>
+        public void WaitForBoth(uint a, uint b)
+        {
+            bool gotA = false, gotB = false;
+            while (!gotA || !gotB)
+            {
+                uint got = ReadReply(out _);
+                gotA |= got == a;
+                gotB |= got == b;
+            }
+        }
+
+        uint ReadReply(out int status)
+        {
+            Receive(_header);
+            if (BinaryPrimitives.ReadUInt32BigEndian(_header) != 3)
+                throw new InvalidOperationException("a reply that is not RET_SUBMIT");
+            uint got = BinaryPrimitives.ReadUInt32BigEndian(_header.AsSpan(4));
+            status = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(20));
+            int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
+            int packets = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(32));
+            if ((got & 1) == 1 && actual > 0) Receive(_data.AsSpan(0, actual));
+            if (packets > 0) Receive(_descs.AsSpan(0, packets * 16));
+            return got;
         }
 
         void Send(ReadOnlySpan<byte> b)
