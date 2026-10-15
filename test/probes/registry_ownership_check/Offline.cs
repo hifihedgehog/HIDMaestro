@@ -2,7 +2,12 @@
 // GameInput table applies to, and that no catalog profile is one of them.
 
 using System;
+using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
 
@@ -64,6 +69,7 @@ internal static partial class Program
         Check("a code-built clone of a catalog DualSense does not", !GameInputMapping.Applies(clone.Inner));
 
         LegacyGiveUp();
+        LegacyGiveUpCallSite();
         WinUsbPackageNote();
     }
 
@@ -603,4 +609,160 @@ internal static partial class Program
         Check("an unbounded wait on an owner read as SYSTEM or Administrators that failed: unchanged, it goes on",
               !LedgerLock.GivesUp(held: false, timeout: Infinite, full: Infinite));
     }
+
+    /// <summary>The same decision where it is made: LedgerLock.TakeLegacy,
+    /// its wait for v1.12.0's mutex and what it does after, against a holder
+    /// this probe makes. The holder owns the mutex as this user, an owner
+    /// read as neither SYSTEM nor Administrators, so the lock's own bound is
+    /// 5 s, or 500 ms once a full wait has marked the name, both scaled by
+    /// HIDMAESTRO_TIMEOUT_SCALE as the lock scales them, and every window
+    /// below is taken from those two. TakeLegacy runs
+    /// on an instance made through reflection around an unnamed mutex: the
+    /// ledger's own mutex lives in the administrators-only namespace, which
+    /// this part, offline and not elevated, does not open. No registry is
+    /// written. The name is v1.12.0's own, so the part does not run while
+    /// anything else has it open.</summary>
+    static void LegacyGiveUpCallSite()
+    {
+        Console.WriteLine("\n== Offline: the ledger lock's wait for v1.12.0's mutex, held by a program read as neither ==");
+        if (OpenMutexW(SYNCHRONIZE, false, LedgerLock.LegacyMutexName) is var open && open != IntPtr.Zero)
+        {
+            CloseHandle(open);
+            Console.WriteLine($"  [SKIP] {LedgerLock.LegacyMutexName} is open in another program, so this part would hold that program up");
+            return;
+        }
+        var ctor = typeof(LedgerLock).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, new[] { typeof(Mutex) });
+        var take = typeof(LedgerLock).GetMethod("TakeLegacy", BindingFlags.NonPublic | BindingFlags.Instance, new[] { typeof(long) });
+        var held = typeof(LedgerLock).GetField("_legacyHeld", BindingFlags.NonPublic | BindingFlags.Instance);
+        var mark = typeof(LedgerLock).GetField("s_legacyHeldByOther", BindingFlags.NonPublic | BindingFlags.Static);
+        if (ctor == null || take == null || held == null || mark == null)
+        {
+            Check("LedgerLock has the constructor, TakeLegacy(long) and the fields this part reads", false);
+            return;
+        }
+        object? priorMark = mark.GetValue(null);
+
+        // The lock's own bounds, as it computes them: its constants through
+        // TimeoutScale.
+        var unknownMs = typeof(LedgerLock).GetField("LegacyUnknownWaitMs", BindingFlags.NonPublic | BindingFlags.Static)?.GetRawConstantValue();
+        var markedMs = typeof(LedgerLock).GetField("LegacyMarkedWaitMs", BindingFlags.NonPublic | BindingFlags.Static)?.GetRawConstantValue();
+        if (unknownMs is not int unknownBase || markedMs is not int markedBase)
+        {
+            Check("LedgerLock has the two wait constants this part scales", false);
+            return;
+        }
+        long fullMs = TimeoutScale.Apply(unknownBase), shortMs = TimeoutScale.Apply(markedBase);
+        long cutMs = fullMs / 5, markedBound = shortMs * 6;
+        Console.WriteLine($"  timeout scale {TimeoutScale.Factor}: the lock waits {fullMs} ms, or {shortMs} ms once marked");
+
+        // The holder: created with this user as owner and a DACL open to
+        // all, and held by its own thread until released.
+        using var created = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        int createError = 0;
+        var holder = new Thread(() =>
+        {
+            string user = WindowsIdentity.GetCurrent().User!.Value;
+            IntPtr sd = IntPtr.Zero, sa = IntPtr.Zero, h = IntPtr.Zero;
+            try
+            {
+                if (!ConvertStringSecurityDescriptorToSecurityDescriptorW($"O:{user}D:(A;;GA;;;WD)", 1, out sd, IntPtr.Zero))
+                {
+                    createError = Marshal.GetLastWin32Error();
+                    return;
+                }
+                sa = Marshal.AllocHGlobal(Marshal.SizeOf<SECURITY_ATTRIBUTES>());
+                Marshal.StructureToPtr(new SECURITY_ATTRIBUTES { nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(), lpSecurityDescriptor = sd }, sa, false);
+                h = CreateMutexW(sa, true, LedgerLock.LegacyMutexName);
+                createError = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            }
+            finally
+            {
+                created.Set();
+                if (h != IntPtr.Zero)
+                {
+                    release.Wait();
+                    ReleaseMutex(h);
+                    CloseHandle(h);
+                }
+                if (sa != IntPtr.Zero) Marshal.FreeHGlobal(sa);
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+        }) { IsBackground = true };
+        holder.Start();
+        created.Wait();
+        if (createError != 0)
+        {
+            Check($"the probe holds {LedgerLock.LegacyMutexName} as this user", false, $"Win32 error {createError}");
+            return;
+        }
+
+        // One TakeLegacy against the held mutex: whether it threw, how long
+        // it waited, and whether it holds the mutex after.
+        (bool Threw, long Ms, bool Held) Take(long until)
+        {
+            using var dummy = new Mutex();
+            var l = (LedgerLock)ctor.Invoke(new object[] { dummy });
+            var sw = Stopwatch.StartNew();
+            bool threw = false;
+            try { take.Invoke(l, new object[] { until }); }
+            catch (TargetInvocationException tie) when (tie.InnerException is TimeoutException) { threw = true; }
+            long ms = sw.ElapsedMilliseconds;
+            bool h = (bool)held.GetValue(l)!;
+            l.Dispose();
+            return (threw, ms, h);
+        }
+
+        // A wait can return up to one timer tick (15.6 ms) early, so every
+        // lower bound leaves that much room at any scale.
+        const int TickMs = 16;
+        try
+        {
+            mark.SetValue(null, false);
+            var cut = Take(Environment.TickCount64 + cutMs);
+            Check($"the caller's {cutMs} ms bound cuts the lock's own {fullMs} ms: it waits its bound and throws, holding nothing",
+                  cut.Threw && !cut.Held && cut.Ms >= cutMs * 9 / 10 - TickMs && cut.Ms < cutMs + fullMs / 2, $"threw {cut.Threw}, held {cut.Held}, {cut.Ms} ms");
+            Check("a cut wait does not mark the name", mark.GetValue(null) is false);
+
+            var full = Take(long.MaxValue);
+            Check($"an unbounded caller waits the lock's own {fullMs} ms and goes on without the mutex, as with a squatter",
+                  !full.Threw && !full.Held && full.Ms >= fullMs * 9 / 10 - TickMs && full.Ms < fullMs * 8 / 5, $"threw {full.Threw}, held {full.Held}, {full.Ms} ms");
+            Check("a full wait marks the name", mark.GetValue(null) is true);
+
+            var marked = Take(Environment.TickCount64 + markedBound);
+            Check($"once marked, a caller's {markedBound} ms bound is longer than the lock's own {shortMs} ms: it waits the {shortMs} ms and goes on",
+                  !marked.Threw && !marked.Held && marked.Ms >= shortMs * 4 / 5 - TickMs && marked.Ms < shortMs * 4, $"threw {marked.Threw}, held {marked.Held}, {marked.Ms} ms");
+        }
+        finally
+        {
+            release.Set();
+            holder.Join();
+            mark.SetValue(null, priorMark);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        public int bInheritHandle;
+    }
+
+    const uint SYNCHRONIZE = 0x00100000;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateMutexW(IntPtr sa, bool initialOwner, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenMutexW(uint access, bool inherit, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReleaseMutex(IntPtr h);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr mem);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr sd, IntPtr size);
 }
