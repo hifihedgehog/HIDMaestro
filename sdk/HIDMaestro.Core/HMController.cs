@@ -82,6 +82,10 @@ public sealed partial class HMController : IDisposable
     // class changes per backend. Dispose routing in HMContext keys on it.
     internal Internal.Usbip.UsbipBackendHandle? UsbipHandle { get; }
 
+    // The WinUSB binding BindWinUsb made, kept across re-imports of the
+    // device. Set once, under WinUsbBinding's lock.
+    internal Internal.WinUsbBinding.Keeper? WinUsbKeeper;
+
     /// <summary>Issue #39: the audio surfaces of a composite USB persona
     /// (speaker/haptic PCM out, microphone in, volume/mute control
     /// events). Null on every UMDF2 profile; non-null exactly when
@@ -1052,10 +1056,20 @@ public sealed partial class HMController : IDisposable
     /// <summary>v1.13.0: bind WinUSB to this controller's virtual USB/IP
     /// device, so libusb hosts can open it, for a profile that declares
     /// <c>usbConfiguration.winUsb</c>. Nothing the device reports changes,
-    /// and no other device is touched: a real device, now or later, keeps
-    /// the driver Windows gives it. The binding is recorded and is undone
-    /// when the controller is disposed or its program ends. Requires
-    /// elevation, as creating the controller does.</summary>
+    /// and the driver goes on this device's devnode alone. The binding is
+    /// recorded. Once the controller is disposed or its program ends and the
+    /// devnode is gone, the devnode is marked to install by rank at its next
+    /// arrival by the first of these: a HIDMaestro program disposing a
+    /// controller, its cleanup, its reclaim of the controllers of a program
+    /// that has ended, a binding that moves to the devnode a dropped adapter
+    /// came back on, or the follow-up that watches the devnode for five
+    /// minutes after its holder lets go. HIDMaestro never changes the driver
+    /// of a present devnode, so a device that sits on the devnode keeps
+    /// WinUSB: a real adapter of the same serial that takes the instance
+    /// while the virtual one is gone opens on WinUSB until it is unplugged,
+    /// and comes back on WinUSB if it is plugged in again before any of
+    /// those has marked the devnode. Requires elevation, as creating the
+    /// controller does.</summary>
     /// <returns><see cref="HMWinUsbBinding.Bound"/>, or
     /// <see cref="HMWinUsbBinding.AlreadyBound"/> when the device already
     /// carries a driver libusb opens, or <see cref="HMWinUsbBinding.OtherDriver"/>

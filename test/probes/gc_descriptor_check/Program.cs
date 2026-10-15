@@ -57,6 +57,7 @@ internal static class Program
         bool offline = args.Contains("--offline");
         Console.WriteLine("=== S79: the GameCube adapter persona's descriptors ===");
         if (Probe.OtherSdkRunning()) return 2;
+        if (!offline && Probe.RefuseWithoutDepartingRule("S79")) return Probe.Finish("S79");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

@@ -2311,8 +2311,8 @@ internal static partial class DeviceOrchestrator
             try
             {
                 try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
-                // The WinUSB binding packages, after every devnode still on
-                // one is put back.
+                // The WinUSB binding packages that no devnode uses. A devnode
+                // still on one keeps its driver and the package stays.
                 try { WinUsbBinding.RemovePackage(); } catch { }
 
                 // Clear registry config

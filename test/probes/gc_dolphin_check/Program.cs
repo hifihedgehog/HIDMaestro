@@ -48,6 +48,8 @@ internal static class Program
 
     static int Main(string[] args)
     {
+        // Every mode below binds a real adapter.
+        if (Probe.RefuseWithoutDepartingRule("S82")) return Probe.Finish("S82");
         // "hold <seconds>": create and bind the persona, then keep it for an
         // investigation run from another process.
         if (args.Length == 2 && args[0] == "hold" && int.TryParse(args[1], out int seconds))

@@ -57,6 +57,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// owner record, under <see cref="_portLock"/>.</summary>
     internal Action<int>? VhciPortChanged { get; set; }
 
+    /// <summary>Called with the vhci port each time the device is plugged
+    /// in on one, the host controller's own re-imports after a drop
+    /// included, under <see cref="_portLock"/>. A WinUSB binding sets it to
+    /// bind the device again (<see cref="WinUsbBinding"/>).</summary>
+    internal Action<int>? Reattached { get; set; }
+
     // Every change of the vhci port, in memory and in the record, and the
     // release of the connection on a drop, so a port found for an import
     // is never written after the drop that ended it.
@@ -80,6 +86,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         if (Interlocked.Exchange(ref _vhciPort, port) == port) return;
         try { VhciPortChanged?.Invoke(port); } catch { /* the record is best-effort */ }
+        if (port > 0)
+            try { Reattached?.Invoke(port); } catch { /* the binding logs its own failures */ }
     }
 
     /// <summary>Whether <paramref name="connection"/> holds the device.</summary>

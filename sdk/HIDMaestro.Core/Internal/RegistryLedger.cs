@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using Microsoft.Win32;
 
 namespace HIDMaestro.Internal;
@@ -46,6 +47,22 @@ internal static class RegistryLedger
     private const string V_InstanceId = "InstanceId";
     private const string V_PriorService = "PriorService";
     private const string V_PriorInf = "PriorInf";
+    // On the root: the uninstall-grade cleanup left a WinUSB package in the
+    // driver store because a bound devnode was still present.
+    private const string V_RemovePackages = "RemoveWinUsbPackages";
+    // A WinUSB entry's follow-up deadline, in UTC wall-clock milliseconds
+    // (NowMs), which every process on the machine reads alike and which a
+    // reboot, unlike a tick count, does not reset.
+    private const string V_FollowUntil = "FollowUntilUtcMs";
+    // How long past its deadline a follow-up may hold its mutex for its last
+    // restore: the WinUSB lock's 120 s and the ledger's 30 s. A holder past
+    // that is frozen or stuck, and its entry no longer waits for it.
+    private const int FollowUpRestoreMs = 150_000;
+    // How long a follow-up watches past the last call for its entry.
+    private const int FollowUpMs = 300_000;
+    // How long a restore, which holds the devnode lock, waits for the
+    // ledger's.
+    private const int RestoreLedgerTimeoutMs = 30_000;
     private const string HoldersKey = "Holders";
     private const string OemNameValue = "OEMName";
 
@@ -344,13 +361,15 @@ internal static class RegistryLedger
     /// <summary>Record a devnode and the driver it has before
     /// <see cref="WinUsbBinding"/> binds WinUSB to it, and the controller as
     /// holder. Throws when the record cannot be written, so nothing is bound
-    /// that the ledger cannot put back. The caller holds the devnode lock
-    /// (<see cref="WinUsbBinding.AcquireDevnodeLock"/>), which a restore
-    /// also holds from its check of the entry to its delete.</summary>
-    internal static void ClaimWinUsb(string instanceId, string? priorService, string? priorInf, int controllerIndex)
+    /// that the ledger cannot put back, and when the ledger's lock is not
+    /// free within <paramref name="timeoutMs"/>. The caller holds the
+    /// devnode lock (<see cref="WinUsbBinding.AcquireDevnodeLock"/>), which a
+    /// restore also holds from its check of the entry to its delete.</summary>
+    internal static void ClaimWinUsb(string instanceId, string? priorService, string? priorInf, int controllerIndex,
+                                     int timeoutMs)
     {
         string entryPath = $@"{Root}\{WinUsbKind}\{WinUsbEntryName(instanceId)}";
-        using var m = Acquire();
+        using var m = LedgerLock.Acquire(TimeoutScale.Apply(timeoutMs));
         try
         {
             bool held;
@@ -368,13 +387,82 @@ internal static class RegistryLedger
         finally { m.ReleaseMutex(); }
     }
 
+    /// <summary>Note that the uninstall-grade cleanup left WinUSB packages
+    /// in the driver store, or that none is left. While the note stands,
+    /// the restore that resolves the last WinUSB entry removes them.</summary>
+    internal static void NoteWinUsbPackagesLeft(bool left)
+    {
+        try
+        {
+            using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
+            try
+            {
+                if (left)
+                {
+                    using var root = Registry.LocalMachine.CreateSubKey(Root);
+                    root.SetValue(V_RemovePackages, 1, RegistryValueKind.DWord);
+                }
+                else
+                {
+                    using var root = Registry.LocalMachine.OpenSubKey(Root, writable: true);
+                    root?.DeleteValue(V_RemovePackages, throwOnMissingValue: false);
+                }
+            }
+            finally { m.ReleaseMutex(); }
+        }
+        catch { }
+    }
+
+    /// <summary>True when the uninstall-grade cleanup's note stands and no
+    /// WinUSB entry remains, read under the ledger's lock. The deferred
+    /// package removal reads it again under the deploy and devnode locks
+    /// (<see cref="WinUsbBinding.RemovePackage"/>).</summary>
+    internal static bool WinUsbPackagesLeftToRemove()
+    {
+        using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(Root);
+            using var kind = root?.OpenSubKey(WinUsbKind);
+            return root?.GetValue(V_RemovePackages) is int r && r == 1 && (kind == null || kind.SubKeyCount == 0);
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>Take back a claim whose install did not happen: the
+    /// controller's hold goes, and the entry with it once nothing holds it,
+    /// since the devnode's driver did not change. A lock that is not free
+    /// within <paramref name="timeoutMs"/> leaves the hold, which a restore
+    /// drops, since the devnode is not on a HIDMaestro package. The caller
+    /// holds the devnode lock.</summary>
+    internal static void UnclaimWinUsb(string instanceId, int controllerIndex, int timeoutMs)
+    {
+        string name = WinUsbEntryName(instanceId);
+        using var m = LedgerLock.Acquire(TimeoutScale.Apply(timeoutMs));
+        try
+        {
+            using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}", writable: true);
+            if (kindKey == null) return;
+            bool empty;
+            using (var holders = kindKey.OpenSubKey($@"{name}\{HoldersKey}", writable: true))
+            {
+                holders?.DeleteValue(HolderName(controllerIndex), throwOnMissingValue: false);
+                empty = holders == null || holders.GetValueNames().Length == 0;
+            }
+            if (empty) kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
     /// <summary>A registry key name for a devnode: instance ids carry
     /// backslashes, which a key name cannot.</summary>
     private static string WinUsbEntryName(string instanceId)
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                System.Text.Encoding.UTF8.GetBytes(instanceId.ToUpperInvariant())))[..16];
 
-    /// <summary>The devnodes the ledger holds a WinUSB binding for.</summary>
+    /// <summary>The devnodes the ledger holds a WinUSB binding for: each
+    /// entry with a holder recorded, live or not. An entry with none waits
+    /// for its device to leave.</summary>
     internal static List<string> HeldWinUsbDevnodes()
     {
         var list = new List<string>();
@@ -384,7 +472,8 @@ internal static class RegistryLedger
             if (k == null) return list;
             foreach (var n in k.GetSubKeyNames())
                 using (var e = k.OpenSubKey(n))
-                    if (e?.GetValue(V_InstanceId) is string id) list.Add(id);
+                using (var h = e?.OpenSubKey(HoldersKey))
+                    if (e?.GetValue(V_InstanceId) is string id && h != null && h.ValueCount > 0) list.Add(id);
         }
         catch { }
         return list;
@@ -406,6 +495,24 @@ internal static class RegistryLedger
     /// <summary>Restore every entry whose holders are all gone.</summary>
     internal static void PruneDead() => Sweep(null);
 
+    /// <summary>Drop one controller's hold on one devnode's WinUSB entry, as
+    /// when its device came back on another devnode, and put the devnode
+    /// back once nothing holds it.</summary>
+    internal static void ReleaseWinUsb(string instanceId, int controllerIndex)
+    {
+        string name = WinUsbEntryName(instanceId);
+        using (var m = Acquire())
+        {
+            try
+            {
+                using var holders = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}\{HoldersKey}", writable: true);
+                holders?.DeleteValue(HolderName(controllerIndex), throwOnMissingValue: false);
+            }
+            finally { m.ReleaseMutex(); }
+        }
+        RestoreWinUsbEntries(new List<WinUsbQueued> { new(name, instanceId, Array.Empty<string>(), Own: false) }, waitGoneMs: 0, ignoreHolders: false);
+    }
+
     private static void Sweep(string[]? releasing)
     {
         var winUsb = new List<WinUsbQueued>();
@@ -419,17 +526,21 @@ internal static class RegistryLedger
                     if (kindKey == null) continue;
                     foreach (var name in kindKey.GetSubKeyNames())
                     {
-                        bool restore;
+                        bool restore, own = false;
                         using (var holders = kindKey.OpenSubKey($@"{name}\{HoldersKey}", writable: true))
                         {
                             if (holders != null)
                                 foreach (var h in holders.GetValueNames())
-                                    if ((releasing != null && Array.IndexOf(releasing, h) >= 0) || !HolderAlive(h))
+                                {
+                                    bool released = releasing != null && Array.IndexOf(releasing, h) >= 0;
+                                    if (released) own = true;
+                                    if (released || !HolderAlive(h))
                                         holders.DeleteValue(h, throwOnMissingValue: false);
+                                }
                             restore = holders == null || holders.GetValueNames().Length == 0;
                         }
                         if (!restore) continue;
-                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb);
+                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb, own);
                         else RestoreEntry(kindKey, kind, name);
                     }
                 }
@@ -438,9 +549,12 @@ internal static class RegistryLedger
             catch { }
             finally { m.ReleaseMutex(); }
         }
-        // A teardown releases right after its detach, so the devnode gets
-        // that long to leave. One still there then is left as it is and
-        // gets the reinstall flag (WinUsbBinding.RestoreLocked).
+        // A teardown releases right after its detach, so the devnode of an
+        // entry the releasing controller held gets that long to leave. Any
+        // other entry is not waited for. A devnode still there is left as
+        // it is, and its entry waits for its follow-up or a later sweep
+        // (WinUsbBinding.RestoreLocked).
+        if (winUsb.Count > 0) WinUsbQueuedForProbe?.Invoke();
         RestoreWinUsbEntries(winUsb, waitGoneMs: releasing != null ? TimeoutScale.Apply(2000) : 0, ignoreHolders: false);
     }
 
@@ -459,7 +573,7 @@ internal static class RegistryLedger
                     if (kindKey == null) continue;
                     foreach (var name in kindKey.GetSubKeyNames())
                     {
-                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb);
+                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb, own: false);
                         else RestoreEntry(kindKey, kind, name);
                     }
                 }
@@ -468,8 +582,15 @@ internal static class RegistryLedger
             catch { }
             finally { m.ReleaseMutex(); }
         }
+        if (winUsb.Count > 0) WinUsbQueuedForProbe?.Invoke();
         RestoreWinUsbEntries(winUsb, waitGoneMs: 0, ignoreHolders: true);
     }
+
+    /// <summary>Called by a sweep and by the full cleanup once they have
+    /// queued WinUSB entries and let the ledger's lock go, before the
+    /// restores. Coexistence probe section Z sets it through reflection to
+    /// claim an entry in that window. Null outside the probe.</summary>
+    internal static Action? WinUsbQueuedForProbe;
 
     /// <summary>Restore a GameInput or joy.cpl entry and delete it, under
     /// the ledger's lock: a few registry writes.</summary>
@@ -488,8 +609,9 @@ internal static class RegistryLedger
     }
 
     /// <summary>A WinUSB entry queued for its restore, with the holders it
-    /// had when it was queued.</summary>
-    private readonly record struct WinUsbQueued(string Name, string InstanceId, string[] Seen);
+    /// had when it was queued. <see cref="Own"/>: the releasing controller
+    /// held it, so the restore waits for its devnode to leave.</summary>
+    private readonly record struct WinUsbQueued(string Name, string InstanceId, string[] Seen, bool Own);
 
     /// <summary>Queue a WinUSB entry for <see cref="RestoreWinUsbEntries"/>.
     /// Its devnode work takes seconds, so it runs after the ledger's lock is
@@ -497,7 +619,7 @@ internal static class RegistryLedger
     /// in between leaves the entry for the next sweep. An entry with no
     /// devnode recorded is deleted now. The caller holds the ledger's
     /// lock.</summary>
-    private static void TakeWinUsbEntry(RegistryKey kindKey, string name, List<WinUsbQueued> queue)
+    private static void TakeWinUsbEntry(RegistryKey kindKey, string name, List<WinUsbQueued> queue, bool own)
     {
         string? id;
         string[] seen;
@@ -507,31 +629,51 @@ internal static class RegistryLedger
             using var holders = entry?.OpenSubKey(HoldersKey);
             seen = holders?.GetValueNames() ?? Array.Empty<string>();
         }
-        if (id != null) queue.Add(new WinUsbQueued(name, id, seen));
+        if (id != null) queue.Add(new WinUsbQueued(name, id, seen, own));
         else try { kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false); } catch { }
     }
 
     /// <summary>Put each queued WinUSB entry's devnode back
-    /// (<see cref="WinUsbBinding.RestoreLocked"/>) and delete the entry.
+    /// (<see cref="WinUsbBinding.RestoreLocked"/>) and delete the entry. An
+    /// entry whose devnode is still present, any device's, stays for a later
+    /// sweep, and so does one whose driver could not be read.
     /// Each runs under the machine-wide devnode lock, which every claim also
     /// takes, and takes the ledger's lock only to read and delete the entry.
     /// An entry a bind claimed since it was queued stays, also when
     /// <paramref name="ignoreHolders"/> restores it regardless of the
-    /// holders it had then.</summary>
-    private static void RestoreWinUsbEntries(List<WinUsbQueued> entries, int waitGoneMs, bool ignoreHolders)
+    /// holders it had then.
+    ///
+    /// <para>An entry another controller held costs this call next to
+    /// nothing: no wait for its devnode to leave, the devnode lock only when
+    /// no one holds it, nothing at all while a follow-up of any program
+    /// watches the entry, and no pnputil while its devnode is present.</para></summary>
+    private static void RestoreWinUsbEntries(List<WinUsbQueued> entries, int waitGoneMs, bool ignoreHolders, bool followUp = true)
     {
         if (entries.Count == 0) return;
-        foreach (var (name, id, seen) in entries)
+        var kept = new List<WinUsbQueued>();
+        foreach (var entry in entries)
         {
+            var (name, id, seen, own) = entry;
             try
             {
-                WinUsbBinding.WaitGone(id, waitGoneMs);
-                using var devnodes = WinUsbBinding.AcquireDevnodeLock();
+                if (followUp && !own && IsFollowed(name)) continue;
+                if (own) WinUsbBinding.WaitGone(id, waitGoneMs);
+                using var devnodes = own || !followUp ? WinUsbBinding.AcquireDevnodeLock() : WinUsbBinding.TryAcquireDevnodeLock();
+                if (devnodes == null)
+                {
+                    kept.Add(entry);
+                    continue;
+                }
                 try
                 {
                     if (!WinUsbEntryUnheld(name, ignoreHolders, seen)) continue;
-                    WinUsbBinding.RestoreLocked(id);
-                    using var m = Acquire();
+                    if (!WinUsbBinding.RestoreLocked(id))
+                    {
+                        DeviceOrchestrator.LogDiag($"    ledger: the WinUSB entry of {id} stays for a later sweep");
+                        kept.Add(entry);
+                        continue;
+                    }
+                    using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
                     try
                     {
                         using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}", writable: true);
@@ -546,13 +688,175 @@ internal static class RegistryLedger
                 DeviceOrchestrator.LogDiag($"    ledger: the WinUSB entry of {id} stays for the next sweep: {ex.GetType().Name}: {ex.Message}");
             }
         }
+        bool removePackages = false;
         try
         {
             using var m = Acquire();
-            try { DeleteEmptyKeys(); }
+            try
+            {
+                using (var root = Registry.LocalMachine.OpenSubKey(Root))
+                using (var kind = root?.OpenSubKey(WinUsbKind))
+                    removePackages = root?.GetValue(V_RemovePackages) is int r && r == 1 && (kind == null || kind.SubKeyCount == 0);
+                DeleteEmptyKeys();
+            }
             finally { m.ReleaseMutex(); }
         }
         catch { }
+        if (followUp)
+            foreach (var e in kept) FollowUp(e, ignoreHolders);
+        if (removePackages) RemoveLeftPackages();
+    }
+
+    /// <summary>The package removal the uninstall-grade cleanup left, now
+    /// that no WinUSB entry remains: under the deploy lock, on a pool thread,
+    /// so no caller waits for another program's deploy. It reads the note
+    /// again under the locks and removes no devnode
+    /// (<see cref="WinUsbBinding.RemovePackage"/>). A package a devnode still
+    /// uses stays, and the note with it.</summary>
+    private static void RemoveLeftPackages() =>
+        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        {
+            try
+            {
+                using var deploy = DriverDeploy.Acquire();
+                try { WinUsbBinding.RemovePackage(deferred: true); }
+                finally { deploy.ReleaseMutex(); }
+            }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    ledger: the WinUSB packages left by a cleanup were not removed: {ex.Message}"); }
+        }, null);
+
+    // The entries a follow-up of this process watches. Guarded by itself.
+    private static readonly HashSet<string> s_followed = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The name, in <see cref="AdminNamespace"/>, of the mutex the
+    /// one follow-up of an entry holds, machine-wide.</summary>
+    private static string FollowUpObject(string name) => "WinUsbFollowUp." + name;
+
+    /// <summary>True when a follow-up of this or another program watches the
+    /// entry: its mutex is held and its deadline, with the last restore's
+    /// bound, has not passed. A program frozen while it holds the mutex
+    /// holds up no entry past that.</summary>
+    private static bool IsFollowed(string name)
+    {
+        lock (s_followed) if (s_followed.Contains(name)) return true;
+        try
+        {
+            using var m = new Mutex(false, AdminNamespace.Name(FollowUpObject(name)));
+            bool free;
+            try { free = m.WaitOne(0); }
+            catch (AbandonedMutexException) { free = true; }
+            if (free) m.ReleaseMutex();
+            return !free && NowMs() < FollowDeadline(name) + TimeoutScale.Apply(FollowUpRestoreMs);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Now, in UTC wall-clock milliseconds.</summary>
+    private static long NowMs() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+
+    /// <summary>The entry's follow-up deadline, 0 when none is recorded. No
+    /// call sets one more than five minutes ahead, so a later one, as after
+    /// the clock was set back, counts as five minutes from now.</summary>
+    private static long FollowDeadline(string name)
+    {
+        try
+        {
+            using var e = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}");
+            return e?.GetValue(V_FollowUntil) is long v ? Math.Min(v, NowMs() + TimeoutScale.Apply(FollowUpMs)) : 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Move the entry's follow-up deadline to
+    /// <paramref name="until"/> when that is later, and return the deadline
+    /// it had, 0 when none or the entry is gone.</summary>
+    private static long ExtendFollowUp(string name, long until)
+    {
+        using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
+        try
+        {
+            using var entry = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}", writable: true);
+            if (entry == null) return 0;
+            long before = entry.GetValue(V_FollowUntil) is long v ? v : 0;
+            // No call sets a deadline more than five minutes ahead. A later
+            // one, as after the clock was set back, is replaced.
+            if (before > NowMs() + TimeoutScale.Apply(FollowUpMs)) before = 0;
+            if (until > before) entry.SetValue(V_FollowUntil, until, RegistryValueKind.QWord);
+            return before;
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>Set by coexistence probe section Z through reflection to keep
+    /// a program from starting follow-ups, so each of its sweeps takes the
+    /// path a teardown takes when no follow-up watches an entry. False
+    /// outside the probe.</summary>
+    internal static volatile bool NoFollowUpForProbe;
+
+    /// <summary>Restore an entry a restore kept once more, as soon as its
+    /// devnode has left (<see cref="WinUsbBinding.HasLeft"/>) or Windows has
+    /// no record of it, within five minutes of the last call for it. One
+    /// follow-up runs per entry on the machine: it holds the entry's mutex in
+    /// <see cref="AdminNamespace"/> while it watches, on a background thread
+    /// of its own, and reads the entry's deadline as it goes. A call that
+    /// finds the entry followed, in this program or another, moves that
+    /// deadline to five minutes from now and starts nothing, so a teardown's
+    /// entry is watched as long as its own follow-up would watch it. A holder
+    /// past its deadline and its last restore's bound is frozen or stuck, and
+    /// the call watches instead of it. A device present when its holder let
+    /// go, on its way out or another that arrived on the instance, is flagged
+    /// for its next arrival soon after it goes. An entry still kept then
+    /// waits for a later sweep, which starts another follow-up.</summary>
+    private static void FollowUp(WinUsbQueued e, bool ignoreHolders)
+    {
+        if (NoFollowUpForProbe) return;
+        long until = NowMs() + TimeoutScale.Apply(FollowUpMs);
+        bool start;
+        lock (s_followed) start = s_followed.Add(e.Name);
+        if (!start)
+        {
+            // This program's follow-up watches it, and reads the later
+            // deadline.
+            try { ExtendFollowUp(e.Name, until); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    ledger: the WinUSB follow-up of {e.InstanceId} was not extended: {ex.Message}"); }
+            return;
+        }
+        var t = new Thread(() =>
+        {
+            Mutex? m = null;
+            bool owned = false;
+            try
+            {
+                // The deadline goes in before the mutex is taken, so a program
+                // that finds the mutex held reads a live holder's deadline.
+                long before = ExtendFollowUp(e.Name, until);
+                m = new Mutex(false, AdminNamespace.Name(FollowUpObject(e.Name)));
+                try { owned = m.WaitOne(0); }
+                catch (AbandonedMutexException) { owned = true; }
+                // Another program's follow-up watches it to the deadline just
+                // written, unless that one is past its own.
+                if (!owned && NowMs() < Math.Min(before, until) + TimeoutScale.Apply(FollowUpRestoreMs)) return;
+                while (true)
+                {
+                    while (!WinUsbBinding.HasLeft(e.InstanceId) && WinUsbBinding.HasRecord(e.InstanceId)
+                           && NowMs() < Math.Max(until, FollowDeadline(e.Name)))
+                        Thread.Sleep(250);
+                    RestoreWinUsbEntries(new List<WinUsbQueued> { e with { Own = false } }, waitGoneMs: 0, ignoreHolders, followUp: false);
+                    // A deadline another call moved during the restore is
+                    // watched to its end. A deleted entry has none.
+                    if (NowMs() >= FollowDeadline(e.Name)) break;
+                    Thread.Sleep(250);
+                }
+            }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    ledger: the WinUSB follow-up of {e.InstanceId} stopped: {ex.Message}"); }
+            finally
+            {
+                if (owned) m!.ReleaseMutex();
+                m?.Dispose();
+                lock (s_followed) s_followed.Remove(e.Name);
+            }
+        }) { IsBackground = true, Name = "HMWinUsbFollowUp" };
+        t.Start();
     }
 
     /// <summary>True when the WinUSB entry still exists and no live
@@ -560,10 +864,10 @@ internal static class RegistryLedger
     /// it exists and every live holder is one of <paramref name="seen"/>, the
     /// holders it had when it was queued: a bind that claimed it since keeps
     /// it. Holders whose process is gone are dropped. The caller holds the
-    /// devnode lock.</summary>
+    /// devnode lock, so the wait for the ledger's is bounded.</summary>
     private static bool WinUsbEntryUnheld(string name, bool ignoreHolders, string[] seen)
     {
-        using var m = Acquire();
+        using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
         try
         {
             using var entry = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}");

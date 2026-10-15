@@ -28,17 +28,20 @@ namespace HIDMaestro.Internal;
 /// <item><c>DiInstallDevice</c> puts it on the virtual device's devnode and
 /// nowhere else.</item>
 /// <item>The registry ledger records the devnode and its driver first, and
-/// puts the devnode back when the last holder lets go: a present devnode is
-/// installed again by rank, and a gone one gets <c>CONFIGFLAG_REINSTALL</c>,
-/// so its next arrival, a real device's included, installs again by rank.
-/// After a crash the next program's reclaim does the same.</item>
+/// puts the devnode back once the last holder lets go and the devnode is
+/// gone: it gets <c>CONFIGFLAG_REINSTALL</c>, so its next arrival, a real
+/// device's included, installs again by rank. A restore installs no driver
+/// on a present devnode, whichever device is on it. After a crash the next
+/// program's reclaim does the same.</item>
 /// </list>
 /// <para>The bound devnode itself carries no reinstall flag. libusb reads
 /// the flag as install state 1 and skips the device as one whose driver
 /// "is reporting an issue" (windows_winusb.c, the DEV and EXT passes of
 /// winusb_get_device_list), so no libusb host could open it. A program
 /// killed while bound therefore leaves its instance on WinUSB, as Zadig
-/// would, until the next HIDMaestro program reclaims its hold.</para></summary>
+/// would, until a HIDMaestro program's reclaim, at its InstallDriver or
+/// first create, releases its hold and the
+/// devnode is gone.</para></summary>
 internal static partial class WinUsbBinding
 {
     /// <summary>The original INF names of HIDMaestro's WinUSB packages start
@@ -151,8 +154,11 @@ DeviceName = ""{deviceName}""
 ";
     }
 
-    // Guards s_published, and no lock is taken under it.
+    // Guards s_published and each controller's keeper creation. No lock is
+    // taken under it.
     private static readonly object s_lock = new();
+    // The controllers with a keeper not yet stopped. Guarded by s_lock.
+    private static readonly HashSet<HMController> s_keeping = new();
     // Published name by original INF name, for the packages this process
     // added. Guarded by s_lock.
     private static readonly Dictionary<string, string> s_published = new(StringComparer.OrdinalIgnoreCase);
@@ -161,97 +167,348 @@ DeviceName = ""{deviceName}""
     /// machine-wide lock over the devnodes a binding changes.</summary>
     internal const string DevnodeMutexObject = "WinUsb";
 
+    /// <summary>How long a claim waits for the registry ledger's lock while
+    /// it holds the devnode lock and the keeper's gate.</summary>
+    private const int ClaimTimeoutMs = 30_000;
+
+    /// <summary>The version of the rule that keeps every driver and setup
+    /// class change off a devnode that is leaving or gone: 5 since a
+    /// restore never installs a driver on a present devnode, and only marks
+    /// one for reinstall once it is gone. 6 since no cleanup removes a
+    /// devnode and a process exit stops its re-binds before it detaches. The
+    /// probes that bind and dispose a real adapter refuse to run on a build
+    /// below the version they were written for, so a run of old code cannot
+    /// change a departing devnode.</summary>
+    internal const int DepartingDevnodeRule = 6;
+
     /// <summary>Take the machine-wide lock over the devnodes a binding
     /// changes, held by the calling thread until it calls
     /// <c>ReleaseMutex</c>. A bind's ledger claim and install, a restore and
     /// the uninstall-grade cleanup each run under it, so a restore that finds
     /// an entry unheld finishes before any bind can claim the devnode.
     ///
-    /// <para>Lock order: the deploy lock, then this one, then the registry
-    /// ledger's. A bind adds its package under the deploy lock before it
-    /// takes this one, never inside it.</para></summary>
+    /// <para>Lock order: the deploy lock, then this one, then a controller's
+    /// keeper gate, then the registry ledger's. A bind adds its package under
+    /// the deploy lock before it takes this one, never inside it.</para></summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
-    internal static Mutex AcquireDevnodeLock()
+    internal static Mutex AcquireDevnodeLock() => AcquireUnlessStopped(DevnodeMutexObject, 120_000, null,
+        "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+
+    /// <summary>Take a mutex of <see cref="AdminNamespace"/> for up to
+    /// <paramref name="timeoutMs"/>, giving up once
+    /// <paramref name="keeper"/>'s controller is disposed. An abandoned mutex
+    /// is taken.</summary>
+    private static Mutex AcquireUnlessStopped(string objectName, int timeoutMs, Keeper? keeper, string timeoutMessage)
     {
-        var m = new Mutex(false, AdminNamespace.Name(DevnodeMutexObject));
+        var m = new Mutex(false, AdminNamespace.Name(objectName));
         try
         {
-            if (!m.WaitOne(TimeoutScale.Apply(120_000)))
-                throw new InvalidOperationException(
-                    "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+            var until = Environment.TickCount64 + TimeoutScale.Apply(timeoutMs);
+            while (true)
+            {
+                try { if (m.WaitOne(250)) return m; }
+                catch (AbandonedMutexException) { return m; }
+                ThrowIfStopped(keeper);
+                if (Environment.TickCount64 >= until) throw new InvalidOperationException(timeoutMessage);
+            }
         }
-        catch (AbandonedMutexException) { }
         catch
         {
             m.Dispose();
             throw;
         }
-        return m;
     }
 
-    /// <summary>Bind WinUSB to the controller's virtual device.</summary>
+    /// <summary>A controller's binding, kept across re-imports of its
+    /// device. <see cref="Gate"/> covers the claim and install of each bind
+    /// and the dispose, never a wait.</summary>
+    internal sealed class Keeper
+    {
+        internal readonly object Gate = new();
+        // The devnode the controller holds in the ledger, under Gate.
+        internal string? InstanceId;
+        // Set at dispose, under Gate. Read without it by the waits, which
+        // give up once it is set.
+        internal volatile bool Stopped;
+        // Where the program's BindWinUsb call stands, under Gate.
+        internal BindPhase Phase;
+        // A re-import came while that call ran, under Gate.
+        internal bool Missed;
+    }
+
+    /// <summary>Binding: the program's BindWinUsb call runs, and a re-import
+    /// meanwhile is bound once it returns. Kept: it returned, and each
+    /// re-import is bound. Refused: it threw, and no re-import is bound,
+    /// since the program was told nothing was.</summary>
+    internal enum BindPhase { None, Binding, Kept, Refused }
+
+    private static void ThrowIfStopped(Keeper? keeper)
+    {
+        if (keeper is { Stopped: true }) throw new ObjectDisposedException(nameof(HMController));
+    }
+
+    /// <summary>Bind WinUSB to the controller's virtual device, and bind it
+    /// again whenever usbip-win2 imports the device again after a drop. The
+    /// import that comes back can be a new devnode on input.inf: another
+    /// device can take the instance the binding was on while the host
+    /// controller waits to re-attach. A call that throws binds nothing later
+    /// either: no re-import is bound until the program calls again.</summary>
     internal static HMWinUsbBinding Bind(HMController controller)
     {
         var handle = controller.UsbipHandle
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' runs on the UMDF2 driver. A WinUSB binding is for a USB/IP device.");
-        return BindDevnode(controller, handle, out _);
+        Keeper keeper;
+        lock (s_lock)
+        {
+            keeper = controller.WinUsbKeeper ??= new Keeper();
+            s_keeping.Add(controller);
+        }
+        lock (keeper.Gate)
+        {
+            ThrowIfStopped(keeper);
+            keeper.Phase = BindPhase.Binding;
+            keeper.Missed = false;
+        }
+        // Set before the bind, so a drop and re-import while it runs is
+        // bound once it returns. The server's port tracker reports each port
+        // on a thread that holds the device's port lock, so the bind runs
+        // elsewhere.
+        handle.Device.Reattached = _ => QueueRebind(controller, handle, keeper);
+        HMWinUsbBinding result;
+        try { result = BindKept(controller, handle, keeper, rebind: false); }
+        catch
+        {
+            handle.Device.Reattached = null;
+            lock (keeper.Gate) keeper.Phase = BindPhase.Refused;
+            throw;
+        }
+        bool missed;
+        lock (keeper.Gate)
+        {
+            keeper.Phase = BindPhase.Kept;
+            missed = keeper.Missed;
+        }
+        if (missed) QueueRebind(controller, handle, keeper);
+        return result;
     }
 
-    /// <summary>Bind WinUSB to the devnode of the controller's import.</summary>
-    private static HMWinUsbBinding BindDevnode(HMController controller, Usbip.UsbipBackendHandle handle, out string instanceId)
+    private static void QueueRebind(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper) =>
+        ThreadPool.UnsafeQueueUserWorkItem(_ => Rebind(controller, handle, keeper), null);
+
+    /// <summary>Stop binding the controller's device again. Called at its
+    /// dispose before the ledger releases its holds. It waits only for a
+    /// claim and install in progress, so no claim lands after the release.
+    /// A bind waiting for a devnode or a lock gives up.</summary>
+    internal static void StopKeeping(HMController controller)
     {
+        Keeper? keeper;
+        lock (s_lock)
+        {
+            keeper = controller.WinUsbKeeper;
+            s_keeping.Remove(controller);
+        }
+        if (keeper == null) return;
+        if (controller.UsbipHandle is { } handle) handle.Device.Reattached = null;
+        lock (keeper.Gate) keeper.Stopped = true;
+    }
+
+    /// <summary>Stop every keeper of this process, as each one's dispose
+    /// would. The process-exit cleanup calls this before it detaches the
+    /// imports, so no re-bind on a pool thread is inside its claim and
+    /// install when the device leaves: each stop waits for one in progress
+    /// and keeps any later one from starting.</summary>
+    internal static void StopKeepingAll()
+    {
+        HMController[] all;
+        lock (s_lock) all = s_keeping.ToArray();
+        foreach (var c in all)
+            try { StopKeeping(c); } catch { /* the exit goes on */ }
+    }
+
+    private static void Rebind(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper)
+    {
+        lock (keeper.Gate)
+        {
+            if (keeper.Stopped || keeper.Phase is BindPhase.None or BindPhase.Refused) return;
+            if (keeper.Phase == BindPhase.Binding)
+            {
+                keeper.Missed = true;
+                return;
+            }
+        }
+        try
+        {
+            var result = BindKept(controller, handle, keeper, rebind: true);
+            DeviceOrchestrator.LogDiag($"    winusb: binding after a re-import: {result}");
+        }
+        catch (ObjectDisposedException) { }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    winusb: binding again after a re-import failed: {ex.GetType().Name}: {ex.Message}");
+            // The device came back somewhere this bind did not reach. A hold
+            // on a devnode that is not the import's any more goes, so the
+            // devnode is put back once nothing holds it.
+            string? left;
+            lock (keeper.Gate)
+            {
+                left = keeper.InstanceId;
+                if (left == null || ImportIsOn(handle, left)) return;
+                keeper.InstanceId = null;
+            }
+            try { RegistryLedger.ReleaseWinUsb(left, controller.Index); }
+            catch (Exception rex) { DeviceOrchestrator.LogDiag($"    winusb: releasing {left} failed: {rex.Message}"); }
+        }
+    }
+
+    /// <summary>Bind, then release the controller's hold on a devnode its
+    /// device left, with no lock held.</summary>
+    private static HMWinUsbBinding BindKept(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper, bool rebind)
+    {
+        var result = BindDevnode(controller, handle, keeper, rebind, out string? left);
+        if (left != null) RegistryLedger.ReleaseWinUsb(left, controller.Index);
+        return result;
+    }
+
+    /// <summary>Bind WinUSB to the devnode of the controller's import.
+    /// <paramref name="left"/> is the devnode the controller held before,
+    /// when the bind found another, so the caller releases it.
+    ///
+    /// <para>No driver or class changes on a devnode that is leaving or gone.
+    /// Under the devnode lock, before the claim, the devnode must be the
+    /// import's (<see cref="IsImportsDevnode"/>): present and not being
+    /// removed, settled on its driver, the only devnode at its address, and
+    /// still the one at the address the import's location gives. After the
+    /// claim and the driver list, right before <c>DiInstallDevice</c>, it
+    /// must still be the import's, on the same arrival. A devnode that fails
+    /// either check is looked for again, with the claim taken back, until the
+    /// device's devnode is found or 10 s pass, counted across every look,
+    /// plus the waits for one devnode to settle and for the locks. A re-bind
+    /// (<paramref name="rebind"/>) gives up when the program has called
+    /// BindWinUsb again or its call threw.</para></summary>
+    private static HMWinUsbBinding BindDevnode(HMController controller, Usbip.UsbipBackendHandle handle, Keeper keeper,
+                                               bool rebind, out string? left)
+    {
+        left = null;
         var d = handle.Device.Descriptors;
         var package = PackageFor(controller.Profile.Inner, d)
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' declares no usbConfiguration.winUsb, so its device takes no WinUSB binding.");
-        instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, TimeoutScale.Apply(10_000))
-            ?? throw new InvalidOperationException(
-                $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not appear within 10 s.");
-        WaitInstalled(instanceId, TimeoutScale.Apply(10_000));
-
         string? published = null;
+        var until = Environment.TickCount64 + TimeoutScale.Apply(10_000);
+        string instanceId;
         while (true)
         {
-            using (var devnodes = AcquireDevnodeLock())
+            int remaining = (int)Math.Max(0, until - Environment.TickCount64);
+            instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, remaining, keeper)
+                ?? throw new InvalidOperationException(
+                    $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not appear within 10 s.");
+            WaitInstalled(instanceId, TimeoutScale.Apply(10_000), keeper);
+
+            bool needPackage = false, retry = false;
+            using (var devnodes = AcquireUnlessStopped(DevnodeMutexObject, 120_000, keeper,
+                       "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes."))
             {
                 try
                 {
-                    var (service, inf) = DriverOf(instanceId, phantom: false);
-                    if (IsLibusbService(service))
+                    if (!IsImportsDevnode(handle, instanceId, d.VendorId, d.ProductId))
                     {
-                        // On one of HIDMaestro's own packages, which a killed
-                        // program's binding leaves until a sweep puts the
-                        // devnode back. This controller holds it from here,
-                        // so no sweep moves it while the controller lives.
-                        if (IsOurPackage(inf))
-                            RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
-                        return HMWinUsbBinding.AlreadyBound;
+                        if (Environment.TickCount64 >= until)
+                            throw new InvalidOperationException(
+                                $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} left {instanceId} and was not found again within 10 s.");
+                        retry = true;
                     }
-                    if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
-                    if (published != null)
+                    else
                     {
-                        // Recorded before the devnode changes, so a crash
-                        // between the two leaves a record whose restore finds
-                        // the devnode as it was.
-                        RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
-                        InstallOn(instanceId, published);
-                        break;
+                        var (service, inf) = DriverOf(instanceId, phantom: false);
+                        HMWinUsbBinding? done = null;
+                        bool ours = false;
+                        if (IsLibusbService(service)) { done = HMWinUsbBinding.AlreadyBound; ours = IsOurPackage(inf) == true; }
+                        else if (!IsInboxOrNone(inf)) done = HMWinUsbBinding.OtherDriver;
+                        else if (published == null || !StillPublished(package, published))
+                        {
+                            // A package a cleanup removed since it was added
+                            // (or since this process cached it) is added
+                            // again. Checked under the devnode lock, which
+                            // the removal holds too.
+                            published = null;
+                            needPackage = true;
+                        }
+                        if (!needPackage)
+                        {
+                            lock (keeper.Gate)
+                            {
+                                ThrowIfStopped(keeper);
+                                if (rebind && keeper.Phase != BindPhase.Kept)
+                                    throw new OperationCanceledException("The program's BindWinUsb call is running again or threw.");
+                                long? arrival = ArrivalOf(instanceId);
+                                if (done == null && PresenceOf(instanceId) != Presence.Present)
+                                {
+                                    // Left since the check above: looked for
+                                    // again, and nothing changes on it.
+                                    retry = true;
+                                }
+                                else if (done == null)
+                                {
+                                    // Recorded before the devnode changes, so a
+                                    // crash between the two leaves a record whose
+                                    // restore finds the devnode as it was.
+                                    RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index, ClaimTimeoutMs);
+                                    if (!InstallOn(instanceId, published!,
+                                            () => ArrivalOf(instanceId) == arrival
+                                                  && IsImportsDevnode(handle, instanceId, d.VendorId, d.ProductId)))
+                                    {
+                                        // It left between the claim and the
+                                        // install, and nothing changed on it.
+                                        RegistryLedger.UnclaimWinUsb(instanceId, controller.Index, ClaimTimeoutMs);
+                                        retry = true;
+                                    }
+                                }
+                                else if (ours)
+                                {
+                                    // On one of HIDMaestro's own packages, which a
+                                    // killed program's binding leaves until a sweep
+                                    // puts the devnode back. This controller holds
+                                    // it from here, so no sweep moves it while the
+                                    // controller lives.
+                                    RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index, ClaimTimeoutMs);
+                                }
+                                string? held = retry ? null : keeper.InstanceId;
+                                bool holds = !retry && done is null or HMWinUsbBinding.AlreadyBound;
+                                if (holds) keeper.InstanceId = instanceId;
+                                if (held != null && !held.Equals(instanceId, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    left = held;
+                                    if (!holds) keeper.InstanceId = null;
+                                }
+                            }
+                            if (done != null) return done.Value;
+                        }
                     }
                 }
                 finally { devnodes.ReleaseMutex(); }
             }
+            if (retry)
+            {
+                if (Environment.TickCount64 >= until)
+                    throw new InvalidOperationException(
+                        $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not stay on {instanceId} long enough to bind within 10 s.");
+                Thread.Sleep(50);
+                continue;
+            }
+            if (!needPackage) break;
             // The package goes into the driver store under the deploy lock
             // with the devnode lock released, since the first add takes
-            // seconds. The devnode is read again under the devnode lock.
-            published = EnsurePackage(package);
+            // seconds. The devnode is found and checked again after.
+            published = EnsurePackage(package, keeper);
         }
 
         // WinUSB is bound once the devnode reports its service and the
         // interface libusb opens.
-        var until = Environment.TickCount64 + TimeoutScale.Apply(10_000);
-        while (Environment.TickCount64 < until)
+        var started = Environment.TickCount64 + TimeoutScale.Apply(10_000);
+        while (Environment.TickCount64 < started)
         {
             var (s, _) = DriverOf(instanceId, phantom: false);
             if (string.Equals(s, "WINUSB", StringComparison.OrdinalIgnoreCase) && IsStarted(instanceId))
@@ -261,9 +518,107 @@ DeviceName = ""{deviceName}""
         throw new InvalidOperationException($"WinUSB did not start on {instanceId} within 10 s.");
     }
 
+    // ── Presence ─────────────────────────────────────────────────────────
+    //
+    // Whether a devnode is there, staying, or gone is decided by the checks
+    // in this section and nowhere else. A bind asks IsImportsDevnode, which
+    // asks PresenceOf. A restore asks HasLeft only. A better signal of a
+    // devnode having finished leaving goes into HasLeft.
+
+    /// <summary>True when <paramref name="instanceId"/> is the devnode of
+    /// the controller's import now: present and not being removed, settled
+    /// on its driver, the one devnode at the address of the vhci port the
+    /// import's location is on, and that location still on the port.</summary>
+    private static bool IsImportsDevnode(Usbip.UsbipBackendHandle handle, string instanceId, ushort vendorId, ushort productId)
+    {
+        int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
+        return port > 0
+            && PresenceOf(instanceId) == Presence.Present
+            && IsSettled(instanceId)
+            && string.Equals(FindDevnode(port, vendorId, productId), instanceId, StringComparison.OrdinalIgnoreCase)
+            && Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId) == port;
+    }
+
+    /// <summary>True when the controller's import is on
+    /// <paramref name="instanceId"/>.</summary>
+    private static bool ImportIsOn(Usbip.UsbipBackendHandle handle, string instanceId)
+    {
+        int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
+        var d = handle.Device.Descriptors;
+        return port > 0 && string.Equals(FindDevnode(port, d.VendorId, d.ProductId), instanceId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private enum Presence { Absent, Leaving, Present }
+
+    /// <summary>Whether a devnode is present and not on its way out, for a
+    /// bind, which pairs it with the import's own location
+    /// (<see cref="IsImportsDevnode"/>). Leaving: the PnP manager marks it for
+    /// removal (DN_WILL_BE_REMOVED, problem 21 or 24 in cfg.h), or it hangs
+    /// off usbip-win2's root hub and no import holds the port at its address,
+    /// or another present devnode there shares the address. usbip-win2 frees
+    /// the port before it plugs the device out (drivers/ude/device.cpp,
+    /// detach: reclaim_roothub_port, then plugout_and_delete), and the
+    /// plug-out can lag (its FIXME there). Another import can take the freed
+    /// port, so this says nothing about whose device the devnode is. A
+    /// restore does not use it.</summary>
+    private static Presence PresenceOf(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return Presence.Absent;
+        if (CM_Get_DevNode_Status(out uint status, out uint problem, dev, 0) != CR_SUCCESS) return Presence.Leaving;
+        if ((status & DN_WILL_BE_REMOVED) != 0) return Presence.Leaving;
+        if ((status & DN_HAS_PROBLEM) != 0 && problem is CM_PROB_WILL_BE_REMOVED or CM_PROB_DEVICE_NOT_THERE) return Presence.Leaving;
+        if (!OnUsbipRootHub(dev)) return Presence.Present;
+        if (ReadDword(dev, CM_DRP_ADDRESS) is not uint address) return Presence.Leaving;
+        if (!Usbip.VhciClient.GetImportedDevices().Any(r => r.Port == (int)address)) return Presence.Leaving;
+        return UsbipDevnodesAt(address) == 1 ? Presence.Present : Presence.Leaving;
+    }
+
+    private static bool OnUsbipRootHub(uint dev) =>
+        CM_Get_Parent(out uint hub, dev, 0) == CR_SUCCESS
+        && CM_Get_Parent(out uint host, hub, 0) == CR_SUCCESS
+        && ReadMultiSz(host, CM_DRP_HARDWAREID).Any(h => h.Contains("USBIP_WIN2", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>How many present devnodes on usbip-win2's root hub have this
+    /// address.</summary>
+    private static int UsbipDevnodesAt(uint address)
+    {
+        int n = 0;
+        foreach (string id in PresentDeviceIds("USB"))
+        {
+            if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+            if (ReadDword(dev, CM_DRP_ADDRESS) == address && OnUsbipRootHub(dev)) n++;
+        }
+        return n;
+    }
+
+    /// <summary>True when the devnode has left: Microsoft Learn's test for
+    /// an unplugged device's phantom devnode ("Determining Whether a Device
+    /// is Plugged In", step 4), CM_Get_DevNode_Status on it returning
+    /// CR_NO_SUCH_DEVINST. A devnode that is present, or has no record at
+    /// all, has not.</summary>
+    internal static bool HasLeft(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) return false;
+        if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return false;
+        return CM_Get_DevNode_Status(out _, out _, dev, 0) == CR_NO_SUCH_DEVINST;
+    }
+
+    /// <summary>When the present devnode last arrived
+    /// (DEVPKEY_Device_LastArrivalDate, devpkey.h, a FILETIME), or null when
+    /// it is not present or has no arrival recorded.</summary>
+    private static long? ArrivalOf(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) return null;
+        var key = DEVPKEY_Device_LastArrivalDate;
+        var buf = new byte[8];
+        uint len = 8;
+        return CM_Get_DevNode_PropertyW(dev, ref key, out uint type, buf, ref len, 0) == CR_SUCCESS
+               && type == DEVPROP_TYPE_FILETIME && len == 8
+            ? BitConverter.ToInt64(buf) : null;
+    }
+
     /// <summary>Wait up to <paramref name="waitGoneMs"/> for a devnode whose
-    /// device was just detached to leave, since a gone devnode needs only the
-    /// reinstall flag. No lock is held.</summary>
+    /// device was just detached to leave. No lock is held.</summary>
     internal static void WaitGone(string instanceId, int waitGoneMs)
     {
         var until = Environment.TickCount64 + waitGoneMs;
@@ -272,55 +627,160 @@ DeviceName = ""{deviceName}""
             Thread.Sleep(20);
     }
 
+    // ── Putting a devnode back ───────────────────────────────────────────
+
     /// <summary>Put a devnode the ledger recorded back on the driver Windows
-    /// picks by rank. A present devnode is installed again now. A gone one
-    /// gets the reinstall flag, which installs it again by rank when it next
-    /// arrives, and so does a present one whose reinstall failed. A devnode
-    /// on any driver but one of HIDMaestro's WinUSB packages is someone
-    /// else's and is left alone. The caller holds the devnode lock
-    /// (<see cref="AcquireDevnodeLock"/>).</summary>
-    internal static void RestoreLocked(string instanceId)
+    /// picks by rank, once it is gone. True when the entry is done, false
+    /// when it stays for a later sweep. The caller holds the devnode lock
+    /// (<see cref="AcquireDevnodeLock"/>).
+    ///
+    /// <para>A devnode on a driver other than HIDMaestro's WinUSB packages is
+    /// someone else's and is left alone. When its driver cannot be told, as
+    /// when pnputil fails, nothing changes and the entry stays.</para>
+    ///
+    /// <para>A devnode that has left (<see cref="HasLeft"/>) gets
+    /// <c>CONFIGFLAG_REINSTALL</c>, which makes Plug and Play install it
+    /// again, by rank, the next time it is enumerated (Microsoft Learn,
+    /// "Determining Whether a Device is Plugged In", steps 4 and 5: the flag
+    /// "causes the device to be reinstalled the next time that the device is
+    /// reenumerated").</para>
+    ///
+    /// <para>Nothing is ever installed on a present devnode, whoever's device
+    /// it is: the device bound, on its way out, or another that arrived on
+    /// the instance since. Another program's dispose, a kill or a dropped
+    /// import can start its removal at any moment, and nothing the restore
+    /// holds stops it, so no check made before <c>DiInstallDevice</c> could
+    /// hold while it runs. A present devnode keeps its driver and its entry
+    /// until a sweep finds it gone, and never gets the flag while
+    /// present.</para></summary>
+    internal static bool RestoreLocked(string instanceId)
     {
-        bool present = CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
-        var (_, inf) = DriverOf(instanceId, phantom: !present);
-        if (!IsOurPackage(inf)) return;
-        if (present)
+        if (CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
         {
-            try { InstallBestDriver(instanceId); return; }
-            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb restore of {instanceId} threw {ex.Message}"); }
+            // Present: nothing is written, so its driver is read without
+            // pnputil. One that ships with Windows is no package of
+            // HIDMaestro's and the entry is done. Any other keeps it, and so
+            // does a driver that cannot be read, as when the devnode left
+            // between the two reads: the entry stays for the look that
+            // finds it gone and flags it.
+            var (_, current) = DriverOf(instanceId, phantom: false);
+            return current != null && IsInboxOrNone(current);
         }
-        try { SetReinstallFlag(instanceId); } catch { }
+        var (_, inf) = DriverOf(instanceId, phantom: true);
+        switch (IsOurPackage(inf))
+        {
+            case false:
+                return true;
+            case null:
+                DeviceOrchestrator.LogDiag($"    winusb restore of {instanceId}: the driver store could not be read");
+                return false;
+        }
+        // Read after the package check, which can run pnputil for seconds.
+        return HasLeft(instanceId) && FlagForNextArrival(instanceId);
     }
 
-    /// <summary>The uninstall-grade cleanup: every devnode still on one of
-    /// the packages goes back to its driver by rank, present ones now, and
-    /// gone ones are removed, since a non-present devnode keeps a package in
-    /// use. Then the packages leave the driver store. Nothing else is
-    /// touched: a package's provider and original name identify it. The
-    /// caller holds the deploy lock.</summary>
-    internal static void RemovePackage()
+    /// <summary>True when Windows has a record of the devnode, present or
+    /// not.</summary>
+    internal static bool HasRecord(string instanceId) =>
+        CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS;
+
+    /// <summary>The devnode lock when no one holds it, or null, with no
+    /// wait.</summary>
+    internal static Mutex? TryAcquireDevnodeLock()
+    {
+        var m = new Mutex(false, AdminNamespace.Name(DevnodeMutexObject));
+        try
+        {
+            if (m.WaitOne(0)) return m;
+        }
+        catch (AbandonedMutexException) { return m; }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        m.Dispose();
+        return null;
+    }
+
+    /// <summary>Set <c>CONFIGFLAG_REINSTALL</c> on a devnode
+    /// <see cref="HasLeft"/> found gone, then look again. A devnode that
+    /// arrived in between gets its old flags back. True when the flag is on
+    /// a gone devnode.</summary>
+    private static bool FlagForNextArrival(string instanceId)
+    {
+        // A failed read writes nothing: a 0 written back would drop every
+        // other flag, CONFIGFLAG_DISABLED among them. The entry stays.
+        if (ConfigFlagsOf(instanceId) is not uint before) return false;
+        if ((before & CONFIGFLAG_REINSTALL) == 0) WriteConfigFlags(instanceId, before | CONFIGFLAG_REINSTALL);
+        if (HasLeft(instanceId)) return true;
+        // It arrived in between. Only the bit this set is taken back, from
+        // the flags as they are now, since the arrival's install can have
+        // written them since.
+        if ((before & CONFIGFLAG_REINSTALL) == 0 && ConfigFlagsOf(instanceId) is uint now && (now & CONFIGFLAG_REINSTALL) != 0)
+        {
+            try { WriteConfigFlags(instanceId, now & ~CONFIGFLAG_REINSTALL); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb: the reinstall flag of {instanceId} not taken back: {ex.Message}"); }
+        }
+        return false;
+    }
+
+    /// <summary>The uninstall-grade cleanup: the packages leave the driver
+    /// store, except one a devnode still uses
+    /// (<see cref="RegistryLedger.NoteWinUsbPackagesLeft"/>). No devnode is
+    /// removed or installed. A devnode on a package that has left
+    /// (<see cref="HasLeft"/>) gets the reinstall flag, which installs it by
+    /// rank at its next arrival, and its package stays, since a devnode that
+    /// is not present keeps a package in use. Removing that devnode instead
+    /// would race a real adapter of that instance arriving and starting its
+    /// install after the check, which nothing here can hold back. Nothing is
+    /// written to a devnode still present, which can be a device on its way
+    /// out. Nothing else is touched: a package's provider and original name
+    /// identify it. The caller holds the deploy lock.
+    ///
+    /// <para>The <paramref name="deferred"/> run, once the last WinUSB entry
+    /// is done, removes what that cleanup left, the same way. It runs only
+    /// while the note still stands, read again here under the deploy and
+    /// devnode locks, since a program that adds a package clears it under
+    /// the deploy lock. A package a gone devnode keeps stays in the driver
+    /// store, ranked below the driver Windows gives the device, until a
+    /// cleanup finds no devnode on it.</para></summary>
+    internal static void RemovePackage(bool deferred = false)
     {
         using var devnodes = AcquireDevnodeLock();
         try
         {
+            if (deferred && !RegistryLedger.WinUsbPackagesLeftToRemove()) return;
             var packages = OurPackages();
-            if (packages.Count == 0) return;
+            if (packages.Count == 0)
+            {
+                RegistryLedger.NoteWinUsbPackagesLeft(false);
+                return;
+            }
+            bool keptAny = false;
             foreach (string id in DevnodesOn(packages))
             {
-                bool present = CM_Locate_DevNodeW(out _, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
                 try
                 {
-                    if (present) InstallBestDriver(id);
-                    else DeviceManager.RemoveDevice(id, timeoutMs: 30_000, forceFallbacks: false);
+                    if (HasLeft(id)) FlagForNextArrival(id);
+                    DeviceOrchestrator.LogDiag($"    winusb cleanup: {id} keeps its package");
+                    keptAny = true;
                 }
                 catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb cleanup of {id} threw {ex.Message}"); }
             }
             foreach (var p in packages)
             {
                 if (!PnputilHelper.DeletePackagePlain(p.PublishedName, out string err))
+                {
                     DeviceOrchestrator.LogDiag($"    winusb package {p.PublishedName} not deleted: {err}");
+                    keptAny = true;
+                }
             }
             lock (s_lock) s_published.Clear();
+            // A package kept for a devnode goes once the restore of the last
+            // entry is done (RegistryLedger.RestoreWinUsbEntries), if no
+            // devnode keeps it then.
+            RegistryLedger.NoteWinUsbPackagesLeft(keptAny);
         }
         finally { devnodes.ReleaseMutex(); }
     }
@@ -335,10 +795,12 @@ DeviceName = ""{deviceName}""
     /// it, so their adds take turns. The test certificate's check and create
     /// is under the same lock (<see cref="DriverBuilder.EnsureTestCertificate"/>),
     /// and so is <see cref="RemovePackage"/>.</para></summary>
-    private static string EnsurePackage(Package p)
+    private static string EnsurePackage(Package p, Keeper keeper)
     {
         if (Published(p) is string known) return known;
-        using var deploy = DriverDeploy.Acquire();
+        // The deploy lock, given up once the controller is disposed.
+        using var deploy = AcquireUnlessStopped(DriverDeploy.MutexObject, 600_000, keeper,
+            "Another program's HIDMaestro driver deploy held the machine-wide deploy lock for ten minutes.");
         try
         {
             // Another thread of this process may have added it while this
@@ -346,6 +808,16 @@ DeviceName = ""{deviceName}""
             return Published(p) ?? AddPackage(p);
         }
         finally { deploy.ReleaseMutex(); }
+    }
+
+    /// <summary>True when <paramref name="published"/> is still this
+    /// package's INF in the driver store. One that is gone is dropped from
+    /// this process's cache.</summary>
+    private static bool StillPublished(Package p, string published)
+    {
+        if (File.Exists(Path.Combine(InfDirectory, published))) return true;
+        lock (s_lock) s_published.Remove(p.InfName);
+        return false;
     }
 
     private static string? Published(Package p)
@@ -376,6 +848,8 @@ DeviceName = ""{deviceName}""
         if (published == null)
             throw new InvalidOperationException($"pnputil did not add {p.InfName} (exit {rc}): {output.Trim()}");
         lock (s_lock) s_published[p.InfName] = published;
+        // A package a program adds again is not an uninstall's leftover.
+        RegistryLedger.NoteWinUsbPackagesLeft(false);
         return published;
     }
 
@@ -390,15 +864,21 @@ DeviceName = ""{deviceName}""
             .ToList();
 
     /// <summary>True when <paramref name="inf"/> is one of HIDMaestro's
-    /// WinUSB packages.</summary>
-    private static bool IsOurPackage(string? inf)
+    /// WinUSB packages, null when that cannot be told: the driver store
+    /// listed nothing, though <paramref name="inf"/> is a third-party package
+    /// it holds, as when pnputil fails or times out.</summary>
+    private static bool? IsOurPackage(string? inf)
     {
-        if (string.IsNullOrEmpty(inf)) return false;
+        if (string.IsNullOrEmpty(inf) || IsInboxOrNone(inf)) return false;
         string file = Path.GetFileName(inf);
         lock (s_lock)
             foreach (var known in s_published.Values)
                 if (string.Equals(file, known, StringComparison.OrdinalIgnoreCase)) return true;
-        return OurPackages().Any(r => string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
+        var all = PnputilHelper.EnumerateDrivers();
+        if (all.Count == 0) return null;
+        return all.Any(r => r.ProviderName.Equals(Provider, StringComparison.OrdinalIgnoreCase)
+                         && r.OriginalName.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase)
+                         && string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string Sha256Hex(byte[] data)
@@ -410,21 +890,24 @@ DeviceName = ""{deviceName}""
     /// host controller at the given vhci port. For a full-speed or
     /// high-speed device the vhci plugs the device in at the root hub port
     /// equal to the vhci port (usbip-win2 drivers/ude/vhci_ioctl.cpp:232-233),
-    /// which is the devnode's address.</summary>
+    /// which is the devnode's address. usbip-win2 frees a port before the
+    /// device on it is plugged out (drivers/ude/device.cpp, detach), so a new
+    /// import can share the address with a devnode still leaving. Two
+    /// devnodes there give none, and the caller looks again.</summary>
     internal static string? FindDevnode(int vhciPort, ushort vendorId, ushort productId)
     {
         string prefix = $@"USB\VID_{vendorId:X4}&PID_{productId:X4}\";
+        string? found = null;
         foreach (string id in PresentDeviceIds("USB"))
         {
             if (!id.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
             if (CM_Locate_DevNodeW(out uint dev, id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
             if (ReadDword(dev, CM_DRP_ADDRESS) != (uint)vhciPort) continue;
-            if (CM_Get_Parent(out uint hub, dev, 0) != CR_SUCCESS) continue;
-            if (CM_Get_Parent(out uint host, hub, 0) != CR_SUCCESS) continue;
-            if (ReadMultiSz(host, CM_DRP_HARDWAREID).Any(h => h.Contains("USBIP_WIN2", StringComparison.OrdinalIgnoreCase)))
-                return id;
+            if (!OnUsbipRootHub(dev)) continue;
+            if (found != null) return null;
+            found = id;
         }
-        return null;
+        return found;
     }
 
     /// <summary>The devnode of the controller's own import. A vhci port
@@ -433,11 +916,12 @@ DeviceName = ""{deviceName}""
     /// id, and the location must still be on that port once the devnode is
     /// found: another program's device of the same VID and PID can take a
     /// port the controller's import has just left.</summary>
-    private static string? WaitForDevnode(Usbip.UsbipBackendHandle handle, ushort vendorId, ushort productId, int timeoutMs)
+    private static string? WaitForDevnode(Usbip.UsbipBackendHandle handle, ushort vendorId, ushort productId, int timeoutMs, Keeper keeper)
     {
         var until = Environment.TickCount64 + timeoutMs;
         while (true)
         {
+            ThrowIfStopped(keeper);
             int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
             if (port > 0
                 && FindDevnode(port, vendorId, productId) is { } id
@@ -457,30 +941,34 @@ DeviceName = ""{deviceName}""
     /// devnode is either started, which a pending reinstall never is, or
     /// stopped on a decided driver: the flag clear, and an INF recorded or
     /// the install failed for want of one (problem 28).</summary>
-    private static void WaitInstalled(string instanceId, int timeoutMs)
+    private static void WaitInstalled(string instanceId, int timeoutMs, Keeper keeper)
     {
         var until = Environment.TickCount64 + timeoutMs;
         while (true)
         {
-            uint left = (uint)Math.Max(0, until - Environment.TickCount64);
+            ThrowIfStopped(keeper);
+            uint left = (uint)Math.Clamp(until - Environment.TickCount64, 0, 250);
             bool idle = CM_WaitNoPendingInstallEvents(left) == WAIT_OBJECT_0;
-            uint? problem = ProblemOf(instanceId);
-            bool settled = problem switch
-            {
-                null => false,
-                0 => IsStarted(instanceId),
-                CM_PROB_REINSTALL => false,
-                CM_PROB_FAILED_INSTALL => ((ConfigFlagsOf(instanceId) ?? 0) & CONFIGFLAG_REINSTALL) == 0,
-                _ => ((ConfigFlagsOf(instanceId) ?? 0) & CONFIGFLAG_REINSTALL) == 0
-                     && DriverOf(instanceId, phantom: false).Inf != null,
-            };
-            if (idle && settled) return;
+            if (idle && IsSettled(instanceId)) return;
             if (Environment.TickCount64 >= until)
                 throw new InvalidOperationException(
                     $"Windows was still installing a driver on {instanceId} after {timeoutMs / 1000} s.");
             Thread.Sleep(20);
         }
     }
+
+    /// <summary>The devnode is present and its driver decided: started, or
+    /// stopped on a decided driver with the reinstall flag clear (see
+    /// <see cref="WaitInstalled"/>).</summary>
+    private static bool IsSettled(string instanceId) => ProblemOf(instanceId) switch
+    {
+        null => false,
+        0 => IsStarted(instanceId),
+        CM_PROB_REINSTALL => false,
+        CM_PROB_FAILED_INSTALL => ((ConfigFlagsOf(instanceId) ?? 0) & CONFIGFLAG_REINSTALL) == 0,
+        _ => ((ConfigFlagsOf(instanceId) ?? 0) & CONFIGFLAG_REINSTALL) == 0
+             && DriverOf(instanceId, phantom: false).Inf != null,
+    };
 
     /// <summary>Every USB devnode, present or not, whose driver is one of
     /// <paramref name="packages"/>.</summary>
@@ -540,8 +1028,11 @@ DeviceName = ""{deviceName}""
     /// devnode's driver list shows another driver ranked above it. A lower
     /// rank is the better match (Microsoft Learn, "How Windows ranks drivers"),
     /// and only that other driver keeps Windows from choosing the package for
-    /// a real device of the same kind.</summary>
-    private static void InstallOn(string instanceId, string publishedInf)
+    /// a real device of the same kind. <paramref name="still"/> runs after
+    /// the driver list is built and the package chosen, right before
+    /// <c>DiInstallDevice</c>, and when it returns false nothing is installed
+    /// and this returns false.</summary>
+    private static bool InstallOn(string instanceId, string publishedInf, Func<bool> still)
     {
         IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
         if (set == INVALID_HANDLE_VALUE)
@@ -586,32 +1077,20 @@ DeviceName = ""{deviceName}""
                         "Windows would choose the package for every real device of this kind. Nothing was bound.");
                 DeviceOrchestrator.LogDiag(
                     $"    winusb: {publishedInf} ranks 0x{ourRank:X8} on {instanceId}, below {Path.GetFileName(bestOtherInf ?? "?")} at 0x{bestOther:X8}");
+                // SetupDiOpenDeviceInfo opens a devnode that is not present
+                // too, so the devnode is checked here, last.
+                if (!still())
+                {
+                    DeviceOrchestrator.LogDiag($"    winusb: {instanceId} left before the install, nothing installed");
+                    return false;
+                }
                 if (!DiInstallDevice(IntPtr.Zero, set, ref dev, ref ours, 0, out bool reboot))
                     throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
                 if (reboot)
                     DeviceOrchestrator.LogDiag($"    winusb: DiInstallDevice on {instanceId} asked for a restart");
+                return true;
             }
             finally { SetupDiDestroyDriverInfoList(set, ref dev, SPDIT_COMPATDRIVER); }
-        }
-        finally { SetupDiDestroyDeviceInfoList(set); }
-    }
-
-    /// <summary>Install the driver Windows ranks best on one devnode,
-    /// which <c>DiInstallDevice</c> does when no driver is named.</summary>
-    private static void InstallBestDriver(string instanceId)
-    {
-        IntPtr set = SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
-        if (set == INVALID_HANDLE_VALUE)
-            throw new InvalidOperationException($"SetupDiCreateDeviceInfoList failed ({Marshal.GetLastWin32Error()}).");
-        try
-        {
-            var dev = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
-            if (!SetupDiOpenDeviceInfoW(set, instanceId, IntPtr.Zero, 0, ref dev))
-                throw new InvalidOperationException($"SetupDiOpenDeviceInfo({instanceId}) failed ({Marshal.GetLastWin32Error()}).");
-            if (!DiInstallDeviceBest(IntPtr.Zero, set, ref dev, IntPtr.Zero, 0, out bool reboot))
-                throw new InvalidOperationException($"DiInstallDevice on {instanceId} failed ({Marshal.GetLastWin32Error()}).");
-            if (reboot)
-                DeviceOrchestrator.LogDiag($"    winusb: restoring {instanceId} asked for a restart");
         }
         finally { SetupDiDestroyDeviceInfoList(set); }
     }
@@ -630,25 +1109,29 @@ DeviceName = ""{deviceName}""
         }
     }
 
-    /// <summary>Set <c>CONFIGFLAG_REINSTALL</c>, keeping every other flag.
-    /// Works on a devnode that is not present.</summary>
-    internal static void SetReinstallFlag(string instanceId)
+    /// <summary>Write a devnode's ConfigFlags. Works on a devnode that is
+    /// not present.</summary>
+    private static void WriteConfigFlags(string instanceId, uint flags)
     {
         if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS)
             throw new InvalidOperationException($"{instanceId} is not a devnode.");
-        uint flags = ReadDword(dev, CM_DRP_CONFIGFLAGS) ?? 0;
-        flags |= CONFIGFLAG_REINSTALL;
         var bytes = BitConverter.GetBytes(flags);
         int cr = CM_Set_DevNode_Registry_PropertyW(dev, CM_DRP_CONFIGFLAGS, bytes, (uint)bytes.Length, 0);
         if (cr != CR_SUCCESS)
             throw new InvalidOperationException($"Setting ConfigFlags on {instanceId} failed (CR {cr}).");
     }
 
-    /// <summary>The devnode's ConfigFlags, or null when it has none.</summary>
+    /// <summary>The devnode's ConfigFlags. A devnode with no ConfigFlags
+    /// value has none set and reads 0 (CR_NO_SUCH_VALUE, cfgmgr32.h). Null
+    /// when the devnode or the value cannot be read.</summary>
     internal static uint? ConfigFlagsOf(string instanceId)
     {
         if (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) return null;
-        return ReadDword(dev, CM_DRP_CONFIGFLAGS);
+        var buf = new byte[4];
+        uint len = 4;
+        int cr = CM_Get_DevNode_Registry_PropertyW(dev, CM_DRP_CONFIGFLAGS, out _, buf, ref len, 0);
+        if (cr == CR_NO_SUCH_VALUE) return 0;
+        return cr == CR_SUCCESS && len >= 4 ? BitConverter.ToUInt32(buf) : null;
     }
 
     // ── cfgmgr32 reads ───────────────────────────────────────────────────
@@ -714,6 +1197,9 @@ DeviceName = ""{deviceName}""
 
     private const int CR_SUCCESS = 0;
     private const int CR_BUFFER_SMALL = 0x1A;
+    private const int CR_NO_SUCH_DEVINST = 0x0D;
+    private const int CR_NO_SUCH_VALUE = 0x25;
+    private const uint DEVPROP_TYPE_FILETIME = 0x10;
     private const uint CM_LOCATE_DEVNODE_NORMAL = 0;
     private const uint CM_LOCATE_DEVNODE_PHANTOM = 1;
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
@@ -725,6 +1211,9 @@ DeviceName = ""{deviceName}""
     private const uint CONFIGFLAG_REINSTALL = 0x00000020;
     private const uint DN_STARTED = 0x00000008;
     private const uint DN_HAS_PROBLEM = 0x00000400;
+    private const uint DN_WILL_BE_REMOVED = 0x00040000;
+    private const uint CM_PROB_WILL_BE_REMOVED = 0x15;
+    private const uint CM_PROB_DEVICE_NOT_THERE = 0x18;
     private const uint CM_PROB_REINSTALL = 18;
     private const uint CM_PROB_FAILED_INSTALL = 28;
     private const uint SPDIT_COMPATDRIVER = 2;
@@ -733,6 +1222,13 @@ DeviceName = ""{deviceName}""
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DEVPROPKEY { public Guid fmtid; public uint pid; }
+
+    // {83da6326-97a6-4088-9453-a1923f573b29}, 102 (devpkey.h)
+    private static readonly DEVPROPKEY DEVPKEY_Device_LastArrivalDate = new()
+    {
+        fmtid = new Guid("83da6326-97a6-4088-9453-a1923f573b29"),
+        pid = 102,
+    };
 
     // {a8b865dd-2e3d-4094-ad97-e593a70c75d6}, 5
     private static readonly DEVPROPKEY DEVPKEY_Device_DriverInfPath = new()
@@ -864,9 +1360,4 @@ DeviceName = ""{deviceName}""
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool DiInstallDevice(IntPtr hwndParent, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
         ref SP_DRVINFO_DATA_W DriverInfoData, uint Flags, [MarshalAs(UnmanagedType.Bool)] out bool NeedReboot);
-
-    [LibraryImport("newdev.dll", EntryPoint = "DiInstallDevice", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DiInstallDeviceBest(IntPtr hwndParent, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
-        IntPtr DriverInfoData, uint Flags, [MarshalAs(UnmanagedType.Bool)] out bool NeedReboot);
 }

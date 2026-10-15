@@ -91,11 +91,23 @@ internal sealed partial class LedgerLock : IDisposable
     /// writes its records before its targets, so a replay is safe.</summary>
     /// <exception cref="UnauthorizedAccessException">The process is not
     /// elevated.</exception>
-    internal static LedgerLock Acquire()
+    internal static LedgerLock Acquire() => Acquire(Timeout.Infinite);
+
+    /// <summary>Take the lock within <paramref name="timeoutMs"/>, both
+    /// mutexes included, or throw <see cref="TimeoutException"/> holding
+    /// neither. <see cref="Timeout.Infinite"/> waits as
+    /// <see cref="Acquire()"/> does.</summary>
+    internal static LedgerLock Acquire(int timeoutMs)
     {
+        long until = timeoutMs == Timeout.Infinite ? long.MaxValue : Environment.TickCount64 + timeoutMs;
         var m = new Mutex(false, AdminNamespace.Name(MutexObject));
-        try { m.WaitOne(); }
-        catch (AbandonedMutexException) { }
+        try
+        {
+            bool taken;
+            try { taken = m.WaitOne(timeoutMs); }
+            catch (AbandonedMutexException) { taken = true; }
+            if (!taken) throw new TimeoutException($"The registry ledger's lock was not free within {timeoutMs} ms.");
+        }
         catch
         {
             m.Dispose();
@@ -105,7 +117,7 @@ internal sealed partial class LedgerLock : IDisposable
         bool outermost = ++t_depth == 1;
         try
         {
-            if (outermost || !t_withoutLegacy) l.TakeLegacy();
+            if (outermost || !t_withoutLegacy) l.TakeLegacy(until);
             else DeviceOrchestrator.LogDiag($"    ledger: nested in a scope that went on without {LegacyMutexName}, not waited for");
             if (outermost) t_withoutLegacy = !l._legacyHeld;
         }
@@ -118,7 +130,7 @@ internal sealed partial class LedgerLock : IDisposable
         return l;
     }
 
-    private void TakeLegacy()
+    private void TakeLegacy(long until)
     {
         IntPtr sd = IntPtr.Zero, sa = IntPtr.Zero;
         try
@@ -171,13 +183,21 @@ internal sealed partial class LedgerLock : IDisposable
             // serializes, and a squatter costs only the wait.
             bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
             bool marked = s_legacyHeldByOther;
-            uint timeout = administrative ? INFINITE
+            uint full = administrative ? INFINITE
                 : (uint)TimeoutScale.Apply(marked ? LegacyMarkedWaitMs : LegacyUnknownWaitMs);
+            // A bounded take waits no longer than its caller allows, and
+            // gives up on a v1.12.0 holder rather than go on without it.
+            bool bounded = until != long.MaxValue;
+            uint timeout = bounded ? (uint)Math.Min(full, Math.Max(0, until - Environment.TickCount64)) : full;
             uint r = WaitForSingleObject(h, timeout);
             _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
+            if (bounded && administrative && !_legacyHeld)
+                throw new TimeoutException($"A HIDMaestro v1.12.0 program held {LegacyMutexName} past the ledger lock's timeout.");
             if (administrative || _legacyHeld)
                 s_legacyHeldByOther = false;
-            else if (!marked)
+            else if (!marked && timeout == full)
+                // Only a wait that ran its own full bound marks the mutex,
+                // not one a caller's shorter bound cut.
                 s_legacyHeldByOther = true;
             if (!administrative)
                 DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} has no owner read as SYSTEM or Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");

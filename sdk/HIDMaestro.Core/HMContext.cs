@@ -632,6 +632,9 @@ public sealed class HMContext : IDisposable
             // that never existed.
             if (controller.UsbipHandle != null)
             {
+                // No WinUSB bind after a re-import lands once the ledger
+                // below has released the controller's holds.
+                try { Internal.WinUsbBinding.StopKeeping(controller); } catch { }
                 try { controller.UsbipHandle.Dispose(); } catch { }
                 try { Internal.SharedMemoryIO.DestroyController(controller.Index); } catch { }
                 // A WinUSB binding (HMController.BindWinUsb) goes back once

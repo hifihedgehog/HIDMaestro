@@ -112,8 +112,11 @@ internal static class OwnerSweep
             MachineClaims.DeleteOwnRecord();
             return;
         }
-        // The composites first: their emulated devices read sections this
-        // process is about to release.
+        // No WinUSB re-bind of this process is inside its claim and install
+        // when the devices leave (WinUsbBinding.StopKeepingAll). Then the
+        // composites: their emulated devices read sections this process is
+        // about to release.
+        WinUsbBinding.StopKeepingAll();
         Usbip.UsbipBackend.DetachOwn();
         var groups = census.Devices.Where(d => d.Owner == OwnerCensus.Owner.Self).ToList();
         if (groups.Count > 0)

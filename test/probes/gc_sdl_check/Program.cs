@@ -66,6 +66,8 @@ internal static class Program
 
     static int Main(string[] args)
     {
+        // Both modes bind a real adapter and dispose it.
+        if (Probe.RefuseWithoutDepartingRule("S83")) return Probe.Finish("S83");
         // "measure <runs>": the latency and rate measurements alone,
         // repeated and pooled, for the release numbers.
         if (args.Length == 2 && args[0] == "measure" && int.TryParse(args[1], out int runs))

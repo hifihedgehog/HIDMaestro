@@ -50,6 +50,8 @@ internal static class Program
     {
         Console.WriteLine("=== S80: the GameCube adapter persona's protocol ===");
         if (Probe.OtherSdkRunning()) return 2;
+        // S80 binds a real adapter and disposes it.
+        if (Probe.RefuseWithoutDepartingRule("S80")) return Probe.Finish("S80");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();

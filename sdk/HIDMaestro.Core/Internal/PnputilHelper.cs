@@ -256,8 +256,8 @@ internal static class PnputilHelper
         => Run($"/add-driver \"{infPath}\"", timeoutMs: 60_000);
 
     /// <summary>Delete one package from the driver store, nothing more: no
-    /// /uninstall and no /force, so a package a device still uses stays.
-    /// The caller moves every device off the package first.</summary>
+    /// /uninstall and no /force, so a package a devnode still uses, present
+    /// or not, stays.</summary>
     public static bool DeletePackagePlain(string publishedName, out string error)
     {
         var (rc, output) = Run($"/delete-driver {publishedName}", timeoutMs: 30_000);

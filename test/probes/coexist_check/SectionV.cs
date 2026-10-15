@@ -473,6 +473,8 @@ internal static partial class Program
     {
         using var a = PeerProcess.Start("V7-binds");
         using var b = PeerProcess.Start("V7-other");
+        // V7 binds a real adapter and disposes it (SectionZ.cs, ZGuarded).
+        if (!ZGuarded(a, "V7")) return;
         string ca = a.Send("create gc -");
         string cb = b.Send("create gc -");
         if (!Ok(ca) || !Ok(cb)) { Check("V7: both programs create a GameCube adapter", false, $"{ca} / {cb}"); return; }

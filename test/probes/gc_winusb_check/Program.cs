@@ -49,10 +49,12 @@ internal static class Program
 
     static int Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "child") return Child();
+        if (args.Length > 0 && args[0] == "child")
+            return Probe.RefuseWithoutDepartingRule("S81's child") ? 1 : Child();
 
         Console.WriteLine("=== S81: the WinUSB binding of the GameCube adapter persona ===");
         if (Probe.OtherSdkRunning()) return 2;
+        if (Probe.RefuseWithoutDepartingRule("S81")) return Probe.Finish("S81");
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -129,6 +131,9 @@ internal static class Program
         Probe.Check("the first's hold goes with it",
             !RegistryLedger.HeldWinUsbDevnodes().Contains(first!, StringComparer.OrdinalIgnoreCase));
         Probe.Check("its devnode leaves", Probe.WaitFor(() => !Devnodes.IsPresent(first!), 10_000));
+        // A devnode still present when the teardown restored it keeps its
+        // entry until a sweep finds it gone, as this one does.
+        RegistryLedger.PruneDead();
         Probe.Check("and the restore gives the gone devnode the reinstall flag for its next arrival",
             ((Devnodes.ConfigFlags(first!) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
             $"ConfigFlags 0x{Devnodes.ConfigFlags(first!) ?? 0:X}");
@@ -344,14 +349,25 @@ internal static class Program
             {
                 Probe.Check("before any reclaim it finds WinUSB, as an instance Zadig bound would",
                     Probe.WaitFor(() => Devnodes.Service(id) == "WINUSB", 10_000), $"{Devnodes.Service(id)}");
+                // A restore never installs a driver on a present devnode: the
+                // stand-in keeps WinUSB, and the entry stays until it leaves.
                 RegistryLedger.PruneDead();
-                Probe.Check("the reclaim puts it back on input.inf",
-                    Probe.WaitFor(() => Devnodes.Service(id) == "HidUsb", 15_000), $"{Devnodes.Service(id)}");
+                Thread.Sleep(3000);
+                Probe.Check("the reclaim leaves the present stand-in on WinUSB, with no reinstall flag",
+                    Devnodes.Service(id) == "WINUSB" && ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) == 0,
+                    $"{Devnodes.Service(id)}, ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X}");
+                Probe.Check("and keeps the entry", HasWinUsbEntry(id));
             }
         }
-        if (bindArrival)
-            Probe.Check("its dispose flags the gone devnode for reinstall", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
+        if (!reclaimFirst)
+        {
+            // As at the first dispose: a devnode the teardown found present
+            // is flagged by the first sweep that finds it gone.
+            Probe.WaitFor(() => !Devnodes.IsPresent(id), 10_000);
+            RegistryLedger.PruneDead();
+            Probe.Check("once it is gone, a sweep flags it for reinstall", ((Devnodes.ConfigFlags(id) ?? 0) & CONFIGFLAG_REINSTALL) != 0,
                 $"ConfigFlags 0x{Devnodes.ConfigFlags(id) ?? 0:X}");
+        }
         Probe.Check("no hold left", RegistryLedger.HeldWinUsbDevnodes().Count == 0, string.Join(", ", RegistryLedger.HeldWinUsbDevnodes()));
         // The child's controller record and its import: the orphan-safe
         // cleanup takes what a dead program left.
@@ -372,6 +388,18 @@ internal static class Program
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>Whether the ledger has a WinUSB entry for the devnode, held
+    /// or not.</summary>
+    static bool HasWinUsbEntry(string instanceId)
+    {
+        using var kind = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroRegistryLedger\WinUsb");
+        if (kind == null) return false;
+        foreach (var n in kind.GetSubKeyNames())
+            using (var e = kind.OpenSubKey(n))
+                if (string.Equals(e?.GetValue("InstanceId") as string, instanceId, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
 
     /// <summary>The adapter devnode of a USB/IP controller, by its vhci
     /// port, once it is present.</summary>

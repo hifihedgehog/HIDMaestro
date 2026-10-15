@@ -83,6 +83,27 @@ internal static class Probe
         Console.Out.Flush();
     }
 
+    /// <summary>The departing-devnode rule these probes were written for
+    /// (WinUsbBinding.DepartingDevnodeRule): a restore never installs a
+    /// driver on a present devnode.</summary>
+    public const int DepartingRule = 6;
+
+    /// <summary>True, after a failed check, when the SDK this probe runs is
+    /// below <see cref="DepartingRule"/>: binding a real adapter and
+    /// disposing it on such a build can change the driver and setup class of
+    /// a devnode on its way out. The probe then runs nothing that binds.
+    /// Read by reflection, so a build that lacks the rule reads as below
+    /// it.</summary>
+    public static bool RefuseWithoutDepartingRule(string scenario)
+    {
+        object? rule = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.WinUsbBinding")
+            ?.GetField("DepartingDevnodeRule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?.GetValue(null);
+        bool ok = rule is int r && r >= DepartingRule;
+        if (!ok) Check($"the SDK has the departing-devnode rule {DepartingRule} ({scenario} binds a real adapter, not run on an older SDK)", false, $"rule {rule ?? "none"}");
+        return !ok;
+    }
+
     public static int Finish(string title)
     {
         Console.WriteLine($"{title}: {s_total - s_failures}/{s_total} passed");
