@@ -396,7 +396,10 @@ public sealed class HMContext : IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
     /// <exception cref="HMResourceInUseException">A live controller on this
-    /// machine, in this program or another, holds the key.</exception>
+    /// machine, in this program or another, holds the key, or the key is
+    /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
+    /// HIDMaestro 1.12.0 runs, which gives that identity to its own
+    /// controller on index N.</exception>
     /// <exception cref="InvalidOperationException">Driver install failed or
     /// device node creation failed.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
@@ -535,7 +538,10 @@ public sealed class HMContext : IDisposable
     /// <exception cref="InvalidOperationException">If the slot is already
     /// in use by another live controller of this context.</exception>
     /// <exception cref="HMResourceInUseException">A live controller on this
-    /// machine, in this program or another, holds the key.</exception>
+    /// machine, in this program or another, holds the key, or the key is
+    /// <c>index:&lt;N&gt;</c> with N below 64 while a program built on
+    /// HIDMaestro 1.12.0 runs, which gives that identity to its own
+    /// controller on index N.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));

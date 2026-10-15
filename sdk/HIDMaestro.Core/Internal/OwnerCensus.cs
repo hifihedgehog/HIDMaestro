@@ -13,7 +13,8 @@ namespace HIDMaestro.Internal;
 /// on this and on nothing else.
 ///
 /// <para>A present device belongs to the record that lists its identity
-/// token or its transport index, a live record before a dead one. A record
+/// token, or, for a device older than identity tokens, its transport index,
+/// a live record before a dead one. A record
 /// is live while its owner claim is held (<see cref="MachineClaims"/>). A
 /// dead record names a device only while no running program holds the
 /// device's transport index or identity: an index or identity outlives the
@@ -107,9 +108,15 @@ internal sealed partial class OwnerCensus
 
         foreach (var (key, g) in groups)
         {
+            // A device with an identity token belongs to the record that
+            // lists the token, and one older than identity tokens to the
+            // record that lists its index, as in Classify. A token no record
+            // lists is another program's, a v1.12.0 program's or an older
+            // one's, even when it shares a recorded index: a running v1.12.0
+            // program takes indices without looking at other programs.
             MachineClaims.OwnerRecord? rec = null;
             if (!key.StartsWith('#')) byToken.TryGetValue(key, out rec);
-            if (rec == null && g.Index >= 0) byIndex.TryGetValue(g.Index, out rec);
+            else if (g.Index >= 0) byIndex.TryGetValue(g.Index, out rec);
             Owner owner;
             if (rec is { Live: true }) owner = rec.Self ? Owner.Self : Owner.Live;
             else

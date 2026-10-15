@@ -16,8 +16,19 @@
 //        and the new device and its index's configuration are there.
 //    W4. The same without a key: the program started again takes its old
 //        index and identity, or another index while the sweep holds those.
+//    W5. A running v1.12.0 program with a controller, and a program on this
+//        SDK that creates two beside it. The v1.12.0 program creates twice
+//        more on the lowest indices free among its own controllers. None of
+//        them lands on the new program's, the new program's devices stay,
+//        and its exit removes its own devices and none of the v1.12.0
+//        program's. A create with the key index:1, which names the identity
+//        the v1.12.0 program gives its next controller, is refused.
+//    W6. A v1.12.0 program with no controller at the moment leaves no sign,
+//        so its next create lands on the index a program on this SDK took.
+//        The new program's exit still removes only its own device.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using Microsoft.Win32;
@@ -33,6 +44,15 @@ internal static partial class Program
         SectionWReclaim("W3", 0xF202, "coexist-w3");
         Clean();
         SectionWReclaim("W4", 0xF203, "-");
+        Clean();
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+            Check("W5: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+        else
+        {
+            SectionWLegacy();
+            Clean();
+            SectionWLegacyIdle();
+        }
     }
 
     /// <summary>W1.</summary>
@@ -112,6 +132,71 @@ internal static partial class Program
         string token = inst.Substring(inst.LastIndexOf('\\') + 1);
         string? entry = Y.CensusEntry(k2.Send("census"), token);
         Check($"{label}: it reads as the program's own", entry?.Split('|')[2] == "Self", entry ?? "(no entry)");
+    }
+
+    /// <summary>W5.</summary>
+    static void SectionWLegacy()
+    {
+        using var old = PeerProcess.Start("W5-v1.12.0", "v1.12.0");
+        string o1 = old.Send("create pad F204 -");
+        if (!Ok(o1)) { Check("W5: the v1.12.0 program creates", false, o1); return; }
+        using var nu = PeerProcess.Start("W5-new");
+        string n1 = nu.Send("create pad F205 -");
+        string n2 = nu.Send("create pad F206 coexist-w5");
+        if (!Ok(n1) || !Ok(n2)) { Check("W5: the new program creates beside it", false, $"{n1} / {n2}"); return; }
+        // index:1 is the identity the v1.12.0 program gives its next
+        // controller, whatever index this one would land on.
+        string nk = nu.Send("create pad F211 index:1");
+        Check("W5: a create with the key index:1 is refused with HMResourceInUseException",
+              nk.StartsWith("ERR create", StringComparison.Ordinal) && nk.Contains("HMResourceInUseException"), nk);
+        string[] newInst = { PeerProcess.Field(n1, "instance")!, PeerProcess.Field(n2, "instance")! };
+        string[] newT = { PeerProcess.Field(n1, "transport")!, PeerProcess.Field(n2, "transport")! };
+        var pathA = WaitPaths(0xBEEF, 0xF205, 1, 10_000);
+        var pathB = WaitPaths(0xBEEF, 0xF206, 1, 10_000);
+        using var capA = pathA.Count == 1 ? HidCapture.Open(pathA[0]) : null;
+        using var capB = pathB.Count == 1 ? HidCapture.Open(pathB[0]) : null;
+        if (capA == null || capB == null) { Check("W5: the new program's devices open", false); return; }
+
+        string o2 = old.Send("create pad F207 -");
+        string o3 = old.Send("create pad F208 -");
+        if (!Ok(o2) || !Ok(o3)) { Check("W5: the v1.12.0 program creates twice more", false, $"{o2} / {o3}"); return; }
+        string[] oldT = { PeerProcess.Field(o1, "transport")!, PeerProcess.Field(o2, "transport")!, PeerProcess.Field(o3, "transport")! };
+        string[] oldInst = { PeerProcess.Field(o1, "instance")!, PeerProcess.Field(o2, "instance")!, PeerProcess.Field(o3, "instance")! };
+        Check("W5: the v1.12.0 program's next creates take no index of the new program's",
+              !oldT.Intersect(newT).Any(), $"v1.12.0 {string.Join(",", oldT)}, new {string.Join(",", newT)}");
+        Thread.Sleep(500);
+        Check("W5: the new program's devices stay, and their open handles never fail",
+              !capA.Broken && !capB.Broken && newInst.All(Native.IsStarted),
+              $"handles {(capA.Broken ? "broken" : "open")}/{(capB.Broken ? "broken" : "open")}");
+
+        string q = nu.Send("quit");
+        Check("W5: the new program exits without disposing", q == "OK quit" && nu.WaitExit(120_000), q);
+        Check("W5: its exit handler removes its devices", newInst.All(i => WaitFor(() => !Native.IsPresent(i), 15_000)));
+        Check("W5: and leaves the v1.12.0 program's three", oldInst.All(Native.IsStarted),
+              string.Join(", ", oldInst.Select(i => $"{i} {(Native.IsStarted(i) ? "started" : "gone")}")));
+    }
+
+    /// <summary>W6.</summary>
+    static void SectionWLegacyIdle()
+    {
+        using var old = PeerProcess.Start("W6-v1.12.0", "v1.12.0");
+        string o1 = old.Send("create pad F209 -");
+        if (!Ok(o1)) { Check("W6: the v1.12.0 program creates", false, o1); return; }
+        old.Send("dispose");
+        WaitFor(() => Native.HidPaths(0xBEEF, 0xF209).Count == 0, 10_000);
+        using var nu = PeerProcess.Start("W6-new");
+        string n1 = nu.Send("create pad F20A coexist-w6");
+        string o2 = old.Send("create pad F20B -");
+        if (!Ok(n1) || !Ok(o2)) { Check("W6: both programs create", false, $"{n1} / {o2}"); return; }
+        Check("W6: the v1.12.0 program's create lands on the new program's index, which nothing here can see coming",
+              PeerProcess.Field(n1, "transport") == PeerProcess.Field(o2, "transport"),
+              $"new {PeerProcess.Field(n1, "transport")}, v1.12.0 {PeerProcess.Field(o2, "transport")}");
+        string instNew = PeerProcess.Field(n1, "instance")!, instOld = PeerProcess.Field(o2, "instance")!;
+        string q = nu.Send("quit");
+        Check("W6: the new program exits without disposing", q == "OK quit" && nu.WaitExit(120_000), q);
+        Check("W6: its exit handler removes its device", WaitFor(() => !Native.IsPresent(instNew), 15_000));
+        Thread.Sleep(500);
+        Check("W6: and leaves the v1.12.0 program's device on the same index", Native.IsStarted(instOld), instOld);
     }
 
     static bool ConfigExists(string transport)

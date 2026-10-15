@@ -99,6 +99,10 @@ internal sealed class PeerProcess : IDisposable
         return reply;
     }
 
+    /// <summary>Wait for the peer to end on its own, after a command that
+    /// exits it.</summary>
+    public bool WaitExit(int timeoutMs) => _p.WaitForExit(timeoutMs);
+
     /// <summary>TerminateProcess: no Dispose, no exit hook, no finally.</summary>
     public void Kill()
     {

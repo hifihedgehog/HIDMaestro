@@ -16,11 +16,13 @@ namespace HIDMaestro.Internal;
 /// key of the controller, and is the <c>ControllerIndex</c> the driver
 /// reads. It is the controller's slot number when that index is free on the
 /// machine, so a program running alone gets the numbers it always got, and
-/// the lowest free index otherwise. An index is free when its claim can be
-/// taken, no v1.12.0 program holds its owner pipe, no present device records
-/// it, no USB/IP import of a program without an owner record uses it, and
-/// none of its named sections and events was made by a program that is not
-/// elevated. Whether its input section exists says nothing: the driver host
+/// the lowest free index otherwise. While a v1.12.0 program runs, whose next
+/// create takes the lowest index free among its own controllers, the search
+/// starts at <see cref="LegacyClearance"/>. An index is free when its claim
+/// can be taken, no v1.12.0 program holds its owner pipe, no present device
+/// records it, no USB/IP import of a program without an owner record uses
+/// it, and none of its named sections and events was made by a program that
+/// is not elevated. Whether its input section exists says nothing: the driver host
 /// of a removed device can hold a section after the removal, until a
 /// process that called XInput on the device polls XInput again or exits.</para>
 /// </summary>
@@ -58,6 +60,9 @@ internal sealed class ControllerLease : IDisposable
                 // The slot is only a placeholder here: a keyed identity
                 // does not depend on where it lands.
                 keyedIdentity = DeviceIdentity.ForKey(identityKey!, slot);
+                // Refused before the claim, so a refused create never first
+                // waits for a sweep that holds the identity.
+                RefuseDefaultBelowFloor(keyedIdentity, identityKey!, Floor(census));
                 identityClaim = ClaimIdentity(keyedIdentity, identityKey!.Trim(), ref census);
             }
 
@@ -84,11 +89,31 @@ internal sealed class ControllerLease : IDisposable
                     reclaimed = k;
                 }
 
+            // A running v1.12.0 program's next create takes the lowest index
+            // free among its own controllers, whatever else runs, and
+            // replaces a devnode of that index's default identity as its own
+            // prior life (b4d29d9 HMContext.CreateController and
+            // DeviceNodeCreator). While one runs, this create starts at
+            // LegacyClearance, above every index that program reaches with
+            // fewer controllers than that. Starting lower lets that program's
+            // next create replace this one's devnode. The cost is everything
+            // derived from the index: a keyless controller's token, paths and
+            // container id, a keyless composite's USB serial and USB instance
+            // id (DeviceIdentity.SerialVariant), and for every controller the
+            // HID serial HM-CTL-<index>, the DualSense and Switch Pro MAC
+            // bytes, a byte of the XUSB capabilities and the USB/IP bus id. A program
+            // restarted after a crash takes its old index back only when it
+            // is at least LegacyClearance.
+            int floor = Floor(census);
+            if (floor > 0)
+                DeviceOrchestrator.LogDiag($"    a v1.12.0 program runs: transport indices from {floor}");
+            // Again, for the census a wait for a sweep took again.
+            if (keyedIdentity != null) RefuseDefaultBelowFloor(keyedIdentity, identityKey!, floor);
             // Indices skipped for an object this release did not create, and
             // for an object nothing about whose maker was read.
             int squattedCount = 0, unreadCount = 0;
             string? firstOwnerRead = null, firstNotOurs = null, firstUnread = null;
-            foreach (int n in Candidates(reclaimed >= 0 ? reclaimed : slot))
+            foreach (int n in Candidates(reclaimed >= floor ? reclaimed : floor + slot, floor))
             {
                 if (used.Contains(n)) continue;
                 SafeFileHandle? indexClaim = MachineClaims.TryClaim(MachineClaims.IndexPipeName(n));
@@ -174,13 +199,46 @@ internal sealed class ControllerLease : IDisposable
     }
 
     /// <summary>The preferred index first, the slot or a reclaimed
-    /// identity's, so a lone program keeps its numbers, then upward.</summary>
-    private static IEnumerable<int> Candidates(int first)
+    /// identity's, so a lone program keeps its numbers, then upward from
+    /// <paramref name="floor"/>, then the indices below it.</summary>
+    private static IEnumerable<int> Candidates(int first, int floor)
     {
         yield return first;
-        for (int n = 0; n < 4096; n++)
+        for (int n = floor; n < 4096; n++)
+            if (n != first) yield return n;
+        for (int n = 0; n < floor; n++)
             if (n != first) yield return n;
     }
+
+    /// <summary>The first transport index a create takes while a v1.12.0
+    /// program runs. Such a program reaches it only with this many
+    /// controllers alive at once.</summary>
+    internal const int LegacyClearance = 64;
+
+    private static int Floor(OwnerCensus census) => LegacyProgramRuns(census) ? LegacyClearance : 0;
+
+    /// <summary>A key of the form index:N is index N's default identity
+    /// wherever the controller lands (DeviceIdentity.ForKey): the devnode
+    /// name a v1.12.0 program gives its controller on index N, which its next
+    /// create replaces as its own prior life. The floor cannot move that
+    /// name, so below the floor the create is refused.</summary>
+    private static void RefuseDefaultBelowFloor(DeviceIdentity identity, string key, int floor)
+    {
+        if (!identity.IsDefault || identity.Index >= floor) return;
+        throw new HMResourceInUseException(
+            $"Identity key '{key.Trim()}' is the default identity of transport index {identity.Index}, and a running program " +
+            $"built on HIDMaestro 1.12.0 that has a controller present gives that identity to its own controller on index {identity.Index}, " +
+            "replacing any device that has it. While that program runs, create this controller with no key or with a key of your own, or close that program first.",
+            $"identity key '{key.Trim()}'", null);
+    }
+
+    /// <summary>Whether a v1.12.0 program runs: a present device of one, or
+    /// a USB/IP import no owner record names whose index's v1.12.0 owner
+    /// pipe is held, a composite of one. A v1.12.0 program with no
+    /// controller at this moment leaves no sign.</summary>
+    private static bool LegacyProgramRuns(OwnerCensus census) =>
+        census.Devices.Any(g => g.Owner == OwnerCensus.Owner.LiveLegacy)
+        || census.ForeignImportIndices.Any(i => MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(i)));
 
     /// <summary>A v1.12.0 program takes no identity claim. Its device of
     /// this token is present and its index's owner pipe is held.</summary>
