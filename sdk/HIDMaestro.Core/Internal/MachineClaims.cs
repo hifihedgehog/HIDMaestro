@@ -266,19 +266,20 @@ internal static partial class MachineClaims
         }
     }
 
-    /// <summary>Drop a controller's entry after its teardown. The record
-    /// stays until the process exits.</summary>
+    /// <summary>Drop a controller's entry after its teardown, or after a
+    /// create that failed writing it. The record stays until the process
+    /// exits. An entry has values and no subkeys, so RegDeleteKeyEx removes
+    /// it with DELETE on the entry alone: the write access a failed write
+    /// was refused is never needed here, where opening the Controllers key
+    /// for writing would need it.</summary>
     internal static void RemoveController(string token)
     {
         lock (s_lock)
         {
             if (s_ownerId == null) return;
-            try
-            {
-                using var cs = Registry.LocalMachine.OpenSubKey($@"{RecordsRoot}\{s_ownerId}\{ControllersKey}", writable: true);
-                cs?.DeleteSubKeyTree(token, throwOnMissingSubKey: false);
-            }
-            catch { }
+            // ERROR_FILE_NOT_FOUND when there is no entry. Any other error
+            // leaves an entry the sweeps read as this live process's.
+            RegDeleteKeyExW(HKEY_LOCAL_MACHINE, $@"{RecordsRoot}\{s_ownerId}\{ControllersKey}\{token}", 0, 0);
         }
     }
 
@@ -385,6 +386,11 @@ internal static partial class MachineClaims
         public IntPtr lpSecurityDescriptor;
         public int bInheritHandle;
     }
+
+    private static readonly IntPtr HKEY_LOCAL_MACHINE = unchecked((IntPtr)(int)0x80000002);
+
+    [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int RegDeleteKeyExW(IntPtr key, string subKey, int samDesired, int reserved);
 
     [LibraryImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial SafeFileHandle CreateNamedPipe(string name, uint openMode, uint pipeMode, uint maxInstances,

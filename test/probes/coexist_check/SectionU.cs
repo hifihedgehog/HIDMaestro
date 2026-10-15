@@ -1,10 +1,11 @@
 // U. A create that fails after it claimed a transport index and an
 //    identity. The program's record is made to refuse the write the create
 //    needs, once before any device exists and once after the device is
-//    made, and a composite's device emulator fails after it mapped the
-//    index's sections. Each time the create leaves no claim pipe, no device
-//    and no record entry, and the same identity creates again at once, in
-//    the same program and in another.
+//    made, and once over an entry it cannot write that is already there.
+//    A composite's device emulator fails after it mapped the index's
+//    sections. Each time the create leaves no claim pipe, no device and no
+//    record entry, and the same identity creates again at once, in the same
+//    program and in another.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -77,10 +78,34 @@ internal static partial class Program
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
 
+        // An entry for the identity is already there and refuses writes,
+        // as an entry a failed removal left would. The create's write
+        // fails on it, and the failed create removes it all the same: the
+        // removal needs DELETE on the entry, not the write access that was
+        // refused.
+        string stale = $@"{controllers}\HM_{int.Parse(t):D4}";
+        var noValueHere = DenyRule(RegistryRights.SetValue, children: false);
+        using (Registry.LocalMachine.CreateSubKey(stale)) { }
+        SetDeny(stale, noValueHere, on: true);
+        try
+        {
+            string f2b = a.Send("create pad F1B0 -");
+            Check("U: a create over an entry it cannot write fails", !Ok(f2b), f2b);
+            UnclaimedAndUnrecorded("U: after it", baseline, controllers, entriesChecked: true);
+        }
+        finally
+        {
+            // Only when the create left it.
+            using (var k = Registry.LocalMachine.OpenSubKey(stale))
+                if (k != null) SetDeny(stale, noValueHere, on: false);
+            Registry.LocalMachine.DeleteSubKeyTree(stale, throwOnMissingSubKey: false);
+        }
+
         // The device is made, then the entry refuses its instance id. A
         // controller's new entry inherits a deny on setting values: the
         // create's own handle wrote the entry, and reopening it to add the
-        // instance id after the device exists fails.
+        // instance id after the device exists fails. The removal of the
+        // entry needs no write access, so the deny does not stop it.
         var noValue = DenyRule(RegistryRights.SetValue, children: true);
         string f3;
         SetDeny(controllers, noValue, on: true);
@@ -91,11 +116,10 @@ internal static partial class Program
             Check("U: no device of it is left",
                   WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000),
                   $"{Native.HidPaths(0xBEEF, UPid).Count} present");
-            UnclaimedAndUnrecorded("U: after the refused instance id", baseline, controllers, entriesChecked: false);
+            UnclaimedAndUnrecorded("U: after the refused instance id", baseline, controllers, entriesChecked: true);
         }
         finally { SetDeny(controllers, noValue, on: false); }
-        // The same deny refused the SDK's removal of the entry, so the
-        // probe removes it to leave the record as the SDK would.
+        // A failed check above leaves entries the next steps would read.
         using (var cs = Registry.LocalMachine.OpenSubKey(controllers, writable: true))
             foreach (var name in cs?.GetSubKeyNames() ?? Array.Empty<string>())
                 cs!.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
