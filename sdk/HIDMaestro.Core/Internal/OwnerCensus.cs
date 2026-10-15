@@ -308,8 +308,12 @@ internal sealed partial class OwnerCensus
             // A process with that id exists but denies this one a handle.
             // Read its creation time without a handle, so a process that
             // reused the id and cannot be opened does not pass as the server.
-            // Its token, hence elevation, cannot be read.
-            bool deniedAlive = CreationTimeByScan((uint)w.ProcessId) is DateTime dc && dc <= w.WrittenUtc;
+            // Where the process list cannot be read, the process counts as
+            // running, as it did before this release: an unreadable list
+            // must not get a running program's devices removed. Its token,
+            // hence elevation, cannot be read.
+            DateTime? listed = CreationTimeByScan((uint)w.ProcessId, out bool listRead);
+            bool deniedAlive = !listRead || (listed is DateTime dc && dc <= w.WrittenUtc);
             return new ServerCheck(deniedAlive, null, false);
         }
         try
@@ -348,11 +352,15 @@ internal sealed partial class OwnerCensus
 
     /// <summary>The creation time of the process with <paramref name="pid"/>
     /// read from the system process list, for when its handle cannot be
-    /// opened. Null when no such process is listed. Used only on the
-    /// access-denied path, which is rare, so the full-list query is
-    /// acceptable there.</summary>
-    private static DateTime? CreationTimeByScan(uint pid)
+    /// opened. Null when no such process is listed. <paramref name="read"/>
+    /// is false when the list could not be read: in a 32-bit process, whose
+    /// layout the offsets below do not describe, or when the query fails.
+    /// Used only on the access-denied path, which is rare, so the full-list
+    /// query is acceptable there.</summary>
+    private static DateTime? CreationTimeByScan(uint pid, out bool read)
     {
+        read = false;
+        if (IntPtr.Size != 8) return null;
         int len = 512 * 1024;
         for (int attempt = 0; attempt < 4; attempt++)
         {
@@ -366,6 +374,7 @@ internal sealed partial class OwnerCensus
                     continue;
                 }
                 if (status != 0) return null;
+                read = true;
                 int offset = 0;
                 while (true)
                 {
@@ -566,8 +575,9 @@ internal sealed partial class OwnerCensus
     private const string LocalSystemSid = "S-1-5-18", AdministratorsSid = "S-1-5-32-544";
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, TOKEN_QUERY = 0x0008, STILL_ACTIVE = 259;
     private const uint SystemProcessInformation = 5, STATUS_INFO_LENGTH_MISMATCH = 0xC0000004;
-    // SYSTEM_PROCESS_INFORMATION field offsets, 64-bit (x64 and ARM64 share
-    // the LLP64 layout): CreateTime at 0x20, UniqueProcessId at 0x50.
+    // SYSTEM_PROCESS_INFORMATION field offsets in a 64-bit process (x64 and
+    // ARM64 share the LLP64 layout): CreateTime at 0x20, UniqueProcessId at
+    // 0x50. A 32-bit process does not read the list (CreationTimeByScan).
     private const int CreateTimeOffset = 0x20, ProcessIdOffset = 0x50;
     private const int ERROR_ACCESS_DENIED = 5, TokenOwner = 4, TokenElevation = 20;
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
