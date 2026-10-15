@@ -621,6 +621,9 @@ internal static partial class Program
         string r2 = p.Send("zclaimsweep all", 60_000);
         Check("Za: a claim between the full cleanup's queue and its restore keeps the entry and its holder",
               PeerProcess.Field(r2, "kept") == "True" && PeerProcess.Field(r2, "holder") == "True", r2);
+        string r3 = p.Send("zclaimsweep same", 60_000);
+        Check("Za: a fresh claim under a holder name the full cleanup saw keeps the entry and its holder",
+              PeerProcess.Field(r3, "kept") == "True" && PeerProcess.Field(r3, "holder") == "True", r3);
     }
 
     // ── Zb ─────────────────────────────────────────────────────────────
@@ -935,9 +938,10 @@ internal static partial class Program
 ///   zwinusbsweep &lt;ms&gt;     a WinUSB ledger entry for a devnode that does
 ///                         not exist, swept while another thread holds the
 ///                         binding's locks &lt;ms&gt;
-///   zclaimsweep sweep|all  the same entry, queued by a sweep or the full
-///                         cleanup, claimed by another thread under the
-///                         WinUSB lock before the restore
+///   zclaimsweep sweep|all|same  the same entry, queued by a sweep or the
+///                         full cleanup, claimed by another thread under the
+///                         WinUSB lock before the restore. same: the entry
+///                         already has that thread's holder when queued
 ///   zcert &lt;name&gt;          DriverBuilder.EnsureTestCertificate(name)
 ///   zguard                whether the SDK's WinUsbBinding.DepartingDevnodeRule
 ///                         is ZDepartingRule or later
@@ -1043,7 +1047,7 @@ internal static class PeerZ
             case "zwinusbsweep":
                 return WinUsbSweep(int.Parse(a[1]));
             case "zclaimsweep":
-                return ClaimDuringSweep(a[1] == "all");
+                return ClaimDuringSweep(a[1] is "all" or "same", a[1] == "same");
             case "zcert":
             {
                 var sw = Stopwatch.StartNew();
@@ -1242,7 +1246,7 @@ internal static class PeerZ
     /// the restore. The entry and that holder must survive. The claim waits
     /// for the SDK's hook after the queue (RegistryLedger.WinUsbQueuedForProbe),
     /// or 1 s on an SDK without it.</summary>
-    static string ClaimDuringSweep(bool all)
+    static string ClaimDuringSweep(bool all, bool sameName)
     {
         const string id = @"USB\VID_057E&PID_0337\HMZATEST";
         string path = FakeEntry(id);
@@ -1253,9 +1257,16 @@ internal static class PeerZ
             using var locked = new ManualResetEventSlim();
             using var queued = new ManualResetEventSlim();
             var claim = M(Ledger, "ClaimWinUsb");
+            // The claim's parameters: the devnode, its prior service and INF,
+            // the controller index, and the ledger timeout where it has one.
             object?[] args = claim.GetParameters().Length == 4
                 ? new object?[] { id, "", "", 7 }
-                : new object?[] { id, "", "", 7, 0L, null, 30_000 };
+                : new object?[] { id, "", "", 7, 30_000 };
+            // The full cleanup restores an entry regardless of the holders
+            // it saw. With sameName the entry already has this holder when
+            // it is queued, and the claim in the window is a fresh one under
+            // the same name.
+            if (sameName) claim.Invoke(null, args);
             var claimer = new Thread(() =>
             {
                 using var m = new Mutex(false, devnodes);

@@ -396,8 +396,13 @@ internal static class RegistryLedger
                 entry.SetValue(V_PriorService, priorService ?? "", RegistryValueKind.String);
                 entry.SetValue(V_PriorInf, priorInf ?? "", RegistryValueKind.String);
             }
+            // Each claim writes a value of its own, so a restore that queued
+            // the entry can tell a claim made since under the same holder
+            // name, as by a controller of the same index after the cleanup
+            // removed the program's devices, from the one it saw
+            // (WinUsbEntryUnheld).
             using var holders = Registry.LocalMachine.CreateSubKey($@"{entryPath}\{HoldersKey}");
-            holders.SetValue(HolderName(controllerIndex), 1, RegistryValueKind.DWord);
+            holders.SetValue(HolderName(controllerIndex), Random.Shared.NextInt64(), RegistryValueKind.QWord);
         }
         finally { m.ReleaseMutex(); }
     }
@@ -629,8 +634,10 @@ internal static class RegistryLedger
     }
 
     /// <summary>A WinUSB entry queued for its restore, with the holders it
-    /// had when it was queued. <see cref="Own"/>: the releasing controller
-    /// held it, so the restore waits for its devnode to leave.</summary>
+    /// had when it was queued, each as its name and the value its claim
+    /// wrote (<see cref="HolderClaim"/>). <see cref="Own"/>: the releasing
+    /// controller held it, so the restore waits for its devnode to
+    /// leave.</summary>
     private readonly record struct WinUsbQueued(string Name, string InstanceId, string[] Seen, bool Own);
 
     /// <summary>Queue a WinUSB entry for <see cref="RestoreWinUsbEntries"/>.
@@ -647,7 +654,7 @@ internal static class RegistryLedger
         {
             id = entry?.GetValue(V_InstanceId) as string;
             using var holders = entry?.OpenSubKey(HoldersKey);
-            seen = holders?.GetValueNames() ?? Array.Empty<string>();
+            seen = holders == null ? Array.Empty<string>() : holders.GetValueNames().Select(h => HolderClaim(holders, h)).ToArray();
         }
         if (id != null) queue.Add(new WinUsbQueued(name, id, seen, own));
         else try { kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false); } catch { }
@@ -879,12 +886,17 @@ internal static class RegistryLedger
         t.Start();
     }
 
+    /// <summary>One holder's claim: its name and the value its claim wrote,
+    /// which differs between two claims of one name.</summary>
+    private static string HolderClaim(RegistryKey holders, string name) => $"{name}={holders.GetValue(name)}";
+
     /// <summary>True when the WinUSB entry still exists and no live
     /// controller holds it. With <paramref name="ignoreHolders"/>, true when
-    /// it exists and every live holder is one of <paramref name="seen"/>, the
-    /// holders it had when it was queued: a bind that claimed it since keeps
-    /// it. Holders whose process is gone are dropped. The caller holds the
-    /// devnode lock, so the wait for the ledger's is bounded.</summary>
+    /// it exists and every live holder's claim is one of
+    /// <paramref name="seen"/>, the claims it had when it was queued: a bind
+    /// that claimed it since keeps it, also under a holder name it had. Holders
+    /// whose process is gone are dropped. The caller holds the devnode lock,
+    /// so the wait for the ledger's is bounded.</summary>
     private static bool WinUsbEntryUnheld(string name, bool ignoreHolders, string[] seen)
     {
         using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
@@ -898,7 +910,7 @@ internal static class RegistryLedger
                 if (!HolderAlive(h)) holders.DeleteValue(h, throwOnMissingValue: false);
             var live = holders.GetValueNames();
             return ignoreHolders
-                ? live.All(h => seen.Contains(h, StringComparer.Ordinal))
+                ? live.All(h => seen.Contains(HolderClaim(holders, h), StringComparer.Ordinal))
                 : live.Length == 0;
         }
         finally { m.ReleaseMutex(); }
