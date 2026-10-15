@@ -19,7 +19,11 @@ namespace HIDMaestro.Internal;
 /// device's transport index or identity: an index or identity outlives the
 /// program that had it, and a program started since, of any version, may
 /// have taken it. A present device no record names was made by a program
-/// before v1.13.0, or belongs to one started since:</para>
+/// before v1.13.0, or belongs to one started since. A program on this
+/// release takes its claims before its record entry, and the census reads
+/// the records before it lists the devices, so a device whose index or
+/// identity claim is held counts as a running program's whether a record
+/// names it or not. Otherwise:</para>
 /// <list type="bullet">
 /// <item>its index's v1.12.0 owner pipe <c>HIDMaestroOwner&lt;N&gt;</c> is
 /// held: a live v1.12.0 program. Any program can create that name, so
@@ -106,10 +110,13 @@ internal sealed partial class OwnerCensus
             MachineClaims.OwnerRecord? rec = null;
             if (!key.StartsWith('#')) byToken.TryGetValue(key, out rec);
             if (rec == null && g.Index >= 0) byIndex.TryGetValue(g.Index, out rec);
-            if (rec is { Live: false } && HeldByLiveProgram(key, g.Index, () => g.Ids)) rec = null;
-            Owner owner = rec != null
-                ? rec.Self ? Owner.Self : rec.Live ? Owner.Live : Owner.Dead
-                : ByLegacySigns(g.Index, () => g.Ids);
+            Owner owner;
+            if (rec is { Live: true }) owner = rec.Self ? Owner.Self : Owner.Live;
+            else
+            {
+                owner = WithoutLiveRecord(key, g.Index, dead: rec != null, () => g.Ids);
+                if (owner != Owner.Dead) rec = null;
+            }
             census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec));
         }
 
@@ -145,8 +152,7 @@ internal sealed partial class OwnerCensus
             if (r.Live) return r.Self ? Owner.Self : Owner.Live;
             dead = true;
         }
-        if (dead && !HeldByLiveProgram(token ? name : "#", index, members)) return Owner.Dead;
-        return ByLegacySigns(index, members);
+        return WithoutLiveRecord(token ? name : "#", index, dead, members);
     }
 
     /// <summary>The present devnodes <see cref="Take"/> groups with this
@@ -167,28 +173,23 @@ internal sealed partial class OwnerCensus
         return ids;
     }
 
-    /// <summary>Whether a running program holds a transport index or an
-    /// identity token now: its v1.12.0 owner pipe, which every release from
-    /// v1.12.0 holds for a live controller (<see cref="LegacyPipeLive"/>),
-    /// or this release's index or identity claim.</summary>
-    private static bool HeldByLiveProgram(string key, int index, Func<IReadOnlyList<string>> members)
+    /// <summary>The owner of a device no live record names, with
+    /// <paramref name="dead"/> true when a dead record names it. A running
+    /// program holds the device's index or identity now through its v1.12.0
+    /// owner pipe, which every release from v1.12.0 holds for a live
+    /// controller (<see cref="LegacyPipeLive"/>), or through this release's
+    /// index or identity claim, which a create takes before its record
+    /// entry. Otherwise the dead record decides, and without one what a
+    /// program before v1.13.0 leaves: the acknowledgement section its driver
+    /// keeps after a v1.12.0 program ends.</summary>
+    private static Owner WithoutLiveRecord(string key, int index, bool dead, Func<IReadOnlyList<string>> members)
     {
-        if (index >= 0
-            && (MachineClaims.IsHeld(MachineClaims.IndexPipeName(index))
-                || LegacyPipeLive(index, members)))
-            return true;
-        return !key.StartsWith('#') && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(key));
-    }
-
-    /// <summary>The owner of a device no record names, from what a program
-    /// before v1.13.0 leaves: its owner pipe while it runs, and the
-    /// acknowledgement section its driver keeps after a v1.12.0 program
-    /// ends.</summary>
-    private static Owner ByLegacySigns(int index, Func<IReadOnlyList<string>> members)
-    {
-        if (index < 0) return Owner.Unknown;
-        if (LegacyPipeLive(index, members)) return Owner.LiveLegacy;
-        if (SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;
+        if (index >= 0 && LegacyPipeLive(index, members)) return Owner.LiveLegacy;
+        if ((index >= 0 && MachineClaims.IsHeld(MachineClaims.IndexPipeName(index)))
+            || (!key.StartsWith('#') && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(key))))
+            return Owner.Live;
+        if (dead) return Owner.Dead;
+        if (index >= 0 && SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;
         return Owner.Unknown;
     }
 

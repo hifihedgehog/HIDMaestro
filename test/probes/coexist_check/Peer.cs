@@ -69,6 +69,9 @@
 //   outputs on                  note the Stopwatch timestamp of every
 //                               OutputReceived on the live controllers
 //   outputs                     reply with those timestamps, t=a,b,...
+//   classify <instance>         the SDK's owner check of one devnode
+//                               (OwnerCensus.Classify), which a create runs
+//                               on a rival before it removes it
 //   readallrace                 write three owner records of a killed
 //                               program, delete the first while the SDK's
 //                               MachineClaims.ReadAll reads it, and reply
@@ -525,6 +528,13 @@ internal static class Peer
                             ?.GetMethod("ReleaseOnExitSupported", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
                         Reply(read == null ? "ERR releases no SharedMemoryIO.ReleaseOnExitSupported"
                               : $"OK releases on={((bool)read.Invoke(null, new object[] { int.Parse(a[1]) })! ? 1 : 0)}");
+                        break;
+                    }
+                    case "classify":
+                    {
+                        var m = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.OwnerCensus")
+                            ?.GetMethod("Classify", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string) });
+                        Reply(m == null ? "ERR classify no OwnerCensus.Classify" : $"OK classify owner={m.Invoke(null, new object[] { a[1] })}");
                         break;
                     }
                     case "readallrace":

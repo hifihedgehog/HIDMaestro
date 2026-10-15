@@ -322,6 +322,9 @@ internal static partial class DriverDeploy
             {
                 OwnerCensus.Owner.Self => "this program",
                 OwnerCensus.Owner.Live when g.Record != null => MachineClaims.Describe(g.Record),
+                // Claimed now by a program on this release that no record
+                // names yet: a create in flight.
+                OwnerCensus.Owner.Live => "a running program",
                 OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
                 _ => "a program built on HIDMaestro older than 1.12.0, which may still be running",
             };
