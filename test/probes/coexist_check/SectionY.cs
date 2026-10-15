@@ -462,7 +462,18 @@ internal static partial class Program
             // the kill. With the dead program streaming until it dies, the
             // kill starts a full window of eight 500 ms waits, so a program
             // that attaches and streams inside it gets no recycle and no map.
-            if (stream) p.Send("stream 1 0.5 250 1");
+            if (stream)
+            {
+                long mark = cap?.Mark() ?? 0;
+                p.Send("stream 1 0.5 250 1");
+                // Kill only once frames have reached the driver: the peer
+                // reports frames submitted, and the probe's handle on the
+                // HID child reads them back. The kill then lands within a
+                // frame of the last input.
+                bool landed = WaitFor(() => int.TryParse(PeerProcess.Field(p.Send("frames"), "n"), out int sent) && sent > 0
+                                            && cap != null && cap.Since(mark).Count > 0, 5000);
+                Check($"{y}: the dead program's frames reach the device before the kill", landed);
+            }
             p.Kill();
         }
         var killed = Stopwatch.StartNew();

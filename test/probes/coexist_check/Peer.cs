@@ -18,6 +18,8 @@
 //                               button <btn> held, X at <x>, and with
 //                               ramp 1, X stepping by one count a frame
 //   stopstream                  stop, and report the submit intervals
+//   frames                      how many SubmitState calls of the current
+//                               stream returned without throwing: n=<count>
 //   sweep                       RemoveAllVirtualControllers(preserveInstall: true)
 //   removeall                   RemoveAllVirtualControllers()
 //   everything                  remove every controller of every program,
@@ -101,6 +103,7 @@ internal static class Peer
     static readonly List<HMController> s_live = new();
     static Thread? s_streamer;
     static volatile bool s_streaming;
+    static int s_framesSent;
     static readonly List<double> s_intervals = new();
     static readonly List<long> s_outputTimes = new();
 
@@ -153,6 +156,9 @@ internal static class Peer
                     case "stream":
                         StartStream(int.Parse(a[1]), float.Parse(a[2], CultureInfo.InvariantCulture), int.Parse(a[3]), a[4] == "1");
                         Reply("OK stream");
+                        break;
+                    case "frames":
+                        Reply($"OK frames n={Volatile.Read(ref s_framesSent)}");
                         break;
                     case "stopstream":
                     {
@@ -583,6 +589,7 @@ internal static class Peer
     {
         StopStream();
         lock (s_intervals) s_intervals.Clear();
+        Volatile.Write(ref s_framesSent, 0);
         s_streaming = true;
         s_streamer = new Thread(() =>
         {
@@ -597,7 +604,12 @@ internal static class Peer
                 lock (s_live) live = s_live.ToArray();
                 foreach (var c in live)
                 {
-                    try { c.SubmitState(in state); } catch { }
+                    try
+                    {
+                        c.SubmitState(in state);
+                        Interlocked.Increment(ref s_framesSent);
+                    }
+                    catch { }
                 }
                 long now = Stopwatch.GetTimestamp();
                 if (last != 0) lock (s_intervals) s_intervals.Add((now - last) * 1000.0 / Stopwatch.Frequency);
