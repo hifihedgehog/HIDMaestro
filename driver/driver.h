@@ -228,7 +228,9 @@ typedef struct _DEVICE_CONTEXT {
      * EvtDeviceAdd; PublishOutput signals it after the ring Head is
      * published so the SDK's reader can block instead of polling every
      * 8 ms. NULL when creation failed; publish simply skips the signal
-     * and an event-less SDK falls back to its poll cadence. */
+     * and an event-less SDK falls back to its poll cadence. While NULL the
+     * worker tries again each time it maps the input section
+     * (TryOpenSharedMapping). */
     HANDLE  OutputSignalEvent;
 
     /* Multi-instance: controller index (0, 1, 2, 3) */

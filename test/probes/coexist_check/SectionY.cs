@@ -18,7 +18,9 @@
 //        device exists. The controller's driver takes neither: the StopEvent
 //        stays signaled, and rumble sent through XInput never signals the
 //        user's OutputEvent. XInput still reads the controller's input. The
-//        SDK does not open the user's OutputEvent either.
+//        SDK does not open the user's OutputEvent either. Once the user's
+//        names are gone, the driver makes its own OutputEvent at its next
+//        handle reset, and the SDK opens it.
 //    Y3. A program on this SDK is killed, and the user creates
 //        \\.\pipe\HIDMaestroOwner<N> on its index. The driver had recorded
 //        the program as its owner pipe's server and then recorded it gone,
@@ -417,6 +419,19 @@ internal static partial class Program
             Check("Y2: rumble never signals the user's OutputEvent", wakes == 0, $"{wakes} wakes");
             string sdkOpen = p.Send($"sdkevents {t}");
             Check("Y2: the SDK does not open the user's OutputEvent either", PeerProcess.Field(sdkOpen, "output") == "0", sdkOpen);
+
+            // The user lets go of both names. With the input stopped, the
+            // driver resets its handles after eight idle 500 ms waits.
+            Y.CloseHandle(stopSquat);
+            stopSquat = IntPtr.Zero;
+            Y.CloseHandle(outputSquat);
+            outputSquat = IntPtr.Zero;
+            p.Send("stopstream");
+            string output = $@"Global\HIDMaestroOutputEvent{t}";
+            bool own = WaitFor(() => Y.HostOnlyDacl(Y.EventSddl(output)), 10_000);
+            Check($"Y2: the driver then makes its own {output}", own, Y.EventSddl(output) ?? "none");
+            string sdkAfter = p.Send($"sdkevents {t}");
+            Check("Y2: and the SDK opens it", PeerProcess.Field(sdkAfter, "output") == "1", sdkAfter);
             p.Send("dispose");
         }
         finally

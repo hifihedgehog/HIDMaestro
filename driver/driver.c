@@ -576,6 +576,7 @@ static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
 static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
+static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name);
 
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
@@ -593,6 +594,17 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
     TryOpenInputAck(ctx);
     TryOpenOwnerWatch(ctx);
     AnnounceVersion(ctx);
+    /* The output doorbell, again while there is none: EvtDeviceAdd found the
+     * name unusable, held by an object no driver host made under a DACL,
+     * and that object may be gone now. The companion retries the same way
+     * on each mapping open. Published with a barrier for PublishOutput,
+     * which runs on the I/O queue's threads and only ever sees NULL or the
+     * handle. */
+    if (ctx->OutputSignalEvent == NULL) {
+        HANDLE ev = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
+        if (ev != NULL)
+            InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
+    }
     return TRUE;
 }
 
