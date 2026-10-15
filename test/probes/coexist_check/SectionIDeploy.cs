@@ -1,5 +1,6 @@
-// I, continued. Staging a deploy uses, and staging another build reaches
-// while a deploy prunes.
+// I, continued. Staging a deploy uses, staging another build reaches while
+// a deploy prunes, and a %ProgramData%\HIDMaestro that a program that is not
+// elevated made first.
 //
 //   I8   A running program's staged signtool manifest removed and another
 //        staged tool file changed to bytes of the same length. Its next
@@ -12,6 +13,19 @@
 //        pause. Its staging gives no reply while the prune holds the staging
 //        lock, replies once the prune is done, and its directory then holds
 //        its payload. The other build is this SDK with another payload hash.
+//   I10  %ProgramData%\HIDMaestro as an upgrade finds it: created by an
+//        elevated administrator, so owned by that user's own SID under
+//        Windows' default owner policy (Native.UserOwnerToken), with the
+//        OpenVR driver's file held open as SteamVR holds it. The SDK takes
+//        the root over in place and stages, and nothing is moved. Then a
+//        root a program that is not elevated created (Native.MediumToken):
+//        taken over in place too.
+//   I11  The OpenVR driver's folder present and its files gone: a
+//        registration extracts them again at the path SteamVR has
+//        registered. Skipped where SteamVR is not installed.
+//
+// I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first and put
+// it back at the end, with the OpenVR install record as it was.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -27,6 +41,8 @@ internal static partial class Program
         SectionI8();
         Clean();
         SectionI9();
+        Clean();
+        SectionI10();
     }
 
     static string NativePrefix =>
@@ -119,5 +135,126 @@ internal static partial class Program
             // The other build's directory exists only for this section.
             try { if (Directory.Exists(versionDir)) Directory.Delete(versionDir, true); } catch { }
         }
+    }
+
+    static string? OpenVrRecord()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro");
+        return k?.GetValue("InstalledVrManifestSha256") as string;
+    }
+
+    /// <summary>Create a directory tree on a thread that runs under the given
+    /// impersonation token, so the directory gets that token's default owner.
+    /// The token is closed here.</summary>
+    static string CreateUnder(IntPtr token, string dir)
+    {
+        string d = "";
+        var t = new Thread(() =>
+        {
+            if (!Native.SetThreadToken(IntPtr.Zero, token)) { d = $"SetThreadToken error {Marshal.GetLastWin32Error()}"; return; }
+            try { Directory.CreateDirectory(dir); d = "created"; }
+            catch (Exception e) { d = $"{e.GetType().Name}: {e.Message}"; }
+            finally { Native.RevertToSelf(); }
+        });
+        t.Start();
+        t.Join();
+        Native.CloseHandle(token);
+        return d;
+    }
+
+    static void SectionI10()
+    {
+        string root = ProgramDataRoot;
+        string programData = Path.GetDirectoryName(root)!;
+        string saved = root + ".coexist-saved-" + Guid.NewGuid().ToString("N");
+        var asideBefore = Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string? vrRecord = OpenVrRecord();
+        bool setAside = false;
+        try
+        {
+            try { Directory.Move(root, saved); setAside = true; }
+            catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is set aside for the section", false, e.Message); return; }
+
+            // I10a. The upgrade case: a root an elevated v1.12.0 made, owned
+            // by the administrator's own SID under Windows' default owner
+            // policy, with the OpenVR driver loaded by SteamVR, which holds
+            // its file open.
+            string dllDir = Path.Combine(root, "openvr", "hidmaestro", "bin", "win64");
+            string made = CreateUnder(Native.UserOwnerToken(), dllDir);
+            string? why = Native.WhyWritableByOthers(root);
+            Check("I10: an elevated administrator's process creates %ProgramData%\\HIDMaestro, owned by its own SID",
+                  made == "created" && why != null && why.StartsWith("owner", StringComparison.Ordinal), $"{made}; {why ?? "protected"}");
+            string dll = Path.Combine(dllDir, "driver_hidmaestro.dll");
+            File.WriteAllBytes(dll, new byte[] { 0x4D, 0x5A });
+            using (var loaded = new FileStream(dll, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var p = PeerProcess.Start("I10a"))
+            {
+                string r = p.Send("stagingdir");
+                Check("I10: with a file under it held open, the driver still stages", Ok(r), r);
+                Check("I10: %ProgramData%\\HIDMaestro is taken over in place, Administrators/SYSTEM-write-only",
+                      Native.WhyWritableByOthers(root) == null, Native.WhyWritableByOthers(root) ?? "");
+                Check("I10: the held file is still at its path", File.Exists(dll) && loaded.CanRead, dll);
+            }
+            Check("I10: nothing was moved aside", Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").All(asideBefore.Contains),
+                  string.Join(", ", Directory.GetDirectories(programData, "HIDMaestro.untrusted-*")));
+
+            // I11. The OpenVR driver's folder present, its files gone.
+            Directory.Delete(Path.Combine(root, "openvr"), true);
+            SectionI11(root);
+
+            // I10b. A root a program that is not elevated created.
+            Directory.Delete(root, true);
+            made = CreateUnder(Native.MediumToken(), root);
+            why = Native.WhyWritableByOthers(root);
+            Check("I10: a program that is not elevated creates %ProgramData%\\HIDMaestro",
+                  made == "created" && why != null && why.StartsWith("owner", StringComparison.Ordinal), $"{made}; {why ?? "protected"}");
+            using (var p = PeerProcess.Start("I10b"))
+            {
+                string r = p.Send("stagingdir");
+                Check("I10: the driver stages, and the root is taken over in place",
+                      Ok(r) && Native.WhyWritableByOthers(root) == null, $"{r}; {Native.WhyWritableByOthers(root) ?? "protected"}");
+                Check("I10: and its staging directory is Administrators/SYSTEM-write-only",
+                      StagingPath(r) is string dir && Native.WhyWritableByOthers(dir) == null, r);
+            }
+        }
+        finally
+        {
+            if (setAside)
+            {
+                // Everything under these was made in this section, by the
+                // impersonating threads, this probe or the SDK under test.
+                try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (Exception e) { Console.WriteLine($"    could not remove the section's root: {e.Message}"); }
+                foreach (string aside in Directory.GetDirectories(programData, "HIDMaestro.untrusted-*"))
+                    if (!asideBefore.Contains(aside))
+                        try { Directory.Delete(aside, true); } catch (Exception e) { Console.WriteLine($"    could not remove {aside}: {e.Message}"); }
+                try { Directory.Move(saved, root); }
+                catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
+                using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro");
+                if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
+                else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
+            }
+        }
+    }
+
+    static void SectionI11(string root)
+    {
+        string ext = Path.Combine(root, "openvr", "hidmaestro");
+        using var p = PeerProcess.Start("I11");
+        string first = p.Send("vrregister");
+        if (first == "OK vrregister False")
+        {
+            Console.WriteLine("  [SKIP] I11: SteamVR is not installed, so nothing registers the OpenVR driver");
+            return;
+        }
+        string manifest = Path.Combine(ext, "driver.vrdrivermanifest");
+        string dll = Path.Combine(ext, "bin", "win64", "driver_hidmaestro.dll");
+        Check("I11: a registration extracts the OpenVR driver under %ProgramData%\\HIDMaestro",
+              Ok(first) && File.Exists(manifest) && File.Exists(dll), first);
+        if (!File.Exists(manifest)) return;
+        // Files the SDK under test extracted in this section.
+        foreach (string f in Directory.GetFiles(ext, "*", SearchOption.AllDirectories)) File.Delete(f);
+        string again = p.Send("vrregister");
+        Check("I11: with the folder left and its files gone, the next registration extracts them again at the registered path",
+              Ok(again) && File.Exists(manifest) && File.Exists(dll), again);
     }
 }

@@ -169,7 +169,9 @@ internal static class Peer
                         var builder = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverBuilder");
                         var ensure = builder?.GetMethod("EnsureExtracted", BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
                         if (ensure == null) { Reply("ERR stagingdir no DriverBuilder.EnsureExtracted"); break; }
-                        string dir = (string)ensure.Invoke(null, null)!;
+                        string dir;
+                        try { dir = (string)ensure.Invoke(null, null)!; }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
                         Reply($"OK stagingdir path={dir}");
                         break;
                     }
@@ -317,6 +319,17 @@ internal static class Peer
                         try { result = m.Invoke(null, null); }
                         catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
                         Reply($"OK builderstep {a[1]} result={result?.ToString() ?? "none"} ms={sw.ElapsedMilliseconds}");
+                        break;
+                    }
+                    case "vrregister":
+                    {
+                        var m = typeof(HMContext).Assembly.GetType("HIDMaestro.HMVR")
+                            ?.GetMethod("EnsureDriverRegistered", BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                        if (m == null) { Reply("ERR vrregister no HMVR.EnsureDriverRegistered"); break; }
+                        object? r;
+                        try { r = m.Invoke(null, null); }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                        Reply($"OK vrregister {r}");
                         break;
                     }
                     case "staleport":

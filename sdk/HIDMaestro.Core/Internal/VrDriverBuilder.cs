@@ -133,8 +133,12 @@ internal static class VrDriverBuilder
         bool current;
         using (var k = Registry.LocalMachine.OpenSubKey(RegKeyPath))
         {
+            // Every file, not the folder alone: a staging repair can move
+            // the whole %ProgramData%\HIDMaestro tree aside (ProtectedStaging),
+            // and the registration names this path, so the files must be
+            // back at it before SteamVR next loads it.
             current = k?.GetValue(VrManifestRegValue) as string == payloadHash &&
-                      Directory.Exists(ExtractRoot);
+                      names.All(n => File.Exists(Path.Combine(ExtractRoot, RelativePath(n))));
         }
 
         if (!current) ExtractPayload(asm, names);
@@ -270,20 +274,39 @@ internal static class VrDriverBuilder
         return Convert.ToHexString(sha.ComputeHash(acc));
     }
 
+    // Logical name: HIDMaestro.VR.<RecursiveDir with '\'><file>.
+    // RecursiveDir keeps real backslashes in the logical name, so the
+    // relative path reconstructs directly.
+    private static string RelativePath(string name) =>
+        name.Substring(ResourcePrefix.Length).Replace('/', '\\');
+
     private static void ExtractPayload(Assembly asm, string[] names)
     {
-        Directory.CreateDirectory(ExtractRoot);
+        // The elevated SDK writes here, and SteamVR loads the result, so
+        // every directory on the way is Administrators/SYSTEM-write-only
+        // like the shared root, and one a non-administrator owns or could
+        // re-permission is moved aside (ProtectedStaging.SharedDir). Each
+        // file goes in through a temporary name and a rename, checked
+        // against its embedded SHA-256, so a link planted at a file's path
+        // is replaced, not written through.
+        // Every folder is repaired first, then all are held for the writes
+        // (ProtectedStaging.Pin): a program holding a handle from before the
+        // repair cannot swap one for a link while the elevated SDK writes.
+        string extractRelative = Path.GetRelativePath(ProtectedStaging.HidMaestroRoot, ExtractRoot);
+        var targets = new System.Collections.Generic.List<(string Dir, string File, string Name)>();
         foreach (var name in names)
         {
-            // Logical name: HIDMaestro.VR.<RecursiveDir with '\'><file>.
-            // RecursiveDir keeps real backslashes in the logical name, so
-            // the relative path reconstructs directly.
-            string rel = name.Substring(ResourcePrefix.Length).Replace('/', '\\');
-            string dest = Path.Combine(ExtractRoot, rel);
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            string rel = RelativePath(name);
+            string? relDir = Path.GetDirectoryName(rel);
+            string dir = ProtectedStaging.SharedDir(
+                string.IsNullOrEmpty(relDir) ? extractRelative : Path.Combine(extractRelative, relDir));
+            targets.Add((dir, Path.GetFileName(rel), name));
+        }
+        using var pin = ProtectedStaging.Pin(targets.Select(t => t.Dir).ToArray());
+        foreach (var (dir, file, name) in targets)
+        {
             using var src = asm.GetManifestResourceStream(name)!;
-            using var dst = File.Create(dest);
-            src.CopyTo(dst);
+            ProtectedStaging.StageStream(dir, file, src, ProtectedStaging.EmbeddedSha256(asm, name));
         }
     }
 }

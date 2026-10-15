@@ -40,8 +40,11 @@
 //      removed. A running program's staged tool library or manifest,
 //      removed or changed, is restored before its next deploy. A deploy's
 //      prune never removes the staging another build's program reaches
-//      while the prune runs. SectionIDeploy.cs has the detail. Battery S72
-//      runs this section.
+//      while the prune runs. A %ProgramData%\HIDMaestro an upgrade finds,
+//      owned by an administrator's own SID with an OpenVR file held open,
+//      or made by a program that is not elevated, is taken over in place,
+//      and the OpenVR driver's files come back at their registered path.
+//      SectionIDeploy.cs has the detail. Battery S72 runs this section.
 //   J. A record a killed program left names a transport index and an
 //      identity that a running program holds now: a v1.12.0 program, and a
 //      program on this SDK whose own record names them too. A sweep leaves
