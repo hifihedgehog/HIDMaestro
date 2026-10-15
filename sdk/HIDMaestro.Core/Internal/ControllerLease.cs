@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace HIDMaestro.Internal;
@@ -56,7 +58,7 @@ internal sealed class ControllerLease : IDisposable
                 // The slot is only a placeholder here: a keyed identity
                 // does not depend on where it lands.
                 keyedIdentity = DeviceIdentity.ForKey(identityKey!, slot);
-                identityClaim = ClaimIdentity(keyedIdentity, identityKey!.Trim(), census);
+                identityClaim = ClaimIdentity(keyedIdentity, identityKey!.Trim(), ref census);
             }
 
             HashSet<int> used = census.IndicesInUse();
@@ -186,10 +188,15 @@ internal sealed class ControllerLease : IDisposable
         census.Devices.Any(g => string.Equals(g.Key, token, StringComparison.OrdinalIgnoreCase)
                                 && g.Owner == OwnerCensus.Owner.LiveLegacy);
 
-    /// <summary>Claim a keyed identity, or say who holds it.</summary>
-    private static SafeFileHandle ClaimIdentity(DeviceIdentity identity, string key, OwnerCensus census)
+    /// <summary>Claim a keyed identity, or say who holds it. After a wait
+    /// for a sweep, <paramref name="census"/> is taken again: the sweep has
+    /// changed what is present.</summary>
+    private static SafeFileHandle ClaimIdentity(DeviceIdentity identity, string key, ref OwnerCensus census)
     {
-        SafeFileHandle? claim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(identity.Token));
+        string name = MachineClaims.IdentityPipeName(identity.Token);
+        SafeFileHandle? claim = MachineClaims.TryClaim(name);
+        if (claim == null && (claim = ClaimAfterSweep(identity.Token, name)) != null)
+            census = OwnerCensus.Take();
         if (claim == null)
         {
             var holder = MachineClaims.LiveHolderOf(identity.Token);
@@ -211,6 +218,30 @@ internal sealed class ControllerLease : IDisposable
                 $"identity key '{key}'", null);
         }
         return claim;
+    }
+
+    /// <summary>A sweep of another program holds an identity's claim while
+    /// it removes the device a dead program left under it (OwnerSweep), and
+    /// no record lists the identity then. A create holds the claim without
+    /// an entry only between its claim and its entry write, milliseconds.
+    /// So while no live record lists the token, the claim is waited for, up
+    /// to the bound this create's own removal of that devnode would take
+    /// (DeviceNodeCreator removes a prior life's devnode with 120 s). Null
+    /// when a live record lists it or the bound passes.</summary>
+    private static SafeFileHandle? ClaimAfterSweep(string token, string name)
+    {
+        var sw = Stopwatch.StartNew();
+        int bound = TimeoutScale.Apply(120_000);
+        while (sw.ElapsedMilliseconds < bound && MachineClaims.LiveHolderOf(token) == null)
+        {
+            Thread.Sleep(25);
+            if (MachineClaims.TryClaim(name) is { } claim)
+            {
+                DeviceOrchestrator.LogDiag($"    identity {token} claimed after a sweep released it, {sw.ElapsedMilliseconds}ms");
+                return claim;
+            }
+        }
+        return null;
     }
 
     /// <summary>The entry goes, then the claims. Called after the

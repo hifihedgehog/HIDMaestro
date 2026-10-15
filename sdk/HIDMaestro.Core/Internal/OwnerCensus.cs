@@ -179,9 +179,10 @@ internal sealed partial class OwnerCensus
     /// owner pipe, which every release from v1.12.0 holds for a live
     /// controller (<see cref="LegacyPipeLive"/>), or through this release's
     /// index or identity claim, which a create takes before its record
-    /// entry. Otherwise the dead record decides, and without one what a
-    /// program before v1.13.0 leaves: the acknowledgement section its driver
-    /// keeps after a v1.12.0 program ends.</summary>
+    /// entry and a sweep holds while it removes the device. Otherwise the
+    /// dead record decides, and without one what a program before v1.13.0
+    /// leaves: the acknowledgement section its driver keeps after a v1.12.0
+    /// program ends.</summary>
     private static Owner WithoutLiveRecord(string key, int index, bool dead, Func<IReadOnlyList<string>> members)
     {
         if (index >= 0 && LegacyPipeLive(index, members)) return Owner.LiveLegacy;
@@ -192,6 +193,11 @@ internal sealed partial class OwnerCensus
         if (index >= 0 && SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;
         return Owner.Unknown;
     }
+
+    /// <summary><see cref="LegacyPipeLive"/> for a group a sweep is about to
+    /// act on: whether a running v1.12.0 program holds the index now.</summary>
+    internal static bool LegacyOwnerRuns(int index, IReadOnlyList<string> instanceIds) =>
+        index >= 0 && LegacyPipeLive(index, () => instanceIds);
 
     /// <summary>Whether the v1.12.0 owner pipe of <paramref name="index"/>
     /// shows a running program. A v1.12.0 program creates that name

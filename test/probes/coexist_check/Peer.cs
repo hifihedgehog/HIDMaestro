@@ -42,6 +42,10 @@
 //                               and goes on at the next line ("go")
 //   pauseindex                  the same, replying "OK paused index=<N>"
 //                               with the transport index the create took
+//   pausereclaim                the next sweep stops once it holds the
+//                               claims of the groups it is about to remove,
+//                               replies "OK paused targets=<n>" and goes on
+//                               at the next line
 //   alive                       reply, to show the program still runs
 //   oemset <pid>                HMOemNameOverride.Set for BEEF:<pid>
 //   oemrecover                  HMOemNameOverride.RecoverOrphans
@@ -297,6 +301,14 @@ internal static class Peer
                                   Console.ReadLine();
                               })
                               ? "OK pauseindex" : "ERR pauseindex no hook");
+                        break;
+                    case "pausereclaim":
+                        Reply(SetHook("HIDMaestro.Internal.OwnerSweep", "BeforeReclaimActs", targets =>
+                              {
+                                  Reply($"OK paused targets={targets}");
+                                  Console.ReadLine();
+                              })
+                              ? "OK pausereclaim" : "ERR pausereclaim no hook");
                         break;
                     case "alive":
                         Reply("OK alive");

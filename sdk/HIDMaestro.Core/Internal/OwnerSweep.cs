@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace HIDMaestro.Internal;
 
@@ -35,7 +36,7 @@ internal static class OwnerSweep
         var sw = Stopwatch.StartNew();
         var census = OwnerCensus.Take();
         if (!census.NothingToReclaim)
-            Reclaim(census, includeSelf: false);
+            Reclaim(census);
         DeviceOrchestrator.LogDiag($"    reclaim dead owners: {sw.ElapsedMilliseconds}ms (records {census.Records.Count}, devices {census.Devices.Count})");
         StartPhantomCleanupOnce();
     }
@@ -61,7 +62,7 @@ internal static class OwnerSweep
         // nothing.
         if (!MachineClaims.TryEnsureOwner()) return;
         var census = OwnerCensus.Take();
-        Reclaim(census, includeSelf: false);
+        Reclaim(census);
 
         try { RegistryLedger.PruneDead(); } catch { }
         try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
@@ -139,33 +140,63 @@ internal static class OwnerSweep
         MachineClaims.DeleteRecord(own.OwnerId);
     }
 
-    /// <summary>Remove every device group of a dead owner (and, for the
-    /// explicit cleanup, of this process), detach dead owners' USB/IP
-    /// imports, and drop their records.</summary>
-    private static void Reclaim(OwnerCensus census, bool includeSelf)
+    /// <summary>Called once <see cref="Reclaim"/> holds the claims of the
+    /// device groups it is about to remove, before it signals or removes
+    /// anything, with the number of groups. Coexistence probe section W sets
+    /// it through reflection to hold the sweep there while another program
+    /// creates: the window between a census and its removals is too short to
+    /// hit any other way. Null outside the probe.</summary>
+    internal static Action<int>? BeforeReclaimActs;
+
+    /// <summary>Remove every device group of a dead owner, detach dead
+    /// owners' USB/IP imports, and drop their records.
+    ///
+    /// <para>The census is at least 500 ms old by the time a removal runs,
+    /// since the stop events drain first, and each removal adds to it.
+    /// In that time a program restarted after a crash, or another program,
+    /// can create on the same index or identity, and the devnode it makes
+    /// has the instance id of the dead one. So the sweep takes each group's
+    /// index and identity claims before it acts on the group, and keeps them
+    /// until the group's devices and its index's configuration are gone. A
+    /// create on this release takes both claims before it writes the index's
+    /// configuration or makes a devnode (ControllerLease), so no create can
+    /// land on a group the sweep holds, and a group whose claims another
+    /// program holds is skipped. A v1.12.0 program takes no claim: its owner
+    /// pipe is checked again right before each removal and each
+    /// configuration delete.</para></summary>
+    private static void Reclaim(OwnerCensus census)
     {
-        var targets = census.Devices
-            .Where(d => d.Owner is OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy
-                        || (includeSelf && d.Owner == OwnerCensus.Owner.Self))
+        var candidates = census.Devices
+            .Where(d => d.Owner is OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy)
             .ToList();
         var liveIndices = new HashSet<int>(census.Devices
-            .Where(d => !targets.Contains(d) && d.ControllerIndex >= 0).Select(d => d.ControllerIndex));
+            .Where(d => !candidates.Contains(d) && d.ControllerIndex >= 0).Select(d => d.ControllerIndex));
         foreach (var r in census.Records)
-            if (r.Live && !(includeSelf && r.Self))
+            if (r.Live)
                 foreach (var c in r.Controllers) liveIndices.Add(c.TransportIndex);
 
-        if (targets.Count > 0)
+        var claims = new GroupClaims();
+        var targets = new List<OwnerCensus.DeviceGroup>();
+        try
         {
-            DeviceOrchestrator.SignalStopEvents(targets.Where(t => t.ControllerIndex >= 0).Select(t => t.ControllerIndex).ToHashSet());
-            foreach (var group in targets)
+            foreach (var group in candidates)
             {
-                DeviceOrchestrator.LogDiag($"    reclaim {group.Owner} {group.Key} index {group.ControllerIndex}: {string.Join(", ", group.InstanceIds)}");
-                RemoveGroup(group);
-                if (group.ControllerIndex >= 0 && !liveIndices.Contains(group.ControllerIndex))
-                    DeviceOrchestrator.DeleteInstanceConfig(group.ControllerIndex);
+                if (claims.TryHold(group)) targets.Add(group);
+                else DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {group.ControllerIndex}: a running program holds it now");
             }
-            try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
+            BeforeReclaimActs?.Invoke(targets.Count);
+            if (targets.Count > 0)
+            {
+                DeviceOrchestrator.SignalStopEvents(targets.Where(t => t.ControllerIndex >= 0).Select(t => t.ControllerIndex).ToHashSet());
+                foreach (var group in targets)
+                {
+                    ReclaimGroup(group, liveIndices);
+                    claims.Release(group);
+                }
+                try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
+            }
         }
+        finally { claims.ReleaseAll(); }
 
         var usbip = new Usbip.UsbipBackend.SweepView();
         foreach (var rec in census.DeadRecords)
@@ -183,6 +214,98 @@ internal static class OwnerSweep
 
         if (targets.Count > 0 || census.DeadRecords.Any())
             try { RegistryLedger.PruneDead(); } catch { }
+    }
+
+    /// <summary>A dead owner's group, under its claims: its devices, then
+    /// its index's configuration when no other present device and no live
+    /// record uses the index. A v1.12.0 program that started on the index
+    /// since the claims were taken holds its owner pipe, and keeps both.</summary>
+    private static void ReclaimGroup(OwnerCensus.DeviceGroup group, HashSet<int> liveIndices)
+    {
+        int index = group.ControllerIndex;
+        if (OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
+        {
+            DeviceOrchestrator.LogDiag($"    reclaim skipped {group.Key} index {index}: a v1.12.0 program holds the index now");
+            return;
+        }
+        DeviceOrchestrator.LogDiag($"    reclaim {group.Owner} {group.Key} index {index}: {string.Join(", ", group.InstanceIds)}");
+        RemoveGroup(group);
+        if (index >= 0 && !liveIndices.Contains(index) && !OwnerCensus.LegacyOwnerRuns(index, group.InstanceIds))
+            DeviceOrchestrator.DeleteInstanceConfig(index);
+    }
+
+    /// <summary>The index and identity claims a sweep holds on the groups
+    /// it removes. Two groups can share an index, so a claim stays until the
+    /// last group that needs it is released.</summary>
+    private sealed class GroupClaims
+    {
+        private readonly object _lock = new();
+        private readonly Dictionary<string, (SafeFileHandle Handle, int Groups)> _held = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Take the group's claims, or none of them when another
+        /// program holds one now or a v1.12.0 program holds the index's
+        /// owner pipe.</summary>
+        public bool TryHold(OwnerCensus.DeviceGroup group)
+        {
+            lock (_lock)
+            {
+                var taken = new List<string>(2);
+                foreach (string name in Names(group))
+                {
+                    if (_held.TryGetValue(name, out var held))
+                    {
+                        _held[name] = (held.Handle, held.Groups + 1);
+                        taken.Add(name);
+                        continue;
+                    }
+                    SafeFileHandle? claim = MachineClaims.TryClaim(name);
+                    if (claim == null)
+                    {
+                        foreach (string t in taken) ReleaseLocked(t);
+                        return false;
+                    }
+                    _held[name] = (claim, 1);
+                    taken.Add(name);
+                }
+                if (OwnerCensus.LegacyOwnerRuns(group.ControllerIndex, group.InstanceIds))
+                {
+                    foreach (string t in taken) ReleaseLocked(t);
+                    return false;
+                }
+                return true;
+            }
+        }
+
+        public void Release(OwnerCensus.DeviceGroup group)
+        {
+            lock (_lock)
+                foreach (string name in Names(group)) ReleaseLocked(name);
+        }
+
+        public void ReleaseAll()
+        {
+            lock (_lock)
+            {
+                foreach (var held in _held.Values) held.Handle.Dispose();
+                _held.Clear();
+            }
+        }
+
+        private void ReleaseLocked(string name)
+        {
+            if (!_held.TryGetValue(name, out var held)) return;
+            if (held.Groups > 1) { _held[name] = (held.Handle, held.Groups - 1); return; }
+            held.Handle.Dispose();
+            _held.Remove(name);
+        }
+
+        /// <summary>A group of a device older than identity tokens is keyed
+        /// by its index and has no identity claim.</summary>
+        private static IEnumerable<string> Names(OwnerCensus.DeviceGroup group)
+        {
+            if (!group.Key.StartsWith('#')) yield return MachineClaims.IdentityPipeName(group.Key);
+            if (group.ControllerIndex >= 0) yield return MachineClaims.IndexPipeName(group.ControllerIndex);
+        }
     }
 
     /// <summary>One controller's devnodes, the main node first so its
