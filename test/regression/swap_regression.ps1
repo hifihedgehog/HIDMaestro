@@ -2000,6 +2000,8 @@ function Scenario-Perf-Budget {
 # DualSense still switches to report 0x31 on the feature read that arms it.
 # An OutputReceived handler still running when Dispose's join gives up: the
 # output thread ends once it returns and meets nothing Dispose released.
+# An OutputReceived handler that disposes its own controller does not wait
+# for its own thread.
 function Scenario-Handler-Isolation {
     Invoke-Probe -Dir 'handler_isolation_check' -Exe 'HandlerIsolationCheck.exe' `
                  -Message 'a throwing event handler stopped another handler or the SDK (see probe stdout)' -SkipCodes 2

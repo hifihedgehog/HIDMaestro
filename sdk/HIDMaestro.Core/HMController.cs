@@ -1947,7 +1947,14 @@ public sealed partial class HMController : IDisposable
 
     /// <summary>Removes the virtual device from PnP and frees the per-controller
     /// shared memory section. Idempotent: safe to call multiple times. Called
-    /// automatically when the owning <see cref="HMContext"/> is disposed.</summary>
+    /// automatically when the owning <see cref="HMContext"/> is disposed.
+    /// Called from this controller's <see cref="OutputReceived"/>,
+    /// <see cref="OutputDecoded"/> or <see cref="KeyboardLedsChanged"/>
+    /// handler, or from a port's <see cref="HMPort.OutputChanged"/> handler,
+    /// it does not wait for the output reader that runs the handler. Once
+    /// the handler returns, the reader raises the rest of that packet's
+    /// events on the disposed controller, then ends without reading another
+    /// packet.</summary>
     public void Dispose()
     {
         if (_disposed) return;
@@ -1963,11 +1970,19 @@ public sealed partial class HMController : IDisposable
             if (!_outputCtsClosed) _outputCts.Cancel();
         // The reader disposes the cancellation source as it ends. A reader
         // still inside a consumer's handler when this join gives up ends
-        // once the handler returns, and waits on nothing disposed.
+        // once the handler returns, and waits on nothing disposed. Called
+        // from one of the reader's own handlers, Dispose does not wait for
+        // its own thread: the reader ends when the handler returns, before
+        // its next read of the section.
         if (_outputThread is { } output)
-            try { output.Join(Internal.TimeoutScale.Apply(500)); } catch { }
+        {
+            if (Thread.CurrentThread != output)
+                try { output.Join(Internal.TimeoutScale.Apply(500)); } catch { }
+        }
         else
+        {
             CloseOutputCts();
+        }
         // The thread is canceled and joined above, so this only needs to
         // forget it, not stop it again.
         try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }

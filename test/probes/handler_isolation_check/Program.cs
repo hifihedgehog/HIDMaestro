@@ -14,6 +14,10 @@
 // own once the handler returns. Before this release Dispose disposed the
 // cancellation source the thread waits on, and the thread's next wait threw.
 //
+// An OutputReceived handler that disposes its own controller: Dispose does not
+// wait for the output reader it runs on. Before this release it joined its
+// own thread for the join's full 500 ms.
+//
 // The other events raised on SDK threads are tested where their stimulus
 // lives: the adapter ports' OutputChanged in S80, the USB audio events in
 // usbip_server_check, HapticReceived in S50, and the Switch 2 Pro's decode
@@ -55,6 +59,7 @@ internal static class Program
         ArmOnFeatureRead(ctx);
         SwitchProRumble(ctx);
         SlowHandlerAtDispose(ctx);
+        DisposeFromOutputHandler(ctx);
         return Probe.Finish("S85");
     }
 
@@ -142,6 +147,42 @@ internal static class Program
             AppDomain.CurrentDomain.FirstChanceException -= watch;
             release.Set();
         }
+    }
+
+    // ── A handler that disposes its own controller ─────────────────────
+
+    static void DisposeFromOutputHandler(HMContext ctx)
+    {
+        Console.WriteLine("-- dualshock-4-v2: an OutputReceived handler that disposes its own controller");
+        var profile = ctx.GetProfile("dualshock-4-v2")!;
+        var before = HidPaths(profile.VendorId, profile.ProductId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var c = ctx.CreateController(profile);
+        var output = (Thread)typeof(HMController).GetField("_outputThread", Any)!.GetValue(c)!;
+        long started = 0;
+        using var entered = new ManualResetEventSlim();
+        c.OutputReceived += (_, p) =>
+        {
+            if (p.ReportId != 0x05 || entered.IsSet) return;
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
+            entered.Set();
+            c.Dispose();
+        };
+        using (var h = OpenNew(profile, before))
+        {
+            if (h == null) { c.Dispose(); return; }
+            var report = new byte[32];
+            report[0] = 0x05;
+            HidD_SetOutputReport(h, report, report.Length);
+        }
+        bool ran = entered.Wait(3000);
+        // The controller leaves the context where Dispose hands it to the
+        // context's teardown, after the join Dispose skips here.
+        bool handedOver = Probe.WaitFor(() => !ctx.ActiveControllers.Contains(c), 3000);
+        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        bool ended = Probe.WaitFor(() => !output.IsAlive, 10_000);
+        Probe.Check("an OutputReceived handler disposing its own controller does not wait for its own thread",
+            ran && handedOver && ms < 250 && ended,
+            ran ? $"teardown reached after {ms:F0} ms, reader ended {ended}" : "the handler never ran");
     }
 
     // ── KeyboardLedsChanged ─────────────────────────────────────────────
