@@ -107,20 +107,36 @@ internal static partial class Program
                 locations.Add((port, "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1)));
             }
             foreach (var p in peers) p.Kill();
-            foreach (var (port, _) in locations)
-                WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+            // The driver starts a re-attach attempt once it drops the import,
+            // so each import must be gone before the attempts are read.
+            bool allGone = true;
+            foreach (var (port, busId) in locations)
+            {
+                bool gone = WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+                Check($"X7 ({label}): the driver dropped the killed program's import ({port}/{busId})", gone,
+                      gone ? "" : "still imported after 10 s");
+                allGone &= gone;
+            }
 
+            // The control and the cancel check need every import gone. The
+            // sweep runs either way, so the killed programs' devices go.
             var (controlPort, controlBus) = locations[1];
-            int control = Vhci.Stop("127.0.0.1", controlPort, controlBus);
-            Check($"X7 ({label}): the driver started a re-attach attempt for a killed program ({controlPort}/{controlBus})",
-                  control >= 1, $"{control} canceled by the probe");
+            if (allGone)
+            {
+                int control = Vhci.Stop("127.0.0.1", controlPort, controlBus);
+                Check($"X7 ({label}): the driver started a re-attach attempt for a killed program ({controlPort}/{controlBus})",
+                      control >= 1, $"{control} canceled by the probe");
+            }
 
             using (var s = PeerProcess.Start($"X7-{label}-sweeper"))
                 Check($"X7 ({label}): another program runs a sweep", Ok(s.Send("sweep")));
-            var (port0, bus0) = locations[0];
-            int left = Vhci.Stop("127.0.0.1", port0, bus0);
-            Check($"X7 ({label}): the sweep canceled the other killed program's attempt ({port0}/{bus0})",
-                  left == 0, $"{left} canceled by the probe");
+            if (allGone)
+            {
+                var (port0, bus0) = locations[0];
+                int left = Vhci.Stop("127.0.0.1", port0, bus0);
+                Check($"X7 ({label}): the sweep canceled the other killed program's attempt ({port0}/{bus0})",
+                      left == 0, $"{left} canceled by the probe");
+            }
         }
         finally
         {
