@@ -30,12 +30,13 @@ internal static partial class Program
         var parts = new (char Part, Action Body)[]
         {
             ('1', SectionX1), ('2', SectionX2), ('3', SectionX3), ('4', SectionX4),
-            ('5', SectionX5), ('6', SectionX6), ('7', SectionX7),
+            ('5', SectionX5), ('6', SectionX6), ('7', SectionX7), ('8', SectionX8),
         };
         bool first = true;
         foreach (var (part, body) in parts)
         {
-            if (!XPart(part)) continue;
+            // X8 measures for minutes, so it runs only when named.
+            if (part == '8' ? !XPartNamed(part) : !XPart(part)) continue;
             if (!first) Clean();
             first = false;
             body();
@@ -47,6 +48,29 @@ internal static partial class Program
     {
         string? arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--x-parts=", StringComparison.Ordinal));
         return arg == null || arg.AsSpan("--x-parts=".Length).Contains(part);
+    }
+
+    /// <summary>Whether this run names X8: section X selected and part 8
+    /// named in "--x-parts=".</summary>
+    internal static bool X8Named(string sections) => sections.Contains('X') && XPartNamed('8');
+
+    /// <summary>Both of X8's sandbox markers: the WDAGUtilityAccount
+    /// profile folder Windows Sandbox runs under, and
+    /// HIDMAESTRO_X8_SANDBOX=1, which lane T's launch script sets inside the
+    /// sandbox. <paramref name="detail"/> says which were found.</summary>
+    internal static bool X8InSandbox(out string detail)
+    {
+        bool profile = System.IO.Directory.Exists(@"C:\Users\WDAGUtilityAccount");
+        bool launched = Environment.GetEnvironmentVariable("HIDMAESTRO_X8_SANDBOX") == "1";
+        detail = $"WDAGUtilityAccount profile {(profile ? "present" : "absent")}, HIDMAESTRO_X8_SANDBOX {(launched ? "set" : "not set")}";
+        return profile && launched;
+    }
+
+    /// <summary>Whether "--x-parts=" is present and names this part.</summary>
+    static bool XPartNamed(char part)
+    {
+        string? arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--x-parts=", StringComparison.Ordinal));
+        return arg != null && arg.AsSpan("--x-parts=".Length).Contains(part);
     }
 
     /// <summary>The USB/IP loopback port ranges taken first. With the first
@@ -143,6 +167,242 @@ internal static partial class Program
             foreach (var p in peers) p.Dispose();
             // Whatever the result, no attempt is left for later runs.
             foreach (var (port, busId) in locations) Vhci.Stop("127.0.0.1", port, busId);
+        }
+    }
+
+    /// <summary>How long a v1.12.0 program holds
+    /// Global\HIDMaestro-OEM-Recovery on its long ledger paths, which
+    /// LedgerLock's waits for an owner other than SYSTEM or Administrators
+    /// must outlast: ReleaseAll in a sweep over four controllers' entries,
+    /// PruneDead in a fresh program's first create after a program with
+    /// four controllers was killed, the GameInput table write in a create,
+    /// and RecoverOrphans over four pending OEM records. Each path runs 30
+    /// times. A poller in this process tries the mutex without waiting and
+    /// counts each run of failed tries as one hold. The longest hold in a
+    /// path's window is that round's sample.
+    ///
+    /// <para>Where it runs. Only when --x-parts= names it, so never in the
+    /// battery, which passes no --x-parts. Only inside Windows Sandbox (lane
+    /// T's), never on a working machine: it makes about 300 device creates
+    /// and removes with v1.12.0 code, among them a killed program's devices
+    /// removed by the next program's first create, the pattern both 0x139
+    /// bugchecks during this release's testing fit. It needs two
+    /// independent markers: the WDAGUtilityAccount profile folder Windows
+    /// Sandbox runs under, and HIDMAESTRO_X8_SANDBOX=1 in its environment,
+    /// which lane T's launch script sets inside the sandbox. A run that
+    /// names X8 without both stops in Main before its first cleanup,
+    /// deploy or section, with one failing check.</para>
+    ///
+    /// <para>What its numbers are. Every reply is checked, and each round
+    /// must show that its path did its work: the ledger entries there before
+    /// a sweep and gone after it, the GameInput table absent before each
+    /// create, present after it and gone after the dispose,
+    /// four records restored, a killed program's entries pruned. The holds
+    /// are a sandbox's, slower than this machine's by inference, which makes
+    /// the bound check conservative. The poller keeps one thread spinning
+    /// for the whole run, which on few virtual processors lengthens the
+    /// holds it measures, also on the conservative side.</para></summary>
+    static void SectionX8()
+    {
+        // Main refuses the whole run before its first step when X8 is named
+        // outside the sandbox. This repeats the test where X8 starts.
+        if (!X8InSandbox(out string markers))
+        {
+            Check("X8: runs only inside lane T's Windows Sandbox", false, markers);
+            return;
+        }
+        const int rounds = 30;
+        // LedgerLock.LegacyMarkedWaitMs, the shorter of the lock's bounds.
+        const double shortBoundMs = 500;
+        const string ledgerRoot = @"SOFTWARE\HIDMaestroRegistryLedger";
+        var samples = new Dictionary<string, List<double>>();
+        var failures = new Dictionary<string, string>();
+        void Fail(string path, string why) { if (!failures.ContainsKey(path)) failures[path] = why; }
+        static int Entries(string kind, IEnumerable<string> names)
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey($@"{ledgerRoot}\{kind}");
+            if (k == null) return 0;
+            var have = new HashSet<string>(k.GetSubKeyNames(), StringComparer.OrdinalIgnoreCase);
+            return names.Count(have.Contains);
+        }
+        static bool KeyExists(string path)
+        {
+            using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(path);
+            return k != null;
+        }
+        static string[] Joy(params string[] pids) => pids.Select(p => $"VID_BEEF&PID_{p}").ToArray();
+
+        using var poll = new LegacyHoldPoller();
+        if (!poll.Started)
+        {
+            Check(@"X8: the poller opens Global\HIDMaestro-OEM-Recovery", false, poll.Error);
+            return;
+        }
+        string Window(string path, Func<string> act)
+        {
+            double from = poll.Now;
+            string reply = act();
+            double to = poll.Now;
+            Thread.Sleep(20);   // a hold that ends after the reply is still counted
+            double longest = poll.LongestStartingIn(from, to);
+            if (!samples.TryGetValue(path, out var list)) samples[path] = list = new List<double>();
+            if (longest >= 0) list.Add(longest);
+            else Fail(path, "a round saw no hold");
+            return reply;
+        }
+        bool Sent(PeerProcess peer, string path, string command)
+        {
+            string r = peer.Send(command);
+            if (!Ok(r)) Fail(path, $"{command}: {r}");
+            return Ok(r);
+        }
+
+        const string releaseAll = "ReleaseAll, in a sweep over four controllers";
+        const string table = "the GameInput table write, in a create";
+        const string recover = "RecoverOrphans over four records";
+        const string prune = "PruneDead, in a fresh program's first create";
+        bool pending = false;
+        var p = PeerProcess.Start("X8", "v1.12.0");
+        try
+        {
+            bool v112 = p.SdkVersion.StartsWith("1.12.0", StringComparison.Ordinal);
+            Check("X8: the peer runs on HIDMaestro 1.12.0", v112, p.SdkVersion);
+            if (!v112) return;
+            Sent(p, releaseAll, "install");
+            var sweepPads = Joy("F801", "F802", "F803", "F804");
+            for (int i = 0; i < rounds; i++)
+            {
+                bool made = true;
+                foreach (string pid in new[] { "F801", "F802", "F803" }) made &= Sent(p, releaseAll, $"create pad {pid} -");
+                made &= Sent(p, releaseAll, "create gipad F804 -");
+                int before = Entries("JoystickOem", sweepPads);
+                if (!made || before != 4) { Fail(releaseAll, $"round {i}: {before} of 4 ledger entries before the sweep"); break; }
+                string r = Window(releaseAll, () => p.Send("sweep"));
+                int after = Entries("JoystickOem", sweepPads);
+                if (!Ok(r) || after != 0) { Fail(releaseAll, $"round {i}: {r}, {after} entries left after it"); break; }
+            }
+            string tableKey = @"SYSTEM\CurrentControlSet\Control\GameInput\Devices\BEEFF80500010005";
+            for (int i = 0; i < rounds; i++)
+            {
+                // Absent before and gone after the dispose, so a round
+                // cannot pass on a table that was already there.
+                if (KeyExists(tableKey)) { Fail(table, $"round {i}: the table was there before the create"); break; }
+                string r = Window(table, () => p.Send("create gipad F805 -"));
+                bool written = KeyExists(tableKey);
+                if (!Ok(r) || !written) { Fail(table, $"round {i}: {r}, table {(written ? "written" : "not written")}"); break; }
+                if (!Sent(p, table, "dispose")) break;
+                if (KeyExists(tableKey)) { Fail(table, $"round {i}: the table stayed after the dispose"); break; }
+            }
+            var oemPids = new[] { "F811", "F812", "F813", "F814" };
+            for (int i = 0; i < rounds; i++)
+            {
+                pending = true;
+                bool set = true;
+                foreach (string pid in oemPids) set &= Sent(p, recover, $"oemset {pid}");
+                if (!set) break;
+                string r = Window(recover, () => p.Send("oemrecover"));
+                int restored = int.TryParse(PeerProcess.Field(r, "restored"), out int n) ? n : -1;
+                int left = oemPids.Count(pid => KeyExists($@"SOFTWARE\HIDMaestroOemOverrides\VID_BEEF&PID_{pid}"));
+                if (!Ok(r) || restored < 4 || left != 0) { Fail(recover, $"round {i}: {r}, {left} records left"); break; }
+                pending = false;
+            }
+        }
+        finally
+        {
+            if (pending)
+            {
+                string r = p.Send("oemrecover");
+                Check("X8: the records left by a failed round are restored", Ok(r), r);
+            }
+            p.Dispose();
+        }
+
+        var prunePads = Joy("F821", "F822", "F823", "F824");
+        for (int i = 0; i < rounds; i++)
+        {
+            using (var killed = PeerProcess.Start($"X8-killed-{i}", "v1.12.0"))
+            {
+                bool made = true;
+                foreach (string pid in new[] { "F821", "F822", "F823" }) made &= Sent(killed, prune, $"create pad {pid} -");
+                made &= Sent(killed, prune, "create gipad F824 -");
+                killed.Kill();
+                if (!made) break;
+            }
+            int before = Entries("JoystickOem", prunePads);
+            if (before != 4) { Fail(prune, $"round {i}: {before} of 4 ledger entries before the fresh create"); break; }
+            using var fresh = PeerProcess.Start($"X8-fresh-{i}", "v1.12.0");
+            string r = Window(prune, () => fresh.Send("create pad F825 -"));
+            int after = Entries("JoystickOem", prunePads);
+            if (!Ok(r) || after != 0) { Fail(prune, $"round {i}: {r}, {after} entries left after it"); break; }
+            if (!Sent(fresh, prune, "sweep")) break;
+        }
+
+        foreach (string path in new[] { releaseAll, table, recover, prune })
+        {
+            var s = (samples.TryGetValue(path, out var list) ? list : new List<double>()).OrderBy(x => x).ToArray();
+            string stats = s.Length == 0 ? "no hold seen"
+                : $"n={s.Length} p50={s[s.Length / 2]:F2} ms p95={s[Math.Min(s.Length - 1, (int)Math.Ceiling(s.Length * 0.95) - 1)]:F2} ms max={s[^1]:F2} ms";
+            Console.WriteLine($"    X8 {path}: {stats}");
+            Console.WriteLine($"    X8 {path}, all: {string.Join(", ", s.Select(x => x.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)))}");
+            Check($"X8: {path}: did its work in each of {rounds} rounds", !failures.ContainsKey(path) && s.Length == rounds,
+                  failures.TryGetValue(path, out string? why) ? why : $"{s.Length} rounds");
+            Check($"X8: {path}: every hold shorter than the {shortBoundMs} ms short bound",
+                  s.Length == rounds && s[^1] < shortBoundMs, stats);
+        }
+    }
+
+    /// <summary>Tries Global\HIDMaestro-OEM-Recovery without waiting, on its
+    /// own thread, and records each run of failed tries as a hold, from the
+    /// first failed try to the next success. Every take is released at once,
+    /// so a v1.12.0 program waits at most one try's length for it.</summary>
+    sealed class LegacyHoldPoller : IDisposable
+    {
+        readonly IntPtr _h;
+        readonly Stopwatch _clock = Stopwatch.StartNew();
+        readonly List<(double Start, double Length)> _holds = new();
+        readonly Thread? _thread;
+        volatile bool _stop;
+        public bool Started => _thread != null;
+        public string Error { get; } = "";
+        public double Now => _clock.Elapsed.TotalMilliseconds;
+
+        public LegacyHoldPoller()
+        {
+            _h = Native.CreateMutexW(IntPtr.Zero, false, @"Global\HIDMaestro-OEM-Recovery");
+            if (_h == IntPtr.Zero) { Error = $"Win32 error {Marshal.GetLastWin32Error()}"; return; }
+            _thread = new Thread(Run) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
+            _thread.Start();
+        }
+
+        void Run()
+        {
+            double heldSince = -1;
+            while (!_stop)
+            {
+                uint r = Native.WaitForSingleObject(_h, 0);
+                double now = Now;
+                if (r is 0 or 0x80)
+                {
+                    Native.ReleaseMutex(_h);
+                    if (heldSince >= 0) { lock (_holds) _holds.Add((heldSince, now - heldSince)); heldSince = -1; }
+                    Thread.Yield();
+                }
+                else if (heldSince < 0) heldSince = now;
+            }
+        }
+
+        /// <summary>The longest hold that started in [from, to], or -1.</summary>
+        public double LongestStartingIn(double from, double to)
+        {
+            lock (_holds)
+                return _holds.Where(x => x.Start >= from && x.Start <= to).Select(x => x.Length).DefaultIfEmpty(-1).Max();
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread?.Join();
+            if (_h != IntPtr.Zero) Native.CloseHandle(_h);
         }
     }
 

@@ -6,6 +6,8 @@
 //
 //   install                     HMContext.InstallDriver
 //   create pad <pid> <key|->    a custom gamepad, VID BEEF and this PID
+//   create gipad <pid> <key|->  a custom gamepad in the shape the SDK writes
+//                               a GameInput table for, VID BEEF
 //   create xbox - <key|->       xbox-360-wired
 //   create composite - <key|->  dualsense-composite (USB/IP)
 //   create gc - <key|->         gamecube-adapter (USB/IP)
@@ -38,6 +40,8 @@
 //   pauseindex                  the same, replying "OK paused index=<N>"
 //                               with the transport index the create took
 //   alive                       reply, to show the program still runs
+//   oemset <pid>                HMOemNameOverride.Set for BEEF:<pid>
+//   oemrecover                  HMOemNameOverride.RecoverOrphans
 //   sdkevents <index>           open the index's output doorbell the way
 //                               the SDK does (SharedMemoryIO.TryOpenOutputEvent),
 //                               wait on it without blocking, and signal its
@@ -360,6 +364,16 @@ internal static class Peer
                         Reply($"OK vrregister {r}");
                         break;
                     }
+                    case "oemset":
+                    {
+                        ushort pid = Convert.ToUInt16(a[1], 16);
+                        HMOemNameOverride.Set(0xBEEF, pid, $"HIDMaestro Coexist OEM {pid:X4}");
+                        Reply($"OK oemset {pid:X4}");
+                        break;
+                    }
+                    case "oemrecover":
+                        Reply($"OK oemrecover restored={HMOemNameOverride.RecoverOrphans()}");
+                        break;
                     case "staleport":
                     {
                         HMController? last;
@@ -437,6 +451,7 @@ internal static class Peer
     static HMProfile Profile(HMContext ctx, string kind, string pid) => kind switch
     {
         "pad" => Pad(Convert.ToUInt16(pid, 16)),
+        "gipad" => GameInputPad(Convert.ToUInt16(pid, 16)),
         "xbox" => ctx.GetProfile("xbox-360-wired")!,
         "composite" => ctx.GetProfile("dualsense-composite")!,
         "gc" => ctx.GetProfile("gamecube-adapter")!,
@@ -449,6 +464,17 @@ internal static class Peer
             .Vid(0xBEEF).Pid(pid).ProductString($"HIDMaestro Coexist {pid:X4}").ManufacturerString("HIDMaestro")
             .Type("gamepad").Connection("usb")
             .FromDescriptorBuilder(new HidDescriptorBuilder().Gamepad().AddStick("Left").AddButtons(8))
+            .Build();
+
+    /// <summary>A gamepad in the one descriptor shape the SDK writes a
+    /// GameInput table for (GameInputMapping.HasMeasuredShape): two sticks,
+    /// two triggers, a hat and ten buttons, built in code. VID BEEF.</summary>
+    public static HMProfile GameInputPad(ushort pid) =>
+        new HMProfileBuilder().Id($"coexist-gi-{pid:x4}").Name($"HIDMaestro Coexist GI {pid:X4}").Vendor("HIDMaestro")
+            .Vid(0xBEEF).Pid(pid).ProductString($"HIDMaestro Coexist GI {pid:X4}").ManufacturerString("HIDMaestro")
+            .Type("gamepad").Connection("usb")
+            .FromDescriptorBuilder(new HidDescriptorBuilder().Gamepad()
+                .AddStick("Left").AddStick("Right").AddTrigger("Left").AddTrigger("Right").AddHat().AddButtons(10))
             .Build();
 
     static HMContext NewContext()

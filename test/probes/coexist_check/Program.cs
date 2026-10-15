@@ -96,6 +96,12 @@
 //      transport index's events and sections. Each is created by a thread
 //      of this probe that impersonates such a program, and HIDMaestro's
 //      deploy, sweep and create neither hang nor use it. SectionX.cs.
+//      "--x-parts=<digits>" after the section letters runs only those
+//      parts. Part 8, how long v1.12.0 holds its ledger mutex, runs only
+//      when named there, never in S71, and only inside lane T's Windows
+//      Sandbox, which sets HIDMAESTRO_X8_SANDBOX=1: it churns devices with
+//      v1.12.0 code. Named anywhere else, the run stops before its first
+//      step.
 //   Y. The driver's StopEvent and OutputEvent admit no program that is
 //      not elevated, and an owner pipe such a program makes for a killed
 //      program's index keeps none of its devices. SectionY.cs has the
@@ -170,6 +176,16 @@ internal static partial class Program
         Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
+        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVXY";
+        // X8 churns devices with v1.12.0 code and runs only inside lane T's
+        // sandbox. Named anywhere else, the whole run stops here, before
+        // any cleanup, deploy or section touches the machine.
+        if (X8Named(only) && !X8InSandbox(out string markers))
+        {
+            Check("X8: runs only inside lane T's Windows Sandbox", false, $"{markers}. Nothing was run.");
+            Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+            return 1;
+        }
         string? consumer = FindLiveSdkConsumer();
         if (consumer != null)
         {
@@ -177,7 +193,6 @@ internal static partial class Program
             return 2;
         }
 
-        string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVXY";
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
