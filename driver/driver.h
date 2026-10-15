@@ -158,7 +158,9 @@ typedef struct _DEVICE_CONTEXT {
      * saturated CPU cores at scale. A 50 ms safety timeout on WaitForMultiple
      * Objects keeps things moving if a signal is ever dropped. */
     HANDLE  InputDataEvent;      /* OpenEvent on Global\HIDMaestroInputEvent<N> */
-    HANDLE  StopEvent;            /* Named: Global\HIDMaestroStopEvent<N> */
+    HANDLE  StopEvent;            /* Named: Global\HIDMaestroStopEvent<N>, or
+                                  * unnamed when that name is unusable
+                                  * (CreateHostEvent) */
     volatile LONG TearingDown;   /* issue #38: set by EvtDeviceContextCleanup
                                   * BEFORE it signals StopEvent. StopEvent is
                                   * a named object shared with every other

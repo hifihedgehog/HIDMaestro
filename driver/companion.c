@@ -11,6 +11,8 @@
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <wdf.h>
+#include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
+#include <aclapi.h>   /* GetSecurityInfo */
 
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
@@ -264,6 +266,53 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
     if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
 }
 
+/* The output doorbell's descriptor and its check on an existing object,
+ * as driver.c's CreateHostEvent: SYSTEM, Administrators and LocalService,
+ * and an object that exists already is used only when it has a DACL and
+ * one of those three owns it. NULL when the name is unusable or the create
+ * fails. */
+static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
+
+static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
+{
+    PSECURITY_DESCRIPTOR sd = NULL;
+    SECURITY_ATTRIBUTES sa;
+    HANDLE ev;
+    BOOL existed;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            g_HostEventSddl, SDDL_REVISION_1, &sd, NULL))
+        return NULL;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+    ev = CreateEventW(&sa, manualReset, FALSE, name);
+    existed = ev != NULL && GetLastError() == ERROR_ALREADY_EXISTS;
+    LocalFree(sd);
+    if (!existed)
+        return ev;
+
+    {
+        PSID owner = NULL;
+        PACL dacl = NULL;
+        PSECURITY_DESCRIPTOR found = NULL;
+        BOOL hostMade = FALSE;
+        if (GetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                            &owner, NULL, &dacl, NULL, &found) == ERROR_SUCCESS) {
+            hostMade = owner != NULL && dacl != NULL
+                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid)
+                    || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+            LocalFree(found);
+        }
+        if (!hostMade) {
+            CloseHandle(ev);
+            ev = NULL;
+        }
+    }
+    return ev;
+}
+
 /* Open the per-controller output section. The test app pre-creates it with
  * a permissive SDDL; we just attach. WUDFHost runs as LocalService and
  * cannot create Global\ sections itself (no SeCreateGlobalPrivilege).
@@ -301,19 +350,11 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
      * ordering between the two hosts doesn't matter. The event object's
      * lifetime is the device session (unlike the SDK-recreated section),
      * so a live handle is kept across the 500-write mapping recycles and
-     * only re-attempted while NULL. Non-fatal: on failure PublishOutput
-     * skips the signal and the SDK's safety timeout drains the ring. */
-    if (ctx->OutputSignalEvent == NULL) {
-        SECURITY_ATTRIBUTES sa;
-        SECURITY_DESCRIPTOR sd;
-        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-        SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
-        sa.nLength = sizeof(sa);
-        sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle = FALSE;
-        ctx->OutputSignalEvent = CreateEventW(&sa, FALSE /* auto reset */, FALSE,
-                                              ctx->OutputEventName);
-    }
+     * only re-attempted while NULL. Non-fatal, an unusable name included:
+     * on failure PublishOutput skips the signal and the SDK's safety
+     * timeout drains the ring. */
+    if (ctx->OutputSignalEvent == NULL)
+        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
 
     ctx->OutputMemHandle = h;
     MemoryBarrier();

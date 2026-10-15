@@ -17,6 +17,8 @@
  */
 
 #include "driver.h"
+#include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
+#include <aclapi.h>   /* GetSecurityInfo */
 #include "version_gen.h"   /* HM_VER_*, generated into the build directory from Directory.Build.props */
 
 /* Sony motion calibration, 34 bytes, written at offset 1 of the
@@ -2164,6 +2166,69 @@ DriverEntry(
 }
 
 /* ================================================================== */
+/*  Named events                                                       */
+/* ================================================================== */
+
+/* The driver's named events (StopEvent, OutputEvent) admit SYSTEM,
+ * Administrators and LocalService: the SDK's own descriptor without the
+ * read for everyone (SharedMemoryIO.Sddl). The SDK, v1.12.0's included,
+ * opens them elevated, and both driver hosts run as LocalService. Until
+ * v1.13.0 they had a NULL DACL, which let any local program signal a
+ * controller's StopEvent or wait on and reset its OutputEvent.
+ * companion.c makes its OutputEvent the same way. */
+static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
+
+/* Create the named event, or open it when a host made it first: the other
+ * host of the same controller, or an earlier device context on the same
+ * index. Any program can create a Global\ event, so one that exists already
+ * is used only when it has a DACL and its owner is LocalService, SYSTEM or
+ * Administrators, owners a program that is not elevated cannot give an
+ * object. The SDK judges these two names by the same owners
+ * (ObjectOwner.IsOwnedByAdmin). An event an older driver made has no DACL
+ * and is not used either. NULL when the name is unusable or the create
+ * fails. */
+static HANDLE
+CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name)
+{
+    PSECURITY_DESCRIPTOR sd = NULL;
+    SECURITY_ATTRIBUTES sa;
+    HANDLE ev;
+    BOOL existed;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            g_HostEventSddl, SDDL_REVISION_1, &sd, NULL))
+        return NULL;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+    ev = CreateEventW(&sa, manualReset, FALSE, name);
+    existed = ev != NULL && GetLastError() == ERROR_ALREADY_EXISTS;
+    LocalFree(sd);
+    if (!existed)
+        return ev;
+
+    {
+        PSID owner = NULL;
+        PACL dacl = NULL;
+        PSECURITY_DESCRIPTOR found = NULL;
+        BOOL hostMade = FALSE;
+        if (GetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                            &owner, NULL, &dacl, NULL, &found) == ERROR_SUCCESS) {
+            hostMade = owner != NULL && dacl != NULL
+                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid)
+                    || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+            LocalFree(found);
+        }
+        if (!hostMade) {
+            CloseHandle(ev);
+            ev = NULL;
+        }
+    }
+    return ev;
+}
+
+/* ================================================================== */
 /*  EvtDeviceAdd                                                       */
 /* ================================================================== */
 
@@ -2361,29 +2426,27 @@ EvtDeviceAdd(
      * event, the worker exits, WUDFHost releases, and PnP removes
      * the device instantly.
      *
-     * Uses a permissive NULL DACL so any elevated process can open it. */
+     * CreateHostEvent admits the elevated SDK and the driver hosts only.
+     * When the name is unusable, because a program that is not a driver
+     * host made it first, the worker gets an unnamed event instead: it
+     * still stops at teardown, and a sweep after a force-kill takes the
+     * slow removal path for this device. */
     {
-        SECURITY_ATTRIBUTES sa;
-        SECURITY_DESCRIPTOR sd;
-        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-        SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
-        sa.nLength = sizeof(sa);
-        sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle = FALSE;
-        ctx->StopEvent = CreateEventW(&sa, TRUE /* manual reset */, FALSE, ctx->StopEventName);
+        ctx->StopEvent = CreateHostEvent(TRUE /* manual reset */, ctx->StopEventName);
+        if (ctx->StopEvent == NULL)
+            ctx->StopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
 
-        /* Output-ring doorbell (issue #34). Auto-reset, same permissive
-         * NULL DACL. Created here (not SDK-side like the input event) so
+        /* Output-ring doorbell (issue #34). Auto-reset, the same
+         * descriptor. Created here (not SDK-side like the input event) so
          * the SDK can DETECT support by OpenEvent success: open works on
          * a new driver (block on the event, zero idle wakes), fails on an
          * old driver (fall back to the 8 ms poll). The companion creates
          * or opens the same name for its XUSB rumble publishes; CreateEventW
          * on an existing name returns the existing object, so creation
          * order between the two hosts doesn't matter. Non-fatal on
-         * failure: PublishOutput skips the signal and the SDK's safety
-         * timeout still drains the ring. */
-        ctx->OutputSignalEvent = CreateEventW(&sa, FALSE /* auto reset */, FALSE,
-                                              ctx->OutputEventName);
+         * failure, an unusable name included: PublishOutput skips the
+         * signal and the SDK's safety timeout still drains the ring. */
+        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
     }
     if (ctx->StopEvent != NULL) {
         /* CRITICAL: reset the StopEvent explicitly before starting the worker.

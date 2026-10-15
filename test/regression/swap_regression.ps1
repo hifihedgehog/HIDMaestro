@@ -1838,7 +1838,7 @@ function Scenario-Kbm-Raw-Input {
 # program is a peer process the probe drives, and the probe judges what
 # they did from outside both. Its header lists every section.
 function Scenario-Coexistence {
-    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVX' -Tag 'coexistence' `
+    Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'ABCDEFGHJKLMNOPQRSTUVXY' -Tag 'coexistence' `
                  -Message 'two programs that embed HIDMaestro disturbed each other (see probe stdout)' -SkipCodes 2
 }
 

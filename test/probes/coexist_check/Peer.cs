@@ -35,7 +35,13 @@
 //   pausemapping                the next create stops before it maps its
 //                               index's input section, replies "OK paused"
 //                               and goes on at the next line ("go")
+//   pauseindex                  the same, replying "OK paused index=<N>"
+//                               with the transport index the create took
 //   alive                       reply, to show the program still runs
+//   sdkevents <index>           open the index's output doorbell the way
+//                               the SDK does (SharedMemoryIO.TryOpenOutputEvent),
+//                               wait on it without blocking, and signal its
+//                               StopEvent as the SDK's sweep does
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
 //   staleport <n>               set the last controller's remembered vhci
@@ -200,6 +206,14 @@ internal static class Peer
                               })
                               ? "OK pausemapping" : "ERR pausemapping no hook");
                         break;
+                    case "pauseindex":
+                        Reply(SetHook("HIDMaestro.Internal.DeviceOrchestrator", "BeforeInputMapping", index =>
+                              {
+                                  Reply($"OK paused index={index}");
+                                  Console.ReadLine();
+                              })
+                              ? "OK pauseindex" : "ERR pauseindex no hook");
+                        break;
                     case "alive":
                         Reply("OK alive");
                         break;
@@ -234,6 +248,9 @@ internal static class Peer
                         Reply($"OK exports n={(set == null ? "null" : set.GetType().GetProperty("Count")!.GetValue(set))} ms={sw.ElapsedMilliseconds}");
                         break;
                     }
+                    case "sdkevents":
+                        Reply(SdkEvents(int.Parse(a[1])));
+                        break;
                     case "threads":
                         Reply($"OK threads n={CountThreads(a[1])}");
                         break;
@@ -347,18 +364,47 @@ internal static class Peer
 
     /// <summary>Set one of the SDK's internal static Action&lt;int&gt;
     /// hooks to run <paramref name="body"/> once, on the next call.</summary>
-    static bool SetHook(string type, string field, Action body)
+    static bool SetHook(string type, string field, Action body) => SetHook(type, field, (int _) => body());
+
+    /// <summary>The same, handing <paramref name="body"/> the hook's
+    /// argument.</summary>
+    static bool SetHook(string type, string field, Action<int> body)
     {
         var f = typeof(HMContext).Assembly.GetType(type)?.GetField(field, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
         if (f == null) return false;
-        f.SetValue(null, (Action<int>)(_ =>
+        f.SetValue(null, (Action<int>)(n =>
         {
             f.SetValue(null, null);
-            body();
+            body(n);
         }));
         return true;
     }
 
+    /// <summary>The output doorbell opened by the SDK's own code, read
+    /// through reflection, and waited on for no time. Then the StopEvent
+    /// opened and signaled with the access the SDK's sweep asks for
+    /// (DeviceOrchestrator.SignalStopEventsAndDrain), from this program's
+    /// token.</summary>
+    static string SdkEvents(int index)
+    {
+        var open = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO")
+            ?.GetMethod("TryOpenOutputEvent", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        if (open == null) return "ERR sdkevents no SharedMemoryIO.TryOpenOutputEvent";
+        IntPtr ev = (IntPtr)open.Invoke(null, new object[] { index })!;
+        uint wait = ev == IntPtr.Zero ? uint.MaxValue : WaitForSingleObject(ev, 0);
+        if (ev != IntPtr.Zero) CloseHandle(ev);
+        IntPtr stop = OpenEventW(0x0002 /*EVENT_MODIFY_STATE*/, false, $@"Global\HIDMaestroStopEvent{index}");
+        bool signaled = stop != IntPtr.Zero && SetEvent(stop);
+        if (stop != IntPtr.Zero) CloseHandle(stop);
+        return $"OK sdkevents output={(ev != IntPtr.Zero ? 1 : 0)} wait={wait} stop={(signaled ? 1 : 0)}";
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetEvent(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr h, uint ms);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenThread(uint access, bool inherit, uint id);
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
