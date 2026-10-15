@@ -102,8 +102,16 @@ public sealed partial class HMController : IDisposable
     // Output passthrough reader (rumble/haptics/FFB): background thread
     // poll-reads the per-controller output section and raises OutputReceived.
     private readonly IntPtr _outputView;
+    // Set once the thread has started.
     private readonly Thread? _outputThread;
+    // The reader waits on this source's handle, so the reader disposes it as
+    // it ends, and Dispose cancels it only while it is open. A reader that
+    // Dispose's bounded join gave up on, inside a consumer's handler, never
+    // waits on a disposed handle. Guarded by _outputCtsLock, which is never
+    // held across a handler.
     private readonly CancellationTokenSource _outputCts = new();
+    private readonly object _outputCtsLock = new();
+    private bool _outputCtsClosed;
 
     // 14-byte GIP-format buffer reused per frame to avoid per-call alloc.
     // The XUSB companion (HMXInput.dll, used for non-xinputhid Xbox
@@ -596,12 +604,13 @@ public sealed partial class HMController : IDisposable
         try
         {
             _outputView = SharedMemoryIO.EnsureOutputMapping(index);
-            _outputThread = new Thread(OutputPollLoop)
+            var output = new Thread(OutputPollLoop)
             {
                 IsBackground = true,
                 Name = $"HMOutputReader_{index}",
             };
-            _outputThread.Start();
+            output.Start();
+            _outputThread = output;
             // Publish the thread so any unmap stops it first. Without this a
             // sweep that runs while this controller is still alive frees the
             // view underneath the loop below (issue #45).
@@ -1607,6 +1616,30 @@ public sealed partial class HMController : IDisposable
     /// in both modes.</summary>
     private void OutputPollLoop()
     {
+        try
+        {
+            OutputPoll();
+        }
+        finally
+        {
+            CloseOutputCts();
+        }
+    }
+
+    /// <summary>Dispose the reader's cancellation source: by the reader as
+    /// it ends, or by Dispose when the reader never started.</summary>
+    private void CloseOutputCts()
+    {
+        lock (_outputCtsLock)
+        {
+            if (_outputCtsClosed) return;
+            _outputCtsClosed = true;
+        }
+        _outputCts.Dispose();
+    }
+
+    private void OutputPoll()
+    {
         if (_outputView == IntPtr.Zero) return;
         // Start where this controller's setup found the ring
         // (SharedMemoryIO.MarkOutputStart), so a packet a host sent while
@@ -1926,14 +1959,18 @@ public sealed partial class HMController : IDisposable
         // land on a section this Dispose is about to unmap.
         try { _idleCts.Cancel(); } catch { }
         try { _idleThread?.Join(Internal.TimeoutScale.Apply(500)); } catch { }
-        try { _outputCts.Cancel(); } catch { }
-        try { _outputThread?.Join(Internal.TimeoutScale.Apply(500)); } catch { }
-        // Drop the registration before the CTS is disposed, so a concurrent
-        // unmap can never reach a disposed CTS through the registry (#45).
-        // The thread is already canceled and joined above, so this only
-        // needs to forget it, not stop it again.
+        lock (_outputCtsLock)
+            if (!_outputCtsClosed) _outputCts.Cancel();
+        // The reader disposes the cancellation source as it ends. A reader
+        // still inside a consumer's handler when this join gives up ends
+        // once the handler returns, and waits on nothing disposed.
+        if (_outputThread is { } output)
+            try { output.Join(Internal.TimeoutScale.Apply(500)); } catch { }
+        else
+            CloseOutputCts();
+        // The thread is canceled and joined above, so this only needs to
+        // forget it, not stop it again.
         try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }
-        try { _outputCts.Dispose(); } catch { }
         _context.OnControllerDisposing(this);
     }
 

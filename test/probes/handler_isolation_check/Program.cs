@@ -9,6 +9,11 @@
 // after it, and a throwing OutputReceived handler skipped the rest of the
 // packet.
 //
+// A handler still running when Dispose's join of the output thread gives up
+// must not leave that thread touching what Dispose released: it ends on its
+// own once the handler returns. Before this release Dispose disposed the
+// cancellation source the thread waits on, and the thread's next wait threw.
+//
 // The other events raised on SDK threads are tested where their stimulus
 // lives: the adapter ports' OutputChanged in S80, the USB audio events in
 // usbip_server_check, HapticReceived in S50, and the Switch 2 Pro's decode
@@ -49,6 +54,7 @@ internal static class Program
         KeyboardLeds(ctx);
         ArmOnFeatureRead(ctx);
         SwitchProRumble(ctx);
+        SlowHandlerAtDispose(ctx);
         return Probe.Finish("S85");
     }
 
@@ -83,6 +89,59 @@ internal static class Program
             sent == Reports && Volatile.Read(ref received) == sent, $"{received} of {sent} sent");
         Probe.Check($"OutputDecoded still fires for all {Reports}, and the handler after a throwing one gets them",
             sent == Reports && Volatile.Read(ref decoded) == sent, $"{decoded} of {sent} sent");
+    }
+
+    // ── A handler still running at Dispose ──────────────────────────────
+
+    static void SlowHandlerAtDispose(HMContext ctx)
+    {
+        Console.WriteLine("-- dualshock-4-v2: an OutputReceived handler still running at Dispose");
+        var profile = ctx.GetProfile("dualshock-4-v2")!;
+        var before = HidPaths(profile.VendorId, profile.ProductId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var c = ctx.CreateController(profile);
+        var output = (Thread)typeof(HMController).GetField("_outputThread", Any)!.GetValue(c)!;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        c.OutputReceived += (_, p) =>
+        {
+            if (p.ReportId != 0x05 || entered.IsSet) return;
+            entered.Set();
+            release.Wait(5000);
+        };
+        // Every exception the output thread meets from here on, caught or
+        // not.
+        var met = new ConcurrentQueue<string>();
+        EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> watch = (_, e) =>
+        {
+            if (Thread.CurrentThread == output) met.Enqueue($"{e.Exception.GetType().Name}: {e.Exception.Message}");
+        };
+        AppDomain.CurrentDomain.FirstChanceException += watch;
+        try
+        {
+            using (var h = OpenNew(profile, before))
+            {
+                if (h == null) { c.Dispose(); return; }
+                var report = new byte[32];
+                report[0] = 0x05;
+                HidD_SetOutputReport(h, report, report.Length);
+            }
+            bool inHandler = entered.Wait(3000);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            c.Dispose();
+            long disposeMs = sw.ElapsedMilliseconds;
+            bool stillInHandler = !release.IsSet && output.IsAlive;
+            release.Set();
+            bool ended = Probe.WaitFor(() => !output.IsAlive, 3000);
+            Probe.Check("Dispose returns while an OutputReceived handler still runs", inHandler && stillInHandler,
+                $"handler entered {inHandler}, Dispose took {disposeMs} ms");
+            Probe.Check("the output thread then ends without meeting anything Dispose released",
+                ended && met.IsEmpty, ended ? (met.IsEmpty ? "no exception" : string.Join("; ", met)) : "the thread is still running");
+        }
+        finally
+        {
+            AppDomain.CurrentDomain.FirstChanceException -= watch;
+            release.Set();
+        }
     }
 
     // ── KeyboardLedsChanged ─────────────────────────────────────────────
