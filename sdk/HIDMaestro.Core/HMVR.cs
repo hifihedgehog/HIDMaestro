@@ -38,17 +38,31 @@ public static class HMVR
         VrDriverBuilder.SetSteamVRPathHint(steamVrDir);
 
     /// <summary>Extract the embedded OpenVR driver to its stable
-    /// %ProgramData% home and register it with SteamVR in the calling
-    /// user's OpenVR path registry, the file vrpathreg edits. The SDK writes
-    /// that file itself and runs nothing from the SteamVR folder. Idempotent:
-    /// the extraction is content-hash gated and the registration is written
-    /// only when missing. SteamVR reads the registry when it starts.
-    /// Returns false when SteamVR is not installed. Requires admin.</summary>
+    /// %ProgramData% home and register it with SteamVR in the OpenVR path
+    /// registry, the file vrpathreg edits. The SDK writes that file itself
+    /// and runs nothing from the SteamVR folder. Idempotent: the extraction
+    /// is content-hash gated and the registration is written only when
+    /// missing. Returns false when SteamVR is not installed. Requires admin.
+    ///
+    /// <para>The registry is the one in the profile of the account the
+    /// process runs as: the signed-in user for a program the user elevated
+    /// through UAC, the administrator's own account when an administrator's
+    /// credentials were typed at a standard user's prompt, and SYSTEM's
+    /// profile for a service. SteamVR reads the registry of the user it runs
+    /// as, when it starts, so a driver registered while SteamVR runs loads
+    /// at its next start. SteamVR shows no new-driver warning for it.</para>
+    ///
+    /// <para>A failure to update the registry throws
+    /// <see cref="InvalidOperationException"/> with the cause as its inner
+    /// exception.</para></summary>
     public static bool EnsureDriverRegistered() =>
         VrDriverBuilder.EnsureDriverRegistered();
 
-    /// <summary>Unregister the driver and clear the idempotence gate.
-    /// Requires admin.</summary>
+    /// <summary>Unregister the driver from the same OpenVR path registry
+    /// <see cref="EnsureDriverRegistered"/> writes, and clear the idempotence
+    /// gate. A failure to update the registry throws
+    /// <see cref="InvalidOperationException"/> with the cause as its inner
+    /// exception. Requires admin.</summary>
     public static void UnregisterDriver() =>
         VrDriverBuilder.UnregisterDriver();
 
