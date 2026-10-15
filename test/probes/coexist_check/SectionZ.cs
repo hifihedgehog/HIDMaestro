@@ -959,9 +959,17 @@ internal static class PeerZ
     const string Ledger = "HIDMaestro.Internal.RegistryLedger";
     const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
 
+    // By name alone when no types are given, which throws
+    // AmbiguousMatchException once the name has a second overload. A name
+    // with overloads goes through Exact.
     static MethodInfo M(string type, string name, params Type[] args) =>
         (args.Length == 0 ? Sdk.GetType(type)?.GetMethod(name, Any) : Sdk.GetType(type)?.GetMethod(name, Any, args))
         ?? throw new MissingMethodException(type, name);
+
+    /// <summary>The overload with exactly these parameter types, none
+    /// meaning the one without parameters.</summary>
+    static MethodInfo Exact(string type, string name, params Type[] types) =>
+        Sdk.GetType(type)?.GetMethod(name, Any, types) ?? throw new MissingMethodException(type, name);
 
     static readonly List<(long Start, long End)> s_restarts = new();
     static Thread? s_bind;
@@ -1085,7 +1093,8 @@ internal static class PeerZ
                 if (a.Length > 2 && a[2] == "nofollow")
                     (Sdk.GetType(Ledger)?.GetField("NoFollowUpForProbe", Any)
                         ?? throw new MissingFieldException(Ledger, "NoFollowUpForProbe")).SetValue(null, true);
-                var release = M(Ledger, "Release");
+                // Release(int), not Release(IEnumerable<int>).
+                var release = Exact(Ledger, "Release", typeof(int));
                 var ms = new List<double>();
                 for (int i = 0; i < int.Parse(a[1]); i++)
                 {
@@ -1168,7 +1177,8 @@ internal static class PeerZ
         return true;
     }
 
-    static object AcquireLedger() => M("HIDMaestro.Internal.LedgerLock", "Acquire").Invoke(null, null)!;
+    // Acquire(), not Acquire(int).
+    static object AcquireLedger() => Exact("HIDMaestro.Internal.LedgerLock", "Acquire").Invoke(null, null)!;
 
     static void ReleaseLedger(object l)
     {
