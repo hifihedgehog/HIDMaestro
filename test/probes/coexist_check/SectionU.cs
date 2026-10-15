@@ -3,9 +3,10 @@
 //    needs, once before any device exists and once after the device is
 //    made, and once over an entry it cannot write that is already there.
 //    The index's input event name is taken, so its input mapping fails
-//    partway, and a composite's device emulator fails after it mapped the
-//    index's sections. Each time the create leaves no claim pipe, no
-//    device, no record entry and no section, and the same identity creates
+//    partway. A composite's device emulator fails after it mapped the
+//    index's sections, and once more after its input pump started. Each
+//    time the create leaves no claim pipe, no device, no record entry and
+//    no section, the program keeps running, and the same identity creates
 //    again at once, in the same program and in another.
 using System;
 using System.Collections.Generic;
@@ -178,6 +179,32 @@ internal static partial class Program
         Check($"U: a retry in the failed program takes transport index {tc} and identity index:{tc}",
               Ok(r4) && PeerProcess.Field(r4, "transport") == tc && PeerProcess.Field(r4, "key") == "index:" + tc, r4);
         a.Send("dispose");
+        WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+
+        // The same emulator fails after its input pump started. The pump
+        // reads the input section, and the failed create unmaps it.
+        Check("U: the next composite's emulator is set to fail after its pump starts", Ok(a.Send("failpump")));
+        string f6 = a.Send("create composite - -");
+        Check("U: a composite whose emulator fails after its pump starts is refused", !Ok(f6), f6);
+        string pumps = a.Send($"threads HMUsbipInput_{tc}");
+        Check("U: no input pump of it is left running", PeerProcess.Field(pumps, "n") == "0", pumps);
+        Thread.Sleep(1500);   // three of the pump's 500 ms waits
+        string alive = a.Send("alive");
+        Check("U: the program still runs after it", Ok(alive), alive);
+        if (Ok(alive))
+        {
+            UnclaimedAndUnrecorded("U: after it", baseline, controllers, entriesChecked: true);
+            string r6 = a.Send("create composite - -");
+            Check($"U: a retry in the failed program takes transport index {tc}",
+                  Ok(r6) && PeerProcess.Field(r6, "transport") == tc, r6);
+            a.Send("dispose");
+            WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
+            // The retry can map its sections where the failed one did, and
+            // its dispose unmaps them again.
+            Thread.Sleep(1500);
+            string alive2 = a.Send("alive");
+            Check("U: and still runs after the retry's dispose", Ok(alive2), alive2);
+        }
     }
 
     /// <summary>No claim pipe beyond the baseline, and with

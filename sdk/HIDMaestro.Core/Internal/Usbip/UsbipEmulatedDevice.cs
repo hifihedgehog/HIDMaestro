@@ -202,42 +202,54 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         _lastInputReport = new byte[Math.Max(1, _builder.InputReportByteSize)];
         if (_builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
 
-        // Sections and events first, so both this device and the
-        // HMController constructed after it see the same objects.
-        _inputView = SharedMemoryIO.EnsureInputMapping(index);
-        _outputView = SharedMemoryIO.EnsureOutputMapping(index);
-        SharedMemoryIO.MarkOutputStart(index);
-        _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
-        _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
-
-        Audio = new UsbAudioEngine(profile, CompleteIsoOnWire);
-
-        _inputThread = new Thread(InputPumpLoop)
+        try
         {
-            IsBackground = true,
-            Name = $"HMUsbipInput_{index}",
-            Priority = ThreadPriority.AboveNormal,
-        };
-        _inputThread.Start();
+            // Sections and events first, so both this device and the
+            // HMController constructed after it see the same objects.
+            _inputView = SharedMemoryIO.EnsureInputMapping(index);
+            _outputView = SharedMemoryIO.EnsureOutputMapping(index);
+            SharedMemoryIO.MarkOutputStart(index);
+            _outputEvent = SharedMemoryIO.EnsureOutputEvent(index);
+            _inputWaitEvent = SharedMemoryIO.OpenInputEventForWait(index);
 
-        if (_switch2 != null)
-        {
-            _streamWake = new AutoResetEvent(false);
-            _streamTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
-                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-            _streamThread = new Thread(Switch2StreamLoop)
+            Audio = new UsbAudioEngine(profile, CompleteIsoOnWire);
+
+            _inputThread = new Thread(InputPumpLoop)
             {
                 IsBackground = true,
-                Name = $"HMUsbipSwitch2Stream_{index}",
+                Name = $"HMUsbipInput_{index}",
                 Priority = ThreadPriority.AboveNormal,
             };
-            _streamThread.Start();
-        }
+            _inputThread.Start();
+            AfterInputPumpStart?.Invoke(index);
 
-        // A device with a declared protocol answers its IN endpoint on its
-        // own host poll clock (UsbipEmulatedDevice.Protocol.cs).
-        if (_engine != null)
-            StartProtocolClock();
+            if (_switch2 != null)
+            {
+                _streamWake = new AutoResetEvent(false);
+                _streamTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+                _streamThread = new Thread(Switch2StreamLoop)
+                {
+                    IsBackground = true,
+                    Name = $"HMUsbipSwitch2Stream_{index}",
+                    Priority = ThreadPriority.AboveNormal,
+                };
+                _streamThread.Start();
+            }
+
+            // A device with a declared protocol answers its IN endpoint on its
+            // own host poll clock (UsbipEmulatedDevice.Protocol.cs).
+            if (_engine != null)
+                StartProtocolClock();
+        }
+        catch
+        {
+            // Nothing outside holds this device yet, so nobody disposes
+            // it. Its threads stop here, before the caller unmaps the
+            // sections the input pump reads.
+            StopAndRelease(Timeout.Infinite);
+            throw;
+        }
     }
 
     /// <summary>Claim this device for one connection. A second import
@@ -1327,28 +1339,40 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         try { c.SendRetSubmitIso(p, inCompacted, perPacketActual); } catch { }
     }
 
-    public void Dispose()
+    public void Dispose() => StopAndRelease(600);
+
+    /// <summary>Stop every thread this device started and close what it
+    /// opened. Dispose ends here, and so does a constructor that throws
+    /// partway, so every field may still be unset. Each loop checks
+    /// <c>_stop</c> after a wait of at most 500 ms.</summary>
+    private void StopAndRelease(int joinMs)
     {
         _stop = true;
         _connection = null;
-        Audio.Dispose();
-        try { _inputThread.Join(600); } catch { }
+        Audio?.Dispose();
+        if (_inputThread is { } input)
+            try { input.Join(joinMs); } catch { }
         if (_inputWaitEvent != IntPtr.Zero)
         {
             CloseHandle(_inputWaitEvent);
             _inputWaitEvent = IntPtr.Zero;
         }
-        if (_streamThread != null)
-        {
-            // _stop is set above. Wake the clock and wait for it before the
-            // handles it waits on go away.
-            try { _streamWake!.Set(); } catch { }
-            try { _streamThread.Join(600); } catch { }
-            if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
-            _streamWake!.Dispose();
-        }
-        DisposeProtocol();
+        // _stop is set above. Wake the clock and wait for it before the
+        // handles it waits on go away.
+        try { _streamWake?.Set(); } catch { }
+        if (_streamThread is { } stream)
+            try { stream.Join(joinMs); } catch { }
+        if (_streamTimer != IntPtr.Zero) CloseHandle(_streamTimer);
+        _streamWake?.Dispose();
+        DisposeProtocol(joinMs);
     }
+
+    /// <summary>Called on the constructor's thread right after the input
+    /// pump starts. Coexistence probe section U sets it through reflection
+    /// to fail a constructor at that point: no real failure there can be
+    /// caused safely, since thread and event creation fail only when the
+    /// process runs out of resources. Null outside the probe.</summary>
+    internal static Action<int>? AfterInputPumpStart;
 
     private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
     private const uint TIMER_ALL_ACCESS = 0x1F0003;

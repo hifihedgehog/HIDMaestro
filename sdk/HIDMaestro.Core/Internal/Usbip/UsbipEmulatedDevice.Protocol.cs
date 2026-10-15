@@ -318,12 +318,18 @@ internal sealed partial class UsbipEmulatedDevice
         }
     }
 
-    private void DisposeProtocol()
+    private void DisposeProtocol(int joinMs)
     {
-        if (_protocolThread == null) return;
-        try { _protocolWake!.Set(); } catch { }
-        try { _protocolThread.Join(600); } catch { }
-        if (_protocolTimer != IntPtr.Zero) CloseHandle(_protocolTimer);
-        _protocolWake!.Dispose();
+        // A constructor that failed inside StartProtocolClock leaves some
+        // of these unset.
+        try { _protocolWake?.Set(); } catch { }
+        if (_protocolThread is { } clock)
+            try { clock.Join(joinMs); } catch { }
+        if (_protocolTimer != IntPtr.Zero)
+        {
+            CloseHandle(_protocolTimer);
+            _protocolTimer = IntPtr.Zero;
+        }
+        _protocolWake?.Dispose();
     }
 }

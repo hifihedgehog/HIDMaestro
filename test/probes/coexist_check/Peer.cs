@@ -27,6 +27,11 @@
 //   swdhelper                   stage hmswd.exe the way a device create does
 //                               (SwdDeviceFactory.EnsureHelperExtracted) and
 //                               reply with its path, last on the line
+//   failpump                    the next composite's device emulator
+//                               throws right after its input pump starts
+//   alive                       reply, to show the program still runs
+//   threads <prefix>            how many of this program's threads have a
+//                               name starting with <prefix>
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 using System;
@@ -160,6 +165,17 @@ internal static class Peer
                         Reply($"OK spawnchild pid={p.Id}");
                         break;
                     }
+                    case "failpump":
+                        Reply(SetHook("HIDMaestro.Internal.Usbip.UsbipEmulatedDevice", "AfterInputPumpStart",
+                                      () => throw new InvalidOperationException("failpump: the device emulator fails after its input pump starts"))
+                              ? "OK failpump" : "ERR failpump no hook");
+                        break;
+                    case "alive":
+                        Reply("OK alive");
+                        break;
+                    case "threads":
+                        Reply($"OK threads n={CountThreads(a[1])}");
+                        break;
                     case "dispose":
                         StopStream();
                         lock (s_live) { foreach (var c in s_live) c.Dispose(); s_live.Clear(); }
@@ -252,6 +268,54 @@ internal static class Peer
         s_streaming = false;
         s_streamer?.Join(2000);
         s_streamer = null;
+    }
+
+    /// <summary>Set one of the SDK's internal static Action&lt;int&gt;
+    /// hooks to run <paramref name="body"/> once, on the next call.</summary>
+    static bool SetHook(string type, string field, Action body)
+    {
+        var f = typeof(HMContext).Assembly.GetType(type)?.GetField(field, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+        if (f == null) return false;
+        f.SetValue(null, (Action<int>)(_ =>
+        {
+            f.SetValue(null, null);
+            body();
+        }));
+        return true;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern int GetThreadDescription(IntPtr thread, out IntPtr description);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr p);
+
+    /// <summary>Threads of this process whose name starts with
+    /// <paramref name="prefix"/>. The runtime gives a named managed thread
+    /// that name as its thread description.</summary>
+    static int CountThreads(string prefix)
+    {
+        int n = 0;
+        using var self = Process.GetCurrentProcess();
+        foreach (ProcessThread t in self.Threads)
+        {
+            IntPtr h = OpenThread(0x0800 /*THREAD_QUERY_LIMITED_INFORMATION*/, false, (uint)t.Id);
+            if (h == IntPtr.Zero) continue;
+            try
+            {
+                if (GetThreadDescription(h, out IntPtr d) >= 0 && d != IntPtr.Zero)
+                {
+                    string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(d);
+                    LocalFree(d);
+                    if (name != null && name.StartsWith(prefix, StringComparison.Ordinal)) n++;
+                }
+            }
+            finally { CloseHandle(h); }
+        }
+        return n;
     }
 
     static string? Get(object o, string name) =>
