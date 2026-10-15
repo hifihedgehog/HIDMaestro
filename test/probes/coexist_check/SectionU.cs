@@ -7,7 +7,10 @@
 //    index's sections, and once more after its input pump started. Each
 //    time the create leaves no claim pipe, no device, no record entry and
 //    no section, the program keeps running, and the same identity creates
-//    again at once, in the same program and in another.
+//    again at once, in the same program and in another. Last, a v1.12.0
+//    program starts an Xbox 360 controller on the index while a create waits
+//    before its mapping: the create is refused, and the v1.12.0 program's
+//    devices and configuration stay.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -205,6 +208,86 @@ internal static partial class Program
             string alive2 = a.Send("alive");
             Check("U: and still runs after the retry's dispose", Ok(alive2), alive2);
         }
+
+        using var r = PeerProcess.Start("U6");
+        SectionULegacyRace(r, t, baseline);
+    }
+
+    /// <summary>A v1.12.0 program takes no claim. It starts on the index a
+    /// create holds, between the create's lease and its input mapping, and
+    /// the create is refused there. The refusal removes nothing of the
+    /// v1.12.0 program's.</summary>
+    static void SectionULegacyRace(PeerProcess a, string t, HashSet<string> baseline)
+    {
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        {
+            Check("U: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        string config = $@"SOFTWARE\HIDMaestro\Controller{t}";
+        Check("U: the next create is set to wait before its input mapping", Ok(a.Send("pausemapping")));
+        a.Post("create pad F1B0 -");
+        string paused = a.Receive("create pad F1B0 - (waiting)", 60_000);
+        if (paused != "OK paused")
+        {
+            Check("U: the create waits before its input mapping", false, paused);
+            return;
+        }
+        // An Xbox 360 controller: its XUSB companion is one of the devices
+        // an index-wide teardown removes by ControllerIndex.
+        using var old = PeerProcess.Start("U5-v1.12.0", "v1.12.0");
+        string co = old.Send("create xbox - -");
+        Check($"U: the v1.12.0 program creates on transport index {t} meanwhile",
+              Ok(co) && PeerProcess.Field(co, "index") == t, co);
+        var oldDevices = IndexDevices(int.Parse(t));
+        string? oldMain = PeerProcess.Field(co, "instance");
+        if (oldMain != null && oldMain != "none") oldDevices.Add(oldMain);
+        bool configThere = Registry.LocalMachine.OpenSubKey(config) is { } ck && Close(ck);
+        Check("U: its devices are present and its configuration written", oldDevices.Count >= 2 && configThere,
+              $"{string.Join(",", oldDevices)}, {config} {configThere}");
+
+        string f7 = a.Send("go", 120_000);
+        Check("U: the waiting create is refused as in use",
+              !Ok(f7) && f7.Contains("HMResourceInUseException", StringComparison.Ordinal), f7);
+        Thread.Sleep(2000);
+        var gone = oldDevices.Where(d => !Native.IsPresent(d)).ToList();
+        Check("U: the v1.12.0 program's devices are all still present", gone.Count == 0,
+              gone.Count == 0 ? "" : "gone: " + string.Join(",", gone));
+        Check($"U: and its configuration {config} is still there",
+              Registry.LocalMachine.OpenSubKey(config) is { } k2 && Close(k2));
+        Check("U: the refused program made no device", Native.HidPaths(0xBEEF, UPid).Count == 0,
+              $"{Native.HidPaths(0xBEEF, UPid).Count} present");
+        // The v1.12.0 program holds its index's owner pipe.
+        var withOld = new HashSet<string>(baseline, StringComparer.OrdinalIgnoreCase) { $"HIDMaestroOwner{t}" };
+        string? ownerId = Native.OwnerRecords().Where(o => o.Value == a.Pid).Select(o => o.Key).FirstOrDefault();
+        UnclaimedAndUnrecorded("U: after it", withOld, $@"SOFTWARE\HIDMaestroOwners\{ownerId}\Controllers", entriesChecked: ownerId != null);
+        Check("U: the v1.12.0 program's controller still takes its dispose", Ok(old.Send("dispose")));
+    }
+
+    /// <summary>The present devices an index-wide teardown removes by
+    /// ControllerIndex: SWD\HIDMAESTRO and ROOT\HIDMAESTRO instances.</summary>
+    static List<string> IndexDevices(int index)
+    {
+        var list = new List<string>();
+        foreach (var root in new[] { "SWD", "ROOT" })
+        {
+            using var e = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}\HIDMAESTRO");
+            if (e == null) continue;
+            foreach (var inst in e.GetSubKeyNames())
+            {
+                using var dp = e.OpenSubKey($@"{inst}\Device Parameters");
+                string id = $@"{root}\HIDMAESTRO\{inst}";
+                if (dp?.GetValue("ControllerIndex") is int ci && ci == index && Native.IsPresent(id))
+                    list.Add(id);
+            }
+        }
+        return list;
+    }
+
+    static bool Close(RegistryKey k)
+    {
+        k.Dispose();
+        return true;
     }
 
     /// <summary>No claim pipe beyond the baseline, and with

@@ -1195,6 +1195,14 @@ internal static partial class DeviceOrchestrator
     //  SetupController: full orchestration
     // ════════════════════════════════════════════════════════════════════
 
+    /// <summary>Called right before step 0 maps the index's input
+    /// section. Coexistence probe section U sets it through reflection to
+    /// hold a create there while a v1.12.0 program starts on the same
+    /// index: that program takes no claim, and the window between the
+    /// lease and the mapping is too short to hit any other way. Null
+    /// outside the probe.</summary>
+    internal static Action<int>? BeforeInputMapping;
+
     public static string? SetupController(
         int controllerIndex, ControllerProfile profile, DeviceIdentity? identity = null)
     {
@@ -1233,6 +1241,7 @@ internal static partial class DeviceOrchestrator
         var setupTotalSw = Stopwatch.StartNew();
         LogDiag($">>> SETUP  ENTER ctrl={controllerIndex} profile={profile.Id} vid=0x{profile.VendorId:X4} pid=0x{profile.ProductId:X4} uses_upper_filter={profile.UsesUpperFilter} companion_only={profile.CompanionOnly} identity={identity}");
         string? returnedId = null;
+        bool configWritten = false;
         try {
         using var _total = new TimingScope(controllerIndex, profile.Id, "TOTAL");
 
@@ -1254,6 +1263,7 @@ internal static partial class DeviceOrchestrator
         // ── Step 0: pre-flight environment ───────────────────────────────
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.shm"))
         {
+            BeforeInputMapping?.Invoke(controllerIndex);
             SharedMemoryIO.EnsureInputMapping(controllerIndex);
             try
             {
@@ -1280,7 +1290,10 @@ internal static partial class DeviceOrchestrator
 
         // ── Step 1: per-instance registry config ────────────────────────
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "1.instance_config"))
+        {
+            configWritten = true;
             WriteInstanceConfig(controllerIndex, profile);
+        }
 
         // ── Step 2: ensure driver is in the store ────────────────────────
         // The deploy gate: under the machine-wide deploy lock, after this
@@ -1561,6 +1574,23 @@ internal static partial class DeviceOrchestrator
         // Return main instance ID, or companion ID for companion-only profiles
         returnedId = mainInstanceId ?? companionId;
         return returnedId;
+        }
+        catch (HMResourceInUseException)
+        {
+            // A refusal: a running program started on this index during
+            // the create (SharedMemoryIO.EnsureInputMapping), or holds the
+            // ParentIdPrefix this identity derives
+            // (DeviceManager.ClearParentIdPrefixRivals). Both come before
+            // this create made a device. Only what this call wrote goes.
+            // TeardownController would remove every device and the
+            // configuration on the index, and those can be the other
+            // program's.
+            LogDiag($"    SETUP  REFUSED ctrl={controllerIndex}: releasing only this create's state");
+            try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
+            try { RegistryLedger.Release(controllerIndex); } catch { }
+            if (configWritten)
+                try { Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false); } catch { }
+            throw;
         }
         finally {
             LogDiag($"<<< SETUP  EXIT  ctrl={controllerIndex} returnedId={(returnedId ?? "(null)")} total={setupTotalSw.ElapsedMilliseconds}ms");

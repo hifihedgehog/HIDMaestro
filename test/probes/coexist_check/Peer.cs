@@ -29,6 +29,9 @@
 //                               reply with its path, last on the line
 //   failpump                    the next composite's device emulator
 //                               throws right after its input pump starts
+//   pausemapping                the next create stops before it maps its
+//                               index's input section, replies "OK paused"
+//                               and goes on at the next line ("go")
 //   alive                       reply, to show the program still runs
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
@@ -169,6 +172,14 @@ internal static class Peer
                         Reply(SetHook("HIDMaestro.Internal.Usbip.UsbipEmulatedDevice", "AfterInputPumpStart",
                                       () => throw new InvalidOperationException("failpump: the device emulator fails after its input pump starts"))
                               ? "OK failpump" : "ERR failpump no hook");
+                        break;
+                    case "pausemapping":
+                        Reply(SetHook("HIDMaestro.Internal.DeviceOrchestrator", "BeforeInputMapping", () =>
+                              {
+                                  Reply("OK paused");
+                                  Console.ReadLine();
+                              })
+                              ? "OK pausemapping" : "ERR pausemapping no hook");
                         break;
                     case "alive":
                         Reply("OK alive");

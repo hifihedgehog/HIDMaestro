@@ -461,6 +461,13 @@ public sealed class HMContext : IDisposable
                 lock (_lock) _controllers[slot] = controller;
                 return controller;
             }
+            catch (HMResourceInUseException)
+            {
+                // SetupController refused before it made a device and took
+                // back what it wrote. The index's devices and configuration
+                // can be another running program's.
+                throw;
+            }
             catch
             {
                 // Best-effort cleanup of any partial state, then rethrow.
