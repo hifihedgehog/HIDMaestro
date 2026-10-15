@@ -1174,7 +1174,7 @@ internal static partial class SharedMemoryIO
     private const uint PIPE_TYPE_BYTE = 0x00000000;
     private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
     private const uint FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
-    private const int ERROR_FILE_NOT_FOUND = 2, ERROR_ACCESS_DENIED = 5, ERROR_PIPE_BUSY = 231, ERROR_ALREADY_EXISTS = 183;
+    private const int ERROR_FILE_NOT_FOUND = 2, ERROR_ACCESS_DENIED = 5, ERROR_INVALID_HANDLE = 6, ERROR_PIPE_BUSY = 231, ERROR_ALREADY_EXISTS = 183;
     private const uint READ_CONTROL = 0x00020000;
     private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
@@ -1258,12 +1258,13 @@ internal static partial class SharedMemoryIO
         // it). The SDK's own events are owned by Administrators.
         if (error == ERROR_ALREADY_EXISTS && !IsOwnedByAdmin(ev, allowLocalService: name.Contains("OutputEvent", StringComparison.Ordinal)))
         {
-            string owner;
+            string? owner;
             using (var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(ev, ownsHandle: false))
-                owner = ObjectOwner.OwnerSid(h) ?? "an owner that cannot be read";
+                owner = ObjectOwner.OwnerSid(h);
             CloseHandle(ev);
+            string found = owner != null ? $"is owned by {owner}" : "has an owner this process could not read";
             throw new HMResourceInUseException(
-                $"{name} is owned by {owner}, neither SYSTEM nor Administrators, so a controller does not use it. Another program made it: a program that is not elevated, or one built on HIDMaestro 1.12.0 or older, whose objects can be owned by the user. Create the controller again: it takes another transport index.",
+                $"{name} {found}, so this release did not create it and a controller does not use it. Another program made it, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older. Create the controller again: it takes another transport index.",
                 name, null);
         }
         return ev;
@@ -1326,7 +1327,13 @@ internal static partial class SharedMemoryIO
         if (handle == IntPtr.Zero)
         {
             int err = Marshal.GetLastPInvokeError();
-            return err == ERROR_FILE_NOT_FOUND ? null : $"exists and does not open as its own kind (Win32 error {err})";
+            return err switch
+            {
+                ERROR_FILE_NOT_FOUND => null,
+                ERROR_INVALID_HANDLE => "is another kind of object",
+                ERROR_ACCESS_DENIED => "refuses this process READ_CONTROL, so its owner was not read",
+                _ => $"did not open (Win32 error {err})",
+            };
         }
         try
         {

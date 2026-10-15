@@ -138,7 +138,7 @@ internal sealed class ControllerLease : IDisposable
             }
             string blocked = squattedCount == 0
                 ? "No transport index is free: every index up to 4096 is held by a running program or a present device."
-                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object owned by neither SYSTEM nor Administrators, which this release does not use ({firstSquatted}). Another program made each one: a program that is not elevated, or one built on HIDMaestro 1.12.0 or older, whose objects can be owned by the user. The rest are held by a running program or a present device. Close those programs, or create the controller again once they are gone.";
+                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object this release did not create ({firstSquatted}). Another program made each, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older. The rest are held by a running program or a present device. Close those programs, or create the controller again once they are gone.";
             throw new HMResourceInUseException(blocked, "transport index", null);
         }
         finally

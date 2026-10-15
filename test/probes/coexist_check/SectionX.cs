@@ -157,17 +157,37 @@ internal static partial class Program
             p.Send("install");
             string c = p.Send("create pad F0E9 -");
             Check("X6: with every index squatted the create is refused, and the refusal names the squatted objects",
-                  !Ok(c) && c.Contains($"{all} carry a Global") && c.Contains("owned by neither SYSTEM nor Administrators"), c);
-            // What is known about such an object is its owner, and that it
-            // is either a program that is not elevated or one built on an
-            // older release. The refusal says both, and names the owner.
+                  !Ok(c) && c.Contains($@"{all} carry a Global\ object this release did not create"), c);
+            // What was read of such an object is its owner. The refusal
+            // names it, and names makers only as examples.
             string user = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
-            Check("X6: the refusal names the object's owner and both programs that can have made it",
-                  c.Contains($"is owned by {user}") && c.Contains("not elevated") && c.Contains("1.12.0 or older"), c);
+            Check("X6: the refusal names the owner it read, and makers only as examples",
+                  c.Contains($"is owned by {user}") && c.Contains("such as one that is not elevated"), c);
         }
         finally { sq.Dispose(); }
         Check("X6: nothing the squatter made is left",
               every.All(n => Native.OpenEventW(Native.SYNCHRONIZE, false, n) == IntPtr.Zero));
+        Clean();
+
+        // Every index's input section name taken by a mutex: an object of
+        // another kind, whose owner the allocator never reads. The refusal
+        // says what it found and claims no owner.
+        var sections = new List<string>(all);
+        for (int i = 0; i < all; i++) sections.Add($@"Global\HIDMaestroInput{i}");
+        sq = new Squatter(s => { foreach (var n in sections) s.Mutex(n, hold: false); });
+        try
+        {
+            int made = sections.Count(sq.Holds);
+            Check($"X6: a program that is not elevated takes the input section name of all {all} indices with a mutex", made == all, $"{made} of {all}");
+            using var p = PeerProcess.Start("X6-kind");
+            p.Send("install");
+            string c = p.Send("create pad F0EA -");
+            Check("X6: the refusal says the object is another kind and claims no owner it did not read",
+                  !Ok(c) && c.Contains("is another kind of object") && !c.Contains("owned by"), c);
+        }
+        finally { sq.Dispose(); }
+        Check("X6: nothing the squatter made is left",
+              sections.All(n => Native.OpenMutexW(Native.SYNCHRONIZE, false, n) == IntPtr.Zero));
     }
 
     /// <summary>The owner of the objects HIDMaestro creates, under the
