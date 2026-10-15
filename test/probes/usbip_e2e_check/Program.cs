@@ -165,8 +165,12 @@ internal static class Program
             for (int i = 0; i < 100 && path == null; i++) { Thread.Sleep(100); path = FindHidDevicePath(0x054C, 0x0CE6); }
             Check("persona enumerated before the sweep", path != null, path ?? "not found");
 
-            // Deliberately NOT disposed: holding it is the whole point.
-            HMContext.RemoveAllVirtualControllers();
+            // Deliberately NOT disposed: holding it is the whole point. The
+            // default overload leaves a running program's controllers alone,
+            // this program's own included (S71 section D). The Everything
+            // scope removes every device and import on the machine, so it is
+            // the sweep that evicts a live persona and unmaps a live view.
+            HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true);
 
             Check("process survived a sweep that unmapped a live view", true,
                   "reaching this line at all is the assertion");
