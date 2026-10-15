@@ -67,6 +67,17 @@ internal static class OwnerSweep
         Reclaim(census);
 
         try { RegistryLedger.PruneDead(); } catch { }
+        // The GameInput tables HIDMaestro wrote through v1.11.0, which v1.12.0's
+        // cleanup removed, go where no running program uses them. A program on
+        // v1.12.0 or later holds a table it uses through the ledger, and a
+        // create of its removes one it does not use. A v1.11.0 program writes
+        // the table at its first create of an identity and reads through it
+        // while that device lives, so a table stays while a present device or
+        // a configuration carries its identity, and every table stays while a
+        // create of unknown identity is in flight. The census runs under the
+        // ledger lock, right before the delete.
+        try { RegistryLedger.RemoveLegacyTables(() => OwnerCensus.GameInputKeysInUse(OwnerCensus.Take())); }
+        catch { }
         try { DeviceManager.RemoveAccumulatedHmPhantoms(); } catch { }
         try { DeviceOrchestrator.RemoveOwnedInterfaceEntries(phantomOnly: true); } catch { }
 

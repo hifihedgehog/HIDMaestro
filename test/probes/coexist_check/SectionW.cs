@@ -42,6 +42,21 @@
 //        own, which runs after the SDK's, disposes its context: the
 //        composite's device is disposed twice, once by each. The program
 //        ends with exit code 0 and leaves no device and no record.
+//    W11. A v1.11.0 program's GameInput table, which it wrote at its
+//        create. A cleanup leaves it while that program's device of the
+//        identity is present, and removes it once the device is gone, while
+//        the sweeping program runs a composite on USB/IP, whose input
+//        section has no configuration and no devnode the census lists.
+//    W12. A v1.11.0 table no device or configuration names, beside an input
+//        section on index 120 that no configuration, device, record or
+//        acknowledgement section explains, as a v1.11.0 create in flight
+//        leaves it, and a v1.12.0 owner pipe for that index that a program
+//        that is not elevated made. A cleanup keeps the table, and removes
+//        it once the section is gone.
+//    W13. A v1.11.0 table no device or configuration names, while that
+//        program runs a composite on USB/IP: its input section has no
+//        configuration, record or acknowledgement section, and its import
+//        alone explains it. A cleanup removes the table.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -77,6 +92,17 @@ internal static partial class Program
         SectionWExitThenCreate();
         Clean();
         SectionWExitThenDispose();
+        Clean();
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.11.0", "CoexistPeer.exe")))
+            Check("W11: the v1.11.0 peer is built", false, "build CoexistCheck.csproj");
+        else
+        {
+            SectionWLegacyTable();
+            Clean();
+            SectionWLegacyTablePipe();
+            Clean();
+            SectionWLegacyTableImport();
+        }
     }
 
     /// <summary>W1.</summary>
@@ -291,6 +317,101 @@ internal static partial class Program
         Check("W10: its composite is gone",
               WaitFor(() => !Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Any(), 15_000));
         Check("W10: and its record", !Native.OwnerRecords().ContainsValue(p.Pid));
+    }
+
+    /// <summary>W11.</summary>
+    static void SectionWLegacyTable()
+    {
+        const string table = @"SYSTEM\CurrentControlSet\Control\GameInput\Devices\BEEFF21000010005";
+        bool TableThere() { using var k = Registry.LocalMachine.OpenSubKey(table); return k != null; }
+        Registry.LocalMachine.DeleteSubKeyTree(table, throwOnMissingSubKey: false);
+        using var old = PeerProcess.Start("W11-v1.11.0", "v1.11.0");
+        string c = old.Send("create pad F210 -");
+        if (!Ok(c)) { Check("W11: the v1.11.0 program creates", false, c); return; }
+        Check("W11: the v1.11.0 program writes its GameInput table", TableThere());
+        using var s = PeerProcess.Start("W11-sweeper");
+        s.Send("sweep");
+        Check("W11: a cleanup leaves the table while the v1.11.0 program's device of that identity is present", TableThere());
+        old.Send("dispose");
+        WaitFor(() => Native.HidPaths(0xBEEF, 0xF210).Count == 0, 10_000);
+        string cc = s.Send("create composite - coexist-w11c");
+        Check("W11: the sweeping program runs a composite", Ok(cc), cc);
+        s.Send("sweep");
+        Check("W11: once that device is gone, the next cleanup removes the table, the composite's input section notwithstanding", !TableThere());
+    }
+
+    /// <summary>A table of an identity no device and no configuration names:
+    /// a v1.11.0 program writes it at its create and keeps nothing of it
+    /// once that controller is disposed.</summary>
+    static string? LeaveLegacyTable(PeerProcess old, ushort pid, string label)
+    {
+        string table = $@"SYSTEM\CurrentControlSet\Control\GameInput\Devices\BEEF{pid:X4}00010005";
+        Registry.LocalMachine.DeleteSubKeyTree(table, throwOnMissingSubKey: false);
+        string c = old.Send($"create pad {pid:X4} -");
+        if (!Ok(c)) { Check($"{label}: the v1.11.0 program creates", false, c); return null; }
+        old.Send("dispose");
+        WaitFor(() => Native.HidPaths(0xBEEF, pid).Count == 0, 10_000);
+        using var k = Registry.LocalMachine.OpenSubKey(table);
+        if (k == null) { Check($"{label}: the v1.11.0 program writes its GameInput table", false); return null; }
+        return table;
+    }
+
+    static bool KeyThere(string path)
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(path);
+        return k != null;
+    }
+
+    /// <summary>W12.</summary>
+    static void SectionWLegacyTablePipe()
+    {
+        const int index = 120;
+        using var old = PeerProcess.Start("W12-v1.11.0", "v1.11.0");
+        string? table = LeaveLegacyTable(old, 0xF212, "W12");
+        if (table == null) return;
+        // A v1.11.0 create on index 120 between its input section and its
+        // configuration, and an owner pipe for that index that a program
+        // that is not elevated made.
+        IntPtr section = Native.CreateSection($@"Global\HIDMaestroInput{index}");
+        IntPtr user = Native.MediumToken();
+        Microsoft.Win32.SafeHandles.SafeFileHandle? pipe;
+        try { pipe = Y.AsUser(user, () => Native.CreatePipe($"HIDMaestroOwner{index}", out _)); }
+        finally { Native.CloseHandle(user); }
+        try
+        {
+            Check("W12: a program that is not elevated holds the v1.12.0 owner pipe of the index", pipe != null);
+            using var s = PeerProcess.Start("W12-sweeper");
+            s.Send("sweep");
+            Check("W12: a cleanup keeps the table while the index's input section has no explanation but that pipe", KeyThere(table));
+        }
+        finally
+        {
+            pipe?.Dispose();
+            Native.CloseHandle(section);
+        }
+        using (var s = PeerProcess.Start("W12-sweeper-after"))
+        {
+            s.Send("sweep");
+            Check("W12: once the section is gone, the next cleanup removes the table", !KeyThere(table));
+        }
+    }
+
+    /// <summary>W13.</summary>
+    static void SectionWLegacyTableImport()
+    {
+        var before = Native.HidPaths(0x054C, 0x0CE6);
+        using var old = PeerProcess.Start("W13-v1.11.0", "v1.11.0");
+        string? table = LeaveLegacyTable(old, 0xF213, "W13");
+        if (table == null) return;
+        string cc = old.Send("create composite - -");
+        bool up = Ok(cc) && WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Any(), 20_000);
+        Check("W13: the v1.11.0 program runs a composite, whose input section has no configuration and no record", up, cc);
+        if (!up) return;
+        string t = PeerProcess.Field(cc, "transport") ?? "?";
+        Check("W13: that section has no acknowledgement section beside it", !Native.SectionExists($@"Global\HIDMaestroInputAck{t}"), $"index {t}");
+        using var s = PeerProcess.Start("W13-sweeper");
+        s.Send("sweep");
+        Check("W13: a cleanup removes the table, the composite's import explaining its section", !KeyThere(table));
     }
 
     /// <summary>The removal times behind the exit handler's and the sweep's

@@ -601,6 +601,124 @@ internal sealed partial class OwnerCensus
         return list;
     }
 
+    /// <summary>How many transport indices the legacy-table check probes
+    /// for an input section. v1.11.0 takes the lowest index its own context
+    /// has free, and a create of this release starts at 64 at most while a
+    /// v1.12.0 program runs.</summary>
+    private const int SectionProbeLimit = 128;
+
+    /// <summary>The GameInput key names (<see cref="GameInputMapping.KeyName"/>)
+    /// that a device or a create in flight may read through, or null when a
+    /// create in flight of unknown identity means every table must stay.
+    ///
+    /// <para>A key is in use when a present devnode's hardware ids carry its
+    /// VID and PID, or any <c>Controller&lt;N&gt;</c> configuration names
+    /// them, present device or not. The configuration's VID and PID can
+    /// differ from the devnode's for an xinputhid persona whose driver PID
+    /// is its own (DeviceNodeCreator). v1.11.0 writes the table first in its
+    /// create, after its input section and before its configuration
+    /// (DeviceOrchestrator.SetupController steps 0 and 1 at v1.11.0). So an
+    /// input section whose index has no configuration and no present device
+    /// is a create whose identity cannot be read yet, and so is a
+    /// configuration that names no VID and PID yet.</para>
+    ///
+    /// <para>A section another program explains is no such create: an
+    /// index a live record lists (this release writes the entry before the
+    /// sections, and a composite on USB/IP writes no configuration), a
+    /// USB/IP import no record names (a composite of an older program), and
+    /// an index whose <c>Global\HIDMaestroInputAck&lt;N&gt;</c> exists. An
+    /// SDK of v1.12.0 or later creates that section beside its input
+    /// section and v1.11.0 never does, and from a desktop session only a
+    /// process holding SeCreateGlobalPrivilege, an elevated program or a
+    /// service, can create a section under Global\, so a program that is not
+    /// elevated cannot make a v1.11.0 create look explained. The v1.12.0
+    /// owner pipe is no such sign: any program can create that name. None of these
+    /// hides a v1.11.0 create except one on another program's index, which
+    /// v1.11.0 breaks anyway.</para></summary>
+    internal static HashSet<string>? GameInputKeysInUse(OwnerCensus census)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var accounted = new HashSet<int>(census.ForeignImportIndices);
+        foreach (var r in census.Records)
+            if (r.Live)
+                foreach (var c in r.Controllers)
+                    if (c.TransportIndex >= 0) accounted.Add(c.TransportIndex);
+        foreach (var g in census.Devices)
+        {
+            if (g.ControllerIndex >= 0) accounted.Add(g.ControllerIndex);
+            foreach (string id in g.InstanceIds)
+            {
+                try
+                {
+                    using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{id}");
+                    if (k?.GetValue("HardwareID") is string[] hwids)
+                        foreach (string hwid in hwids)
+                            if (TryParseVidPid(hwid, out ushort vid, out ushort pid))
+                                keys.Add(GameInputMapping.KeyName(vid, pid));
+                }
+                catch (Exception e) when (e is SecurityException or UnauthorizedAccessException or IOException) { }
+            }
+        }
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro");
+            foreach (string name in root?.GetSubKeyNames() ?? Array.Empty<string>())
+            {
+                const string lead = "Controller";
+                if (!name.StartsWith(lead, StringComparison.OrdinalIgnoreCase)
+                    || !int.TryParse(name.AsSpan(lead.Length), System.Globalization.NumberStyles.None,
+                                     System.Globalization.CultureInfo.InvariantCulture, out int n))
+                    continue;
+                using var c = root!.OpenSubKey(name);
+                if (c == null) continue;   // deleted since the listing
+                accounted.Add(n);
+                if (c.GetValue("VendorId") is int vid && c.GetValue("ProductId") is int pid)
+                    keys.Add(GameInputMapping.KeyName((ushort)vid, (ushort)pid));
+                else if (c.GetValue("DeviceInstanceId") is string instance && TryParseVidPid(instance, out ushort v, out ushort p))
+                    keys.Add(GameInputMapping.KeyName(v, p));
+                else
+                {
+                    DeviceOrchestrator.LogDiag($"    legacy GameInput tables kept: {name} names no VID and PID yet");
+                    return null;
+                }
+            }
+        }
+        catch (Exception e) when (e is SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+        for (int n = 0; n < SectionProbeLimit; n++)
+        {
+            if (accounted.Contains(n) || !SectionPresent($@"Global\HIDMaestroInput{n}")) continue;
+            if (SectionPresent($@"Global\HIDMaestroInputAck{n}")) continue;
+            DeviceOrchestrator.LogDiag($"    legacy GameInput tables kept: transport index {n} has an input section nothing else explains, so a create of unknown identity may be in flight");
+            return null;
+        }
+        return keys;
+    }
+
+    /// <summary>Whether a named section exists, counting one this process
+    /// may not open.</summary>
+    private static bool SectionPresent(string name)
+    {
+        IntPtr h = OpenFileMapping(FILE_MAP_READ, false, name);
+        if (h != IntPtr.Zero) { CloseHandle(h); return true; }
+        return Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED;
+    }
+
+    /// <summary>The VID and PID of a hardware id that carries
+    /// <c>VID_xxxx&amp;PID_xxxx</c>.</summary>
+    private static bool TryParseVidPid(string hwid, out ushort vid, out ushort pid)
+    {
+        vid = pid = 0;
+        int v = hwid.IndexOf("VID_", StringComparison.OrdinalIgnoreCase);
+        if (v < 0 || v + 17 > hwid.Length) return false;
+        ReadOnlySpan<char> s = hwid.AsSpan(v);
+        return s.Slice(8, 5).Equals("&PID_", StringComparison.OrdinalIgnoreCase)
+            && ushort.TryParse(s.Slice(4, 4), System.Globalization.NumberStyles.HexNumber, null, out vid)
+            && ushort.TryParse(s.Slice(13, 4), System.Globalization.NumberStyles.HexNumber, null, out pid);
+    }
+
     internal static int ReadControllerIndex(string instanceId)
     {
         try

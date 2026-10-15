@@ -169,11 +169,26 @@ internal static class RegistryLedger
     }
 
     /// <summary>Delete every table older builds left behind that no live
-    /// controller holds. Returns the number removed.</summary>
-    internal static int RemoveLegacyTables()
+    /// controller holds and <paramref name="inUse"/> does not name.
+    /// <paramref name="inUse"/> runs once the lock is held, so the gap
+    /// between its reading and the delete is the table walk alone, and
+    /// not this lock's wait, however long another program's ledger work
+    /// holds it. A null answer keeps every table. Returns the number
+    /// removed.</summary>
+    internal static int RemoveLegacyTables(Func<HashSet<string>?>? inUse = null)
     {
         using var m = Acquire();
-        try { return GameInputMapping.RemoveLegacyTables(HeldGameInputKeys()); }
+        try
+        {
+            var keep = HeldGameInputKeys();
+            if (inUse != null)
+            {
+                var used = inUse();
+                if (used == null) return 0;
+                keep.UnionWith(used);
+            }
+            return GameInputMapping.RemoveLegacyTables(keep);
+        }
         catch { return 0; }
         finally { m.ReleaseMutex(); }
     }

@@ -297,6 +297,18 @@ internal static class Native
         return d;
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileMappingW(IntPtr file, IntPtr sa, uint protect, uint sizeHigh, uint sizeLow, string name);
+
+    /// <summary>A named section of one page, as an SDK's create makes its
+    /// input section first. Close the handle to remove it.</summary>
+    internal static IntPtr CreateSection(string name)
+    {
+        IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, 0x04 /*PAGE_READWRITE*/, 0, 4096, name);
+        if (h == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+        return h;
+    }
+
     /// <summary>The owner records with a controller entry for
     /// <paramref name="token"/>, each with the process id it names, or null
     /// when it names none.</summary>
