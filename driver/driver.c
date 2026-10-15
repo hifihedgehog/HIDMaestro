@@ -2199,13 +2199,6 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 
             if (rc == WAIT_OBJECT_0 + 1) {
                 idleTimeouts = 0;
-                /* A doorbell the device could not make at start, held then
-                 * by a program's object, is retried on a steady input
-                 * stream too, not only on a recycle. A Switch Pro device
-                 * never recycles its mapping, and a streaming consumer never
-                 * idles into one. */
-                if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
-                    TryCreateDoorbell(ctx);
                 ULONG prevSeq = ctx->SharedMemSeqNo;
                 ProcessSharedInput(ctx);
                 if (ctx->SharedMemSeqNo == prevSeq) {
@@ -2213,6 +2206,14 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 } else {
                     staleWakeups = 0;
                 }
+                /* A doorbell the device could not make at start, held then
+                 * by a program's object, is retried on a steady input
+                 * stream too, not only on a recycle. A Switch Pro device
+                 * never recycles its mapping, and a streaming consumer never
+                 * idles into one. The attempt runs after the frame, so it
+                 * never adds to that frame's latency. */
+                if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
+                    TryCreateDoorbell(ctx);
                 continue;
             }
 

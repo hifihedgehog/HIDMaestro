@@ -801,14 +801,16 @@ static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
         /* A doorbell this device could not make, while a program held its
          * name, is retried on a steady input stream every 256 frames and
          * on each 2 s idle wake, as the main driver's worker does. Output
-         * writes alone retry it only every 500 publishes. */
-        if (ctx->OutputSignalEvent == NULL
-            && (rc != WAIT_OBJECT_0 + 1 || (++doorbellTick & 0xFF) == 0))
-            TryCreateDoorbell(ctx);
+         * writes alone retry it only every 500 publishes. On a frame the
+         * attempt runs after the frame, so it never adds to its latency. */
         if (rc == WAIT_OBJECT_0 + 1) {
             CompanionPumpOnce(ctx);
+            if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
+                TryCreateDoorbell(ctx);
             continue;
         }
+        if (ctx->OutputSignalEvent == NULL)
+            TryCreateDoorbell(ctx);
         /* Timeout or failure: drop the handle and re-open so a recreated
          * event object (new SDK session, same name) gets picked up. */
         CloseHandle(ctx->CompanionInputEvent);
