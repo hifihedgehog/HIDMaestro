@@ -290,11 +290,44 @@ internal static partial class Program
         Check("X1: nothing the squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
     }
 
+    static long s_x2BaselineExitMs = -1;
+
+    /// <summary>The eight pads' JoystickOem ledger entries that exist.</summary>
+    static int ExitPadEntries()
+    {
+        using var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroRegistryLedger\JoystickOem");
+        if (k == null) return 0;
+        var have = new HashSet<string>(k.GetSubKeyNames(), StringComparer.OrdinalIgnoreCase);
+        return Enumerable.Range(0, 8).Count(i => have.Contains($"VID_BEEF&PID_{0xF0C0 + i:X4}"));
+    }
+
+    /// <summary>Start a program, have it sweep once (with the legacy name
+    /// squatted, that runs the five-second wait out and marks the name),
+    /// create eight pads, and exit without disposing them. How long the exit
+    /// took, or -1 when a step failed, the eight ledger entries were not
+    /// there before the exit, or the exit left any of them.</summary>
+    static long ExitWithControllers(string label)
+    {
+        using var q = PeerProcess.Start(label);
+        if (!Ok(q.Send("sweep", 60_000))) return -1;
+        for (int i = 0; i < 8; i++)
+            if (!Ok(q.Send($"create pad {0xF0C0 + i:X4} -"))) return -1;
+        int before = ExitPadEntries();
+        var clock = Stopwatch.StartNew();
+        q.Post("quit");
+        bool exited = WaitFor(() => q.Exited, 120_000);
+        long ms = clock.ElapsedMilliseconds;
+        int after = ExitPadEntries();
+        Console.WriteLine($"    {label}: {before} ledger entries before the exit, {after} after, exit {ms} ms");
+        return exited && before == 8 && after == 0 ? ms : -1;
+    }
+
     /// <summary>The registry ledger's lock, which v1.12.0 programs take as
     /// Global\HIDMaestro-OEM-Recovery.</summary>
     static void SectionX2()
     {
         const string name = @"Global\HIDMaestro-OEM-Recovery";
+        s_x2BaselineExitMs = ExitWithControllers("X2-exit");
         using var p = PeerProcess.Start("X2");
         var sq = new Squatter(s => s.Mutex(name, hold: true));
         try
@@ -320,6 +353,17 @@ internal static partial class Program
                 long second = clock.ElapsedMilliseconds;
                 Check("X2: the same program's next sweep waits the short bound, not five seconds again",
                       Ok(again) && second < 2000, $"first {first} ms, second {second} ms: {again}");
+
+                // A program that exits with eight controllers releases each
+                // one's ledger entries inside one ledger lock, so the exit
+                // pays the short bound once, not once per controller.
+                // Compared with the same exit before the squatter came,
+                // which waited for nothing: once per controller adds about
+                // 4 s (8 x 500 ms), once about 0.5 s.
+                long squatted = ExitWithControllers("X2-exit-squatted");
+                Check("X2: an exit with eight controllers waits the short bound once, not once per controller",
+                      squatted >= 0 && s_x2BaselineExitMs >= 0 && squatted - s_x2BaselineExitMs < 2000,
+                      $"exit {squatted} ms with the name squatted, {s_x2BaselineExitMs} ms before");
 
                 // The squatter leaves, and a v1.12.0 program, which opened the
                 // same object, writes under it. The object is still the

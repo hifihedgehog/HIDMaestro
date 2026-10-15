@@ -24,7 +24,19 @@ namespace HIDMaestro.Internal;
 /// than the bound. A process pays that wait once: when it ran out, later
 /// acquisitions wait only a short bound that still covers a v1.12.0 write,
 /// until one takes the mutex or finds it owned by SYSTEM or Administrators
-/// again.</para>
+/// again. An acquisition nested inside one on the same thread that went on
+/// without the mutex does not wait at all: its outer scope already writes
+/// without it.</para>
+///
+/// <para>Bounded waits leave two ways for this process to write while a
+/// v1.12.0 program holds the mutex. A scope that went on without the mutex
+/// writes for its whole length, and if the squatter lets the mutex go in
+/// that time, a v1.12.0 program can take it and write beside the scope. And
+/// a v1.12.0 hold that outlasts the bound, five seconds on a first wait and
+/// the short bound once a wait has run out (both scaled by
+/// <see cref="TimeoutScale"/>), is not waited out. Only an unbounded wait
+/// closes both, and an unbounded wait lets any program stop every
+/// HIDMaestro program's ledger work by holding the name.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {
@@ -45,6 +57,16 @@ internal sealed partial class LedgerLock : IDisposable
     // acquisition, not five seconds each.
     private static volatile bool s_legacyHeldByOther;
 
+    // How many acquisitions this thread holds, and whether the outermost one
+    // went on without the legacy mutex. A nested acquisition inside such a
+    // scope skips the legacy mutex: waiting for it would serialize nothing,
+    // since the scope around it already writes without it. An outer scope
+    // that holds the legacy mutex takes it again at once, mutexes being
+    // recursive per thread.
+    [ThreadStatic] private static int t_depth;
+    [ThreadStatic] private static bool t_withoutLegacy;
+    private bool _counted;
+
     private LedgerLock(Mutex m) => _lock = m;
 
     /// <summary>Take the lock. An abandoned mutex is acquired: the ledger
@@ -61,8 +83,14 @@ internal sealed partial class LedgerLock : IDisposable
             m.Dispose();
             throw;
         }
-        var l = new LedgerLock(m);
-        try { l.TakeLegacy(); }
+        var l = new LedgerLock(m) { _counted = true };
+        bool outermost = ++t_depth == 1;
+        try
+        {
+            if (outermost || !t_withoutLegacy) l.TakeLegacy();
+            else DeviceOrchestrator.LogDiag($"    ledger: nested in a scope that went on without {LegacyMutexName}, not waited for");
+            if (outermost) t_withoutLegacy = !l._legacyHeld;
+        }
         catch
         {
             l.ReleaseMutex();
@@ -104,9 +132,8 @@ internal sealed partial class LedgerLock : IDisposable
             // release did not create the mutex, whether a squatter or such a
             // v1.12.0 program did. It is waited for, bounded: longer than
             // v1.12.0 holds the mutex (it holds it only while it writes a few
-            // registry values), so a v1.12.0 holder that this check cannot
-            // read as its own still serializes, and a squatter costs only the
-            // wait.
+            // registry values), so a v1.12.0 hold within the bound still
+            // serializes, and a squatter costs only the wait.
             bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
             bool marked = s_legacyHeldByOther;
             uint timeout = administrative ? INFINITE
@@ -134,6 +161,11 @@ internal sealed partial class LedgerLock : IDisposable
         {
             ReleaseMutexNative(_legacy);
             _legacyHeld = false;
+        }
+        if (_counted)
+        {
+            _counted = false;
+            if (--t_depth == 0) t_withoutLegacy = false;
         }
         _lock.ReleaseMutex();
     }
