@@ -325,8 +325,10 @@ public static partial class DeviceManager
     }
 
     /// <summary>
-    /// Waits for a device instance to be fully removed.
-    /// Returns true when gone, false on timeout.
+    /// Waits for a device instance to leave the device tree by the removal
+    /// test (<see cref="RemovalComplete"/>): for a devnode present at the
+    /// call, until its DEVICEINSTANCEREMOVED notification. Its records are
+    /// not waited for. Returns true when gone, false on timeout.
     /// </summary>
     public static bool WaitForDeviceRemoval(string instanceId, int timeoutMs = 5000) =>
         WaitForDeviceRemoval(instanceId, uninstalls: false, timeoutMs);
@@ -392,9 +394,36 @@ public static partial class DeviceManager
     }
 
     /// <summary>Whether a removal is complete by what
-    /// <paramref name="o"/> has seen.</summary>
-    internal static bool RemovalComplete(in RemovalObservation o, bool uninstalls) =>
-        o.RemovedDelivered || !o.InTree;
+    /// <paramref name="o"/> has seen.
+    ///
+    /// <para>A devnode that was in the tree when the watch registered has
+    /// left it once Windows delivers DEVICEINSTANCEREMOVED, "sent when a
+    /// device instance that meets your filter criteria is no longer present"
+    /// (CM_NOTIFY_ACTION on Microsoft Learn). A failed
+    /// CM_LOCATE_DEVNODE_NORMAL locate says only that the device is not
+    /// "currently configured in the device tree" (CM_Locate_DevNodeW), and it
+    /// does not stand in for the notification: until v1.13.0 it did, and on
+    /// the bench it ended every wait for a ROOT parent before the
+    /// notification could (2343 of 2343 waits returned at 0 ms). It decides
+    /// alone only for a devnode already out of the tree when the watch
+    /// started, and when Windows refused the registration.</para>
+    ///
+    /// <para>A removal that uninstalls is complete once a
+    /// CM_LOCATE_DEVNODE_PHANTOM locate fails as well. SetupDiRemoveDevice
+    /// deletes "all traces of the device instance" from the registry and
+    /// CM_Uninstall_DevNode "removes all persistent state associated with a
+    /// device instance" (Learn), so a record that is still there is a
+    /// removal still in progress. A removal that keeps the record, as
+    /// SwDeviceClose does, is complete when the devnode has left.</para>
+    ///
+    /// <para>CM_LOCATE_DEVNODE_CANCELREMOVE is never used: "If the device is
+    /// in the process of being removed, the function cancels the removal of
+    /// the device."</para></summary>
+    internal static bool RemovalComplete(in RemovalObservation o, bool uninstalls)
+    {
+        bool left = !o.InTree && (o.RemovedDelivered || !o.PresentAtStart || !o.Registered);
+        return left && (!uninstalls || !o.Record);
+    }
 
     /// <summary>One instance's removal test. Registered for the instance's
     /// DEVICEINSTANCEREMOVED notification before it first looks at the
@@ -959,14 +988,17 @@ public static partial class DeviceManager
             CM_Locate_DevNodeW(out devInst, instanceId, 1) != CR_SUCCESS)
             return true;
 
-        // In fast mode (used by cleanup paths), fire-and-forget: issue
-        // DIF_REMOVE for all children and the parent without waiting for
-        // each removal to complete. PnP processes them asynchronously.
-        // This avoids 500ms+ of WaitForDeviceRemoval per device (~24
-        // calls during a 6-controller teardown = 12+ seconds of waiting
-        // for events that won't fire until WUDFHost releases handles).
-        // Any devices that survive as phantoms get caught by the ghost
-        // cleanup at the start of the next SetupController run.
+        // In fast mode (used by cleanup paths), each devnode goes by
+        // CM_Disable + CM_Uninstall instead of SetupDiRemoveDevice, and the
+        // pnputil and devcon fallbacks run only when the caller forces
+        // them. Every removal, fast or not, is confirmed by the removal test
+        // (RemovalComplete): a child within 2 s, the parent within
+        // timeoutMs. Until v1.13.0 fast mode waited for nothing, so the next
+        // registration could follow a removal Windows was still processing.
+        // Each watch registers before its removal call, so the REMOVED
+        // notification of a devnode that leaves during the call is not
+        // missed.
+        using var parentWatch = RemovalWatch.Start(instanceId);
 
         bool isSwdParent = instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase);
 
@@ -1053,7 +1085,9 @@ public static partial class DeviceManager
             // timeoutMs budget so callers explicitly choose how long to
             // wait. Live-swap callers pass 120_000 ms (the full BT
             // xinputhid cascade budget); cleanup paths may pass less.
-            goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
+            // SwDeviceClose leaves the instance's record, so the record is
+            // not waited for.
+            goneAfterDif = parentWatch.Wait(uninstalls: false, timeoutMs);
             DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} confirmed_offline={goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
         }
 
@@ -1078,33 +1112,42 @@ public static partial class DeviceManager
                 // instead (DisableAndUninstall), before its parent is tried.
                 if (CM_Locate_DevNodeW(out uint ci, childId, 0) == CR_SUCCESS
                  || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
-                    DisableAndUninstall(ci, childId, waitMs: 2000);
+                {
+                    using var childWatch = RemovalWatch.Start(childId);
+                    if (DisableAndUninstall(ci, childId))
+                        childWatch.Wait(uninstalls: true, 2000);
+                }
             }
             else
             {
-                DifRemoveDevice(childId);
-                WaitForDeviceRemoval(childId, 2000);
+                using var childWatch = RemovalWatch.Start(childId);
+                if (DifRemoveDevice(childId))
+                    childWatch.Wait(uninstalls: true, 2000);
             }
         }
 
         // Step 2: Remove the parent (for non-SWD; SWD already done above)
+        // A removal call that failed has nothing to confirm, and goes
+        // straight to the fallbacks below.
         if (fast)
         {
-            DisableAndUninstall(devInst, instanceId, waitMs: 0);
-            goneAfterDif = false; // don't wait, don't confirm
+            var waitSw = System.Diagnostics.Stopwatch.StartNew();
+            goneAfterDif = DisableAndUninstall(devInst, instanceId)
+                        && parentWatch.Wait(uninstalls: true, timeoutMs);
+            DeviceOrchestrator.LogDiag($"      fast removal of {instanceId} confirmed={goneAfterDif} after {waitSw.ElapsedMilliseconds}ms");
         }
         else if (isSwdParent)
         {
             // Already removed at the top of the function. Re-check in case
             // a survivor sweep above kicked the parent into a transient
             // state.
-            goneAfterDif = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS;
+            goneAfterDif = parentWatch.IsComplete(uninstalls: false);
         }
         else
         {
-            DifRemoveDevice(instanceId);
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
-            goneAfterDif = WaitForDeviceRemoval(instanceId, timeoutMs);
+            goneAfterDif = DifRemoveDevice(instanceId)
+                        && parentWatch.Wait(uninstalls: true, timeoutMs);
             DeviceOrchestrator.LogDiag($"      WaitForDeviceRemoval({instanceId}, {timeoutMs}ms) returned {goneAfterDif} after {waitSw.ElapsedMilliseconds}ms");
         }
 
@@ -1222,6 +1265,10 @@ public static partial class DeviceManager
                     catch { }
                 }
             }
+
+            // The fallbacks are removals too, confirmed the same way.
+            if (stillPhantom)
+                parentWatch.Wait(uninstalls: true, 2000);
         }
 
         // Step 4: Final check
@@ -1310,8 +1357,9 @@ public static partial class DeviceManager
     /// SetupDiRemoveDevice still removes the keyboard itself, and the root
     /// can be disabled once the keyboard is gone, so a devnode that refuses
     /// the disable is removed that way. RemoveDevice takes the children
-    /// before the parent, so a keyboard child goes first, and
-    /// <paramref name="waitMs"/> waits it out before the parent is tried.
+    /// before the parent, so a keyboard child goes first, and its removal
+    /// test waits it out before the parent is tried. False when the removal
+    /// call failed.
     ///
     /// Measured 2026-10-13 on the root of a keyboard whose consumer had
     /// been killed: CM_Disable_DevNode returned CR_NOT_DISABLEABLE and
@@ -1320,25 +1368,21 @@ public static partial class DeviceManager
     /// and SetupDiRemoveDevice removed it. The two mice the same consumer
     /// held reported disableable throughout.
     /// </summary>
-    static void DisableAndUninstall(uint devInst, string instanceId, int waitMs)
+    static bool DisableAndUninstall(uint devInst, string instanceId)
     {
         if (CM_Disable_DevNode(devInst, 0) != CR_NOT_DISABLEABLE)
-        {
-            CM_Uninstall_DevNode(devInst, 0);
-            return;
-        }
-        DifRemoveDevice(instanceId);
-        if (waitMs > 0)
-            WaitForDeviceRemoval(instanceId, waitMs);
+            return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
+        return DifRemoveDevice(instanceId);
     }
 
     /// <summary>
     /// Removes a single device via SetupDiRemoveDevice (same as devcon remove).
     /// This is more thorough than DIF_REMOVE: it bypasses class installers and
     /// directly removes the device node, preventing ghost entries on UMDF devices.
-    /// Falls back to CM_Disable + CM_Uninstall if SetupAPI fails.
+    /// Falls back to CM_Disable + CM_Uninstall if SetupAPI fails. False when
+    /// its removal failed.
     /// </summary>
-    static void DifRemoveDevice(string instanceId)
+    static bool DifRemoveDevice(string instanceId)
     {
         uint devInst = 0;
         bool located = CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS
@@ -1350,12 +1394,9 @@ public static partial class DeviceManager
         IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
         if (dis == new IntPtr(-1))
         {
-            if (located)
-            {
-                CM_Disable_DevNode(devInst, 0);
-                CM_Uninstall_DevNode(devInst, 0);
-            }
-            return;
+            if (!located) return false;
+            CM_Disable_DevNode(devInst, 0);
+            return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
         }
 
         try
@@ -1369,22 +1410,17 @@ public static partial class DeviceManager
             {
                 if (!SetupDiOpenDeviceInfoW(dis, instanceId, IntPtr.Zero, 0, devInfoHandle.AddrOfPinnedObject()))
                 {
-                    if (located)
-                    {
-                        CM_Disable_DevNode(devInst, 0);
-                        CM_Uninstall_DevNode(devInst, 0);
-                    }
-                    return;
+                    if (!located) return false;
+                    CM_Disable_DevNode(devInst, 0);
+                    return CM_Uninstall_DevNode(devInst, 0) == CR_SUCCESS;
                 }
 
                 // SetupDiRemoveDevice: direct removal like devcon.exe.
                 // Unlike DIF_REMOVE (class installer), this fully removes the device
                 // node and registry entries, preventing ghosts on UMDF devices.
-                if (!SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
-                {
-                    // Fallback to DIF_REMOVE if direct removal fails
-                    SetupDiCallClassInstaller(DIF_REMOVE, dis, devInfoHandle.AddrOfPinnedObject());
-                }
+                // Fallback to DIF_REMOVE if direct removal fails.
+                return SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject())
+                    || SetupDiCallClassInstaller(DIF_REMOVE, dis, devInfoHandle.AddrOfPinnedObject());
             }
             finally
             {
@@ -1569,7 +1605,13 @@ public static partial class DeviceManager
 
                     // Parent is gone: remove the orphan silently. Caller
                     // gets the count for whatever observability it wants.
-                    DifRemoveDevice(hidInstanceId);
+                    // Confirmed by the removal test, as RemoveDevice removes
+                    // a child.
+                    using (var watch = RemovalWatch.Start(hidInstanceId))
+                    {
+                        if (DifRemoveDevice(hidInstanceId))
+                            watch.Wait(uninstalls: true, 2000);
+                    }
                     removedIds?.Add(hidInstanceId);
                     removed++;
                 }
