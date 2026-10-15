@@ -248,29 +248,6 @@ internal static partial class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  P/Invoke: SetupAPI
-    // ════════════════════════════════════════════════════════════════════
-
-    [LibraryImport("SetupAPI.dll", SetLastError = true)]
-    private static partial IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);
-
-    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCreateDeviceInfoW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName, ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, int CreationFlags, IntPtr DeviceInfoData);
-
-    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiSetDeviceRegistryPropertyW", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, IntPtr DeviceInfoData, int Property, byte[] PropertyBuffer, uint PropertyBufferSize);
-
-    [LibraryImport("SetupAPI.dll", EntryPoint = "SetupDiCallClassInstaller", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetupDiCallClassInstaller(int InstallFunction, IntPtr DeviceInfoSet, IntPtr DeviceInfoData);
-
-    [LibraryImport("SetupAPI.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
-
-    // ════════════════════════════════════════════════════════════════════
     //  P/Invoke: CfgMgr32
     // ════════════════════════════════════════════════════════════════════
 
