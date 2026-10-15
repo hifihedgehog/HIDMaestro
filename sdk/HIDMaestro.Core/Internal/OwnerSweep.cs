@@ -504,9 +504,9 @@ internal static class OwnerSweep
     /// HID child it removed to leave the device tree.</summary>
     private const int OrphanRemovalWaitMs = 10_000;
 
-    /// <summary>The HID orphan sweep, then a wait for each child it removed,
-    /// since its removal does not wait. Returns true once none of them is
-    /// in the device tree.</summary>
+    /// <summary>The HID orphan sweep, which tests each removal for 2 s under
+    /// the PnP lock, then up to 10 s more for any child it removed that is
+    /// still there. Returns true once every one of them is gone.</summary>
     private static bool RemoveOrphanChildren()
     {
         var removed = new List<string>();

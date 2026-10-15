@@ -186,6 +186,20 @@ internal static class Offline
     /// <summary>A removal issued while the devnode is in the tree: the
     /// watch is started first, as RemoveDevice starts it before its removal
     /// call, then the sequence begins.</summary>
+    /// <summary>DeviceManager.WaitRemovalComplete on a devnode in the tree,
+    /// called as the sequence begins: the watch starts inside the call.</summary>
+    static (bool Done, long Ms) Complete(Sequence s, bool uninstalls, int budgetMs)
+    {
+        s.Hook();
+        try
+        {
+            s.Begin();
+            bool done = DeviceManager.WaitRemovalComplete(Id, uninstalls, budgetMs);
+            return (done, s.Now);
+        }
+        finally { s.End(); }
+    }
+
     static (DeviceManager.RemovalOutcome Outcome, long Ms) WatchedRemoval(Sequence s, bool uninstalls, int budgetMs,
                                                                           int removedMs = DeviceManager.RemovedBoundMs)
     {
@@ -327,18 +341,9 @@ internal static class Offline
         Check("removal that uninstalls but whose record never goes -> not gone when the 400 ms budget ends",
               w6b.Outcome == NotGone && Within(w6b.Ms, 400), $"{w6b.Outcome} at {w6b.Ms} ms");
 
-        var s7 = new Sequence { LeavesTree = 100, RemovedAt = 250, RecordGoneAt = 300 };
-        s7.Hook();
-        DeviceManager.RemovalOutcome w7;
-        try
-        {
-            s7.Begin();
-            w7 = DeviceManager.WaitForDeviceRemoval(Id, uninstalls: true, timeoutMs: 5000);
-        }
-        finally { s7.End(); }
-        long w7Ms = s7.Clock.ElapsedMilliseconds;
-        Check("WaitForDeviceRemoval on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> removed at 300",
-              w7 == Removed && Within(w7Ms, 300), $"{w7} at {w7Ms} ms");
+        var w7 = Complete(new Sequence { LeavesTree = 100, RemovedAt = 250, RecordGoneAt = 300 }, uninstalls: true, 5000);
+        Check("WaitRemovalComplete on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> finished at 300",
+              w7.Done && Within(w7.Ms, 300), $"{w7.Done} at {w7.Ms} ms");
 
         // The counts S77's live part asserts on: only watches of a devnode
         // in the tree count. Four ended on the notification (w1, w2, w3,
@@ -350,6 +355,22 @@ internal static class Offline
         Check("the removal counts: 4 on the notification, 1 without it, 1 not gone, 1 unregistered",
               dOn == 4 && dWithout == 1 && dNotGone == 1 && dUnreg == 1,
               $"{dOn}, {dWithout}, {dNotGone}, {dUnreg}");
+
+        // WaitRemovalComplete, the sweeps' and the exit's one test, keeps its
+        // budget whole, the notification's bound inside it, and with 0 looks
+        // once.
+        var w8 = Complete(new Sequence { LeavesTree = 100, RecordGoneAt = 100 }, uninstalls: true, 0);
+        Check("WaitRemovalComplete with a budget of 0 on a devnode still in the tree -> not finished, at once",
+              !w8.Done && w8.Ms < 50, $"{w8.Done} at {w8.Ms} ms");
+        var w9 = Complete(new Sequence { LeavesTree = 50, RecordGoneAt = 100, RemovedAt = null }, uninstalls: true, 400);
+        Check("WaitRemovalComplete, out at 50, record gone at 100, REMOVED never, budget 400 -> finished when the budget ends, not past it",
+              w9.Done && Within(w9.Ms, 400) && w9.Ms < 400 + 100, $"{w9.Done} at {w9.Ms} ms");
+        var w10 = Complete(new Sequence { LeavesTree = 0, RecordGoneAt = null, RemovedAt = 50 }, uninstalls: true, 300);
+        Check("WaitRemovalComplete on an uninstall whose record stays, budget 300 -> not finished at 300",
+              !w10.Done && Within(w10.Ms, 300), $"{w10.Done} at {w10.Ms} ms");
+        var w11 = Complete(new Sequence { LeavesTree = 50, RecordGoneAt = null, RemovedAt = 150 }, uninstalls: false, 5000);
+        Check("WaitRemovalComplete on a software device that keeps its record: out at 50, REMOVED at 150 -> finished at 150",
+              w11.Done && Within(w11.Ms, 150), $"{w11.Done} at {w11.Ms} ms");
 
         // The registration gate.
         var sG1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };

@@ -349,17 +349,7 @@ public static partial class DeviceManager
     /// not waited for. Returns true when gone, false on timeout.
     /// </summary>
     public static bool WaitForDeviceRemoval(string instanceId, int timeoutMs = 5000) =>
-        WaitForDeviceRemoval(instanceId, uninstalls: false, timeoutMs) != RemovalOutcome.NotGone;
-
-    /// <summary>The outcome of the removal of <paramref name="instanceId"/>
-    /// by the removal test, the devnode (and, when
-    /// <paramref name="uninstalls"/>, its records) given
-    /// <paramref name="timeoutMs"/> to go.</summary>
-    internal static RemovalOutcome WaitForDeviceRemoval(string instanceId, bool uninstalls, int timeoutMs)
-    {
-        using var watch = RemovalWatch.Start(instanceId);
-        return watch.Wait(uninstalls, timeoutMs);
-    }
+        WaitRemovalComplete(instanceId, uninstalls: false, TimeoutScale.Apply(timeoutMs));
 
     // ── The removal test and the registration gate ──
 
@@ -387,8 +377,24 @@ public static partial class DeviceManager
     /// outside them.</summary>
     internal static Func<IDisposable>? PnpLockHook;
 
-    static uint Locate(string instanceId, uint flags) =>
-        LocateHook?.Invoke(instanceId, flags) ?? CM_Locate_DevNodeW(out _, instanceId, flags);
+    static uint Locate(string instanceId, uint flags)
+    {
+        if (LocateHook is { } hook) return hook(instanceId, flags);
+        if (RemovalLocate is { } phantoms)
+        {
+            // The seam stands for a phantom: never in the tree, its record
+            // known while the seam says so. A seam that throws counts as
+            // finding the id.
+            if (flags == CM_LOCATE_DEVNODE_NORMAL) return CR_NO_SUCH_DEVNODE;
+            bool found;
+            try { found = phantoms(instanceId); }
+            catch { found = true; }
+            return found ? CR_SUCCESS : CR_NO_SUCH_DEVNODE;
+        }
+        return CM_Locate_DevNodeW(out _, instanceId, flags);
+    }
+
+    const uint CR_NO_SUCH_DEVNODE = 0x0000000D;
 
     /// <summary>What a removal wait has seen of one instance id.</summary>
     internal readonly struct RemovalObservation
@@ -564,11 +570,21 @@ public static partial class DeviceManager
         /// uninstall, get <paramref name="timeoutMs"/> (scaled) to go, and
         /// the notification <paramref name="removedMs"/> (scaled) from the
         /// moment they are gone.</summary>
-        internal RemovalOutcome Wait(bool uninstalls, int timeoutMs, int removedMs = RemovedBoundMs)
+        internal RemovalOutcome Wait(bool uninstalls, int timeoutMs, int removedMs = RemovedBoundMs) =>
+            WaitMs(uninstalls, TimeoutScale.Apply(timeoutMs), TimeoutScale.Apply(removedMs), withinBudget: false);
+
+        /// <summary>As <see cref="Wait"/>, within <paramref name="budgetMs"/>
+        /// already scaled, and with the notification's bound inside that
+        /// budget: a devnode gone when the budget ends is gone, with or
+        /// without its notification.</summary>
+        internal RemovalOutcome WaitWithin(bool uninstalls, int budgetMs) =>
+            WaitMs(uninstalls, budgetMs, TimeoutScale.Apply(RemovedBoundMs), withinBudget: true);
+
+        private RemovalOutcome WaitMs(bool uninstalls, int timeoutMs, int removedMs, bool withinBudget)
         {
             long freq = System.Diagnostics.Stopwatch.Frequency;
-            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + TimeoutScale.Apply(timeoutMs) * freq / 1000;
-            long removedTicks = TimeoutScale.Apply(removedMs) * freq / 1000;
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + Math.Max(0, timeoutMs) * freq / 1000;
+            long removedTicks = Math.Max(0, removedMs) * freq / 1000;
             while (true)
             {
                 var o = Observe();
@@ -578,7 +594,8 @@ public static partial class DeviceManager
                 var r = RemovalComplete(o, uninstalls, removedOverdue: gone && now - _goneAt >= removedTicks);
                 if (r != RemovalOutcome.Pending) return _last = r;
                 long until = gone ? _goneAt + removedTicks : deadline;
-                if (until <= now) return _last = RemovalOutcome.NotGone;
+                if (gone && withinBudget) until = Math.Min(until, deadline);
+                if (until <= now) return _last = gone ? RemovalOutcome.GoneWithoutRemoved : RemovalOutcome.NotGone;
                 _signal.WaitOne((int)Math.Clamp((until - now) * 1000 / freq + 1, 1, RecheckMs));
             }
         }
@@ -1097,7 +1114,7 @@ public static partial class DeviceManager
             // the id until the callback returns. A phantom is out of the tree,
             // so its record decides and no REMOVED registration is opened.
             settled = afterUninstall?.Invoke(instanceId)
-                      ?? WaitRemovalComplete(instanceId, uninstalls: true, QuickRemovalMs);
+                      ?? WaitRemovalComplete(instanceId, uninstalls: true, TimeoutScale.Apply(QuickRemovalMs));
             return true;
         }
         finally
@@ -1120,43 +1137,36 @@ public static partial class DeviceManager
 
     private static readonly List<SafeFileHandle> s_keptClaims = new();
 
-    /// <summary>Answers in place of the locates in
-    /// <see cref="WaitRemovalComplete"/>. Coexistence probe `phantomgate`
-    /// sets it through reflection, with <see cref="PhantomSource"/>, to run
-    /// the cleanup's gate, its wait and the exit join with no device. Null
+    /// <summary>Answers, in place of the PHANTOM locate, whether Windows
+    /// still knows a phantom, for the removal test (<see cref="Locate"/>):
+    /// a phantom is never in the tree. Coexistence probe `phantomgate` sets
+    /// it through reflection, with <see cref="PhantomSource"/>, to run the
+    /// cleanup's gate, its wait and the exit join with no device. Null
     /// outside the probe.</summary>
     internal static Func<string, bool>? RemovalLocate;
 
-    /// <summary>How often <see cref="WaitRemovalComplete"/> looks.</summary>
-    internal const int RemovalPollMs = 50;
+    /// <summary>How often <see cref="WaitRemovalComplete"/> looks when no
+    /// notification wakes it.</summary>
+    internal const int RemovalPollMs = RecheckMs;
 
     /// <summary>Wait until a removal the SDK started on
     /// <paramref name="instanceId"/> has finished, or
-    /// <paramref name="budgetMs"/> passes, and say whether it finished. With
-    /// a budget of 0 it looks once. The one test of a finished removal for
-    /// the sweeps, the exit handler and the phantom cleanup, so a stronger
-    /// signal replaces it in one place. An uninstall
-    /// (<paramref name="uninstalls"/> true) is finished once the PHANTOM
-    /// locate no longer finds the id, and any other removal once the NORMAL
-    /// locate no longer finds it, which does not see a removal still in
-    /// progress (<see cref="IsLive"/>). A locate that throws counts as
-    /// finding the id.</summary>
+    /// <paramref name="budgetMs"/> (already scaled) passes, and say whether
+    /// it finished. With a budget of 0 it looks once. The one test of a
+    /// finished removal for the sweeps, the exit handler and the phantom
+    /// cleanup: the removal test (<see cref="RemovalComplete"/>), started
+    /// at the call. A devnode in the tree then is finished on its
+    /// DEVICEINSTANCEREMOVED notification or, at the end of the budget,
+    /// once a NORMAL locate fails. An uninstall
+    /// (<paramref name="uninstalls"/> true: a ROOT or HID id removed by
+    /// SetupDiRemoveDevice or CM_Uninstall_DevNode) is finished only once a
+    /// PHANTOM locate fails as well. A software device closed by
+    /// SwDeviceClose keeps its record, so pass false for an SWD id. A locate
+    /// the probe's seam answers by throwing counts as finding the id.</summary>
     internal static bool WaitRemovalComplete(string instanceId, bool uninstalls, int budgetMs)
     {
-        long start = System.Diagnostics.Stopwatch.GetTimestamp();
-        while (true)
-        {
-            bool found;
-            try
-            {
-                found = RemovalLocate?.Invoke(instanceId)
-                        ?? (uninstalls ? IsKnownInstance(instanceId) : IsLive(instanceId));
-            }
-            catch { found = true; }
-            if (!found) return true;
-            if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds >= budgetMs) return false;
-            Thread.Sleep(RemovalPollMs);
-        }
+        using var watch = RemovalWatch.Start(instanceId);
+        return watch.WaitWithin(uninstalls, budgetMs) != RemovalOutcome.NotGone;
     }
 
     /// <summary>The identity claim of the controller a phantom belongs to:
@@ -1195,20 +1205,6 @@ public static partial class DeviceManager
             return DeviceIdentity.IsIdentityToken(name) ? name : null;
         }
     }
-
-    /// <summary>Whether Windows still knows a device instance of this id,
-    /// present or not: CM_Locate_DevNode with CM_LOCATE_DEVNODE_PHANTOM.
-    /// Never CM_LOCATE_DEVNODE_CANCELREMOVE, which cancels a removal in
-    /// progress.</summary>
-    internal static bool IsKnownInstance(string instanceId) =>
-        CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS;
-
-    /// <summary>Whether a devnode of this instance id is configured in the
-    /// device tree. A phantom is not, and neither is a device in the process
-    /// of being removed: CM_Locate_DevNode finds that one only with
-    /// CM_LOCATE_DEVNODE_CANCELREMOVE, which cancels the removal. So false
-    /// here does not prove a removal has finished.</summary>
-    internal static bool IsLive(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
 
     /// <summary>The instance ids of a present devnode's direct children,
     /// none when it is not present.</summary>
