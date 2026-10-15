@@ -16,13 +16,17 @@ namespace HIDMaestro.Internal.Usbip;
 /// per the wire contract read at source in 0.9.7.5, which 0.9.8.1 keeps (see
 /// <see cref="UsbipProtocol"/>).
 ///
-/// <para>The listen port is fixed-range rather than ephemeral
-/// (<see cref="BasePort"/>..+15, first free wins) so a later process can
-/// name this server's host/service tuple when cleaning up after a crash:
-/// the vhci driver starts background re-attach attempts when a connection
-/// drops without a PLUGOUT (usbip-win2 device.cpp detach →
-/// start_attach_attempts), and STOP_ATTACH_ATTEMPTS needs the exact
-/// location to cancel them.</para></summary>
+/// <para>The listen port is a fixed range (<see cref="BasePort"/>..+15,
+/// first free wins) rather than ephemeral so a later process can name this
+/// server's host/service tuple when cleaning up after a crash: the vhci
+/// driver starts background re-attach attempts when a connection drops
+/// without a PLUGOUT (usbip-win2 device.cpp detach → start_attach_attempts),
+/// and STOP_ATTACH_ATTEMPTS needs the exact location to cancel them. The
+/// exact port is also written to the owner record, so recovery that reads
+/// the record does not depend on the range. When every port in the range is
+/// taken, which any program can do by binding all sixteen first, the server
+/// binds an OS-assigned port instead of failing, and the recorded port
+/// carries it.</para></summary>
 internal sealed class UsbipServer : IDisposable
 {
     /// <summary>0x484D, "HM". Outside the IANA ephemeral range, no
@@ -76,8 +80,31 @@ internal sealed class UsbipServer : IDisposable
             }
             catch (SocketException ex) { last = ex; }
         }
+        if (listener == null)
+        {
+            // Every port in the range is taken: another program, which may
+            // not be elevated, bound all sixteen first. Rather than fail
+            // every composite persona, bind an OS-assigned loopback port
+            // (port 0). GetOrStart writes it to this process's owner record
+            // (SetUsbipPort), so a sweep matches this server's imports by the
+            // recorded port, and a crash is recovered through the record's
+            // port in DetachDeadImport, both the same way a range port is.
+            // The blind range walk in DetachImportsOfDeadServers does not
+            // reach a port outside the range, but that walk is only a
+            // belt for imports whose owner record is already gone, and the
+            // record-driven reclaim cancels this server's attempts first.
+            try
+            {
+                var l = new TcpListener(IPAddress.Loopback, 0);
+                l.Start();
+                listener = l;
+                port = ((IPEndPoint)l.LocalEndpoint).Port;
+                DeviceOrchestrator.LogDiag($"    usbip: ports {BasePort}..{BasePort + PortRange - 1} all taken, bound {port}");
+            }
+            catch (SocketException ex) { last = ex; }
+        }
         _listener = listener ?? throw new InvalidOperationException(
-            $"No free USB/IP server port in {BasePort}..{BasePort + PortRange - 1}.", last);
+            $"No free loopback port for the USB/IP server (range {BasePort}..{BasePort + PortRange - 1} and an OS-assigned port both failed).", last);
         Port = port;
 
         _acceptThread = new Thread(AcceptLoop)

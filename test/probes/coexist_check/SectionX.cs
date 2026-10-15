@@ -11,6 +11,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -36,6 +38,39 @@ internal static partial class Program
         SectionX5();
         Clean();
         SectionX6();
+        Clean();
+        SectionX7();
+    }
+
+    /// <summary>The USB/IP loopback port range taken first. A composite
+    /// persona still creates, on an OS-assigned port, and the port is in the
+    /// program's owner record so a sweep still matches it.</summary>
+    static void SectionX7()
+    {
+        const int basePort = 18509, range = 16;
+        var held = new List<TcpListener>();
+        try
+        {
+            for (int i = 0; i < range; i++)
+            {
+                try { var l = new TcpListener(IPAddress.Loopback, basePort + i); l.Start(); held.Add(l); }
+                catch (SocketException) { }
+            }
+            Check($"X7: the probe holds the whole USB/IP port range {basePort}..{basePort + range - 1}", held.Count == range, $"{held.Count} of {range} bound");
+            if (held.Count != range) return;
+
+            using var p = PeerProcess.Start("X7");
+            p.Send("install");
+            string c = p.Send("create composite - coexist-x7");
+            Check("X7: a composite persona still creates with the range taken", Ok(c), c);
+            if (!Ok(c)) return;
+            var path = WaitPaths(0x054C, 0x0CE6, 1, 15_000);
+            Check("X7: the composite's device is present", path.Count == 1, $"{path.Count} interfaces");
+            string? recorded = Native.RecordValue(p.Pid, "UsbipPort");
+            bool outside = int.TryParse(recorded, out int sp) && (sp < basePort || sp >= basePort + range);
+            Check("X7: its server bound a port outside the range, recorded in its owner record", outside, $"recorded port {recorded ?? "none"}");
+        }
+        finally { foreach (var l in held) try { l.Stop(); } catch { } }
     }
 
     /// <summary>Many indices squatted at once. The create walks past them
