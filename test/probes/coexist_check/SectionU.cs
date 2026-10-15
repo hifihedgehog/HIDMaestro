@@ -152,7 +152,7 @@ internal static partial class Program
         string f5;
         using (LockedEvent($@"Global\HIDMaestroInputEvent{t}"))
             f5 = a.Send("create pad F1B0 -");
-        bool denied5 = !Ok(f5) && f5.Contains("Access is denied", StringComparison.Ordinal);
+        bool denied5 = !Ok(f5) && PeerProcess.Field(f5, "win32") == ErrorAccessDenied;
         Check($"U: a create on index {t} is refused at its input event", denied5, f5);
         Check("U: the program still runs after it", Ok(a.Send("alive")));
         var left5 = InputObjectsPresent(t, output: false);
@@ -181,7 +181,7 @@ internal static partial class Program
         string f4;
         using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}"))
             f4 = a.Send("create composite - -");
-        bool denied4 = !Ok(f4) && f4.Contains("Access is denied", StringComparison.Ordinal);
+        bool denied4 = !Ok(f4) && PeerProcess.Field(f4, "win32") == ErrorAccessDenied;
         Check($"U: a composite on index {tc} is refused at its output doorbell", denied4, f4);
         Check("U: the program still runs after it", Ok(a.Send("alive")));
         var left4 = InputObjectsPresent(tc, output: true);
@@ -281,6 +281,8 @@ internal static partial class Program
         byte[]? ackBefore = Native.SectionBytes(ackName, AckSectionSize);
         Check("U: the v1.12.0 controller's input section carries its frame",
               inBefore != null && inBefore.Any(x => x != 0), inBefore == null ? "absent" : inBefore.Any(x => x != 0) ? "" : "all zero");
+        Check("U: and its acknowledgement section carries a delivered frame",
+              ackBefore != null && ackBefore.Any(x => x != 0), ackBefore == null ? "absent" : ackBefore.Any(x => x != 0) ? "" : "all zero");
 
         string f7 = a.Send("go", 120_000);
         Check("U: the waiting create is refused as in use",
@@ -291,7 +293,7 @@ internal static partial class Program
         Check($"U: the refused create left {inputName} as it was",
               inBefore != null && inAfter != null && inBefore.SequenceEqual(inAfter), FirstDifference(inBefore, inAfter));
         Check($"U: and {ackName}",
-              ackBefore != null && ackAfter != null && ackBefore.SequenceEqual(ackAfter),
+              ackBefore != null && ackAfter != null && ackBefore.Any(x => x != 0) && ackBefore.SequenceEqual(ackAfter),
               FirstDifference(ackBefore, ackAfter) + (ackBefore != null && ackBefore.All(x => x == 0) ? ", all zero before" : ""));
         var gone = oldDevices.Where(d => !Native.IsPresent(d)).ToList();
         Check("U: the v1.12.0 program's devices are all still present", gone.Count == 0,
@@ -369,6 +371,9 @@ internal static partial class Program
             if (Native.OwnerOf($@"Global\HIDMaestro{k}{index}", section: false) != "absent") present.Add($"HIDMaestro{k}{index}");
         return present;
     }
+
+    // ERROR_ACCESS_DENIED, as the peer's reply carries it.
+    const string ErrorAccessDenied = "5";
 
     sealed class Handle(IntPtr h) : IDisposable
     {

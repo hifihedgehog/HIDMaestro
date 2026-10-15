@@ -283,7 +283,10 @@ internal static class Peer
             {
                 var chain = new List<string>();
                 for (var t = ex.GetType(); t != null && t != typeof(object); t = t.BaseType) chain.Add(t.Name);
-                Reply($"ERR {a[0]} {string.Join('<', chain)} {ex.Message.Replace('\n', ' ').Replace('\r', ' ')}");
+                // The Win32 error code, which reads the same in every
+                // display language, beside the message, which does not.
+                string code = ex is System.ComponentModel.Win32Exception w ? $" win32={w.NativeErrorCode}" : "";
+                Reply($"ERR {a[0]} {string.Join('<', chain)}{code} {ex.Message.Replace('\n', ' ').Replace('\r', ' ')}");
             }
         }
         StopStream();
