@@ -17,10 +17,11 @@ namespace HIDMaestro.Internal;
 /// neither take first nor hold. A v1.12.0 program writes the same OEM keys
 /// under <c>Global\HIDMaestro-OEM-Recovery</c>, so the lock takes that
 /// mutex too, after its own. Any program can create that name first and
-/// hold it. When an elevated process created it, the lock waits for it as
-/// v1.12.0 does. When anyone else did, the lock takes it only if it is free
-/// and never waits: a v1.12.0 program holds it only while it writes
-/// registry values.</para>
+/// hold it. When it is owned by SYSTEM or Administrators, the lock waits
+/// for it as v1.12.0 does. When it is owned by anyone else, the lock waits
+/// for it a bounded five seconds and goes on without it after that: a
+/// v1.12.0 program holds it only while it writes registry values, far less
+/// than the bound.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {

@@ -78,9 +78,11 @@ internal static partial class VrSharedMemory
     // SharedMemoryIO's SDDL grants SY/BA full, LS full, World read. VR
     // needs the Interactive group instead of LocalService: vrserver runs
     // in the logged-on user's session and both maps the section for
-    // haptic writes and waits on events. 0x1F0003 = EVENT_ALL_ACCESS.
-    private const string SectionSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
-    private const string EventSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1F0003;;;IU)";
+    // haptic writes and waits on events. 0x1F0003 = EVENT_ALL_ACCESS. Owner
+    // Administrators (O:BA), as for every object the SDK creates, so the
+    // owner does not depend on the default-owner policy.
+    private const string SectionSddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
+    private const string EventSddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1F0003;;;IU)";
 
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     private static partial IntPtr CreateFileMappingW(IntPtr hFile, ref SECURITY_ATTRIBUTES attrs, uint protect, uint maxHigh, uint maxLow, string name);

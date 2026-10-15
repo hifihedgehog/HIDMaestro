@@ -1250,16 +1250,17 @@ internal static partial class SharedMemoryIO
         if (ev == IntPtr.Zero)
             throw new Win32Exception(error);
         // An event that already existed came from a controller of this index
-        // before, unless a program that is not elevated made it first, after
-        // the transport allocator looked (ForeignObjectAt). Its maker could
-        // wait on it and take the signals meant for the driver. Only the
+        // before, unless another program made it first, after the transport
+        // allocator looked (ForeignObjectAt), which its owner, neither
+        // SYSTEM nor Administrators, shows. Its maker could wait on it and
+        // take the signals meant for the driver. Only the
         // output doorbell may be LocalService-owned (the driver host made
         // it). The SDK's own events are owned by Administrators.
         if (error == ERROR_ALREADY_EXISTS && !IsOwnedByAdmin(ev, allowLocalService: name.Contains("OutputEvent", StringComparison.Ordinal)))
         {
             CloseHandle(ev);
             throw new HMResourceInUseException(
-                $"{name} was created by a program that is not elevated, so a controller cannot use it. Create the controller again: it takes another transport index.",
+                $"{name} is owned by neither SYSTEM nor Administrators: another program created it, so a controller cannot use it. Create the controller again: it takes another transport index.",
                 name, null);
         }
         return ev;
@@ -1281,7 +1282,11 @@ internal static partial class SharedMemoryIO
     private static bool DriverCreates(string eventKind) => eventKind is "OutputEvent" or "StopEvent";
 
     /// <summary>The first of a transport index's named sections and events
-    /// that a program that is not elevated made, or null when it made none.
+    /// that is owned by neither SYSTEM nor Administrators (nor, for the
+    /// driver's two events, LocalService), or null when there is none. That
+    /// is a program that is not elevated, or, under the object-creator
+    /// default-owner policy, a v1.12.0 program, whose descriptors name no
+    /// owner and so leave its objects owned by the user.
     /// Any local program can create a <c>Global\</c> event, or take a
     /// section's name with an object of another kind, before HIDMaestro
     /// does, and keep it. The driver and the SDK would then signal and wait

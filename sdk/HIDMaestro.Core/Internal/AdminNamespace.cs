@@ -27,22 +27,29 @@ namespace HIDMaestro.Internal;
 /// on this build the opposite: with the creator's handle closed the
 /// namespace still opened while another process held a handle, and only
 /// after the last handle closed did it stop opening, though a mutex made in
-/// it was still held. The code is correct whichever way it falls. Every
-/// process opens the namespace once and keeps the handle until it exits, so
-/// a held lock always has a live namespace. A process that finds the open
-/// gone creates the namespace again, and the create fails with
-/// ERROR_ALREADY_EXISTS while one still exists, so at most one namespace of
-/// this boundary and alias exists at a time and the lock inside it is one
-/// object. If the strict reading held and an open failed, the create retries
-/// below cover it, and a deploy that cannot take the lock simply does not
-/// run rather than running beside another.</para>
+/// it was still held. Every process opens the namespace once and keeps the
+/// handle until it exits, so a held lock always has a live namespace. A
+/// process that finds the open gone creates the namespace again, and the
+/// create fails with ERROR_ALREADY_EXISTS while one still exists, so at most
+/// one namespace of this boundary exists at a time and the lock inside it
+/// is one object. Under the strict reading the lock stays exclusive but is
+/// not available: once the creator exits, a new program's create finds the
+/// namespace and its open fails, the loop below gives up after eight tries
+/// with InvalidOperationException, and every machine-wide step of that
+/// program fails until the last process holding a handle exits. Two deploys
+/// never run at once either way.</para>
 ///
-/// <para>The boundary holds the Administrators SID and nothing else. The NS1
-/// example on Learn adds "the current session number" to a boundary on
-/// purpose to scope a namespace to one session, so a boundary without a
-/// session SID, like this one, is not per-session. A session-0 service and a
-/// desktop program therefore share the one namespace. This was not run
-/// across two sessions here: no session-0 process is available to the test.</para>
+/// <para>Scope. "Each namespace is uniquely identified by its name and
+/// boundaries", and another process can open it when "Both the specified
+/// name and boundary must match" (Object Namespaces on Learn). No session
+/// is part of that identity unless the creator adds one: Learn's NS1
+/// example puts "the current session number" into a boundary to scope a
+/// namespace to one session. This boundary holds the name HIDMaestro and
+/// the Administrators SID, so a session-0 service and a desktop program
+/// open the one namespace, as long as their tokens have Administrators
+/// enabled. A service that runs as LocalService or NetworkService is outside
+/// the boundary and refused. This was not run across two sessions: no
+/// session-0 process is available to the test.</para>
 /// </summary>
 internal static partial class AdminNamespace
 {

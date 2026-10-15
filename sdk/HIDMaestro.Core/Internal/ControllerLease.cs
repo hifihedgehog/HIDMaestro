@@ -97,7 +97,7 @@ internal sealed class ControllerLease : IDisposable
                     {
                         squattedCount++;
                         firstSquatted ??= squatted;
-                        DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted} was made by a program that is not elevated");
+                        DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted} is owned by neither SYSTEM nor Administrators");
                         continue;
                     }
 
@@ -138,7 +138,7 @@ internal sealed class ControllerLease : IDisposable
             }
             string blocked = squattedCount == 0
                 ? "No transport index is free: every index up to 4096 is held by a running program or a present device."
-                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object a program that is not elevated created (such as {firstSquatted}), and the rest are held by a running program or a present device. Close that program, or create the controller again once it is gone.";
+                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object owned by neither SYSTEM nor Administrators (such as {firstSquatted}), which another program created, and the rest are held by a running program or a present device. Close the program that created it, or create the controller again once it is gone.";
             throw new HMResourceInUseException(blocked, "transport index", null);
         }
         finally
