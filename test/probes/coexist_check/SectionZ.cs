@@ -49,9 +49,15 @@
 //         devnode. Once the other adapter is disposed and gone, the instance
 //         gets the reinstall flag and the entry goes.
 //      a. A bind that claims a WinUSB entry between a sweep's queue and its
-//         restore keeps its hold, for a sweep and for the full cleanup. The
-//         claim waits for the SDK's hook after the queue (a timed wait on an
-//         SDK without it).
+//         restore keeps its hold, for a sweep and for the full cleanup, and a
+//         fresh claim under a holder name the full cleanup saw keeps it too.
+//         The claim runs in the SDK's hook, on the sweep's thread after the
+//         queue, so the restore decides before the sweep returns. Each part
+//         has an instance id of its own. A fourth part reaches the
+//         follow-up's decision: a thread of the peer holds the WinUSB lock
+//         through the full cleanup's restore, so the entry goes to the
+//         follow-up thread, then claims under the holder name the cleanup
+//         saw and lets the lock go, and the follow-up keeps the entry.
 //      b. Two programs ensure a test certificate under a name that does not
 //         contain HIDMaestroTestCert while the probe holds the deploy lock:
 //         neither adds it while the lock is held, and one certificate is in
@@ -615,15 +621,41 @@ internal static partial class Program
     static void ZClaimDuringSweep()
     {
         using var p = PeerProcess.Start("Za");
+        // Each part claims inside the sweep, on its thread, so the restore
+        // decides before the sweep returns (handshake=hook).
         string r1 = p.Send("zclaimsweep sweep", 60_000);
         Check("Za: a claim between a sweep's queue and its restore keeps the entry and its holder",
-              PeerProcess.Field(r1, "kept") == "True" && PeerProcess.Field(r1, "holder") == "True", r1);
+              PeerProcess.Field(r1, "kept") == "True" && PeerProcess.Field(r1, "holder") == "True"
+              && PeerProcess.Field(r1, "handshake") == "hook", r1);
         string r2 = p.Send("zclaimsweep all", 60_000);
         Check("Za: a claim between the full cleanup's queue and its restore keeps the entry and its holder",
-              PeerProcess.Field(r2, "kept") == "True" && PeerProcess.Field(r2, "holder") == "True", r2);
+              PeerProcess.Field(r2, "kept") == "True" && PeerProcess.Field(r2, "holder") == "True"
+              && PeerProcess.Field(r2, "handshake") == "hook", r2);
         string r3 = p.Send("zclaimsweep same", 60_000);
         Check("Za: a fresh claim under a holder name the full cleanup saw keeps the entry and its holder",
-              PeerProcess.Field(r3, "kept") == "True" && PeerProcess.Field(r3, "holder") == "True", r3);
+              PeerProcess.Field(r3, "kept") == "True" && PeerProcess.Field(r3, "holder") == "True"
+              && PeerProcess.Field(r3, "handshake") == "hook", r3);
+
+        // The follow-up's decision. The full cleanup cannot take the WinUSB
+        // lock, which a thread of the peer holds, so it leaves the entry to
+        // its follow-up thread and returns.
+        string q = p.Send("zfollow queue", 60_000);
+        Check("Za: with the WinUSB lock held, the full cleanup returns and leaves the entry to its follow-up",
+              PeerProcess.Field(q, "kept") == "True", q);
+        string t1 = p.Send("threads HMWinUsbFollowUp");
+        Check("Za: the follow-up thread runs", int.TryParse(PeerProcess.Field(t1, "n"), out int n1) && n1 >= 1, t1);
+        string c = p.Send("zfollow claim", 30_000);
+        Check("Za: the lock holder claims under the holder name the cleanup saw and lets the lock go", Ok(c), c);
+        // The follow-up retries every 250 ms, so in 3 s it has decided more
+        // than once.
+        Thread.Sleep(3000);
+        string k = p.Send("zfollow check");
+        string t2 = p.Send("threads HMWinUsbFollowUp");
+        Check("Za: the follow-up keeps the entry and the fresh claim",
+              PeerProcess.Field(k, "kept") == "True" && PeerProcess.Field(k, "fresh") == "True"
+              && int.TryParse(PeerProcess.Field(t2, "n"), out int n2) && n2 >= 1, $"{k}, {t2}");
+        string e = p.Send("zfollow end", 30_000);
+        Check("Za: with the entry gone, the follow-up ends", PeerProcess.Field(e, "threads") == "0", e);
     }
 
     // ── Zb ─────────────────────────────────────────────────────────────
@@ -938,10 +970,19 @@ internal static partial class Program
 ///   zwinusbsweep &lt;ms&gt;     a WinUSB ledger entry for a devnode that does
 ///                         not exist, swept while another thread holds the
 ///                         binding's locks &lt;ms&gt;
-///   zclaimsweep sweep|all|same  the same entry, queued by a sweep or the
-///                         full cleanup, claimed by another thread under the
-///                         WinUSB lock before the restore. same: the entry
-///                         already has that thread's holder when queued
+///   zfollow queue|claim|check|end  the follow-up's decision: queue holds
+///                         the WinUSB lock on a thread, claims the entry,
+///                         and runs the full cleanup, which leaves the entry
+///                         to its follow-up. claim claims it again under the
+///                         same name on that thread and lets the lock go.
+///                         check reads the entry and whether its claim is
+///                         the fresh one. end deletes the entry and waits
+///                         for the follow-up to end
+///   zclaimsweep sweep|all|same  such an entry, one per part, queued by a
+///                         sweep or the full cleanup and claimed under the
+///                         WinUSB lock in the sweep's hook, before the
+///                         restore. same: the entry already has this
+///                         program's holder when queued
 ///   zcert &lt;name&gt;          DriverBuilder.EnsureTestCertificate(name)
 ///   zguard                whether the SDK's WinUsbBinding.DepartingDevnodeRule
 ///                         is ZDepartingRule or later
@@ -1055,7 +1096,9 @@ internal static class PeerZ
             case "zwinusbsweep":
                 return WinUsbSweep(int.Parse(a[1]));
             case "zclaimsweep":
-                return ClaimDuringSweep(a[1] is "all" or "same", a[1] == "same");
+                return ClaimDuringSweep(a[1]);
+            case "zfollow":
+                return FollowUpDecides(a[1]);
             case "zcert":
             {
                 var sw = Stopwatch.StartNew();
@@ -1256,16 +1299,18 @@ internal static class PeerZ
     /// the restore. The entry and that holder must survive. The claim waits
     /// for the SDK's hook after the queue (RegistryLedger.WinUsbQueuedForProbe),
     /// or 1 s on an SDK without it.</summary>
-    static string ClaimDuringSweep(bool all, bool sameName)
+    static string ClaimDuringSweep(string part)
     {
-        const string id = @"USB\VID_057E&PID_0337\HMZATEST";
+        bool all = part is "all" or "same", sameName = part == "same";
+        // An instance id of its own per part: a follow-up an earlier part
+        // started in this program would otherwise watch the entry, and a
+        // sweep skips an entry its own program follows.
+        string id = $@"USB\VID_057E&PID_0337\HMZA{part.ToUpperInvariant()}";
         string path = FakeEntry(id);
         var hook = Sdk.GetType(Ledger)?.GetField("WinUsbQueuedForProbe", Any);
         try
         {
             string devnodes = AdminName("WinUsb");
-            using var locked = new ManualResetEventSlim();
-            using var queued = new ManualResetEventSlim();
             var claim = M(Ledger, "ClaimWinUsb");
             // The claim's parameters: the devnode, its prior service and INF,
             // the controller index, and the ledger timeout where it has one.
@@ -1277,29 +1322,49 @@ internal static class PeerZ
             // it is queued, and the claim in the window is a fresh one under
             // the same name.
             if (sameName) claim.Invoke(null, args);
-            var claimer = new Thread(() =>
+            // Every claim takes the WinUSB lock, as this one does.
+            void Claim()
             {
                 using var m = new Mutex(false, devnodes);
                 try { m.WaitOne(); } catch (AbandonedMutexException) { }
-                locked.Set();
-                queued.Wait();
-                claim.Invoke(null, args);
-                m.ReleaseMutex();
-            });
-            claimer.Start();
-            locked.Wait();
-            hook?.SetValue(null, (Action)(() => queued.Set()));
-            var sweeper = new Thread(() => M(Ledger, all ? "ReleaseAll" : "PruneDead").Invoke(null, null));
-            sweeper.Start();
-            // The sweep takes the ledger, queues the entry, lets the ledger go,
-            // calls the hook and waits for the WinUSB lock.
-            if (hook == null)
+                try { claim.Invoke(null, args); }
+                finally { m.ReleaseMutex(); }
+            }
+            if (hook != null)
             {
+                // The sweep calls the hook on its own thread once the entry is
+                // queued and the ledger's lock is let go, before the restore.
+                // The claim runs there and lets the WinUSB lock go, so the
+                // restore takes the lock at once, decides on the same thread
+                // before the sweep returns, and leaves nothing for a
+                // follow-up thread to decide later.
+                hook.SetValue(null, (Action)Claim);
+                M(Ledger, all ? "ReleaseAll" : "PruneDead").Invoke(null, null);
+            }
+            else
+            {
+                // An SDK without the hook: a thread holds the WinUSB lock from
+                // before the sweep and claims after a fixed wait.
+                using var locked = new ManualResetEventSlim();
+                using var queued = new ManualResetEventSlim();
+                var claimer = new Thread(() =>
+                {
+                    using var m = new Mutex(false, devnodes);
+                    try { m.WaitOne(); } catch (AbandonedMutexException) { }
+                    locked.Set();
+                    queued.Wait();
+                    try { claim.Invoke(null, args); }
+                    finally { m.ReleaseMutex(); }
+                });
+                claimer.Start();
+                locked.Wait();
+                var sweeper = new Thread(() => M(Ledger, all ? "ReleaseAll" : "PruneDead").Invoke(null, null));
+                sweeper.Start();
                 Thread.Sleep(1000);
                 queued.Set();
+                claimer.Join();
+                sweeper.Join();
             }
-            claimer.Join();
-            sweeper.Join();
             bool kept, holder;
             using (var k = Registry.LocalMachine.OpenSubKey(path))
             {
@@ -1313,6 +1378,75 @@ internal static class PeerZ
         {
             hook?.SetValue(null, null);
             try { Registry.LocalMachine.DeleteSubKeyTree(path, throwOnMissingSubKey: false); } catch { }
+        }
+    }
+    static Thread? s_followHolder;
+    static ManualResetEventSlim? s_followClaim;
+    static string? s_followPath, s_followFresh;
+
+    /// <summary>The steps of zfollow.</summary>
+    static string FollowUpDecides(string step)
+    {
+        const string id = @"USB\VID_057E&PID_0337\HMZAFOLLOW";
+        var claim = M(Ledger, "ClaimWinUsb");
+        object?[] args = claim.GetParameters().Length == 4
+            ? new object?[] { id, "", "", 7 }
+            : new object?[] { id, "", "", 7, 30_000 };
+        string ClaimValue()
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"{s_followPath}\Holders");
+            return k?.GetValueNames().FirstOrDefault(n => n.StartsWith($"{Environment.ProcessId}-", StringComparison.Ordinal)) is string h
+                ? $"{h}={k.GetValue(h)}" : "";
+        }
+        switch (step)
+        {
+            case "queue":
+            {
+                s_followPath = FakeEntry(id);
+                claim.Invoke(null, args);
+                string devnodes = AdminName("WinUsb");
+                using var locked = new ManualResetEventSlim();
+                s_followClaim = new ManualResetEventSlim();
+                var go = s_followClaim;
+                s_followHolder = new Thread(() =>
+                {
+                    using var m = new Mutex(false, devnodes);
+                    try { m.WaitOne(); } catch (AbandonedMutexException) { }
+                    locked.Set();
+                    go.Wait();
+                    try { claim.Invoke(null, args); }
+                    finally { m.ReleaseMutex(); }
+                }) { IsBackground = true };
+                s_followHolder.Start();
+                locked.Wait();
+                M(Ledger, "ReleaseAll").Invoke(null, null);
+                using var k = Registry.LocalMachine.OpenSubKey(s_followPath);
+                return $"OK zfollow kept={k != null}";
+            }
+            case "claim":
+            {
+                string before = ClaimValue();
+                s_followClaim!.Set();
+                bool done = s_followHolder!.Join(20_000);
+                s_followFresh = ClaimValue();
+                return done && s_followFresh.Length > 0 && s_followFresh != before
+                    ? "OK zfollow claimed" : $"ERR zfollow claim done={done} before={before} after={s_followFresh}";
+            }
+            case "check":
+            {
+                using var k = Registry.LocalMachine.OpenSubKey(s_followPath!);
+                return $"OK zfollow kept={k != null} fresh={k != null && ClaimValue() == s_followFresh}";
+            }
+            case "end":
+            {
+                try { Registry.LocalMachine.DeleteSubKeyTree(s_followPath!, throwOnMissingSubKey: false); } catch { }
+                var sw = Stopwatch.StartNew();
+                int n;
+                while ((n = Peer.CountThreads("HMWinUsbFollowUp")) > 0 && sw.ElapsedMilliseconds < 20_000) Thread.Sleep(100);
+                return $"OK zfollow threads={n} ms={sw.ElapsedMilliseconds}";
+            }
+            default:
+                return $"ERR zfollow {step}";
         }
     }
 }

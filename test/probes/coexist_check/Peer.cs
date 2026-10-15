@@ -966,7 +966,7 @@ internal static class Peer
     /// <summary>Threads of this process whose name starts with
     /// <paramref name="prefix"/>. The runtime gives a named managed thread
     /// that name as its thread description.</summary>
-    static int CountThreads(string prefix)
+    public static int CountThreads(string prefix)
     {
         int n = 0;
         using var self = Process.GetCurrentProcess();
