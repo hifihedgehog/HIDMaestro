@@ -73,21 +73,22 @@ internal static class UsbipBackend
             var server = UsbipServer.Current;
             if (server != null)
                 foreach (var device in server.SnapshotDevices()) own.Add(device.BusId);
+            // The port may be outside the SDK's range when the range was
+            // full (UsbipServer), so the match is on the port alone.
+            string service = currentPort.ToString();
             foreach (var row in VhciClient.GetImportedDevices())
-            {
-                if (!IsOurLocation(row.Host, row.Service)) continue;
-                if (row.Service == currentPort.ToString() && !own.Contains(row.BusId))
+                if (row.Host == "127.0.0.1" && row.Service == service && !own.Contains(row.BusId))
                     VhciClient.Detach(row.Port);
-            }
         }
         catch { /* best-effort recovery */ }
         DetachImportsOfDeadServers();
     }
 
-    /// <summary>Plug out every import in the SDK's port range whose server
-    /// no longer listens, and cancel the re-attach attempts of servers that
-    /// are gone. Covers programs of every version: a v1.12.0 server listens
-    /// the same way. This process's own port counts as gone for the
+    /// <summary>Plug out every import in the SDK's port range, or on a
+    /// port an owner record names, whose server no longer listens, and
+    /// cancel the re-attach attempts of servers that are gone. Covers
+    /// programs of every version: a v1.12.0 server listens the same way.
+    /// This process's own port counts as gone for the
     /// attempts, except for the bus ids its server exports: an attempt for
     /// one of those is its own controller coming back after a dropped
     /// connection, and any other was left by the program that held the
@@ -100,10 +101,10 @@ internal static class UsbipBackend
             view ??= new SweepView();
             var listening = view.Listening;
             int own = UsbipServer.Current?.Port ?? 0;
+            var recorded = RecordedPorts();
             foreach (var row in VhciClient.GetImportedDevices())
             {
-                if (!IsOurLocation(row.Host, row.Service)) continue;
-                int port = int.Parse(row.Service, System.Globalization.CultureInfo.InvariantCulture);
+                if (!IsOurLocation(row.Host, row.Service, recorded, out int port)) continue;
                 if (port == own || listening.Contains(port)) continue;
                 VhciClient.Detach(row.Port);
             }
@@ -136,7 +137,7 @@ internal static class UsbipBackend
         var list = new List<(int, string)>();
         foreach (var rec in MachineClaims.ReadAll())
         {
-            if ((deadOnly && rec.Live) || !IsOurPort(rec.UsbipPort)) continue;
+            if ((deadOnly && rec.Live) || rec.UsbipPort <= 0) continue;
             foreach (var c in rec.Controllers)
                 if (c.TransportIndex >= 0 && string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
                     list.Add((rec.UsbipPort, UsbipEmulatedDevice.BusIdFor(c.TransportIndex)));
@@ -363,9 +364,10 @@ internal static class UsbipBackend
             }
 
             if (!VhciClient.IsAvailable()) return;
+            var recorded = RecordedPorts();
             foreach (var row in VhciClient.GetImportedDevices())
             {
-                if (!IsOurLocation(row.Host, row.Service)) continue;
+                if (!IsOurLocation(row.Host, row.Service, recorded, out _)) continue;
                 VhciClient.Detach(row.Port);
             }
             VhciClient.StopAttachAttempts("127.0.0.1", AttemptLocations(_ => true, deadOnly: false));
@@ -373,8 +375,22 @@ internal static class UsbipBackend
         catch { /* best-effort: eviction must never throw out of a sweep */ }
     }
 
-    private static bool IsOurLocation(string host, string service) =>
-        host == "127.0.0.1" && int.TryParse(service, out int port) && IsOurPort(port);
+    /// <summary>A loopback import on the SDK's port range, or on a port an
+    /// owner record names: a server binds outside the range when every port
+    /// in it is taken, and its record carries the port (UsbipServer).</summary>
+    private static bool IsOurLocation(string host, string service, HashSet<int> recorded, out int port) =>
+        int.TryParse(service, out port) && host == "127.0.0.1" && (IsOurPort(port) || recorded.Contains(port));
+
+    /// <summary>The server ports every owner record names, this process's
+    /// own included.</summary>
+    private static HashSet<int> RecordedPorts()
+    {
+        var set = new HashSet<int>();
+        foreach (var rec in MachineClaims.ReadAll())
+            if (rec.UsbipPort > 0) set.Add(rec.UsbipPort);
+        if (UsbipServer.Current is { } server) set.Add(server.Port);
+        return set;
+    }
 
     private static bool IsOurPort(int port) =>
         port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange;

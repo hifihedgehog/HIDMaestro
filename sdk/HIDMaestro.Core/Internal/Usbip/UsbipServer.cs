@@ -89,10 +89,10 @@ internal sealed class UsbipServer : IDisposable
             // (SetUsbipPort), so a sweep matches this server's imports by the
             // recorded port, and a crash is recovered through the record's
             // port in DetachDeadImport, both the same way a range port is.
-            // The blind range walk in DetachImportsOfDeadServers does not
-            // reach a port outside the range, but that walk is only a
-            // belt for imports whose owner record is already gone, and the
-            // record-driven reclaim cancels this server's attempts first.
+            // The sweeps that walk the range take every port an owner
+            // record names as well. Only the bus ids a server before
+            // v1.13.0 canceled itself are tried on range ports alone, since
+            // such a server never binds outside the range.
             try
             {
                 var l = new TcpListener(IPAddress.Loopback, 0);

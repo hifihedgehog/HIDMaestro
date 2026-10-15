@@ -49,6 +49,12 @@
 //         drop that races the port tracker leaves, and binds WinUSB. The
 //         binding lands on its own adapter, and the other's keeps its
 //         driver.
+//      8. The probe holds the whole port range 18509 to 18524, so servers
+//         bind ports outside it. A program on this SDK keeps a composite
+//         running there, and another is killed with one there. The
+//         uninstall-grade cleanup cancels the killed program's attempt and
+//         detaches the running program's composite, both named only by
+//         their owner records.
 //    "--v-parts=<digits>" after the section letters runs only those parts.
 using System;
 using System.Collections.Generic;
@@ -86,6 +92,7 @@ internal static partial class Program
             if (VPart('5')) { VOwnReattach(touched); Clean(); }
             if (VPart('6')) { VListenerThatHolds(touched); Clean(); }
             if (VPart('7')) { VBindByLocation(touched); Clean(); }
+            if (VPart('8')) { VOutsideRange(touched); Clean(); }
         }
         finally
         {
@@ -494,6 +501,67 @@ internal static partial class Program
               Usb.Service(devA) ?? "none");
         Check($"V7: the other program's adapter keeps its driver {serviceB ?? "none"}", Usb.Service(devB) == serviceB,
               Usb.Service(devB) ?? "none");
+    }
+
+    // ── V8 ─────────────────────────────────────────────────────────────
+
+    static void VOutsideRange(HashSet<(int Port, string BusId)> touched)
+    {
+        var held = new List<System.Net.Sockets.TcpListener>();
+        try
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                try
+                {
+                    var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, UsbipBasePort + i);
+                    l.Start();
+                    held.Add(l);
+                }
+                catch (System.Net.Sockets.SocketException) { }
+            }
+            Check("V8: the probe holds the whole port range", held.Count == 16, $"{held.Count} of 16");
+            bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16);
+
+            // The running program creates first, so its own first-create
+            // sweep is done before the other program is killed.
+            using var b = PeerProcess.Start("V8-running");
+            string cb = b.Send("create composite -");
+            if (!Ok(cb)) { Check("V8: the running program creates a composite", false, cb); return; }
+            string busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
+            int portB = RecordUsbipPort(b.Pid);
+            touched.Add((portB, busB));
+            Check($"V8: the running program's server is on port {portB}, outside the range",
+                  Outside(portB) && Vhci.Imported().Any(r => r.Port == portB && r.BusId == busB));
+
+            int portA;
+            string busA;
+            using (var a = PeerProcess.Start("V8-killed"))
+            {
+                string c = a.Send("create composite -");
+                if (!Ok(c)) { Check("V8: the program to be killed creates a composite", false, c); return; }
+                busA = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
+                portA = RecordUsbipPort(a.Pid);
+                touched.Add((portA, busA));
+                Check($"V8: its server is on port {portA}, outside the range", Outside(portA));
+                a.Kill();
+            }
+            WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA), 10_000);
+
+            using (var e = PeerProcess.Start("V8-cleanup"))
+            {
+                string r = e.Send("everything");
+                Check("V8: another program removes everything", Ok(r), r);
+            }
+            int left = Vhci.Stop("127.0.0.1", portA, busA);
+            Check($"V8: the killed program's attempt for {portA}/{busA} is canceled", left == 0, $"{left} canceled by the probe");
+            Check($"V8: the running program's composite {portB}/{busB} is detached",
+                  WaitFor(() => !Vhci.Imported().Any(r => r.Port == portB && r.BusId == busB), 10_000));
+        }
+        finally
+        {
+            foreach (var l in held) l.Stop();
+        }
     }
 
     /// <summary>USB devnodes behind the usbip-win2 host controller.</summary>
