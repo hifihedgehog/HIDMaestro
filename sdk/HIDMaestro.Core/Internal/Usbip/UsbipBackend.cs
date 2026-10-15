@@ -44,7 +44,7 @@ internal static class UsbipBackend
         server.Register(device);
         try
         {
-            device.SetVhciPort(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
+            device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
             return new UsbipBackendHandle(server, device);
         }
         catch
@@ -395,6 +395,10 @@ internal sealed class UsbipBackendHandle : IDisposable
     /// <summary>The vhci port the device is on now, 0 while it is not
     /// attached.</summary>
     public int VhciPort => Device.VhciPort;
+
+    /// <summary>The loopback port of the server that exports the device.
+    /// With the device's bus id it is the import's location.</summary>
+    public int ServerPort => _server.Port;
     private int _disposed;
 
     internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device)

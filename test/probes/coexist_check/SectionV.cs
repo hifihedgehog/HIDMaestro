@@ -41,6 +41,11 @@
 //         killed program's record, the one thing naming those attempts.
 //         Once the listener is gone the next sweep cancels them and
 //         removes the record.
+//      7. Two programs each run a GameCube adapter. The first one's
+//         controller is given the other's vhci port, the stale value a
+//         drop that races the port tracker leaves, and binds WinUSB. The
+//         binding lands on its own adapter, and the other's keeps its
+//         driver.
 //    "--v-parts=<digits>" after the section letters runs only those parts.
 using System;
 using System.Collections.Generic;
@@ -77,6 +82,7 @@ internal static partial class Program
             if (VPart('4')) { VDroppedImport(touched); Clean(); }
             if (VPart('5')) { VOwnReattach(touched); Clean(); }
             if (VPart('6')) { VListenerThatHolds(touched); Clean(); }
+            if (VPart('7')) { VBindByLocation(touched); Clean(); }
         }
         finally
         {
@@ -430,6 +436,89 @@ internal static partial class Program
         Check("V6: once the listener is gone, the next sweep cancels every attempt the record names",
               Ok(r2) && left.All(n => n == 0), $"{string.Join(", ", left)} canceled by the probe, {dropped.ElapsedMilliseconds} ms after the drop");
         Check("V6: and removes the record", ownerId != null && !Native.OwnerRecords().ContainsKey(ownerId));
+    }
+
+    // ── V7 ─────────────────────────────────────────────────────────────
+
+    static void VBindByLocation(HashSet<(int Port, string BusId)> touched)
+    {
+        using var a = PeerProcess.Start("V7-binds");
+        using var b = PeerProcess.Start("V7-other");
+        string ca = a.Send("create gc -");
+        string cb = b.Send("create gc -");
+        if (!Ok(ca) || !Ok(cb)) { Check("V7: both programs create a GameCube adapter", false, $"{ca} / {cb}"); return; }
+        string busA = "1-" + (int.Parse(PeerProcess.Field(ca, "transport")!) + 1);
+        string busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
+        int portA = RecordUsbipPort(a.Pid), portB = RecordUsbipPort(b.Pid);
+        touched.Add((portA, busA));
+        touched.Add((portB, busB));
+        int vhciA = 0, vhciB = 0;
+        WaitFor(() =>
+        {
+            var rows = Vhci.Imported();
+            vhciA = rows.FirstOrDefault(r => r.Port == portA && r.BusId == busA).VhciPort;
+            vhciB = rows.FirstOrDefault(r => r.Port == portB && r.BusId == busB).VhciPort;
+            return vhciA > 0 && vhciB > 0;
+        }, 10_000);
+        string? devA = null, devB = null;
+        WaitFor(() => (devA = Usb.OnVhciPort(0x057E, 0x0337, vhciA)) != null && (devB = Usb.OnVhciPort(0x057E, 0x0337, vhciB)) != null, 15_000);
+        if (devA == null || devB == null) { Check("V7: both adapters enumerate", false, $"vhci {vhciA} {devA}, vhci {vhciB} {devB}"); return; }
+        string? serviceB = Usb.Service(devB);
+
+        string st = a.Send($"staleport {vhciB}");
+        Check($"V7: the first program's controller now names vhci port {vhciB}", st == $"OK staleport {vhciB}", st);
+        string bound = a.Send("bindwinusb", 60_000);
+        Check("V7: its BindWinUsb binds", bound == "OK bindwinusb Bound", bound);
+        Check("V7: WinUSB is on its own adapter",
+              WaitFor(() => string.Equals(Usb.Service(devA), "WinUSB", StringComparison.OrdinalIgnoreCase), 15_000),
+              Usb.Service(devA) ?? "none");
+        Check($"V7: the other program's adapter keeps its driver {serviceB ?? "none"}", Usb.Service(devB) == serviceB,
+              Usb.Service(devB) ?? "none");
+    }
+
+    /// <summary>USB devnodes behind the usbip-win2 host controller.</summary>
+    static class Usb
+    {
+        const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x1, CM_GETIDLIST_FILTER_PRESENT = 0x100;
+        const uint CM_DRP_SERVICE = 0x05, CM_DRP_ADDRESS = 0x1D;
+
+        /// <summary>The present device of a VID and PID on one vhci port.</summary>
+        public static string? OnVhciPort(ushort vid, ushort pid, int vhciPort)
+        {
+            string prefix = $@"USB\VID_{vid:X4}&PID_{pid:X4}\";
+            const uint flags = CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT;
+            if (CM_Get_Device_ID_List_SizeW(out uint len, "USB", flags) != 0 || len <= 1) return null;
+            var buf = new char[len];
+            if (CM_Get_Device_ID_ListW("USB", buf, len, flags) != 0) return null;
+            foreach (string id in new string(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!id.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (Native.CM_Locate_DevNodeW(out uint dev, id, 0) != 0) continue;
+                var b = new byte[4];
+                uint size = 4;
+                if (CM_Get_DevNode_Registry_PropertyW(dev, CM_DRP_ADDRESS, out _, b, ref size, 0) == 0
+                    && BitConverter.ToUInt32(b, 0) == (uint)vhciPort)
+                    return id;
+            }
+            return null;
+        }
+
+        /// <summary>The devnode's driver service, or null.</summary>
+        public static string? Service(string id)
+        {
+            if (Native.CM_Locate_DevNodeW(out uint dev, id, 0) != 0) return null;
+            var b = new byte[512];
+            uint size = (uint)b.Length;
+            if (CM_Get_DevNode_Registry_PropertyW(dev, CM_DRP_SERVICE, out _, b, ref size, 0) != 0) return null;
+            return Encoding.Unicode.GetString(b, 0, (int)size).TrimEnd('\0');
+        }
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        static extern uint CM_Get_Device_ID_List_SizeW(out uint len, string filter, uint flags);
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        static extern uint CM_Get_Device_ID_ListW(string filter, [Out] char[] buffer, uint len, uint flags);
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        static extern uint CM_Get_DevNode_Registry_PropertyW(uint dev, uint property, out uint type, byte[] buffer, ref uint size, uint flags);
     }
 
     /// <summary>A loopback listener that takes device-list requests and

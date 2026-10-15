@@ -267,7 +267,7 @@ internal sealed class UsbipServer : IDisposable
                         int port = VhciClient.FindLocation("127.0.0.1", _server.Port, device.BusId);
                         if (port > 0)
                         {
-                            if (device.IsClaimedBy(this)) device.SetVhciPort(port);
+                            device.SetVhciPortFor(this, port);
                             return;
                         }
                         Thread.Sleep(25);

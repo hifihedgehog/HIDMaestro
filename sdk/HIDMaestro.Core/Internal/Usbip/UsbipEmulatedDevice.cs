@@ -54,10 +54,29 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private int _vhciPort;
 
     /// <summary>Called with the new vhci port whenever it changes, for the
-    /// owner record.</summary>
+    /// owner record, under <see cref="_portLock"/>.</summary>
     internal Action<int>? VhciPortChanged { get; set; }
 
-    internal void SetVhciPort(int port)
+    // Every change of the vhci port, in memory and in the record, and the
+    // release of the connection on a drop, so a port found for an import
+    // is never written after the drop that ended it.
+    private readonly object _portLock = new();
+
+    /// <summary>The port the create's own attach returned, unless the
+    /// import has dropped already.</summary>
+    internal void SetVhciPortIfAttached(int port)
+    {
+        lock (_portLock) if (Volatile.Read(ref _connection) != null) SetVhciPortLocked(port);
+    }
+
+    /// <summary>The port the driver plugged <paramref name="connection"/>'s
+    /// import into, while that connection still holds the device.</summary>
+    internal void SetVhciPortFor(UsbipServer.Connection connection, int port)
+    {
+        lock (_portLock) if (Volatile.Read(ref _connection) == connection) SetVhciPortLocked(port);
+    }
+
+    private void SetVhciPortLocked(int port)
     {
         if (Interlocked.Exchange(ref _vhciPort, port) == port) return;
         try { VhciPortChanged?.Invoke(port); } catch { /* the record is best-effort */ }
@@ -286,12 +305,16 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     public void DetachConnection(UsbipServer.Connection connection)
     {
-        // The import is gone with its connection. Cleared before the
-        // device is released, so the next import's port is never
-        // overwritten.
-        if (IsClaimedBy(connection)) SetVhciPort(0);
-        if (Interlocked.CompareExchange(ref _connection, null, connection) != connection)
-            return; // a different connection owns the device
+        // The import is gone with its connection. Cleared and released
+        // under one lock, so neither the next import's port nor this one's
+        // is ever overwritten by the other.
+        lock (_portLock)
+        {
+            if (Volatile.Read(ref _connection) != connection)
+                return; // a different connection owns the device
+            SetVhciPortLocked(0);
+            Interlocked.Exchange(ref _connection, null);
+        }
         Audio.Clear();
         lock (_hidLock)
         {

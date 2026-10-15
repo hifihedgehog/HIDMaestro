@@ -8,6 +8,7 @@
 //   create pad <pid> <key|->    a custom gamepad, VID BEEF and this PID
 //   create xbox - <key|->       xbox-360-wired
 //   create composite - <key|->  dualsense-composite (USB/IP)
+//   create gc - <key|->         gamecube-adapter (USB/IP)
 //   createat <slot> <kind> <pid|->  CreateControllerAt(slot, profile), the
 //                               same kinds as create, no identity key
 //   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
@@ -37,6 +38,10 @@
 //   alive                       reply, to show the program still runs
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
+//   staleport <n>               set the last controller's remembered vhci
+//                               port to <n>, the value a drop that races
+//                               the port tracker leaves
+//   bindwinusb                  the last controller's BindWinUsb
 //   exports <port>              what the SDK's sweep reads a USB/IP
 //                               server on <port> to export, through its
 //                               internal UsbipBackend.ExportedBusIds:
@@ -198,6 +203,27 @@ internal static class Peer
                     case "alive":
                         Reply("OK alive");
                         break;
+                    case "staleport":
+                    {
+                        HMController? last;
+                        lock (s_live) last = s_live.Count > 0 ? s_live[^1] : null;
+                        object? handle = last?.GetType().GetProperty("UsbipHandle", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(last);
+                        object? device = handle?.GetType().GetProperty("Device")?.GetValue(handle);
+                        var field = device?.GetType().GetField("_vhciPort", BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (field == null) { Reply("ERR staleport no device"); break; }
+                        field.SetValue(device, int.Parse(a[1], CultureInfo.InvariantCulture));
+                        Reply($"OK staleport {a[1]}");
+                        break;
+                    }
+                    case "bindwinusb":
+                    {
+                        HMController? last;
+                        lock (s_live) last = s_live.Count > 0 ? s_live[^1] : null;
+                        var m = last?.GetType().GetMethod("BindWinUsb", Type.EmptyTypes);
+                        if (m == null) { Reply("ERR bindwinusb no method"); break; }
+                        Reply($"OK bindwinusb {m.Invoke(last, null)}");
+                        break;
+                    }
                     case "exports":
                     {
                         var m = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipBackend")
@@ -247,6 +273,7 @@ internal static class Peer
         "pad" => Pad(Convert.ToUInt16(pid, 16)),
         "xbox" => ctx.GetProfile("xbox-360-wired")!,
         "composite" => ctx.GetProfile("dualsense-composite")!,
+        "gc" => ctx.GetProfile("gamecube-adapter")!,
         _ => throw new ArgumentException(kind),
     };
 

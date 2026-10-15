@@ -166,9 +166,9 @@ DeviceName = ""{deviceName}""
         var package = PackageFor(controller.Profile.Inner, d)
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' declares no usbConfiguration.winUsb, so its device takes no WinUSB binding.");
-        string instanceId = WaitForDevnode(handle.VhciPort, d.VendorId, d.ProductId, TimeoutScale.Apply(10_000))
+        string instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, TimeoutScale.Apply(10_000))
             ?? throw new InvalidOperationException(
-                $"The device on vhci port {handle.VhciPort} did not appear within 10 s.");
+                $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not appear within 10 s.");
         WaitInstalled(instanceId, TimeoutScale.Apply(10_000));
 
         // The package goes into the driver store first, under this lock
@@ -373,13 +373,23 @@ DeviceName = ""{deviceName}""
         return null;
     }
 
-    private static string? WaitForDevnode(int vhciPort, ushort vendorId, ushort productId, int timeoutMs)
+    /// <summary>The devnode of the controller's own import. A vhci port
+    /// number names whatever device holds the port now, so the port comes
+    /// from the import's location, 127.0.0.1, the server's port and the bus
+    /// id, and the location must still be on that port once the devnode is
+    /// found: another program's device of the same VID and PID can take a
+    /// port the controller's import has just left.</summary>
+    private static string? WaitForDevnode(Usbip.UsbipBackendHandle handle, ushort vendorId, ushort productId, int timeoutMs)
     {
         var until = Environment.TickCount64 + timeoutMs;
         while (true)
         {
-            string? id = FindDevnode(vhciPort, vendorId, productId);
-            if (id != null || Environment.TickCount64 >= until) return id;
+            int port = Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId);
+            if (port > 0
+                && FindDevnode(port, vendorId, productId) is { } id
+                && Usbip.VhciClient.FindLocation("127.0.0.1", handle.ServerPort, handle.Device.BusId) == port)
+                return id;
+            if (Environment.TickCount64 >= until) return null;
             Thread.Sleep(20);
         }
     }
