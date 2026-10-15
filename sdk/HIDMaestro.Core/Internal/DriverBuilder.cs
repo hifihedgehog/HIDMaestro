@@ -439,7 +439,7 @@ public static class DriverBuilder
     /// deploy lock, like <see cref="SignDrivers"/>. It catalogs the binaries
     /// <see cref="SignDrivers"/> signed in this process when they are still
     /// in place, and otherwise stages and signs the package first, so the
-    /// catalogs always hash signed binaries. Until v1.13.0 it catalogued
+    /// catalogs always hash signed binaries. Until v1.13.0 it cataloged
     /// whatever package an earlier call in the process had staged, signed or
     /// not.</summary>
     /// <returns>Always true. A failure throws.</returns>
