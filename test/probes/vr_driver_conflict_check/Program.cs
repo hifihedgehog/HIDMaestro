@@ -67,6 +67,7 @@ internal static class Program
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
         RepairLeftoverHint();
+        RepairLeftoverGate();
         string root = Path.Combine(Path.GetTempPath(), "hm-vr-conflict-" + Guid.NewGuid().ToString("N"));
         string? saved = Environment.GetEnvironmentVariable("VR_PATHREG_OVERRIDE");
         try
@@ -112,6 +113,24 @@ internal static class Program
         k!.DeleteValue("SteamVRPath", throwOnMissingValue: false);
         Console.WriteLine($"  removed the SteamVRPath hint a killed run left at {hint}");
     }
+
+    /// <summary>A run killed inside the unregister section leaves its marker
+    /// in the HKLM gate and loses the real hash. Remove the marker: the next
+    /// registration extracts the payload again and writes the hash back.</summary>
+    static void RepairLeftoverGate()
+    {
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestro", writable: IsAdmin());
+        if (k?.GetValue("InstalledVrManifestSha256") as string != UnregisterMarker) return;
+        if (!IsAdmin())
+        {
+            Console.WriteLine("  a killed run left its marker in the InstalledVrManifestSha256 gate. Run elevated to remove it.");
+            return;
+        }
+        k!.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
+        Console.WriteLine("  removed the gate marker a killed run left");
+    }
+
+    const string UnregisterMarker = "S68-unregister-gate";
 
     static bool IsAdmin() => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
@@ -362,6 +381,7 @@ internal static class Program
             return;
         }
         PlantedTool(root);
+        UnregisterFailure(root, elevation == TokenElevationTypeFull);
         if (elevation == TokenElevationTypeFull)
         {
             UserRights(root);
@@ -369,6 +389,77 @@ internal static class Program
         }
         else
             Console.WriteLine("  the token is not split (elevation type " + elevation + "): the SDK writes as is, user-rights checks do not apply");
+    }
+
+    /// <summary>HMVR.UnregisterDriver throws InvalidOperationException when
+    /// the registry cannot be updated, and the HKLM idempotence gate stays
+    /// set while the entry is still registered. Two refusals: a registry file
+    /// another handle holds open exclusively, and, for the elevated half of a
+    /// split token, one in a folder only administrators can read (the write
+    /// runs as the user). A clean removal still clears the gate.</summary>
+    static void UnregisterFailure(string root, bool splitToken)
+    {
+        const string Key = @"SOFTWARE\HIDMaestro";
+        const string Gate = "InstalledVrManifestSha256";
+        const string Marker = UnregisterMarker;
+        using var k = Registry.LocalMachine.CreateSubKey(Key);
+        object? savedGate = k.GetValue(Gate);
+        byte[] seed = Apply(null, "adddriver", ExtractRoot) ?? Array.Empty<byte>();
+        try
+        {
+            string held = Path.Combine(root, "unreg-held", "openvrpaths.vrpath");
+            Directory.CreateDirectory(Path.GetDirectoryName(held)!);
+            File.WriteAllBytes(held, seed);
+            Environment.SetEnvironmentVariable("VR_PATHREG_OVERRIDE", held);
+            k.SetValue(Gate, Marker);
+            using (new FileStream(held, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                UnregisterRefused("a registry file another handle holds open", k, Gate, Marker);
+            Check("and the entry is still registered", File.ReadAllBytes(held).AsSpan().SequenceEqual(seed));
+
+            if (splitToken)
+            {
+                var locked = new DirectoryInfo(Path.Combine(root, "unreg-admins-only"));
+                var sec = new DirectorySecurity();
+                sec.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+                locked.Create(sec);
+                string lockedFile = Path.Combine(locked.FullName, "openvrpaths.vrpath");
+                File.WriteAllBytes(lockedFile, seed);
+                Environment.SetEnvironmentVariable("VR_PATHREG_OVERRIDE", lockedFile);
+                k.SetValue(Gate, Marker);
+                UnregisterRefused("a registry in a folder only administrators can read", k, Gate, Marker);
+                Check("and the entry is still registered", File.ReadAllBytes(lockedFile).AsSpan().SequenceEqual(seed));
+            }
+
+            string clean = Path.Combine(root, "unreg-clean", "openvrpaths.vrpath");
+            Directory.CreateDirectory(Path.GetDirectoryName(clean)!);
+            File.WriteAllBytes(clean, seed);
+            Environment.SetEnvironmentVariable("VR_PATHREG_OVERRIDE", clean);
+            k.SetValue(Gate, Marker);
+            string detail = "";
+            try { HMVR.UnregisterDriver(); }
+            catch (Exception e) { detail = e.GetType().Name + ": " + e.Message; }
+            Check("a removal that succeeds returns", detail.Length == 0, detail);
+            var listed = Internal("ExternalDrivers")?.Invoke(null, null) as List<string>;
+            Check("and takes the entry out of the registry",
+                  listed != null && !listed.Contains(ExtractRoot, StringComparer.Ordinal), listed == null ? "ExternalDrivers missing" : "");
+            Check("and clears the gate", k.GetValue(Gate) == null, k.GetValue(Gate)?.ToString() ?? "");
+        }
+        finally
+        {
+            if (savedGate != null) k.SetValue(Gate, savedGate); else k.DeleteValue(Gate, throwOnMissingValue: false);
+        }
+        Check("the HKLM gate is back as it was", Equals(k.GetValue(Gate), savedGate));
+    }
+
+    static void UnregisterRefused(string what, RegistryKey k, string gate, string marker)
+    {
+        string outcome = "returned normally";
+        bool threw = false;
+        try { HMVR.UnregisterDriver(); }
+        catch (InvalidOperationException) { threw = true; outcome = ""; }
+        catch (Exception e) { outcome = e.GetType().Name + ": " + e.Message; }
+        Check($"UnregisterDriver throws InvalidOperationException for {what}", threw, outcome);
+        Check("and the gate stays set", Equals(k.GetValue(gate), marker), k.GetValue(gate)?.ToString() ?? "(cleared)");
     }
 
     /// <summary>Discovery pointed at a SteamVR folder whose vrpathreg.exe is

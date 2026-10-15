@@ -240,14 +240,17 @@ internal static class VrDriverBuilder
         catch { return ""; }
     }
 
-    /// <summary>Unregister and clear the gate. Used by cleanup paths and
-    /// the smoke probe's teardown. The entry is removed from the user's path
-    /// registry whether or not SteamVR or the extracted folder is still
-    /// there, since a registration left behind is the thing to remove.</summary>
+    /// <summary>Remove the driver from the user's OpenVR path registry, then
+    /// clear the idempotence gate so the next <see cref="EnsureDriverRegistered"/>
+    /// extracts the payload again. The entry is removed whether or not
+    /// SteamVR or the extracted folder is still there, since a registration
+    /// left behind is the thing to remove. A registry that cannot be updated
+    /// throws InvalidOperationException before the gate is touched: the entry
+    /// is still registered, so the extraction and the gate that describes it
+    /// stay as they were.</summary>
     public static void UnregisterDriver()
     {
-        try { OpenVrPathRegistry.RemoveDriver(ExtractRoot); }
-        catch { /* best-effort: a missing registration is the goal state */ }
+        OpenVrPathRegistry.RemoveDriver(ExtractRoot);
         using var k = Registry.LocalMachine.CreateSubKey(RegKeyPath);
         k.DeleteValue(VrManifestRegValue, throwOnMissingValue: false);
     }
