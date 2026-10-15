@@ -328,25 +328,186 @@ public static partial class DeviceManager
     /// Waits for a device instance to be fully removed.
     /// Returns true when gone, false on timeout.
     /// </summary>
-    public static bool WaitForDeviceRemoval(string instanceId, int timeoutMs = 5000)
-    {
-        static bool Gone(string id) => CM_Locate_DevNodeW(out uint _, id, 0) != CR_SUCCESS;
-        if (Gone(instanceId))
-            return true;
+    public static bool WaitForDeviceRemoval(string instanceId, int timeoutMs = 5000) =>
+        WaitForDeviceRemoval(instanceId, uninstalls: false, timeoutMs);
 
-        bool removed = false;
-        using var signal = new AutoResetEvent(false);
-        CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
+    /// <summary>Waits until the removal of <paramref name="instanceId"/>
+    /// passes <see cref="RemovalComplete"/>. <paramref name="uninstalls"/>
+    /// says whether the removal deletes the instance's records. True when it
+    /// passed, false on timeout.</summary>
+    internal static bool WaitForDeviceRemoval(string instanceId, bool uninstalls, int timeoutMs)
+    {
+        using var watch = RemovalWatch.Start(instanceId);
+        return watch.Wait(uninstalls, timeoutMs);
+    }
+
+    // ── The removal test and the registration gate ──
+
+    const uint CM_LOCATE_DEVNODE_NORMAL = 0x00000000;
+
+    /// <summary>Stand-ins for the PnP calls the removal test and the
+    /// registration gate make, in the hook style of
+    /// <see cref="DeviceOrchestrator.BeforeInputMapping"/>. <see cref="LocateHook"/>
+    /// answers CM_Locate_DevNodeW (instance id and flags to a CONFIGRET),
+    /// <see cref="RemovedHook"/> registers for an instance's
+    /// DEVICEINSTANCEREMOVED notification (the instance id and the action to
+    /// run when it is delivered, to a registration to dispose, or null when
+    /// it is refused), and <see cref="InstallQueueHook"/> answers
+    /// CMP_WaitNoPendingInstallEvents (a timeout to a WAIT_ code).
+    /// pnp_notify_check's offline part sets them to feed a recorded sequence.
+    /// Null outside that test.</summary>
+    internal static Func<string, uint, uint>? LocateHook;
+    /// <inheritdoc cref="LocateHook"/>
+    internal static Func<string, Action, IDisposable?>? RemovedHook;
+    /// <inheritdoc cref="LocateHook"/>
+    internal static Func<uint, uint>? InstallQueueHook;
+
+    static uint Locate(string instanceId, uint flags) =>
+        LocateHook?.Invoke(instanceId, flags) ?? CM_Locate_DevNodeW(out _, instanceId, flags);
+
+    /// <summary>What a removal wait has seen of one instance id.</summary>
+    internal readonly struct RemovalObservation
+    {
+        /// <summary>The devnode was in the device tree when the wait had
+        /// registered for its REMOVED notification.</summary>
+        public readonly bool PresentAtStart;
+        /// <summary>Windows accepted that registration.</summary>
+        public readonly bool Registered;
+        /// <summary>The DEVICEINSTANCEREMOVED notification has arrived.</summary>
+        public readonly bool RemovedDelivered;
+        /// <summary>A CM_LOCATE_DEVNODE_NORMAL locate finds it.</summary>
+        public readonly bool InTree;
+        /// <summary>A CM_LOCATE_DEVNODE_PHANTOM locate finds it: in the tree,
+        /// or a nonpresent device whose records remain.</summary>
+        public readonly bool Record;
+
+        public RemovalObservation(bool presentAtStart, bool registered, bool removedDelivered, bool inTree, bool record)
         {
-            if (action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED)
+            PresentAtStart = presentAtStart;
+            Registered = registered;
+            RemovedDelivered = removedDelivered;
+            InTree = inTree;
+            Record = record;
+        }
+    }
+
+    /// <summary>Whether a removal is complete by what
+    /// <paramref name="o"/> has seen.</summary>
+    internal static bool RemovalComplete(in RemovalObservation o, bool uninstalls) =>
+        o.RemovedDelivered || !o.InTree;
+
+    /// <summary>One instance's removal test. Registered for the instance's
+    /// DEVICEINSTANCEREMOVED notification before it first looks at the
+    /// instance, so a removal that ends between the two still reaches the
+    /// callback.</summary>
+    internal sealed class RemovalWatch : IDisposable
+    {
+        private readonly string _id;
+        private readonly AutoResetEvent _signal = new(false);
+        private GCHandle _keep;
+        private IntPtr _registration;
+        private IDisposable? _hooked;
+        private int _removed;
+        private bool _disposed;
+
+        internal bool PresentAtStart { get; private set; }
+        internal bool Registered { get; }
+
+        private RemovalWatch(string instanceId)
+        {
+            _id = instanceId;
+            if (RemovedHook is { } hook)
             {
-                Volatile.Write(ref removed, true);
-                signal.Set();
+                _hooked = hook(instanceId, OnRemoved);
+                Registered = _hooked != null;
+                return;
             }
-            return 0u;
-        };
-        return WithNotification(cb => RegisterInstanceEvents(instanceId, cb), callback,
-            () => WaitUntil(() => Volatile.Read(ref removed) || Gone(instanceId), signal, timeoutMs));
+            CM_NOTIFY_CALLBACK callback = (hNotify, context, action, data, size) =>
+            {
+                if (action == CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED) OnRemoved();
+                return 0u;
+            };
+            _keep = GCHandle.Alloc(callback);
+            _registration = RegisterInstanceEvents(instanceId, GCHandle.ToIntPtr(_keep));
+            Registered = _registration != IntPtr.Zero;
+        }
+
+        /// <summary>Register for <paramref name="instanceId"/>'s REMOVED
+        /// notification, then note whether it is in the device tree.</summary>
+        internal static RemovalWatch Start(string instanceId)
+        {
+            var watch = new RemovalWatch(instanceId);
+            try { watch.PresentAtStart = Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS; }
+            catch
+            {
+                watch.Dispose();
+                throw;
+            }
+            return watch;
+        }
+
+        private void OnRemoved()
+        {
+            Volatile.Write(ref _removed, 1);
+            try { _signal.Set(); }
+            catch (ObjectDisposedException) { }
+        }
+
+        internal RemovalObservation Observe() => new(
+            PresentAtStart, Registered, Volatile.Read(ref _removed) != 0,
+            inTree: Locate(_id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS,
+            record: Locate(_id, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS);
+
+        internal bool IsComplete(bool uninstalls) => RemovalComplete(Observe(), uninstalls);
+
+        /// <summary>Waits until <see cref="IsComplete"/>, checking at once,
+        /// on the notification, and every <see cref="RecheckMs"/>. False when
+        /// the scaled budget runs out first.</summary>
+        internal bool Wait(bool uninstalls, int timeoutMs) =>
+            WaitUntil(() => IsComplete(uninstalls), _signal, timeoutMs);
+
+        /// <summary>CM_Unregister_Notification "waits for pending callbacks
+        /// to finish" (Microsoft Learn), so the callback's handle is freed
+        /// only after it.</summary>
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_registration != IntPtr.Zero) CM_Unregister_Notification(_registration);
+            _hooked?.Dispose();
+            if (_keep.IsAllocated) _keep.Free();
+            _signal.Dispose();
+        }
+    }
+
+    /// <summary>What the registration gate decided.</summary>
+    internal enum RegistrationGate
+    {
+        /// <summary>Register now.</summary>
+        Allowed,
+        /// <summary>Register now. Windows still had device installs pending
+        /// when the gate's bounded wait for them ended.</summary>
+        AllowedInstallsPending,
+        /// <summary>Do not register.</summary>
+        Refused,
+    }
+
+    /// <summary>How long the gate waits for Windows to have no device
+    /// install pending.</summary>
+    internal const int InstallQueueWaitMs = 30_000;
+
+    /// <summary>The gate a fixed instance id passes before it is registered
+    /// again. <paramref name="removePriorLife"/> removes a record the id
+    /// still has and returns false to refuse the registration instead.</summary>
+    internal static RegistrationGate AwaitRegistrationGate(string instanceId, Func<bool> removePriorLife,
+                                                           int timeoutMs, int installWaitMs)
+    {
+        if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
+            || Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
+        {
+            if (!removePriorLife()) return RegistrationGate.Refused;
+        }
+        return RegistrationGate.Allowed;
     }
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──

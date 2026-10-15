@@ -131,16 +131,19 @@ internal static partial class DeviceNodeCreator
         // is a hard stop, because claiming it would mutate a foreign device
         // (issue #28).
         string instId = $@"ROOT\{enumerator}\{identity.Token}";
-        if (CM_Locate_DevNodeW(out _, instId, 0) == 0 || CM_Locate_DevNodeW(out _, instId, 1) == 0)
+        var gate = DeviceManager.AwaitRegistrationGate(instId, () =>
         {
             if (!DeviceManager.IsHidMaestroOwned(instId))
             {
                 DeviceOrchestrator.LogDiag($"      {instId} exists and is not HIDMaestro-owned; refusing to claim it");
-                return new Result(false, null);
+                return false;
             }
             DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
             DeviceManager.RemoveDevice(instId, timeoutMs: 120_000, forceFallbacks: true);
-        }
+            return true;
+        }, timeoutMs: 120_000, installWaitMs: DeviceManager.InstallQueueWaitMs);
+        if (gate == DeviceManager.RegistrationGate.Refused)
+            return new Result(false, null);
 
         // No second parent on this prefix, ever. See the helper for why a
         // failure here has to stop the create rather than be logged past.

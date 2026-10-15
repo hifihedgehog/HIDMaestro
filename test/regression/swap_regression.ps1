@@ -1923,8 +1923,14 @@ function Scenario-Json-Parity {
 # S77: PnP notifications reach the SDK's create and dispose waits. Without
 # them every wait still finishes, on its 50 ms re-checks, so only the count
 # taken inside the SDK's callback shows they arrive. The count is split by
-# filter kind so the device-interface filter is checked on its own.
+# filter kind so the device-interface filter is checked on its own. First,
+# with no device, the removal test and the registration gate get recorded
+# sequences through the SDK's hooks: a removal is complete, and its id may
+# be registered again, only after the REMOVED notification and the PHANTOM
+# record's removal, and no locate cancels a removal.
 function Scenario-Pnp-Notify {
+    Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                 -Message 'the removal test or the registration gate answered before a removal was complete (see probe stdout)'
     Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' `
                  -Message 'PnP notifications stopped reaching the SDK''s waits (see probe stdout)' -SkipCodes 2
 }
