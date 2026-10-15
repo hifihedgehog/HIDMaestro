@@ -765,7 +765,12 @@ internal static class VendorBlobCodec
                     var pressed = new List<string>();
                     for (int i = 0; i < field.Buttons.Count; i++)
                     {
-                        if (((buffer[f.B] >> (f.BitLo + i)) & 1) != 0
+                        // The mask can span bytes, as the encoder writes it
+                        // (a 64-bit Valve mask). A bit past a short host
+                        // write reads as released.
+                        int bit = f.BitLo + i;
+                        int at = f.B + (bit >> 3);
+                        if (at < buffer.Length && ((buffer[at] >> (bit & 7)) & 1) != 0
                             && !string.IsNullOrEmpty(field.Buttons[i])
                             && field.Buttons[i] != "_")
                         {

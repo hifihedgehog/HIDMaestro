@@ -90,6 +90,7 @@ internal static class Program
 
         CheckCatalogCompiles(ctx);
         CheckMalformedRefused(ctx);
+        CheckWideMaskDecodes();
         if (offline) return Probe.Finish("S79");
         CheckCreateRefusedFirst(ctx);
 
@@ -389,6 +390,34 @@ internal static class Program
     };
 
     const string WideMask = """{"byte":1,"bits":"0-15","type":"button-mask","semantic":"held","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","LeftStick","RightStick","Guide","_","_","_","_","_"]}""";
+
+    delegate (System.Collections.Generic.Dictionary<string, object> Fields, bool CrcValid) DecodeFn(
+        HIDMaestro.Internal.ExtendedReportSpec spec, ReadOnlySpan<byte> buffer);
+
+    /// <summary>An output button mask wider than a byte decodes every bit it
+    /// declares, the bits past the first byte included.</summary>
+    static void CheckWideMaskDecodes()
+    {
+        var method = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.VendorBlobCodec")?.GetMethod("Decode", Any | BindingFlags.Static);
+        if (method == null)
+        {
+            Probe.Check("a 16-bit output button mask decodes bits 8 to 15", false, "VendorBlobCodec.Decode is absent");
+            return;
+        }
+        var decode = (DecodeFn)method.CreateDelegate(typeof(DecodeFn));
+        var spec = new HIDMaestro.Internal.ExtendedReportSpec
+        {
+            ReportId = "0x11",
+            Size = 4,
+            Fields = { System.Text.Json.JsonSerializer.Deserialize<HIDMaestro.Internal.FieldSpec>(WideMask)! },
+        };
+        // A and Start in the first byte, LeftStick, RightStick and Guide in
+        // the second.
+        var (fields, _) = decode(spec, new byte[] { 0x11, 0x81, 0x07, 0x00 });
+        var held = fields.TryGetValue("held", out var v) && v is System.Collections.Generic.List<string> l ? l : new();
+        Probe.Check("a 16-bit output button mask decodes bits 8 to 15",
+            string.Join(",", held) == "A,Start,LeftStick,RightStick,Guide", string.Join(",", held));
+    }
 
     /// <summary>CreateController refuses a malformed profile before it
     /// claims anything: no claim pipe, no owner record and no devnode
