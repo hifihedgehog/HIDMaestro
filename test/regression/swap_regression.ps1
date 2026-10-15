@@ -1868,8 +1868,9 @@ function Scenario-Coexistence {
 # and a staged file with the right length but the wrong bytes is replaced
 # from the embedded copy. Section I of the coexistence probe, then its
 # offline checks: whether a directory may be reset where it is, the refusal
-# of one that may not be and cannot move, the pin's opens and holds, and the
-# deploy's tools running from held files.
+# of one that may not be and cannot move, T6 at timeout scales 1, 1.5 and
+# 2, the pin's opens and holds, and the deploy's tools running from held
+# files.
 function Scenario-Protected-Staging {
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2

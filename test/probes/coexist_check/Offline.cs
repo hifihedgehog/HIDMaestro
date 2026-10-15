@@ -8,6 +8,10 @@
 //        every folder an elevated program creates under it inherits,
 //        v1.12.0's %ProgramData%\HIDMaestro included, which grants Users
 //        create and write but no other principal the right to change it.
+//   OF3  T6 at HIDMAESTRO_TIMEOUT_SCALE 1, 1.5 and 2: a peer at each scale
+//        runs a tool whose child holds the output for 15 s scaled, and the
+//        tool runner returns at its 10 s drain bound scaled, with the output
+//        still open and the tool's exit code.
 //   OF4  The refusal. A directory this process's user owns, with a file
 //        under it held open so it cannot be moved aside, goes through the
 //        repair the shared root takes (ProtectedStaging.EnsureProtected,
@@ -64,6 +68,12 @@ internal static partial class Program
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             bool pdAllowed = (bool)allowed.Invoke(null, new object[] { programData })!;
             Check("OF2: %ProgramData%, owned by SYSTEM with the DACL its folders inherit, may", pdAllowed, programData);
+        }
+        foreach (string scale in new[] { "1", "1.5", "2" })
+        {
+            using var p = PeerProcess.Start("OF3-" + scale, timeoutScale: scale);
+            string h = p.Send("runtool beyond", 180_000);
+            Check($"OF3: at timeout scale {scale}, the tool runner returns at its drain bound, not when the child lets go", HeldForDrainBound(h), h);
         }
         OfflineRefusal();
         OfflinePinShape();

@@ -1506,17 +1506,27 @@ internal static partial class Program
         using var p = PeerProcess.Start("T5");
         string r = p.Send("runtool");
         Check("T5: the tool runner returns a tool's output to its last line", PeerProcess.Field(r, "last") == "yes", r);
-        // T6. The same child holding the output 5 s past the runner's drain
-        // bound, both as the peer scales them (HIDMAESTRO_TIMEOUT_SCALE): the
-        // runner gives up on the output at the bound, says so, and keeps the
-        // tool's exit code, so the deploy lock is not held until the child
-        // ends.
+        // T6. The same child holding the output for 15 s against the
+        // runner's 10 s drain bound, both as the peer scales them
+        // (HIDMAESTRO_TIMEOUT_SCALE): the runner gives up on the output at
+        // the bound, says so, and keeps the tool's exit code, so the deploy
+        // lock is not held until the child ends. The offline mode runs the
+        // same check at scales 1, 1.5 and 2 (OF3).
         string h = p.Send("runtool beyond", 180_000);
-        int ms = int.TryParse(PeerProcess.Field(h, "ms"), out int v) ? v : -1;
-        int drain = int.TryParse(PeerProcess.Field(h, "drain"), out int d) ? d : -1;
         Check("T6: a child that keeps the tool's output open holds the runner for the drain bound, not until it ends",
-              drain > 0 && PeerProcess.Field(h, "open") == "yes" && PeerProcess.Field(h, "exit") == "0"
-              && ms >= drain - 1_000 && ms < drain + 4_000, h);
+              HeldForDrainBound(h), h);
+    }
+
+    /// <summary>A "runtool beyond" reply in which the runner returned at its
+    /// drain bound with the output still open and the tool's exit code,
+    /// short of the child's hold by more than a second.</summary>
+    static bool HeldForDrainBound(string reply)
+    {
+        int ms = int.TryParse(PeerProcess.Field(reply, "ms"), out int v) ? v : -1;
+        int drain = int.TryParse(PeerProcess.Field(reply, "drain"), out int d) ? d : -1;
+        int hold = int.TryParse(PeerProcess.Field(reply, "hold"), out int x) ? x : -1;
+        return drain > 0 && hold > drain && PeerProcess.Field(reply, "open") == "yes" && PeerProcess.Field(reply, "exit") == "0"
+               && ms >= drain - 1_000 && ms < hold - 1_000;
     }
 
     static void SectionT1()

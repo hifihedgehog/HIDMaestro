@@ -38,8 +38,10 @@ internal sealed class PeerProcess : IDisposable
         _p.BeginErrorReadLine();
     }
 
-    /// <summary>Start a peer and wait for its ready line.</summary>
-    public static PeerProcess Start(string name, string? legacyVersion = null)
+    /// <summary>Start a peer and wait for its ready line. A
+    /// <paramref name="timeoutScale"/> is the peer's
+    /// HIDMAESTRO_TIMEOUT_SCALE, which otherwise it inherits.</summary>
+    public static PeerProcess Start(string name, string? legacyVersion = null, string? timeoutScale = null)
     {
         string self = Environment.ProcessPath!;
         string exe = legacyVersion == null
@@ -55,6 +57,7 @@ internal sealed class PeerProcess : IDisposable
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(exe)!,
         };
+        if (timeoutScale != null) psi.Environment["HIDMAESTRO_TIMEOUT_SCALE"] = timeoutScale;
         var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {exe}");
         var peer = new PeerProcess(name, p);
         string ready = peer.Read(30_000);
