@@ -134,6 +134,27 @@ internal static partial class Program
         finally { sq.Dispose(); }
         Check("X6: nothing the squatter made is left",
               names.All(n => Native.OpenEventW(Native.SYNCHRONIZE, false, n) == IntPtr.Zero));
+        Clean();
+
+        // Every index squatted: the create is refused, and the refusal names
+        // the cause the allocator found, not running programs or devices.
+        const int all = 4096;
+        var every = new List<string>(all);
+        for (int i = 0; i < all; i++) every.Add($@"Global\HIDMaestroInputEvent{i}");
+        sq = new Squatter(s => { foreach (var n in every) s.Event(n); });
+        try
+        {
+            int made = every.Count(sq.Holds);
+            Check($"X6: a program that is not elevated squats the input event of all {all} indices", made == all, $"{made} of {all}");
+            using var p = PeerProcess.Start("X6-all");
+            p.Send("install");
+            string c = p.Send("create pad F0E9 -");
+            Check("X6: with every index squatted the create is refused, and the refusal names the squatted objects",
+                  !Ok(c) && c.Contains($"{all} carry a Global") && c.Contains("owned by neither SYSTEM nor Administrators"), c);
+        }
+        finally { sq.Dispose(); }
+        Check("X6: nothing the squatter made is left",
+              every.All(n => Native.OpenEventW(Native.SYNCHRONIZE, false, n) == IntPtr.Zero));
     }
 
     /// <summary>The owner of the objects HIDMaestro creates, under the
@@ -143,28 +164,45 @@ internal static partial class Program
     /// lock then read as HIDMaestro's own and not a squatter's.</summary>
     static void SectionX5()
     {
-        // The DACL the SDK's sections and events carry, with and without the
-        // owner it now also sets.
-        const string dacl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
+        // The descriptors the SDK under test creates its objects with, read
+        // from its own constants, so a descriptor that lost its O:BA fails.
+        var descriptors = new (string Type, string Field)[]
+        {
+            ("SharedMemoryIO", "Sddl"), ("SharedMemoryIO", "OwnerPipeSddl"), ("MachineClaims", "ClaimSddl"),
+            ("LedgerLock", "LegacySddl"), ("AdminNamespace", "Sddl"),
+            ("VrSharedMemory", "SectionSddl"), ("VrSharedMemory", "EventSddl"),
+        };
+        var sddls = new List<(string Name, string? Sddl)>();
+        using (var p = PeerProcess.Start("X5"))
+            foreach (var (type, field) in descriptors)
+                sddls.Add(($"{type}.{field}", PeerProcess.Field(p.Send($"sddl {type} {field}"), "value")));
+
+        // A DACL with no owner shows the policy's effect is reproduced.
+        const string dacl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
         string user = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
-        string noOwner = "?", withOwner = "?";
+        string control = "?";
+        var owners = new List<(string Name, string Owner)>();
         IntPtr token = Native.UserOwnerToken();
         var t = new Thread(() =>
         {
-            if (!Native.SetThreadToken(IntPtr.Zero, token)) { noOwner = $"SetThreadToken err {Marshal.GetLastWin32Error()}"; return; }
+            if (!Native.SetThreadToken(IntPtr.Zero, token)) { control = $"SetThreadToken err {Marshal.GetLastWin32Error()}"; return; }
             try
             {
-                noOwner = Native.CreateAndReadOwner(dacl, @"Global\HIDMaestroX5NoOwner");
-                withOwner = Native.CreateAndReadOwner("O:BA" + dacl, @"Global\HIDMaestroX5Owner");
+                control = Native.CreateAndReadOwner(dacl, @"Global\HIDMaestroX5Control");
+                int k = 0;
+                foreach (var (name, sddl) in sddls)
+                    owners.Add((name, sddl == null ? "no descriptor read" : Native.CreateAndReadOwner(sddl, $@"Global\HIDMaestroX5Owner{k++}")));
             }
             finally { Native.RevertToSelf(); }
         });
         t.Start(); t.Join();
         Native.CloseHandle(token);
         Check("X5: the policy's effect is reproduced: without an owner in the descriptor the object is the user's",
-              noOwner == user, $"owner {noOwner}, user {user}");
-        Check("X5: with O:BA, as the SDK sets, the object is owned by Administrators whatever the policy",
-              withOwner == "S-1-5-32-544", $"owner {withOwner}");
+              control == user, $"owner {control}, user {user}");
+        var wrong = owners.Where(o => o.Owner != "S-1-5-32-544").ToList();
+        Check($"X5: under that policy, an object made with each of the SDK's {sddls.Count} descriptors is owned by Administrators",
+              owners.Count == sddls.Count && wrong.Count == 0,
+              wrong.Count == 0 ? $"{owners.Count} checked" : string.Join(", ", wrong.Select(o => $"{o.Name}: {o.Owner}")));
     }
 
     /// <summary>The deploy lock.</summary>

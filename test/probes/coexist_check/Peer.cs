@@ -54,6 +54,9 @@
 //                               server on <port> to export, through its
 //                               internal UsbipBackend.ExportedBusIds:
 //                               n=<count> or n=null, and ms=<elapsed>
+//   sddl <type> <field>         the security descriptor string a
+//                               HIDMaestro.Internal type creates its
+//                               objects with, read from its constant
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 //   quit                        exit without disposing anything, so only
@@ -150,6 +153,14 @@ internal static class Peer
                         RemoveEverything(preserveInstall: false);
                         Reply("OK uninstall");
                         break;
+                    case "sddl":
+                    {
+                        var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal." + a[1]);
+                        var field = type?.GetField(a[2], BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                        if (field?.GetRawConstantValue() is not string sddl) { Reply($"ERR sddl no {a[1]}.{a[2]}"); break; }
+                        Reply($"OK sddl value={sddl}");
+                        break;
+                    }
                     case "driverversion":
                     {
                         HMController? last;
