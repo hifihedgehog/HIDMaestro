@@ -17,9 +17,10 @@
 //        device exists. The controller's driver takes neither: the StopEvent
 //        stays signaled, and rumble sent through XInput never signals the
 //        user's OutputEvent. XInput still reads the controller's input. The
-//        SDK does not open the user's OutputEvent either. Once the user's
-//        names are gone, the driver makes its own OutputEvent at its next
-//        handle reset, and the SDK opens it.
+//        program's own output reader does not wait on the user's event, so
+//        rumble reaches it on the 8 ms poll. Once the user's names are gone,
+//        the driver makes its own OutputEvent at its next handle reset, and
+//        the SDK opens it.
 //    Y3. A program on this SDK is killed, and the user creates
 //        \\.\pipe\HIDMaestroOwner<N> on its index. The driver had recorded
 //        the program as its owner pipe's server and then recorded it gone,
@@ -29,7 +30,8 @@
 //        nothing leaves them: the pipe keeps the devices, as before this
 //        release.
 //    Y5. A running v1.12.0 program. On its own driver, which records
-//        nothing, the census counts its held pipe as before this release.
+//        nothing, the census counts its held pipe as before this release,
+//        and this SDK's reader takes that driver's NULL-DACL OutputEvent.
 //        Moved to the installed driver, the best match the driver store holds,
 //        the census sees its owner pipe's server connected, alive and
 //        elevated, and every sweep above left its controller running.
@@ -160,37 +162,22 @@ internal static partial class Program
             if (hid == null) { Check("Y11: the controller's HID interface is present", false); return; }
             IntPtr h = Native.CreateFileW(hid, 0x40000000 /*GENERIC_WRITE*/, 3, IntPtr.Zero, 3 /*OPEN_EXISTING*/, 0, IntPtr.Zero);
             if (h == Native.INVALID) { Check("Y11: the controller's HID interface opens for writing", false); return; }
-            var sent = new List<long>();
+            OutputTiming timing;
             try
             {
-                for (int i = 0; i < 31; i++)
+                timing = TimeOutputs(old, i =>
                 {
                     var report = new byte[32];
                     report[0] = 0x05;
                     report[1] = 0x07;
                     report[4] = (byte)(i * 8);
                     report[6] = (byte)i;
-                    sent.Add(Stopwatch.GetTimestamp());
                     Y.WriteFile(h, report, report.Length, out _, IntPtr.Zero);
-                    Thread.Sleep(100);
-                }
+                }, 31, 100);
             }
             finally { Native.CloseHandle(h); }
-            Thread.Sleep(600);
-            string reply = old.Send("outputs");
-            var got = (PeerProcess.Field(reply, "t") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).OrderBy(x => x).ToList();
-            var ms = new List<double>();
-            for (int i = 0; i < sent.Count; i++)
-            {
-                long end = i + 1 < sent.Count ? sent[i + 1] : long.MaxValue;
-                long hit = got.FirstOrDefault(x => x >= sent[i] && x < end);
-                ms.Add(hit == 0 ? double.NaN : (hit - sent[i]) * 1000.0 / Stopwatch.Frequency);
-            }
-            var arrived = ms.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
-            double P(double q) => arrived.Count == 0 ? double.NaN : arrived[Math.Min(arrived.Count - 1, (int)(arrived.Count * q))];
-            string shown = FormattableString.Invariant($"first {ms[0]:F1} ms, p50 {P(0.5):F1} ms, p95 {P(0.95):F1} ms, max {(arrived.Count == 0 ? double.NaN : arrived[^1]):F1} ms, {arrived.Count}/{ms.Count} arrived");
-            Console.WriteLine($"    Y11 output latency: {shown}");
-            Check("Y11: every output arrives within 20 ms", arrived.Count == ms.Count && arrived[^1] < 20, shown);
+            Console.WriteLine($"    Y11 output latency: {timing.Shown}");
+            Check("Y11: every output arrives within 20 ms", timing.AllArrived && timing.Max < 20, timing.Shown);
             old.Kill();
         }
         var tree = Native.Subtree(inst);
@@ -354,6 +341,13 @@ internal static partial class Program
         Check("Y5: the v1.12.0 program's controller runs on its own driver",
               Native.DriverVersionOf(instOld) is { } ownDriver && ownDriver != installed && Y.WatchValues(instOld) == null,
               $"{Native.DriverVersionOf(instOld)} beside {installed}, {Y.ShowWatch(instOld)}");
+        // The v1.12.0 driver made its OutputEvent with a NULL DACL, owned by
+        // LocalService. This SDK's reader takes that event (the arm in
+        // SharedMemoryIO.TryOpenOutputEvent), as a v1.13.0 program running
+        // on an earlier driver must, or it would poll at 8 ms.
+        string legacyOpen = live.Send($"sdkevents {tOld}");
+        Check("Y5: this SDK's reader opens the v1.12.0 driver's NULL-DACL OutputEvent",
+              PeerProcess.Field(legacyOpen, "output") == "1", legacyOpen);
         string? before = Y.CensusEntry(live.Send("census"), tokOld);
         Check("Y5: there the census keeps the rule before this release: the held pipe is a running v1.12.0 program's",
               before is { } b && b.Split('|')[2] == "LiveLegacy" && b.EndsWith("|watch=none", StringComparison.Ordinal), before ?? "no entry");
@@ -459,6 +453,7 @@ internal static partial class Program
             string cx = p.Send("go");
             if (!Ok(cx)) { Check("Y2: the Xbox 360 controller creates beside the user's names", false, cx); return; }
             if (!made) return;
+            Check("Y2: the program's output reader is subscribed", Ok(p.Send("outputs on")));
             p.Send("stream 0 0.95 125 0");
             int slot = -1;
             bool reads = WaitFor(() =>
@@ -472,6 +467,21 @@ internal static partial class Program
             Check("Y2: the driver did not take the user's StopEvent, which is still signaled",
                   Y.WaitForSingleObject(stopSquat, 0) == Y.WAIT_OBJECT_0);
             if (!reads) return;
+
+            // The program's own output reader (HMController.OutputPollLoop)
+            // must not wait on the user's event, which nothing signals: it
+            // stays on its 8 ms poll. A reader that took the event waited
+            // out a 500 ms timeout for each of its first outputs before it
+            // dropped to polling, so these are the first outputs it sees.
+            Action<int> rumble = i =>
+            {
+                var v = new Y.XINPUT_VIBRATION { wLeftMotorSpeed = (ushort)(0x1000 + i * 0x100), wRightMotorSpeed = (ushort)(0x800 + i * 0x80) };
+                Y.XInputSetState((uint)slot, ref v);
+            };
+            OutputTiming squatted = TimeOutputs(p, rumble, 30, 60);
+            Console.WriteLine($"    Y2 output latency beside the user's event: {squatted.Shown}");
+            Check("Y2: the program's reader does not wait on the user's OutputEvent: every rumble arrives within 50 ms",
+                  squatted.AllArrived && squatted.Max < 50, squatted.Shown);
 
             // Rumble through XInput: the XUSB companion publishes each packet
             // and signals the output doorbell it holds.
@@ -493,8 +503,6 @@ internal static partial class Program
             Y.XInputSetState((uint)slot, ref stopVib);
             waiter.Join();
             Check("Y2: rumble never signals the user's OutputEvent", wakes == 0, $"{wakes} wakes");
-            string sdkOpen = p.Send($"sdkevents {t}");
-            Check("Y2: the SDK does not open the user's OutputEvent either", PeerProcess.Field(sdkOpen, "output") == "0", sdkOpen);
 
             // The user lets go of both names. With the input stopped, the
             // driver resets its handles after eight idle 500 ms waits.
@@ -579,6 +587,40 @@ internal static partial class Program
         // The sweep that kept them dropped the killed program's record, as
         // it did before this release, so the cleanup at the end of the
         // section removes them.
+    }
+
+    /// <summary>The latency of each output, from the send to the program's
+    /// OutputReceived, on the one machine-wide Stopwatch clock.</summary>
+    record struct OutputTiming(List<double> Ms, bool AllArrived, double P50, double P95, double Max, string Shown);
+
+    /// <summary>Send <paramref name="n"/> outputs <paramref name="spacingMs"/>
+    /// apart through <paramref name="send"/> and time each one to the first
+    /// OutputReceived the peer noted after it ("outputs on" must have run).
+    /// An output with no OutputReceived before the next send is a miss.</summary>
+    static OutputTiming TimeOutputs(PeerProcess peer, Action<int> send, int n, int spacingMs)
+    {
+        var sent = new List<long>();
+        for (int i = 0; i < n; i++)
+        {
+            sent.Add(Stopwatch.GetTimestamp());
+            send(i);
+            Thread.Sleep(spacingMs);
+        }
+        Thread.Sleep(600);
+        string reply = peer.Send("outputs");
+        var got = (PeerProcess.Field(reply, "t") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(long.Parse).OrderBy(x => x).ToList();
+        var ms = new List<double>();
+        for (int i = 0; i < sent.Count; i++)
+        {
+            long end = i + 1 < sent.Count ? sent[i + 1] : long.MaxValue;
+            long hit = got.FirstOrDefault(x => x >= sent[i] && x < end);
+            ms.Add(hit == 0 ? double.NaN : (hit - sent[i]) * 1000.0 / Stopwatch.Frequency);
+        }
+        var arrived = ms.Where(x => !double.IsNaN(x)).OrderBy(x => x).ToList();
+        double P(double q) => arrived.Count == 0 ? double.NaN : arrived[Math.Min(arrived.Count - 1, (int)(arrived.Count * q))];
+        double max = arrived.Count == 0 ? double.NaN : arrived[^1];
+        string shown = FormattableString.Invariant($"first {ms[0]:F1} ms, p50 {P(0.5):F1} ms, p95 {P(0.95):F1} ms, max {max:F1} ms, {arrived.Count}/{ms.Count} arrived");
+        return new OutputTiming(ms, arrived.Count == ms.Count, P(0.5), P(0.95), max, shown);
     }
 
     /// <summary>Section Y's helpers and the Win32 calls they make.</summary>
