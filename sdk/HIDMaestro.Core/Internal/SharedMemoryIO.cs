@@ -1258,9 +1258,12 @@ internal static partial class SharedMemoryIO
         // it). The SDK's own events are owned by Administrators.
         if (error == ERROR_ALREADY_EXISTS && !IsOwnedByAdmin(ev, allowLocalService: name.Contains("OutputEvent", StringComparison.Ordinal)))
         {
+            string owner;
+            using (var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(ev, ownsHandle: false))
+                owner = ObjectOwner.OwnerSid(h) ?? "an owner that cannot be read";
             CloseHandle(ev);
             throw new HMResourceInUseException(
-                $"{name} is owned by neither SYSTEM nor Administrators: another program created it, so a controller cannot use it. Create the controller again: it takes another transport index.",
+                $"{name} is owned by {owner}, neither SYSTEM nor Administrators, so a controller does not use it. Another program made it: a program that is not elevated, or one built on HIDMaestro 1.12.0 or older, whose objects can be owned by the user. Create the controller again: it takes another transport index.",
                 name, null);
         }
         return ev;
@@ -1294,30 +1297,43 @@ internal static partial class SharedMemoryIO
     /// transport allocator skips such an index. An object that exists and
     /// opens as its own kind is one a controller of the index left when its
     /// owner is Administrators (the SDK) or SYSTEM, or, for the two events
-    /// the driver host creates, LocalService (<see cref="ObjectOwner"/>).</summary>
+    /// the driver host creates, LocalService (<see cref="ObjectOwner"/>).
+    ///
+    /// <para>The result names the object and what was found: its owner,
+    /// or that it did not open as its own kind.</para></summary>
     internal static string? ForeignObjectAt(int controllerIndex)
     {
         foreach (string kind in IndexSections)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (!Acceptable(OpenFileMappingW(READ_CONTROL, false, name), allowLocalService: false)) return name;
+            if (Unacceptable(OpenFileMappingW(READ_CONTROL, false, name), allowLocalService: false) is { } why) return $"{name} {why}";
         }
         foreach (string kind in IndexEvents)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (!Acceptable(OpenEventW(READ_CONTROL, false, name), DriverCreates(kind))) return name;
+            if (Unacceptable(OpenEventW(READ_CONTROL, false, name), DriverCreates(kind)) is { } why) return $"{name} {why}";
         }
         return null;
     }
 
-    /// <summary>An open that found nothing, or found an object of the
-    /// expected kind owned by Administrators or SYSTEM, or by LocalService
-    /// when <paramref name="allowLocalService"/>. An open refused for access
-    /// or for the kind of object counts as made by someone else.</summary>
-    private static bool Acceptable(IntPtr handle, bool allowLocalService)
+    /// <summary>Null for an open that found nothing, or found an object of
+    /// the expected kind owned by Administrators or SYSTEM, or by
+    /// LocalService when <paramref name="allowLocalService"/>. Otherwise
+    /// what was found: the owner, or an open refused for access or for the
+    /// kind of object, which also counts as made by someone else.</summary>
+    private static string? Unacceptable(IntPtr handle, bool allowLocalService)
     {
-        if (handle == IntPtr.Zero) return Marshal.GetLastPInvokeError() == ERROR_FILE_NOT_FOUND;
-        try { return IsOwnedByAdmin(handle, allowLocalService); }
+        if (handle == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastPInvokeError();
+            return err == ERROR_FILE_NOT_FOUND ? null : $"exists and does not open as its own kind (Win32 error {err})";
+        }
+        try
+        {
+            if (IsOwnedByAdmin(handle, allowLocalService)) return null;
+            using var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, ownsHandle: false);
+            return $"is owned by {ObjectOwner.OwnerSid(h) ?? "an owner that cannot be read"}";
+        }
         finally { CloseHandle(handle); }
     }
 

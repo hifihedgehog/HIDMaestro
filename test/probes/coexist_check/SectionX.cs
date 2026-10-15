@@ -151,6 +151,12 @@ internal static partial class Program
             string c = p.Send("create pad F0E9 -");
             Check("X6: with every index squatted the create is refused, and the refusal names the squatted objects",
                   !Ok(c) && c.Contains($"{all} carry a Global") && c.Contains("owned by neither SYSTEM nor Administrators"), c);
+            // What is known about such an object is its owner, and that it
+            // is either a program that is not elevated or one built on an
+            // older release. The refusal says both, and names the owner.
+            string user = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+            Check("X6: the refusal names the object's owner and both programs that can have made it",
+                  c.Contains($"is owned by {user}") && c.Contains("not elevated") && c.Contains("1.12.0 or older"), c);
         }
         finally { sq.Dispose(); }
         Check("X6: nothing the squatter made is left",
