@@ -1492,7 +1492,7 @@ function Scenario-Usb-Composite-Schema {
 
 function Scenario-Usbip-Server-Protocol {
     Invoke-Probe -Dir 'usbip_server_check' -Exe 'UsbipServerCheck.exe' `
-                 -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, or a teardown racing Dispose; see probe stdout)'
+                 -Message 'the USB/IP wire contract regressed (descriptors, HID both directions, isochronous pacing, unlink, a teardown racing Dispose, or the import handshake; see probe stdout)'
 }
 
 function Scenario-Usbip-Bundle-Deploy {

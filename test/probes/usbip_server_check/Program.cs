@@ -44,7 +44,7 @@ using HIDMaestro;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
 
-internal static class Program
+internal static partial class Program
 {
     static int s_total, s_failures, s_unhandled;
 
@@ -96,6 +96,7 @@ internal static class Program
             try
             {
                 RunAll(server, device, profile, outFrames, controlWrites);
+                Handshake(server, device);
                 ThrowingHandlers();
             }
             finally

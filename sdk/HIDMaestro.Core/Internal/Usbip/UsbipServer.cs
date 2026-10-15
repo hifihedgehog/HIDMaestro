@@ -159,6 +159,12 @@ internal sealed class UsbipServer : IDisposable
         lock (_connections) _connections.Remove(c);
     }
 
+    /// <summary>Called on the connection's thread after an import claims
+    /// the device and before the reply goes out. usbip_server_check (S43)
+    /// sets it to fail the reply: no real send failure can be caused at
+    /// that point on demand. Null outside the probe.</summary>
+    internal static Action<string>? BeforeImportReply;
+
     public void Dispose()
     {
         _stop = true;
@@ -232,11 +238,17 @@ internal sealed class UsbipServer : IDisposable
                     return;
                 }
 
+                // Held from the claim on, so the finally releases the claim
+                // on every path out, a reply that fails to send included:
+                // a claim left on a dead connection answers every later
+                // import of the bus id ST_DEV_BUSY.
+                _device = device;
+                BeforeImportReply?.Invoke(busid);
+
                 UsbipProtocol.WriteOpCommon(reply, UsbipProtocol.OpRepImport, UsbipProtocol.StOk);
                 WriteDeviceBlock(reply[8..], device);
                 Send(reply);
 
-                _device = device;
                 TrackVhciPort(device);
                 CommandLoop(device);
             }
