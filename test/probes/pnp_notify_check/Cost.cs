@@ -70,11 +70,20 @@ internal static partial class Cost
             Console.WriteLine($"  REMOVED registration for {id} ({(probe.PresentAtStart ? "present" : "absent")}): " +
                               $"{(probe.Registered ? "accepted" : "refused, CONFIGRET 0x" + Measure.RegisterResult(id).ToString("X"))}");
         }
-        Report("removal test: REMOVED registration, locates, unregister", runs, () =>
+        Report("removal test of an absent id: locates only, no registration", runs, () =>
         {
             using var w = DeviceManager.RemovalWatch.Start(Id);
             w.Wait(uninstalls: true, 0);
         });
+        Report("removal test of a present devnode: registration, locates, unregister (the root devnode, budget 0)", runs, () =>
+        {
+            using var w = DeviceManager.RemovalWatch.Start(@"HTREE\ROOT\0");
+            w.Wait(uninstalls: false, 0, removedMs: 0);
+        });
+        Report("dispose of a devnode already gone: RemoveDevice's first check", runs, () =>
+            DeviceManager.RemoveDevice(Id, timeoutMs: 120_000, forceFallbacks: true));
+        Report("sweep and exit: WaitRemovalComplete of an absent id, 2 s budget", runs, () =>
+            DeviceManager.WaitRemovalComplete(Id, uninstalls: true, 2000));
         Report("install queue: CMP_WaitNoPendingInstallEvents(30000), idle", runs, () => CMP_WaitNoPendingInstallEvents(30_000));
         string name = @"Local\HIDMaestro.PnpNotifyCheck.Cost." + Environment.ProcessId;
         // The gate's whole path for an absent id, with the session-namespace
