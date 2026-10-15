@@ -28,7 +28,9 @@
 //     engine's event thread, driven in process as the connection drives it
 //     (its wake event closed at Dispose, queued events raised at Dispose,
 //     IsStreaming current while a handler blocks, one waiting write per
-//     control while a handler blocks)
+//     control while a handler blocks, every handle closed and nothing
+//     thrown to the connection when a thread does not start, a change
+//     queued then raised at Dispose)
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -924,6 +926,7 @@ internal static partial class Program
     static int Offline()
     {
         Console.WriteLine("=== USB/IP audio engine, offline ===");
+        SetErrorMode(QuietErrorMode);
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         var ds = ctx.GetProfile("dualsense-composite")!.Inner;
@@ -1013,9 +1016,123 @@ internal static partial class Program
             engine.Dispose();
         }
 
+        // A thread that does not start. Thread.Start throws only when the
+        // process is out of threads or memory, so the engine's own seam
+        // fails it.
+        var failStarts = typeof(UsbAudioEngine).GetField("FailThreadStarts", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        // The pump: the constructor throws, and the device never gets an
+        // engine to dispose, so the constructor closes every handle it
+        // opened.
+        {
+            var engine = (UsbAudioEngine)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(UsbAudioEngine));
+            var ctor = typeof(UsbAudioEngine).GetConstructor(new[] { typeof(ControllerProfile), typeof(UsbAudioEngine.IsoCompletion) })!;
+            failStarts.SetValue(null, 1);
+            string threw = "nothing";
+            try { ctor.Invoke(engine, new object[] { ds, none }); }
+            catch (TargetInvocationException e) { threw = e.InnerException?.GetType().Name ?? "?"; }
+            finally { failStarts.SetValue(null, 0); }
+            var pumpWake = (AutoResetEvent?)typeof(UsbAudioEngine).GetField("_wake", Private)!.GetValue(engine);
+            var wake = (AutoResetEvent?)wakeField.GetValue(engine);
+            var timer = (IntPtr)typeof(UsbAudioEngine).GetField("_timer", Private)!.GetValue(engine)!;
+            bool pumpWakeClosed = pumpWake?.SafeWaitHandle.IsClosed ?? false;
+            bool wakeClosed = wake?.SafeWaitHandle.IsClosed ?? false;
+            bool timerClosed = timer != IntPtr.Zero && !GetHandleInformation(timer, out _);
+            Check("an audio engine whose pump does not start throws and closes its two events and its timer",
+                  threw == nameof(OutOfMemoryException) && pumpWakeClosed && wakeClosed && timerClosed,
+                  $"threw {threw}, pump wake closed {pumpWakeClosed}, event wake closed {wakeClosed}, timer closed {timerClosed}");
+        }
+
+        // The event thread, at the first event: the connection's reader
+        // gets no exception, the change waits, and the next change starts
+        // the thread.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            var raised = new System.Collections.Concurrent.ConcurrentQueue<short>();
+            engine.ControlChanged += (_, _, _, v) => raised.Enqueue(v);
+            failStarts.SetValue(null, 1);
+            string threw = "nothing";
+            try { engine.HandleUacSet(2, 2, 0, Volume(-4096)); }
+            catch (Exception e) { threw = e.GetType().Name; }
+            finally { failStarts.SetValue(null, 0); }
+            bool noThread = eventsThread.GetValue(engine) == null;
+            engine.HandleUacSet(2, 2, 0, Volume(-2048));
+            bool raisedLater = WaitUntil(() => raised.Contains((short)-2048), 2000);
+            var thread = (Thread?)eventsThread.GetValue(engine);
+            engine.Dispose();
+            bool ended = WaitUntil(() => thread != null && !thread.IsAlive, 3000);
+            var wake = (AutoResetEvent)wakeField.GetValue(engine)!;
+            Check("an event thread that does not start throws nothing to the connection's reader, and the next change starts it",
+                  threw == "nothing" && noThread && raisedLater && string.Join(",", raised) == "-2048" && ended && wake.SafeWaitHandle.IsClosed,
+                  $"threw {threw}, raised [{string.Join(", ", raised)}], ended {ended}, wake closed {wake.SafeWaitHandle.IsClosed}");
+        }
+
+        // The same failure, then Dispose with no other change: Dispose
+        // starts the thread, which raises the change and closes its wake
+        // event.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            var raised = new System.Collections.Concurrent.ConcurrentQueue<short>();
+            engine.ControlChanged += (_, _, _, v) => raised.Enqueue(v);
+            failStarts.SetValue(null, 1);
+            string threw = "nothing";
+            try { engine.HandleUacSet(2, 2, 0, Volume(-4096)); }
+            catch (Exception e) { threw = e.GetType().Name; }
+            finally { failStarts.SetValue(null, 0); }
+            var wake = (AutoResetEvent)wakeField.GetValue(engine)!;
+            engine.Dispose();
+            var thread = (Thread?)eventsThread.GetValue(engine);
+            bool ended = WaitUntil(() => thread != null && !thread.IsAlive, 3000);
+            Check("a change queued while the event thread could not start is raised at Dispose, which starts the thread",
+                  threw == "nothing" && string.Join(",", raised) == "-4096" && ended && wake.SafeWaitHandle.IsClosed,
+                  $"threw {threw}, raised [{string.Join(", ", raised)}], thread ended {ended}, wake closed {wake.SafeWaitHandle.IsClosed}");
+        }
+
+        // The start fails at the change and again at Dispose: nothing is
+        // raised, nothing is thrown, and Dispose closes the wake event and
+        // drops what waits.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            var raised = new System.Collections.Concurrent.ConcurrentQueue<short>();
+            engine.ControlChanged += (_, _, _, v) => raised.Enqueue(v);
+            var queue = (System.Collections.ICollection)typeof(UsbAudioEngine).GetField("_events", Private)!.GetValue(engine)!;
+            string diagLog = Path.Combine(Path.GetTempPath(), "HIDMaestro", "teardown_diag.log");
+            long diagFrom = File.Exists(diagLog) ? new FileInfo(diagLog).Length : 0;
+            failStarts.SetValue(null, 2);
+            string threw = "nothing";
+            try { engine.HandleUacSet(2, 2, 0, Volume(-4096)); engine.Dispose(); }
+            catch (Exception e) { threw = e.GetType().Name; }
+            finally { failStarts.SetValue(null, 0); }
+            var wake = (AutoResetEvent)wakeField.GetValue(engine)!;
+            Thread.Sleep(100);
+            Check("an event thread that cannot start at the change or at Dispose: nothing thrown, the wait dropped, the wake event closed",
+                  threw == "nothing" && raised.IsEmpty && queue.Count == 0 && eventsThread.GetValue(engine) == null && wake.SafeWaitHandle.IsClosed,
+                  $"threw {threw}, raised {raised.Count}, waiting {queue.Count}, wake closed {wake.SafeWaitHandle.IsClosed}");
+            // Under HIDMAESTRO_DIAG=1 the diagnostic log names both failures,
+            // in the lines this run added.
+            if (DeviceOrchestrator.DiagEnabled)
+            {
+                string log = "";
+                try
+                {
+                    using var f = new FileStream(diagLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    f.Seek(Math.Min(diagFrom, f.Length), SeekOrigin.Begin);
+                    log = new StreamReader(f).ReadToEnd();
+                }
+                catch (IOException) { }
+                bool started = log.Contains("audio event thread did not start, 1 change(s) waiting: System.OutOfMemoryException");
+                bool dropped = log.Contains("audio engine dropped 1 change(s) at Dispose");
+                Check("the diagnostic log records the failed start and the dropped change",
+                      started && dropped, $"failed start {started}, dropped {dropped}");
+            }
+        }
+
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern bool GetHandleInformation(IntPtr handle, out uint flags);
 
     static (int Code, string Line) RunChild(string which) => RunChild($"--throwing {which}", null);
 

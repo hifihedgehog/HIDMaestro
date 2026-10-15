@@ -58,6 +58,18 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private readonly IntPtr[] _waitPair = new IntPtr[2];
     private volatile bool _stop;
 
+    /// <summary>Thread starts to fail before the next real one.
+    /// usbip_server_check sets it through reflection: no real failure of
+    /// Thread.Start can be caused safely. Zero outside the probe.</summary>
+    internal static int FailThreadStarts;
+
+    private static void StartThread(Thread thread)
+    {
+        if (Volatile.Read(ref FailThreadStarts) > 0 && Interlocked.Decrement(ref FailThreadStarts) >= 0)
+            throw new OutOfMemoryException("usbip_server_check failed this thread start.");
+        thread.Start();
+    }
+
     /// <summary>Puts a completed URB on the wire: IN, the compacted data
     /// and each packet's actual length. Called on the pump thread. The data
     /// is the pump's own buffer, valid for the call.</summary>
@@ -218,20 +230,34 @@ internal sealed partial class UsbAudioEngine : IDisposable
             _controlRange[(ctl.UnitId, 2, 0)] = (ctl.VolumeMinRaw, ctl.VolumeMaxRaw, ctl.VolumeResRaw);
         }
 
-        _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        if (_timer == IntPtr.Zero) // pre-1803 fallback; still functional, just coarser
-            _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, 0, TIMER_ALL_ACCESS);
-        _waitPair[0] = _timer;
-        _waitPair[1] = _wake.SafeWaitHandle.DangerousGetHandle();
-
-        _thread = new Thread(PumpLoop)
+        try
         {
-            IsBackground = true,
-            Name = "HMUsbipAudioPump",
-            Priority = ThreadPriority.Highest,
-        };
-        _thread.Start();
+            _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (_timer == IntPtr.Zero) // before Windows 10 1803: a coarser timer that still works
+                _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, 0, TIMER_ALL_ACCESS);
+            _waitPair[0] = _timer;
+            _waitPair[1] = _wake.SafeWaitHandle.DangerousGetHandle();
+
+            _thread = new Thread(PumpLoop)
+            {
+                IsBackground = true,
+                Name = "HMUsbipAudioPump",
+                Priority = ThreadPriority.Highest,
+            };
+            StartThread(_thread);
+        }
+        catch
+        {
+            // No pump runs to close the handles it waits on, and the device
+            // gets no engine to dispose, so they close here.
+            _stop = true;
+            _eventWakeClosed = true;
+            if (_timer != IntPtr.Zero) CloseHandle(_timer);
+            _wake.Dispose();
+            _eventWake.Dispose();
+            throw;
+        }
     }
 
     // ── Submission (called from the connection reader thread) ────────────
@@ -380,18 +406,53 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 }
             }
         }
-        _events.Add(e);
-        if (_eventThread == null)
+        try
         {
-            var events = new Thread(EventLoop)
+            _events.Add(e);
+        }
+        catch (OutOfMemoryException)
+        {
+            // The queue could not grow. The change is dropped, and the
+            // connection's reader gets no exception.
+            if (DeviceOrchestrator.DiagEnabled)
+                try { DeviceOrchestrator.LogDiag("the USB/IP audio engine dropped a change: out of memory to queue it"); } catch { }
+            return;
+        }
+        if (_eventThread == null && !TryStartEventsLocked()) return;
+        _eventWake.Set();
+    }
+
+    /// <summary>Starts the event thread. Caller holds <see cref="_lock"/>.
+    /// False when the process cannot start a thread, being out of threads or
+    /// memory. The connection's reader gets no exception and goes on
+    /// answering the host, the queue keeps its changes, and the next change
+    /// or Dispose tries again. The failure goes to the diagnostic log under
+    /// HIDMAESTRO_DIAG=1.</summary>
+    private bool TryStartEventsLocked()
+    {
+        Thread events;
+        try
+        {
+            events = new Thread(EventLoop)
             {
                 IsBackground = true,
                 Name = "HMUsbipAudioEvents",
             };
-            events.Start();
-            _eventThread = events;
+            StartThread(events);
         }
-        _eventWake.Set();
+        catch (Exception ex) when (ex is OutOfMemoryException or ThreadStartException)
+        {
+            if (DeviceOrchestrator.DiagEnabled)
+                try
+                {
+                    DeviceOrchestrator.LogDiag($"the USB/IP audio event thread did not start, {_events.Count} change(s) waiting: " +
+                                               $"{ex.GetType().FullName}: {ex.Message}");
+                }
+                catch { }
+            return false;
+        }
+        _eventThread = events;
+        return true;
     }
 
     /// <summary>The event thread: raises each queued event in order, and
@@ -709,8 +770,10 @@ internal sealed partial class UsbAudioEngine : IDisposable
 
     /// <summary>Stops the pump and the event thread. Each closes its own
     /// handles as it ends, and the event thread first raises what is
-    /// queued. An engine that never raised an event has no event thread,
-    /// and its wake event is closed here. Each join gives up after 500 ms,
+    /// queued. Changes queued while the event thread could not start get a
+    /// last try to start it here, and are dropped if that fails too. An
+    /// engine that never raised an event has no event thread, and its wake
+    /// event is closed here. Each join gives up after 500 ms,
     /// so a handler still running holds Dispose up that long at most. A
     /// second call returns. Called from a handler on either thread, it does
     /// not wait for that thread.</summary>
@@ -722,6 +785,10 @@ internal sealed partial class UsbAudioEngine : IDisposable
             if (_stop) return;
             _stop = true;
             _wake.Set();
+            // Changes queued while the event thread could not start get one
+            // more try here, so they are still raised.
+            if (!_eventWakeClosed && _eventThread == null && _events.Count > 0)
+                TryStartEventsLocked();
             events = _eventThread;
             if (!_eventWakeClosed)
             {
@@ -731,8 +798,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 }
                 else
                 {
-                    // No thread will ever wait on it. The queue starts no
-                    // thread after _stop.
+                    // No thread will ever wait on it or raise what is
+                    // queued. The queue starts no thread after _stop.
+                    if (_events.Count > 0 && DeviceOrchestrator.DiagEnabled)
+                        try { DeviceOrchestrator.LogDiag($"the USB/IP audio engine dropped {_events.Count} change(s) at Dispose: its event thread did not start"); } catch { }
+                    _events.Clear();
                     _eventWakeClosed = true;
                     _eventWake.Dispose();
                 }

@@ -46,8 +46,13 @@ public sealed class HMUsbAudio
     /// open and park the host makes meanwhile. A change the host made
     /// before the controller is disposed is still raised, after Dispose
     /// returns if a handler is still running then. Dispose waits for a
-    /// running handler 500 ms at most. An exception a handler throws is
-    /// caught and dropped.</summary>
+    /// running handler 500 ms at most. A process out of threads or memory
+    /// may fail to start the audio event thread. A change then waits until
+    /// the next change or Dispose starts it, and Dispose drops what is
+    /// waiting if it cannot start the thread either. A change the process
+    /// has no memory left to queue is dropped. Under HIDMAESTRO_DIAG=1 the
+    /// diagnostic log records each of these. An exception a handler throws
+    /// is caught and dropped.</summary>
     public event EventHandler<HMAudioControlChangedEventArgs>? ControlChanged;
 
     private readonly Dictionary<byte, string> _unitFunctions = new();
@@ -144,7 +149,9 @@ public sealed class HMAudioOutput
     /// sound adds two waiting changes per sound while an audio handler
     /// blocks. A change the host made before the controller is disposed is
     /// still raised, after Dispose returns if a handler is still running
-    /// then. An exception a handler throws is caught and dropped.</summary>
+    /// then, unless the audio event thread cannot start, as
+    /// <see cref="HMUsbAudio.ControlChanged"/> describes. An exception a
+    /// handler throws is caught and dropped.</summary>
     public event Action<HMAudioOutput, bool>? StreamingChanged;
 
     private readonly UsbAudioEngine _engine;
