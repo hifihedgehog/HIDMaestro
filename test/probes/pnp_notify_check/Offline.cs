@@ -29,6 +29,10 @@ internal static class Offline
 
     const string Id = @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_OFFLINE";
 
+    // How long the SDK waits for REMOVED once a devnode and its record are
+    // gone.
+    const long RemovedBoundMs = 2000;
+
     // A finished wait is seen within one 50 ms re-check of its last change.
     // This bound only catches a wait that does not end.
     const long Slack = 1000;
@@ -53,6 +57,8 @@ internal static class Offline
         public long? LeavesTree = 0, RemovedAt, RecordGoneAt;
         public long? InstallsIdleAt = 0;
         public bool InstallWaitFails, RefuseRegistration;
+        /// <summary>REMOVED registrations the SDK asked for.</summary>
+        public int Registrations;
 
         public readonly Stopwatch Clock = new();
         readonly object _lock = new();
@@ -104,6 +110,7 @@ internal static class Offline
         /// in flight.</summary>
         public IDisposable? Register(string id, Action onRemoved)
         {
+            Interlocked.Increment(ref Registrations);
             if (RefuseRegistration) return null;
             lock (_lock)
             {
@@ -269,6 +276,22 @@ internal static class Offline
         Check("gate: a present prior life it removes, out at 50, record gone at 100, REMOVED at 250 -> allowed at 250",
               g6.Gate == DeviceManager.RegistrationGate.Allowed && Within(g6.Ms, 250),
               $"{g6.Gate} at {g6.Ms} ms after the removal began, {g6.Removals} removal(s)");
+
+        // A prior life whose devnode and record are gone is gone, whether or
+        // not its REMOVED notification arrives. Its absence costs at most the
+        // notification's own bound, and the create goes ahead.
+        var g7 = Gate(new Sequence { LeavesTree = 50, RecordGoneAt = 100, RemovedAt = null }, removalBegins: true);
+        Check("gate: a prior life it removes leaves the tree and its record goes at 100, REMOVED never comes -> allowed within the notification bound",
+              g7.Gate == DeviceManager.RegistrationGate.Allowed && g7.Ms >= 100 && g7.Ms < 100 + RemovedBoundMs + Slack,
+              $"{g7.Gate} at {g7.Ms} ms after the removal began");
+
+        // An id with no devnode and no record has nothing whose removal a
+        // notification could prove, so the gate registers for none.
+        var s8 = new Sequence { AbsentBefore = true };
+        var g8 = Gate(s8);
+        Check("gate: an id with no devnode and no record opens no REMOVED registration",
+              g8.Gate == DeviceManager.RegistrationGate.Allowed && s8.Registrations == 0,
+              $"{g8.Gate}, {s8.Registrations} registration(s)");
 
         int locates, cancels;
         lock (s_flags)

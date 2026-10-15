@@ -49,6 +49,10 @@ internal static class Program
     static int Main(string[] args)
     {
         string mode = args.Length > 0 ? args[0] : "";
+        // The offline modes touch no device. Their lines stay out of the
+        // diag log a live run on this machine writes (HIDMAESTRO_DIAG=1),
+        // which is read once, when DeviceOrchestrator first loads.
+        if (mode is "offline" or "cost") Environment.SetEnvironmentVariable("HIDMAESTRO_DIAG", null);
         if (mode == "offline") return Offline.Run();
         if (mode == "cost") return Cost.Run(args.Length > 1 ? int.Parse(args[1]) : 200);
 
