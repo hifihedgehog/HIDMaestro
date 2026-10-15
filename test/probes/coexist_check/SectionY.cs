@@ -41,6 +41,10 @@
 //        index's Global\HIDMaestroInputAck<N>, so the census reads the
 //        device as a v1.12.0 program's that has exited, and a sweep
 //        removes it.
+//    Y8. A reset of the driver's handles, forced by a signal on the
+//        StopEvent as a sweep sends it, leaves the release-on-exit bit in
+//        the acknowledgement section's capabilities, and the SDK still
+//        reads release-on-exit support.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -112,6 +116,29 @@ internal static partial class Program
         WaitFor(() => tree.All(Native.IsGone), 5000);
         Check("Y7: a sweep removes it", Ok(sw) && tree.Count > 0 && tree.All(Native.IsGone),
               string.Join(", ", tree.Where(d => !Native.IsGone(d))));
+    }
+
+    /// <summary>Y8. The release-on-exit bit across a reset of the driver's
+    /// handles.</summary>
+    static void SectionYReleaseBit(PeerProcess live, int t, HidCapture cap)
+    {
+        string section = $@"Global\HIDMaestroInputAck{t}";
+        int? before = Y.AckCapabilities(section);
+        string sdkBefore = live.Send($"releases {t}");
+        Check("Y8: before any reset the driver announces release on exit, and the SDK reads it",
+              before is int b && (b & 2) != 0 && PeerProcess.Field(sdkBefore, "on") == "1",
+              $"capabilities {before?.ToString("X") ?? "none"}, {sdkBefore}");
+        IntPtr stop = Y.OpenEventW(Y.EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroStopEvent{t}");
+        bool signaled = stop != IntPtr.Zero && Y.SetEvent(stop);
+        if (stop != IntPtr.Zero) Y.CloseHandle(stop);
+        Check("Y8: a signal on the StopEvent, as a sweep sends it", signaled);
+        Thread.Sleep(1500);
+        int? after = Y.AckCapabilities(section);
+        string sdkAfter = live.Send($"releases {t}");
+        Check("Y8: after the reset the bit is still set", after is int a && (a & 2) != 0,
+              $"capabilities {after?.ToString("X") ?? "none"}");
+        Check("Y8: and the SDK still reads release-on-exit support", PeerProcess.Field(sdkAfter, "on") == "1", sdkAfter);
+        Check("Y8: the controller's input keeps flowing", !cap.Broken && Flows(cap));
     }
 
     /// <summary>Y6. A previous device's values on the instance.</summary>
@@ -187,6 +214,9 @@ internal static partial class Program
         using var capOld = pathOld.Count == 1 ? HidCapture.Open(pathOld[0]) : null;
         using var capLive = pathLive.Count == 1 ? HidCapture.Open(pathLive[0]) : null;
         if (capOld == null || capLive == null) { Check("Y: both programs' devices open", false); return null; }
+
+        // Y8 before Y1, whose own StopEvent signals reset the handles too.
+        SectionYReleaseBit(live, tLive, capLive);
 
         // Y1.
         {
@@ -382,6 +412,22 @@ internal static partial class Program
     /// <summary>Section Y's helpers and the Win32 calls they make.</summary>
     static class Y
     {
+        /// <summary>The capabilities word of an acknowledgement section
+        /// (HIDMAESTRO_INPUT_ACK, offset 4), or null when it does not exist.</summary>
+        internal static int? AckCapabilities(string name)
+        {
+            IntPtr h = OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, name);
+            if (h == IntPtr.Zero) return null;
+            try
+            {
+                IntPtr v = MapViewOfFile(h, 0x0004, 0, 0, (UIntPtr)16);
+                if (v == IntPtr.Zero) return null;
+                try { return Marshal.ReadInt32(v, 4); }
+                finally { UnmapViewOfFile(v); }
+            }
+            finally { CloseHandle(h); }
+        }
+
         /// <summary>DiInstallDevice with no driver named on one devnode: the
         /// best match the driver store holds, on that device alone.</summary>
         internal static bool InstallBestStoreDriver(string instanceId)
@@ -621,7 +667,13 @@ internal static partial class Program
         static extern bool DiInstallDevice(IntPtr hwnd, IntPtr set, IntPtr data, IntPtr driver, uint flags, out bool needReboot);
         [DllImport("xinput1_4.dll")] internal static extern uint XInputSetState(uint idx, ref XINPUT_VIBRATION v);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+        internal static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+        [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool SetEvent(IntPtr h);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenFileMappingW(uint access, bool inherit, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offHigh, uint offLow, UIntPtr bytes);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool UnmapViewOfFile(IntPtr view);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern IntPtr CreateEventW(ref SECURITY_ATTRIBUTES sa, bool manualReset, bool initialState, string name);
         [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(IntPtr h, uint ms);

@@ -624,7 +624,8 @@ AnnounceVersion(_In_ PDEVICE_CONTEXT ctx)
 /* Issue #67: open the delivery acknowledgement the SDK creates beside the
  * input section, and announce the capability in it. Best effort: an SDK
  * that predates it creates neither object. Takes InputLock because the
- * read path writes through the pointer under it. */
+ * read path writes through the pointer under it. Worker thread only, like
+ * the owner watch it reads. */
 static VOID
 TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -639,8 +640,12 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     ctx->InputAckMemHandle = h;
     ctx->InputAckMemPtr = (volatile LONG *)view;
     ctx->InputAckEvent = ev;
+    /* The release bit says the owner watch is connected. The watch stays
+     * open across a reset of the worker's handles, which maps this section
+     * again, so the bit is announced again with it. */
     InterlockedExchange(&((PHIDMAESTRO_INPUT_ACK)view)->Capabilities,
-                        (LONG)HIDMAESTRO_INPUT_ACK_CAP_DELIVERED);
+                        (LONG)(HIDMAESTRO_INPUT_ACK_CAP_DELIVERED
+                               | (ctx->OwnerPipe != NULL ? HIDMAESTRO_INPUT_ACK_CAP_RELEASE : 0)));
     WdfWaitLockRelease(ctx->InputLock);
 }
 

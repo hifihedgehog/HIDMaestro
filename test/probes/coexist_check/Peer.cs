@@ -48,6 +48,8 @@
 //                               StopEvent as the SDK's sweep does
 //   census                      the SDK's census of present devices, one
 //                               token|index|owner|watch per device group
+//   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
+//                               read behind HMController.ReleasesOnConsumerExit
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
 //   staleport <n>               set the last controller's remembered vhci
@@ -411,6 +413,14 @@ internal static class Peer
                     case "census":
                         Reply(Census());
                         break;
+                    case "releases":
+                    {
+                        var read = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO")
+                            ?.GetMethod("ReleaseOnExitSupported", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                        Reply(read == null ? "ERR releases no SharedMemoryIO.ReleaseOnExitSupported"
+                              : $"OK releases on={((bool)read.Invoke(null, new object[] { int.Parse(a[1]) })! ? 1 : 0)}");
+                        break;
+                    }
                     case "threads":
                         Reply($"OK threads n={CountThreads(a[1])}");
                         break;
