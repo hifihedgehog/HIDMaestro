@@ -1,6 +1,7 @@
-// Y. The driver's named events. A thread of this probe impersonates the
-//    user's medium-integrity token (explorer's, duplicated), so the program
-//    that is not elevated is a thread, never a process.
+// Y. The driver's named events, and a v1.12.0 owner pipe another program
+//    fakes. A thread of this probe impersonates the user's medium-integrity
+//    token (explorer's, duplicated), so the program that is not elevated is a
+//    thread, never a process.
 //
 //    Y1. On a controller of this SDK, the user cannot open
 //        Global\HIDMaestroStopEvent<N> to signal it, or
@@ -17,6 +18,24 @@
 //        device exists. The controller's driver takes neither: the StopEvent
 //        stays signaled, and rumble sent through XInput never signals the
 //        user's OutputEvent. XInput still reads the controller's input.
+//    Y3. A program on this SDK is killed, and the user creates
+//        \\.\pipe\HIDMaestroOwner<N> on its index. The driver had recorded
+//        the program as its owner pipe's server and then recorded it gone,
+//        so the next sweep of a running program removes the killed one's
+//        devices.
+//    Y4. The same with the driver's values deleted, as a driver that records
+//        nothing leaves them: the pipe keeps the devices, as before this
+//        release.
+//    Y5. A running v1.12.0 program. On its own driver, which records
+//        nothing, the census counts its held pipe as before this release.
+//        Moved to the installed driver, the best match the driver store holds,
+//        the census sees its owner pipe's server connected, alive and
+//        elevated, and every sweep above left its controller running.
+//    Y6. Values an earlier device left on the instance, naming a running
+//        elevated server, are gone once the device starts on the installed
+//        driver, and a v1.11.0 program, which makes no owner pipe, leaves
+//        none: the census never reads a previous device's watch as this
+//        one's.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -32,53 +51,95 @@ internal static partial class Program
 {
     static void SectionY()
     {
-        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
-        {
-            Check("Y: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
-            return;
-        }
+        foreach (var v in new[] { "v1.12.0", "v1.11.0" })
+            if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", v, "CoexistPeer.exe")))
+            {
+                Check($"Y: the {v} peer is built", false, "build CoexistCheck.csproj");
+                return;
+            }
         IntPtr user = Y.UserToken(out string why);
         Check("Y: the user's medium-integrity token is at hand", user != IntPtr.Zero, why);
         if (user == IntPtr.Zero) return;
-        try { SectionYBody(user); }
+        string? installed;
+        try { installed = SectionYBody(user); }
         finally { Y.CloseHandle(user); }
+        // A v1.11.0 program takes index 0 whatever runs, so it runs alone.
+        if (installed != null) SectionYStale(installed);
     }
 
-    /// <summary>Y1 and Y2.</summary>
-    static void SectionYBody(IntPtr user)
+    /// <summary>Y6. A previous device's values on the instance.</summary>
+    static void SectionYStale(string installed)
+    {
+        using var v11 = PeerProcess.Start("Y-v1.11.0", "v1.11.0");
+        string cv = v11.Send("create pad F1F4 coexist-y-v11");
+        if (!Ok(cv)) { Check("Y6: the v1.11.0 program creates", false, cv); return; }
+        // Before v1.12.0 a controller does not name its devnode: the HID
+        // collection's parent is it.
+        string? inst = PeerProcess.Field(cv, "instance");
+        if (inst is null or "none")
+            inst = WaitPaths(0xBEEF, 0xF1F4, 1, 10_000).Select(Native.InstanceOfInterface).Select(c => c == null ? null : Native.ParentOf(c)).FirstOrDefault();
+        if (inst == null) { Check("Y6: the v1.11.0 program's device is present", false); return; }
+        // What a device that watched an elevated program's pipe leaves.
+        using (var k = Registry.LocalMachine.CreateSubKey($@"SYSTEM\CurrentControlSet\Enum\{inst}\Device Parameters\{Y.WatchSubkey}"))
+        {
+            k.SetValue("OwnerConnected", 1, RegistryValueKind.DWord);
+            k.SetValue("OwnerProcessId", Environment.ProcessId, RegistryValueKind.DWord);
+            k.SetValue("OwnerPipeOwner", "S-1-5-32-544", RegistryValueKind.String);
+        }
+        bool moved = Y.InstallBestStoreDriver(inst)
+                     && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000);
+        Check("Y6: the v1.11.0 program's controller moves to the installed driver", moved,
+              $"{Native.DriverVersionOf(inst)}, installed {installed}");
+        if (!moved) return;
+        Thread.Sleep(1500);   // past the worker's first 200 ms bootstrap waits
+        Check("Y6: the values the earlier device left are gone, and none are written", Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+    }
+
+    /// <summary>Y1 to Y5. Returns the installed driver's version, or null
+    /// when the section stopped early.</summary>
+    static string? SectionYBody(IntPtr user)
     {
         // A v1.12.0 program takes the lowest index of its own, so it starts
         // first.
         using var old = PeerProcess.Start("Y-v1.12.0", "v1.12.0");
         string co = old.Send("create pad F1F0 coexist-y-old");
-        if (!Ok(co)) { Check("Y: the v1.12.0 program creates", false, co); return; }
+        if (!Ok(co)) { Check("Y: the v1.12.0 program creates", false, co); return null; }
         old.Send("stream 3 0.25 125 0");
         string instOld = PeerProcess.Field(co, "instance")!;
         int tOld = int.Parse(PeerProcess.Field(co, "transport")!);
 
         using var live = PeerProcess.Start("Y-live");
         string cl = live.Send("create pad F1F1 coexist-y-live");
-        if (!Ok(cl)) { Check("Y: the program on this SDK creates", false, cl); return; }
+        if (!Ok(cl)) { Check("Y: the program on this SDK creates", false, cl); return null; }
         live.Send("stream 4 0.75 125 0");
         string instLive = PeerProcess.Field(cl, "instance")!;
         int tLive = int.Parse(PeerProcess.Field(cl, "transport")!);
         string? installed = Native.DriverVersionOf(instLive);
+        string tokOld = instOld.Substring(instOld.LastIndexOf('\\') + 1);
 
         // A v1.12.0 program installs its own package on each device it makes
-        // (UpdateDriverForPlugAndPlayDevices with its INF). The best driver
-        // in the store goes on that device alone, as this SDK's create
-        // installs one (DeviceNodeCreator.InstallBestStoreDriver).
+        // (UpdateDriverForPlugAndPlayDevices with its INF), and that driver
+        // records nothing.
+        Check("Y5: the v1.12.0 program's controller runs on its own driver",
+              Native.DriverVersionOf(instOld) is { } ownDriver && ownDriver != installed && Y.WatchValues(instOld) == null,
+              $"{Native.DriverVersionOf(instOld)} beside {installed}, {Y.ShowWatch(instOld)}");
+        string? before = Y.CensusEntry(live.Send("census"), tokOld);
+        Check("Y5: there the census keeps the rule before this release: the held pipe is a running v1.12.0 program's",
+              before is { } b && b.Split('|')[2] == "LiveLegacy" && b.EndsWith("|watch=none", StringComparison.Ordinal), before ?? "no entry");
+
+        // The best driver in the store on that device alone, as this SDK's
+        // create installs one (DeviceNodeCreator.InstallBestStoreDriver).
         bool moved = Y.InstallBestStoreDriver(instOld)
                      && WaitFor(() => Native.DriverVersionOf(instOld) == installed && Native.IsStarted(instOld), 20_000);
         Check("Y: the v1.12.0 program's controller moves to the installed driver", moved,
               $"{Native.DriverVersionOf(instOld)}, installed {installed}");
-        if (!moved) return;
+        if (!moved) return null;
 
         var pathOld = WaitPaths(0xBEEF, 0xF1F0, 1, 10_000);
         var pathLive = WaitPaths(0xBEEF, 0xF1F1, 1, 10_000);
         using var capOld = pathOld.Count == 1 ? HidCapture.Open(pathOld[0]) : null;
         using var capLive = pathLive.Count == 1 ? HidCapture.Open(pathLive[0]) : null;
-        if (capOld == null || capLive == null) { Check("Y: both programs' devices open", false); return; }
+        if (capOld == null || capLive == null) { Check("Y: both programs' devices open", false); return null; }
 
         // Y1.
         {
@@ -119,6 +180,19 @@ internal static partial class Program
         }
 
         SectionYSquat(user);
+        SectionYFakePipe(user, live, tOld, tLive);
+
+        // Y5, on the installed driver.
+        string census = live.Send("census");
+        string? entry = Y.CensusEntry(census, tokOld);
+        Check("Y5: the census holds the v1.12.0 program's device as a running v1.12.0 program's",
+              entry?.Split('|')[2] == "LiveLegacy", entry ?? census);
+        Check("Y5: the census sees its owner pipe's server connected, alive and elevated",
+              entry != null && Regex.IsMatch(entry, $@"\|watch=connected,pid={old.Pid},owner=[^,]+,alive=1,elevated=1,trusted=1$"),
+              entry ?? census);
+        Check("Y5: every sweep left the v1.12.0 program's controller running", Native.IsStarted(instOld) && !capOld.Broken && Flows(capOld));
+        Check("Y5: and the running program's own", Native.IsStarted(instLive) && !capLive.Broken && Flows(capLive));
+        return installed;
     }
 
     /// <summary>Y2. Both event names, made by the user before a create.</summary>
@@ -194,6 +268,70 @@ internal static partial class Program
         }
     }
 
+    /// <summary>Y3 and Y4. A killed program's index, and the v1.12.0 owner
+    /// pipe of it made by the user.</summary>
+    static void SectionYFakePipe(IntPtr user, PeerProcess live, int tOld, int tLive)
+    {
+        // Y3.
+        string inst, tok;
+        int t;
+        using (var a = PeerProcess.Start("Y-killed"))
+        {
+            string ca = a.Send("create pad F1F2 coexist-y-killed");
+            if (!Ok(ca)) { Check("Y3: a program creates", false, ca); return; }
+            inst = PeerProcess.Field(ca, "instance")!;
+            t = int.Parse(PeerProcess.Field(ca, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            bool rec = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } v && v.Pid == a.Pid, 5000);
+            Check("Y3: the driver records the program as its owner pipe's server", rec, Y.ShowWatch(inst));
+            a.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        Check("Y3: once the program is killed the driver records no owner",
+              WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000), Y.ShowWatch(inst));
+        using (var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t)))
+        {
+            Check($"Y3: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
+            string? entry = Y.CensusEntry(live.Send("census"), tok);
+            Check("Y3: the census does not count the user's pipe as a running program's",
+                  entry?.Split('|')[2] == "Dead", entry ?? "no entry");
+            string s = live.Send("sweep");
+            WaitFor(() => tree.All(Native.IsGone), 5000);
+            Check("Y3: the running program's sweep removes the killed program's devices", Ok(s) && tree.All(Native.IsGone),
+                  string.Join(", ", tree.Where(d => !Native.IsGone(d))));
+        }
+
+        // Y4.
+        using (var c = PeerProcess.Start("Y-unreported"))
+        {
+            string cc = c.Send("create pad F1F3 coexist-y-unreported");
+            if (!Ok(cc)) { Check("Y4: a program creates", false, cc); return; }
+            inst = PeerProcess.Field(cc, "instance")!;
+            t = int.Parse(PeerProcess.Field(cc, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            c.Kill();
+        }
+        tree = Native.Subtree(inst);
+        WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000);
+        Check("Y4: the driver's values are deleted", Y.DeleteWatchValues(inst) && Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+        using (var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t)))
+        {
+            Check($"Y4: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
+            string census = live.Send("census");
+            Check("Y4: without the driver's values the census counts the pipe as a running v1.12.0 program's",
+                  Y.CensusEntry(census, tok) is { } e && e.Split('|')[2] == "LiveLegacy" && e.EndsWith("|watch=none", StringComparison.Ordinal),
+                  Y.CensusEntry(census, tok) ?? census);
+            live.Send("sweep");
+            Thread.Sleep(2000);
+            Check("Y4: and the sweep keeps the killed program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
+                  string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
+        }
+        // The sweep that kept them dropped the killed program's record, as
+        // it did before this release, so the cleanup at the end of the
+        // section removes them.
+    }
+
     /// <summary>Section Y's helpers and the Win32 calls they make.</summary>
     static class Y
     {
@@ -215,6 +353,47 @@ internal static partial class Program
             {
                 pin.Free();
                 SetupDiDestroyDeviceInfoList(dis);
+            }
+        }
+
+        /// <summary>One device group of a "census" reply: token|index|owner|watch.</summary>
+        internal static string? CensusEntry(string reply, string token) =>
+            reply.Split(' ').FirstOrDefault(p => p.StartsWith(token + "|", StringComparison.OrdinalIgnoreCase));
+
+        // ── The driver's owner watch values ────────────────────────────────
+
+        internal const string WatchSubkey = "HIDMaestro";
+
+        internal record struct Watch(int? Connected, int? Pid, string? Owner);
+
+        /// <summary>The values the driver writes in the device's own key, or
+        /// null when it wrote none.</summary>
+        internal static Watch? WatchValues(string instanceId)
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{WatchSubkey}");
+            if (k == null) return null;
+            var w = new Watch(k.GetValue("OwnerConnected") as int?, k.GetValue("OwnerProcessId") as int?, k.GetValue("OwnerPipeOwner") as string);
+            return w.Connected == null && w.Pid == null && w.Owner == null ? null : w;
+        }
+
+        internal static string ShowWatch(string instanceId) => WatchValues(instanceId) is { } w
+            ? $"connected={w.Connected?.ToString() ?? "-"} pid={w.Pid?.ToString() ?? "-"} owner={w.Owner ?? "-"}"
+            : "no values";
+
+        internal static bool DeleteWatchValues(string instanceId)
+        {
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{WatchSubkey}", writable: true);
+                if (k == null) return false;
+                foreach (string v in new[] { "OwnerConnected", "OwnerProcessId", "OwnerPipeOwner" })
+                    k.DeleteValue(v, throwOnMissingValue: false);
+                return true;
+            }
+            catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                Console.WriteLine($"    cannot delete the values: {e.Message}");
+                return false;
             }
         }
 
@@ -306,6 +485,18 @@ internal static partial class Program
             finally { Marshal.FreeHGlobal(sd); }
         }
 
+        /// <summary>\\.\pipe\HIDMaestroOwner&lt;N&gt; with v1.12.0's mode and
+        /// instance count, and the default security a program gets. Null when
+        /// the name is taken.</summary>
+        internal static Microsoft.Win32.SafeHandles.SafeFileHandle? FakeOwnerPipe(int index)
+        {
+            var h = CreateNamedPipeW($@"\\.\pipe\HIDMaestroOwner{index}", 0x00000002 /*OUTBOUND*/ | 0x00080000 /*FIRST_PIPE_INSTANCE*/,
+                                     0x00000008 /*REJECT_REMOTE_CLIENTS*/, 2, 0, 0, 0, IntPtr.Zero);
+            if (!h.IsInvalid) return h;
+            h.Dispose();
+            return null;
+        }
+
         /// <summary>The owner and DACL of a named event in SDDL, read from an
         /// elevated handle, or null.</summary>
         internal static string? EventSddl(string name)
@@ -390,6 +581,9 @@ internal static partial class Program
         [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
         [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateNamedPipeW(string name, uint openMode, uint pipeMode,
+            uint maxInstances, uint outSize, uint inSize, uint timeout, IntPtr sa);
         [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
         [DllImport("advapi32.dll", SetLastError = true)]
         static extern bool DuplicateTokenEx(IntPtr token, uint access, IntPtr sa, int level, int type, out IntPtr dup);

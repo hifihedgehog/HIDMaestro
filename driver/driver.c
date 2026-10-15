@@ -17,7 +17,7 @@
  */
 
 #include "driver.h"
-#include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
+#include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertSidToStringSidW */
 #include <aclapi.h>   /* GetSecurityInfo */
 #include "version_gen.h"   /* HM_VER_*, generated into the build directory from Directory.Build.props */
 
@@ -672,6 +672,105 @@ NoteFrameCompletedLocked(_In_ PDEVICE_CONTEXT ctx, _In_ ULONG seqNo)
     ctx->AckPendingSeqNo = seqNo;
 }
 
+/* v1.13.0: the owner watch's state, for the SDK's census of who owns each
+ * device (sdk OwnerCensus.cs). Any program can create the v1.12.0 owner
+ * pipe's name, \\.\pipe\HIDMaestroOwner<N>, so the name alone does not show
+ * that a program runs on index N. The driver is the pipe's client and asks
+ * Windows who serves it. Three values in the device's own key, in the
+ * subkey a UMDF driver may write (Device Parameters\HIDMaestro):
+ *   OwnerConnected  1 while the watch is connected, 0 once it has ended
+ *   OwnerProcessId  the server's process id (GetNamedPipeServerProcessId)
+ *   OwnerPipeOwner  the pipe's owner SID as text: Administrators or SYSTEM
+ *                   when an elevated token made it, which no other token
+ *                   can name as an owner
+ * Written only when the watch connects or ends, never per frame. A device
+ * context deletes them when it starts, so they describe its own watch and
+ * nothing a previous device on this instance left. Until the watch
+ * connects there are none, which the census reads as a driver that cannot
+ * report. Worker thread only, except the delete in EvtDeviceAdd before
+ * the worker starts. */
+static const PCWSTR g_OwnerWatchValues[] = { L"OwnerConnected", L"OwnerProcessId", L"OwnerPipeOwner" };
+
+static BOOLEAN
+OpenOwnerWatchKey(_In_ PDEVICE_CONTEXT ctx, _Out_ WDFKEY *key)
+{
+    /* The key object is the device's child: none is made once the
+     * device's cleanup has begun. */
+    *key = NULL;
+    if (ctx->TearingDown) return FALSE;
+    return NT_SUCCESS(WdfDeviceOpenRegistryKey(ctx->Device,
+        PLUGPLAY_REGKEY_DEVICE | WDF_REGKEY_DEVICE_SUBKEY,
+        KEY_READ | KEY_SET_VALUE, WDF_NO_OBJECT_ATTRIBUTES, key));
+}
+
+static VOID
+RemoveOwnerWatchValues(_In_ WDFKEY key)
+{
+    for (ULONG i = 0; i < ARRAYSIZE(g_OwnerWatchValues); i++) {
+        UNICODE_STRING name;
+        RtlInitUnicodeString(&name, g_OwnerWatchValues[i]);
+        WdfRegistryRemoveValue(key, &name);
+    }
+}
+
+static VOID
+ForgetOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
+{
+    WDFKEY key;
+    if (!OpenOwnerWatchKey(ctx, &key)) return;
+    RemoveOwnerWatchValues(key);
+    WdfRegistryClose(key);
+}
+
+/* The watch just connected on this client handle. A server the driver
+ * cannot name, or values it cannot write, leave none. */
+static VOID
+RecordOwnerConnected(_In_ PDEVICE_CONTEXT ctx, _In_ HANDLE pipe)
+{
+    WDFKEY key;
+    ULONG pid = 0;
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    LPWSTR ownerText = NULL;
+    BOOLEAN written = FALSE;
+
+    if (!OpenOwnerWatchKey(ctx, &key)) return;
+    if (GetNamedPipeServerProcessId(pipe, &pid) && pid != 0
+        && GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                           &owner, NULL, NULL, NULL, &sd) == ERROR_SUCCESS
+        && owner != NULL && ConvertSidToStringSidW(owner, &ownerText)) {
+        UNICODE_STRING name, text;
+        RtlInitUnicodeString(&name, L"OwnerProcessId");
+        written = NT_SUCCESS(WdfRegistryAssignULong(key, &name, pid));
+        if (written) {
+            RtlInitUnicodeString(&name, L"OwnerPipeOwner");
+            RtlInitUnicodeString(&text, ownerText);
+            written = NT_SUCCESS(WdfRegistryAssignUnicodeString(key, &name, &text));
+        }
+        if (written) {
+            RtlInitUnicodeString(&name, L"OwnerConnected");
+            written = NT_SUCCESS(WdfRegistryAssignULong(key, &name, 1));
+        }
+    }
+    if (!written) RemoveOwnerWatchValues(key);
+    if (ownerText != NULL) LocalFree(ownerText);
+    if (sd != NULL) LocalFree(sd);
+    WdfRegistryClose(key);
+}
+
+/* The watch ended: the server's end of the pipe closed. */
+static VOID
+RecordOwnerGone(_In_ PDEVICE_CONTEXT ctx)
+{
+    WDFKEY key;
+    UNICODE_STRING name;
+    if (!OpenOwnerWatchKey(ctx, &key)) return;
+    RtlInitUnicodeString(&name, L"OwnerConnected");
+    if (!NT_SUCCESS(WdfRegistryAssignULong(key, &name, 0)))
+        RemoveOwnerWatchValues(key);
+    WdfRegistryClose(key);
+}
+
 /* Issue #67: connect to the SDK's owner pipe and leave one read pending.
  * The SDK never writes to it, so the read completes only when the SDK's end
  * closes, which Windows does when the consumer's process ends however it
@@ -696,6 +795,7 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
         /* The SDK's end closed between the open and the read. */
         SetEvent(ev);
     }
+    RecordOwnerConnected(ctx, p);
 
     WdfWaitLockAcquire(ctx->InputLock, NULL);
     if (ctx->InputAckMemPtr)
@@ -732,6 +832,7 @@ static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
     CloseOwnerWatch(ctx);
+    RecordOwnerGone(ctx);
 
     WdfWaitLockAcquire(ctx->InputLock, NULL);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
@@ -2417,6 +2518,9 @@ EvtDeviceAdd(
      * Replaces the old 1 ms WdfTimer busy poll: see commit/diff for the
      * CPU-saturation root cause. */
     ctx->InputDataEvent = NULL;
+    /* Nothing an earlier device on this instance recorded about its owner
+     * watch describes this one (v1.13.0, RecordOwnerConnected). */
+    ForgetOwnerWatch(ctx);
     /* Create a NAMED StopEvent so external cleanup code (SDK's
      * RemoveAllVirtualControllers) can signal it after a force-kill,
      * breaking the deadlock where PnP waits for WUDFHost to release

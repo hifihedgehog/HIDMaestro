@@ -42,6 +42,8 @@
 //                               the SDK does (SharedMemoryIO.TryOpenOutputEvent),
 //                               wait on it without blocking, and signal its
 //                               StopEvent as the SDK's sweep does
+//   census                      the SDK's census of present devices, one
+//                               token|index|owner|watch per device group
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
 //   staleport <n>               set the last controller's remembered vhci
@@ -251,6 +253,9 @@ internal static class Peer
                     case "sdkevents":
                         Reply(SdkEvents(int.Parse(a[1])));
                         break;
+                    case "census":
+                        Reply(Census());
+                        break;
                     case "threads":
                         Reply($"OK threads n={CountThreads(a[1])}");
                         break;
@@ -397,6 +402,23 @@ internal static class Peer
         bool signaled = stop != IntPtr.Zero && SetEvent(stop);
         if (stop != IntPtr.Zero) CloseHandle(stop);
         return $"OK sdkevents output={(ev != IntPtr.Zero ? 1 : 0)} wait={wait} stop={(signaled ? 1 : 0)}";
+    }
+
+    /// <summary>OwnerCensus.Take() and, where the SDK has it,
+    /// OwnerCensus.DescribeOwnerWatch for each device group.</summary>
+    static string Census()
+    {
+        var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.OwnerCensus");
+        object? census = type?.GetMethod("Take", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, Type.EmptyTypes)?.Invoke(null, null);
+        if (census == null) return "ERR census no OwnerCensus.Take";
+        var describe = type!.GetMethod("DescribeOwnerWatch", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        var parts = new List<string>();
+        foreach (object g in (System.Collections.IEnumerable)census.GetType().GetProperty("Devices")!.GetValue(census)!)
+        {
+            string watch = describe == null ? "unsupported" : (string)describe.Invoke(null, new[] { g })!;
+            parts.Add($"{Get(g, "Key")}|{Get(g, "ControllerIndex")}|{Get(g, "Owner")}|watch={watch}");
+        }
+        return parts.Count == 0 ? "OK census" : "OK census " + string.Join(' ', parts);
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]

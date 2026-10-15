@@ -22,8 +22,12 @@ namespace HIDMaestro.Internal;
 /// before v1.13.0, or belongs to one started since:</para>
 /// <list type="bullet">
 /// <item>its index's v1.12.0 owner pipe <c>HIDMaestroOwner&lt;N&gt;</c> is
-/// held: a live v1.12.0 program;</item>
-/// <item>no owner pipe, but the section <c>Global\HIDMaestroInputAck&lt;N&gt;</c>
+/// held by a running program: a live v1.12.0 program. Any program can
+/// create that name, so where the device's driver reports on the pipe
+/// (<see cref="LegacyPipeLive"/>), the pipe counts only while the driver
+/// is connected to it, the server it names runs, and an elevated token
+/// made the pipe.</item>
+/// <item>no such pipe, but the section <c>Global\HIDMaestroInputAck&lt;N&gt;</c>
 /// exists: a v1.12.0 program that has exited. Only a v1.12.0 or later SDK
 /// creates that section, the driver keeps it open while the device exists,
 /// and the program's owner pipe closed when the program ended;</item>
@@ -103,10 +107,10 @@ internal sealed partial class OwnerCensus
             MachineClaims.OwnerRecord? rec = null;
             if (!key.StartsWith('#')) byToken.TryGetValue(key, out rec);
             if (rec == null && g.Index >= 0) byIndex.TryGetValue(g.Index, out rec);
-            if (rec is { Live: false } && HeldByLiveProgram(key, g.Index)) rec = null;
+            if (rec is { Live: false } && HeldByLiveProgram(key, g.Index, () => g.Ids)) rec = null;
             Owner owner = rec != null
                 ? rec.Self ? Owner.Self : rec.Live ? Owner.Live : Owner.Dead
-                : ByLegacySigns(g.Index);
+                : ByLegacySigns(g.Index, () => g.Ids);
             census.Devices.Add(new DeviceGroup(key, g.Index, g.Ids, owner, rec));
         }
 
@@ -131,6 +135,7 @@ internal sealed partial class OwnerCensus
         string name = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
         int index = ReadControllerIndex(instanceId);
         bool token = DeviceIdentity.IsIdentityToken(name);
+        Func<IReadOnlyList<string>> members = () => GroupMembers(instanceId, name, token, index);
         bool dead = false;
         foreach (var r in MachineClaims.ReadAll())
         {
@@ -141,19 +146,37 @@ internal sealed partial class OwnerCensus
             if (r.Live) return r.Self ? Owner.Self : Owner.Live;
             dead = true;
         }
-        if (dead && !HeldByLiveProgram(token ? name : "#", index)) return Owner.Dead;
-        return ByLegacySigns(index);
+        if (dead && !HeldByLiveProgram(token ? name : "#", index, members)) return Owner.Dead;
+        return ByLegacySigns(index, members);
+    }
+
+    /// <summary>The present devnodes <see cref="Take"/> groups with this
+    /// one: those of its identity token, or, for a device older than
+    /// identity tokens, those of its index.</summary>
+    private static List<string> GroupMembers(string instanceId, string name, bool token, int index)
+    {
+        var ids = new List<string>();
+        foreach (string id in PresentOwnedDevnodes())
+        {
+            string n = id.Substring(id.LastIndexOf('\\') + 1);
+            bool same = token
+                ? string.Equals(n, name, StringComparison.OrdinalIgnoreCase)
+                : !DeviceIdentity.IsIdentityToken(n) && ReadControllerIndex(id) == index;
+            if (same) ids.Add(id);
+        }
+        if (!ids.Contains(instanceId, StringComparer.OrdinalIgnoreCase)) ids.Add(instanceId);
+        return ids;
     }
 
     /// <summary>Whether a running program holds a transport index or an
     /// identity token now: its v1.12.0 owner pipe, which every release from
-    /// v1.12.0 holds for a live controller, or this release's index or
-    /// identity claim.</summary>
-    private static bool HeldByLiveProgram(string key, int index)
+    /// v1.12.0 holds for a live controller (<see cref="LegacyPipeLive"/>),
+    /// or this release's index or identity claim.</summary>
+    private static bool HeldByLiveProgram(string key, int index, Func<IReadOnlyList<string>> members)
     {
         if (index >= 0
-            && (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))
-                || MachineClaims.IsHeld(MachineClaims.IndexPipeName(index))))
+            && (MachineClaims.IsHeld(MachineClaims.IndexPipeName(index))
+                || LegacyPipeLive(index, members)))
             return true;
         return !key.StartsWith('#') && MachineClaims.IsHeld(MachineClaims.IdentityPipeName(key));
     }
@@ -162,12 +185,152 @@ internal sealed partial class OwnerCensus
     /// before v1.13.0 leaves: its owner pipe while it runs, and the
     /// acknowledgement section its driver keeps after a v1.12.0 program
     /// ends.</summary>
-    private static Owner ByLegacySigns(int index)
+    private static Owner ByLegacySigns(int index, Func<IReadOnlyList<string>> members)
     {
         if (index < 0) return Owner.Unknown;
-        if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return Owner.LiveLegacy;
+        if (LegacyPipeLive(index, members)) return Owner.LiveLegacy;
         if (SectionExists($@"Global\HIDMaestroInputAck{index}")) return Owner.DeadLegacy;
         return Owner.Unknown;
+    }
+
+    /// <summary>Whether the v1.12.0 owner pipe of <paramref name="index"/>
+    /// shows a running program. A v1.12.0 program creates that name
+    /// unprotected, so any program can create it too. The device's own
+    /// driver is the pipe's client, and from v1.13.0 it records the server
+    /// it is connected to (driver.c RecordOwnerConnected). Where it does,
+    /// the pipe counts only while the driver is connected to it, the server
+    /// it names runs, and an elevated token made the pipe
+    /// (<see cref="CheckServer"/>). A driver that records nothing, one
+    /// older than v1.13.0 or one whose watch has not connected yet, leaves
+    /// the rule before v1.13.0: a held pipe is a running program.
+    /// <paramref name="members"/> gives the device's devnodes and is called
+    /// only when the pipe is held.</summary>
+    private static bool LegacyPipeLive(int index, Func<IReadOnlyList<string>> members)
+    {
+        if (!MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return false;
+        IReadOnlyList<string> ids = members();
+        bool reported = false;
+        foreach (string id in ids)
+        {
+            OwnerWatch? w = ReadOwnerWatch(id);
+            if (w == null) continue;
+            reported = true;
+            if (w.Connected && CheckServer(w).Trusted) return true;
+        }
+        if (reported)
+            DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is not a running program's: {DescribeWatch(ids)}");
+        return !reported;
+    }
+
+    /// <summary>What a device's driver recorded about its owner watch:
+    /// connected or not, and while connected the server's process id and
+    /// the pipe's owner SID.</summary>
+    internal sealed record OwnerWatch(bool Connected, int ProcessId, string PipeOwner);
+
+    /// <summary>The server a driver named, judged now. Alive: the process
+    /// runs, or exists and this process may not open it. Elevated: its
+    /// token's TokenElevation, null when the token cannot be read.
+    /// Trusted: alive, and an elevated token made the pipe, which the
+    /// pipe's owner shows. Administrators or SYSTEM own what an elevated
+    /// token makes, unless policy makes administrators own their objects
+    /// themselves. Then the server's elevated token must own it, as it does
+    /// a pipe it made, and a pipe a thread of that process made while
+    /// impersonating another token does not pass.</summary>
+    internal readonly record struct ServerCheck(bool Alive, bool? Elevated, bool Trusted);
+
+    /// <summary>The values a device's driver writes in its own key, or null
+    /// when it wrote none. A UMDF driver may write only its service's
+    /// subkey of Device Parameters (WdfDeviceOpenRegistryKey,
+    /// WDF_REGKEY_DEVICE_SUBKEY).</summary>
+    internal static OwnerWatch? ReadOwnerWatch(string instanceId)
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{OwnerWatchSubkey}");
+            if (k?.GetValue("OwnerConnected") is not int connected) return null;
+            if (connected == 0) return new OwnerWatch(false, 0, "");
+            return k.GetValue("OwnerProcessId") is int pid && k.GetValue("OwnerPipeOwner") is string owner
+                ? new OwnerWatch(true, pid, owner)
+                : null;
+        }
+        // OpenSubKey throws SecurityException on access denied, GetValue
+        // IOException on a deleted key and UnauthorizedAccessException on
+        // access denied (RegistryKey.cs, Win32Error).
+        catch (Exception e) when (e is SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The service's subkey of Device Parameters: the UmdfService
+    /// name in hidmaestro.inf.</summary>
+    private const string OwnerWatchSubkey = "HIDMaestro";
+
+    internal static ServerCheck CheckServer(OwnerWatch w)
+    {
+        bool privilegedOwner = w.PipeOwner is LocalSystemSid or AdministratorsSid;
+        IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)w.ProcessId);
+        if (process == IntPtr.Zero)
+        {
+            // An id no process has fails with ERROR_INVALID_PARAMETER.
+            bool exists = Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED;
+            return new ServerCheck(exists, null, exists && privilegedOwner);
+        }
+        try
+        {
+            bool alive = GetExitCodeProcess(process, out uint code) && code == STILL_ACTIVE;
+            bool? elevated = null;
+            string? tokenOwner = null;
+            if (OpenProcessToken(process, TOKEN_QUERY, out IntPtr token))
+            {
+                try
+                {
+                    if (GetTokenInformation(token, TokenElevation, out int isElevated, sizeof(int), out _))
+                        elevated = isElevated != 0;
+                    tokenOwner = TokenOwnerSid(token);
+                }
+                finally { CloseHandle(token); }
+            }
+            bool trusted = alive && (privilegedOwner
+                || (elevated == true && string.Equals(tokenOwner, w.PipeOwner, StringComparison.OrdinalIgnoreCase)));
+            return new ServerCheck(alive, elevated, trusted);
+        }
+        finally { CloseHandle(process); }
+    }
+
+    /// <summary>A token's default owner SID as text, or null.</summary>
+    private static string? TokenOwnerSid(IntPtr token)
+    {
+        GetTokenInformation(token, TokenOwner, IntPtr.Zero, 0, out int length);
+        if (length <= 0) return null;
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try
+        {
+            if (!GetTokenInformation(token, TokenOwner, buffer, length, out _)) return null;
+            if (!ConvertSidToStringSid(Marshal.ReadIntPtr(buffer), out IntPtr text)) return null;
+            try { return Marshal.PtrToStringUni(text); }
+            finally { LocalFree(text); }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    /// <summary>A device group's owner watch in one token, for the
+    /// diagnostic log and the coexistence probe: none, gone, or connected
+    /// with the server and what <see cref="CheckServer"/> found.</summary>
+    internal static string DescribeOwnerWatch(DeviceGroup group) => DescribeWatch(group.InstanceIds);
+
+    private static string DescribeWatch(IReadOnlyList<string> instanceIds)
+    {
+        foreach (string id in instanceIds)
+        {
+            OwnerWatch? w = ReadOwnerWatch(id);
+            if (w == null) continue;
+            if (!w.Connected) return "gone";
+            ServerCheck c = CheckServer(w);
+            return $"connected,pid={w.ProcessId},owner={w.PipeOwner},alive={(c.Alive ? 1 : 0)}," +
+                   $"elevated={(c.Elevated is bool e ? (e ? "1" : "0") : "?")},trusted={(c.Trusted ? 1 : 0)}";
+        }
+        return "none";
     }
 
     /// <summary>Present ROOT and SWD devnodes HIDMaestro made: the
@@ -315,6 +478,9 @@ internal sealed partial class OwnerCensus
         return true;
     }
 
+    private const string LocalSystemSid = "S-1-5-18", AdministratorsSid = "S-1-5-32-544";
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, TOKEN_QUERY = 0x0008, STILL_ACTIVE = 259;
+    private const int ERROR_ACCESS_DENIED = 5, TokenOwner = 4, TokenElevation = 20;
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
     private const uint CM_GETIDLIST_FILTER_PRESENT = 0x00000100;
     private const uint CM_LOCATE_DEVNODE_NORMAL = 0x00000000;
@@ -336,4 +502,30 @@ internal sealed partial class OwnerCensus
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(IntPtr handle);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint processId);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetTokenInformation(IntPtr token, int infoClass, out int info, int length, out int returned);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returned);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "ConvertSidToStringSidW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ConvertSidToStringSid(IntPtr sid, out IntPtr text);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr LocalFree(IntPtr memory);
 }

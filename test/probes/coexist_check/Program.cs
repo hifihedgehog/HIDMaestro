@@ -80,7 +80,9 @@
 //      of this probe that impersonates such a program, and HIDMaestro's
 //      deploy, sweep and create neither hang nor use it. SectionX.cs.
 //   Y. The driver's StopEvent and OutputEvent admit no program that is
-//      not elevated. SectionY.cs has the detail.
+//      not elevated, and an owner pipe such a program makes for a killed
+//      program's index keeps none of its devices. SectionY.cs has the
+//      detail.
 //   S71 runs A to H, J to V, X and Y.
 //
 // Each program is a peer process (this binary with --peer, or the same
@@ -185,7 +187,7 @@ internal static partial class Program
             ('U', "a create that fails after its claims", SectionU),
             ('V', "re-attach attempts a killed composite program leaves", SectionV),
             ('X', "machine-wide names a program that is not elevated creates first", SectionX),
-            ('Y', "the driver's events", SectionY),
+            ('Y', "the driver's events and a faked v1.12.0 owner pipe", SectionY),
         };
         foreach (var (id, title, body) in sections)
         {
