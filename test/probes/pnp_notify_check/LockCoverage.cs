@@ -27,8 +27,9 @@ internal static class LockCoverage
     static readonly HashSet<string> UnderLockOnly = new() { "DifRemoveDevice", "DisableAndUninstall", "RemoveDeviceLocked" };
 
     // A call passed as a delegate to a helper that runs it under the lock
-    // it takes itself: RemovePhantom runs each phantom's uninstall.
-    static readonly string[] LockingHelpers = { "RemovePhantom(" };
+    // it takes itself: RemovePhantom runs each phantom's uninstall, and
+    // RemoveOrphanHidChild each orphan's removal.
+    static readonly string[] LockingHelpers = { "RemovePhantom(", "RemoveOrphanHidChild(" };
 
     static readonly string[] LockTakers = { "HoldPnpLock()", "TryHoldPnpLock(", "EnterRegistrationGate(" };
 

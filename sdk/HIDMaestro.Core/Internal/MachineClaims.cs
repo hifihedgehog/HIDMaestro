@@ -247,8 +247,25 @@ internal static partial class MachineClaims
     // ── Claims ───────────────────────────────────────────────────────────
 
     /// <summary>Create the named claim. Returns the handle when this call
-    /// made the first and only instance, null when anyone already holds it.</summary>
+    /// made the first and only instance, null when anyone already holds it,
+    /// this process included: a second instance of a one-instance pipe is
+    /// refused to the process that holds the first as well.</summary>
     internal static SafeFileHandle? TryClaim(string name)
+    {
+        SafeFileHandle? claim = CreateClaimHook is { } hook ? hook(name) : CreateClaim(name);
+        if (claim != null)
+            lock (s_madeHere)
+            {
+                // Entries of claims let go since are dropped here, so the
+                // table holds about as many names as the process holds.
+                foreach (string gone in s_madeHere.Where(kv => !Open(kv.Value)).Select(kv => kv.Key).ToList())
+                    s_madeHere.Remove(gone);
+                s_madeHere[name] = new WeakReference<SafeFileHandle>(claim);
+            }
+        return claim;
+    }
+
+    private static SafeFileHandle? CreateClaim(string name)
     {
         IntPtr sa = ClaimSecurityAttributes();
         SafeFileHandle h = CreateNamedPipe(@"\\.\pipe\" + name,
@@ -263,6 +280,31 @@ internal static partial class MachineClaims
         }
         return h;
     }
+
+    /// <summary>Whether a claim this process made through
+    /// <see cref="TryClaim"/> is still open: a lease's, a sweep's, the
+    /// phantom cleanup's. A claim is let go by disposing its handle, or
+    /// with the handle when the process ends.</summary>
+    internal static bool HeldHere(string name)
+    {
+        lock (s_madeHere)
+            return s_madeHere.TryGetValue(name, out var made) && Open(made);
+    }
+
+    private static bool Open(WeakReference<SafeFileHandle> made) =>
+        made.TryGetTarget(out var h) && !h.IsClosed && !h.IsInvalid;
+
+    /// <summary>The claims this process made, by name, for
+    /// <see cref="HeldHere"/>. Guarded by itself.</summary>
+    private static readonly Dictionary<string, WeakReference<SafeFileHandle>> s_madeHere =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Stands in for the pipe create of <see cref="TryClaim"/>:
+    /// the claim's name to a handle, or null when it is held. Set by
+    /// pnp_notify_check's offline part, which cannot create a claim without
+    /// elevation, to hold claims for this process or for another one. Null
+    /// outside that test.</summary>
+    internal static Func<string, SafeFileHandle?>? CreateClaimHook;
 
     /// <summary>Whether a live process holds the named claim. True and
     /// ERROR_SEM_TIMEOUT both mean a holder, ERROR_FILE_NOT_FOUND means

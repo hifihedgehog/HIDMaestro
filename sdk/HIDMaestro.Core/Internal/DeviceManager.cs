@@ -1120,17 +1120,20 @@ public static partial class DeviceManager
                       ?? WaitRemovalComplete(instanceId, uninstalls: true, TimeoutScale.Apply(QuickRemovalMs));
             return true;
         }
-        finally
-        {
-            // An id Windows still knows when the process is exiting keeps
-            // its claim until the process ends: releasing it earlier would
-            // let another program register the id while it may still be
-            // being removed, during the rest of this process's exit.
-            if (claim != null && !settled && KeepUnsettledClaims)
-                lock (s_keptClaims) s_keptClaims.Add(claim);
-            else
-                claim?.Dispose();
-        }
+        finally { ReleaseOwnerClaim(claim, settled); }
+    }
+
+    /// <summary>Let go of the identity claim held across a removal.
+    /// An id Windows still knows when the process is exiting keeps its claim
+    /// until the process ends: releasing it earlier would let another
+    /// program register the id while it may still be being removed, during
+    /// the rest of this process's exit.</summary>
+    private static void ReleaseOwnerClaim(SafeFileHandle? claim, bool settled)
+    {
+        if (claim != null && !settled && KeepUnsettledClaims)
+            lock (s_keptClaims) s_keptClaims.Add(claim);
+        else
+            claim?.Dispose();
     }
 
     /// <summary>Set by the exit handler before it joins the phantom
@@ -1189,12 +1192,12 @@ public static partial class DeviceManager
     private static SafeFileHandle? ClaimPhantomOwner(string instanceId, out bool heldElsewhere)
     {
         heldElsewhere = false;
-        string? token = OwnerToken(instanceId);
+        string? token = IdentityTokenOf(instanceId);
         if (token == null && instanceId.StartsWith(@"HID\", StringComparison.OrdinalIgnoreCase))
         {
             string[] parts = instanceId.Split('\\');
             string? parent = parts.Length == 3 ? GetRegistryParentId(@"SYSTEM\CurrentControlSet\Enum\HID", parts[1], parts[2]) : null;
-            if (parent != null) token = OwnerToken(parent);
+            if (parent != null) token = IdentityTokenOf(parent);
         }
         if (token == null) return null;
         if (token.Length == DeviceIdentity.TokenPrefix.Length + 4
@@ -1208,12 +1211,14 @@ public static partial class DeviceManager
         SafeFileHandle? claim = MachineClaims.TryClaim(MachineClaims.IdentityPipeName(token));
         heldElsewhere = claim == null;
         return claim;
+    }
 
-        static string? OwnerToken(string id)
-        {
-            string name = id.Substring(id.LastIndexOf('\\') + 1);
-            return DeviceIdentity.IsIdentityToken(name) ? name : null;
-        }
+    /// <summary>The identity token an instance id ends in, or null for a
+    /// name older than identity tokens.</summary>
+    private static string? IdentityTokenOf(string instanceId)
+    {
+        string name = instanceId.Substring(instanceId.LastIndexOf('\\') + 1);
+        return DeviceIdentity.IsIdentityToken(name) ? name : null;
     }
 
     /// <summary>The instance ids of a present devnode's direct children,
@@ -2047,22 +2052,10 @@ public static partial class DeviceManager
                     if (!parentIsHmEnum)
                         continue;
 
-                    // If parent can be located (live or phantom), it's not
-                    // orphaned.
-                    if (CM_Locate_DevNodeW(out uint _, parentId, 0) == CR_SUCCESS)
-                        continue;
-                    if (CM_Locate_DevNodeW(out uint _, parentId, 1) == CR_SUCCESS)
-                        continue;
-
                     // Parent is gone: remove the orphan silently. Caller
                     // gets the count for whatever observability it wants.
-                    // Under the PnP lock and confirmed by the removal test,
-                    // as RemoveDevice removes a child.
-                    using (HoldPnpLock())
-                    {
-                        using var watch = RemovalWatch.Start(hidInstanceId);
-                        watch.Wait(uninstalls: true, DifRemoveDevice(hidInstanceId) ? QuickRemovalMs : 0);
-                    }
+                    if (!RemoveOrphanHidChild(hidInstanceId, parentId, () => DifRemoveDevice(hidInstanceId)))
+                        continue;
                     removedIds?.Add(hidInstanceId);
                     removed++;
                 }
@@ -2075,6 +2068,49 @@ public static partial class DeviceManager
         }
 
         return removed;
+    }
+
+    /// <summary>Remove one HID child whose recorded parent Windows no
+    /// longer knows, in the tree or as a record, with
+    /// <paramref name="remove"/>, under the PnP lock and the claim of the
+    /// identity its parent belongs to, and test the removal. True when it
+    /// was removed, false when it was left.
+    ///
+    /// <para>The parent is looked for again under the lock. The wait for the
+    /// lock can be a whole registration of the same identity: the child's
+    /// instance id stays the same across lives (issue #60 fixes both the
+    /// parent's id and the child's path), so a parent registered during the
+    /// wait would get its HID child back under this id while the sweep
+    /// removed it. As <see cref="RemovePhantom"/> does, the child is also
+    /// left while another program holds its identity's claim: a create of
+    /// this release takes it before its gate.</para>
+    ///
+    /// <para>A claim this process holds is no other program's create, and
+    /// the child is removed under it: the lease of the controller whose
+    /// teardown runs this sweep (issue #9's surviving child), a sweep's
+    /// claims of the groups it removes, the leases still open at exit. A
+    /// create of this process cannot hold the identity of a controller being
+    /// disposed, and its registration waits for the lock held here.</para></summary>
+    internal static bool RemoveOrphanHidChild(string hidInstanceId, string parentId, Func<bool> remove)
+    {
+        if (ParentKnown(parentId)) return false;
+        using var pnp = HoldPnpLock();
+        if (ParentKnown(parentId)) return false;
+        SafeFileHandle? claim = ClaimPhantomOwner(parentId, out bool heldElsewhere);
+        if (heldElsewhere && !(IdentityTokenOf(parentId) is string token
+                               && MachineClaims.HeldHere(MachineClaims.IdentityPipeName(token))))
+            return false;
+        var outcome = RemovalOutcome.Pending;
+        try
+        {
+            using var watch = RemovalWatch.Start(hidInstanceId);
+            outcome = watch.Wait(uninstalls: true, remove() ? QuickRemovalMs : 0);
+            return true;
+        }
+        finally { ReleaseOwnerClaim(claim, settled: outcome != RemovalOutcome.NotGone); }
+
+        static bool ParentKnown(string id) =>
+            Locate(id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS || Locate(id, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS;
     }
 
     /// <summary>

@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 using HIDMaestro.Internal;
 
 internal static class Offline
@@ -183,9 +184,6 @@ internal static class Offline
         }
     }
 
-    /// <summary>A removal issued while the devnode is in the tree: the
-    /// watch is started first, as RemoveDevice starts it before its removal
-    /// call, then the sequence begins.</summary>
     /// <summary>DeviceManager.WaitRemovalComplete on a devnode in the tree,
     /// called as the sequence begins: the watch starts inside the call.</summary>
     static (bool Done, long Ms) Complete(Sequence s, bool uninstalls, int budgetMs)
@@ -270,6 +268,70 @@ internal static class Offline
     }
 
     static bool Within(long ms, long from) => ms >= from && ms < from + Slack;
+
+    const string OrphanChild = @"HID\PNP_NOTIFY_CHECK\1&7e57&0&0000";
+
+    /// <summary>What the parent of an orphan does while the sweep waits for
+    /// the PnP lock.</summary>
+    enum ParentDuringWait { StaysGone, Registered, Created }
+
+    /// <summary>The HID orphan sweep's act on one child, a record out of the
+    /// tree whose parent was gone at the sweep's first look, unless
+    /// <paramref name="presentFirst"/>. Taking the stand-in lock is when
+    /// another program's registration of the same identity, queued ahead of
+    /// the sweep, runs.</summary>
+    static (bool Removed, int Removals, bool RemovedUnderLock, int LockTakes, int Registrations) Orphan(
+        string parentId, ParentDuringWait during, bool presentFirst = false)
+    {
+        bool parentInTree = presentFirst, parentRecord = presentFirst, childInTree = false, childRecord = true, held = false;
+        int removals = 0, takes = 0, registrations = 0;
+        bool underLock = false;
+        DeviceManager.LocateHook = (id, flags) =>
+        {
+            lock (s_flags) s_flags.Add(flags);
+            bool inTree = id == parentId ? parentInTree : id == OrphanChild && childInTree;
+            bool record = id == parentId ? parentRecord : id == OrphanChild && childRecord;
+            bool found = flags == CM_LOCATE_DEVNODE_PHANTOM ? inTree || record : inTree;
+            return found ? CR_SUCCESS : CR_NO_SUCH_DEVINST;
+        };
+        DeviceManager.RemovedHook = (id, onRemoved) =>
+        {
+            registrations++;
+            return null;
+        };
+        DeviceManager.PnpLockHook = () =>
+        {
+            takes++;
+            if (during != ParentDuringWait.StaysGone) parentRecord = true;
+            if (during == ParentDuringWait.Created) parentInTree = childInTree = true;
+            held = true;
+            return new Released(() => held = false);
+        };
+        try
+        {
+            bool removed = DeviceManager.RemoveOrphanHidChild(OrphanChild, parentId, () =>
+            {
+                removals++;
+                underLock = held;
+                childInTree = childRecord = false;
+                return true;
+            });
+            return (removed, removals, underLock, takes, registrations);
+        }
+        finally
+        {
+            DeviceManager.LocateHook = null;
+            DeviceManager.RemovedHook = null;
+            DeviceManager.PnpLockHook = null;
+        }
+    }
+
+    sealed class Released : IDisposable
+    {
+        readonly Action _a;
+        public Released(Action a) => _a = a;
+        public void Dispose() => _a();
+    }
 
     internal static int Run()
     {
@@ -503,6 +565,64 @@ internal static class Offline
 
         Check("gate: no removal, prefix removal or install wait ran under the lock in any gate run",
               s_underLock == 0, $"{s_underLock}");
+
+        // The HID orphan sweep decides from the parent before it waits for
+        // the lock. A registration of the same identity queued ahead of it
+        // brings the child back under the same instance id, so it looks
+        // again under the lock.
+        const string GoneParent = @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_PARENT";
+        var o1 = Orphan(GoneParent, ParentDuringWait.StaysGone);
+        Check("orphan sweep: the parent still gone under the lock -> the child removed once, under the lock, with no REMOVED registration",
+              o1.Removed && o1.Removals == 1 && o1.RemovedUnderLock && o1.Registrations == 0,
+              $"removed {o1.Removed}, {o1.Removals} removal(s), under the lock {o1.RemovedUnderLock}, {o1.Registrations} registration(s)");
+        var o2 = Orphan(GoneParent, ParentDuringWait.Registered);
+        Check("orphan sweep: the parent registered while the sweep waited for the lock -> the child left",
+              !o2.Removed && o2.Removals == 0, $"removed {o2.Removed}, {o2.Removals} removal(s)");
+        var o3 = Orphan(GoneParent, ParentDuringWait.Created);
+        Check("orphan sweep: the parent and the child back in the tree while the sweep waited -> the child left",
+              !o3.Removed && o3.Removals == 0, $"removed {o3.Removed}, {o3.Removals} removal(s)");
+        var o4 = Orphan(GoneParent, ParentDuringWait.StaysGone, presentFirst: true);
+        Check("orphan sweep: a parent present at the first look -> the child left without taking the lock",
+              !o4.Removed && o4.Removals == 0 && o4.LockTakes == 0, $"removed {o4.Removed}, {o4.LockTakes} take(s) of the lock");
+        // The identity claims, through a stand-in for the one-instance pipes,
+        // which only an elevated process can create: a name is refused while
+        // any handle to it is open, the holder's own process included, as a
+        // pipe made with FILE_FLAG_FIRST_PIPE_INSTANCE refuses it.
+        var pipes = new Dictionary<string, SafeFileHandle>(StringComparer.OrdinalIgnoreCase);
+        MachineClaims.CreateClaimHook = name =>
+        {
+            lock (pipes)
+            {
+                if (pipes.TryGetValue(name, out var open) && !open.IsClosed) return null;
+                var made = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+                pipes[name] = made;
+                return made;
+            }
+        };
+        try
+        {
+            const string Token = "HM_PNPNOTIFYCHECK";
+            string claimName = MachineClaims.IdentityPipeName(Token);
+            // Another program's create in flight holds the claim: not through
+            // this process's TryClaim.
+            var foreign = new SafeFileHandle(new IntPtr(1), ownsHandle: false);
+            lock (pipes) pipes[claimName] = foreign;
+            var o5 = Orphan($@"ROOT\HIDCLASS\{Token}", ParentDuringWait.StaysGone);
+            Check("orphan sweep: the claim of the parent's identity held by another program -> the child left",
+                  !o5.Removed && o5.Removals == 0, $"removed {o5.Removed}, {o5.Removals} removal(s)");
+            foreign.Dispose();
+
+            // A one-controller dispose: the lease of the controller whose
+            // teardown runs the sweep holds its identity's claim (issue #9's
+            // surviving HID child).
+            using var lease = MachineClaims.TryClaim(claimName);
+            var o6 = Orphan($@"ROOT\HIDCLASS\{Token}", ParentDuringWait.StaysGone);
+            bool kept = lease != null && MachineClaims.HeldHere(claimName);
+            Check("orphan sweep: the claim held by this process, as a one-controller dispose's lease holds it -> the child removed under it, the claim kept",
+                  lease != null && o6.Removed && o6.Removals == 1 && o6.RemovedUnderLock && kept,
+                  $"claim taken {lease != null}, removed {o6.Removed}, {o6.Removals} removal(s), under the lock {o6.RemovedUnderLock}, claim still held {kept}");
+        }
+        finally { MachineClaims.CreateClaimHook = null; }
 
         int locates, cancels;
         lock (s_flags)
