@@ -208,21 +208,51 @@ internal static class SwdDeviceFactory
         }
 
         int perAttempt = TimeoutScale.Apply(Math.Min(callbackTimeoutMs, 15000));
-        int[] backoffMs = { 0, 1500, 3000 };
+        return CreateWithRetries($@"SWD\{enumName}\{instanceIdSuffix}", RetryBackoffMs, perAttempt, () => RunOnce(perAttempt));
+    }
+
+    /// <summary>The wait before each create attempt, in ms before scaling.</summary>
+    private static readonly int[] RetryBackoffMs = { 0, 1500, 3000 };
+
+    /// <summary>HRESULT_FROM_WIN32(ERROR_BUSY): the device a timed-out
+    /// attempt made was still in the device tree when its removal test
+    /// ended.</summary>
+    internal const int StillInTreeHr = unchecked((int)0x800700AA);
+
+    /// <summary>Runs <paramref name="attempt"/> once per entry of
+    /// <paramref name="backoffMs"/>, after that entry's wait (scaled), and
+    /// again only when it ended in WAIT_TIMEOUT. A timed-out attempt can have
+    /// created the device and closed it again, hmswd.exe killed or giving up
+    /// on its own callback timeout, so Windows can still be removing
+    /// <paramref name="instanceId"/>. After every timed-out attempt, the last
+    /// one included, the removal test waits up to
+    /// <paramref name="removalTestMs"/> (scaled, an attempt's own bound) for
+    /// the device to leave the tree, inside the caller's hold of the PnP
+    /// lock, so no retry registers the id and no other program's
+    /// registration follows the hold while that removal runs. A device still
+    /// there ends the retries with <see cref="StillInTreeHr"/>, and the
+    /// caller refuses the create.</summary>
+    internal static Result CreateWithRetries(string instanceId, int[] backoffMs, int removalTestMs, Func<Result> attempt)
+    {
         Result last = default;
-        for (int attempt = 0; attempt < backoffMs.Length; attempt++)
+        for (int i = 0; i < backoffMs.Length; i++)
         {
-            if (backoffMs[attempt] > 0)
+            if (backoffMs[i] > 0)
             {
                 // Let PnP quiesce: a prior pnputil /add-driver /install can
                 // still be draining bind notifications when we get here.
-                Thread.Sleep(TimeoutScale.Apply(backoffMs[attempt]));
+                Thread.Sleep(TimeoutScale.Apply(backoffMs[i]));
             }
-            last = RunOnce(perAttempt);
+            last = attempt();
             if (last.Success) return last;
             // Retry ONLY for WAIT_TIMEOUT (0x80070102): other failures are
             // structural (bad args, ACL, no matching INF) and won't fix with a retry.
-            if (unchecked((uint)last.HResult) != 0x80070102u) break;
+            if (unchecked((uint)last.HResult) != 0x80070102u) return last;
+            if (!DeviceManager.WaitRemovalComplete(instanceId, uninstalls: false, removalTestMs))
+            {
+                DeviceOrchestrator.LogDiag($"      {instanceId} still in the device tree after a timed-out create, no retry");
+                return new Result(false, null, StillInTreeHr);
+            }
         }
         return last;
     }

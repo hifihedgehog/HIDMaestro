@@ -859,8 +859,9 @@ public static partial class DeviceManager
     /// devcon fallbacks (up to 7 s each) with 4 s to test them, about 150 s
     /// for a devnode with a few children, all scaled alike. A registration
     /// holds it for its checks and its own calls, at most the three
-    /// hmswd.exe create attempts of up to 15 s each with 4.5 s between.
-    /// Neither nests the other.</summary>
+    /// hmswd.exe create attempts of up to 15 s each with 4.5 s between and
+    /// a removal test of up to 15 s after each that timed out. Neither
+    /// nests the other.</summary>
     const int PnpLockWaitMs = 600_000;
 
     /// <summary>Take the machine-wide PnP lock, held by the calling thread
@@ -882,10 +883,13 @@ public static partial class DeviceManager
     ///
     /// <para>One hold is one removal or one registration, never both: a
     /// registration's gate removes what it must, each removal in a hold of
-    /// its own, before it takes the lock. A thread that holds it can take it
-    /// again, which none does today. An abandoned lock is taken: the gate and
-    /// the removal test look at the devnode again whatever the last holder
-    /// left.</para>
+    /// its own, before it takes the lock. Inside a software device's
+    /// registration, a create attempt that timed out and closed the device
+    /// again is waited for by the removal test before the retry, and after
+    /// the last attempt before the hold ends. A thread
+    /// that holds it can take it again, which none does today. An abandoned
+    /// lock is taken: the gate and the removal test look at the devnode
+    /// again whatever the last holder left.</para>
     ///
     /// <para>Lock order: the deploy lock, then the WinUSB devnode lock, then
     /// this one, then the staging lock. WinUsbBinding.RemovePackage removes a

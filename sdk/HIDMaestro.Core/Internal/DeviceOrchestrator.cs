@@ -720,6 +720,21 @@ internal static partial class DeviceOrchestrator
     //  CreateGamepadCompanion (xinputhid path)
     // ════════════════════════════════════════════════════════════════════
 
+    /// <summary>A software companion that was not created ends the create,
+    /// as a main devnode that was not created does: a controller without it
+    /// is one no game sees (an xinputhid controller has no other device, and
+    /// an Xbox 360 controller gets no XInput). The failed create's cleanup
+    /// removes what the create made. <paramref name="hr"/> is null when the
+    /// registration gate refused.</summary>
+    private static InvalidOperationException CompanionNotCreated(string what, string instanceId, ControllerProfile profile,
+                                                                 int controllerIndex, int? hr) =>
+        new($"The {what} {instanceId} of profile '{profile.Id}' at index {controllerIndex} was not created: " + hr switch
+        {
+            null => "a prior life of it or a device with its ParentIdPrefix was still there after its removal.",
+            SwdDeviceFactory.StillInTreeHr => "the device a timed-out create attempt made was still in the device tree when its removal test ended.",
+            _ => $"hmswd.exe returned 0x{hr.Value:X8}.",
+        });
+
     private static string? CreateGamepadCompanion(int controllerIndex, ControllerProfile profile,
                                                   DeviceIdentity identity)
     {
@@ -819,7 +834,7 @@ internal static partial class DeviceOrchestrator
                        out _))
             {
                 if (pnp == null)
-                    return null;
+                    throw CompanionNotCreated("gamepad companion", gpSwdId, profile, controllerIndex, null);
 
                 result = SwdDeviceFactory.Create(
                     instanceSuffix,
@@ -854,6 +869,7 @@ internal static partial class DeviceOrchestrator
                     k?.SetValue("LastSwdGamepadHResult", result.HResult, RegistryValueKind.DWord);
                 }
                 catch { }
+                throw CompanionNotCreated("gamepad companion", gpSwdId, profile, controllerIndex, result.HResult);
             }
         }
 
@@ -949,7 +965,7 @@ internal static partial class DeviceOrchestrator
                        clearRivals: null, out _))
             {
                 if (pnp == null)
-                    return null;
+                    throw CompanionNotCreated("XUSB companion", xusbId, profile, controllerIndex, null);
 
                 result = SwdDeviceFactory.Create(
                     instanceSuffix,
@@ -996,13 +1012,14 @@ internal static partial class DeviceOrchestrator
             {
                 // SwDeviceCreate failed: record HRESULT in a trace breadcrumb
                 // so post-mortem diagnostics know why the companion didn't
-                // materialize. Return null; caller's error path kicks in.
+                // materialize, then refuse the create.
                 try
                 {
                     using var k = Registry.LocalMachine.CreateSubKey(RegPathForIndex(controllerIndex));
                     k?.SetValue("LastSwdCompanionHResult", result.HResult, RegistryValueKind.DWord);
                 }
                 catch { }
+                throw CompanionNotCreated("XUSB companion", xusbId, profile, controllerIndex, result.HResult);
             }
         }
         else
