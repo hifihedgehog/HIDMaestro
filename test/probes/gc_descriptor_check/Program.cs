@@ -272,6 +272,19 @@ internal static class Program
             j => Ports(j)["status"]!["connections"]![1]!["value"] = "0x00",
             "extendedReport.ports.status.connections[1].value 0x00 is the empty port's, connections[0]'s, so a port holding it would read as empty"),
 
+        // Port blocks on byte 0. Each created at a7e5015: port 1's status
+        // byte went out where the input report's ID belongs, and an output
+        // block on byte 0 was never read.
+        ("input port blocks from byte 0, the report ID's",
+            j => Ports(j)["offset"] = 0,
+            "extendedReport.ports.offset 0 puts port 1's block on byte 0, which holds report ID 0x21. The blocks start at byte 1 or later"),
+        ("output port blocks from byte 0, the report ID's",
+            j => OutPorts(j)["offset"] = 0,
+            "extendedOutputReport.ports.offset 0 puts port 1's block on byte 0, which every output path hands the SDK as the report ID. The blocks start at byte 1 or later"),
+        ("output port blocks from byte 0 of an output report with no ID",
+            j => { Out(j)["reportId"] = ""; OutPorts(j)["offset"] = 0; },
+            "extendedOutputReport.ports.offset 0 puts port 1's block on byte 0, which every output path hands the SDK as the report ID. The blocks start at byte 1 or later"),
+
         ("a port count that wraps an int",
             j =>
             {
@@ -400,6 +413,8 @@ internal static class Program
             j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint16-le"}""")),
         ("an output button mask of 16 bits",
             j => Out(j)["fields"] = Arr(WideMask)),
+        ("port blocks from byte 0 of a report with no ID",
+            j => { In(j)["reportId"] = ""; Ports(j)["offset"] = 0; }),
     };
 
     const string WideMask = """{"byte":1,"bits":"0-15","type":"button-mask","semantic":"held","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","LeftStick","RightStick","Guide","_","_","_","_","_"]}""";

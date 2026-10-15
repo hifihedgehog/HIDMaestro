@@ -48,7 +48,7 @@ internal sealed class PortLayout
     /// compiles and caches them as it does a report's.</summary>
     public ExtendedReportSpec FieldSpec { get; }
 
-    private PortLayout(PortsSpec spec, int reportSize, string where, bool output)
+    private PortLayout(PortsSpec spec, int reportSize, byte reportId, string where, bool output)
     {
         Count = spec.Count;
         Offset = spec.Offset;
@@ -58,6 +58,19 @@ internal sealed class PortLayout
         if (Count < 1 || Stride < 1 || Offset < 0 || Offset + (long)Count * Stride > reportSize)
             throw new InvalidOperationException(
                 $"{where}.ports: {Count} ports of {Stride} bytes from offset {Offset} do not fit a {reportSize}-byte report.");
+        // The SDK writes an input report's ID at byte 0 and the device
+        // reads it there, so an input block on byte 0 would write over it.
+        // An output report reaches the SDK with byte 0 split off as the
+        // ring's report ID on every path, ID or none, so an output block
+        // on byte 0 is never read.
+        if (Offset == 0 && output)
+            throw new InvalidOperationException(
+                $"{where}.ports.offset 0 puts port 1's block on byte 0, which every output path hands the SDK " +
+                "as the report ID. The blocks start at byte 1 or later.");
+        if (Offset == 0 && reportId != 0)
+            throw new InvalidOperationException(
+                $"{where}.ports.offset 0 puts port 1's block on byte 0, which holds report ID 0x{reportId:X2}. " +
+                "The blocks start at byte 1 or later.");
 
         if (spec.Status != null)
         {
@@ -243,7 +256,7 @@ internal sealed class PortLayout
     {
         if (spec?.Ports == null) return null;
         if (spec.PortLayoutCache is PortLayout cached) return cached;
-        var built = new PortLayout(spec.Ports, spec.Size, where, output);
+        var built = new PortLayout(spec.Ports, spec.Size, spec.ReportIdByte, where, output);
         spec.PortLayoutCache = built;
         return built;
     }
