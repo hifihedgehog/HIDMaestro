@@ -22,8 +22,9 @@ namespace HIDMaestro.Internal;
 /// for it a bounded five seconds and goes on without it after that: a
 /// v1.12.0 program holds it only while it writes registry values, far less
 /// than the bound. A process pays that wait once: when it ran out, later
-/// acquisitions take the mutex only if it is free, until one finds it free
-/// or owned by SYSTEM or Administrators again.</para>
+/// acquisitions wait only a short bound that still covers a v1.12.0 write,
+/// until one takes the mutex or finds it owned by SYSTEM or Administrators
+/// again.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {
@@ -36,9 +37,12 @@ internal sealed partial class LedgerLock : IDisposable
 
     // Set when a bounded wait for a legacy mutex owned by neither SYSTEM nor
     // Administrators ran out, which v1.12.0, holding it for a few registry
-    // writes, never causes. While set the mutex is taken only if free, so
-    // one squatter costs this process one wait, not one per acquisition,
-    // and a nested acquisition on the same thread does not wait again.
+    // writes, never causes. While set the wait is the short bound, which
+    // still covers a v1.12.0 write: a v1.12.0 program can hold the same
+    // object after the squatter leaves, or own its mutex as the user on a
+    // host whose default owner is the user, and must stay serialized. One
+    // squatter then costs this process one long wait and a short one per
+    // acquisition, not five seconds each.
     private static volatile bool s_legacyHeldByOther;
 
     private LedgerLock(Mutex m) => _lock = m;
@@ -101,14 +105,14 @@ internal sealed partial class LedgerLock : IDisposable
             // that this check cannot read as its own under the object-creator
             // policy still serializes, and a squatter costs only the wait.
             bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
+            bool marked = s_legacyHeldByOther;
             uint timeout = administrative ? INFINITE
-                : s_legacyHeldByOther ? 0
-                : (uint)TimeoutScale.Apply(LegacyUnknownWaitMs);
+                : (uint)TimeoutScale.Apply(marked ? LegacyMarkedWaitMs : LegacyUnknownWaitMs);
             uint r = WaitForSingleObject(h, timeout);
             _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
             if (administrative || _legacyHeld)
                 s_legacyHeldByOther = false;
-            else if (timeout > 0)
+            else if (!marked)
                 s_legacyHeldByOther = true;
             if (!administrative)
                 DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} is owned by neither SYSTEM nor Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");
@@ -144,8 +148,11 @@ internal sealed partial class LedgerLock : IDisposable
     // policy is.
     private const string LegacySddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
     // How long to wait for a legacy mutex whose owner is neither SYSTEM nor
-    // Administrators. v1.12.0 holds it for a few registry writes.
+    // Administrators. v1.12.0 holds it for a few registry writes: measured
+    // over 23 holds across creates and disposes, p50 0.7 ms, p95 29 ms,
+    // most 34 ms. The marked bound covers that with room to spare.
     private const int LegacyUnknownWaitMs = 5000;
+    private const int LegacyMarkedWaitMs = 500;
     private const uint SYNCHRONIZE = 0x00100000;
     private const uint MUTEX_MODIFY_STATE = 0x0001;
     private const uint READ_CONTROL = 0x00020000;

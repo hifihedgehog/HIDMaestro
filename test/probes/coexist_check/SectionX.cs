@@ -27,19 +27,26 @@ internal static partial class Program
         // SDK has taken a lock, so the squatter's open below meets it.
         using (Native.AdminMutex("Deploy")) { }
 
-        SectionX1();
-        Clean();
-        SectionX2();
-        Clean();
-        SectionX3();
-        Clean();
-        SectionX4();
-        Clean();
-        SectionX5();
-        Clean();
-        SectionX6();
-        Clean();
-        SectionX7();
+        var parts = new (char Part, Action Body)[]
+        {
+            ('1', SectionX1), ('2', SectionX2), ('3', SectionX3), ('4', SectionX4),
+            ('5', SectionX5), ('6', SectionX6), ('7', SectionX7),
+        };
+        bool first = true;
+        foreach (var (part, body) in parts)
+        {
+            if (!XPart(part)) continue;
+            if (!first) Clean();
+            first = false;
+            body();
+        }
+    }
+
+    /// <summary>Whether "--x-parts=" names this part, or is absent.</summary>
+    static bool XPart(char part)
+    {
+        string? arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--x-parts=", StringComparison.Ordinal));
+        return arg == null || arg.AsSpan("--x-parts=".Length).Contains(part);
     }
 
     /// <summary>The USB/IP loopback port ranges taken first. With the first
@@ -263,13 +270,38 @@ internal static partial class Program
             }
             else
             {
-                // The process paid the bounded wait once. Its next sweep takes
-                // the ledger lock again, and must not wait on the squatter.
+                // The process paid the five-second wait once. Its next sweep
+                // takes the ledger lock again and waits only the short bound
+                // that covers a v1.12.0 write.
                 clock.Restart();
                 string again = p.Send("sweep", 60_000);
                 long second = clock.ElapsedMilliseconds;
-                Check("X2: the same program's next sweep does not wait on the squatter again",
+                Check("X2: the same program's next sweep waits the short bound, not five seconds again",
                       Ok(again) && second < 2000, $"first {first} ms, second {second} ms: {again}");
+
+                // The squatter leaves, and a v1.12.0 program, which opened the
+                // same object, writes under it. The object is still the
+                // squatter's, owned by the user. Measured, v1.12.0 holds the
+                // mutex 34 ms at most (p95 29 ms over 23 holds). The hold here
+                // is 150 ms so the wait stands out from the sweep's own time.
+                IntPtr legacy = Native.OpenMutexW(Native.SYNCHRONIZE | 0x0001 /* MUTEX_MODIFY_STATE */, false, name);
+                sq.Dispose();
+                bool holding = legacy != IntPtr.Zero && Native.WaitForSingleObject(legacy, 1000) is 0 or 0x80;
+                Check("X2: after the squatter leaves, a writer holds its mutex as a v1.12.0 program would", holding,
+                      holding ? "" : legacy == IntPtr.Zero ? "the mutex did not open" : "not taken");
+                if (holding)
+                {
+                    // A sweep that answers while the writer still holds the
+                    // mutex wrote beside it.
+                    p.Post("sweep");
+                    string during = p.Receive("sweep, while the writer holds the mutex", 150);
+                    Native.ReleaseMutex(legacy);
+                    bool waited = during.StartsWith("ERR timeout", StringComparison.Ordinal);
+                    string third = waited ? p.Receive("sweep, once the writer let go", 60_000) : during;
+                    Check("X2: the next sweep waits for that brief hold instead of writing beside it",
+                          waited && Ok(third), waited ? third : $"answered while held: {during}");
+                }
+                if (legacy != IntPtr.Zero) Native.CloseHandle(legacy);
             }
         }
         finally { sq.Dispose(); }
