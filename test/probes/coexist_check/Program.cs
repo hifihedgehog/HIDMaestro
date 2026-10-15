@@ -192,10 +192,18 @@ internal static partial class Program
             Peer.Extra = PeerZ.Run;
             return Peer.Run();
         }
-        if (args.Length > 0 && args[0] == "phantomclaims") return PhantomClaims();
-        // Every process the probe starts is a peer with no window, and a
-        // loader failure in one returns an exit code, never a dialog.
+        // Every process the probe starts has no window, and a loader failure
+        // in one returns an exit code, never a dialog. Set before any mode
+        // that starts one: phantomgate starts children.
         Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
+        if (args.Length > 0 && args[0] == "phantomclaims") return PhantomClaims();
+        if (args.Length > 0 && args[0] == "phantomgate") return PhantomGate();
+        if (args.Length > 2 && args[0] == "phantomgate-child") return PhantomGateChild(args[1], args[2]);
+        if (args.Length > 1 && args[0] == "firstcall" && !args.Contains("phantoms"))
+            return FirstCallTimes(RunCount(args), makePhantoms: false, args.Contains("inexit"));
+        if (args.Length > 1 && args[0] == "firstcall-child") return FirstCallChild(args[1], args.Contains("inexit"));
+        // Its SDK loads only where the child asks for it.
+        if (args.Length > 1 && args[0] == "exitcut-child") return ExitCutChild(args[1] == "early");
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
         string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -218,7 +226,30 @@ internal static partial class Program
         if (args.Length > 1 && args[0] == "removaltimes")
         {
             Clean();
-            int rc = RemovalTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture));
+            int rc = RemovalTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture),
+                args.Length > 2 ? args[2] : "xbox",
+                args.Length > 3 ? int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture) : 4);
+            Clean();
+            return rc;
+        }
+        if (args.Length > 2 && args[0] == "firstcall" && args.Contains("phantoms"))
+        {
+            Clean();
+            int rc = FirstCallTimes(RunCount(args), makePhantoms: true, args.Contains("inexit"));
+            Clean();
+            return rc;
+        }
+        if (args.Length > 0 && args[0] == "exitcut")
+        {
+            Clean();
+            int rc = ExitCut();
+            Clean();
+            return rc;
+        }
+        if (args.Length > 1 && args[0] == "phantomtimes")
+        {
+            Clean();
+            int rc = PhantomTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture));
             Clean();
             return rc;
         }

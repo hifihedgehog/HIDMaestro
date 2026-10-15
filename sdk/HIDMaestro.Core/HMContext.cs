@@ -200,7 +200,27 @@ public sealed class HMContext : IDisposable
     /// <see cref="HMCleanupScope.Everything"/>. A program that exits without
     /// disposing its controllers has their devices removed by the SDK as it
     /// exits, and a program that is killed has them removed by the next
-    /// sweep of any program on the machine.</para></summary>
+    /// sweep of any program on the machine.</para>
+    ///
+    /// <para>The records Windows keeps of removed devices, shown only with
+    /// hidden devices, go with a cleanup that runs once per process on a
+    /// background thread: the first of <see cref="InstallDriver"/>, the
+    /// first create and this call starts it and returns without waiting for
+    /// it to end, and a later call removes none of them. While it runs, a
+    /// create in this process and the <see cref="HMCleanupScope.Everything"/>
+    /// cleanup wait for it to end: one pass over the records, their
+    /// uninstalls, at most 5 seconds of waiting after them, and two passes
+    /// over interface registrations that do not wait. The ones left go with
+    /// the next process's first cleanup. When the runtime has already begun
+    /// process exit, which the SDK learns from
+    /// <c>AssemblyLoadContext.Default.Unloading</c>, raised before
+    /// ProcessExit, that first call runs the cleanup itself before it
+    /// returns, waiting at most 10 seconds for a create in flight to let it
+    /// start. Under .NET the SDK learns this only when code of the program
+    /// that refers to the SDK ran or was compiled before exit began: for a
+    /// program that uses the SDK only inside its own ProcessExit handler,
+    /// the cleanup ends with the process, and the next process's first
+    /// cleanup removes what it left.</para></summary>
     public static void RemoveAllVirtualControllers()
         => RemoveAllVirtualControllers(HMCleanupScope.Orphaned, preserveInstall: false);
 

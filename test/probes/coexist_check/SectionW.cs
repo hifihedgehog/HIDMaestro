@@ -416,11 +416,15 @@ internal static partial class Program
 
     /// <summary>The removal times behind the exit handler's and the sweep's
     /// way of removing several controllers: <paramref name="runs"/> times,
-    /// a program creates four Xbox 360 controllers and exits without
-    /// disposing them, timed from its last command to its end, and a program
-    /// creates four and is killed, and another program's sweep is timed.
-    /// Prints p50 and p95 of each. Run as "removaltimes &lt;runs&gt;".</summary>
-    static int RemovalTimes(int runs)
+    /// a program creates <paramref name="count"/> controllers of the peer
+    /// kind <paramref name="kind"/> and exits without disposing them, timed
+    /// from its last command to its end, and a program creates as many and
+    /// is killed, and another program's sweep is timed. Prints p50 and p95
+    /// of each, and fails when a removal leaves a device. Run as
+    /// "removaltimes &lt;runs&gt; [kind] [count]", by default four Xbox 360
+    /// controllers ("xbox 4"). "xboxbt" is xbox-series-xs-bt, an xinputhid
+    /// persona.</summary>
+    static int RemovalTimes(int runs, string kind, int count)
     {
         var exit = new List<double>();
         var sweep = new List<double>();
@@ -430,8 +434,8 @@ internal static partial class Program
             string[]? inst;
             using (var p = PeerProcess.Start($"T{i}-exit"))
             {
-                inst = CreateFour(p);
-                if (inst == null) { Check("removal times: four Xbox 360 controllers create", false); return 1; }
+                inst = CreateMany(p, kind, count);
+                if (inst == null) { Check($"removal times: {count} {kind} controllers create", false); return 1; }
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 p.Send("quit");
                 if (!p.WaitExit(600_000)) { Check("removal times: the program ends", false); return 1; }
@@ -441,8 +445,8 @@ internal static partial class Program
 
             using (var p = PeerProcess.Start($"T{i}-killed"))
             {
-                inst = CreateFour(p);
-                if (inst == null) { Check("removal times: four Xbox 360 controllers create", false); return 1; }
+                inst = CreateMany(p, kind, count);
+                if (inst == null) { Check($"removal times: {count} {kind} controllers create", false); return 1; }
                 p.Kill();
             }
             using (var s = PeerProcess.Start($"T{i}-sweeper"))
@@ -455,18 +459,69 @@ internal static partial class Program
             if (inst.Any(Native.IsPresent)) left++;
             Console.WriteLine($"    run {i}: exit {exit[^1]:F0} ms, sweep {sweep[^1]:F0} ms");
         }
-        Console.WriteLine($"  exit handler, four Xbox 360: {Percentiles(exit)}");
-        Console.WriteLine($"  sweep of a killed program's four Xbox 360: {Percentiles(sweep)}");
+        Console.WriteLine($"  exit handler, {count} {kind}: {Percentiles(exit)}");
+        Console.WriteLine($"  sweep of a killed program's {count} {kind}: {Percentiles(sweep)}");
         Check("removal times: every device is gone after each removal", left == 0, $"{left} removals left a device");
         return s_failures == 0 ? 0 : 1;
     }
 
-    static string[]? CreateFour(PeerProcess p)
+    /// <summary>What the phantom cleanup costs the first create of a
+    /// program, <paramref name="runs"/> times: a program creates two Xbox
+    /// 360 controllers and a pad and disposes them, which leaves phantoms
+    /// behind, and the probe counts them. A new program's first create runs
+    /// the session sweep, whose cleanup holds the create gate while it
+    /// uninstalls them and waits for each to leave, and is timed, with the
+    /// cleanup's own report. A second new program's first create, with no
+    /// phantom left, is the baseline. Prints p50 and p95 of each and of the
+    /// wait per uninstalled phantom. Run as "phantomtimes &lt;runs&gt;".</summary>
+    static int PhantomTimes(int runs)
+    {
+        var withPhantoms = new List<double>();
+        var baseline = new List<double>();
+        var perPhantom = new List<double>();
+        int made = 0, unsettled = 0;
+        for (int i = 1; i <= runs; i++)
+        {
+            using (var maker = PeerProcess.Start($"P{i}-maker"))
+            {
+                bool ok = Ok(maker.Send("create xbox - -")) & Ok(maker.Send("create xbox - -")) & Ok(maker.Send("create pad F212 -"));
+                maker.Send("dispose");
+                if (!ok) { Check("phantom times: the maker creates", false); return 1; }
+            }
+            int phantoms = Native.HidMaestroPhantoms().Count;
+            made += phantoms;
+            using (var first = PeerProcess.Start($"P{i}-first"))
+            {
+                string c = first.Send("create pad F213 -");
+                string s = first.Send("phantomstats", 180_000);
+                if (!Ok(c) || PeerProcess.Field(s, "ran") != "1") { Check("phantom times: the first create and its cleanup run", false, $"{c} / {s}"); return 1; }
+                withPhantoms.Add(double.Parse(PeerProcess.Field(c, "ms")!, System.Globalization.CultureInfo.InvariantCulture));
+                int ids = int.Parse(PeerProcess.Field(s, "ids")!, System.Globalization.CultureInfo.InvariantCulture);
+                if (ids > 0) perPhantom.Add(double.Parse(PeerProcess.Field(s, "waitedms")!, System.Globalization.CultureInfo.InvariantCulture) / ids);
+                unsettled += int.Parse(PeerProcess.Field(s, "unsettled")!, System.Globalization.CultureInfo.InvariantCulture);
+                Console.WriteLine($"    run {i}: {phantoms} phantoms, first create {PeerProcess.Field(c, "ms")} ms, {s}");
+            }
+            using (var second = PeerProcess.Start($"P{i}-baseline"))
+            {
+                string c = second.Send("create pad F214 -");
+                second.Send("phantomstats", 180_000);
+                if (Ok(c)) baseline.Add(double.Parse(PeerProcess.Field(c, "ms")!, System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+        Console.WriteLine($"  first create behind the cleanup: {Percentiles(withPhantoms)}");
+        Console.WriteLine($"  first create with no phantom left: {Percentiles(baseline)}");
+        if (perPhantom.Count > 0) Console.WriteLine($"  wait per uninstalled phantom: {Percentiles(perPhantom)}");
+        Check("phantom times: the maker left phantoms to measure", made > 0, $"{made} in {runs} runs");
+        Check("phantom times: every uninstalled phantom left Windows' records within the budget", unsettled == 0, $"{unsettled} still known");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    static string[]? CreateMany(PeerProcess p, string kind, int count)
     {
         var inst = new List<string>();
-        for (int n = 0; n < 4; n++)
+        for (int n = 0; n < count; n++)
         {
-            string c = p.Send("create xbox - -");
+            string c = p.Send($"create {kind} - -");
             if (!Ok(c)) return null;
             inst.Add(PeerProcess.Field(c, "instance")!);
         }
@@ -476,10 +531,246 @@ internal static partial class Program
     /// <summary>p50 and p95 by nearest rank, with the run count.</summary>
     static string Percentiles(List<double> v)
     {
+        if (v.Count == 0) return "no runs";
         var s = v.OrderBy(x => x).ToArray();
         double Rank(double q) => s[Math.Max(0, (int)Math.Ceiling(q * s.Length) - 1)];
         return FormattableString.Invariant($"p50 {Rank(0.50):F0} ms, p95 {Rank(0.95):F0} ms, min {s[0]:F0}, max {s[^1]:F0}, n={s.Length}");
     }
+
+    /// <summary>`exitcut`, live run 17, elevated: what a phantom cleanup
+    /// started inside a program's own ProcessExit handler does with real
+    /// phantoms. Twice, each time after a peer creates two Xbox 360
+    /// controllers and a pad and disposes them, which leaves phantoms. The
+    /// probe lists every HIDMaestro instance id Windows knows and is not
+    /// present, with its HardwareID. A child then makes its first SDK claim
+    /// through RemoveAllVirtualControllers(preserveInstall: true) inside a
+    /// ProcessExit handler of its own, with the SDK's diagnostic log on.
+    /// First as the program's first call into the SDK: the cleanup starts
+    /// on a thread, which logs its Windows thread id with the "begins" line
+    /// right before SetupDiRemoveDevice. The handler returns once that
+    /// thread, after the line and with no "returned" line, is seen waiting
+    /// in three samples 10 ms apart (a wait state other than Suspended), and
+    /// writes what it saw beside the log. That is the evidence that the
+    /// process ended inside the call: the thread does nothing between the
+    /// line and the call that waits, short of a JIT or loader lock. A cut
+    /// is bounded below by the missing "returned" line, so a process that
+    /// ends in the instant between the call's return and that line counts
+    /// too. The process must end that way, up to five attempts. Then after a call
+    /// into the SDK at startup: the call runs the cleanup to its end on the
+    /// calling thread, and every listed id is gone once the child has ended.
+    /// Each time a new process's first cleanup follows, and every id any
+    /// attempt listed, and every id an uninstall of any attempt began on and
+    /// did not return from, whatever it names now, must be unknown to
+    /// Windows after it (CM_Locate_DevNode, normal and phantom).</summary>
+    static int ExitCut()
+    {
+        foreach (bool early in new[] { false, true })
+        {
+            string label = early ? "exitcut, SDK called before exit" : "exitcut, first call into the SDK in the exit handler";
+            List<string> listed = new();
+            var everListed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var everInside = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string log = "", seen = "";
+            bool cut = false;
+            for (int attempt = 1; attempt <= (early ? 1 : 5) && !cut; attempt++)
+            {
+                using (var maker = PeerProcess.Start($"X{attempt}-maker"))
+                {
+                    bool ok = Ok(maker.Send("create xbox - -")) & Ok(maker.Send("create xbox - -")) & Ok(maker.Send("create pad F216 -"));
+                    maker.Send("dispose");
+                    if (!ok) { Check($"{label}: the maker creates", false); return 1; }
+                }
+                listed = Native.HidMaestroPhantoms();
+                everListed.UnionWith(listed);
+                Console.WriteLine($"    attempt {attempt}: {listed.Count} phantoms");
+                foreach (string id in listed) Console.WriteLine($"      {id}  HardwareID {HardwareIds(id)}");
+                if (listed.Count == 0) { Check($"{label}: the maker left phantoms", false); return 1; }
+                int rc = RunExitCutChild(early, out log, out seen);
+                var begun = DiagIds(log, "phantom uninstall begins on thread ");
+                var returned = DiagIds(log, "phantom uninstall returned ");
+                var inside = begun.Except(returned).ToList();
+                everInside.UnionWith(inside);
+                Console.WriteLine($"    child exit {rc}: {begun.Count} uninstalls began, {returned.Count} returned, cut inside: {string.Join(", ", inside)}");
+                Console.WriteLine($"    the handler saw: {(seen.Length == 0 ? "nothing" : seen)}");
+                cut = early || (inside.Count > 0 && inside.Exists(id => seen.EndsWith(" id=" + id, StringComparison.Ordinal)));
+            }
+            if (early)
+            {
+                Check($"{label}: the call ran the cleanup on the calling thread to its end",
+                      log.Contains("runs on the calling thread", StringComparison.Ordinal) && log.Contains(" removed in ", StringComparison.Ordinal),
+                      LastLineWith(log, "phantom cleanup"));
+                var known = listed.Where(id => !Native.IsGone(id)).ToList();
+                Check($"{label}: every listed id is gone once the child has ended", known.Count == 0, Describe(known));
+            }
+            else Check($"{label}: the process ended inside an uninstall, its thread seen waiting in it", cut,
+                       $"{LastLineWith(log, "phantom uninstall")}. Seen: {(seen.Length == 0 ? "nothing" : seen)}");
+            using (var next = PeerProcess.Start("X-next"))
+            {
+                next.Send("sweep");
+                next.Send("phantomstats", 180_000);
+            }
+            var left = everListed.Union(everInside, StringComparer.OrdinalIgnoreCase).Where(id => !Native.IsGone(id)).ToList();
+            Check($"{label}: after the next process's first cleanup no id any attempt listed or cut is known to Windows",
+                  left.Count == 0, Describe(left));
+        }
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    static string Describe(List<string> ids) =>
+        ids.Count == 0 ? "none" : string.Join(", ", ids.Select(id => $"{id} (HardwareID {HardwareIds(id)})"));
+
+    /// <summary>The HardwareID values Windows keeps for an instance, or
+    /// "none".</summary>
+    static string HardwareIds(string instanceId)
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
+            return k?.GetValue("HardwareID") is string[] ids && ids.Length > 0 ? string.Join("|", ids) : "none";
+        }
+        catch (Exception e) { return e.GetType().Name; }
+    }
+
+    static List<string> DiagIds(string log, string prefix)
+    {
+        var ids = new List<string>();
+        foreach (string line in log.Split('\n'))
+        {
+            int at = line.IndexOf(prefix, StringComparison.Ordinal);
+            if (at < 0) continue;
+            string rest = line[(at + prefix.Length)..].Trim();
+            int colon = rest.IndexOf(": ", StringComparison.Ordinal);
+            ids.Add(prefix.EndsWith(": ", StringComparison.Ordinal) || colon < 0 ? rest : rest[(colon + 2)..]);
+        }
+        return ids;
+    }
+
+    static string LastLineWith(string log, string text)
+    {
+        string last = "(none)";
+        foreach (string line in log.Split('\n'))
+            if (line.Contains(text, StringComparison.Ordinal)) last = line.Trim();
+        return last;
+    }
+
+    /// <summary>The exitcut child, with its own TEMP and the SDK's
+    /// diagnostic log on, that log, and what the child's handler saw of the
+    /// uninstalling thread.</summary>
+    static int RunExitCutChild(bool early, out string log, out string seen)
+    {
+        string temp = Path.Combine(Path.GetTempPath(), "hm-exitcut-" + Environment.ProcessId);
+        try { Directory.Delete(temp, true); } catch { }
+        Directory.CreateDirectory(temp);
+        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!, $"exitcut-child {(early ? "early" : "late")}")
+        { UseShellExecute = false, CreateNoWindow = true };
+        psi.Environment["TMP"] = temp;
+        psi.Environment["TEMP"] = temp;
+        psi.Environment["HIDMAESTRO_DIAG"] = "1";
+        int rc;
+        using (var p = System.Diagnostics.Process.Start(psi)!)
+        {
+            if (!p.WaitForExit(300_000)) { try { p.Kill(); } catch { } rc = -1; }
+            else rc = p.ExitCode;
+        }
+        log = "";
+        seen = "";
+        try { log = File.ReadAllText(Path.Combine(temp, "HIDMaestro", "teardown_diag.log")); } catch { }
+        try { seen = File.ReadAllText(Path.Combine(temp, ExitCutSeen)).Trim(); } catch { }
+        try { Directory.Delete(temp, true); } catch { }
+        return rc;
+    }
+
+    /// <summary>What the late child's handler saw, in its TEMP.</summary>
+    const string ExitCutSeen = "exitcut.seen";
+
+    /// <summary>The exitcut child. With "early" it calls into the SDK now,
+    /// which runs the SDK's module initializer. Its own ProcessExit handler
+    /// makes the first claim. With "late" the handler returns once the
+    /// thread the log names in a "begins" line, with no "returned" line for
+    /// that id, is seen waiting three times in a row.</summary>
+    static int ExitCutChild(bool early)
+    {
+        if (early) LoadSdk();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ExitCutHandler(early);
+        return 0;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static void LoadSdk() => _ = HIDMaestro.HMBuildInfo.HasOpenVrDriver;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static void ExitCutHandler(bool early)
+    {
+        ExitCutCall();
+        if (early) return;
+        string temp = Path.GetTempPath();
+        string path = Path.Combine(temp, "HIDMaestro", "teardown_diag.log");
+        const string begins = "phantom uninstall begins on thread ";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 60_000)
+        {
+            string text = "";
+            try
+            {
+                using var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var r = new StreamReader(f);
+                text = r.ReadToEnd();
+            }
+            catch (IOException) { }
+            // The cleanup ended before a sample caught it: this attempt
+            // ends normally and the probe makes another.
+            if (text.Contains(" removed in ", StringComparison.Ordinal) && text.Contains("phantom cleanup: ", StringComparison.Ordinal)) return;
+            int at = text.LastIndexOf(begins, StringComparison.Ordinal);
+            if (at >= 0)
+            {
+                string rest = text[(at + begins.Length)..];
+                rest = rest[..Math.Max(0, rest.IndexOf('\n'))].Trim();
+                int colon = rest.IndexOf(": ", StringComparison.Ordinal);
+                if (colon > 0 && int.TryParse(rest[..colon], out int tid))
+                {
+                    string id = rest[(colon + 2)..];
+                    string? state = WaitingThrice(tid, id, path);
+                    if (state != null)
+                    {
+                        File.WriteAllText(Path.Combine(temp, ExitCutSeen), $"thread {tid} {state} id={id}");
+                        return;
+                    }
+                }
+            }
+            Thread.Sleep(1);
+        }
+    }
+
+    /// <summary>The thread seen in a wait other than Suspended three times,
+    /// 10 ms apart, while the log has no "returned" line for the id, or
+    /// null. The state of the last sample.</summary>
+    static string? WaitingThrice(int tid, string id, string log)
+    {
+        string? state = null;
+        for (int n = 0; n < 3; n++)
+        {
+            if (n > 0) Thread.Sleep(10);
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            System.Diagnostics.ProcessThread? t = null;
+            foreach (System.Diagnostics.ProcessThread pt in self.Threads)
+                if (pt.Id == tid) { t = pt; break; }
+            if (t == null || t.ThreadState != System.Diagnostics.ThreadState.Wait
+                || t.WaitReason == System.Diagnostics.ThreadWaitReason.Suspended)
+                return null;
+            state = $"waiting ({t.WaitReason})";
+            try
+            {
+                using var f = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var r = new StreamReader(f);
+                if (DiagIds(r.ReadToEnd(), "phantom uninstall returned ").Contains(id)) return null;
+            }
+            catch (IOException) { }
+        }
+        return state;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static void ExitCutCall() => HIDMaestro.HMContext.RemoveAllVirtualControllers(preserveInstall: true);
 
     static bool ConfigExists(string transport)
     {

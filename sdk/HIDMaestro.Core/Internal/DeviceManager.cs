@@ -14,6 +14,9 @@ namespace HIDMaestro.Internal;
 /// </summary>
 public static partial class DeviceManager
 {
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetCurrentThreadId();
+
     // ── CfgMgr32 P/Invoke ──
 
     [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
@@ -66,6 +69,7 @@ public static partial class DeviceManager
     const uint CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED = 9;
 
     const uint CR_SUCCESS = 0;
+    const uint CM_LOCATE_DEVNODE_PHANTOM = 0x00000001;
     const uint CR_NOT_DISABLEABLE = 0x00000028;
     const uint DN_STARTED = 0x00000008;
 
@@ -397,26 +401,25 @@ public static partial class DeviceManager
     /// Skips PRESENT devnodes: only touches PHANTOM/non-loaded ones.
     /// Safe to call while a HIDMaestro session is live; will not disturb
     /// any current controller. Returns the number of phantoms removed.
+    /// <paramref name="afterUninstall"/> runs under the phantom's claim
+    /// after each successful uninstall and says whether Windows has finished
+    /// with the id. Once <paramref name="stop"/> answers true, no further
+    /// phantom is uninstalled.
     /// </summary>
-    internal static int RemoveAccumulatedHmPhantoms()
+    internal static int RemoveAccumulatedHmPhantoms(Func<string, bool>? afterUninstall = null, Func<bool>? stop = null)
     {
-        // Issue #28 (v1.3.16): the prior VID_045E&PID_028E /
-        // VID_BEEF&PID_F000 substring checks matched real Xbox 360 wired
-        // controllers and PadForge Custom devices regardless of enumerator
-        //: so a real unplugged Xbox 360's phantom record qualified. The
-        // new test scopes pure-name matches to the HIDMAESTRO* /
-        // HMCOMPANION* enumerator forms (which are HM-exclusive by
-        // construction), and otherwise routes through IsHidMaestroOwned to
-        // prove ownership via the devnode's HardwareID list.
-        bool IsHmInstance(string iid)
+        int removed = 0;
+        var source = PhantomSource;
+        if (source != null)
         {
-            if (iid.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0
-                || iid.IndexOf("HMCOMPANION", StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-            return IsHidMaestroOwned(iid);
+            foreach (var (id, uninstall) in source())
+            {
+                if (stop?.Invoke() == true) break;
+                if (IsHmInstance(id) && RemovePhantom(id, uninstall, afterUninstall)) removed++;
+            }
+            return removed;
         }
 
-        int removed = 0;
         Guid nullGuid = Guid.Empty;
         IntPtr dis = SetupDiGetClassDevsByRef(ref nullGuid, IntPtr.Zero, IntPtr.Zero, DIGCF_ALLCLASSES);
         if (dis == new IntPtr(-1)) return 0;
@@ -445,28 +448,9 @@ public static partial class DeviceManager
                     string instanceId = new string(idBuf, 0, (int)idLen - 1);
 
                     if (!IsHmInstance(instanceId)) continue;
-
-                    // Skip PRESENT devnodes. Only sweep PHANTOMs to guarantee
-                    // we never disturb a live controller.
-                    if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
-                        continue;
-
-                    // The claim of the identity the phantom belongs to is
-                    // held across the uninstall. A create of this release
-                    // takes that claim before it registers a devnode, so it
-                    // cannot register this id during SetupDiRemoveDevice.
-                    // That covers Windows' removal only if the call has
-                    // finished it when it returns, which is not verified.
-                    // A phantom whose claim another program holds is that
-                    // program's create in flight, and is left. The test
-                    // above does not find a devnode in the process of being
-                    // removed, so one with no claim to take (a name older
-                    // than identity tokens, a HID child whose parent cannot
-                    // be found) still reaches the uninstall.
-                    using SafeFileHandle? claim = ClaimPhantomOwner(instanceId, out bool heldElsewhere);
-                    if (heldElsewhere) continue;
-
-                    if (SetupDiRemoveDevice(dis, devInfoHandle.AddrOfPinnedObject()))
+                    if (stop?.Invoke() == true) break;
+                    IntPtr data = devInfoHandle.AddrOfPinnedObject();
+                    if (RemovePhantom(instanceId, () => SetupDiRemoveDevice(dis, data), afterUninstall))
                         removed++;
                 }
             }
@@ -483,6 +467,128 @@ public static partial class DeviceManager
         if (removed > 0)
             DeviceOrchestrator.LogDiag($"    RemoveAccumulatedHmPhantoms: removed {removed} HIDMaestro phantom(s)");
         return removed;
+    }
+
+    /// <summary>Phantoms with no device behind them, each id with the call
+    /// that stands for its SetupDiRemoveDevice. Coexistence probe
+    /// `phantomgate` sets it through reflection to run the phantom cleanup's
+    /// real path, claim, uninstall and wait, with no device. Null outside
+    /// the probe.</summary>
+    internal static Func<IEnumerable<(string Id, Func<bool> Uninstall)>>? PhantomSource;
+
+    // Issue #28 (v1.3.16): the prior VID_045E&PID_028E /
+    // VID_BEEF&PID_F000 substring checks matched real Xbox 360 wired
+    // controllers and PadForge Custom devices regardless of enumerator
+    //: so a real unplugged Xbox 360's phantom record qualified. The
+    // new test scopes pure-name matches to the HIDMAESTRO* /
+    // HMCOMPANION* enumerator forms (which are HM-exclusive by
+    // construction), and otherwise routes through IsHidMaestroOwned to
+    // prove ownership via the devnode's HardwareID list.
+    private static bool IsHmInstance(string iid)
+    {
+        if (iid.IndexOf("HIDMAESTRO", StringComparison.OrdinalIgnoreCase) >= 0
+            || iid.IndexOf("HMCOMPANION", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+        return IsHidMaestroOwned(iid);
+    }
+
+    /// <summary>Uninstall one HIDMaestro phantom under its owner's claim,
+    /// and run <paramref name="afterUninstall"/> inside that claim once the
+    /// uninstall succeeded. True when it was uninstalled.</summary>
+    private static bool RemovePhantom(string instanceId, Func<bool> uninstall, Func<string, bool>? afterUninstall)
+    {
+        // Skip PRESENT devnodes. Only sweep PHANTOMs to guarantee
+        // we never disturb a live controller.
+        if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
+            return false;
+
+        // The claim of the identity the phantom belongs to is held across
+        // the uninstall. A create of this release takes that claim before
+        // it registers a devnode, so it cannot register this id during the
+        // uninstall. That covers Windows' removal only if the call has
+        // finished it when it returns, which is not verified. A phantom
+        // whose claim another program holds is that program's create in
+        // flight, and is left. The test above does not find a devnode in
+        // the process of being removed, so one with no claim to take (a
+        // name older than identity tokens, a HID child whose parent cannot
+        // be found) still reaches the uninstall. The claim holds off only
+        // this release's creates: a v1.12.0 program takes none, so one that
+        // starts on a default token's index once its owner pipe has closed
+        // can register the id during the uninstall and the wait after it.
+        SafeFileHandle? claim = ClaimPhantomOwner(instanceId, out bool heldElsewhere);
+        if (heldElsewhere) return false;
+        bool settled = true;
+        try
+        {
+            // The one uninstall the phantom cleanup makes. The lines around
+            // it let a log show a process that ended inside it, and the
+            // thread's Windows id lets a probe find the thread waiting in it.
+            DeviceOrchestrator.LogDiag($"    phantom uninstall begins on thread {GetCurrentThreadId()}: {instanceId}");
+            bool uninstalled = uninstall();
+            DeviceOrchestrator.LogDiag($"    phantom uninstall returned {uninstalled}: {instanceId}");
+            if (!uninstalled) return false;
+            // Still under the claim, so no create of this release registers
+            // the id until the callback returns.
+            settled = afterUninstall?.Invoke(instanceId) ?? true;
+            return true;
+        }
+        finally
+        {
+            // An id Windows still knows when the process is exiting keeps
+            // its claim until the process ends: releasing it earlier would
+            // let another program register the id while it may still be
+            // being removed, during the rest of this process's exit.
+            if (claim != null && !settled && KeepUnsettledClaims)
+                lock (s_keptClaims) s_keptClaims.Add(claim);
+            else
+                claim?.Dispose();
+        }
+    }
+
+    /// <summary>Set by the exit handler before it joins the phantom
+    /// cleanup: from then on the claim of a phantom whose removal was not
+    /// confirmed stays with the process until it ends.</summary>
+    internal static volatile bool KeepUnsettledClaims;
+
+    private static readonly List<SafeFileHandle> s_keptClaims = new();
+
+    /// <summary>Answers in place of the locates in
+    /// <see cref="WaitRemovalComplete"/>. Coexistence probe `phantomgate`
+    /// sets it through reflection, with <see cref="PhantomSource"/>, to run
+    /// the cleanup's gate, its wait and the exit join with no device. Null
+    /// outside the probe.</summary>
+    internal static Func<string, bool>? RemovalLocate;
+
+    /// <summary>How often <see cref="WaitRemovalComplete"/> looks.</summary>
+    internal const int RemovalPollMs = 50;
+
+    /// <summary>Wait until a removal the SDK started on
+    /// <paramref name="instanceId"/> has finished, or
+    /// <paramref name="budgetMs"/> passes, and say whether it finished. With
+    /// a budget of 0 it looks once. The one test of a finished removal for
+    /// the sweeps, the exit handler and the phantom cleanup, so a stronger
+    /// signal replaces it in one place. An uninstall
+    /// (<paramref name="uninstalls"/> true) is finished once the PHANTOM
+    /// locate no longer finds the id, and any other removal once the NORMAL
+    /// locate no longer finds it, which does not see a removal still in
+    /// progress (<see cref="IsLive"/>). A locate that throws counts as
+    /// finding the id.</summary>
+    internal static bool WaitRemovalComplete(string instanceId, bool uninstalls, int budgetMs)
+    {
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            bool found;
+            try
+            {
+                found = RemovalLocate?.Invoke(instanceId)
+                        ?? (uninstalls ? IsKnownInstance(instanceId) : IsLive(instanceId));
+            }
+            catch { found = true; }
+            if (!found) return true;
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds >= budgetMs) return false;
+            Thread.Sleep(RemovalPollMs);
+        }
     }
 
     /// <summary>The identity claim of the controller a phantom belongs to:
@@ -521,6 +627,13 @@ public static partial class DeviceManager
             return DeviceIdentity.IsIdentityToken(name) ? name : null;
         }
     }
+
+    /// <summary>Whether Windows still knows a device instance of this id,
+    /// present or not: CM_Locate_DevNode with CM_LOCATE_DEVNODE_PHANTOM.
+    /// Never CM_LOCATE_DEVNODE_CANCELREMOVE, which cancels a removal in
+    /// progress.</summary>
+    internal static bool IsKnownInstance(string instanceId) =>
+        CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS;
 
     /// <summary>Whether a devnode of this instance id is configured in the
     /// device tree. A phantom is not, and neither is a device in the process

@@ -345,23 +345,29 @@ internal static partial class DeviceOrchestrator
     //
     //   2. OwnerSweep.RemoveOrphaned
     //        Trigger:  RemoveAllVirtualControllers() and (bool), which
-    //                  PadForge calls at engine start and from its
-    //                  ProcessExit handler
+    //                  PadForge calls in its launch sweep, at engine start
+    //                  and from its ProcessExit handler
     //        Scope:    (1), then the packages only when no device of any
     //                  program is left on the driver. A running program's
     //                  controllers, the caller's own included, stay.
     //
     //   2a. OwnerSweep.RemoveOwnDevicesAtExit
     //        Trigger:  ProcessExit, registered with the owner claim, once
-    //                  this process's creates in flight are done
-    //                  (OwnerSweep.CreateGate)
+    //                  the phantom cleanup and this process's creates in
+    //                  flight are done (OwnerSweep.CreateGate)
     //        Scope:    the devices of this process's controllers that it
-    //                  did not dispose
+    //                  did not dispose. OwnerSweep.ExitWaitMs bounds the
+    //                  waits for the cleanup and a create in flight: past
+    //                  it nothing is removed and the record stays for the
+    //                  next sweep. The removal itself runs to its end, each
+    //                  RemoveDevice within its own bound
     //
     //   3. RemoveEverything
     //        Trigger:  RemoveAllVirtualControllers(HMCleanupScope.Everything, bool)
     //        Scope:    every HIDMaestro device, import and ledger entry on
     //                  the machine, whoever made it. The pre-1.13.0 sweep.
+    //                  It holds OwnerSweep.CreateGate for writing, so it
+    //                  never runs beside (5) or a create of this process
     //
     //   4. RemoveOrphanHidChildren (DeviceManager)
     //        Trigger:  each teardown, once after a batch, and after (1)
@@ -371,8 +377,26 @@ internal static partial class DeviceOrchestrator
     //      RemoveGhostXusbInterfaces and RemoveOwnedInterfaceEntries
     //      (phantomOnly)
     //        Trigger:  a background thread once per process, started by
-    //                  (1), behind OwnerSweep.CreateGate so it never runs
-    //                  during one of this process's creates
+    //                  (1) or (2), behind OwnerSweep.CreateGate so it never runs
+    //                  during one of this process's creates. It keeps the
+    //                  gate, and each phantom's identity claim, until
+    //                  Windows no longer knows the id it uninstalled,
+    //                  with half the exit's budget of waiting in all per
+    //                  run (OwnerSweep.UninstallWait). At exit it starts
+    //                  no further uninstall, and the exit handler joins it
+    //                  within the exit's budget (OwnerSweep.JoinPhantomCleanup).
+    //                  A later call starts none. The call that starts it
+    //                  returns without waiting for it to end, and a create
+    //                  of this process and (3) wait behind it: one pass
+    //                  over the phantoms, their uninstalls, at most
+    //                  UninstallWaitBudgetMs of waiting after them, and
+    //                  two interface passes that do not wait. A first call
+    //                  made while the process exits (ProcessExitSignal)
+    //                  runs it on the calling thread instead. Under .NET a
+    //                  program in which no code that refers to the SDK ran
+    //                  or was compiled before exit began misses that
+    //                  signal, and the thread ends with the process
+    //                  (OwnerSweep.StartPhantomCleanupOnce)
     //        Scope:    HIDMaestro records of devnodes that are not
     //                  present, except one whose identity claim another
     //                  program holds, and their interface registrations
@@ -1283,7 +1307,10 @@ internal static partial class DeviceOrchestrator
         // programs that have exited. HMContext runs it before the lease, so
         // here it finds it done. A running program's devices, in this
         // process or another, are never touched, and the phantom-record
-        // cleanup runs in the background behind OwnerSweep.CreateGate.
+        // cleanup runs behind OwnerSweep.CreateGate on a thread of its own.
+        // This thread holds the gate's read side, so a cleanup started here
+        // while the process exits would run none. HMContext's own call,
+        // before the gate, has already started it.
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "0.ghost_cleanup"))
             OwnerSweep.SessionSweepOnce();
 
@@ -2078,6 +2105,28 @@ internal static partial class DeviceOrchestrator
     /// manifest-hash fast path, which a battery or support tool resetting
     /// devices between runs wants.</summary>
     internal static void RemoveEverything(bool preserveInstall)
+    {
+        // This process's phantom cleanup uninstalls phantom records under
+        // CreateGate's write side, and its creates register devnodes under
+        // the read side. The walk below removes those same records and the
+        // packages they are bound to, so it waits for both and holds the
+        // next back until it is done.
+        OwnerSweep.CreateGate.EnterWriteLock();
+        try
+        {
+            BeforeEverythingActs?.Invoke();
+            RemoveEverythingGated(preserveInstall);
+        }
+        finally { OwnerSweep.CreateGate.ExitWriteLock(); }
+    }
+
+    /// <summary>Called by <see cref="RemoveEverything"/> once it holds
+    /// CreateGate, before it acts. The phantomgate probe sets it through
+    /// reflection to see when the sweep would start, and throws from it so
+    /// the sweep acts on nothing. Null outside the probe.</summary>
+    internal static Action? BeforeEverythingActs;
+
+    private static void RemoveEverythingGated(bool preserveInstall)
     {
         var sweepSw = System.Diagnostics.Stopwatch.StartNew();
         long lastMs = 0;

@@ -118,6 +118,39 @@ internal static class Native
 
     internal static bool IsPresent(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == 0;
 
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_List_SizeW(out uint length, string filter, uint flags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_ListW(string filter, [Out] char[] buffer, uint length, uint flags);
+
+    /// <summary>The HIDMaestro instance ids Windows knows under ROOT, SWD
+    /// and HID that are not present: the phantoms the SDK's cleanup
+    /// uninstalls. Named by HIDMaestro's enumerators or an identity token.</summary>
+    internal static List<string> HidMaestroPhantoms()
+    {
+        var list = new List<string>();
+        foreach (string root in new[] { "ROOT", "SWD", "HID" })
+        {
+            const uint FilterEnumerator = 0x1;
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                if (CM_Get_Device_ID_List_SizeW(out uint len, root, FilterEnumerator) != 0 || len <= 1) break;
+                var buf = new char[len];
+                uint cr = CM_Get_Device_ID_ListW(root, buf, len, FilterEnumerator);
+                if (cr == 0x1A) continue;   // CR_BUFFER_SMALL: a device arrived between the calls
+                if (cr != 0) break;
+                foreach (string id in new string(buf).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+                    if ((id.Contains("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
+                         || id.Contains("HMCOMPANION", StringComparison.OrdinalIgnoreCase)
+                         || id.Contains(@"\HM_", StringComparison.OrdinalIgnoreCase))
+                        && !IsPresent(id))
+                        list.Add(id);
+                break;
+            }
+        }
+        return list;
+    }
+
     /// <summary>Neither live nor phantom: what DeviceManager.RemoveDevice ends with.</summary>
     internal static bool IsGone(string instanceId) =>
         CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;

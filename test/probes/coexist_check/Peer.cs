@@ -12,6 +12,7 @@
 //   create composite - <key|->  dualsense-composite (USB/IP)
 //   create gc - <key|->         gamecube-adapter (USB/IP)
 //   create xinputhid - <key|->  xbox-elite-v2, a gamepad companion
+//   create xboxbt - <key|->     xbox-series-xs-bt, a gamepad companion
 //   createat <slot> <kind> <pid|->  CreateControllerAt(slot, profile), the
 //                               same kinds as create, no identity key
 //   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
@@ -66,6 +67,10 @@
 //   droppedsignal <index>       whether a frame signaled that index's
 //                               unnamed event since the last ask:
 //                               signaled=0|1
+//   phantomstats                wait for this program's phantom cleanup,
+//                               up to 120 s, and reply what its run did
+//                               (OwnerSweep.LastPhantomCleanup): removed,
+//                               totalms, ids, waitedms, unsettled
 //   census                      the SDK's census of present devices, one
 //                               token|index|owner|watch per device group
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
@@ -533,6 +538,19 @@ internal static class Peer
                     case "droppedsignal":
                         Reply($"OK droppedsignal signaled={(s_dropped.TryGetValue(int.Parse(a[1], CultureInfo.InvariantCulture), out IntPtr d) && WaitForSingleObject(d, 0) == 0 ? 1 : 0)}");
                         break;
+                    case "phantomstats":
+                    {
+                        var sweep = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.OwnerSweep");
+                        var join = sweep?.GetMethod("JoinPhantomCleanup", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(int) });
+                        var last = sweep?.GetProperty("LastPhantomCleanup", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                        if (join == null || last == null) { Reply("ERR phantomstats no OwnerSweep.LastPhantomCleanup"); break; }
+                        bool ended = (bool)join.Invoke(null, new object[] { 120_000 })!;
+                        object? r = last.GetValue(null);
+                        Reply(r == null ? $"OK phantomstats ran=0 ended={(ended ? 1 : 0)}"
+                            : $"OK phantomstats ran=1 ended={(ended ? 1 : 0)} removed={Get(r, "Removed")} totalms={Get(r, "TotalMs")} ids={Get(r, "Ids")} " +
+                              $"waitedms={Get(r, "WaitedMs")} unsettled={Get(r, "Unsettled")}");
+                        break;
+                    }
                     case "census":
                         Reply(Census());
                         break;
@@ -681,6 +699,7 @@ internal static class Peer
         "gc" => ctx.GetProfile("gamecube-adapter")!,
         "ds4" => ctx.GetProfile("dualshock-4-v2")!,
         "xinputhid" => ctx.GetProfile("xbox-elite-v2")!,
+        "xboxbt" => ctx.GetProfile("xbox-series-xs-bt")!,
         _ => throw new ArgumentException(kind),
     };
 
