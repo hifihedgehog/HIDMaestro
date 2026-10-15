@@ -276,7 +276,12 @@ internal sealed partial class OwnerCensus
             if (RegQueryInfoKey(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
                                 IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out long written) != 0)
                 return null;
-            return new OwnerWatch(true, pid, owner, DateTime.FromFileTimeUtc(written));
+            // A value only a KEY_SET_VALUE holder (the driver host or an
+            // administrator) can plant could be out of range. Treat an
+            // unreadable write time as no values, which keeps the rule from
+            // before this release (the held pipe counts), never a throw.
+            if (FileTimeToUtc(written) is not DateTime writtenUtc) return null;
+            return new OwnerWatch(true, pid, owner, writtenUtc);
         }
         // OpenSubKey throws SecurityException on access denied, GetValue
         // IOException on a deleted key and UnauthorizedAccessException on
@@ -298,14 +303,20 @@ internal sealed partial class OwnerCensus
         if (process == IntPtr.Zero)
         {
             // An id no process has fails with ERROR_INVALID_PARAMETER.
-            bool exists = Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED;
-            return new ServerCheck(exists, null, false);
+            if (Marshal.GetLastPInvokeError() != ERROR_ACCESS_DENIED)
+                return new ServerCheck(false, null, false);
+            // A process with that id exists but denies this one a handle.
+            // Read its creation time without a handle, so a process that
+            // reused the id and cannot be opened does not pass as the server.
+            // Its token, hence elevation, cannot be read.
+            bool deniedAlive = CreationTimeByScan((uint)w.ProcessId) is DateTime dc && dc <= w.WrittenUtc;
+            return new ServerCheck(deniedAlive, null, false);
         }
         try
         {
             bool alive = GetExitCodeProcess(process, out uint code) && code == STILL_ACTIVE
                 && GetProcessTimes(process, out long created, out _, out _, out _)
-                && DateTime.FromFileTimeUtc(created) <= w.WrittenUtc;
+                && FileTimeToUtc(created) is DateTime c && c <= w.WrittenUtc;
             bool? elevated = null;
             string? tokenOwner = null;
             if (OpenProcessToken(process, TOKEN_QUERY, out IntPtr token))
@@ -323,6 +334,53 @@ internal sealed partial class OwnerCensus
             return new ServerCheck(alive, elevated, trusted);
         }
         finally { CloseHandle(process); }
+    }
+
+    /// <summary>A FILETIME in UTC, or null when it is zero or out of the
+    /// range <see cref="DateTime.FromFileTimeUtc"/> accepts, so a planted or
+    /// garbage value is a miss, never a throw.</summary>
+    private static DateTime? FileTimeToUtc(long fileTime)
+    {
+        if (fileTime <= 0) return null;
+        try { return DateTime.FromFileTimeUtc(fileTime); }
+        catch (ArgumentOutOfRangeException) { return null; }
+    }
+
+    /// <summary>The creation time of the process with <paramref name="pid"/>
+    /// read from the system process list, for when its handle cannot be
+    /// opened. Null when no such process is listed. Used only on the
+    /// access-denied path, which is rare, so the full-list query is
+    /// acceptable there.</summary>
+    private static DateTime? CreationTimeByScan(uint pid)
+    {
+        int len = 512 * 1024;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            IntPtr buf = Marshal.AllocHGlobal(len);
+            try
+            {
+                uint status = NtQuerySystemInformation(SystemProcessInformation, buf, (uint)len, out uint needed);
+                if (status == STATUS_INFO_LENGTH_MISMATCH)
+                {
+                    len = (int)Math.Max((uint)len * 2, needed + 64 * 1024);
+                    continue;
+                }
+                if (status != 0) return null;
+                int offset = 0;
+                while (true)
+                {
+                    IntPtr entry = buf + offset;
+                    int next = Marshal.ReadInt32(entry);                        // NextEntryOffset
+                    nint entryPid = Marshal.ReadIntPtr(entry, ProcessIdOffset);  // UniqueProcessId
+                    if ((uint)entryPid == pid)
+                        return FileTimeToUtc(Marshal.ReadInt64(entry, CreateTimeOffset));
+                    if (next == 0) return null;
+                    offset += next;
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+        return null;
     }
 
     /// <summary>A token's default owner SID as text, or null.</summary>
@@ -507,6 +565,10 @@ internal sealed partial class OwnerCensus
 
     private const string LocalSystemSid = "S-1-5-18", AdministratorsSid = "S-1-5-32-544";
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, TOKEN_QUERY = 0x0008, STILL_ACTIVE = 259;
+    private const uint SystemProcessInformation = 5, STATUS_INFO_LENGTH_MISMATCH = 0xC0000004;
+    // SYSTEM_PROCESS_INFORMATION field offsets, 64-bit (x64 and ARM64 share
+    // the LLP64 layout): CreateTime at 0x20, UniqueProcessId at 0x50.
+    private const int CreateTimeOffset = 0x20, ProcessIdOffset = 0x50;
     private const int ERROR_ACCESS_DENIED = 5, TokenOwner = 4, TokenElevation = 20;
     private const uint CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000001;
     private const uint CM_GETIDLIST_FILTER_PRESENT = 0x00000100;
@@ -559,6 +621,9 @@ internal sealed partial class OwnerCensus
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+
+    [LibraryImport("ntdll.dll")]
+    private static partial uint NtQuerySystemInformation(uint infoClass, IntPtr info, uint length, out uint returnLength);
 
     [LibraryImport("advapi32.dll", EntryPoint = "RegQueryInfoKeyW")]
     private static partial int RegQueryInfoKey(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, IntPtr className, IntPtr classLength,

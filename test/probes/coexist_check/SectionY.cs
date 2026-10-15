@@ -70,6 +70,8 @@
 //        the input section. The user holds the owner pipe. With no input
 //        section, which only a running program can create, the pipe does
 //        not count, and a sweep removes the device.
+//    Y15. The driver's values carry a key write time out of the range a
+//        FILETIME converts to. The census completes instead of throwing.
 //    Y16. A running program lets go of its input event, and the driver, past
 //        its idle handle reset, waits for that event to come back. The
 //        program is then killed. The driver records its owner pipe closed
@@ -117,6 +119,7 @@ internal static partial class Program
             SectionYLegacyEvents(user, installed);
             SectionYHeldSection(user);
             SectionYNoSection(user);
+            SectionYBadTime(user);
             SectionYWatchWhileWaiting();
         }
         finally { Y.CloseHandle(user); }
@@ -332,6 +335,32 @@ internal static partial class Program
         WaitFor(() => tree.All(Native.IsGone), 5000);
         Check("Y14: a sweep removes the killed program's devices", tree.Count > 0 && tree.All(Native.IsGone),
               string.Join(", ", tree.Where(d => !Native.IsGone(d))));
+    }
+
+    /// <summary>Y15. A key write time out of FILETIME's range.</summary>
+    static void SectionYBadTime(IntPtr user)
+    {
+        Clean();
+        string inst, tok;
+        int t;
+        using (var p = PeerProcess.Start("Y-badtime"))
+        {
+            string cp = p.Send("create pad F1FC coexist-y-badtime");
+            if (!Ok(cp)) { Check("Y15: a program creates", false, cp); return; }
+            inst = PeerProcess.Field(cp, "instance")!;
+            t = int.Parse(PeerProcess.Field(cp, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            p.Kill();
+        }
+        WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000);
+        using var nu = PeerProcess.Start("Y-badtime-census");
+        bool planted = Y.PlantWatchRaw(inst, nu.Pid, "S-1-5-32-544", long.MaxValue);
+        Check("Y15: the values carry a write time past FILETIME's range", planted, Y.ShowWatch(inst));
+        using var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t));
+        Check($"Y15: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
+        string census = nu.Send("census");
+        Check("Y15: the census completes and lists the device", Ok(census) && Y.CensusEntry(census, tok) != null, census);
     }
 
     /// <summary>Y16. An owner pipe that closes while the driver waits for
@@ -884,6 +913,26 @@ internal static partial class Program
                 k.SetValue("OwnerConnected", 1, RegistryValueKind.DWord);
                 long ft = written.ToFileTimeUtc();
                 return NtSetInformationKey(k.Handle, 0 /*KeyWriteTimeInformation*/, ref ft, 8) == 0;
+            }
+            catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                Console.WriteLine($"    cannot plant the values: {e.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>The same with a raw last-write FILETIME, which may lie
+        /// outside the range DateTime accepts.</summary>
+        internal static bool PlantWatchRaw(string instanceId, int pid, string owner, long fileTime)
+        {
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{WatchSubkey}", writable: true);
+                if (k == null) return false;
+                k.SetValue("OwnerProcessId", pid, RegistryValueKind.DWord);
+                k.SetValue("OwnerPipeOwner", owner, RegistryValueKind.String);
+                k.SetValue("OwnerConnected", 1, RegistryValueKind.DWord);
+                return NtSetInformationKey(k.Handle, 0 /*KeyWriteTimeInformation*/, ref fileTime, 8) == 0;
             }
             catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             {
