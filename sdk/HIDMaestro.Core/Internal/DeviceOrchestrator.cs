@@ -821,19 +821,32 @@ internal static partial class DeviceOrchestrator
             string instanceSuffix = identity.Token;
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Gamepad";
 
-            // This parent has a HID child, so the one-parent-per-prefix
-            // rule applies to it exactly as it does to a ROOT parent.
-            if (!DeviceManager.ClearParentIdPrefixRivals("SWD", gpSwdEnumerator, identity.Token, identity.ParentIdPrefix))
-                return null;
+            // The machine-wide PnP lock is held from the prefix check through
+            // SwDeviceCreate (DeviceManager.AcquirePnpLock), after the
+            // install-queue part of the registration gate. Its removal test
+            // does not apply: SwDeviceClose keeps a software device's record,
+            // and "the new create will be queued until the previous removal
+            // processing completes" (SwDeviceClose on Microsoft Learn).
+            SwdDeviceFactory.Result result;
+            using (DeviceManager.HoldPnpLock())
+            {
+                // This parent has a HID child, so the one-parent-per-prefix
+                // rule applies to it exactly as it does to a ROOT parent.
+                if (!DeviceManager.ClearParentIdPrefixRivals("SWD", gpSwdEnumerator, identity.Token, identity.ParentIdPrefix))
+                    return null;
+                if (DeviceManager.AwaitInstallQueue($@"SWD\{gpSwdEnumerator}\{instanceSuffix}")
+                    == DeviceManager.RegistrationGate.Refused)
+                    return null;
 
-            var result = SwdDeviceFactory.Create(
-                instanceSuffix,
-                hardwareIds,
-                compatList.ToArray(),
-                identity.ContainerId,
-                companionDesc,
-                driverRequired: true,
-                enumeratorName: gpSwdEnumerator);
+                result = SwdDeviceFactory.Create(
+                    instanceSuffix,
+                    hardwareIds,
+                    compatList.ToArray(),
+                    identity.ContainerId,
+                    companionDesc,
+                    driverRequired: true,
+                    enumeratorName: gpSwdEnumerator);
+            }
 
             if (result.Success && result.InstanceId != null)
             {
@@ -944,14 +957,24 @@ internal static partial class DeviceOrchestrator
             // SWD#HIDMAESTRO#<token>#{EC87F1E3-...} on every life.
             string instanceSuffix = identity.Token;
 
-            var result = SwdDeviceFactory.Create(
-                instanceSuffix,
-                hardwareIds,
-                compatIds,
-                identity.ContainerId,
-                companionDesc,
-                driverRequired: true,
-                enumeratorName: "HIDMAESTRO");
+            // The PnP lock and the install-queue gate, as for the gamepad
+            // companion in CreateGamepadCompanion.
+            SwdDeviceFactory.Result result;
+            using (DeviceManager.HoldPnpLock())
+            {
+                if (DeviceManager.AwaitInstallQueue($@"SWD\HIDMAESTRO\{instanceSuffix}")
+                    == DeviceManager.RegistrationGate.Refused)
+                    return null;
+
+                result = SwdDeviceFactory.Create(
+                    instanceSuffix,
+                    hardwareIds,
+                    compatIds,
+                    identity.ContainerId,
+                    companionDesc,
+                    driverRequired: true,
+                    enumeratorName: "HIDMAESTRO");
+            }
 
             if (result.Success && result.InstanceId != null)
             {

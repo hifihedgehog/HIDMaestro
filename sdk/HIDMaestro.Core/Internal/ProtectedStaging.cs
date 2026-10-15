@@ -103,10 +103,11 @@ namespace HIDMaestro.Internal;
 /// staging a deploy does, and a WinUSB package's), under the transport lock
 /// (<c>UsbipDriverInstaller.TransportMutexObject</c>: the usbip-win2
 /// installer's staging, the host controller package's, and the SWD
-/// helper's when the host controller update stages it), or with no lock
-/// held (a constructor's prewarm, the SWD helper's staging for a create or
-/// a remove), and nothing takes another machine-wide lock while holding
-/// it.
+/// helper's when the host controller update stages it), under the PnP lock
+/// (the SWD helper's staging for a create or a remove, inside its
+/// registration's or its removal's hold), or with no lock held (a
+/// constructor's prewarm), and nothing takes another machine-wide lock
+/// while holding it.
 /// <see cref="DirFor"/> holds it only around its record note, before its
 /// process-local lock. S81 checks that a staging waits for a holder of the
 /// lock and a deploy completes after it.</para>

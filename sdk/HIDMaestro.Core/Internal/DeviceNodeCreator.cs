@@ -123,14 +123,30 @@ internal static partial class DeviceNodeCreator
         }
         string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
 
+        // From here through DIF_REGISTERDEVICE this create holds the
+        // machine-wide PnP lock, which every registration and removal of a
+        // program of this release holds (DeviceManager.AcquirePnpLock). Two
+        // bugchecks 0x139 on 2026-10-14 and 10-15 fired in this registration,
+        // at its class GUID write, while other programs created and removed
+        // HIDClass devnodes. The lock and the gate below narrow that window.
+        // Neither is shown to close it.
+        using var pnp = DeviceManager.HoldPnpLock();
+
+        // No second parent on this prefix, ever. See the helper for why a
+        // failure here has to stop the create rather than be logged past.
+        string instId = $@"ROOT\{enumerator}\{identity.Token}";
+        if (!DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix))
+            return new Result(false, null);
+
         // Issue #60. The instance id is the identity's, not a number Windows
         // generates, so this parent has the same name on every life and the
         // HID child below it can keep its path. A record with that name that
         // is still around (a prior life's crash residue, or a phantom whose
         // teardown timed out) is removed first; a record that is not ours
         // is a hard stop, because claiming it would mutate a foreign device
-        // (issue #28).
-        string instId = $@"ROOT\{enumerator}\{identity.Token}";
+        // (issue #28). The gate registers the name again only once its last
+        // removal has passed the removal test and Windows has no device
+        // install pending (DeviceManager.AwaitRegistrationGate).
         var gate = DeviceManager.AwaitRegistrationGate(instId, () =>
         {
             if (!DeviceManager.IsHidMaestroOwned(instId))
@@ -143,11 +159,6 @@ internal static partial class DeviceNodeCreator
             return true;
         }, timeoutMs: 120_000, installWaitMs: DeviceManager.InstallQueueWaitMs);
         if (gate == DeviceManager.RegistrationGate.Refused)
-            return new Result(false, null);
-
-        // No second parent on this prefix, ever. See the helper for why a
-        // failure here has to stop the create rather than be logged past.
-        if (!DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix))
             return new Result(false, null);
 
         Guid classGuid = HIDClassGuid;
@@ -326,6 +337,7 @@ internal static partial class DeviceNodeCreator
                 if (!SetupDiCallClassInstaller(0x19 /*DIF_REGISTERDEVICE*/, dis,
                         devInfoHandle.AddrOfPinnedObject()))
                     return new Result(false, null);
+                pnp.Dispose();
             }
             finally
             {

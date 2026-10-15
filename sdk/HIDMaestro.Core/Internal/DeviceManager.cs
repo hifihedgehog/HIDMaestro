@@ -522,22 +522,153 @@ public static partial class DeviceManager
     }
 
     /// <summary>How long the gate waits for Windows to have no device
-    /// install pending.</summary>
+    /// install pending: the bound vJoy's installer gives the same wait before
+    /// it installs on a devnode it registered (vJoyInstallLib.cpp, cmdUpdate,
+    /// CMP_WaitNoPendingInstallEvents(30000)).</summary>
     internal const int InstallQueueWaitMs = 30_000;
 
     /// <summary>The gate a fixed instance id passes before it is registered
-    /// again. <paramref name="removePriorLife"/> removes a record the id
-    /// still has and returns false to refuse the registration instead.</summary>
+    /// again, run by the caller under <see cref="AcquirePnpLock"/>. A record
+    /// the id still has fails the removal test (<see cref="RemovalComplete"/>,
+    /// as a removal that uninstalls): <paramref name="removePriorLife"/>
+    /// removes it, or returns false to refuse the registration, and the gate
+    /// then waits up to <paramref name="timeoutMs"/> for the test to pass,
+    /// once. A record that outlasts that refuses the registration. Then
+    /// <see cref="AwaitInstallQueue"/>.
+    ///
+    /// <para>The gate covers a removal of the id by any program, by its
+    /// PHANTOM record. What it cannot see is a removal Windows has not
+    /// finished after that record went: a program of this release holds the
+    /// PnP lock until its removal test passes, and a program before v1.13.0
+    /// takes no lock.</para></summary>
     internal static RegistrationGate AwaitRegistrationGate(string instanceId, Func<bool> removePriorLife,
                                                            int timeoutMs, int installWaitMs)
     {
-        if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
-            || Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
+        using (var watch = RemovalWatch.Start(instanceId))
         {
-            if (!removePriorLife()) return RegistrationGate.Refused;
+            if (!watch.IsComplete(uninstalls: true))
+            {
+                if (!removePriorLife()) return RegistrationGate.Refused;
+                if (!watch.Wait(uninstalls: true, timeoutMs))
+                {
+                    DeviceOrchestrator.LogDiag($"      {instanceId} has not passed the removal test after its removal; refusing to register it");
+                    return RegistrationGate.Refused;
+                }
+            }
         }
-        return RegistrationGate.Allowed;
+        return AwaitInstallQueue(instanceId, installWaitMs);
     }
+
+    /// <summary>Waits up to <paramref name="installWaitMs"/> for Windows to
+    /// have no device install pending, the last step of the registration
+    /// gate and the whole gate of a software device's create.
+    /// CMP_WaitNoPendingInstallEvents "waits until there are no pending
+    /// device installation activities for the PnP manager to perform", and
+    /// "just indicates that there are no pending installation activities at
+    /// the moment it is called" (Learn). An install still pending when the
+    /// wait ends lets the registration go ahead, as vJoy's installer goes on
+    /// after its WAIT_TIMEOUT: it can belong to any device on the machine,
+    /// and refusing would turn another device's slow install into a failed
+    /// create. A failed wait refuses it, as vJoy's stops (WAIT_FAILED).</summary>
+    internal static RegistrationGate AwaitInstallQueue(string instanceId, int installWaitMs = InstallQueueWaitMs)
+    {
+        uint timeout = (uint)TimeoutScale.Apply(installWaitMs);
+        uint r = InstallQueueHook?.Invoke(timeout) ?? CMP_WaitNoPendingInstallEvents(timeout);
+        switch (r)
+        {
+            case WAIT_OBJECT_0:
+                return RegistrationGate.Allowed;
+            case WAIT_TIMEOUT:
+                DeviceOrchestrator.LogDiag($"      device installs still pending after {timeout} ms; registering {instanceId} anyway");
+                return RegistrationGate.AllowedInstallsPending;
+            default:
+                DeviceOrchestrator.LogDiag($"      CMP_WaitNoPendingInstallEvents failed (0x{r:X8}, Win32 {Marshal.GetLastPInvokeError()}); refusing to register {instanceId}");
+                return RegistrationGate.Refused;
+        }
+    }
+
+    const uint WAIT_OBJECT_0 = 0x00000000;
+    const uint WAIT_TIMEOUT = 0x00000102;
+
+    // cfgmgr32.h: #define CM_WaitNoPendingInstallEvents CMP_WaitNoPendingInstallEvents.
+    // The DLL exports only the CMP_ name.
+    [LibraryImport("CfgMgr32.dll", EntryPoint = "CMP_WaitNoPendingInstallEvents", SetLastError = true)]
+    private static partial uint CMP_WaitNoPendingInstallEvents(uint dwTimeout);
+
+    /// <summary>The name, in <see cref="AdminNamespace"/>, of the
+    /// machine-wide lock over PnP registrations and removals.</summary>
+    internal const string PnpMutexObject = "Pnp";
+
+    /// <summary>How long a program waits for another to release the PnP
+    /// lock, as long as the deploy lock's wait. The longest hold, about five
+    /// minutes, is a create's gate that removes a prior life: one removal (a
+    /// 120 s removal test, the pnputil and devcon fallbacks at up to 7 s
+    /// each, the hmswd.exe close at 8 s), then up to 120 s more for the
+    /// gate's own removal test and 30 s for the install queue.</summary>
+    const int PnpLockWaitMs = 600_000;
+
+    /// <summary>Take the machine-wide PnP lock, held by the calling thread
+    /// until it calls <c>ReleaseMutex</c>. Every registration of a devnode the
+    /// SDK makes holds it from its gate through its registration
+    /// (<see cref="DeviceNodeCreator.CreateDeviceNode"/> through
+    /// DIF_REGISTERDEVICE, a software device's create through SwDeviceCreate),
+    /// and every removal it makes through <see cref="RemoveDevice"/> and the
+    /// HID orphan sweep (<see cref="RemoveOrphanHidChildren"/>) holds it from
+    /// the removal call through the removal test. So no program of this
+    /// release registers a devnode while another removes one, and two
+    /// removals do not overlap. A thread that
+    /// holds it can take it again: a create's gate removes a prior life
+    /// through RemoveDevice. An abandoned lock is taken: the gate and the
+    /// removal test look at the devnode again whatever the last holder
+    /// left.
+    ///
+    /// <para>Lock order: the deploy lock, then the WinUSB devnode lock, then
+    /// this one, then the staging lock. WinUsbBinding.RemovePackage removes a
+    /// devnode that has left with the first two held. Under this lock the
+    /// SDK stages hmswd.exe (SwdDeviceFactory) and takes no other
+    /// machine-wide lock. The registry ledger's lock and the transport
+    /// install's lock are never held with it. In process,
+    /// <see cref="OwnerSweep.CreateGate"/> and a controller's teardown gate
+    /// come before it.</para></summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    internal static Mutex AcquirePnpLock()
+    {
+        var m = new Mutex(false, AdminNamespace.Name(PnpMutexObject));
+        try
+        {
+            if (!m.WaitOne(TimeoutScale.Apply(PnpLockWaitMs)))
+                throw new InvalidOperationException(
+                    "Another program held HIDMaestro's machine-wide PnP lock for ten minutes.");
+        }
+        catch (AbandonedMutexException) { }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        return m;
+    }
+
+    /// <summary><see cref="AcquirePnpLock"/> as a scope: disposing it
+    /// releases the lock, once, so a caller can let it go early and leave
+    /// the end of the scope to a no-op.</summary>
+    internal sealed class PnpLockHold : IDisposable
+    {
+        private Mutex? _mutex;
+        internal PnpLockHold(Mutex mutex) => _mutex = mutex;
+
+        public void Dispose()
+        {
+            if (_mutex == null) return;
+            _mutex.ReleaseMutex();
+            _mutex.Dispose();
+            _mutex = null;
+        }
+    }
+
+    /// <inheritdoc cref="PnpLockHold"/>
+    internal static PnpLockHold HoldPnpLock() => new(AcquirePnpLock());
 
     // ── SetupAPI P/Invoke for DIF_REMOVE ──
 
@@ -980,9 +1111,20 @@ public static partial class DeviceManager
     /// </summary>
     /// <exception cref="InvalidOperationException">An SWD parent's removal
     /// needs hmswd.exe, and it could not be staged or held
-    /// (<see cref="SwdDeviceFactory.Remove"/>). Thrown before any wait, with
-    /// the device left in place.</exception>
+    /// (<see cref="SwdDeviceFactory.Remove"/>). Thrown under the PnP lock
+    /// before any wait for the removal, with the device left in
+    /// place.</exception>
     public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false)
+    {
+        if (CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS &&
+            CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS)
+            return true;
+
+        using var pnp = HoldPnpLock();
+        return RemoveDeviceLocked(instanceId, timeoutMs, fast, forceFallbacks);
+    }
+
+    static bool RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS &&
             CM_Locate_DevNodeW(out devInst, instanceId, 1) != CR_SUCCESS)
@@ -1266,7 +1408,8 @@ public static partial class DeviceManager
                 }
             }
 
-            // The fallbacks are removals too, confirmed the same way.
+            // The fallbacks are removals too, confirmed the same way before
+            // the PnP lock is let go.
             if (stillPhantom)
                 parentWatch.Wait(uninstalls: true, 2000);
         }
@@ -1605,10 +1748,11 @@ public static partial class DeviceManager
 
                     // Parent is gone: remove the orphan silently. Caller
                     // gets the count for whatever observability it wants.
-                    // Confirmed by the removal test, as RemoveDevice removes
-                    // a child.
-                    using (var watch = RemovalWatch.Start(hidInstanceId))
+                    // Under the PnP lock and confirmed by the removal test,
+                    // as RemoveDevice removes a child.
+                    using (HoldPnpLock())
                     {
+                        using var watch = RemovalWatch.Start(hidInstanceId);
                         if (DifRemoveDevice(hidInstanceId))
                             watch.Wait(uninstalls: true, 2000);
                     }
