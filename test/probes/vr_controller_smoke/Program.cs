@@ -15,7 +15,8 @@
 //   the reader goes on. Another child holds a HapticReceived handler past
 //   Dispose's join of the haptic reader: the reader then ends on its own,
 //   touching nothing Dispose released, and the channel can be claimed
-//   again.
+//   again. A third has a HapticReceived handler dispose its own
+//   controller.
 //
 //   LIVE STEAMVR (runs when a SteamVR install is found): registers the
 //   embedded driver via HMVR.EnsureDriverRegistered, starts the headless
@@ -223,6 +224,54 @@ internal static class Program
         }
     }
 
+    /// <summary>The child: a HapticReceived handler that disposes its own
+    /// controller, on the haptic reader's thread. Before this release that
+    /// Dispose joined its own thread for a second, then released the
+    /// channel under the reader, whose next read ended the process.</summary>
+    static int SelfDisposeHapticMain()
+    {
+        SetErrorMode(QuietErrorMode);
+        var vr = new HMVRController();
+        var reader = (Thread)typeof(HMVRController).GetField("_hapticThread",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(vr)!;
+        long disposeMs = -1;
+        using var returned = new ManualResetEventSlim();
+        vr.HapticReceived += (_, _) =>
+        {
+            if (returned.IsSet) return;
+            var sw = Stopwatch.StartNew();
+            vr.Dispose();
+            disposeMs = sw.ElapsedMilliseconds;
+            returned.Set();
+        };
+        IntPtr mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, false, VrSharedMemory.SectionName);
+        if (mapping == IntPtr.Zero)
+        {
+            Console.WriteLine($"CHILD self-dispose failed: OpenFileMapping error {Marshal.GetLastWin32Error()}");
+            return 1;
+        }
+        IntPtr view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, (UIntPtr)VrSharedMemory.SectionSize);
+        try
+        {
+            // Two pulses, so the reader has another slot to read after the
+            // handler that disposed the controller returns.
+            PublishHaptic(view, hand: 0, amplitude: 0.25f);
+            PublishHaptic(view, hand: 1, amplitude: 0.5f);
+            bool ran = returned.Wait(5000);
+            bool ended = System.Threading.SpinWait.SpinUntil(() => !reader.IsAlive, 3000);
+            bool reclaimed;
+            try { using var again = new HMVRController(); reclaimed = true; }
+            catch (InvalidOperationException) { reclaimed = false; }
+            Console.WriteLine($"CHILD self-dispose returned={ran && disposeMs < 500} ended={ended} reclaimed={reclaimed}");
+            return 0;
+        }
+        finally
+        {
+            if (view != IntPtr.Zero) UnmapViewOfFile(view);
+            CloseHandle(mapping);
+        }
+    }
+
     static int Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--legacy-reader")
@@ -231,6 +280,8 @@ internal static class Program
             return ThrowingHapticMain();
         if (args.Length >= 1 && args[0] == "--slow-haptic")
             return SlowHapticMain();
+        if (args.Length >= 1 && args[0] == "--self-dispose-haptic")
+            return SelfDisposeHapticMain();
 
         // Diagnostic: hold a pumping consumer with the known legacy state
         // for N seconds so a reader can be timed independently.
@@ -344,6 +395,13 @@ internal static class Program
         var (slowCode, slowLine) = RunChild("--slow-haptic");
         Check("a HapticReceived handler past Dispose's join: the reader ends on its own and the channel can be claimed again",
               slowCode == 0 && slowLine == "CHILD slow-haptic held=True ended=True reclaimed=True", $"exit {slowCode}: {slowLine}");
+
+        // A handler that disposes its own controller, in a child: Dispose
+        // returns at once on the reader's thread, the reader ends and the
+        // channel can be claimed again.
+        var (selfCode, selfLine) = RunChild("--self-dispose-haptic");
+        Check("a HapticReceived handler that disposes its controller: Dispose returns, the reader ends and the channel can be claimed again",
+              selfCode == 0 && selfLine == "CHILD self-dispose returned=True ended=True reclaimed=True", $"exit {selfCode}: {selfLine}");
 
         // ── Phase 2: live SteamVR ──────────────────────────────────────
         Console.WriteLine("\n-- phase 2: live SteamVR --");

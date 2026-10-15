@@ -268,7 +268,9 @@ public sealed class HMVRController : IDisposable
 
     /// <summary>Stops the haptic reader. It releases the channel, and with
     /// it the consumer claim, as it ends: within the join below, or once a
-    /// <see cref="HapticReceived"/> handler still running returns.</summary>
+    /// <see cref="HapticReceived"/> handler still running returns. Called
+    /// from a HapticReceived handler, it returns at once, and the reader
+    /// ends when the handler returns.</summary>
     public void Dispose()
     {
         lock (_lifetimeLock)
@@ -277,6 +279,6 @@ public sealed class HMVRController : IDisposable
             _disposed = true;
             if (!_readerEnded) _cts.Cancel();
         }
-        _hapticThread.Join(1000);
+        if (Thread.CurrentThread != _hapticThread) _hapticThread.Join(1000);
     }
 }
