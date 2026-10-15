@@ -403,7 +403,7 @@ internal static class Program
         string detail = "";
         bool refused = false;
         try { add.Invoke(null, new object[] { ExtractRoot }); detail = "written"; }
-        catch (TargetInvocationException e) when (e.InnerException is UnauthorizedAccessException) { refused = true; }
+        catch (TargetInvocationException e) when (e.InnerException is InvalidOperationException { InnerException: UnauthorizedAccessException }) { refused = true; }
         catch (TargetInvocationException e) { detail = e.InnerException?.GetType().Name + ": " + e.InnerException?.Message; }
         Check("a registry in a folder only administrators can write is refused", refused && !File.Exists(lockedFile), detail);
         Check("and nothing is left in that folder", locked.GetFiles().Length == 0,
