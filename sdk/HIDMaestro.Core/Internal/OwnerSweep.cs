@@ -72,10 +72,7 @@ internal static class OwnerSweep
             using var mutex = DriverDeploy.Acquire();
             try
             {
-                var after = OwnerCensus.Take();
-                bool othersRun = after.Records.Any(r => r.Live && !r.Self);
-                bool ownHeld = after.Records.Any(r => r.Self && r.Controllers.Count > 0);
-                if (after.Devices.Count == 0 && !othersRun && !ownHeld)
+                if (DriverDeploy.PackagesUnused(out string holders))
                 {
                     try { PnputilHelper.RemoveAllHidMaestroPackages(); } catch { }
                     try { WinUsbBinding.RemovePackage(); } catch { }
@@ -83,8 +80,7 @@ internal static class OwnerSweep
                 }
                 else
                 {
-                    DeviceOrchestrator.LogDiag($"    cleanup kept the driver packages: {after.Devices.Count} device group(s), " +
-                        $"{after.Records.Count(r => r.Live && !r.Self)} other running program(s)");
+                    DeviceOrchestrator.LogDiag($"    cleanup kept the driver packages: {holders}");
                 }
             }
             finally { mutex.ReleaseMutex(); }

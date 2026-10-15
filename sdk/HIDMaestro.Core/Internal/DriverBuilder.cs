@@ -281,18 +281,34 @@ public static class DriverBuilder
 
     /// <summary>Signs HIDMaestro.dll and HMXInput.dll of a driver package
     /// staged fresh from the embedded bytes, with the staged signtool.exe and
-    /// the test certificate from LocalMachine\My.</summary>
+    /// the test certificate from LocalMachine\My. Holds the machine-wide
+    /// deploy lock, since the package directory is the one every program of
+    /// this build deploys from. Until v1.13.0 it took no lock, and a later
+    /// call reused the package one call before had staged.
+    ///
+    /// <para><see cref="GenerateCatalogs"/> and a deploy later in the same
+    /// process catalog and install the binaries this call signed, as long
+    /// as no other program has staged the package since.</para></summary>
+    /// <returns>Always true. A failure throws.</returns>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated. The deploy lock lives in the namespace only an elevated
+    /// process can open (<see cref="AdminNamespace"/>).</exception>
+    /// <exception cref="InvalidOperationException">Another program held the
+    /// deploy lock for ten minutes, or signtool failed.</exception>
     public static bool SignDrivers()
     {
-        SignDriversIn(EnsureExtracted(), s_packageDir ??= StagePackage());
+        using var mutex = DriverDeploy.Acquire();
+        try { SignDriversIn(EnsureExtracted(), StagePackage()); }
+        finally { mutex.ReleaseMutex(); }
         return true;
     }
 
     private static void SignDriversIn(string tools, string package)
     {
         EnsureTestCertificate();
-        s_packageDir = package;
         string signtool = Path.Combine(tools, "signtool.exe");
+        s_signedPackage = null;
+        var signed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         var asm = typeof(DriverBuilder).Assembly;
         foreach (string dll in new[] { "HIDMaestro.dll", "HMXInput.dll" })
@@ -305,7 +321,37 @@ public static class DriverBuilder
                 workingDir: tools);
             if (rc != 0)
                 throw new InvalidOperationException($"signtool failed for {dll}: {output}");
+            signed[dll] = ProtectedStaging.FileSha256(path);
         }
+        s_signedPackage = signed;
+    }
+
+    // The signed binaries the last signing in this process left in the
+    // package directory, by SHA-256. Written and read only under the deploy
+    // lock, which serializes threads as well as programs.
+    private static Dictionary<string, string>? s_signedPackage;
+
+    /// <summary>This build's package: the one the last signing in this
+    /// process left, when its binaries still carry the bytes that signing
+    /// wrote (<paramref name="signed"/> true), or one staged fresh, to be
+    /// signed (false). Its INFs are checked against the
+    /// embedded bytes and its catalogs removed either way. Runs no tool. The
+    /// caller holds the deploy lock.</summary>
+    private static string PackageLocked(out bool signed)
+    {
+        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationPackage);
+        signed = s_signedPackage is { Count: > 0 } last
+            && last.All(kv => ProtectedStaging.Matches(Path.Combine(dir, kv.Key), kv.Value));
+        if (signed)
+        {
+            foreach (string cat in Directory.GetFiles(dir, "*.cat"))
+                File.Delete(cat);
+            var asm = typeof(DriverBuilder).Assembly;
+            foreach (string inf in PackageInfs)
+                ProtectedStaging.StageResource(dir, inf, asm, NativePrefix + inf);
+            return dir;
+        }
+        return StagePackage();
     }
 
     /// <summary>The Inf2Cat <c>/os:</c> value for an architecture's INFs.
@@ -321,10 +367,29 @@ public static class DriverBuilder
         arch == Architecture.Arm64 ? "10_RS3_ARM64" : "10_X64";
 
     /// <summary>Generates the catalogs for the driver package's INFs and
-    /// signs each resulting .cat file with the test certificate.</summary>
+    /// signs each resulting .cat file with the test certificate. Under the
+    /// deploy lock, like <see cref="SignDrivers"/>. It catalogs the binaries
+    /// <see cref="SignDrivers"/> signed in this process when they are still
+    /// in place, and otherwise stages and signs the package first, so the
+    /// catalogs always hash signed binaries. Until v1.13.0 it catalogued
+    /// whatever package an earlier call in the process had staged, signed or
+    /// not.</summary>
+    /// <returns>Always true. A failure throws.</returns>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated (see <see cref="SignDrivers"/>).</exception>
+    /// <exception cref="InvalidOperationException">Another program held the
+    /// deploy lock for ten minutes, or inf2cat or signtool failed.</exception>
     public static bool GenerateCatalogs()
     {
-        GenerateCatalogsIn(EnsureExtracted(), s_packageDir ??= StagePackage());
+        using var mutex = DriverDeploy.Acquire();
+        try
+        {
+            string tools = EnsureExtracted();
+            string package = PackageLocked(out bool signed);
+            if (!signed) SignDriversIn(tools, package);
+            GenerateCatalogsIn(tools, package);
+        }
+        finally { mutex.ReleaseMutex(); }
         return true;
     }
 
@@ -389,11 +454,30 @@ public static class DriverBuilder
         }
     }
 
-    /// <summary>Installs the driver package's INFs via pnputil (Windows builtin).</summary>
+    /// <summary>Installs the driver through the machine-wide install policy,
+    /// the same call as <see cref="FullDeploy"/> and
+    /// <c>HMContext.InstallDriver</c>: under the deploy lock, never a
+    /// downgrade, and never a replacement under another program's
+    /// controllers. Throws <see cref="HMDriverVersionException"/> where that
+    /// policy does. Until v1.13.0 it added whatever package an earlier call
+    /// had staged, with no lock and no policy. The package it installs is
+    /// the one <see cref="SignDrivers"/> signed in this process when that is
+    /// still in place.</summary>
+    /// <returns>True when this call installed or upgraded the driver. False
+    /// when the policy kept the installed one, the same build
+    /// (<see cref="HMDriverInstallOutcome.AlreadyCurrent"/>), a newer one
+    /// (<see cref="HMDriverInstallOutcome.KeptNewer"/>) or an older one that
+    /// running controllers hold (<see cref="HMDriverInstallOutcome.KeptInUse"/>),
+    /// and installed nothing. Until v1.13.0 it returned true after every
+    /// install.</returns>
+    /// <exception cref="UnauthorizedAccessException">A deploy was needed and
+    /// the process is not elevated (see <see cref="SignDrivers"/>). With
+    /// this build's driver already installed it returns false without
+    /// elevation.</exception>
     public static bool InstallDrivers()
     {
-        InstallDriversFrom(s_packageDir ??= StagePackage());
-        return true;
+        var outcome = DriverDeploy.Run();
+        return outcome is HMDriverInstallOutcome.Installed or HMDriverInstallOutcome.Upgraded;
     }
 
     private static void InstallDriversFrom(string dir)
@@ -437,10 +521,32 @@ public static class DriverBuilder
     /// INF allow-list, retries on "in use" failures, and verifies removal.
     /// Throws if anything is left in the store afterward: that prevents
     /// the next install from silently using a stale binary, which was the
-    /// failure mode that hid the CPU-saturation bug for hours.</summary>
+    /// failure mode that hid the CPU-saturation bug for hours.
+    ///
+    /// <para>Under the deploy lock, and only while no HIDMaestro device is
+    /// present, no other program that embeds HIDMaestro runs and this one
+    /// has no controller: the rule <c>RemoveAllVirtualControllers()</c>
+    /// follows for the packages. Otherwise it removes nothing and throws
+    /// <see cref="InvalidOperationException"/> naming what holds them. Until
+    /// v1.13.0 it removed them unconditionally, from under running
+    /// controllers.</para></summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated (see <see cref="SignDrivers"/>). Until v1.13.0 such a call
+    /// reached pnputil and threw <see cref="InvalidOperationException"/>
+    /// from its check of the store.</exception>
+    /// <exception cref="InvalidOperationException">The packages were kept,
+    /// another program held the deploy lock for ten minutes, or a package
+    /// is left in the store after the removal.</exception>
     public static void RemoveOldDriverPackages()
     {
-        PnputilHelper.RemoveAllHidMaestroPackages();
+        using var mutex = DriverDeploy.Acquire();
+        try
+        {
+            if (!DriverDeploy.PackagesUnused(out string holders))
+                throw new InvalidOperationException($"The HIDMaestro driver packages were kept: {holders}.");
+            PnputilHelper.RemoveAllHidMaestroPackages();
+        }
+        finally { mutex.ReleaseMutex(); }
     }
 
     /// <summary>Registry path where we record the SHA-256 of the
@@ -485,9 +591,9 @@ public static class DriverBuilder
         DeviceOrchestrator.ReleaseStaleDriverHosts();
         string tools = EnsureExtracted();
         VerifyStagedBeforeUse(tools);
-        string package = StagePackage();
-        RemoveOldDriverPackages();
-        SignDriversIn(tools, package);
+        string package = PackageLocked(out bool signed);
+        PnputilHelper.RemoveAllHidMaestroPackages();
+        if (!signed) SignDriversIn(tools, package);
         GenerateCatalogsIn(tools, package);
         InstallDriversFrom(package);
         RecordInstalledPayload();
@@ -535,8 +641,8 @@ public static class DriverBuilder
         if (infs.Count == 0) return;
         string tools = EnsureExtracted();
         VerifyStagedBeforeUse(tools);
-        string package = StagePackage();
-        SignDriversIn(tools, package);
+        string package = PackageLocked(out bool signed);
+        if (!signed) SignDriversIn(tools, package);
         GenerateCatalogsIn(tools, package);
         string pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
         foreach (string inf in infs)
@@ -549,8 +655,6 @@ public static class DriverBuilder
         }
         PnputilHelper.InvalidateInstalledCache();
     }
-
-    private static string? s_packageDir;
 
     /// <summary>Re-check, against the embedded bytes, the signing and
     /// catalog tools about to run elevated. A staged tool changed since

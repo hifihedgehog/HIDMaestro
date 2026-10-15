@@ -174,7 +174,9 @@ internal static class ProtectedStaging
 
     private const string TempMarker = ".new-";
 
-    private static bool Matches(string path, string expectedSha256)
+    /// <summary>True when the file exists and its SHA-256 is
+    /// <paramref name="expectedSha256"/>.</summary>
+    internal static bool Matches(string path, string expectedSha256)
     {
         try { return File.Exists(path) && Sha256OfFile(path).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase); }
         catch (IOException) { return false; }
@@ -386,6 +388,9 @@ internal static class ProtectedStaging
     }
 
     // ── Hashing ─────────────────────────────────────────────────────────
+
+    /// <summary>The SHA-256 of a file, lowercase hex.</summary>
+    internal static string FileSha256(string path) => Sha256OfFile(path);
 
     private static string Sha256OfFile(string path)
     {

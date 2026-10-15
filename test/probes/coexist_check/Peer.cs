@@ -274,6 +274,21 @@ internal static class Peer
                               $"open={(output.Contains("output still open", StringComparison.Ordinal) ? "yes" : "no")} exit={code} ms={ms} drain={drain}");
                         break;
                     }
+                    case "builderstep":
+                    {
+                        // One of the public DriverBuilder steps by name:
+                        // SignDrivers, GenerateCatalogs, InstallDrivers or
+                        // RemoveOldDriverPackages.
+                        var m = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverBuilder")
+                            ?.GetMethod(a[1], BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                        if (m == null) { Reply($"ERR builderstep no DriverBuilder.{a[1]}"); break; }
+                        var sw = Stopwatch.StartNew();
+                        object? result;
+                        try { result = m.Invoke(null, null); }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                        Reply($"OK builderstep {a[1]} result={result?.ToString() ?? "none"} ms={sw.ElapsedMilliseconds}");
+                        break;
+                    }
                     case "staleport":
                     {
                         HMController? last;

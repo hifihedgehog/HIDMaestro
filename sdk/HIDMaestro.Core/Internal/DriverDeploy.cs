@@ -294,6 +294,20 @@ internal static partial class DriverDeploy
         finally { mutex.ReleaseMutex(); }
     }
 
+    /// <summary>True when the driver packages may go: no HIDMaestro device
+    /// is present, no other program that embeds HIDMaestro runs, and this
+    /// one has no controller. Otherwise <paramref name="holders"/> says what
+    /// keeps them. The caller holds the deploy lock.</summary>
+    internal static bool PackagesUnused(out string holders)
+    {
+        var census = OwnerCensus.Take();
+        int others = census.Records.Count(r => r.Live && !r.Self);
+        bool ownHeld = census.Records.Any(r => r.Self && r.Controllers.Count > 0);
+        holders = $"{census.Devices.Count} device group(s), {others} other running program(s)"
+                + (ownHeld ? ", and this program's own controllers" : "");
+        return census.Devices.Count == 0 && others == 0 && !ownHeld;
+    }
+
     private static List<string> Describe(List<OwnerCensus.DeviceGroup> holders)
     {
         var list = new List<string>();

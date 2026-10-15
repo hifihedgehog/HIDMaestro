@@ -56,10 +56,14 @@
 //      that program is gone.
 //   O. Another running program, with no controller, keeps the driver
 //      packages through RemoveAllVirtualControllers(). Once it is gone they
-//      go.
+//      go. The public DriverBuilder.RemoveOldDriverPackages() follows the
+//      same rule.
 //   P. A program's create after another program removed the driver
 //      deploys it again and succeeds.
-//   Q. A create waits for a deploy that holds the deploy lock.
+//   Q. A create waits for a deploy that holds the deploy lock, and so does
+//      the public DriverBuilder.SignDrivers(). GenerateCatalogs() catalogs
+//      what SignDrivers() signed, and InstallDrivers() returns false when it
+//      installed nothing.
 //   R. A program that has only staged names its staging in its record, and
 //      a deploy keeps the staging a running program's record names.
 //   S. Two deploys in one program, with another program's uninstall
@@ -987,6 +991,15 @@ internal static partial class Program
                 string r = p.Send("removeall");
                 Check("O2: with no other program, they go", Ok(r) && MainPackages() == 0, $"{r}, {MainPackages()} package(s)");
             }
+            Clean();
+            using (LiveRecord(ownerId, null))
+            {
+                using var p = PeerProcess.Start("O3");
+                string r = p.Send("builderstep RemoveOldDriverPackages");
+                Check("O3: with another program running, the public DriverBuilder.RemoveOldDriverPackages() keeps them and says why",
+                      !Ok(r) && r.Contains("other running program", StringComparison.Ordinal) && MainPackages() > 0,
+                      $"{r}, {MainPackages()} package(s)");
+            }
         }
         finally { Native.DeleteRecord(ownerId); }
     }
@@ -1035,6 +1048,46 @@ internal static partial class Program
         int ms = int.TryParse(PeerProcess.Field(c, "ms"), out int v) ? v : -1;
         Check("Q: a create waits for the deploy lock another program holds, then succeeds",
               Ok(c) && ms >= 2500, $"CreateController took {ms} ms: {c}");
+
+        // Q2. The public DriverBuilder.SignDrivers() signs in the package
+        // directory a deploy uses, so it waits for the lock too.
+        using var held2 = new ManualResetEventSlim();
+        using var release2 = new ManualResetEventSlim();
+        var holder2 = new Thread(() =>
+        {
+            using var m = Native.AdminMutex("Deploy");
+            m.WaitOne();
+            held2.Set();
+            release2.Wait(15_000);
+            m.ReleaseMutex();
+        }) { IsBackground = true };
+        holder2.Start();
+        held2.Wait(10_000);
+        p.Post("builderstep SignDrivers");
+        Thread.Sleep(3000);
+        release2.Set();
+        string s = p.Receive("SignDrivers");
+        holder2.Join(5000);
+        int sms = int.TryParse(PeerProcess.Field(s, "ms"), out int sv) ? sv : -1;
+        Check("Q2: the public DriverBuilder.SignDrivers() waits for the deploy lock, then signs",
+              Ok(s) && sms >= 2500, $"SignDrivers took {sms} ms: {s}");
+
+        // Q3. GenerateCatalogs() catalogs the binaries SignDrivers() signed,
+        // rather than staging and signing them again, and InstallDrivers()
+        // reports that it installed nothing on a machine already running
+        // this build's driver.
+        string? driverDir = StagingPath(p.Send("stagingdir"));
+        string signedDll = driverDir == null ? "" : Path.Combine(Path.GetDirectoryName(driverDir)!, "package", "HIDMaestro.dll");
+        (DateTime When, byte[] Bytes)? before = File.Exists(signedDll) ? (File.GetLastWriteTimeUtc(signedDll), File.ReadAllBytes(signedDll)) : null;
+        string g = p.Send("builderstep GenerateCatalogs");
+        bool same = before != null && File.GetLastWriteTimeUtc(signedDll) == before.Value.When
+                    && File.ReadAllBytes(signedDll).AsSpan().SequenceEqual(before.Value.Bytes);
+        int cats = driverDir == null ? 0 : Directory.GetFiles(Path.Combine(Path.GetDirectoryName(driverDir)!, "package"), "*.cat").Length;
+        Check("Q3: GenerateCatalogs() catalogs the binaries SignDrivers() signed, unchanged",
+              Ok(g) && same && cats == 2, $"{g}; {(same ? "same file" : "rewritten")}; {cats} catalog(s)");
+        string i = p.Send("builderstep InstallDrivers");
+        Check("Q3: InstallDrivers() returns false when this build's driver is already installed",
+              Ok(i) && PeerProcess.Field(i, "result") == "False", i);
     }
 
     static void SectionR()
