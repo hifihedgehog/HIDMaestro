@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Threading;
 
 namespace HIDMaestro.Internal;
 
@@ -183,7 +184,10 @@ internal sealed class PortLayout
 
     /// <summary>Names of the block's output fields, from their semantics,
     /// once <see cref="PrepareOutput"/> has checked them.</summary>
-    public IReadOnlyList<string> OutputNames => _outputNames ?? (IReadOnlyList<string>)Array.Empty<string>();
+    public IReadOnlyList<string> OutputNames => Volatile.Read(ref _outputNames) ?? (IReadOnlyList<string>)Array.Empty<string>();
+    // Published last, with a release write, and read with an acquire, so
+    // a thread that sees it also sees _outputKeys. The layout is shared by
+    // every controller of a profile, and two can be created at once.
     private string[]? _outputNames;
     // "port{n}.{name}" for OutputDecoded, per port then per field.
     private string[][]? _outputKeys;
@@ -193,7 +197,7 @@ internal sealed class PortLayout
     /// <see cref="ReadOutput"/> hands to the per-port events.</summary>
     public void PrepareOutput(string where)
     {
-        if (_outputNames != null) return;
+        if (Volatile.Read(ref _outputNames) != null) return;
         var prog = VendorBlobProgram.Get(FieldSpec);
         var names = new string[prog.Fields.Length];
         for (int i = 0; i < names.Length; i++)
@@ -215,7 +219,7 @@ internal sealed class PortLayout
             for (int i = 0; i < names.Length; i++) keys[p][i] = $"port{p + 1}.{names[i]}";
         }
         _outputKeys = keys;
-        _outputNames = names;
+        Volatile.Write(ref _outputNames, names);
     }
 
     private static int OutputWidth(VendorBlobProgram.FieldOp op) => op switch
