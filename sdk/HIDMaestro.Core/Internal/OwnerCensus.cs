@@ -22,11 +22,10 @@ namespace HIDMaestro.Internal;
 /// before v1.13.0, or belongs to one started since:</para>
 /// <list type="bullet">
 /// <item>its index's v1.12.0 owner pipe <c>HIDMaestroOwner&lt;N&gt;</c> is
-/// held by a running program: a live v1.12.0 program. Any program can
-/// create that name, so where the device's driver reports on the pipe
-/// (<see cref="LegacyPipeLive"/>), the pipe counts only while the driver
-/// is connected to it, the server it names runs, and an elevated token
-/// made the pipe.</item>
+/// held: a live v1.12.0 program. Any program can create that name, so
+/// where the device's driver reports on the pipe
+/// (<see cref="LegacyPipeLive"/>), a held pipe does not count once the
+/// driver shows the program it watched is gone.</item>
 /// <item>no such pipe, but the section <c>Global\HIDMaestroInputAck&lt;N&gt;</c>
 /// exists: a v1.12.0 program that has exited. Only a v1.12.0 or later SDK
 /// creates that section, the driver keeps it open while the device exists,
@@ -197,29 +196,33 @@ internal sealed partial class OwnerCensus
     /// shows a running program. A v1.12.0 program creates that name
     /// unprotected, so any program can create it too. The device's own
     /// driver is the pipe's client, and from v1.13.0 it records the server
-    /// it is connected to (driver.c RecordOwnerConnected). Where it does,
-    /// the pipe counts only while the driver is connected to it, the server
-    /// it names runs, and an elevated token made the pipe
-    /// (<see cref="CheckServer"/>). A driver that records nothing, one
-    /// older than v1.13.0 or one whose watch has not connected yet, leaves
-    /// the rule before v1.13.0: a held pipe is a running program.
+    /// it is connected to (driver.c RecordOwnerConnected). A held pipe stops
+    /// counting only on proof that the program the driver watched is gone:
+    /// the watch has ended, or the server it named no longer runs
+    /// (<see cref="CheckServer"/>). A watch connected to a server that runs
+    /// keeps the pipe counting, trusted or not: a program that made the
+    /// name first can leave a v1.12.0 program's watch on its own pipe, and
+    /// that proves nothing about the program writing the device's sections.
+    /// A driver that records nothing, one older than v1.13.0 or one whose
+    /// watch has not connected yet, leaves the rule before v1.13.0.
     /// <paramref name="members"/> gives the device's devnodes and is called
     /// only when the pipe is held.</summary>
     private static bool LegacyPipeLive(int index, Func<IReadOnlyList<string>> members)
     {
         if (!MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return false;
-        IReadOnlyList<string> ids = members();
-        bool reported = false;
-        foreach (string id in ids)
+        string? gone = null;
+        foreach (string id in members())
         {
             OwnerWatch? w = ReadOwnerWatch(id);
             if (w == null) continue;
-            reported = true;
-            if (w.Connected && CheckServer(w).Trusted) return true;
+            if (!w.Connected) { gone ??= "the watch ended"; continue; }
+            ServerCheck c = CheckServer(w);
+            if (c.Alive) return true;
+            gone ??= $"server {w.ProcessId} no longer runs";
         }
-        if (reported)
-            DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is not a running program's: {DescribeWatch(ids)}");
-        return !reported;
+        if (gone != null)
+            DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is not a running program's: {gone}");
+        return gone == null;
     }
 
     /// <summary>What a device's driver recorded about its owner watch:
@@ -235,7 +238,8 @@ internal sealed partial class OwnerCensus
     /// token makes, unless policy makes administrators own their objects
     /// themselves. Then the server's elevated token must own it, as it does
     /// a pipe it made, and a pipe a thread of that process made while
-    /// impersonating another token does not pass.</summary>
+    /// impersonating another token does not pass. Trusted is reported, not
+    /// acted on (<see cref="LegacyPipeLive"/>).</summary>
     internal readonly record struct ServerCheck(bool Alive, bool? Elevated, bool Trusted);
 
     /// <summary>The values a device's driver writes in its own key, or null

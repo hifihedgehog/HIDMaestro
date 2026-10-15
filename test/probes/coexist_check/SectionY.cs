@@ -45,6 +45,10 @@
 //        StopEvent as a sweep sends it, leaves the release-on-exit bit in
 //        the acknowledgement section's capabilities, and the SDK still
 //        reads release-on-exit support.
+//    Y9. The user creates \\.\pipe\HIDMaestroOwner0 before a v1.12.0 program
+//        starts on index 0. Moved to the installed driver, its controller's
+//        watch connects to a pipe it cannot vouch for, and a sweep still
+//        leaves the running program's devices alone.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -77,8 +81,43 @@ internal static partial class Program
             // run alone.
             SectionYStale(installed);
             SectionYAckKept(installed);
+            SectionYPreSquat(user, installed);
         }
         finally { Y.CloseHandle(user); }
+    }
+
+    /// <summary>Y9. The v1.12.0 owner pipe's name, taken by the user before
+    /// a v1.12.0 program starts on the index.</summary>
+    static void SectionYPreSquat(IntPtr user, string installed)
+    {
+        Clean();
+        using var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(0));
+        Check(@"Y9: the user creates \\.\pipe\HIDMaestroOwner0 first", fake != null);
+        if (fake == null) return;
+        using var old = PeerProcess.Start("Y-v1.12.0-squatted", "v1.12.0");
+        string co = old.Send("create pad F1F7 coexist-y-presquat");
+        if (!Ok(co)) { Check("Y9: the v1.12.0 program creates", false, co); return; }
+        old.Send("stream 5 0.4 125 0");
+        string inst = PeerProcess.Field(co, "instance")!;
+        string tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+        bool moved = Y.InstallBestStoreDriver(inst)
+                     && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
+                     && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
+        Check("Y9: its controller runs on the installed driver, whose watch connects", moved,
+              $"{Native.DriverVersionOf(inst)}, installed {installed}, {Y.ShowWatch(inst)}");
+        if (!moved) return;
+        var tree = Native.Subtree(inst);
+        var path = WaitPaths(0xBEEF, 0xF1F7, 1, 10_000);
+        using var cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
+        using var nu = PeerProcess.Start("Y-presquat-sweeper");
+        string? entry = Y.CensusEntry(nu.Send("census"), tok);
+        Check("Y9: the census holds the device as a running v1.12.0 program's",
+              entry?.Split('|')[2] == "LiveLegacy", entry ?? "no entry");
+        nu.Send("sweep");
+        Thread.Sleep(2000);
+        Check("Y9: a sweep leaves the running program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
+              string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
+        Check("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
     }
 
     /// <summary>Y7. The acknowledgement section of a killed v1.12.0
