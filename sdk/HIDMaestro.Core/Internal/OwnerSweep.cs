@@ -163,14 +163,19 @@ internal static class OwnerSweep
             try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
         }
 
+        var usbip = new Usbip.UsbipBackend.SweepView();
         foreach (var rec in census.DeadRecords)
         {
+            bool settled = true;
             foreach (var c in rec.Controllers)
                 if (string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
-                    Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex);
-            MachineClaims.DeleteRecord(rec.OwnerId);
+                    settled &= Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex, usbip);
+            // A composite whose attempt was left, because a listener on its
+            // port did not say what it exports, is named by this record
+            // alone, so the record stays for the next sweep.
+            if (settled) MachineClaims.DeleteRecord(rec.OwnerId);
         }
-        Usbip.UsbipBackend.DetachImportsOfDeadServers();
+        Usbip.UsbipBackend.DetachImportsOfDeadServers(usbip);
 
         if (targets.Count > 0 || census.DeadRecords.Any())
             try { RegistryLedger.PruneDead(); } catch { }

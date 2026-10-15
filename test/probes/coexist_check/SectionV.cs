@@ -32,6 +32,16 @@
 //         the composite comes back. It loses it again and the program
 //         disposes it, and then again and the program exits without
 //         disposing it: each time no attempt for it is left.
+//      6. Another program's listener that answers a device-list request
+//         slowly, or claims more devices than a server exports, holds a
+//         query no longer than its one-second deadline and gets no list.
+//         A program on this SDK is killed with composites on indices 9 to
+//         12, and a listener that never answers takes its port. A sweep
+//         asks that listener once, not once per composite, and keeps the
+//         killed program's record, the one thing naming those attempts.
+//         Once the listener is gone the next sweep cancels them and
+//         removes the record.
+//    "--v-parts=<digits>" after the section letters runs only those parts.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -62,18 +72,23 @@ internal static partial class Program
             WaitFor(() => (control += Math.Max(0, Vhci.Stop("127.0.0.1", controlPort, "1-1"))) > 0, 5000);
             Check("V: an attempt the probe starts is counted", !attached && control == 1, $"attach {attached}, counted {control}");
 
-            VTakenOverPort(touched);
-            Clean();
-            VLegacyTakesPort(touched);
-            Clean();
-            VDroppedImport(touched);
-            Clean();
-            VOwnReattach(touched);
+            if (VPart('1')) { VTakenOverPort(touched); Clean(); }
+            if (VPart('2') || VPart('3')) { VLegacyTakesPort(touched); Clean(); }
+            if (VPart('4')) { VDroppedImport(touched); Clean(); }
+            if (VPart('5')) { VOwnReattach(touched); Clean(); }
+            if (VPart('6')) { VListenerThatHolds(touched); Clean(); }
         }
         finally
         {
             foreach (var (port, busId) in touched) Vhci.Stop("127.0.0.1", port, busId);
         }
+    }
+
+    /// <summary>Whether "--v-parts=" names this part, or is absent.</summary>
+    static bool VPart(char part)
+    {
+        string? arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--v-parts=", StringComparison.Ordinal));
+        return arg == null || arg.AsSpan("--v-parts=".Length).Contains(part);
     }
 
     // ── V1 ─────────────────────────────────────────────────────────────
@@ -352,6 +367,139 @@ internal static partial class Program
         int afterExit = Vhci.Stop("127.0.0.1", port, bus);
         Check("V5: its exit without a dispose leaves no re-attach attempt for it", exited && afterExit == 0,
               $"{q}, exited {exited}, {afterExit} canceled by the probe");
+    }
+
+    // ── V6 ─────────────────────────────────────────────────────────────
+
+    static void VListenerThatHolds(HashSet<(int Port, string BusId)> touched)
+    {
+        // A free port outside the SDK's range keeps these listeners away
+        // from every server's port.
+        const int probePort = UsbipBasePort - 2;
+        using (var q = PeerProcess.Start("V6-query"))
+        {
+            using (new FakeServer(probePort, FakeServer.Kind.Trickle))
+            {
+                string r = q.Send($"exports {probePort}");
+                Check("V6: a listener that answers one byte at a time gets no list, within the deadline",
+                      PeerProcess.Field(r, "n") == "null" && int.TryParse(PeerProcess.Field(r, "ms"), out int ms) && ms < 2000, r);
+            }
+            using (new FakeServer(probePort, FakeServer.Kind.Oversized))
+            {
+                string r = q.Send($"exports {probePort}");
+                Check("V6: a listener that claims more devices than a server exports gets no list",
+                      PeerProcess.Field(r, "n") == "null", r);
+            }
+        }
+
+        int port;
+        var buses = new List<string>();
+        string? ownerId;
+        using (var k = PeerProcess.Start("V6-killed"))
+        {
+            for (int i = 9; i <= 12; i++)
+            {
+                string c = k.Send($"createat {i} composite -");
+                if (!Ok(c)) { Check($"V6: the program to be killed creates a composite at index {i}", false, c); return; }
+                buses.Add("1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1));
+            }
+            port = RecordUsbipPort(k.Pid);
+            ownerId = Native.OwnerRecords().Where(r => r.Value == k.Pid).Select(r => r.Key).FirstOrDefault();
+            foreach (string b in buses) touched.Add((port, b));
+            k.Kill();
+        }
+        // The attempts' first try comes 30 s after the drop, and a try that
+        // reaches the silent listener would hang in its handshake, where a
+        // cancel is lost. Everything below runs well inside those 30 s.
+        var dropped = Stopwatch.StartNew();
+        WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+
+        using var s = PeerProcess.Start("V6-sweeper");
+        using (new FakeServer(port, FakeServer.Kind.Silent))
+        {
+            var sw = Stopwatch.StartNew();
+            string r = s.Send("sweep");
+            long ms = sw.ElapsedMilliseconds;
+            Check("V6: a sweep asks the silent listener on the killed program's port once, not once per composite",
+                  Ok(r) && ms < 2500, $"{r}, {ms} ms for {buses.Count} composites");
+            Check("V6: and keeps the killed program's record, which names the attempts it left",
+                  ownerId != null && Native.OwnerRecords().ContainsKey(ownerId));
+        }
+        string r2 = s.Send("sweep");
+        var left = buses.Select(b => Vhci.Stop("127.0.0.1", port, b)).ToList();
+        Check("V6: once the listener is gone, the next sweep cancels every attempt the record names",
+              Ok(r2) && left.All(n => n == 0), $"{string.Join(", ", left)} canceled by the probe, {dropped.ElapsedMilliseconds} ms after the drop");
+        Check("V6: and removes the record", ownerId != null && !Native.OwnerRecords().ContainsKey(ownerId));
+    }
+
+    /// <summary>A loopback listener that takes device-list requests and
+    /// answers them badly: never, one byte at a time, or with more devices
+    /// than a server exports. Every connection it accepts closes when it is
+    /// disposed.</summary>
+    sealed class FakeServer : IDisposable
+    {
+        public enum Kind { Silent, Trickle, Oversized }
+
+        readonly System.Net.Sockets.TcpListener _listener;
+        readonly Kind _kind;
+        readonly Thread _thread;
+        readonly List<System.Net.Sockets.Socket> _held = new();
+        volatile bool _stop;
+
+        public FakeServer(int port, Kind kind)
+        {
+            _kind = kind;
+            _listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+            _listener.Start();
+            _thread = new Thread(Run) { IsBackground = true, Name = "V fake server" };
+            _thread.Start();
+        }
+
+        void Run()
+        {
+            while (!_stop)
+            {
+                if (!_listener.Pending()) { Thread.Sleep(10); continue; }
+                var s = _listener.AcceptSocket();
+                lock (_held) _held.Add(s);
+                if (_kind == Kind.Silent) continue;
+                try
+                {
+                    var request = new byte[8];
+                    for (int got = 0; got < 8;) { int n = s.Receive(request, got, 8 - got, System.Net.Sockets.SocketFlags.None); if (n <= 0) break; got += n; }
+                    // op_common: version 0x0111, OP_REP_DEVLIST, ST_OK, then the count.
+                    if (_kind == Kind.Trickle)
+                    {
+                        byte[] reply = { 0x01, 0x11, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+                        foreach (byte b in reply)
+                        {
+                            if (_stop) break;
+                            s.Send(new[] { b });
+                            Thread.Sleep(400);
+                        }
+                    }
+                    else
+                    {
+                        const int count = 5000;
+                        var reply = new byte[12 + count * 312];
+                        new byte[] { 0x01, 0x11, 0x00, 0x05, 0, 0, 0, 0 }.CopyTo(reply, 0);
+                        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(reply.AsSpan(8), count);
+                        for (int i = 0; i < count; i++)
+                            Encoding.ASCII.GetBytes($"1-{i + 1}").CopyTo(reply, 12 + i * 312 + 256);
+                        s.Send(reply);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join(10_000);
+            lock (_held) foreach (var s in _held) { try { s.Close(); } catch { } }
+            _listener.Stop();
+        }
     }
 
     /// <summary>The vhci port a program's owner record names for its one

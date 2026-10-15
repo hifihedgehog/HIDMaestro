@@ -37,6 +37,10 @@
 //   alive                       reply, to show the program still runs
 //   threads <prefix>            how many of this program's threads have a
 //                               name starting with <prefix>
+//   exports <port>              what the SDK's sweep reads a USB/IP
+//                               server on <port> to export, through its
+//                               internal UsbipBackend.ExportedBusIds:
+//                               n=<count> or n=null, and ms=<elapsed>
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 //   quit                        exit without disposing anything, so only
@@ -194,6 +198,16 @@ internal static class Peer
                     case "alive":
                         Reply("OK alive");
                         break;
+                    case "exports":
+                    {
+                        var m = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.Usbip.UsbipBackend")
+                            ?.GetMethod("ExportedBusIds", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (m == null) { Reply("ERR exports no UsbipBackend.ExportedBusIds"); break; }
+                        var sw = Stopwatch.StartNew();
+                        object? set = m.Invoke(null, new object[] { int.Parse(a[1], CultureInfo.InvariantCulture) });
+                        Reply($"OK exports n={(set == null ? "null" : set.GetType().GetProperty("Count")!.GetValue(set))} ms={sw.ElapsedMilliseconds}");
+                        break;
+                    }
                     case "threads":
                         Reply($"OK threads n={CountThreads(a[1])}");
                         break;
