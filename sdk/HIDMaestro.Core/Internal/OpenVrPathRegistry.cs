@@ -812,7 +812,14 @@ internal static partial class OpenVrPathRegistry
     /// unelevated programs can change, so the write gets exactly the user's
     /// access: a link planted there cannot point it at a file only
     /// administrators may write. A process that is not elevated, or runs as
-    /// SYSTEM or as an administrator without a split token, runs it as is.
+    /// SYSTEM or as an administrator without a split token, runs it as is,
+    /// and so does a thread that already runs on a token of its own: the
+    /// caller chose that token, and the thread comes back on it.
+    ///
+    /// <para>The thread leaves exactly as it came. When the work throws, the
+    /// thread is back on the process token before the exception goes on, so
+    /// no caller's exception filter, which runs before any finally here
+    /// would, runs on the user's token.</para>
     ///
     /// <para>The token is SaferComputeTokenFromLevel at
     /// SAFER_LEVELID_NORMALUSER ("execute as a user that does not have
@@ -828,7 +835,7 @@ internal static partial class OpenVrPathRegistry
                 throw new System.ComponentModel.Win32Exception();
             if (!GetTokenInformation(process, TokenElevationType, out int elevationType, sizeof(int), out _))
                 throw new System.ComponentModel.Win32Exception();
-            if (elevationType != TokenElevationTypeFull)
+            if (elevationType != TokenElevationTypeFull || ThreadHasToken())
                 return work();
 
             if (!SaferCreateLevel(SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, out level, IntPtr.Zero))
@@ -840,17 +847,18 @@ internal static partial class OpenVrPathRegistry
 
             if (!ImpersonateLoggedOnUser(limited))
                 throw new System.ComponentModel.Win32Exception();
+            T result;
             try
             {
-                return work();
+                result = work();
             }
-            finally
+            catch
             {
-                // A thread left impersonating would run the caller's next
-                // code with the wrong token. There is no safe way on.
-                if (!RevertToSelf())
-                    Environment.FailFast("HIDMaestro: RevertToSelf failed after writing the OpenVR path registry.");
+                BackToProcessToken();
+                throw;
             }
+            BackToProcessToken();
+            return result;
         }
         finally
         {
@@ -858,6 +866,27 @@ internal static partial class OpenVrPathRegistry
             if (level != IntPtr.Zero) SaferCloseLevel(level);
             if (process != IntPtr.Zero) CloseHandle(process);
         }
+    }
+
+    /// <summary>A thread left on the user's token would run the caller's
+    /// next code with the wrong rights. There is no safe way on.</summary>
+    private static void BackToProcessToken()
+    {
+        if (!RevertToSelf())
+            Environment.FailFast("HIDMaestro: RevertToSelf failed after writing the OpenVR path registry.");
+    }
+
+    /// <summary>Whether this thread runs on a token of its own.</summary>
+    private static bool ThreadHasToken()
+    {
+        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, openAsSelf: true, out IntPtr token))
+        {
+            CloseHandle(token);
+            return true;
+        }
+        int error = Marshal.GetLastPInvokeError();
+        if (error == ERROR_NO_TOKEN) return false;
+        throw new System.ComponentModel.Win32Exception(error);
     }
 
     private static void SetMediumIntegrity(IntPtr token)
@@ -900,6 +929,7 @@ internal static partial class OpenVrPathRegistry
     }
 
     private const uint TOKEN_QUERY = 0x0008;
+    private const int ERROR_NO_TOKEN = 1008;
     private const int TokenOwner = 4;
     private const int TokenElevationType = 18;
     private const int TokenIntegrityLevel = 25;
@@ -911,6 +941,14 @@ internal static partial class OpenVrPathRegistry
 
     [LibraryImport("kernel32.dll")]
     private static partial IntPtr GetCurrentProcess();
+
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr GetCurrentThread();
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool OpenThreadToken(IntPtr thread, uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool openAsSelf, out IntPtr token);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

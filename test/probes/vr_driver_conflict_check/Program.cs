@@ -21,8 +21,8 @@
 // SteamVR. Section 4 runs when the probe is elevated: it points the SDK's
 // SteamVR discovery at a folder whose vrpathreg.exe is not a program and
 // registers, then, for the elevated half of a split token, checks the write
-// carries the user's rights and no more. It restores the two HKLM values it
-// changes. Exit 0 PASS / 1 FAIL.
+// carries the user's rights and no more and leaves the calling thread as it
+// found it. It restores the two HKLM values it changes. Exit 0 PASS / 1 FAIL.
 
 using System;
 using System.Collections.Generic;
@@ -329,7 +329,10 @@ internal static class Program
         }
         PlantedTool(root);
         if (elevation == TokenElevationTypeFull)
+        {
             UserRights(root);
+            ThreadState(root);
+        }
         else
             Console.WriteLine("  the token is not split (elevation type " + elevation + "): the SDK writes as is, user-rights checks do not apply");
     }
@@ -426,7 +429,76 @@ internal static class Program
               thread.ImpersonationLevel.ToString());
     }
 
+    /// <summary>The write leaves the calling thread as it found it. A thread
+    /// on a token of its own comes back on that token, and a caller's
+    /// exception filter, which runs before any finally below the caller,
+    /// runs on the process token. The internal method is called through a
+    /// delegate: reflection's Invoke would catch the exception first and
+    /// hide what the filter sees.</summary>
+    static void ThreadState(string root)
+    {
+        var method = typeof(HMVR).Assembly.GetType("HIDMaestro.Internal.OpenVrPathRegistry")?
+            .GetMethod("RunAsUser", BindingFlags.Static | BindingFlags.NonPublic);
+        Check("OpenVrPathRegistry.RunAsUser exists", method != null);
+        if (method == null) return;
+        var run = (Func<Func<bool>, bool>)method.MakeGenericMethod(typeof(bool)).CreateDelegate(typeof(Func<Func<bool>, bool>));
+
+        bool kept = false;
+        string detail = "";
+        var t = new System.Threading.Thread(() =>
+        {
+            if (!ImpersonateSelf(SecurityImpersonation)) { detail = "ImpersonateSelf error " + Marshal.GetLastWin32Error(); return; }
+            try
+            {
+                run(() => true);
+                kept = ThreadHasToken();
+            }
+            catch (Exception e) { detail = e.GetType().Name + ": " + e.Message; }
+            finally { RevertToSelf(); }
+        });
+        t.Start();
+        t.Join();
+        Check("a thread that already runs on a token of its own comes back on it", kept, detail);
+
+        bool? filterSawToken = null;
+        try { run(() => throw new IOException("S68: a write that fails")); }
+        catch (IOException) when (Observe(ref filterSawToken)) { }
+        Check("a caller's exception filter runs on the process token, not the user's", filterSawToken == false,
+              filterSawToken == null ? "the filter did not run" : filterSawToken.Value ? "the filter ran on the user's token" : "");
+        Check("and the thread is back on the process token", !ThreadHasToken());
+    }
+
+    static bool Observe(ref bool? sawToken)
+    {
+        sawToken = ThreadHasToken();
+        return true;
+    }
+
+    static bool ThreadHasToken()
+    {
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, out IntPtr token)) return false;
+        CloseHandle(token);
+        return true;
+    }
+
     const int TokenElevationTypeFull = 2;
+    const int SecurityImpersonation = 2;
+    const uint TOKEN_QUERY = 0x0008;
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool ImpersonateSelf(int level);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool RevertToSelf();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenThreadToken(IntPtr thread, uint access, bool openAsSelf, out IntPtr token);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentThread();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
 
     static int ElevationType()
     {
