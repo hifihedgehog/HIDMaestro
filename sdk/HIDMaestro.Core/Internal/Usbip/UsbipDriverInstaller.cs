@@ -233,10 +233,12 @@ internal static partial class UsbipDriverInstaller
     internal static bool RunForProbe(Func<Action<string>, bool> work, Action<string>? progress) =>
         TransportWork.Run(w => work(w.Report), progress);
 
-    /// <summary>Coexistence probe section Z calls this through reflection:
-    /// the host controller repair under the transport lock, with the
-    /// transport's availability and the PnP restart replaced, since a test
-    /// never restarts a host controller.</summary>
+    /// <summary>The host controller repair under the transport lock, with
+    /// the availability check, the PnP restart and the budget the caller
+    /// passes. Coexistence probe section Z calls it through reflection with
+    /// stand-ins for the first two, so it never restarts a host controller.
+    /// usbip_bundle_check passes the production ones, on a machine whose
+    /// transport is installed and not answering.</summary>
     internal static bool RepairForProbe(Func<bool> available, Action restart, int budgetMs, Action<string>? progress) =>
         TransportWork.Run(w => TryRestartHostController(w, available, restart, budgetMs), progress);
 
