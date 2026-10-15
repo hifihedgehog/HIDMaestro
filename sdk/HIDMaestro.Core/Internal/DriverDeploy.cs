@@ -108,18 +108,26 @@ internal static partial class DriverDeploy
     }
 
     /// <summary>This build's INFs that have no package of this build's stamp
-    /// in the driver store.</summary>
-    internal static List<string> MissingOfBuild(DriverStamp embedded) =>
-        DriverBuilder.PackageInfs.Where(inf => !InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0)).ToList();
+    /// in the driver store. Each INF is compared with its own embedded
+    /// stamp: a build made before v1.13.0 stamped its two INFs at two
+    /// moments, and when those fell in two minutes the XUSB package never
+    /// carried the driver INF's stamp, so it read as missing after every
+    /// add.</summary>
+    internal static List<string> MissingOfBuild() =>
+        DriverBuilder.PackageInfs.Where(inf => !InstalledStamps(inf).Any(s => s.CompareTo(EmbeddedStamp(inf)) == 0)).ToList();
 
-    /// <summary>This SDK's own driver stamp, from its embedded INF.</summary>
-    internal static DriverStamp EmbeddedDriver()
+    /// <summary>This SDK's own driver stamp, from its embedded
+    /// <c>hidmaestro.inf</c>.</summary>
+    internal static DriverStamp EmbeddedDriver() => EmbeddedStamp("hidmaestro.inf");
+
+    /// <summary>The stamp of one of this SDK's embedded INFs.</summary>
+    internal static DriverStamp EmbeddedStamp(string infName)
     {
-        using var stream = typeof(DriverDeploy).Assembly.GetManifestResourceStream(DriverBuilder.NativePrefix + "hidmaestro.inf")
-            ?? throw new InvalidOperationException("The embedded hidmaestro.inf is missing from HIDMaestro.Core.dll.");
+        using var stream = typeof(DriverDeploy).Assembly.GetManifestResourceStream(DriverBuilder.NativePrefix + infName)
+            ?? throw new InvalidOperationException($"The embedded {infName} is missing from HIDMaestro.Core.dll.");
         using var reader = new StreamReader(stream);
         return ParseDriverVer(reader.ReadToEnd())
-            ?? throw new InvalidOperationException("The embedded hidmaestro.inf has no DriverVer line.");
+            ?? throw new InvalidOperationException($"The embedded {infName} has no DriverVer line.");
     }
 
     /// <summary>Acquire the deploy mutex. An abandoned mutex is acquired,
@@ -190,7 +198,7 @@ internal static partial class DriverDeploy
                 // lacks is added: a full deploy would remove that package and
                 // its hosts under them.
                 if (held && DriverBuilder.PackageInfs.Any(inf => InstalledStamps(inf).Count > 0))
-                    DriverBuilder.AddPackagesLocked(MissingOfBuild(embedded));
+                    DriverBuilder.AddPackagesLocked(MissingOfBuild());
                 else
                     DriverBuilder.DeployLocked();
                 return HMDriverInstallOutcome.Installed;
@@ -207,7 +215,7 @@ internal static partial class DriverDeploy
                 // nothing installed. Otherwise only the record of the install
                 // is missing, as after SOFTWARE\HIDMaestro was deleted: it is
                 // restored rather than reinstalled under running devices.
-                var missing = MissingOfBuild(embedded);
+                var missing = MissingOfBuild();
                 if (missing.Count > 0)
                 {
                     DriverBuilder.AddPackagesLocked(missing);

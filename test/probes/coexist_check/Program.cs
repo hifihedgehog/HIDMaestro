@@ -67,7 +67,9 @@
 //      embedded binaries after a deploy, since each deploy signs its own copy.
 //   T. A set a deploy left incomplete, this build's XUSB package gone and
 //      its main package installed: InstallDriver adds the missing package,
-//      and an Xbox 360 controller, which needs it, creates.
+//      and an Xbox 360 controller, which needs it, creates. With the record
+//      of the install gone, InstallDriver finds this build's packages at
+//      their own stamps.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
 //   V. USB/IP re-attach attempts and dropped imports of composites: a
@@ -1334,6 +1336,13 @@ internal static partial class Program
 
     static void SectionT()
     {
+        SectionT1();
+        Clean();
+        SectionT2();
+    }
+
+    static void SectionT1()
+    {
         var xusb = PublishedNames("hidmaestro_xusb.inf");
         Check("T: this build's XUSB package is installed", xusb.Count == 1, string.Join(", ", xusb));
         if (xusb.Count != 1) return;
@@ -1346,6 +1355,21 @@ internal static partial class Program
               && XusbPackages() == 1 && MainPackages() == 1, $"{r}, {MainPackages()} main, {XusbPackages()} XUSB");
         string c = p.Send("create xbox - coexist-t");
         Check("T: an Xbox 360 controller, which needs it, creates", Ok(c), c);
+    }
+
+    /// <summary>This build's packages installed and the record of them
+    /// gone: the deploy finds both INFs at their own stamps and reinstalls
+    /// nothing. A build whose two INFs carry different stamps, as one before
+    /// v1.13.0 could, failed here and in T: each INF was compared with the
+    /// driver INF's stamp.</summary>
+    static void SectionT2()
+    {
+        Native.DropInstalledManifest();
+        using var p = PeerProcess.Start("T2");
+        string r = p.Send("install");
+        Check("T2: with the record of the install gone, InstallDriver finds this build's packages current",
+              PeerProcess.Field(r, "outcome") == "AlreadyCurrent" && MainPackages() == 1 && XusbPackages() == 1,
+              $"{r}, {MainPackages()} main, {XusbPackages()} XUSB");
     }
 
     static byte[]? ReadEmbedded(string logicalName)

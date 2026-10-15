@@ -506,9 +506,9 @@ public static class DriverBuilder
         SignDriversIn(tools, package);
         GenerateCatalogsIn(tools, package);
         string pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
-        var embedded = DriverDeploy.EmbeddedDriver();
         foreach (string inf in infs)
         {
+            var embedded = DriverDeploy.EmbeddedStamp(inf);
             DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
             Run(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\" /install", timeoutMs: 30_000);
             if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
