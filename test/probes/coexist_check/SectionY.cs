@@ -65,6 +65,11 @@
 //        and input event open and creates the owner pipe after the kill. The
 //        driver does not reconnect its watch, so the census reads the device
 //        gone and a sweep removes it.
+//    Y14. A killed program's device whose driver values are gone, as a driver
+//        that records nothing leaves them, after the driver has let go of
+//        the input section. The user holds the owner pipe. With no input
+//        section, which only a running program can create, the pipe does
+//        not count, and a sweep removes the device.
 //    Y16. A running program lets go of its input event, and the driver, past
 //        its idle handle reset, waits for that event to come back. The
 //        program is then killed. The driver records its owner pipe closed
@@ -111,6 +116,7 @@ internal static partial class Program
             SectionYReused(user);
             SectionYLegacyEvents(user, installed);
             SectionYHeldSection(user);
+            SectionYNoSection(user);
             SectionYWatchWhileWaiting();
         }
         finally { Y.CloseHandle(user); }
@@ -292,6 +298,40 @@ internal static partial class Program
             if (ev != IntPtr.Zero) Y.CloseHandle(ev);
             pipe?.Dispose();
         }
+    }
+
+    /// <summary>Y14. A held pipe with no driver values and no input section.</summary>
+    static void SectionYNoSection(IntPtr user)
+    {
+        Clean();
+        string inst, tok;
+        int t;
+        using (var p = PeerProcess.Start("Y-nosection"))
+        {
+            string cp = p.Send("create pad F1FB coexist-y-nosection");
+            if (!Ok(cp)) { Check("Y14: a program creates", false, cp); return; }
+            inst = PeerProcess.Field(cp, "instance")!;
+            t = int.Parse(PeerProcess.Field(cp, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            p.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        string section = $@"Global\HIDMaestroInput{t}";
+        // Eight idle 500 ms waits, then the driver drops the input section.
+        bool sectionGone = WaitFor(() => !Native.SectionExists(section), 12_000);
+        Check($"Y14: past the driver's idle reset, {section} is gone", sectionGone);
+        Check("Y14: the driver's values are deleted", Y.DeleteWatchValues(inst) && Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+        using var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t));
+        Check($"Y14: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
+        using var nu = PeerProcess.Start("Y-nosection-sweeper");
+        string? entry = Y.CensusEntry(nu.Send("census"), tok);
+        Check("Y14: the census does not count a held pipe with no input section",
+              entry?.Split('|')[2] is "Dead" or "DeadLegacy", entry ?? "no entry");
+        nu.Send("sweep");
+        WaitFor(() => tree.All(Native.IsGone), 5000);
+        Check("Y14: a sweep removes the killed program's devices", tree.Count > 0 && tree.All(Native.IsGone),
+              string.Join(", ", tree.Where(d => !Native.IsGone(d))));
     }
 
     /// <summary>Y16. An owner pipe that closes while the driver waits for

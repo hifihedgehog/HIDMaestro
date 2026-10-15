@@ -221,8 +221,23 @@ internal sealed partial class OwnerCensus
             gone ??= $"server {w.ProcessId} no longer runs";
         }
         if (gone != null)
+        {
             DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is not a running program's: {gone}");
-        return gone == null;
+            return false;
+        }
+        // No v1.13.0 driver reported on the pipe (an older driver, or a
+        // device added again before its watch reconnected). A running
+        // program creates Global\HIDMaestroInput<N> before its owner pipe,
+        // and a program that is not elevated cannot create a Global\
+        // section, so the section's presence is the one signal left that a
+        // real program, not a squatter holding only the pipe name, is on
+        // the index.
+        if (!SectionExists($@"Global\HIDMaestroInput{index}"))
+        {
+            DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is held with no input section: a squatter, not a running program");
+            return false;
+        }
+        return true;
     }
 
     /// <summary>What a device's driver recorded about its owner watch:
