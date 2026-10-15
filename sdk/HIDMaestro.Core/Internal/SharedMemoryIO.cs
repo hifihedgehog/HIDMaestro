@@ -329,102 +329,112 @@ internal static partial class SharedMemoryIO
 
             string name = $@"Global\HIDMaestroInput{controllerIndex}";
             (IntPtr h, IntPtr view) = CreateSection(name, SHARED_INPUT_SIZE);
-
-            // Zero-init: pagefile-backed sections start zero already, but we
-            // explicitly write SeqNo=0 so a stale section from a previous
-            // run (under the same name) doesn't carry forward a non-zero
-            // sequence number that the driver would treat as "no change".
-            // Bulk Marshal.Copy from a freshly allocated zero buffer is one
-            // P/Invoke; the prior per-byte loop was 278 P/Invokes per setup.
-            Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
-
-            // Companion input doorbell (perf audit 2026-07-21). The XUSB
-            // companion's WAIT_FOR_INPUT pump was purely 8 ms
-            // timer-quantized, which put a 0-8 ms (median ~4 ms) phase
-            // delay on the WGI/GameInput input path and 125 idle wakes/s
-            // per Xbox controller. A SECOND named auto-reset event (the
-            // main input event is consumed by the HID driver's worker,
-            // an auto-reset event cannot serve two waiters) lets the
-            // companion complete a parked WAIT_FOR_INPUT at frame
-            // arrival. Old companions never open it: timer fallback.
-            string cevName = $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}";
-            IntPtr cev = CreateNamedEvent(cevName);
-            s_companionInputEvents[controllerIndex] = cev;
-
-            // Issue #67: the driver stores each delivered frame's SeqNo here
-            // and signals the event, so keyboard and mouse writers can send
-            // every frame instead of the latest one. A separate section, so
-            // the input layout native writers depend on is unchanged. The
-            // driver opens both alongside the input section, since it
-            // cannot create Global\ objects itself, and sets the capability
-            // word. An older driver leaves the word zero and nobody waits.
-            (IntPtr ah, IntPtr av) = CreateSection($@"Global\HIDMaestroInputAck{controllerIndex}", INPUT_ACK_SIZE);
-            Marshal.Copy(new byte[INPUT_ACK_SIZE], 0, av, INPUT_ACK_SIZE);
-            s_inputAckHandles[controllerIndex] = ah;
-            s_inputAckViews[controllerIndex] = av;
-            s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
-
-            // Issue #67: the owner pipe. The driver connects and keeps a
-            // read pending that never gets data. Windows closes these ends
-            // when this process ends, however it ends, and the read
-            // completes, which is how the driver learns to let go of the
-            // keys and buttons this process held. Best effort: without it
-            // the device keeps its last report until it is removed.
-            //
-            // The first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE.
-            // A v1.12.0 program holds this name for the index it uses and
-            // takes no claim, so failing here means one started on this index
-            // after the claim was checked. Both would write these sections,
-            // so the create stops instead.
-            var pipes = new List<IntPtr>();
-            for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
+            try
             {
-                IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}", first: k == 0);
-                if (ph != INVALID_HANDLE_VALUE) { pipes.Add(ph); continue; }
-                if (k == 0 && Marshal.GetLastPInvokeError() is ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY)
+                // Zero-init: pagefile-backed sections start zero already, but we
+                // explicitly write SeqNo=0 so a stale section from a previous
+                // run (under the same name) doesn't carry forward a non-zero
+                // sequence number that the driver would treat as "no change".
+                // Bulk Marshal.Copy from a freshly allocated zero buffer is one
+                // P/Invoke. The prior per-byte loop was 278 P/Invokes per setup.
+                Marshal.Copy(new byte[SHARED_INPUT_SIZE], 0, view, SHARED_INPUT_SIZE);
+
+                // Companion input doorbell (perf audit 2026-07-21). The XUSB
+                // companion's WAIT_FOR_INPUT pump was purely 8 ms
+                // timer-quantized, which put a 0-8 ms (median ~4 ms) phase
+                // delay on the WGI/GameInput input path and 125 idle wakes/s
+                // per Xbox controller. A SECOND named auto-reset event (the
+                // main input event is consumed by the HID driver's worker,
+                // an auto-reset event cannot serve two waiters) lets the
+                // companion complete a parked WAIT_FOR_INPUT at frame
+                // arrival. Old companions never open it: timer fallback.
+                string cevName = $@"Global\HIDMaestroCompanionInputEvent{controllerIndex}";
+                IntPtr cev = CreateNamedEvent(cevName);
+                s_companionInputEvents[controllerIndex] = cev;
+
+                // Issue #67: the driver stores each delivered frame's SeqNo here
+                // and signals the event, so keyboard and mouse writers can send
+                // every frame instead of the latest one. A separate section, so
+                // the input layout native writers depend on is unchanged. The
+                // driver opens both alongside the input section, since it
+                // cannot create Global\ objects itself, and sets the capability
+                // word. An older driver leaves the word zero and nobody waits.
+                (IntPtr ah, IntPtr av) = CreateSection($@"Global\HIDMaestroInputAck{controllerIndex}", INPUT_ACK_SIZE);
+                Marshal.Copy(new byte[INPUT_ACK_SIZE], 0, av, INPUT_ACK_SIZE);
+                s_inputAckHandles[controllerIndex] = ah;
+                s_inputAckViews[controllerIndex] = av;
+                s_inputAckEvents[controllerIndex] = CreateNamedEvent($@"Global\HIDMaestroInputAckEvent{controllerIndex}");
+
+                // Issue #67: the owner pipe. The driver connects and keeps a
+                // read pending that never gets data. Windows closes these ends
+                // when this process ends, however it ends, and the read
+                // completes, which is how the driver learns to let go of the
+                // keys and buttons this process held. Best effort: without it
+                // the device keeps its last report until it is removed.
+                //
+                // The first instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE.
+                // A v1.12.0 program holds this name for the index it uses and
+                // takes no claim, so failing here means one started on this index
+                // after the claim was checked. Both would write these sections,
+                // so the create stops instead.
+                var pipes = new List<IntPtr>();
+                for (int k = 0; k < OWNER_PIPE_INSTANCES; k++)
                 {
-                    UnmapViewOfFile(av); CloseHandle(ah);
-                    if (s_inputAckEvents.Remove(controllerIndex, out IntPtr aev)) CloseHandle(aev);
-                    s_inputAckHandles.Remove(controllerIndex); s_inputAckViews.Remove(controllerIndex);
-                    if (s_companionInputEvents.Remove(controllerIndex, out IntPtr c)) CloseHandle(c);
-                    UnmapViewOfFile(view); CloseHandle(h);
-                    throw new HMResourceInUseException(
-                        $"Transport index {controllerIndex} is in use by a running program built on HIDMaestro 1.12.0, which started on it during this create. Create the controller again.",
-                        $"transport index {controllerIndex}", null);
+                    IntPtr ph = CreateOwnerPipe($@"\\.\pipe\HIDMaestroOwner{controllerIndex}", first: k == 0);
+                    if (ph != INVALID_HANDLE_VALUE) { pipes.Add(ph); continue; }
+                    if (k == 0 && Marshal.GetLastPInvokeError() is ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY)
+                    {
+                        // The catch below releases what this call made.
+                        throw new HMResourceInUseException(
+                            $"Transport index {controllerIndex} is in use by a running program built on HIDMaestro 1.12.0, which started on it during this create. Create the controller again.",
+                            $"transport index {controllerIndex}", null);
+                    }
                 }
+                s_ownerPipes[controllerIndex] = pipes;
+
+                // v1.13.0: the version handshake (HIDMAESTRO_VERSION_INFO in
+                // driver.h). This SDK's half goes in now. The driver writes its
+                // half when it opens the input section, so the section must
+                // exist before the event below, like the acknowledgement.
+                (IntPtr vh, IntPtr vv) = CreateSection($@"Global\HIDMaestroVersion{controllerIndex}", VERSION_INFO_SIZE);
+                Marshal.Copy(new byte[VERSION_INFO_SIZE], 0, vv, VERSION_INFO_SIZE);
+                Marshal.WriteInt32(vv, VERSION_OFFSET_LAYOUT, VERSION_LAYOUT);
+                Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MIN, SDK_PROTOCOL_MIN);
+                Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MAX, SDK_PROTOCOL);
+                var sdk = typeof(SharedMemoryIO).Assembly.GetName().Version ?? new Version(0, 0, 0);
+                Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 0, (short)sdk.Major);
+                Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 2, (short)sdk.Minor);
+                Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 4, (short)Math.Max(0, sdk.Build));
+                s_versionHandles[controllerIndex] = vh;
+                s_versionViews[controllerIndex] = vv;
+
+                // Driver signaling event. Auto-reset (manual_reset=FALSE), not
+                // initially set. The driver's per-device worker thread waits on
+                // this with a 50ms safety timeout to replace the old 1ms busy poll.
+                // SDDL matches the section so WUDFHost (LocalService) can open it.
+                // Created last: the worker maps the input section and the
+                // acknowledgement once, when this event first opens, so both
+                // must exist by then.
+                string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
+                IntPtr ev = CreateNamedEvent(evName);
+
+                s_inputHandles[controllerIndex] = h;
+                s_inputViews[controllerIndex] = view;
+                s_inputEvents[controllerIndex] = ev;
+                return view;
             }
-            s_ownerPipes[controllerIndex] = pipes;
-
-            // v1.13.0: the version handshake (HIDMAESTRO_VERSION_INFO in
-            // driver.h). This SDK's half goes in now. The driver writes its
-            // half when it opens the input section, so the section must
-            // exist before the event below, like the acknowledgement.
-            (IntPtr vh, IntPtr vv) = CreateSection($@"Global\HIDMaestroVersion{controllerIndex}", VERSION_INFO_SIZE);
-            Marshal.Copy(new byte[VERSION_INFO_SIZE], 0, vv, VERSION_INFO_SIZE);
-            Marshal.WriteInt32(vv, VERSION_OFFSET_LAYOUT, VERSION_LAYOUT);
-            Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MIN, SDK_PROTOCOL_MIN);
-            Marshal.WriteInt32(vv, VERSION_OFFSET_SDK_PROTOCOL_MAX, SDK_PROTOCOL);
-            var sdk = typeof(SharedMemoryIO).Assembly.GetName().Version ?? new Version(0, 0, 0);
-            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 0, (short)sdk.Major);
-            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 2, (short)sdk.Minor);
-            Marshal.WriteInt16(vv, VERSION_OFFSET_SDK_VERSION + 4, (short)Math.Max(0, sdk.Build));
-            s_versionHandles[controllerIndex] = vh;
-            s_versionViews[controllerIndex] = vv;
-
-            // Driver signaling event. Auto-reset (manual_reset=FALSE), not
-            // initially set. The driver's per-device worker thread waits on
-            // this with a 50ms safety timeout to replace the old 1ms busy poll.
-            // SDDL matches the section so WUDFHost (LocalService) can open it.
-            // Created last: the worker maps the input section and the
-            // acknowledgement once, when this event first opens, so both
-            // must exist by then.
-            string evName = $@"Global\HIDMaestroInputEvent{controllerIndex}";
-            IntPtr ev = CreateNamedEvent(evName);
-
-            s_inputHandles[controllerIndex] = h;
-            s_inputViews[controllerIndex] = view;
-            s_inputEvents[controllerIndex] = ev;
-            return view;
+            catch
+            {
+                // Everything this call made goes before the exception
+                // leaves it: nothing is cached for the index until the last
+                // step succeeds, so no later DestroyController would find
+                // the input section, and the other objects would keep the
+                // index's names alive in this process.
+                ReleaseInputExtrasLocked(controllerIndex);
+                UnmapViewOfFile(view);
+                CloseHandle(h);
+                throw;
+            }
         }
     }
 
@@ -954,6 +964,30 @@ internal static partial class SharedMemoryIO
         return true;
     }
 
+    /// <summary>The objects an input mapping makes beside the input section
+    /// and its event: the companion doorbell, the acknowledgement section
+    /// and event, the owner pipe and the version section. Caller holds
+    /// s_inputViews.</summary>
+    private static void ReleaseInputExtrasLocked(int controllerIndex)
+    {
+        // The companion doorbell is created per input mapping too, and
+        // a recreate of this index makes a new one.
+        if (s_companionInputEvents.Remove(controllerIndex, out IntPtr cev) && cev != IntPtr.Zero)
+            CloseHandle(cev);
+        if (s_inputAckViews.Remove(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
+            UnmapViewOfFile(av);
+        if (s_inputAckHandles.Remove(controllerIndex, out IntPtr ah) && ah != IntPtr.Zero)
+            CloseHandle(ah);
+        if (s_inputAckEvents.Remove(controllerIndex, out IntPtr aev) && aev != IntPtr.Zero)
+            CloseHandle(aev);
+        if (s_ownerPipes.Remove(controllerIndex, out var pipes))
+            foreach (var ph in pipes) CloseHandle(ph);
+        if (s_versionViews.Remove(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
+            UnmapViewOfFile(vv);
+        if (s_versionHandles.Remove(controllerIndex, out IntPtr vh) && vh != IntPtr.Zero)
+            CloseHandle(vh);
+    }
+
     /// <summary>Releases the input and output sections for a single controller.
     /// Called when an HMController is disposed. Idempotent.</summary>
     public static void DestroyController(int controllerIndex)
@@ -976,28 +1010,7 @@ internal static partial class SharedMemoryIO
                 CloseHandle(ev);
             s_inputEvents.Remove(controllerIndex);
 
-            // The companion doorbell is created per input mapping too, and
-            // a recreate of this index makes a new one.
-            if (s_companionInputEvents.TryGetValue(controllerIndex, out IntPtr cev) && cev != IntPtr.Zero)
-                CloseHandle(cev);
-            s_companionInputEvents.Remove(controllerIndex);
-
-            if (s_inputAckViews.TryGetValue(controllerIndex, out IntPtr av) && av != IntPtr.Zero)
-                UnmapViewOfFile(av);
-            s_inputAckViews.Remove(controllerIndex);
-            if (s_inputAckHandles.TryGetValue(controllerIndex, out IntPtr ah) && ah != IntPtr.Zero)
-                CloseHandle(ah);
-            s_inputAckHandles.Remove(controllerIndex);
-            if (s_inputAckEvents.TryGetValue(controllerIndex, out IntPtr aev) && aev != IntPtr.Zero)
-                CloseHandle(aev);
-            s_inputAckEvents.Remove(controllerIndex);
-            if (s_ownerPipes.TryGetValue(controllerIndex, out var pipes))
-                foreach (var ph in pipes) CloseHandle(ph);
-            s_ownerPipes.Remove(controllerIndex);
-            if (s_versionViews.Remove(controllerIndex, out IntPtr vv) && vv != IntPtr.Zero)
-                UnmapViewOfFile(vv);
-            if (s_versionHandles.Remove(controllerIndex, out IntPtr vh) && vh != IntPtr.Zero)
-                CloseHandle(vh);
+            ReleaseInputExtrasLocked(controllerIndex);
         }
         lock (s_outputViews)
         {

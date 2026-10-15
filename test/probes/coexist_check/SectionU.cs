@@ -2,16 +2,18 @@
 //    identity. The program's record is made to refuse the write the create
 //    needs, once before any device exists and once after the device is
 //    made, and once over an entry it cannot write that is already there.
-//    A composite's device emulator fails after it mapped the index's
-//    sections. Each time the create leaves no claim pipe, no device and no
-//    record entry, and the same identity creates again at once, in the same
-//    program and in another.
+//    The index's input event name is taken, so its input mapping fails
+//    partway, and a composite's device emulator fails after it mapped the
+//    index's sections. Each time the create leaves no claim pipe, no
+//    device, no record entry and no section, and the same identity creates
+//    again at once, in the same program and in another.
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading;
 using Microsoft.Win32;
 
 internal static partial class Program
@@ -132,6 +134,24 @@ internal static partial class Program
               string.Join(",", Entries(controllers)));
         WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
 
+        // The input mapping's last step creates the input event. A mutex
+        // squatting its name fails it after the input section exists.
+        string section = $@"Global\HIDMaestroInput{t}";
+        bool sectionGone = WaitFor(() => !Native.SectionExists(section), 10_000);
+        Check($"U: before the next create nothing holds {section}", sectionGone);
+        string f5;
+        using (var squat = new Mutex(false, $@"Global\HIDMaestroInputEvent{t}"))
+            f5 = a.Send("create pad F1B0 -");
+        Check("U: a create whose input event cannot be made fails", !Ok(f5), f5);
+        if (sectionGone)
+            Check($"U: after it, no handle to {section} is open", !Native.SectionExists(section));
+        UnclaimedAndUnrecorded("U: after it", baseline, controllers, entriesChecked: true);
+        string r5 = a.Send("create pad F1B0 -");
+        Check($"U: a retry in the failed program takes transport index {t}",
+              Ok(r5) && PeerProcess.Field(r5, "transport") == t, r5);
+        a.Send("dispose");
+        WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
+
         // A composite's device emulator maps the index's sections, which
         // holds the index's v1.12.0 owner pipe, then creates its output
         // doorbell. A mutex squatting the doorbell's name fails that step.
@@ -142,7 +162,7 @@ internal static partial class Program
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
         string f4;
-        using (var squat = new System.Threading.Mutex(false, $@"Global\HIDMaestroOutputEvent{tc}"))
+        using (var squat = new Mutex(false, $@"Global\HIDMaestroOutputEvent{tc}"))
             f4 = a.Send("create composite - -");
         Check("U: a composite whose device emulator fails is refused", !Ok(f4), f4);
         UnclaimedAndUnrecorded("U: after the failed composite", baseline, controllers, entriesChecked: true);

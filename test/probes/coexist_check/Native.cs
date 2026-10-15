@@ -249,6 +249,16 @@ internal static class Native
         finally { CloseHandle(h); }
     }
 
+    /// <summary>Whether any process holds a handle to the named section.
+    /// A section exists while one handle to it is open.</summary>
+    internal static bool SectionExists(string name)
+    {
+        IntPtr h = OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, name);
+        if (h == IntPtr.Zero) return false;
+        CloseHandle(h);
+        return true;
+    }
+
     // ── Registry ───────────────────────────────────────────────────────
 
     /// <summary>Owner records of programs running the SDK under test,
