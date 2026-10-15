@@ -267,14 +267,17 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
 }
 
 /* The output doorbell's descriptor and its check on an existing object,
- * as driver.c's CreateHostEvent: SYSTEM, Administrators and LocalService.
- * An object that exists already is used when one of those three owns it
- * under a DACL, or LocalService or SYSTEM owns it under the NULL DACL a
- * driver before v1.13.0 gave it, which is then replaced with the
- * descriptor above. NULL when the name is unusable or the create fails. */
+ * as driver.c's CreateHostEvent with takeOverNullDacl set: SYSTEM,
+ * Administrators and LocalService. An object that exists already is used
+ * when one of those three owns it under a DACL, or LocalService or SYSTEM
+ * owns it under the NULL DACL a driver before v1.13.0 gave it, which is
+ * then replaced with the descriptor above. The doorbell is read-only to a
+ * consumer, so a program holding it from before the takeover gains nothing.
+ * driver.c keeps refusing the StopEvent for the opposite reason. NULL when
+ * the name is unusable or the create fails. */
 static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
 
-static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
+static HANDLE CreateHostEvent(BOOL manualReset, BOOL takeOverNullDacl, LPCWSTR name)
 {
     PSECURITY_DESCRIPTOR sd = NULL;
     SECURITY_ATTRIBUTES sa;
@@ -305,15 +308,16 @@ static HANDLE CreateHostEvent(BOOL manualReset, LPCWSTR name)
             BOOL adminOwner = owner != NULL && IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
             if (dacl != NULL) {
                 usable = hostOwner || adminOwner;
-            } else if (hostOwner) {
-                /* A driver before v1.13.0 made it with a NULL DACL, and a
-                 * program still holds it, the SDK's output reader most
-                 * often. A program that is not elevated cannot own an
-                 * object as LocalService or SYSTEM. The owner's account may
-                 * always rewrite the DACL, so this host, which runs as that
-                 * account, gives the object the descriptor above. Handles
-                 * opened before keep their access. No new one can be
-                 * opened by a program that is not elevated. */
+            } else if (hostOwner && takeOverNullDacl) {
+                /* The output doorbell. A driver before v1.13.0 made it with
+                 * a NULL DACL, and a program still holds it, the SDK's output
+                 * reader most often. A program that is not elevated cannot
+                 * own an object as LocalService or SYSTEM. The owner's
+                 * account may rewrite the DACL, so this host, which runs as
+                 * that account, gives the object the descriptor above. A new
+                 * open by name is then checked against it. A handle opened
+                 * before keeps its access, which is harmless on a doorbell a
+                 * consumer only reads. */
                 PACL ours = NULL;
                 BOOL present = FALSE, defaulted = FALSE;
                 usable = GetSecurityDescriptorDacl(sd, &present, &ours, &defaulted) && present && ours != NULL
@@ -373,7 +377,7 @@ static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
      * on failure PublishOutput skips the signal and the SDK's safety
      * timeout drains the ring. */
     if (ctx->OutputSignalEvent == NULL)
-        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
+        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
 
     ctx->OutputMemHandle = h;
     MemoryBarrier();

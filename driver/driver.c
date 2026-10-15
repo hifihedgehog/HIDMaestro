@@ -576,7 +576,7 @@ static VOID TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx);
 static VOID OwnerGone(_In_ PDEVICE_CONTEXT ctx);
 static VOID DeliverReleaseFrames(_In_ PDEVICE_CONTEXT ctx);
-static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name);
+static HANDLE CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name);
 
 /* Try to open and map the named section. Returns TRUE on success.
  * On failure, leaves SharedMemHandle/SharedMemPtr unchanged (NULL). */
@@ -601,7 +601,7 @@ TryOpenSharedMapping(_In_ PDEVICE_CONTEXT ctx)
      * which runs on the I/O queue's threads and only ever sees NULL or the
      * handle. */
     if (ctx->OutputSignalEvent == NULL) {
-        HANDLE ev = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
+        HANDLE ev = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
         if (ev != NULL)
             InterlockedExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev);
     }
@@ -2304,13 +2304,22 @@ static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)
  * host of the same controller, or an earlier device context on the same
  * index. Any program can create a Global\ event, so one that exists already
  * is used only when its owner is one a program that is not elevated cannot
- * give an object: LocalService, SYSTEM or Administrators with a DACL, or
- * LocalService or SYSTEM with the NULL DACL a driver before v1.13.0 gave
- * it, which this host then replaces with its own. The SDK's reader applies
- * the same rule (SharedMemoryIO.TryOpenOutputEvent). NULL when the name is
- * unusable or the create fails. */
+ * give an object: LocalService, SYSTEM or Administrators with a DACL.
+ *
+ * With takeOverNullDacl and a LocalService or SYSTEM owner, a NULL DACL is
+ * also taken: a driver before v1.13.0 made the object that way, and this
+ * host, which runs as that account, replaces the DACL with its own. This is
+ * for the output doorbell only. A program that opened the old NULL-DACL
+ * object keeps every right its handle was granted, WRITE_DAC included, so a
+ * holder of the StopEvent could put the NULL DACL back and signal the
+ * worker through its old handle. The doorbell is read-only to a consumer
+ * and carries no such risk. The StopEvent therefore passes FALSE and falls
+ * back to an unnamed event, as before v1.13.0 took the NULL DACL at all.
+ * The SDK's reader applies the same rule for the doorbell
+ * (SharedMemoryIO.TryOpenOutputEvent). NULL when the name is unusable or
+ * the create fails. */
 static HANDLE
-CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name)
+CreateHostEvent(_In_ BOOL manualReset, _In_ BOOL takeOverNullDacl, _In_ LPCWSTR name)
 {
     PSECURITY_DESCRIPTOR sd = NULL;
     SECURITY_ATTRIBUTES sa;
@@ -2341,15 +2350,17 @@ CreateHostEvent(_In_ BOOL manualReset, _In_ LPCWSTR name)
             BOOL adminOwner = owner != NULL && IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
             if (dacl != NULL) {
                 usable = hostOwner || adminOwner;
-            } else if (hostOwner) {
-                /* A driver before v1.13.0 made it with a NULL DACL, and a
-                 * program still holds it, the SDK's output reader most
-                 * often. A program that is not elevated cannot own an
-                 * object as LocalService or SYSTEM. The owner's account may
-                 * always rewrite the DACL, so this host, which runs as that
-                 * account, gives the object the descriptor above. Handles
-                 * opened before keep their access. No new one can be
-                 * opened by a program that is not elevated. */
+            } else if (hostOwner && takeOverNullDacl) {
+                /* The output doorbell only (see the header). A driver before
+                 * v1.13.0 made it with a NULL DACL, and a program still
+                 * holds it, the SDK's output reader most often. A program
+                 * that is not elevated cannot own an object as LocalService
+                 * or SYSTEM. The owner's account may rewrite the DACL, so
+                 * this host, which runs as that account, gives the object
+                 * the descriptor above. A new open by name is then checked
+                 * against it. A handle opened before keeps the access it was
+                 * granted, WRITE_DAC among them against a NULL DACL, which is
+                 * why the StopEvent is never taken this way. */
                 PACL ours = NULL;
                 BOOL present = FALSE, defaulted = FALSE;
                 usable = GetSecurityDescriptorDacl(sd, &present, &ours, &defaulted) && present && ours != NULL
@@ -2570,12 +2581,16 @@ EvtDeviceAdd(
      * the device instantly.
      *
      * CreateHostEvent admits the elevated SDK and the driver hosts only.
-     * When the name is unusable, because a program that is not a driver
-     * host made it first, the worker gets an unnamed event instead: it
-     * still stops at teardown, and a sweep after a force-kill takes the
-     * slow removal path for this device. */
+     * The StopEvent passes takeOverNullDacl=FALSE: an event a program that
+     * is not a driver host made first, or one a driver before v1.13.0 made
+     * with a NULL DACL, is refused, and the worker gets an unnamed event
+     * instead. It still stops at teardown, and a sweep after a force-kill
+     * takes the slow removal path for this device. Taking over the old
+     * NULL-DACL StopEvent would hand a program holding it from before the
+     * takeover the means to signal the worker (its handle keeps WRITE_DAC),
+     * so that object is never reused. */
     {
-        ctx->StopEvent = CreateHostEvent(TRUE /* manual reset */, ctx->StopEventName);
+        ctx->StopEvent = CreateHostEvent(TRUE /* manual reset */, FALSE, ctx->StopEventName);
         if (ctx->StopEvent == NULL)
             ctx->StopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
 
@@ -2589,7 +2604,7 @@ EvtDeviceAdd(
          * order between the two hosts doesn't matter. Non-fatal on
          * failure, an unusable name included: PublishOutput skips the
          * signal and the SDK's safety timeout still drains the ring. */
-        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, ctx->OutputEventName);
+        ctx->OutputSignalEvent = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
     }
     if (ctx->StopEvent != NULL) {
         /* CRITICAL: reset the StopEvent explicitly before starting the worker.

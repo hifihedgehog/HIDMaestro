@@ -56,6 +56,11 @@
 //    Y10. The driver's values name a process created after they were
 //        written, as a reused process id would, and the user holds the
 //        killed program's pipe name: the sweep removes the devices.
+//    Y12. A program that is not elevated holds an EVENT_ALL_ACCESS handle to
+//        a v1.12.0 device's NULL-DACL StopEvent from before the move. Once
+//        the controller is on the installed driver, signaling that handle
+//        does not disturb the controller, because the new driver refused the
+//        object and runs an unnamed StopEvent.
 //    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
 //        while its SDK holds the earlier driver's OutputEvent. The probe
 //        writes 31 output reports 100 ms apart and times each one to the
@@ -149,11 +154,47 @@ internal static partial class Program
             inst = PeerProcess.Field(co, "instance")!;
             t = int.Parse(PeerProcess.Field(co, "transport")!);
             Check("Y11: its output reader is subscribed", Ok(old.Send("outputs on")));
+
+            // Y12: open the v1.12.0 device's NULL-DACL StopEvent for every
+            // right, from the medium thread, before the move. The handle
+            // keeps whatever it is granted now.
+            string stopName = $@"Global\HIDMaestroStopEvent{t}";
+            IntPtr heldStop = Y.AsUser(user, () => Y.OpenEventW(Y.EVENT_ALL_ACCESS, false, stopName));
+            Check("Y12: the user opens the v1.12.0 StopEvent for every right (its DACL is null)", heldStop != IntPtr.Zero);
+
             bool moved = Y.InstallBestStoreDriver(inst)
                          && WaitFor(() => Native.DriverVersionOf(inst) == installed && Native.IsStarted(inst), 20_000)
                          && WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000);
             Check("Y11: the controller moves to the installed driver", moved, $"{Native.DriverVersionOf(inst)}, installed {installed}");
-            if (!moved) return;
+            if (!moved) { if (heldStop != IntPtr.Zero) Y.CloseHandle(heldStop); return; }
+
+            // Y12: signal the held StopEvent while the controller streams
+            // input. The refused object is not the worker's, so a signal on
+            // it reaches nothing. The takeover made it the worker's event.
+            if (heldStop != IntPtr.Zero)
+            {
+                old.Send("stream 5 0.5 125 0");
+                var pathIn = WaitPaths(0x054C, 0x09CC, 1, 10_000);
+                using var capIn = pathIn.Count == 1 ? HidCapture.Open(pathIn[0]) : null;
+                if (capIn == null) Check("Y12: the moved controller's input opens", false);
+                else
+                {
+                    // The StopEvent is manual-reset. If the new worker waits
+                    // on this object, it resets it on the signal. The
+                    // takeover made the held object the worker's, so the
+                    // signal was consumed and the worker recycled. The
+                    // refusal leaves the worker an unnamed event, so the
+                    // signal stays and input is untouched.
+                    Y.SetEvent(heldStop);
+                    Thread.Sleep(500);
+                    bool consumed = Y.WaitForSingleObject(heldStop, 0) != Y.WAIT_OBJECT_0;
+                    Check("Y12: the new worker does not consume a signal on the held StopEvent, and input flows",
+                          !consumed && Native.IsStarted(inst) && !capIn.Broken && Flows(capIn),
+                          consumed ? "the worker reset the held event" : "");
+                }
+                old.Send("stopstream");
+                Y.CloseHandle(heldStop);
+            }
             string output = $@"Global\HIDMaestroOutputEvent{t}";
             int err = Y.AsUser(user, () => Y.OpenError(Y.SYNCHRONIZE, output));
             Check($"Y11: the user cannot open {output}", err == Y.ERROR_ACCESS_DENIED, Y.Win32(err) + ", " + (Y.EventSddl(output) ?? "none"));
@@ -893,6 +934,7 @@ internal static partial class Program
         }
 
         internal const uint EVENT_MODIFY_STATE = 0x0002, SYNCHRONIZE = 0x00100000, READ_CONTROL = 0x00020000;
+        internal const uint EVENT_ALL_ACCESS = 0x1F0003;
         const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         const uint TOKEN_DUPLICATE = 0x0002, TOKEN_IMPERSONATE = 0x0004, TOKEN_QUERY = 0x0008;
         const uint OWNER_SECURITY_INFORMATION = 0x1, DACL_SECURITY_INFORMATION = 0x4;
