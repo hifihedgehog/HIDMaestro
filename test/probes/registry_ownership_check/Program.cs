@@ -20,6 +20,9 @@
 // Everything planted is removed at the end, and anything that was there
 // before is put back from a copy taken first.
 //
+// "--winusb-note" runs the offline part and then, in place of the live
+// part, the WinUSB package note's, which belongs in a sandbox (WinUsbNote.cs).
+//
 // Requires elevation. Exit 0 PASS / 1 FAIL / 2 when another SDK consumer is
 // running and the live part cannot run.
 
@@ -373,11 +376,17 @@ internal static partial class Program
     {
         if (args.Length >= 2 && args[0] == "--child-hold") return ChildHold(args[1]);
         if (args.Length >= 2 && args[0] == "--child-create") return ChildCreate(args[1]);
+        if (args.Length >= 1 && args[0] == "--child-bindgc") return ChildBindGc("");
         Console.WriteLine("=== Registry keys shared with real devices (foundation-sunshine #1138) ===");
         bool offlineOnly = args.Contains("--offline");
         Offline();
         bool ranLive = false;
-        if (!offlineOnly) ranLive = Live();
+        if (args.Contains("--winusb-note"))
+        {
+            WinUsbNoteLive();
+            ranLive = true;
+        }
+        else if (!offlineOnly) ranLive = Live();
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures != 0) return 1;
         return offlineOnly || ranLive ? 0 : 2;

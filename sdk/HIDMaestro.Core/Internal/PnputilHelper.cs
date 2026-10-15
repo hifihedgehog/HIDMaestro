@@ -114,19 +114,40 @@ internal static class PnputilHelper
     /// like "Published Name" and silently returned empty on non-English
     /// Windows installs, which broke <see cref="IsHidMaestroDriverInstalled"/>
     ///: see issue #17.)</summary>
-    public static List<DriverRecord> EnumerateDrivers()
-    {
-        var (_, output) = Run("/enum-drivers /format xml");
-        var records = new List<DriverRecord>();
+    public static List<DriverRecord> EnumerateDrivers() =>
+        ParseDrivers(Run("/enum-drivers /format xml").output) ?? new List<DriverRecord>();
 
-        if (string.IsNullOrWhiteSpace(output)) return records;
+    /// <summary>The same, or null when the listing failed: pnputil did not
+    /// exit with 0, as when <see cref="RunTool"/> ends it at its timeout, or
+    /// its output is not a whole listing. A caller that acts on what the
+    /// listing leaves out tells a failed listing from an empty one.
+    /// <paramref name="run"/> stands in for the pnputil run in
+    /// registry_ownership_check's offline part.</summary>
+    internal static List<DriverRecord>? TryEnumerateDrivers(Func<(int ExitCode, string Output)>? run = null)
+    {
+        var (exitCode, output) = (run ?? (() => Run("/enum-drivers /format xml")))();
+        return ListingOf(exitCode, output);
+    }
+
+    /// <summary>The records of one pnputil run's listing, or null when it
+    /// did not exit with 0 or its output does not parse.
+    /// registry_ownership_check's offline part checks it.</summary>
+    internal static List<DriverRecord>? ListingOf(int exitCode, string output) =>
+        exitCode == 0 ? ParseDrivers(output) : null;
+
+    /// <summary>The records of a listing, or null when it does not parse.
+    /// registry_ownership_check's offline part checks it.</summary>
+    internal static List<DriverRecord>? ParseDrivers(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
 
         XDocument doc;
         try { doc = XDocument.Parse(output); }
-        catch (System.Xml.XmlException) { return records; }
+        catch (System.Xml.XmlException) { return null; }
 
         var root = doc.Root;
-        if (root == null) return records;
+        if (root == null) return null;
+        var records = new List<DriverRecord>();
 
         foreach (var driver in root.Elements("Driver"))
         {
@@ -255,15 +276,12 @@ internal static class PnputilHelper
     public static (int exitCode, string output) AddDriver(string infPath)
         => Run($"/add-driver \"{infPath}\"", timeoutMs: 60_000);
 
-    /// <summary>Delete one package from the driver store, nothing more: no
+    /// <summary>The answer of a plain delete, /delete-driver with no
     /// /uninstall and no /force, so a package a devnode still uses, present
-    /// or not, stays.</summary>
-    public static bool DeletePackagePlain(string publishedName, out string error)
-    {
-        var (rc, output) = Run($"/delete-driver {publishedName}", timeoutMs: 30_000);
-        error = output.Trim();
-        return rc == 0 && !output.Contains("Failed", StringComparison.OrdinalIgnoreCase);
-    }
+    /// or not, stays: done only on exit code 0 with no failure in pnputil's
+    /// output.</summary>
+    internal static bool PlainDeleteDone(int exitCode, string output) =>
+        exitCode == 0 && !output.Contains("Failed", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Removes every HIDMaestro package from the driver store and
     /// verifies they're actually gone. Throws <see cref="InvalidOperationException"/>

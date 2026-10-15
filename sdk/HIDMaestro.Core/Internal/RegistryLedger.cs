@@ -47,9 +47,12 @@ internal static class RegistryLedger
     private const string V_InstanceId = "InstanceId";
     private const string V_PriorService = "PriorService";
     private const string V_PriorInf = "PriorInf";
-    // On the root: the uninstall-grade cleanup left a WinUSB package in the
-    // driver store because a bound devnode was still present.
-    private const string V_RemovePackages = "RemoveWinUsbPackages";
+    // The INF names of the WinUSB packages the uninstall-grade cleanup left
+    // in the driver store, because a devnode still used them or a delete
+    // failed (NoteWinUsbPackagesLeft). A key of its own, written only under
+    // the deploy lock (Note).
+    private const string NoteKey = @"SOFTWARE\HIDMaestroPackagesLeft";
+    private const string V_WinUsbPackages = "WinUsb";
     // A WinUSB entry's follow-up deadline, in UTC wall-clock milliseconds
     // (NowMs), which every process on the machine reads alike and which a
     // reboot, unlike a tick count, does not reset.
@@ -407,47 +410,195 @@ internal static class RegistryLedger
         finally { m.ReleaseMutex(); }
     }
 
-    /// <summary>Note that the uninstall-grade cleanup left WinUSB packages
-    /// in the driver store, or that none is left. While the note stands,
-    /// the restore that resolves the last WinUSB entry removes them.</summary>
-    internal static void NoteWinUsbPackagesLeft(bool left)
+    /// <summary>One change to the cleanup's note, the INF names of the
+    /// WinUSB packages it left in the driver store: drop
+    /// <see cref="Remove"/>, or every name when <see cref="RemoveAll"/>,
+    /// then add <see cref="Add"/>. Every change is made through
+    /// <see cref="Replace"/>, <see cref="Cleanup"/> or <see cref="Added"/>,
+    /// which registry_ownership_check's offline part checks.</summary>
+    internal readonly record struct NoteChange(string[] Remove, string[] Add, bool RemoveAll = false)
     {
-        try
+        /// <summary>The uninstall cleanup's change: the note becomes the
+        /// packages it kept. Its listing, under the deploy lock that every
+        /// change takes, is the whole driver store at that moment, so a
+        /// noted name it did not list is a package no longer there, and the
+        /// note goes when nothing is kept.</summary>
+        internal static NoteChange Replace(IEnumerable<string> kept) =>
+            new(Array.Empty<string>(), kept.ToArray(), RemoveAll: true);
+
+        /// <summary>The deferred run's change: the names it looked at go,
+        /// and the packages it kept are added. A name it did not look at
+        /// stays.</summary>
+        internal static NoteChange Cleanup(IEnumerable<string> looked, IEnumerable<string> kept) =>
+            new(looked.ToArray(), kept.ToArray());
+
+        /// <summary>A program added this package again, so it is no
+        /// cleanup's leftover. Every other name stays.</summary>
+        internal static NoteChange Added(string infName) => new(new[] { infName }, Array.Empty<string>());
+
+        /// <summary>The note after this change, from
+        /// <paramref name="noted"/>.</summary>
+        internal string[] ApplyTo(string[] noted)
         {
-            using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
-            try
-            {
-                if (left)
-                {
-                    using var root = Registry.LocalMachine.CreateSubKey(Root);
-                    root.SetValue(V_RemovePackages, 1, RegistryValueKind.DWord);
-                }
-                else
-                {
-                    using var root = Registry.LocalMachine.OpenSubKey(Root, writable: true);
-                    root?.DeleteValue(V_RemovePackages, throwOnMissingValue: false);
-                }
-            }
-            finally { m.ReleaseMutex(); }
+            var names = new SortedSet<string>(RemoveAll ? Array.Empty<string>() : noted, StringComparer.OrdinalIgnoreCase);
+            names.ExceptWith(Remove);
+            names.UnionWith(Add);
+            return names.ToArray();
         }
-        catch { }
     }
 
-    /// <summary>True when the uninstall-grade cleanup's note stands and no
-    /// WinUSB entry remains, read under the ledger's lock. The deferred
-    /// package removal reads it again under the deploy and devnode locks
-    /// (<see cref="WinUsbBinding.RemovePackage"/>).</summary>
-    internal static bool WinUsbPackagesLeftToRemove()
+    /// <summary>Note which WinUSB packages, by INF name, a cleanup left in
+    /// the driver store (<see cref="WinUsbBinding.NoteAfterRemoval"/>).
+    /// While a name stands, the restore that resolves the last WinUSB entry
+    /// removes that package, and so does the first sweep of each program
+    /// that finds no WinUSB entry (<see cref="Sweep"/>).</summary>
+    internal static void NoteWinUsbPackagesLeft(NoteChange change) => Note(change);
+
+    /// <summary>A program added this package again, so it is no cleanup's
+    /// leftover. Every other name in the note stays.</summary>
+    internal static void NoteWinUsbPackageAdded(string infName) => Note(NoteChange.Added(infName));
+
+    /// <summary>Write a note change when it is made.
+    ///
+    /// <para>Under the deploy lock, which every caller holds already: the
+    /// uninstall cleanup, a package add and the deferred removal. So the
+    /// changes of every program on the machine land in the order they were
+    /// decided, each against the note as the one before left it, and none
+    /// waits for another program. The note has a key of its own,
+    /// <see cref="NoteKey"/>, outside the ledger's lock, which a frozen
+    /// program can hold, and outside the ledger's root, which the full
+    /// cleanup deletes. Only a write that fails loses a change, and that is
+    /// logged.</para></summary>
+    private static void Note(NoteChange change)
     {
-        using var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
+        if (NoteForProbe is { } probe)
+        {
+            probe(change);
+            return;
+        }
+        NoteIn(Registry.LocalMachine, change, TakeDeployLock);
+    }
+
+    /// <summary>Write <paramref name="change"/> to the note in
+    /// <paramref name="hive"/>, read and written while the lock
+    /// <paramref name="takeLock"/> takes is held, released by the action it
+    /// returns. The SDK passes HKLM and the deploy lock.
+    /// registry_ownership_check's offline part passes HKCU and no lock. A
+    /// failure is logged and loses this change.</summary>
+    internal static void NoteIn(RegistryKey hive, NoteChange change, Func<Action> takeLock)
+    {
         try
         {
-            using var root = Registry.LocalMachine.OpenSubKey(Root);
-            using var kind = root?.OpenSubKey(WinUsbKind);
-            return root?.GetValue(V_RemovePackages) is int r && r == 1 && (kind == null || kind.SubKeyCount == 0);
+            Action release = takeLock();
+            try { NoteWithin(change, () => NotedPackages(hive), names => WriteNote(hive, names)); }
+            finally { release(); }
         }
-        finally { m.ReleaseMutex(); }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"    ledger: the WinUSB package note was not written: {ex.GetType().Name}: {ex.Message}");
+        }
     }
+
+    private static Action TakeDeployLock()
+    {
+        var m = DriverDeploy.Acquire();
+        return () =>
+        {
+            m.ReleaseMutex();
+            m.Dispose();
+        };
+    }
+
+    /// <summary>A note change against the note as it stands: the names
+    /// <paramref name="read"/> gives, changed, go to <paramref name="write"/>,
+    /// or null when none is left, which deletes the key.
+    /// registry_ownership_check's offline part checks it. The caller holds
+    /// the deploy lock.</summary>
+    internal static void NoteWithin(NoteChange change, Func<string[]> read, Action<string[]?> write)
+    {
+        string[] names = change.ApplyTo(read());
+        write(names.Length > 0 ? names : null);
+    }
+
+    /// <summary>Write the note's names to <paramref name="hive"/>, or delete
+    /// its key when there are none. The SDK passes HKLM.
+    /// registry_ownership_check's offline part passes HKCU, which it can
+    /// write without elevation.</summary>
+    internal static void WriteNote(RegistryKey hive, string[]? names)
+    {
+        if (names != null)
+        {
+            using var key = hive.CreateSubKey(NoteKey);
+            key.SetValue(V_WinUsbPackages, names, RegistryValueKind.MultiString);
+        }
+        else hive.DeleteSubKeyTree(NoteKey, throwOnMissingSubKey: false);
+    }
+
+    /// <summary>Takes each note change in place of its write.
+    /// registry_ownership_check's offline part sets it to read the changes
+    /// the production call sites make. Null outside the probe.</summary>
+    internal static Action<NoteChange>? NoteForProbe;
+
+    /// <summary>The INF names the note in <paramref name="hive"/> holds,
+    /// HKLM in the SDK (see <see cref="WriteNote"/>).</summary>
+    internal static string[] NotedPackages(RegistryKey hive)
+    {
+        using var key = hive.OpenSubKey(NoteKey);
+        return key?.GetValue(V_WinUsbPackages) as string[] ?? Array.Empty<string>();
+    }
+
+    // Set once this program's sweep has handed a standing note to
+    // RemoveLeftPackages.
+    private static int s_leftPackagesTried;
+
+    /// <summary>The cleanup's note names a package and no WinUSB entry
+    /// remains. The caller holds the ledger's lock.</summary>
+    private static bool PackagesLeftNoted() => PackagesLeftNoted(Registry.LocalMachine);
+
+    /// <summary>The same, read from <paramref name="hive"/> (see
+    /// <see cref="WriteNote"/>).</summary>
+    internal static bool PackagesLeftNoted(RegistryKey hive)
+    {
+        using var root = hive.OpenSubKey(Root);
+        using var kind = root?.OpenSubKey(WinUsbKind);
+        return LeftToRemove(NotedPackages(hive), kind?.SubKeyCount ?? 0);
+    }
+
+    /// <summary>The note names a package and no WinUSB entry remains, the
+    /// <paramref name="entries"/> the ledger holds. registry_ownership_check's
+    /// offline part checks it.</summary>
+    internal static bool LeftToRemove(string[] noted, int entries) => noted.Length > 0 && entries == 0;
+
+    /// <summary>The packages the cleanup's note names, when no WinUSB entry
+    /// remains, read under the ledger's lock, or none. The deferred package
+    /// removal reads it under the deploy and devnode locks
+    /// (<see cref="WinUsbBinding.RemovePackage"/>).</summary>
+    internal static string[] WinUsbPackagesLeftToRemove() => LeftToRemoveLocked(Registry.LocalMachine, () =>
+    {
+        var m = LedgerLock.Acquire(TimeoutScale.Apply(RestoreLedgerTimeoutMs));
+        return () =>
+        {
+            m.ReleaseMutex();
+            m.Dispose();
+        };
+    });
+
+    /// <summary>The same, read from <paramref name="hive"/> while the lock
+    /// <paramref name="takeLock"/> takes is held, released by the action it
+    /// returns. The SDK passes HKLM and the ledger's lock.
+    /// registry_ownership_check's offline part passes HKCU and no
+    /// lock.</summary>
+    internal static string[] LeftToRemoveLocked(RegistryKey hive, Func<Action> takeLock)
+    {
+        Action release = takeLock();
+        try { return LeftToRemoveIn(hive); }
+        finally { release(); }
+    }
+
+    /// <summary>The same, read from <paramref name="hive"/> (see
+    /// <see cref="WriteNote"/>).</summary>
+    internal static string[] LeftToRemoveIn(RegistryKey hive) =>
+        PackagesLeftNoted(hive) ? NotedPackages(hive) : Array.Empty<string>();
 
     /// <summary>Take back a claim whose install did not happen: the
     /// controller's hold goes, and the entry with it once nothing holds it,
@@ -541,6 +692,7 @@ internal static class RegistryLedger
     private static void Sweep(string[]? releasing)
     {
         var winUsb = new List<WinUsbQueued>();
+        bool packagesLeft = false;
         using (var m = Acquire())
         {
             try
@@ -570,10 +722,18 @@ internal static class RegistryLedger
                     }
                 }
                 DeleteEmptyKeys();
+                // The packages a cleanup left, whose removal at the restore
+                // of the last entry did not happen: a note written or a
+                // removal failed after that restore, or no entry was left to
+                // restore. The first sweep of each program with no WinUSB
+                // entry tries again, once, so a lasting leftover, a package a
+                // gone devnode keeps, costs a teardown nothing after it.
+                packagesLeft = winUsb.Count == 0 && PackagesLeftNoted();
             }
             catch { }
             finally { m.ReleaseMutex(); }
         }
+        if (packagesLeft && Interlocked.Exchange(ref s_leftPackagesTried, 1) == 0) RemoveLeftPackages();
         // A teardown releases right after its detach, so the devnode of an
         // entry the releasing controller held gets that long to leave. Any
         // other entry is not waited for. A devnode still there is left as
@@ -721,9 +881,7 @@ internal static class RegistryLedger
             using var m = Acquire();
             try
             {
-                using (var root = Registry.LocalMachine.OpenSubKey(Root))
-                using (var kind = root?.OpenSubKey(WinUsbKind))
-                    removePackages = root?.GetValue(V_RemovePackages) is int r && r == 1 && (kind == null || kind.SubKeyCount == 0);
+                removePackages = PackagesLeftNoted();
                 DeleteEmptyKeys();
             }
             finally { m.ReleaseMutex(); }
@@ -736,21 +894,42 @@ internal static class RegistryLedger
 
     /// <summary>The package removal the uninstall-grade cleanup left, now
     /// that no WinUSB entry remains: under the deploy lock, on a pool thread,
-    /// so no caller waits for another program's deploy. It reads the note
-    /// again under the locks and removes no devnode
+    /// so no caller waits for another program's deploy. The lock is taken
+    /// only when a look with no lock finds the run can do something
+    /// (<see cref="WinUsbBinding.LeftRemovalCanChange"/>), so a package a
+    /// gone devnode keeps costs a UMDF2 create no wait. The run reads the
+    /// note again under the locks and removes no devnode
     /// (<see cref="WinUsbBinding.RemovePackage"/>). A package a devnode still
-    /// uses stays, and the note with it.</summary>
+    /// uses stays, and the note with it. A removal an exit's release starts
+    /// can end with the process, pnputil still running: its deploy and
+    /// WinUSB mutexes are then abandoned, which every acquirer takes, and
+    /// the note stays, so a later program tries again.</summary>
     private static void RemoveLeftPackages() =>
         ThreadPool.UnsafeQueueUserWorkItem(_ =>
         {
             try
             {
-                using var deploy = DriverDeploy.Acquire();
-                try { WinUsbBinding.RemovePackage(deferred: true); }
-                finally { deploy.ReleaseMutex(); }
+                RunLeftRemoval(WinUsbPackagesLeftToRemove, WinUsbBinding.LeftRemovalCanChange, () =>
+                {
+                    using var deploy = DriverDeploy.Acquire();
+                    try { WinUsbBinding.RemovePackage(deferred: true); }
+                    finally { deploy.ReleaseMutex(); }
+                });
             }
             catch (Exception ex) { DeviceOrchestrator.LogDiag($"    ledger: the WinUSB packages left by a cleanup were not removed: {ex.Message}"); }
         }, null);
+
+    /// <summary>The deferred removal's decision: <paramref name="run"/> only
+    /// when <paramref name="canChange"/> finds the run can change something
+    /// for the note <paramref name="readNoted"/> gives. While a gone devnode
+    /// keeps every noted package, the lasting case, no run can change
+    /// anything, and the deploy lock, which every UMDF2 create waits on, is
+    /// not taken at all. registry_ownership_check's offline part checks
+    /// it.</summary>
+    internal static void RunLeftRemoval(Func<string[]> readNoted, Func<string[], bool> canChange, Action run)
+    {
+        if (canChange(readNoted())) run();
+    }
 
     // The entries a follow-up of this process watches. Guarded by itself.
     private static readonly HashSet<string> s_followed = new(StringComparer.OrdinalIgnoreCase);

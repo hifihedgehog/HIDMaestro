@@ -739,51 +739,199 @@ DeviceName = ""{deviceName}""
     /// identify it. The caller holds the deploy lock.
     ///
     /// <para>The <paramref name="deferred"/> run, once the last WinUSB entry
-    /// is done, removes what that cleanup left, the same way. It runs only
-    /// while the note still stands, read again here under the deploy and
-    /// devnode locks, since a program that adds a package clears it under
-    /// the deploy lock. A package a gone devnode keeps stays in the driver
-    /// store, ranked below the driver Windows gives the device, until a
-    /// cleanup finds no devnode on it.</para></summary>
+    /// is done, removes the packages that cleanup's note names, the same
+    /// way. It reads the note again here under the deploy and devnode
+    /// locks, since a program that adds a package takes its name out of the
+    /// note under the deploy lock. A package a gone devnode keeps stays in
+    /// the driver store, ranked below the driver Windows gives the device,
+    /// until a cleanup finds no devnode on it.</para></summary>
     internal static void RemovePackage(bool deferred = false)
     {
         using var devnodes = AcquireDevnodeLock();
-        try
+        try { RemoveUnderLocks(deferred); }
+        finally { devnodes.ReleaseMutex(); }
+    }
+
+    /// <summary><see cref="RemovePackage"/>'s work, under its locks: the
+    /// note it reads, the listing, the walk, the flags, the deletes and the
+    /// note it writes. <paramref name="readNoted"/>, <paramref name="list"/>,
+    /// <paramref name="walk"/>, <paramref name="hasLeft"/>,
+    /// <paramref name="flag"/> and <paramref name="delete"/> stand in for
+    /// the ledger's note, pnputil's listing, <see cref="DevnodesByPackage"/>,
+    /// <see cref="HasLeft"/>, <see cref="FlagForNextArrival"/> and pnputil's
+    /// plain delete in registry_ownership_check's offline part, which checks
+    /// what this deletes, flags and notes. RemovePackage passes none.</summary>
+    internal static void RemoveUnderLocks(bool deferred,
+        Func<string[]>? readNoted = null,
+        Func<List<PnputilHelper.DriverRecord>?>? list = null,
+        Func<List<PnputilHelper.DriverRecord>, Dictionary<string, List<string>>?>? walk = null,
+        Func<string, bool>? hasLeft = null,
+        Action<string>? flag = null,
+        Func<string, (bool Deleted, string Error)>? delete = null)
+    {
+        string[] noted = Array.Empty<string>();
+        if (deferred)
         {
-            if (deferred && !RegistryLedger.WinUsbPackagesLeftToRemove()) return;
-            var packages = OurPackages();
-            if (packages.Count == 0)
-            {
-                RegistryLedger.NoteWinUsbPackagesLeft(false);
-                return;
-            }
-            bool keptAny = false;
-            foreach (string id in DevnodesOn(packages))
+            noted = (readNoted ?? RegistryLedger.WinUsbPackagesLeftToRemove)();
+            if (noted.Length == 0) return;
+        }
+        var (decided, undecided) = DecideRemoval((list ?? (() => PnputilHelper.TryEnumerateDrivers()))(), deferred, noted, walk);
+        if (decided is not { } plan)
+        {
+            DeviceOrchestrator.LogDiag("    winusb cleanup: the driver store or its USB devnodes could not be listed; the packages stay");
+            if (undecided is { } note) RegistryLedger.NoteWinUsbPackagesLeft(note);
+            return;
+        }
+        foreach (var (published, ids) in plan.On)
+            foreach (string id in ids)
             {
                 try
                 {
-                    if (HasLeft(id)) FlagForNextArrival(id);
-                    DeviceOrchestrator.LogDiag($"    winusb cleanup: {id} keeps its package");
-                    keptAny = true;
+                    if ((hasLeft ?? HasLeft)(id)) (flag ?? (i => FlagForNextArrival(i)))(id);
+                    DeviceOrchestrator.LogDiag($"    winusb cleanup: {id} keeps its package {published}");
                 }
                 catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb cleanup of {id} threw {ex.Message}"); }
             }
-            foreach (var p in packages)
+        var kept = new List<string>(plan.Keep);
+        foreach (var p in plan.Delete)
+        {
+            var (deleted, err) = (delete ?? (published => DeletePlain(published)))(p.PublishedName);
+            if (!deleted)
             {
-                if (!PnputilHelper.DeletePackagePlain(p.PublishedName, out string err))
-                {
-                    DeviceOrchestrator.LogDiag($"    winusb package {p.PublishedName} not deleted: {err}");
-                    keptAny = true;
-                }
+                DeviceOrchestrator.LogDiag($"    winusb package {p.PublishedName} not deleted: {err}");
+                kept.Add(p.OriginalName);
             }
-            lock (s_lock) s_published.Clear();
-            // A package kept for a devnode goes once the restore of the last
-            // entry is done (RegistryLedger.RestoreWinUsbEntries), if no
-            // devnode keeps it then.
-            RegistryLedger.NoteWinUsbPackagesLeft(keptAny);
+            else lock (s_lock) s_published.Remove(p.OriginalName);
         }
-        finally { devnodes.ReleaseMutex(); }
+        // A package kept for a devnode goes once the restore of the last
+        // entry is done (RegistryLedger.RestoreWinUsbEntries), if no
+        // devnode keeps it then.
+        RegistryLedger.NoteWinUsbPackagesLeft(NoteAfterRemoval(deferred, noted, kept));
     }
+
+    /// <summary>pnputil's plain delete of one package and its answer:
+    /// deleted only on exit code 0 with no failure in its output
+    /// (<see cref="PnputilHelper.PlainDeleteDone"/>). <paramref name="run"/>
+    /// stands in for pnputil in registry_ownership_check's offline part,
+    /// which checks the command and how each answer reads.</summary>
+    internal static (bool Deleted, string Error) DeletePlain(string published,
+        Func<string, (int ExitCode, string Output)>? run = null)
+    {
+        var (rc, output) = (run ?? (args => PnputilHelper.Run(args, timeoutMs: 30_000)))($"/delete-driver {published}");
+        return (PnputilHelper.PlainDeleteDone(rc, output), output.Trim());
+    }
+
+    /// <summary>A removal's decision from the driver store's listing and one
+    /// walk of the USB devnodes: HIDMaestro's WinUSB packages in the store,
+    /// the ones to delete, which no devnode uses, and the ones to keep. The
+    /// deferred run looks only at the packages it <paramref name="noted"/>.
+    /// Null when the <paramref name="store"/> could not be listed, or the
+    /// devnodes could not all be read, since neither is an empty one:
+    /// nothing is removed, and <see cref="DecideRemoval"/> says what the
+    /// note becomes.
+    ///
+    /// <para>A package goes to delete only when the whole walk found no
+    /// devnode on it, so the plain delete is never asked to take a package a
+    /// devnode uses. Learn documents that check for the setup API's delete,
+    /// not for pnputil's: without its force flag SetupUninstallOEMInf keeps
+    /// an INF a device was installed with, and "A device does not need to
+    /// be present to be detected as using the .inf file"
+    /// (SetupUninstallOEMInfW, SUOI_FORCEDELETE). PnPUtil's page says only
+    /// that /force deletes a package "even when it is in use by devices",
+    /// and maps the old -d [-f] to /delete-driver [/force]. That
+    /// /delete-driver applies the same check to a devnode that is not
+    /// present is read from that mapping, not documented, so nothing here
+    /// relies on it.</para>
+    ///
+    /// <para><paramref name="walk"/> stands in for
+    /// <see cref="DevnodesByPackage"/> in registry_ownership_check's
+    /// offline part, which checks the decision. RemovePackage passes
+    /// none.</para></summary>
+    internal static RemovalPlan? PlanRemoval(List<PnputilHelper.DriverRecord>? store, bool deferred, string[] noted,
+                                             Func<List<PnputilHelper.DriverRecord>, Dictionary<string, List<string>>?>? walk = null)
+    {
+        if (store == null) return null;
+        var ours = Ours(store);
+        if (deferred)
+            ours = ours.Where(p => noted.Contains(p.OriginalName, StringComparer.OrdinalIgnoreCase)).ToList();
+        // One walk of the USB devnodes for every package the run looks at:
+        // the cleanup all of them, the deferred run the noted ones.
+        if ((walk ?? (p => DevnodesByPackage(p)))(ours) is not { } on) return null;
+        var delete = new List<PnputilHelper.DriverRecord>();
+        var keep = new List<string>();
+        foreach (var p in ours)
+        {
+            if (on.ContainsKey(p.PublishedName)) keep.Add(p.OriginalName);
+            else delete.Add(p);
+        }
+        return new RemovalPlan(delete, keep.ToArray(), on);
+    }
+
+    /// <summary>RemovePackage's decision: the plan, or when there is none,
+    /// the note change it makes instead. A whole listing whose devnode walk
+    /// failed leaves the cleanup undecided on every package it listed, so it
+    /// notes them all, and a later sweep's deferred run plans again with a
+    /// walk of its own (<see cref="LeftRemovalCanChange"/>). A failed
+    /// listing changes no note, nor does the deferred run, whose note already
+    /// names the packages it looked at. registry_ownership_check's offline
+    /// part checks it, <paramref name="walk"/> standing in for
+    /// <see cref="DevnodesByPackage"/>.</summary>
+    internal static (RemovalPlan? Plan, RegistryLedger.NoteChange? Undecided) DecideRemoval(
+        List<PnputilHelper.DriverRecord>? store, bool deferred, string[] noted,
+        Func<List<PnputilHelper.DriverRecord>, Dictionary<string, List<string>>?>? walk = null)
+    {
+        if (PlanRemoval(store, deferred, noted, walk) is { } plan) return (plan, null);
+        if (deferred || store == null) return (null, null);
+        return (null, RegistryLedger.NoteChange.Replace(Ours(store).Select(p => p.OriginalName)));
+    }
+
+    /// <summary>What <see cref="PlanRemoval"/> decided: the packages to
+    /// delete, the INF names of those to keep, and the devnodes on each
+    /// package it looked at, by published name.</summary>
+    internal readonly record struct RemovalPlan(List<PnputilHelper.DriverRecord> Delete, string[] Keep,
+                                                Dictionary<string, List<string>> On);
+
+    /// <summary>True when a deferred run would change the driver store or
+    /// the note: a noted package that no devnode uses, which its delete can
+    /// remove, or a noted name no longer in the store, which comes out of
+    /// the note. False while every noted package is kept by a devnode, the
+    /// lasting case, or when the store cannot be listed. Read with no lock
+    /// of the deploy, so a sweep takes the deploy lock, which every UMDF2
+    /// create waits on, only for a run that can do something. The run reads
+    /// all of it again under the locks.</summary>
+    internal static bool LeftRemovalCanChange(string[] noted) =>
+        noted.Length > 0 && LeftRemovalWouldChange(noted, PnputilHelper.TryEnumerateDrivers());
+
+    /// <summary><see cref="LeftRemovalCanChange"/>'s decision from the
+    /// <paramref name="store"/>'s listing and one walk of the USB devnodes
+    /// on the noted packages. A noted name with no package in the store
+    /// comes out of the note, so the run would change it. That is counted
+    /// by INF name, since one name can have two packages in the store, as
+    /// from two builds whose INF text differs. A listing or a walk that
+    /// failed answers false, and the next program's first sweep looks
+    /// again. <paramref name="walk"/> stands in for
+    /// <see cref="DevnodesByPackage"/> in registry_ownership_check's
+    /// offline part, which checks the decision.</summary>
+    internal static bool LeftRemovalWouldChange(string[] noted, List<PnputilHelper.DriverRecord>? store,
+        Func<List<PnputilHelper.DriverRecord>, Dictionary<string, List<string>>?>? walk = null)
+    {
+        if (noted.Length == 0 || store == null) return false;
+        var noteds = Ours(store).Where(p => noted.Contains(p.OriginalName, StringComparer.OrdinalIgnoreCase)).ToList();
+        int inStore = noteds.Select(p => p.OriginalName).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        if (inStore < noted.Distinct(StringComparer.OrdinalIgnoreCase).Count()) return true;
+        if ((walk ?? (p => DevnodesByPackage(p)))(noteds) is not { } used) return false;
+        return noteds.Any(p => !used.ContainsKey(p.PublishedName));
+    }
+
+    /// <summary>The note change a removal makes. The cleanup's note becomes
+    /// the packages it <paramref name="kept"/>: its whole listing was taken
+    /// under the deploy lock that every note change takes, so a noted name
+    /// it did not list is no longer in the store. The deferred run takes out
+    /// every name it <paramref name="noted"/>, gone from the store or
+    /// removed now, and puts back the ones it kept. registry_ownership_check's
+    /// offline part checks it.</summary>
+    internal static RegistryLedger.NoteChange NoteAfterRemoval(bool deferred, string[] noted, IEnumerable<string> kept) =>
+        deferred ? RegistryLedger.NoteChange.Cleanup(noted, kept) : RegistryLedger.NoteChange.Replace(kept);
 
     // ── The packages ─────────────────────────────────────────────────────
 
@@ -841,15 +989,25 @@ DeviceName = ""{deviceName}""
         DriverBuilder.CatalogAndSignPackage(dir);
 
         var (rc, output) = PnputilHelper.AddDriver(Path.Combine(dir, p.InfName));
-        string? published = OurPackages()
-            .Where(r => r.OriginalName.Equals(p.InfName, StringComparison.OrdinalIgnoreCase))
+        return RecordAdd(p.InfName, OurPackages(), rc, output);
+    }
+
+    /// <summary>A package add's outcome from the driver store listed after
+    /// it: the package's published name, kept for this process, and the
+    /// note change, which takes the add's own INF name out of the cleanup's
+    /// note. A package a program adds again is not an uninstall's leftover,
+    /// and the note keeps every other package it names. registry_ownership_check's
+    /// offline part checks it.</summary>
+    internal static string RecordAdd(string infName, List<PnputilHelper.DriverRecord> ours, int rc, string output)
+    {
+        string? published = ours
+            .Where(r => r.OriginalName.Equals(infName, StringComparison.OrdinalIgnoreCase))
             .Select(r => r.PublishedName)
             .FirstOrDefault();
         if (published == null)
-            throw new InvalidOperationException($"pnputil did not add {p.InfName} (exit {rc}): {output.Trim()}");
-        lock (s_lock) s_published[p.InfName] = published;
-        // A package a program adds again is not an uninstall's leftover.
-        RegistryLedger.NoteWinUsbPackagesLeft(false);
+            throw new InvalidOperationException($"pnputil did not add {infName} (exit {rc}): {output.Trim()}");
+        lock (s_lock) s_published[infName] = published;
+        RegistryLedger.NoteWinUsbPackageAdded(infName);
         return published;
     }
 
@@ -857,11 +1015,19 @@ DeviceName = ""{deviceName}""
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF");
 
     /// <summary>HIDMaestro's WinUSB packages in the driver store.</summary>
-    private static List<PnputilHelper.DriverRecord> OurPackages()
-        => PnputilHelper.EnumerateDrivers()
-            .Where(r => r.ProviderName.Equals(Provider, StringComparison.OrdinalIgnoreCase)
-                     && r.OriginalName.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+    private static List<PnputilHelper.DriverRecord> OurPackages() => TryOurPackages() ?? new List<PnputilHelper.DriverRecord>();
+
+    /// <summary>The same, or null when the driver store could not be listed
+    /// (<see cref="PnputilHelper.TryEnumerateDrivers"/>).</summary>
+    private static List<PnputilHelper.DriverRecord>? TryOurPackages()
+        => PnputilHelper.TryEnumerateDrivers() is { } store ? Ours(store) : null;
+
+    /// <summary>HIDMaestro's WinUSB packages in a listing: its provider and
+    /// the INF name's prefix.</summary>
+    private static List<PnputilHelper.DriverRecord> Ours(List<PnputilHelper.DriverRecord> store)
+        => store.Where(r => r.ProviderName.Equals(Provider, StringComparison.OrdinalIgnoreCase)
+                         && r.OriginalName.StartsWith(PackagePrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
 
     /// <summary>True when <paramref name="inf"/> is one of HIDMaestro's
     /// WinUSB packages, null when that cannot be told: the driver store
@@ -971,20 +1137,98 @@ DeviceName = ""{deviceName}""
     };
 
     /// <summary>Every USB devnode, present or not, whose driver is one of
-    /// <paramref name="packages"/>.</summary>
-    private static List<string> DevnodesOn(List<PnputilHelper.DriverRecord> packages)
+    /// <paramref name="packages"/>, by the package's published name, in one
+    /// walk of the USB devnodes. A package no devnode uses has no key. Null
+    /// when the walk is not whole: the devnode list could not be read, a
+    /// devnode in it could not be located, or its driver INF could not be
+    /// read. A package that reads as unused then has a devnode the walk
+    /// missed, so the caller removes nothing.
+    ///
+    /// <para>Each devnode is located with CM_LOCATE_DEVNODE_PHANTOM alone,
+    /// which finds it present or not, so one that leaves during the walk is
+    /// still read. Its driver INF is DEVPKEY_Device_DriverInfPath, and
+    /// <see cref="InfSize"/> reads the size query's answer. Learn's page for
+    /// CM_Get_DevNode_PropertyW names no code for a property that is not
+    /// set, so that was measured, read-only, on one Windows 11 machine on
+    /// 2026-10-15. Each of 125 USB devnodes, present and not, located with
+    /// the phantom flag. 118 answered CR_BUFFER_SMALL. 7 answered
+    /// CR_NO_SUCH_VALUE: present raw PDOs with no Driver value, no service
+    /// and no class (a receiver's LampArray children). Across every
+    /// enumerator, each devnode with no Driver value, present or not,
+    /// answered CR_NO_SUCH_VALUE, and each devnode with a Driver value
+    /// answered CR_BUFFER_SMALL.
+    /// registry_ownership_check's offline part walks the machine it runs on
+    /// with this code and fails when the walk is not whole.
+    /// <paramref name="listIds"/> and <paramref name="readInf"/> stand in for
+    /// the configuration manager in that probe's other checks.</para></summary>
+    internal static Dictionary<string, List<string>>? DevnodesByPackage(List<PnputilHelper.DriverRecord> packages,
+        Func<List<string>?>? listIds = null, Func<string, (bool Read, string? Inf)>? readInf = null)
     {
-        var list = new List<string>();
+        var on = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (packages.Count == 0) return on;
         var published = new HashSet<string>(packages.Select(p => p.PublishedName), StringComparer.OrdinalIgnoreCase);
-        foreach (string id in AllDeviceIds("USB"))
+        if ((listIds ?? (() => TryDeviceIds("USB", CM_GETIDLIST_FILTER_ENUMERATOR)))() is not { } all) return null;
+        foreach (string id in all)
         {
-            bool present = CM_Locate_DevNodeW(out _, id, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
-            var (_, inf) = DriverOf(id, phantom: !present);
-            if (inf != null && published.Contains(Path.GetFileName(inf)))
-                list.Add(id);
+            var (read, inf) = (readInf ?? DriverInfOf)(id);
+            if (!read) return null;
+            if (inf == null) continue;
+            string name = Path.GetFileName(inf);
+            if (!published.Contains(name)) continue;
+            if (!on.TryGetValue(name, out var ids)) on[name] = ids = new List<string>();
+            ids.Add(id);
         }
-        return list;
+        return on;
     }
+
+    /// <summary>The INF of a devnode's driver, present or not. Read false
+    /// when it could not be read, a null INF for a devnode with no driver
+    /// installed (see <see cref="DevnodesByPackage"/>).</summary>
+    private static (bool Read, string? Inf) DriverInfOf(string instanceId) => DriverInfFrom(
+        () => (CM_Locate_DevNodeW(out uint dev, instanceId, CM_LOCATE_DEVNODE_PHANTOM), dev),
+        (dev, buf) =>
+        {
+            var key = DEVPKEY_Device_DriverInfPath;
+            uint len = (uint)(buf?.Length ?? 0);
+            int cr = CM_Get_DevNode_PropertyW(dev, ref key, out _, buf, ref len, 0);
+            return (cr, len);
+        });
+
+    /// <summary><see cref="DriverInfOf"/>'s reads, with the locate and the
+    /// property query passed in: the query takes no buffer for the size and
+    /// one of that size for the INF, and answers its code and length. A
+    /// locate or a read that fails is a failed read, never "no driver".
+    /// registry_ownership_check's offline part answers for them.</summary>
+    internal static (bool Read, string? Inf) DriverInfFrom(Func<(int Cr, uint Dev)> locate, Func<uint, byte[]?, (int Cr, uint Len)> property)
+    {
+        var (locateCr, dev) = locate();
+        if (locateCr != CR_SUCCESS) return (false, null);
+        var (sizeCr, size) = property(dev, null);
+        switch (InfSize(sizeCr, size))
+        {
+            case InfAnswer.NoDriver: return (true, null);
+            case InfAnswer.Failed: return (false, null);
+        }
+        var buf = new byte[size];
+        var (readCr, len) = property(dev, buf);
+        if (readCr != CR_SUCCESS) return (false, null);
+        // The property is a null-terminated string, and its length counts
+        // the terminator.
+        return (true, Encoding.Unicode.GetString(buf, 0, (int)Math.Min(len, size)).TrimEnd('\0'));
+    }
+
+    /// <summary>What the size query of a devnode's driver INF answered.</summary>
+    internal enum InfAnswer { NoDriver, Read, Failed }
+
+    /// <summary>The size query's answer: CR_NO_SUCH_VALUE is a devnode with
+    /// no driver installed, CR_BUFFER_SMALL with a length is an INF to read,
+    /// and every other answer, a zero length included, is a failed read (see
+    /// <see cref="DevnodesByPackage"/>). registry_ownership_check's offline
+    /// part checks it.</summary>
+    internal static InfAnswer InfSize(int cr, uint len) =>
+        cr == CR_NO_SUCH_VALUE ? InfAnswer.NoDriver
+        : cr == CR_BUFFER_SMALL && len > 0 ? InfAnswer.Read
+        : InfAnswer.Failed;
 
     // ── Drivers ──────────────────────────────────────────────────────────
 
@@ -1136,27 +1380,43 @@ DeviceName = ""{deviceName}""
 
     // ── cfgmgr32 reads ───────────────────────────────────────────────────
 
+    /// <summary>The present devnodes of an enumerator, none when the list
+    /// cannot be read. Its callers look for one devnode, and finding none
+    /// makes them look again or leave the devnode alone.</summary>
     private static List<string> PresentDeviceIds(string enumerator)
-        => DeviceIds(enumerator, CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT);
+        => TryDeviceIds(enumerator, CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT) ?? new List<string>();
 
-    private static List<string> AllDeviceIds(string enumerator)
-        => DeviceIds(enumerator, CM_GETIDLIST_FILTER_ENUMERATOR);
+    /// <summary>An enumerator's devnodes, or null when the list cannot be
+    /// read: a call failed, or the list grew three times between the size
+    /// and the read, as a burst of arrivals makes it.</summary>
+    private static List<string>? TryDeviceIds(string enumerator, uint flags) =>
+        ReadIdList(() =>
+        {
+            int cr = CM_Get_Device_ID_List_SizeW(out uint len, enumerator, flags);
+            return (cr, len);
+        }, buf => CM_Get_Device_ID_ListW(enumerator, buf, (uint)buf.Length, flags));
 
-    private static List<string> DeviceIds(string enumerator, uint flags)
+    /// <summary><see cref="TryDeviceIds"/>'s reads, with the two
+    /// configuration manager calls passed in, so registry_ownership_check's
+    /// offline part can answer for them.</summary>
+    internal static List<string>? ReadIdList(Func<(int Cr, uint Len)> size, Func<char[], int> list)
     {
-        var result = new List<string>();
         for (int attempt = 0; attempt < 3; attempt++)
         {
-            if (CM_Get_Device_ID_List_SizeW(out uint len, enumerator, flags) != CR_SUCCESS || len == 0) return result;
+            var (sizeCr, len) = size();
+            if (sizeCr != CR_SUCCESS) return null;
+            // A size of 0 or 1 holds no id, only the final terminator.
+            if (len <= 1) return new List<string>();
             var buf = new char[len];
-            int cr = CM_Get_Device_ID_ListW(enumerator, buf, len, flags);
+            int cr = list(buf);
             if (cr == CR_BUFFER_SMALL) continue;
-            if (cr != CR_SUCCESS) return result;
+            if (cr != CR_SUCCESS) return null;
+            var result = new List<string>();
             foreach (var s in new string(buf).Split('\0'))
                 if (s.Length > 0) result.Add(s);
             return result;
         }
-        return result;
+        return null;
     }
 
     private static uint? ReadDword(uint dev, uint property)
