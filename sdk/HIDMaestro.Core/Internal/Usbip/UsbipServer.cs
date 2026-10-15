@@ -25,8 +25,19 @@ namespace HIDMaestro.Internal.Usbip;
 /// exact port is also written to the owner record, so recovery that reads
 /// the record does not depend on the range. When every port in the range is
 /// taken, which any program can do by binding all sixteen first, the server
-/// binds an OS-assigned port instead of failing, and the recorded port
-/// carries it.</para></summary>
+/// takes the first free port of a second range,
+/// <see cref="SecondBasePort"/>..+15, and only when that is full too an
+/// OS-assigned port. The recorded port carries any of them.</para>
+///
+/// <para>Both ranges sit below Windows' default dynamic port range,
+/// 49152-65535 ("The new default start port is 49152, and the new default
+/// end port is 65535", KB 929851 on Learn), from which every port-0 bind
+/// on the machine draws. A port there that a dead server held is soon
+/// another program's listener, and a sweep would take it for a live
+/// server: it would leave the dead server's import and send that program
+/// an OP_REQ_DEVLIST. A listener on either range after HIDMaestro's server
+/// died is in practice another HIDMaestro server. The dynamic range can be
+/// moved with netsh, so this holds for the default range.</para></summary>
 internal sealed class UsbipServer : IDisposable
 {
     /// <summary>0x484D, "HM". Outside the IANA ephemeral range, no
@@ -34,6 +45,10 @@ internal sealed class UsbipServer : IDisposable
     /// standard port is untouched.</summary>
     public const int BasePort = 18509;
     public const int PortRange = 16;
+
+    /// <summary>The second range, taken when the first is full. Unassigned
+    /// in the IANA registry (28241-28588), below the dynamic range.</summary>
+    public const int SecondBasePort = 28509;
 
     private static readonly object s_lock = new();
     private static UsbipServer? s_instance;
@@ -68,43 +83,46 @@ internal sealed class UsbipServer : IDisposable
         Exception? last = null;
         TcpListener? listener = null;
         int port = 0;
-        for (int i = 0; i < PortRange; i++)
+        foreach (int first in new[] { BasePort, SecondBasePort })
         {
-            try
+            for (int i = 0; i < PortRange && listener == null; i++)
             {
-                var l = new TcpListener(IPAddress.Loopback, BasePort + i);
-                l.Start();
-                listener = l;
-                port = BasePort + i;
-                break;
+                try
+                {
+                    var l = new TcpListener(IPAddress.Loopback, first + i);
+                    l.Start();
+                    listener = l;
+                    port = first + i;
+                }
+                catch (SocketException ex) { last = ex; }
             }
-            catch (SocketException ex) { last = ex; }
+            if (listener != null) break;
         }
         if (listener == null)
         {
-            // Every port in the range is taken: another program, which may
-            // not be elevated, bound all sixteen first. Rather than fail
+            // Every port in both ranges is taken: another program, which may
+            // not be elevated, bound all of them first. Rather than fail
             // every composite persona, bind an OS-assigned loopback port
             // (port 0). GetOrStart writes it to this process's owner record
             // (SetUsbipPort), so a sweep matches this server's imports by the
             // recorded port, and a crash is recovered through the record's
             // port in DetachDeadImport, both the same way a range port is.
-            // The sweeps that walk the range take every port an owner
+            // The sweeps that walk the ranges take every port an owner
             // record names as well. Only the bus ids a server before
-            // v1.13.0 canceled itself are tried on range ports alone, since
-            // such a server never binds outside the range.
+            // v1.13.0 canceled itself are tried on the first range alone,
+            // since such a server never binds outside it.
             try
             {
                 var l = new TcpListener(IPAddress.Loopback, 0);
                 l.Start();
                 listener = l;
                 port = ((IPEndPoint)l.LocalEndpoint).Port;
-                DeviceOrchestrator.LogDiag($"    usbip: ports {BasePort}..{BasePort + PortRange - 1} all taken, bound {port}");
+                DeviceOrchestrator.LogDiag($"    usbip: ports {BasePort}..{BasePort + PortRange - 1} and {SecondBasePort}..{SecondBasePort + PortRange - 1} all taken, bound {port}");
             }
             catch (SocketException ex) { last = ex; }
         }
         _listener = listener ?? throw new InvalidOperationException(
-            $"No free loopback port for the USB/IP server (range {BasePort}..{BasePort + PortRange - 1} and an OS-assigned port both failed).", last);
+            $"No free loopback port for the USB/IP server ({BasePort}..{BasePort + PortRange - 1}, {SecondBasePort}..{SecondBasePort + PortRange - 1} and an OS-assigned port all failed).", last);
         Port = port;
 
         _acceptThread = new Thread(AcceptLoop)

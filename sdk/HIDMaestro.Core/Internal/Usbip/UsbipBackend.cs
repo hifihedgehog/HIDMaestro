@@ -421,9 +421,10 @@ internal static class UsbipBackend
         catch { /* best-effort: eviction must never throw out of a sweep */ }
     }
 
-    /// <summary>A loopback import on the SDK's port range, or on a port an
-    /// owner record names: a server binds outside the range when every port
-    /// in it is taken, and its record carries the port (UsbipServer).</summary>
+    /// <summary>A loopback import on one of the SDK's port ranges, or on a
+    /// port an owner record names: a server binds an OS-assigned port when
+    /// every port in both ranges is taken, and its record carries the port
+    /// (UsbipServer).</summary>
     private static bool IsOurLocation(string host, string service, HashSet<int> recorded, out int port) =>
         int.TryParse(service, out port) && host == "127.0.0.1" && (IsOurPort(port) || recorded.Contains(port));
 
@@ -438,8 +439,10 @@ internal static class UsbipBackend
         return set;
     }
 
+    /// <summary>A port of one of the SDK's two ranges (<see cref="UsbipServer"/>).</summary>
     private static bool IsOurPort(int port) =>
-        port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange;
+        (port >= UsbipServer.BasePort && port < UsbipServer.BasePort + UsbipServer.PortRange)
+        || (port >= UsbipServer.SecondBasePort && port < UsbipServer.SecondBasePort + UsbipServer.PortRange);
 }
 
 /// <summary>The live backing of one usbip-backend controller. Disposal

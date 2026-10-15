@@ -49,8 +49,8 @@
 //         drop that races the port tracker leaves, and binds WinUSB. The
 //         binding lands on its own adapter, and the other's keeps its
 //         driver.
-//      8. The probe holds the whole port range 18509 to 18524, so servers
-//         bind ports outside it. A program on this SDK keeps a composite
+//      8. The probe holds both port ranges, 18509 to 18524 and 28509 to
+//         28524, so servers bind OS-assigned ports outside them. A program on this SDK keeps a composite
 //         running there, and another is killed with one there. The
 //         uninstall-grade cleanup cancels the killed program's attempt and
 //         detaches the running program's composite, both named only by
@@ -69,6 +69,8 @@ using Microsoft.Win32;
 internal static partial class Program
 {
     const int UsbipBasePort = 18509;
+    // The second range a server takes when the first is full (UsbipServer).
+    const int UsbipSecondBasePort = 28509;
 
     static void SectionV()
     {
@@ -510,18 +512,20 @@ internal static partial class Program
         var held = new List<System.Net.Sockets.TcpListener>();
         try
         {
-            for (int i = 0; i < 16; i++)
-            {
-                try
+            foreach (int first in new[] { UsbipBasePort, UsbipSecondBasePort })
+                for (int i = 0; i < 16; i++)
                 {
-                    var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, UsbipBasePort + i);
-                    l.Start();
-                    held.Add(l);
+                    try
+                    {
+                        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, first + i);
+                        l.Start();
+                        held.Add(l);
+                    }
+                    catch (System.Net.Sockets.SocketException) { }
                 }
-                catch (System.Net.Sockets.SocketException) { }
-            }
-            Check("V8: the probe holds the whole port range", held.Count == 16, $"{held.Count} of 16");
-            bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16);
+            Check("V8: the probe holds both port ranges", held.Count == 32, $"{held.Count} of 32");
+            bool Outside(int port) => port > 0 && (port < UsbipBasePort || port >= UsbipBasePort + 16)
+                && (port < UsbipSecondBasePort || port >= UsbipSecondBasePort + 16);
 
             // The running program creates first, so its own first-create
             // sweep is done before the other program is killed.
@@ -531,7 +535,7 @@ internal static partial class Program
             string busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
             int portB = RecordUsbipPort(b.Pid);
             touched.Add((portB, busB));
-            Check($"V8: the running program's server is on port {portB}, outside the range",
+            Check($"V8: the running program's server is on port {portB}, outside both ranges",
                   Outside(portB) && Vhci.Imported().Any(r => r.Port == portB && r.BusId == busB));
 
             int portA;
@@ -543,7 +547,7 @@ internal static partial class Program
                 busA = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
                 portA = RecordUsbipPort(a.Pid);
                 touched.Add((portA, busA));
-                Check($"V8: its server is on port {portA}, outside the range", Outside(portA));
+                Check($"V8: its server is on port {portA}, outside both ranges", Outside(portA));
                 a.Kill();
             }
             WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA), 10_000);

@@ -42,35 +42,74 @@ internal static partial class Program
         SectionX7();
     }
 
-    /// <summary>The USB/IP loopback port range taken first. A composite
-    /// persona still creates, on an OS-assigned port, and the port is in the
-    /// program's owner record so a sweep still matches it.</summary>
+    /// <summary>The USB/IP loopback port ranges taken first. With the first
+    /// range held, a composite persona's server takes a port of the second
+    /// range, which sits below the dynamic port range like the first. With
+    /// both held it still creates, on an OS-assigned port its owner record
+    /// names. That program is then killed, and the vhci driver starts a
+    /// re-attach attempt against the port (usbip-win2 device.cpp detach,
+    /// start_attach_attempts). A sweep by another program must cancel it:
+    /// the record is the only thing that names the port, and the sweep
+    /// deletes it. Section V part 8 covers the cleanup that removes
+    /// everything in the same state.</summary>
     static void SectionX7()
     {
-        const int basePort = 18509, range = 16;
+        const int basePort = 18509, secondPort = 28509, range = 16;
         var held = new List<TcpListener>();
         try
         {
-            for (int i = 0; i < range; i++)
-            {
-                try { var l = new TcpListener(IPAddress.Loopback, basePort + i); l.Start(); held.Add(l); }
-                catch (SocketException) { }
-            }
-            Check($"X7: the probe holds the whole USB/IP port range {basePort}..{basePort + range - 1}", held.Count == range, $"{held.Count} of {range} bound");
+            held.AddRange(HoldPorts(basePort, range));
+            Check($"X7: the probe holds the first USB/IP port range {basePort}..{basePort + range - 1}", held.Count == range, $"{held.Count} of {range} bound");
             if (held.Count != range) return;
+            using (var p = PeerProcess.Start("X7-second"))
+            {
+                p.Send("install");
+                string c = p.Send("create composite - coexist-x7s");
+                string? recorded = Ok(c) ? Native.RecordValue(p.Pid, "UsbipPort") : null;
+                bool inSecond = int.TryParse(recorded, out int sp) && sp >= secondPort && sp < secondPort + range;
+                Check($"X7: with the first range held, a composite's server takes a port of {secondPort}..{secondPort + range - 1}", inSecond,
+                      $"{c}, recorded port {recorded ?? "none"}");
+            }
+            Clean();
 
-            using var p = PeerProcess.Start("X7");
-            p.Send("install");
-            string c = p.Send("create composite - coexist-x7");
-            Check("X7: a composite persona still creates with the range taken", Ok(c), c);
-            if (!Ok(c)) return;
-            var path = WaitPaths(0x054C, 0x0CE6, 1, 15_000);
-            Check("X7: the composite's device is present", path.Count == 1, $"{path.Count} interfaces");
-            string? recorded = Native.RecordValue(p.Pid, "UsbipPort");
-            bool outside = int.TryParse(recorded, out int sp) && (sp < basePort || sp >= basePort + range);
-            Check("X7: its server bound a port outside the range, recorded in its owner record", outside, $"recorded port {recorded ?? "none"}");
+            var second = HoldPorts(secondPort, range);
+            held.AddRange(second);
+            Check($"X7: the probe holds the second range {secondPort}..{secondPort + range - 1} too", second.Count == range, $"{second.Count} of {range} bound");
+            if (second.Count != range) return;
+            int port = 0;
+            string busId = "";
+            using (var a = PeerProcess.Start("X7-killed"))
+            {
+                a.Send("install");
+                string c = a.Send("create composite - coexist-x7");
+                Check("X7: a composite persona still creates with both ranges taken", Ok(c), c);
+                if (!Ok(c)) return;
+                busId = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
+                string? recorded = Native.RecordValue(a.Pid, "UsbipPort");
+                bool outside = int.TryParse(recorded, out port)
+                    && (port < basePort || port >= basePort + range) && (port < secondPort || port >= secondPort + range);
+                Check("X7: its server bound a port outside both ranges, recorded in its owner record", outside, $"recorded port {recorded ?? "none"}");
+                if (!outside) return;
+                a.Kill();
+            }
+            WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+            using (var b = PeerProcess.Start("X7-sweeper"))
+                Check("X7: another program runs a sweep", Ok(b.Send("sweep")));
+            int left = Vhci.Stop("127.0.0.1", port, busId);
+            Check($"X7: the sweep canceled the killed program's attempt for {port}/{busId}", left == 0, $"{left} canceled by the probe");
         }
         finally { foreach (var l in held) try { l.Stop(); } catch { } }
+    }
+
+    static List<TcpListener> HoldPorts(int first, int count)
+    {
+        var list = new List<TcpListener>();
+        for (int i = 0; i < count; i++)
+        {
+            try { var l = new TcpListener(IPAddress.Loopback, first + i); l.Start(); list.Add(l); }
+            catch (SocketException) { }
+        }
+        return list;
     }
 
     /// <summary>Many indices squatted at once. The create walks past them
