@@ -12,7 +12,10 @@
 //   and C++ layout mirrors to each other at the byte level. A child
 //   process then holds the channel with a HapticReceived handler that
 //   throws ahead of one that counts: the second still gets every pulse and
-//   the reader goes on.
+//   the reader goes on. Another child holds a HapticReceived handler past
+//   Dispose's join of the haptic reader: the reader then ends on its own,
+//   touching nothing Dispose released, and the channel can be claimed
+//   again.
 //
 //   LIVE STEAMVR (runs when a SteamVR install is found): registers the
 //   embedded driver via HMVR.EnsureDriverRegistered, starts the headless
@@ -112,12 +115,14 @@ internal static class Program
     [DllImport("kernel32.dll")]
     static extern uint SetErrorMode(uint mode);
 
-    static (int Code, string Line) RunThrowingHapticChild()
+    static (int Code, string Line) RunThrowingHapticChild() => RunChild("--throwing-haptic");
+
+    static (int Code, string Line) RunChild(string mode)
     {
         // The child inherits this error mode: a crash there ends in an exit
         // code, never in a dialog on the desktop.
         SetErrorMode(QuietErrorMode);
-        var psi = new ProcessStartInfo(Environment.ProcessPath!, "--throwing-haptic")
+        var psi = new ProcessStartInfo(Environment.ProcessPath!, mode)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -170,12 +175,62 @@ internal static class Program
         }
     }
 
+    /// <summary>The child: a HapticReceived handler still running when
+    /// Dispose's join of the haptic reader gives up. Before this release
+    /// Dispose then unmapped the channel and closed the events the reader
+    /// waits on, and the reader's next read of the ring ended the
+    /// process.</summary>
+    static int SlowHapticMain()
+    {
+        SetErrorMode(QuietErrorMode);
+        var vr = new HMVRController();
+        var reader = (Thread)typeof(HMVRController).GetField("_hapticThread",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(vr)!;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        vr.HapticReceived += (_, _) =>
+        {
+            if (entered.IsSet) return;
+            entered.Set();
+            release.Wait(5000);
+        };
+        IntPtr mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, false, VrSharedMemory.SectionName);
+        if (mapping == IntPtr.Zero)
+        {
+            Console.WriteLine($"CHILD slow-haptic failed: OpenFileMapping error {Marshal.GetLastWin32Error()}");
+            return 1;
+        }
+        IntPtr view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, (UIntPtr)VrSharedMemory.SectionSize);
+        try
+        {
+            PublishHaptic(view, hand: 1, amplitude: 0.5f);
+            bool inHandler = entered.Wait(2000);
+            vr.Dispose();
+            bool stillInHandler = !release.IsSet && reader.IsAlive;
+            release.Set();
+            bool ended = System.Threading.SpinWait.SpinUntil(() => !reader.IsAlive, 3000);
+            bool reclaimed;
+            try { using var again = new HMVRController(); reclaimed = true; }
+            catch (InvalidOperationException) { reclaimed = false; }
+            Console.WriteLine($"CHILD slow-haptic held={inHandler && stillInHandler} ended={ended} reclaimed={reclaimed}");
+            return 0;
+        }
+        finally
+        {
+            release.Set();
+            if (view != IntPtr.Zero) UnmapViewOfFile(view);
+            CloseHandle(mapping);
+        }
+    }
+
     static int Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--legacy-reader")
             return LegacyReaderMain(args[1]);
         if (args.Length >= 1 && args[0] == "--throwing-haptic")
             return ThrowingHapticMain();
+        if (args.Length >= 1 && args[0] == "--slow-haptic")
+            return SlowHapticMain();
 
         // Diagnostic: hold a pumping consumer with the known legacy state
         // for N seconds so a reader can be timed independently.
@@ -283,6 +338,12 @@ internal static class Program
         var (hapticCode, hapticLine) = RunThrowingHapticChild();
         Check("behind a throwing HapticReceived handler, the next one gets both pulses and the reader goes on",
               hapticCode == 0 && hapticLine == "CHILD haptic seen=2", $"exit {hapticCode}: {hapticLine}");
+
+        // A handler still running when Dispose's join gives up, in a child:
+        // before this release the reader's next read ended the process.
+        var (slowCode, slowLine) = RunChild("--slow-haptic");
+        Check("a HapticReceived handler past Dispose's join: the reader ends on its own and the channel can be claimed again",
+              slowCode == 0 && slowLine == "CHILD slow-haptic held=True ended=True reclaimed=True", $"exit {slowCode}: {slowLine}");
 
         // ── Phase 2: live SteamVR ──────────────────────────────────────
         Console.WriteLine("\n-- phase 2: live SteamVR --");

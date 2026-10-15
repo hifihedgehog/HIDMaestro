@@ -1537,7 +1537,9 @@ function Scenario-Switch2-Pro {
 # S50: the virtual VR controller subsystem (issues #32, #51, #55).
 # Phase 1 always runs and pins the C# and C++ halves of the HIDMaestroVR
 # IPC protocol to each other byte-for-byte, with the probe playing the
-# driver's role. Phase 2 runs when a SteamVR install is present (BOTH
+# driver's role, and holds a HapticReceived handler past Dispose's join of
+# the haptic reader in a child. Phase 2 runs when a SteamVR install is
+# present (BOTH
 # battery machines carry the Steam-free steamcmd install at C:\SteamVR,
 # with the headless null-HMD rig config): registers the embedded OpenVR
 # driver, boots the stack, and asserts controller enumeration, hand

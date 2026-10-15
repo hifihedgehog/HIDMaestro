@@ -106,6 +106,14 @@ public sealed class HMVRController : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private ulong _hapticCursor;
     private bool _disposed;
+    // The haptic reader reads the channel and waits on the source's handle
+    // and the channel's haptic event, so the reader releases both as it
+    // ends, and Dispose cancels the source only while it is open. A reader
+    // that Dispose's bounded join gave up on, inside a consumer's handler,
+    // touches nothing released. Guarded by _lifetimeLock, which is never
+    // held across a handler.
+    private readonly object _lifetimeLock = new();
+    private bool _readerEnded;
 
     /// <summary>Raised on a background thread for each haptic pulse a VR
     /// app plays on either virtual controller. An exception a handler throws
@@ -205,6 +213,20 @@ public sealed class HMVRController : IDisposable
 
     private void HapticLoop()
     {
+        try
+        {
+            ReadHaptics();
+        }
+        finally
+        {
+            lock (_lifetimeLock) _readerEnded = true;
+            _cts.Dispose();
+            _channel.Dispose();
+        }
+    }
+
+    private void ReadHaptics()
+    {
         var token = _cts.Token;
         // The driver signals the haptic event after each ring publish; the
         // 250 ms timeout is the degraded-mode bound if a signal is ever
@@ -217,7 +239,10 @@ public sealed class HMVRController : IDisposable
         var waits = new WaitHandle[] { token.WaitHandle, hapticSignal };
         while (!token.IsCancellationRequested)
         {
-            while (VrSharedMemory.TryReadHaptic(_channel, ref _hapticCursor,
+            // Checked before each read too: a handler can return after
+            // Dispose.
+            while (!token.IsCancellationRequested
+                   && VrSharedMemory.TryReadHaptic(_channel, ref _hapticCursor,
                        out uint hand, out float dur, out float freq, out float amp, out ulong ts))
             {
                 var handler = HapticReceived;
@@ -241,13 +266,17 @@ public sealed class HMVRController : IDisposable
         return (double)(Stopwatch.GetTimestamp() - (long)qpc) / Stopwatch.Frequency;
     }
 
+    /// <summary>Stops the haptic reader. It releases the channel, and with
+    /// it the consumer claim, as it ends: within the join below, or once a
+    /// <see cref="HapticReceived"/> handler still running returns.</summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _cts.Cancel();
+        lock (_lifetimeLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (!_readerEnded) _cts.Cancel();
+        }
         _hapticThread.Join(1000);
-        _cts.Dispose();
-        _channel.Dispose();
     }
 }
