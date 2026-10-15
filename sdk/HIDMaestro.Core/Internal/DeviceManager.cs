@@ -597,42 +597,126 @@ public static partial class DeviceManager
     /// CMP_WaitNoPendingInstallEvents(30000)).</summary>
     internal const int InstallQueueWaitMs = 30_000;
 
-    /// <summary>The gate a fixed instance id passes before it is registered
-    /// again, run by the caller under <see cref="AcquirePnpLock"/>. When a
-    /// NORMAL or PHANTOM locate still finds the id,
-    /// <paramref name="removePriorLife"/> removes that prior life and
-    /// returns its removal's outcome, or null to refuse the registration.
-    /// The gate waits for nothing itself: the removal's own test is the one
-    /// wait. NotGone refuses, since the devnode or its record is still there,
-    /// as SetupDiCreateDeviceInfoW would then refuse too. GoneWithoutRemoved
-    /// goes ahead, as a pending install does when its wait ends. Then
-    /// <see cref="AwaitInstallQueue"/>.
-    ///
-    /// <para>The gate covers a removal of the id by any program, by its
-    /// PHANTOM record. What it cannot see is a removal Windows has not
-    /// finished after that record went: a program of this release holds the
-    /// PnP lock until its removal test has an outcome, and a program before
-    /// v1.13.0 takes no lock.</para></summary>
-    internal static RegistrationGate AwaitRegistrationGate(string instanceId, Func<RemovalOutcome?> removePriorLife,
-                                                           int installWaitMs)
+    /// <summary>What of a devnode's prior life the registration gate needs
+    /// gone before the id is registered again.</summary>
+    internal enum RegistrationKind
     {
-        if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
-            || Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
-        {
-            var outcome = removePriorLife();
-            if (outcome is not { } o) return RegistrationGate.Refused;
-            if (o == RemovalOutcome.NotGone)
-            {
-                DeviceOrchestrator.LogDiag($"      {instanceId} is still there after its removal; refusing to register it");
-                return RegistrationGate.Refused;
-            }
-        }
-        return AwaitInstallQueue(instanceId, installWaitMs);
+        /// <summary>A ROOT devnode (SetupDiCreateDeviceInfoW,
+        /// DIF_REGISTERDEVICE): the prior life out of the tree and its record
+        /// gone. SetupDiCreateDeviceInfoW refuses an id whose record is still
+        /// there.</summary>
+        Root,
+        /// <summary>A software device (SwDeviceCreate): the prior life out of
+        /// the tree. Its record stays: SwDeviceClose keeps it and
+        /// SwDeviceCreate takes it over.</summary>
+        Software,
     }
 
+    /// <summary>How many times a gate goes round again because something it
+    /// had removed was back when it took the lock.</summary>
+    const int GateRounds = 3;
+
+    /// <summary>The gate an instance id passes before the SDK registers it.
+    /// It returns holding the PnP lock (<see cref="HoldPnpLock"/>), which the
+    /// caller releases after the registration, or null to refuse it.
+    ///
+    /// <para>Outside the lock, everything that takes time: rivals of its
+    /// ParentIdPrefix go (<paramref name="clearRivals"/> with true), a prior
+    /// life that a NORMAL locate, or for a ROOT id a PHANTOM locate, still
+    /// finds goes through <paramref name="removePriorLife"/>, which returns
+    /// its removal's outcome or null to refuse, and Windows' install queue
+    /// gets up to <paramref name="installWaitMs"/> to empty
+    /// (<see cref="AwaitInstallQueue"/>). Each removal takes the lock for
+    /// itself and has its own test, which is the one wait for it: NotGone
+    /// refuses, as SetupDiCreateDeviceInfoW would refuse a record still
+    /// there, and GoneWithoutRemoved goes ahead, as a pending install does
+    /// when its wait ends.</para>
+    ///
+    /// <para>Under the lock nothing is removed and nothing is waited for: a
+    /// rival (<paramref name="clearRivals"/> with false) or a prior life back
+    /// since sends the gate round again, up to <see cref="GateRounds"/>, and
+    /// so does a pending install while the install wait has time left, which
+    /// CMP_WaitNoPendingInstallEvents with 0 reports at once ("tests whether
+    /// there are pending installation events and returns immediately",
+    /// Learn). So a registration holds the lock for its checks and its own
+    /// calls only, and another program's removal never waits behind a
+    /// removal or an install this one waits for.</para>
+    ///
+    /// <para>The gate sees a removal of the id by any program through the
+    /// id's locates. What it cannot see is a removal Windows has not
+    /// finished after the devnode and its record went: a program of this
+    /// release holds the lock until its removal test has an outcome, and a
+    /// program before v1.13.0 takes no lock.</para></summary>
+    internal static PnpLockHold? EnterRegistrationGate(string instanceId, RegistrationKind kind,
+        Func<RemovalOutcome?> removePriorLife, Func<bool, bool>? clearRivals,
+        out RegistrationGate decision, int installWaitMs = InstallQueueWaitMs)
+    {
+        long freq = System.Diagnostics.Stopwatch.Frequency;
+        long installDeadline = System.Diagnostics.Stopwatch.GetTimestamp() + TimeoutScale.Apply(installWaitMs) * freq / 1000;
+        // Rounded up, so the wait never ends a millisecond short of its bound.
+        int MsLeft() => (int)Math.Max(0, ((installDeadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 + freq - 1) / freq);
+
+        for (int rounds = 1; ; rounds++)
+        {
+            decision = RegistrationGate.Refused;
+            if (clearRivals != null && !clearRivals(true)) return null;
+            if (Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS
+                || (kind == RegistrationKind.Root && Locate(instanceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS))
+            {
+                var outcome = removePriorLife();
+                if (outcome is not { } o) return null;
+                if (o == RemovalOutcome.NotGone)
+                {
+                    DeviceOrchestrator.LogDiag($"      {instanceId} is still there after its removal; refusing to register it");
+                    return null;
+                }
+            }
+            var queue = AwaitInstallQueue(instanceId, MsLeft());
+            if (queue == RegistrationGate.Refused) return null;
+
+            var hold = HoldPnpLock();
+            try
+            {
+                bool back = (clearRivals != null && !clearRivals(false))
+                    || Locate(instanceId, kind == RegistrationKind.Root ? CM_LOCATE_DEVNODE_PHANTOM : CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
+                if (back)
+                {
+                    hold.Dispose();
+                    if (rounds < GateRounds) continue;
+                    DeviceOrchestrator.LogDiag($"      {instanceId} or a rival of its prefix came back {rounds} times; refusing to register it");
+                    return null;
+                }
+                uint now = InstallQueue(0);
+                if (now == WAIT_TIMEOUT && MsLeft() > 0)
+                {
+                    hold.Dispose();
+                    continue;
+                }
+                if (now != WAIT_OBJECT_0 && now != WAIT_TIMEOUT)
+                {
+                    hold.Dispose();
+                    DeviceOrchestrator.LogDiag($"      CMP_WaitNoPendingInstallEvents failed (0x{now:X8}); refusing to register {instanceId}");
+                    return null;
+                }
+                if (now == WAIT_TIMEOUT)
+                    DeviceOrchestrator.LogDiag($"      device installs still pending after {installWaitMs} ms; registering {instanceId} anyway");
+                decision = now == WAIT_OBJECT_0 ? RegistrationGate.Allowed : RegistrationGate.AllowedInstallsPending;
+                return hold;
+            }
+            catch
+            {
+                hold.Dispose();
+                throw;
+            }
+        }
+    }
+
+    static uint InstallQueue(uint timeoutMs) =>
+        InstallQueueHook?.Invoke(timeoutMs) ?? CMP_WaitNoPendingInstallEvents(timeoutMs);
+
     /// <summary>Waits up to <paramref name="installWaitMs"/> for Windows to
-    /// have no device install pending, the last step of the registration
-    /// gate and the whole gate of a software device's create.
+    /// have no device install pending, the registration gate's wait outside
+    /// the lock.
     /// CMP_WaitNoPendingInstallEvents "waits until there are no pending
     /// device installation activities for the PnP manager to perform", and
     /// "just indicates that there are no pending installation activities at
@@ -641,19 +725,20 @@ public static partial class DeviceManager
     /// after its WAIT_TIMEOUT: it can belong to any device on the machine,
     /// and refusing would turn another device's slow install into a failed
     /// create. A failed wait refuses it, as vJoy's stops (WAIT_FAILED).</summary>
-    internal static RegistrationGate AwaitInstallQueue(string instanceId, int installWaitMs = InstallQueueWaitMs)
+    internal static RegistrationGate AwaitInstallQueue(string instanceId, int installWaitMs)
     {
-        uint timeout = (uint)TimeoutScale.Apply(installWaitMs);
-        uint r = InstallQueueHook?.Invoke(timeout) ?? CMP_WaitNoPendingInstallEvents(timeout);
+        // Already scaled by the caller's deadline.
+        bool real = InstallQueueHook == null;
+        uint r = InstallQueue((uint)installWaitMs);
         switch (r)
         {
             case WAIT_OBJECT_0:
                 return RegistrationGate.Allowed;
             case WAIT_TIMEOUT:
-                DeviceOrchestrator.LogDiag($"      device installs still pending after {timeout} ms; registering {instanceId} anyway");
                 return RegistrationGate.AllowedInstallsPending;
             default:
-                DeviceOrchestrator.LogDiag($"      CMP_WaitNoPendingInstallEvents failed (0x{r:X8}, Win32 {Marshal.GetLastPInvokeError()}); refusing to register {instanceId}");
+                DeviceOrchestrator.LogDiag($"      CMP_WaitNoPendingInstallEvents failed (0x{r:X8}" +
+                    (real ? $", Win32 {Marshal.GetLastPInvokeError()}" : "") + $"); refusing to register {instanceId}");
                 return RegistrationGate.Refused;
         }
     }
@@ -671,18 +756,22 @@ public static partial class DeviceManager
     internal const string PnpMutexObject = "Pnp";
 
     /// <summary>How long a program waits for another to release the PnP
-    /// lock, as long as the deploy lock's wait. The longest hold, about five
-    /// minutes, is a create's gate that removes a prior life: one removal (a
-    /// 120 s removal test, the pnputil and devcon fallbacks at up to 7 s
-    /// each, the hmswd.exe close at 8 s), then up to 120 s more for the
-    /// gate's own removal test and 30 s for the install queue.</summary>
+    /// lock, as long as the deploy lock's wait. The longest hold is one
+    /// removal: the hmswd.exe close (up to 8 s), its parent's 120 s budget
+    /// and 2 s for its notification, 4 s per child, and the pnputil and
+    /// devcon fallbacks (up to 7 s each) with 4 s to test them, about 150 s
+    /// for a devnode with a few children, all scaled alike. A registration
+    /// holds it for its checks and its own calls, at most the three
+    /// hmswd.exe create attempts of up to 15 s each with 4.5 s between.
+    /// Neither nests the other.</summary>
     const int PnpLockWaitMs = 600_000;
 
     /// <summary>Take the machine-wide PnP lock, held by the calling thread
     /// until it calls <c>ReleaseMutex</c>.
     ///
     /// <para>Held by: each devnode registration the SDK makes, from its
-    /// gate through DIF_REGISTERDEVICE (<see cref="DeviceNodeCreator.CreateDeviceNode"/>)
+    /// gate's last checks (<see cref="EnterRegistrationGate"/>) through
+    /// DIF_REGISTERDEVICE (<see cref="DeviceNodeCreator.CreateDeviceNode"/>)
     /// or SwDeviceCreate (the two software companions), and each removal
     /// and uninstall the SDK makes, from its call through its removal test:
     /// <see cref="RemoveDevice"/> (with its children, its fallbacks and
@@ -694,10 +783,12 @@ public static partial class DeviceManager
     /// controller's repair, and any program built on HIDMaestro before
     /// v1.13.0.</para>
     ///
-    /// <para>A thread that holds it can take it again: a create's gate
-    /// removes a prior life through RemoveDevice. An abandoned lock is taken:
-    /// the gate and the removal test look at the devnode again whatever the
-    /// last holder left.</para>
+    /// <para>One hold is one removal or one registration, never both: a
+    /// registration's gate removes what it must, each removal in a hold of
+    /// its own, before it takes the lock. A thread that holds it can take it
+    /// again, which none does today. An abandoned lock is taken: the gate and
+    /// the removal test look at the devnode again whatever the last holder
+    /// left.</para>
     ///
     /// <para>Lock order: the deploy lock, then the WinUSB devnode lock, then
     /// this one, then the staging lock. WinUsbBinding.RemovePackage removes a
@@ -1141,7 +1232,9 @@ public static partial class DeviceManager
     /// <summary>
     /// Clears every other parent under <paramref name="enumRoot"/>\<paramref name="enumerator"/>
     /// that holds <paramref name="prefix"/> as its ParentIdPrefix, and says
-    /// whether the way is clear. Two parents of one enumerator with one
+    /// whether the way is clear. With <paramref name="remove"/> false it only
+    /// checks, and a rival it would remove makes the way not clear: the
+    /// registration gate's check under the PnP lock. Two parents of one enumerator with one
     /// prefix make hidclass build the same HID child id twice, which PnP
     /// answers with bugcheck 0xCA (duplicate PDO). A ROOT record is
     /// re-enumerated at every boot, live or not, so it is removed either
@@ -1149,7 +1242,8 @@ public static partial class DeviceManager
     /// enumerates while its creator holds it, so only a live one counts.
     /// False means a rival is still there and the caller must not create.
     /// </summary>
-    internal static bool ClearParentIdPrefixRivals(string enumRoot, string enumerator, string token, string prefix)
+    internal static bool ClearParentIdPrefixRivals(string enumRoot, string enumerator, string token, string prefix,
+                                                   bool remove = true)
     {
         string enumPath = $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{enumerator}";
         string[] names;
@@ -1211,6 +1305,12 @@ public static partial class DeviceManager
                 }
             }
 
+            if (!remove)
+            {
+                DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix} again");
+                clear = false;
+                continue;
+            }
             DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix}; removing it before create");
             // An SWD rival whose helper cannot be staged throws here, and the
             // create fails with the reason instead of returning no device.

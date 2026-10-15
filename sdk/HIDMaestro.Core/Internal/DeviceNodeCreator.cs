@@ -123,41 +123,40 @@ internal static partial class DeviceNodeCreator
         }
         string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
 
-        // From here through DIF_REGISTERDEVICE this create holds the
-        // machine-wide PnP lock, which every registration and removal of a
-        // program of this release holds (DeviceManager.AcquirePnpLock). Two
-        // bugchecks 0x139 on 2026-10-14 and 10-15 fired in this registration,
-        // at its class GUID write, while other programs created and removed
-        // HIDClass devnodes. The lock and the gate below narrow that window.
-        // Neither is shown to close it.
-        using var pnp = DeviceManager.HoldPnpLock();
-
-        // No second parent on this prefix, ever. See the helper for why a
-        // failure here has to stop the create rather than be logged past.
-        string instId = $@"ROOT\{enumerator}\{identity.Token}";
-        if (!DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix))
-            return new Result(false, null);
-
         // Issue #60. The instance id is the identity's, not a number Windows
         // generates, so this parent has the same name on every life and the
         // HID child below it can keep its path. A record with that name that
         // is still around (a prior life's crash residue, or a phantom whose
         // teardown timed out) is removed first; a record that is not ours
         // is a hard stop, because claiming it would mutate a foreign device
-        // (issue #28). The gate registers the name again only once its prior
-        // life is gone by its removal test and Windows has no device install
-        // pending (DeviceManager.AwaitRegistrationGate).
-        var gate = DeviceManager.AwaitRegistrationGate(instId, () =>
-        {
-            if (!DeviceManager.IsHidMaestroOwned(instId))
+        // (issue #28). No second parent on this prefix, ever: see
+        // ClearParentIdPrefixRivals for why a failure there has to stop the
+        // create rather than be logged past.
+        //
+        // The registration gate (DeviceManager.EnterRegistrationGate) does
+        // both removals outside the machine-wide PnP lock, waits for Windows'
+        // install queue, and returns holding the lock, which this create
+        // lets go after DIF_REGISTERDEVICE. Every registration and removal
+        // of a program of this release holds that lock. Two bugchecks 0x139
+        // on 2026-10-14 and 10-15 fired in this registration, at its class
+        // GUID write, while other programs created and removed HIDClass
+        // devnodes. The lock and the gate narrow that window. Neither is
+        // shown to close it.
+        string instId = $@"ROOT\{enumerator}\{identity.Token}";
+        using var pnp = DeviceManager.EnterRegistrationGate(instId, DeviceManager.RegistrationKind.Root,
+            removePriorLife: () =>
             {
-                DeviceOrchestrator.LogDiag($"      {instId} exists and is not HIDMaestro-owned; refusing to claim it");
-                return null;
-            }
-            DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
-            return DeviceManager.RemovePriorLife(instId, timeoutMs: 120_000);
-        }, installWaitMs: DeviceManager.InstallQueueWaitMs);
-        if (gate == DeviceManager.RegistrationGate.Refused)
+                if (!DeviceManager.IsHidMaestroOwned(instId))
+                {
+                    DeviceOrchestrator.LogDiag($"      {instId} exists and is not HIDMaestro-owned; refusing to claim it");
+                    return null;
+                }
+                DeviceOrchestrator.LogDiag($"      {instId} still exists from a prior life; removing before recreate");
+                return DeviceManager.RemovePriorLife(instId, timeoutMs: 120_000);
+            },
+            clearRivals: remove => DeviceManager.ClearParentIdPrefixRivals("ROOT", enumerator, identity.Token, identity.ParentIdPrefix, remove),
+            out _);
+        if (pnp == null)
             return new Result(false, null);
 
         Guid classGuid = HIDClassGuid;

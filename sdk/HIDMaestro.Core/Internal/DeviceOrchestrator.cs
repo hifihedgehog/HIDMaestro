@@ -800,21 +800,25 @@ internal static partial class DeviceOrchestrator
             string instanceSuffix = identity.Token;
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Gamepad";
 
-            // The machine-wide PnP lock is held from the prefix check through
-            // SwDeviceCreate (DeviceManager.AcquirePnpLock), after the
-            // install-queue part of the registration gate. Its removal test
-            // does not apply: SwDeviceClose keeps a software device's record,
-            // and "the new create will be queued until the previous removal
-            // processing completes" (SwDeviceClose on Microsoft Learn).
+            // Through the registration gate (DeviceManager.EnterRegistrationGate),
+            // which returns holding the machine-wide PnP lock for
+            // SwDeviceCreate. A prior life of this id still in the tree, one
+            // FindExistingCompanion did not take, goes first, and must pass
+            // its removal test: Learn's promise that a create after
+            // SwDeviceClose "will be queued until the previous removal
+            // processing completes" covers SwDeviceClose only, and the SDK
+            // and programs before v1.13.0 remove these devnodes other ways
+            // too. Its record stays, since SwDeviceCreate takes it over. This
+            // parent has a HID child, so the one-parent-per-prefix rule
+            // applies to it exactly as it does to a ROOT parent.
+            string gpSwdId = $@"SWD\{gpSwdEnumerator}\{instanceSuffix}";
             SwdDeviceFactory.Result result;
-            using (DeviceManager.HoldPnpLock())
+            using (var pnp = DeviceManager.EnterRegistrationGate(gpSwdId, DeviceManager.RegistrationKind.Software,
+                       () => DeviceManager.IsHidMaestroOwned(gpSwdId) ? DeviceManager.RemovePriorLife(gpSwdId, timeoutMs: 120_000) : null,
+                       remove => DeviceManager.ClearParentIdPrefixRivals("SWD", gpSwdEnumerator, identity.Token, identity.ParentIdPrefix, remove),
+                       out _))
             {
-                // This parent has a HID child, so the one-parent-per-prefix
-                // rule applies to it exactly as it does to a ROOT parent.
-                if (!DeviceManager.ClearParentIdPrefixRivals("SWD", gpSwdEnumerator, identity.Token, identity.ParentIdPrefix))
-                    return null;
-                if (DeviceManager.AwaitInstallQueue($@"SWD\{gpSwdEnumerator}\{instanceSuffix}")
-                    == DeviceManager.RegistrationGate.Refused)
+                if (pnp == null)
                     return null;
 
                 result = SwdDeviceFactory.Create(
@@ -936,13 +940,15 @@ internal static partial class DeviceOrchestrator
             // SWD#HIDMAESTRO#<token>#{EC87F1E3-...} on every life.
             string instanceSuffix = identity.Token;
 
-            // The PnP lock and the install-queue gate, as for the gamepad
-            // companion in CreateGamepadCompanion.
+            // Through the registration gate, as the gamepad companion in
+            // CreateGamepadCompanion. It has no HID child, so no prefix rule.
+            string xusbId = $@"SWD\HIDMAESTRO\{instanceSuffix}";
             SwdDeviceFactory.Result result;
-            using (DeviceManager.HoldPnpLock())
+            using (var pnp = DeviceManager.EnterRegistrationGate(xusbId, DeviceManager.RegistrationKind.Software,
+                       () => DeviceManager.IsHidMaestroOwned(xusbId) ? DeviceManager.RemovePriorLife(xusbId, timeoutMs: 120_000) : null,
+                       clearRivals: null, out _))
             {
-                if (DeviceManager.AwaitInstallQueue($@"SWD\HIDMAESTRO\{instanceSuffix}")
-                    == DeviceManager.RegistrationGate.Refused)
+                if (pnp == null)
                     return null;
 
                 result = SwdDeviceFactory.Create(

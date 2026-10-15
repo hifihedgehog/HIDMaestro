@@ -37,6 +37,21 @@ internal static partial class Cost
         Console.WriteLine($"  {what,-64} n={runs} p50={Us(ticks[runs / 2]),9:F1} us  p95={Us(ticks[(int)(runs * 0.95)]),9:F1} us");
     }
 
+    sealed class StandIn : IDisposable
+    {
+        readonly Mutex _m;
+        public StandIn(string name)
+        {
+            _m = new Mutex(false, name);
+            _m.WaitOne();
+        }
+        public void Dispose()
+        {
+            _m.ReleaseMutex();
+            _m.Dispose();
+        }
+    }
+
     internal static int Run(int runs)
     {
         Console.WriteLine($"=== Removal test and registration gate: cost with nothing pending ({runs} runs each) ===");
@@ -61,9 +76,17 @@ internal static partial class Cost
             w.Wait(uninstalls: true, 0);
         });
         Report("install queue: CMP_WaitNoPendingInstallEvents(30000), idle", runs, () => CMP_WaitNoPendingInstallEvents(30_000));
-        Report("gate: removal test and install queue, absent id", runs, () =>
-            DeviceManager.AwaitRegistrationGate(Id, () => DeviceManager.RemovalOutcome.Removed, installWaitMs: DeviceManager.InstallQueueWaitMs));
         string name = @"Local\HIDMaestro.PnpNotifyCheck.Cost." + Environment.ProcessId;
+        // The gate's whole path for an absent id, with the session-namespace
+        // mutex below standing in for the administrators-only one.
+        DeviceManager.PnpLockHook = () => new StandIn(name);
+        try
+        {
+            Report("gate: locates, install queue outside and under a stand-in lock, release", runs, () =>
+                DeviceManager.EnterRegistrationGate(Id, DeviceManager.RegistrationKind.Root,
+                    () => DeviceManager.RemovalOutcome.Removed, null, out _)?.Dispose());
+        }
+        finally { DeviceManager.PnpLockHook = null; }
         Report("mutex stand-in: open, wait, release, close", runs, () =>
         {
             using var m = new Mutex(false, name);

@@ -60,6 +60,13 @@ internal static class Offline
         public bool InstallWaitFails, RefuseRegistration;
         /// <summary>REMOVED registrations the SDK asked for.</summary>
         public int Registrations;
+        /// <summary>Pending installs that a 0 ms test under the first hold
+        /// of the lock sees, and nothing else does.</summary>
+        public bool BusyUnderFirstLock;
+        /// <summary>The stand-in lock: held now, times taken, and what ran
+        /// under it that must not.</summary>
+        public bool LockHeld;
+        public int LockTakes, WaitsUnderLock;
 
         public readonly Stopwatch Clock = new();
         readonly object _lock = new();
@@ -132,7 +139,9 @@ internal static class Offline
         /// install is pending, WAIT_TIMEOUT when the timeout ends first.</summary>
         public uint WaitInstalls(uint timeoutMs)
         {
+            if (LockHeld && timeoutMs > 0) WaitsUnderLock++;
             if (InstallWaitFails) return WAIT_FAILED;
+            if (BusyUnderFirstLock && LockHeld && LockTakes == 1) return WAIT_TIMEOUT;
             var waited = Stopwatch.StartNew();
             while (true)
             {
@@ -142,11 +151,26 @@ internal static class Offline
             }
         }
 
+        public IDisposable Lock()
+        {
+            LockHeld = true;
+            LockTakes++;
+            return new Release(this);
+        }
+
+        sealed class Release : IDisposable
+        {
+            readonly Sequence _s;
+            public Release(Sequence s) => _s = s;
+            public void Dispose() => _s.LockHeld = false;
+        }
+
         public void Hook()
         {
             DeviceManager.LocateHook = Locate;
             DeviceManager.RemovedHook = Register;
             DeviceManager.InstallQueueHook = WaitInstalls;
+            DeviceManager.PnpLockHook = Lock;
         }
 
         public void End()
@@ -154,6 +178,7 @@ internal static class Offline
             DeviceManager.LocateHook = null;
             DeviceManager.RemovedHook = null;
             DeviceManager.InstallQueueHook = null;
+            DeviceManager.PnpLockHook = null;
             _timer?.Dispose();
         }
     }
@@ -175,26 +200,41 @@ internal static class Offline
         finally { s.End(); }
     }
 
-    static (DeviceManager.RegistrationGate Gate, long Ms, int Removals) Gate(Sequence s, bool owned = true,
-                                                                            bool removalBegins = false, int installWaitMs = 30_000)
+    /// <summary>Removals, prefix checks and install waits seen while the
+    /// stand-in lock was held, over every gate run.</summary>
+    static int s_underLock;
+
+    /// <summary>One gate run. It returns when the gate would let the caller
+    /// register: Held says whether the stand-in lock is held then, as it
+    /// must be.</summary>
+    static (DeviceManager.RegistrationGate Gate, long Ms, int Removals, bool Held, int Takes) Gate(Sequence s, bool owned = true,
+        bool removalBegins = false, int installWaitMs = 30_000, Func<bool, bool>? rivals = null,
+        DeviceManager.RegistrationKind kind = DeviceManager.RegistrationKind.Root)
     {
         int removals = 0;
         s.Hook();
         try
         {
             if (!removalBegins) s.Begin();
-            var gate = DeviceManager.AwaitRegistrationGate(Id, () =>
+            Func<bool, bool>? checkedRivals = rivals == null ? null : remove =>
+            {
+                if (s.LockHeld && remove) s_underLock++;
+                return rivals(remove);
+            };
+            using var hold = DeviceManager.EnterRegistrationGate(Id, kind, () =>
             {
                 removals++;
+                if (s.LockHeld) s_underLock++;
                 if (!owned) return null;
-                // As DeviceManager.RemovePriorLife does it: the watch
-                // registers before the removal starts, and its test is the
-                // one wait.
+                // As DeviceManager.RemovePriorLife does it: the watch starts
+                // before the removal, and its test is the one wait.
                 using var watch = DeviceManager.RemovalWatch.Start(Id);
                 if (removalBegins) s.Begin();
-                return watch.Wait(uninstalls: true, 5000);
-            }, installWaitMs: installWaitMs);
-            return (gate, s.Now, removals);
+                return watch.Wait(uninstalls: kind == DeviceManager.RegistrationKind.Root, 5000);
+            }, checkedRivals, out var decision, installWaitMs);
+            bool held = hold != null && s.LockHeld;
+            s_underLock += s.WaitsUnderLock;
+            return (decision, s.Now, removals, held, s.LockTakes);
         }
         finally { s.End(); }
     }
@@ -301,8 +341,8 @@ internal static class Offline
         // The registration gate.
         var sG1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };
         var g1 = Gate(sG1);
-        Check("gate: prior life out of the tree at 0, REMOVED at 200, record gone at 300 -> allowed at 300",
-              g1.Gate == DeviceManager.RegistrationGate.Allowed && Within(g1.Ms, 300),
+        Check("gate: prior life out of the tree at 0, REMOVED at 200, record gone at 300 -> allowed at 300, under the lock",
+              g1.Gate == DeviceManager.RegistrationGate.Allowed && Within(g1.Ms, 300) && g1.Held,
               $"{g1.Gate} at {g1.Ms} ms, {g1.Removals} prior-life removal(s)");
         Check("gate: the prior life's removal ran once", g1.Removals == 1, $"{g1.Removals}");
         Check("gate: a prior life out of the tree at the gate opens no REMOVED registration", sG1.Registrations == 0,
@@ -356,6 +396,37 @@ internal static class Offline
             Check("every call that registers, removes or uninstalls a devnode is under the PnP lock",
                   outside.Count == 0 && sites > 0,
                   outside.Count == 0 ? $"{sites} call sites" : string.Join(" | ", outside));
+
+        // Under the lock nothing is removed and nothing waited for: what came
+        // back sends the gate round again, without the lock.
+        int rivalChecks = 0;
+        var g9 = Gate(new Sequence { AbsentBefore = true }, rivals: remove => remove || ++rivalChecks > 1);
+        Check("gate: a rival back when the lock is taken -> the lock let go, removed outside, allowed on the second take",
+              g9.Gate == DeviceManager.RegistrationGate.Allowed && g9.Held && g9.Takes == 2,
+              $"{g9.Gate}, {g9.Takes} takes of the lock");
+        var g10 = Gate(new Sequence { AbsentBefore = true }, rivals: remove => remove);
+        Check("gate: a rival back every time -> refused after 3 takes of the lock, the lock let go",
+              g10.Gate == DeviceManager.RegistrationGate.Refused && !g10.Held && g10.Takes == 3,
+              $"{g10.Gate}, {g10.Takes} takes, held {g10.Held}");
+        var g11 = Gate(new Sequence { AbsentBefore = true, BusyUnderFirstLock = true });
+        Check("gate: an install pending under the lock with time left -> the lock let go, allowed on the second take",
+              g11.Gate == DeviceManager.RegistrationGate.Allowed && g11.Held && g11.Takes == 2,
+              $"{g11.Gate}, {g11.Takes} takes");
+
+        // A software device's record stays by design: a phantom one is not
+        // removed, a prior life in the tree is, and must pass its test.
+        var g12 = Gate(new Sequence { OutOfTreeBefore = true, RecordGoneAt = null }, kind: DeviceManager.RegistrationKind.Software);
+        Check("gate, software device: a record with no devnode -> allowed without a removal",
+              g12.Gate == DeviceManager.RegistrationGate.Allowed && g12.Removals == 0 && g12.Held,
+              $"{g12.Gate}, {g12.Removals} removal(s)");
+        var g13 = Gate(new Sequence { LeavesTree = 50, RemovedAt = 150, RecordGoneAt = null }, removalBegins: true,
+                       kind: DeviceManager.RegistrationKind.Software);
+        Check("gate, software device: a prior life in the tree, out at 50, REMOVED at 150, record kept -> allowed at 150",
+              g13.Gate == DeviceManager.RegistrationGate.Allowed && Within(g13.Ms, 150) && g13.Removals == 1,
+              $"{g13.Gate} at {g13.Ms} ms, {g13.Removals} removal(s)");
+
+        Check("gate: no removal, prefix removal or install wait ran under the lock in any gate run",
+              s_underLock == 0, $"{s_underLock}");
 
         int locates, cancels;
         lock (s_flags)
