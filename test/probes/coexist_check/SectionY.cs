@@ -49,6 +49,9 @@
 //        starts on index 0. Moved to the installed driver, its controller's
 //        watch connects to a pipe it cannot vouch for, and a sweep still
 //        leaves the running program's devices alone.
+//    Y10. The driver's values name a process created after they were
+//        written, as a reused process id would, and the user holds the
+//        killed program's pipe name: the sweep removes the devices.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -82,6 +85,7 @@ internal static partial class Program
             SectionYStale(installed);
             SectionYAckKept(installed);
             SectionYPreSquat(user, installed);
+            SectionYReused(user);
         }
         finally { Y.CloseHandle(user); }
     }
@@ -118,6 +122,41 @@ internal static partial class Program
         Check("Y9: a sweep leaves the running program's devices", tree.Count > 0 && tree.All(Native.IsPresent),
               string.Join(", ", tree.Where(d => !Native.IsPresent(d))));
         Check("Y9: and its input keeps flowing", cap != null && !cap.Broken && Flows(cap));
+    }
+
+    /// <summary>Y10. Values that name a process created after them.</summary>
+    static void SectionYReused(IntPtr user)
+    {
+        Clean();
+        string inst, tok;
+        int t;
+        using (var c = PeerProcess.Start("Y-reused-killed"))
+        {
+            string cc = c.Send("create pad F1F8 coexist-y-reused");
+            if (!Ok(cc)) { Check("Y10: a program creates", false, cc); return; }
+            inst = PeerProcess.Field(cc, "instance")!;
+            t = int.Parse(PeerProcess.Field(cc, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            c.Kill();
+        }
+        var tree = Native.Subtree(inst);
+        WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000);
+        using var later = PeerProcess.Start("Y-reused-later");
+        // The values name this later, elevated process. The key's write time
+        // is set back before it started, as if the driver had recorded a
+        // server whose id this process took over.
+        bool planted = Y.PlantWatch(inst, later.Pid, "S-1-5-32-544", Y.ProcessCreated(later.Pid).AddSeconds(-5));
+        Check("Y10: the values name a process created after they were written", planted, Y.ShowWatch(inst));
+        using var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t));
+        Check($"Y10: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
+        string? entry = Y.CensusEntry(later.Send("census"), tok);
+        Check("Y10: the census does not count the pipe as a running program's",
+              entry?.Split('|')[2] == "Dead", entry ?? "no entry");
+        later.Send("sweep");
+        WaitFor(() => tree.All(Native.IsGone), 5000);
+        Check("Y10: the sweep removes the killed program's devices", tree.Count > 0 && tree.All(Native.IsGone),
+              string.Join(", ", tree.Where(d => !Native.IsGone(d))));
     }
 
     /// <summary>Y7. The acknowledgement section of a killed v1.12.0
@@ -511,6 +550,37 @@ internal static partial class Program
         internal static string ShowWatch(string instanceId) => WatchValues(instanceId) is { } w
             ? $"connected={w.Connected?.ToString() ?? "-"} pid={w.Pid?.ToString() ?? "-"} owner={w.Owner ?? "-"}"
             : "no values";
+
+        /// <summary>Write the three values as the driver writes them for a
+        /// connected watch, then set the key's last-write time
+        /// (ZwSetInformationKey, KeyWriteTimeInformation).</summary>
+        internal static bool PlantWatch(string instanceId, int pid, string owner, DateTime written)
+        {
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{WatchSubkey}", writable: true);
+                if (k == null) return false;
+                k.SetValue("OwnerProcessId", pid, RegistryValueKind.DWord);
+                k.SetValue("OwnerPipeOwner", owner, RegistryValueKind.String);
+                k.SetValue("OwnerConnected", 1, RegistryValueKind.DWord);
+                long ft = written.ToFileTimeUtc();
+                return NtSetInformationKey(k.Handle, 0 /*KeyWriteTimeInformation*/, ref ft, 8) == 0;
+            }
+            catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                Console.WriteLine($"    cannot plant the values: {e.Message}");
+                return false;
+            }
+        }
+
+        internal static DateTime ProcessCreated(int pid)
+        {
+            using var p = Process.GetProcessById(pid);
+            return p.StartTime.ToUniversalTime();
+        }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtSetInformationKey(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, int infoClass, ref long info, int length);
 
         internal static bool DeleteWatchValues(string instanceId)
         {

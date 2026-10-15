@@ -226,17 +226,19 @@ internal sealed partial class OwnerCensus
     }
 
     /// <summary>What a device's driver recorded about its owner watch:
-    /// connected or not, and while connected the server's process id and
-    /// the pipe's owner SID.</summary>
-    internal sealed record OwnerWatch(bool Connected, int ProcessId, string PipeOwner);
+    /// connected or not, while connected the server's process id and the
+    /// pipe's owner SID, and when the values were last written.</summary>
+    internal sealed record OwnerWatch(bool Connected, int ProcessId, string PipeOwner, DateTime WrittenUtc);
 
-    /// <summary>The server a driver named, judged now. Alive: the process
-    /// runs, or exists and this process may not open it. Elevated: its
-    /// token's TokenElevation, null when the token cannot be read.
-    /// Trusted: alive, and an elevated token made the pipe, which the
-    /// pipe's owner shows. Administrators or SYSTEM own what an elevated
-    /// token makes, unless policy makes administrators own their objects
-    /// themselves. Then the server's elevated token must own it, as it does
+    /// <summary>The server a driver named, judged now. Alive: a process
+    /// with that id runs and was created before the driver wrote the
+    /// values, so it is the server the driver saw and not one that took
+    /// over its id, or a process exists that this one may not open.
+    /// Elevated: its token's TokenElevation, null when the token cannot be
+    /// read. Trusted: alive, elevated, and an elevated token made the pipe,
+    /// which the pipe's owner shows. Administrators or SYSTEM own what an
+    /// elevated token makes, unless policy makes administrators own their
+    /// objects themselves. Then the server's token must own it, as it does
     /// a pipe it made, and a pipe a thread of that process made while
     /// impersonating another token does not pass. Trusted is reported, not
     /// acted on (<see cref="LegacyPipeLive"/>).</summary>
@@ -252,10 +254,14 @@ internal sealed partial class OwnerCensus
         {
             using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters\{OwnerWatchSubkey}");
             if (k?.GetValue("OwnerConnected") is not int connected) return null;
-            if (connected == 0) return new OwnerWatch(false, 0, "");
-            return k.GetValue("OwnerProcessId") is int pid && k.GetValue("OwnerPipeOwner") is string owner
-                ? new OwnerWatch(true, pid, owner)
-                : null;
+            if (connected == 0) return new OwnerWatch(false, 0, "", default);
+            if (k.GetValue("OwnerProcessId") is not int pid || k.GetValue("OwnerPipeOwner") is not string owner) return null;
+            // The driver writes OwnerConnected last, so the key's last write
+            // is the connect.
+            if (RegQueryInfoKey(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out long written) != 0)
+                return null;
+            return new OwnerWatch(true, pid, owner, DateTime.FromFileTimeUtc(written));
         }
         // OpenSubKey throws SecurityException on access denied, GetValue
         // IOException on a deleted key and UnauthorizedAccessException on
@@ -278,11 +284,13 @@ internal sealed partial class OwnerCensus
         {
             // An id no process has fails with ERROR_INVALID_PARAMETER.
             bool exists = Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED;
-            return new ServerCheck(exists, null, exists && privilegedOwner);
+            return new ServerCheck(exists, null, false);
         }
         try
         {
-            bool alive = GetExitCodeProcess(process, out uint code) && code == STILL_ACTIVE;
+            bool alive = GetExitCodeProcess(process, out uint code) && code == STILL_ACTIVE
+                && GetProcessTimes(process, out long created, out _, out _, out _)
+                && DateTime.FromFileTimeUtc(created) <= w.WrittenUtc;
             bool? elevated = null;
             string? tokenOwner = null;
             if (OpenProcessToken(process, TOKEN_QUERY, out IntPtr token))
@@ -295,8 +303,8 @@ internal sealed partial class OwnerCensus
                 }
                 finally { CloseHandle(token); }
             }
-            bool trusted = alive && (privilegedOwner
-                || (elevated == true && string.Equals(tokenOwner, w.PipeOwner, StringComparison.OrdinalIgnoreCase)));
+            bool trusted = alive && elevated == true
+                && (privilegedOwner || string.Equals(tokenOwner, w.PipeOwner, StringComparison.OrdinalIgnoreCase));
             return new ServerCheck(alive, elevated, trusted);
         }
         finally { CloseHandle(process); }
@@ -532,4 +540,13 @@ internal sealed partial class OwnerCensus
 
     [LibraryImport("kernel32.dll")]
     private static partial IntPtr LocalFree(IntPtr memory);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "RegQueryInfoKeyW")]
+    private static partial int RegQueryInfoKey(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, IntPtr className, IntPtr classLength,
+        IntPtr reserved, IntPtr subKeys, IntPtr maxSubKeyLength, IntPtr maxClassLength, IntPtr values, IntPtr maxValueNameLength,
+        IntPtr maxValueLength, IntPtr securityDescriptorLength, out long lastWriteTime);
 }
