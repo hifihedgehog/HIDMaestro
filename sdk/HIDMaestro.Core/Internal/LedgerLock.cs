@@ -96,14 +96,17 @@ internal sealed partial class LedgerLock : IDisposable
                 return;
             }
             _legacy = h;
-            // The owner is SYSTEM or Administrators for a v1.12.0 program's
-            // mutex, whose creator is elevated. A mutex this process made is
-            // owned by Administrators too, from its O:BA. Another owner means
-            // a program that is not elevated took the name. It is waited for,
-            // bounded: longer than v1.12.0 holds the mutex (it holds it only
-            // while it writes a few registry values), so a v1.12.0 holder
-            // that this check cannot read as its own under the object-creator
-            // policy still serializes, and a squatter costs only the wait.
+            // A mutex this process made is owned by Administrators, from its
+            // O:BA, and a v1.12.0 program's mutex by its creator's default
+            // owner: SYSTEM for a service, Administrators for an elevated
+            // program on most hosts, and the user where UAC makes the user
+            // the owner (KB 947721). Another owner says only that this
+            // release did not create the mutex, whether a squatter or such a
+            // v1.12.0 program did. It is waited for, bounded: longer than
+            // v1.12.0 holds the mutex (it holds it only while it writes a few
+            // registry values), so a v1.12.0 holder that this check cannot
+            // read as its own still serializes, and a squatter costs only the
+            // wait.
             bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
             bool marked = s_legacyHeldByOther;
             uint timeout = administrative ? INFINITE

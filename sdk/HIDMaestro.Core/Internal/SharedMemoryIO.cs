@@ -138,8 +138,7 @@ internal static partial class SharedMemoryIO
     // owner is set to Administrators (O:BA), so the object's owner is
     // Administrators whatever the machine's "default owner for objects
     // created by members of the Administrators group" policy says, and an
-    // owner check tells this object from one a program that is not elevated
-    // made.
+    // owner check tells this object from one this release did not create.
     private const string Sddl =
         "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
 
@@ -1286,11 +1285,12 @@ internal static partial class SharedMemoryIO
     private static bool DriverCreates(string eventKind) => eventKind is "OutputEvent" or "StopEvent";
 
     /// <summary>The first of a transport index's named sections and events
-    /// that is owned by neither SYSTEM nor Administrators (nor, for the
-    /// driver's two events, LocalService), or null when there is none. That
-    /// is a program that is not elevated, or, under the object-creator
-    /// default-owner policy, a v1.12.0 program, whose descriptors name no
-    /// owner and so leave its objects owned by the user.
+    /// that this release did not create, or null when there is none: one
+    /// owned by neither SYSTEM nor Administrators (nor, for the driver's two
+    /// events, LocalService), or one that does not open as its own kind or
+    /// for READ_CONTROL. Who made it is not known: a program that is not
+    /// elevated, a service, or any elevated program on a host whose default
+    /// owner is the user (KB 947721), a v1.12.0 program included.
     /// Any local program can create a <c>Global\</c> event, or take a
     /// section's name with an object of another kind, before HIDMaestro
     /// does, and keep it. The driver and the SDK would then signal and wait
