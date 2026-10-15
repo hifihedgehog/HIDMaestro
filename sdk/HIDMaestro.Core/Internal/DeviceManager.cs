@@ -762,6 +762,8 @@ public static partial class DeviceManager
             }
 
             DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix}; removing it before create");
+            // An SWD rival whose helper cannot be staged throws here, and the
+            // create fails with the reason instead of returning no device.
             RemoveDevice(rival, timeoutMs: 120_000, forceFallbacks: true);
 
             bool stillThere;
@@ -786,6 +788,10 @@ public static partial class DeviceManager
     /// Enumerates HID children first and removes them individually via DIF_REMOVE,
     /// then removes the parent. This prevents ghost HID children from surviving.
     /// </summary>
+    /// <exception cref="InvalidOperationException">An SWD parent's removal
+    /// needs hmswd.exe, and it could not be staged or held
+    /// (<see cref="SwdDeviceFactory.Remove"/>). Thrown before any wait, with
+    /// the device left in place.</exception>
     public static bool RemoveDevice(string instanceId, int timeoutMs = 5000, bool fast = false, bool forceFallbacks = false)
     {
         if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS &&

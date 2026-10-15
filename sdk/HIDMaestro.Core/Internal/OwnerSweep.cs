@@ -476,7 +476,7 @@ internal static class OwnerSweep
         foreach (var g in groups)
         {
             try { remove(g); }
-            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    removing {g.Key} threw {ex.GetType().Name}"); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    removing {g.Key} threw {ex.GetType().Name}: {ex.Message}"); }
         }
     }
 
@@ -495,7 +495,7 @@ internal static class OwnerSweep
                 removed.AddRange(DeviceManager.ChildIdsOf(id));
                 DeviceManager.RemoveDevice(id, timeoutMs: 120_000, forceFallbacks: true);
             }
-            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    reclaim RemoveDevice({id}) threw {ex.GetType().Name}"); }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    reclaim RemoveDevice({id}) threw {ex.GetType().Name}: {ex.Message}"); }
         }
         return AllGone(removed);
     }

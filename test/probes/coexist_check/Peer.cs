@@ -34,8 +34,19 @@
 //                               process and reply with its directory, last
 //                               on the line so a path with spaces survives
 //   swdhelper                   stage hmswd.exe the way a device create does
-//                               (SwdDeviceFactory.EnsureHelperExtracted) and
+//                               (SwdDeviceFactory.PinHelper, or
+//                               EnsureHelperExtracted before v1.13.0) and
 //                               reply with its path, last on the line
+//   swdpin                      take the hold a device create runs hmswd.exe
+//                               under (SwdDeviceFactory.PinHelper) and, while
+//                               it is held, try to open the helper for
+//                               writing, rename it, and rename its
+//                               directory, the build's directory above it,
+//                               Staging and the folder above Staging,
+//                               putting back any that moves:
+//                               write=<refused|opened> file=, leaf=,
+//                               version=, staging=, root=<refused|moved>,
+//                               then the path, last on the line
 //   failpump                    the next composite's device emulator
 //                               throws right after its input pump starts
 //   pausemapping                the next create stops before it maps its
@@ -127,6 +138,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -287,10 +299,73 @@ internal static class Peer
                         // report its path. Internal on every release, so
                         // reflection reaches it.
                         var swd = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SwdDeviceFactory");
-                        var m = swd?.GetMethod("EnsureHelperExtracted", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
-                        if (m == null) { Reply("ERR swdhelper no SwdDeviceFactory.EnsureHelperExtracted"); break; }
-                        string? path = (string?)m.Invoke(null, null);
+                        var pinHelper = swd?.GetMethod("PinHelper", BindingFlags.NonPublic | BindingFlags.Static);
+                        string? path;
+                        if (pinHelper != null)
+                        {
+                            var args = new object?[] { null };
+                            IDisposable? held;
+                            try { held = pinHelper.Invoke(null, args) as IDisposable; }
+                            catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                            using (held)
+                                path = args[0] as string;
+                            if (path == "") path = null;
+                        }
+                        else
+                        {
+                            var m = swd?.GetMethod("EnsureHelperExtracted", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static, Type.EmptyTypes);
+                            if (m == null) { Reply("ERR swdhelper no SwdDeviceFactory.PinHelper or EnsureHelperExtracted"); break; }
+                            path = (string?)m.Invoke(null, null);
+                        }
                         Reply(path == null ? "ERR swdhelper none" : $"OK swdhelper path={path}");
+                        break;
+                    }
+                    case "swdpin":
+                    {
+                        var swd = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SwdDeviceFactory");
+                        var pinHelper = swd?.GetMethod("PinHelper", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (pinHelper == null) { Reply("ERR swdpin no SwdDeviceFactory.PinHelper"); break; }
+                        var args = new object?[] { null };
+                        IDisposable? held;
+                        try { held = pinHelper.Invoke(null, args) as IDisposable; }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                        using var pin = held;
+                        string path = args[0] as string ?? "";
+                        if (pin == null || path == "") { Reply("ERR swdpin none"); break; }
+                        // This process is elevated, so only the hold's
+                        // sharing, and NTFS's refusal to rename a folder
+                        // with an open handle below it, can stop these.
+                        string leaf = Path.GetDirectoryName(path)!;
+                        string version = Path.GetDirectoryName(leaf)!;
+                        string staging = Path.GetDirectoryName(version)!;
+                        string root = Path.GetDirectoryName(staging)!;
+                        string TryWrite()
+                        {
+                            try { using var w = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); }
+                            catch (IOException) { return "refused"; }
+                            catch (UnauthorizedAccessException) { return "refused"; }
+                            return "opened";
+                        }
+                        string TryRenameFile()
+                        {
+                            string moved = path + ".coexist-" + Guid.NewGuid().ToString("N");
+                            try { File.Move(path, moved); }
+                            catch (IOException) { return "refused"; }
+                            catch (UnauthorizedAccessException) { return "refused"; }
+                            File.Move(moved, path);
+                            return "moved";
+                        }
+                        string TryRename(string dir)
+                        {
+                            string moved = dir + ".coexist-" + Guid.NewGuid().ToString("N");
+                            try { Directory.Move(dir, moved); }
+                            catch (IOException) { return "refused"; }
+                            catch (UnauthorizedAccessException) { return "refused"; }
+                            Directory.Move(moved, dir);
+                            return "moved";
+                        }
+                        Reply($"OK swdpin write={TryWrite()} file={TryRenameFile()} leaf={TryRename(leaf)} version={TryRename(version)} " +
+                              $"staging={TryRename(staging)} root={TryRename(root)} path={path}");
                         break;
                     }
                     case "spawnchild":

@@ -110,9 +110,10 @@ internal static class SwdDeviceFactory
         int callbackTimeoutMs = 35000,
         string? enumeratorName = null)
     {
-        string? helperPath = EnsureHelperExtracted();
-        if (helperPath == null || !File.Exists(helperPath))
-            return new Result(false, null, unchecked((int)0x80070002)); // ERROR_FILE_NOT_FOUND
+        // Held until the last attempt's helper has exited. A helper that
+        // cannot be staged or held throws, with the reason, out to the
+        // create (HMContext.CreateController).
+        using var pin = PinHelper(out string helperPath);
 
         // hmswd expects '|' as the list separator.
         string hwList     = string.Join('|', hardwareIds ?? Array.Empty<string>());
@@ -240,6 +241,11 @@ internal static class SwdDeviceFactory
     /// <c>HKLM\SYSTEM\CurrentControlSet\Enum\&lt;instanceId&gt;</c>. If
     /// the registry entry is missing, the device is already fully gone.
     /// </summary>
+    /// <exception cref="InvalidOperationException">hmswd.exe could not be
+    /// staged or held (<see cref="PinHelper"/>), with the reason. Nothing
+    /// was removed. Thrown before any wait, so a create that removes a rival
+    /// or a stale companion fails at once with the reason, and a teardown
+    /// logs it and goes on.</exception>
     public static int Remove(string instanceId)
     {
         if (instanceId == null) return unchecked((int)0x80070057); // E_INVALIDARG
@@ -280,9 +286,11 @@ internal static class SwdDeviceFactory
                 return unchecked((int)0x80004005); // E_FAIL: no container, can't reconnect
         }
 
-        string? helperPath = EnsureHelperExtracted();
-        if (helperPath == null || !File.Exists(helperPath))
-            return unchecked((int)0x80070002); // ERROR_FILE_NOT_FOUND
+        // Held until the helper has exited. A helper that cannot be staged
+        // or held throws to the caller: no other step removes an SWD device
+        // whose lifetime is tied to its parent, so a fallback would only
+        // wait for a removal that never started.
+        using var pin = PinHelper(out string helperPath);
 
         var psi = new ProcessStartInfo
         {
@@ -337,46 +345,64 @@ internal static class SwdDeviceFactory
     private static string? s_extractedPath;
     private static string? s_expectedSha256;
 
+    /// <summary>Stage <c>hmswd.exe</c> when this process has not, pin its
+    /// directory and every directory above it and hold the file
+    /// (<see cref="ProtectedStaging.PinFile"/>), checked against the
+    /// embedded hash through the hold. Every run of the helper happens
+    /// inside the pin this returns, so the file checked is the file that
+    /// runs. A staged copy that fails is staged again once.</summary>
+    /// <exception cref="InvalidOperationException">The helper could not be
+    /// staged or held, with the reason: a staging refusal
+    /// (<see cref="ProtectedStaging.DirFor"/>), a directory or file that
+    /// could not be opened, or a file that does not match.</exception>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    internal static ProtectedStaging.Pinned PinHelper(out string helperPath)
+    {
+        lock (s_extractLock)
+        {
+            if (s_extractedPath != null && s_expectedSha256 != null)
+            {
+                try
+                {
+                    var pin = ProtectedStaging.PinFile(s_extractedPath, s_expectedSha256);
+                    helperPath = s_extractedPath;
+                    return pin;
+                }
+                catch (InvalidOperationException e)
+                {
+                    // Changed, gone or unprotected: stage it again below.
+                    DeviceOrchestrator.LogDiag($"SwdDeviceFactory: staging hmswd.exe again: {e.Message}");
+                    s_extractedPath = null;
+                }
+            }
+            string path = Stage();
+            var staged = ProtectedStaging.PinFile(path, s_expectedSha256!);
+            helperPath = path;
+            return staged;
+        }
+    }
+
     /// <summary>Stage <c>hmswd.exe</c> from the embedded resources into the
-    /// protected per-version staging directory and return its path, or null
-    /// on failure. Its SHA-256 is verified against the embedded bytes when it
-    /// is staged, so the file the helper process runs from matches what
-    /// shipped inside HIDMaestro.Core.dll.
+    /// protected per-version staging directory and return its path. Its
+    /// SHA-256 is verified against the embedded bytes when it is staged, and
+    /// again under the pin at each use (<see cref="PinHelper"/>). Called
+    /// under <c>s_extractLock</c>. Throws what the staging throws.
     ///
     /// <para>There is no longer a sibling-to-the-assembly fast path: it read
     /// <c>Assembly.Location</c>, which is empty in a single-file or NativeAOT
     /// app, and it trusted whatever <c>hmswd.exe</c> sat next to the DLL. The
     /// helper always comes from the embedded resource now, which is both
     /// single-file-safe and the source whose bytes are verified.</para></summary>
-    internal static string? EnsureHelperExtracted()
+    private static string Stage()
     {
-        lock (s_extractLock)
-        {
-            // Every caller runs the helper elevated right after this returns,
-            // so the staged file is checked against the embedded hash each
-            // time, not only when it was first staged.
-            if (s_extractedPath != null && s_expectedSha256 != null)
-            {
-                try
-                {
-                    ProtectedStaging.VerifyBeforeUse(s_extractedPath, s_expectedSha256);
-                    return s_extractedPath;
-                }
-                catch { s_extractedPath = null; } // changed or gone: stage again
-            }
-
-            try
-            {
-                var asm = typeof(SwdDeviceFactory).Assembly;
-                string logical = DriverBuilder.NativePrefix + HelperFile;
-                string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationSwd);
-                s_expectedSha256 ??= ProtectedStaging.EmbeddedSha256(asm, logical);
-                ProtectedStaging.StageResource(dir, HelperFile, asm, logical);
-                s_extractedPath = Path.Combine(dir, HelperFile);
-                return s_extractedPath;
-            }
-            catch { return null; }
-        }
+        var asm = typeof(SwdDeviceFactory).Assembly;
+        string logical = DriverBuilder.NativePrefix + HelperFile;
+        string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationSwd);
+        s_expectedSha256 ??= ProtectedStaging.EmbeddedSha256(asm, logical);
+        ProtectedStaging.StageResource(dir, HelperFile, asm, logical);
+        s_extractedPath = Path.Combine(dir, HelperFile);
+        return s_extractedPath;
     }
 
     private static bool IsHex(char c) =>

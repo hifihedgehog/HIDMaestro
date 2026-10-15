@@ -44,7 +44,9 @@
 //      owned by Administrators with an OpenVR file held open, is reset
 //      where it is, one a program that is not elevated made is moved aside,
 //      or refused when it cannot move, and the OpenVR driver's files come
-//      back at their registered path.
+//      back at their registered path. While hmswd.exe is held for its run,
+//      no process can write or rename it, or rename its directory, the
+//      build's above it or the root.
 //      SectionIDeploy.cs has the detail. Battery S72 runs this section.
 //   J. A record a killed program left names a transport index and an
 //      identity that a running program holds now: a v1.12.0 program, and a

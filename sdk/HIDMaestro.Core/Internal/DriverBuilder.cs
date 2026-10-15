@@ -325,14 +325,18 @@ public static class DriverBuilder
         {
             string tools = EnsureExtracted();
             string package = StagePackage();
-            using var pin = PinForUse(tools, package, driverPackage: true);
-            SignDriversIn(tools, package);
+            using var pin = PinForUse(tools, package, driverPackage: true, signed: null);
+            SignDriversIn(tools, package, pin);
         }
         finally { mutex.ReleaseMutex(); }
         return true;
     }
 
-    private static void SignDriversIn(string tools, string package)
+    /// <summary>Sign the package's two binaries, then hold each under
+    /// <paramref name="pin"/> and record the SHA-256 read through the hold,
+    /// so what the catalog and pnputil read next is what signtool
+    /// wrote.</summary>
+    private static void SignDriversIn(string tools, string package, ProtectedStaging.Pinned pin)
     {
         EnsureTestCertificate();
         string signtool = Path.Combine(tools, "signtool.exe");
@@ -350,7 +354,7 @@ public static class DriverBuilder
                 workingDir: tools);
             if (rc != 0)
                 throw new InvalidOperationException($"signtool failed for {dll}: {output}");
-            signed[dll] = ProtectedStaging.FileSha256(path);
+            signed[dll] = pin.HoldAndHash(path);
         }
         s_signedPackage = signed;
     }
@@ -362,16 +366,18 @@ public static class DriverBuilder
 
     /// <summary>This build's package: the one the last signing in this
     /// process left, when its binaries still carry the bytes that signing
-    /// wrote (<paramref name="signed"/> true), or one staged fresh, to be
-    /// signed under the pin (false). Its INFs are checked against the
-    /// embedded bytes and its catalogs removed either way. Runs no tool. The
-    /// caller holds the deploy lock.</summary>
-    private static string PackageLocked(out bool signed)
+    /// wrote (<paramref name="signed"/> names them and their hashes, which
+    /// <see cref="PinForUse"/> checks again under the pin), or one staged
+    /// fresh, to be signed under the pin (null). Its INFs are restaged from
+    /// the embedded bytes and its catalogs removed either way. Runs no tool.
+    /// The caller holds the deploy lock.</summary>
+    private static string PackageLocked(out IReadOnlyDictionary<string, string>? signed)
     {
         string dir = ProtectedStaging.DirFor(ProtectedStaging.OperationPackage);
         signed = s_signedPackage is { Count: > 0 } last
-            && last.All(kv => ProtectedStaging.Matches(Path.Combine(dir, kv.Key), kv.Value));
-        if (signed)
+            && last.All(kv => ProtectedStaging.Matches(Path.Combine(dir, kv.Key), kv.Value))
+            ? last : null;
+        if (signed != null)
         {
             foreach (string cat in Directory.GetFiles(dir, "*.cat"))
                 File.Delete(cat);
@@ -383,23 +389,30 @@ public static class DriverBuilder
         return StagePackage();
     }
 
-    /// <summary>Hold the tools directory and <paramref name="package"/>, and
-    /// every directory above them up to the root, for their use
-    /// (<see cref="ProtectedStaging.Pin"/>), then check every staged tool
-    /// file, and the INFs of this build's own package, against the embedded
-    /// bytes again. A mismatch here is a change made since they were staged,
-    /// and nothing runs.</summary>
-    private static ProtectedStaging.Pinned PinForUse(string tools, string package, bool driverPackage)
+    /// <summary>Pin the tools directory and <paramref name="package"/>, and
+    /// every directory above them up to the root
+    /// (<see cref="ProtectedStaging.Pin"/>), then hold every staged tool
+    /// file, the INFs of this build's own package, and the binaries an
+    /// earlier signing left (<paramref name="signed"/>), each checked
+    /// through its hold against the embedded bytes or the hash the signing
+    /// recorded (<see cref="ProtectedStaging.Pinned.Hold"/>). A mismatch here
+    /// is a change made since they were staged or signed, and nothing
+    /// runs.</summary>
+    private static ProtectedStaging.Pinned PinForUse(string tools, string package, bool driverPackage,
+        IReadOnlyDictionary<string, string>? signed)
     {
         var pin = ProtectedStaging.Pin(tools, package);
         try
         {
             var asm = typeof(DriverBuilder).Assembly;
             foreach (var (file, logical) in AllPayload())
-                ProtectedStaging.VerifyBeforeUse(Path.Combine(tools, file), asm, logical);
+                pin.Hold(Path.Combine(tools, file), ProtectedStaging.EmbeddedSha256(asm, logical));
             if (driverPackage)
                 foreach (string inf in PackageInfs)
-                    ProtectedStaging.VerifyBeforeUse(Path.Combine(package, inf), asm, NativePrefix + inf);
+                    pin.Hold(Path.Combine(package, inf), ProtectedStaging.EmbeddedSha256(asm, NativePrefix + inf));
+            if (signed != null)
+                foreach (var (dll, sha) in signed)
+                    pin.Hold(Path.Combine(package, dll), sha);
             return pin;
         }
         catch
@@ -440,16 +453,18 @@ public static class DriverBuilder
         try
         {
             string tools = EnsureExtracted();
-            string package = PackageLocked(out bool signed);
-            using var pin = PinForUse(tools, package, driverPackage: true);
-            if (!signed) SignDriversIn(tools, package);
-            GenerateCatalogsIn(tools, package);
+            string package = PackageLocked(out var signed);
+            using var pin = PinForUse(tools, package, driverPackage: true, signed);
+            if (signed == null) SignDriversIn(tools, package, pin);
+            GenerateCatalogsIn(tools, package, pin);
         }
         finally { mutex.ReleaseMutex(); }
         return true;
     }
 
-    private static void GenerateCatalogsIn(string tools, string package)
+    /// <summary>Catalog the package and sign each catalog, then hold each
+    /// one under <paramref name="pin"/> for pnputil's add.</summary>
+    private static void GenerateCatalogsIn(string tools, string package, ProtectedStaging.Pinned pin)
     {
         string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
         string signtool = Path.Combine(tools, "signtool.exe");
@@ -472,6 +487,7 @@ public static class DriverBuilder
                 workingDir: tools);
             if (rc2 != 0)
                 throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
+            pin.HoldAndHash(cat);
         }
     }
 
@@ -479,14 +495,16 @@ public static class DriverBuilder
     /// directory, with the same Inf2Cat, signtool and test certificate the
     /// driver package uses, such as a profile's WinUSB binding. Inf2Cat
     /// catalogs every INF in the directory it is given, which is why the
-    /// package has a directory of its own.</summary>
-    internal static void CatalogAndSignPackage(string packageDir)
+    /// package has a directory of its own. Each signed catalog is held under
+    /// <paramref name="holder"/>, the caller's pin over the package, until
+    /// pnputil has added it.</summary>
+    internal static void CatalogAndSignPackage(string packageDir, ProtectedStaging.Pinned holder)
     {
         EnsureTestCertificate();
         // Checks every staged tool file, libraries and manifests included,
         // and again under the pin.
         string tools = EnsureExtracted();
-        using var pin = PinForUse(tools, packageDir, driverPackage: false);
+        using var pin = PinForUse(tools, packageDir, driverPackage: false, signed: null);
         string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
         string signtool = Path.Combine(tools, "signtool.exe");
 
@@ -507,6 +525,7 @@ public static class DriverBuilder
                 workingDir: tools);
             if (rc2 != 0)
                 throw new InvalidOperationException($"Catalog sign failed for {cat}: {output2}");
+            holder.HoldAndHash(cat);
         }
     }
 
@@ -646,11 +665,11 @@ public static class DriverBuilder
         // every such host is an orphan.
         DeviceOrchestrator.ReleaseStaleDriverHosts();
         string tools = EnsureExtracted();
-        string package = PackageLocked(out bool signed);
-        using var pin = PinForUse(tools, package, driverPackage: true);
+        string package = PackageLocked(out var signed);
+        using var pin = PinForUse(tools, package, driverPackage: true, signed);
         PnputilHelper.RemoveAllHidMaestroPackages();
-        if (!signed) SignDriversIn(tools, package);
-        GenerateCatalogsIn(tools, package);
+        if (signed == null) SignDriversIn(tools, package, pin);
+        GenerateCatalogsIn(tools, package, pin);
         InstallDriversFrom(package);
         RecordInstalledPayload();
     }
@@ -696,10 +715,10 @@ public static class DriverBuilder
     {
         if (infs.Count == 0) return;
         string tools = EnsureExtracted();
-        string package = PackageLocked(out bool signed);
-        using var pin = PinForUse(tools, package, driverPackage: true);
-        if (!signed) SignDriversIn(tools, package);
-        GenerateCatalogsIn(tools, package);
+        string package = PackageLocked(out var signed);
+        using var pin = PinForUse(tools, package, driverPackage: true, signed);
+        if (signed == null) SignDriversIn(tools, package, pin);
+        GenerateCatalogsIn(tools, package, pin);
         string pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "pnputil.exe");
         foreach (string inf in infs)
         {

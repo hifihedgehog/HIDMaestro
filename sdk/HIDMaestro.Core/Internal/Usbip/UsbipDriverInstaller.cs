@@ -499,35 +499,41 @@ internal static partial class UsbipDriverInstaller
         // calling thread forever, and that thread belongs to the consumer.
         // Out of process it can be given up on, and the transport that was
         // answering is still there to use.
-        string helper = SwdDeviceFactory.EnsureHelperExtracted()
-            ?? throw new InvalidOperationException("hmswd.exe is not available to run the driver update.");
-        var sw = Stopwatch.StartNew();
-        var psi = new ProcessStartInfo
+        // The helper and the package are held, and checked under the hold,
+        // until the helper has exited: the update reads the package's files
+        // while it runs.
+        var sw = new Stopwatch();
+        using (SwdDeviceFactory.PinHelper(out string helper))
+        using (PinUdePackage(inf))
         {
-            FileName = helper,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardError = true,
-            WorkingDirectory = Path.GetDirectoryName(helper)!,
-        };
-        psi.ArgumentList.Add("force-driver");
-        psi.ArgumentList.Add(inf);
-        psi.ArgumentList.Add(UdeHardwareId);
-        using (var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start hmswd.exe."))
-        {
-            // Drained as it comes, so hmswd never blocks on a full pipe
-            // while this waits for it to exit.
-            var stderr = p.StandardError.ReadToEndAsync();
-            if (!p.WaitForExit(TimeoutScale.Apply(90_000)))
+            sw.Start();
+            var psi = new ProcessStartInfo
             {
-                try { p.Kill(entireProcessTree: true); } catch { }
-                throw new TimeoutException(
-                    $"The driver update for {UdeHardwareId} did not return in time; keeping the existing transport.");
+                FileName = helper,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                WorkingDirectory = Path.GetDirectoryName(helper)!,
+            };
+            psi.ArgumentList.Add("force-driver");
+            psi.ArgumentList.Add(inf);
+            psi.ArgumentList.Add(UdeHardwareId);
+            using (var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start hmswd.exe."))
+            {
+                // Drained as it comes, so hmswd never blocks on a full pipe
+                // while this waits for it to exit.
+                var stderr = p.StandardError.ReadToEndAsync();
+                if (!p.WaitForExit(TimeoutScale.Apply(90_000)))
+                {
+                    try { p.Kill(entireProcessTree: true); } catch { }
+                    throw new TimeoutException(
+                        $"The driver update for {UdeHardwareId} did not return in time; keeping the existing transport.");
+                }
+                if (p.ExitCode != 0 && p.ExitCode != 3010)
+                    throw new InvalidOperationException(
+                        $"hmswd force-driver returned {p.ExitCode}: {(stderr.Wait(TimeoutScale.Apply(5_000)) ? stderr.Result.Trim() : "")}");
+                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   driver update returned {p.ExitCode} in {sw.ElapsedMilliseconds} ms.");
             }
-            if (p.ExitCode != 0 && p.ExitCode != 3010)
-                throw new InvalidOperationException(
-                    $"hmswd force-driver returned {p.ExitCode}: {(stderr.Wait(TimeoutScale.Apply(5_000)) ? stderr.Result.Trim() : "")}");
-            DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   driver update returned {p.ExitCode} in {sw.ElapsedMilliseconds} ms.");
         }
 
         while (sw.ElapsedMilliseconds < TimeoutScale.Apply(60_000))
@@ -666,6 +672,27 @@ internal static partial class UsbipDriverInstaller
             ProtectedStaging.StageStream(dir, file, src, PinnedUdeHash(file));
         }
         return Path.Combine(dir, "usbip2_ude.inf");
+    }
+
+    /// <summary>Pin the staged host controller package's directory and
+    /// every directory above it (<see cref="ProtectedStaging.Pin"/>), and
+    /// hold each of its files, checked against its pinned hash through the
+    /// hold.</summary>
+    private static ProtectedStaging.Pinned PinUdePackage(string inf)
+    {
+        string dir = Path.GetDirectoryName(inf)!;
+        var pin = ProtectedStaging.Pin(dir);
+        try
+        {
+            foreach (string file in UdeFiles)
+                pin.Hold(Path.Combine(dir, file), PinnedUdeHash(file));
+            return pin;
+        }
+        catch
+        {
+            pin.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Full path of the usbip2_ude.sys the service is set to load,
@@ -1186,9 +1213,10 @@ internal static partial class UsbipDriverInstaller
     /// <see cref="InstallerArguments"/>.</summary>
     private static void RunSilentInstall(string exePath)
     {
-        // Point-of-use check: the staged installer still matches the pinned
-        // hash right before it runs elevated.
-        ProtectedStaging.VerifyBeforeUse(exePath, InstallerSha256);
+        // Point-of-use check under a pin held until the installer exits: the
+        // staged installer still matches the pinned hash, and its directory
+        // cannot be renamed or replaced while it runs elevated.
+        using var pin = ProtectedStaging.PinFile(exePath, InstallerSha256);
         var psi = new ProcessStartInfo
         {
             FileName = exePath,

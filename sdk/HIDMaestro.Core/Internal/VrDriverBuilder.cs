@@ -289,9 +289,11 @@ internal static class VrDriverBuilder
         // file goes in through a temporary name and a rename, checked
         // against its embedded SHA-256, so a link planted at a file's path
         // is replaced, not written through.
-        // Every folder is repaired first, then all are held for the writes
-        // (ProtectedStaging.Pin): a program holding a handle from before the
-        // repair cannot swap one for a link while the elevated SDK writes.
+        // Every folder is repaired first, then checked again through a
+        // handle (ProtectedStaging.Pin). Users can read these folders, as
+        // SteamVR needs, so any program could block a hold on them, and the
+        // pin holds none: while the SDK writes, only an administrator can
+        // rename or re-permission one.
         string extractRelative = Path.GetRelativePath(ProtectedStaging.HidMaestroRoot, ExtractRoot);
         var targets = new System.Collections.Generic.List<(string Dir, string File, string Name)>();
         foreach (var name in names)

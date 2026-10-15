@@ -24,6 +24,13 @@
 //   I11  The OpenVR driver's folder present and its files gone: a
 //        registration extracts them again at the path SteamVR has
 //        registered. Skipped where SteamVR is not installed.
+//   I12  While a program holds hmswd.exe the way a device create holds it
+//        for the helper's run (SwdDeviceFactory.PinHelper), the helper
+//        cannot be written or renamed, and its directory, the build's
+//        directory above it, Staging and the folder above Staging cannot be
+//        renamed,
+//        even by an elevated process. Until v1.13.0 the helper was checked
+//        and then run with nothing held.
 //
 // I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first and put
 // it back at the end, with the OpenVR install record as it was.
@@ -44,6 +51,26 @@ internal static partial class Program
         SectionI9();
         Clean();
         SectionI10();
+        SectionI12();
+    }
+
+    static void SectionI12()
+    {
+        using var p = PeerProcess.Start("I12");
+        string r = p.Send("swdpin");
+        Check("I12: while the SWD helper is held for its run, its directory cannot be renamed",
+              r.StartsWith("OK ", StringComparison.Ordinal) && r.Contains(" leaf=refused ", StringComparison.Ordinal), r);
+        Check("I12: nor the build's staging directory above it",
+              r.StartsWith("OK ", StringComparison.Ordinal) && r.Contains(" version=refused ", StringComparison.Ordinal), r);
+        Check("I12: nor Staging",
+              r.StartsWith("OK ", StringComparison.Ordinal) && r.Contains(" staging=refused ", StringComparison.Ordinal), r);
+        Check("I12: nor the folder above Staging",
+              r.StartsWith("OK ", StringComparison.Ordinal) && r.Contains(" root=refused ", StringComparison.Ordinal), r);
+        Check("I12: and hmswd.exe itself cannot be opened for writing or renamed",
+              r.StartsWith("OK ", StringComparison.Ordinal) && r.Contains(" write=refused ", StringComparison.Ordinal)
+              && r.Contains(" file=refused ", StringComparison.Ordinal), r);
+        string? path = StagingPath(r);
+        Check("I12: and hmswd.exe is still in place once the hold is released", path != null && File.Exists(path), r);
     }
 
     static string NativePrefix =>

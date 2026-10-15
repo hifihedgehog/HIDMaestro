@@ -986,9 +986,18 @@ DeviceName = ""{deviceName}""
         byte[] inf = [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes(InfText(p))];
         using (var ms = new MemoryStream(inf))
             ProtectedStaging.StageStream(dir, p.InfName, ms, Sha256Hex(inf));
-        DriverBuilder.CatalogAndSignPackage(dir);
 
-        var (rc, output) = PnputilHelper.AddDriver(Path.Combine(dir, p.InfName));
+        // Held from the check of the INF through pnputil's add, so the INF
+        // the catalog signs is the one checked and the package pnputil adds
+        // is the one signed.
+        int rc;
+        string output;
+        string infPath = Path.Combine(dir, p.InfName);
+        using (var pin = ProtectedStaging.PinFile(infPath, Sha256Hex(inf)))
+        {
+            DriverBuilder.CatalogAndSignPackage(dir, pin);
+            (rc, output) = PnputilHelper.AddDriver(infPath);
+        }
         return RecordAdd(p.InfName, OurPackages(), rc, output);
     }
 

@@ -41,16 +41,27 @@ namespace HIDMaestro.Internal;
 /// requested access is compared to the granted access",
 /// ObReferenceObjectByHandle on Learn).</para>
 ///
-/// <para>The elevated uses of staged files run inside a
-/// <see cref="Pin"/>: each directory from the root down to the one in use is
-/// held open without delete sharing, which no rename or delete of those
-/// directories can get past, and is checked again once held, and the file
-/// is checked against its SHA-256 under the pin. The signing tools, the
-/// driver package and the OpenVR extraction take one. A change made
-/// between two uses is found at the next one. Every staged file's SHA-256 is
-/// checked against the embedded or pinned hash after it is written and
-/// again under the pin, so a file that does not match the bytes HIDMaestro
-/// ships never runs.</para>
+/// <para>Every elevated use of a staged file runs inside a
+/// <see cref="Pin"/>. <c>Staging</c> and each directory
+/// below it down to the one in use are held open without delete sharing,
+/// which no rename or delete of them can get past, and the root cannot be
+/// renamed while they are held. The root and the OpenVR folders, which
+/// Users can read, are opened only to be checked, so that no program
+/// without elevation can make a pin fail. Each directory is checked through
+/// its handle. Each file HIDMaestro ships is held for reading with read
+/// sharing only, which no write, rename or delete can get past, and checked
+/// against its SHA-256 through the hold (<see cref="Pinned.Hold"/>). A
+/// driver binary cannot be held while signtool rewrites it: it is checked
+/// right before, and held once signed. A catalog is held once signed. The
+/// pin lasts until the use is over. The signing tools, the driver package, the SWD helper
+/// (<c>SwdDeviceFactory.PinHelper</c>), the usbip-win2 installer, its host
+/// controller package and each WinUSB package take one. The OpenVR
+/// extraction, which writes files for SteamVR and runs none, takes a pin
+/// over folders Users can all read, so it checks them and holds none. A
+/// change made between two uses is found at the next one. Every staged
+/// file's SHA-256 is checked against the embedded or pinned hash after it
+/// is written and again through its hold, so a file that does not match
+/// the bytes HIDMaestro ships never runs.</para>
 ///
 /// <para>Lock order. The staging lock (<see cref="StagingMutexObject"/>) is
 /// a leaf. It is taken under the deploy lock (a deploy's prune, every
@@ -198,12 +209,41 @@ internal static partial class ProtectedStaging
         }
     }
 
-    /// <summary>Directories held open, without delete sharing, for as long
-    /// as staged files in them are used. Dispose releases them.</summary>
+    /// <summary>The directories and files a use of staged files holds open
+    /// (<see cref="Pin"/>, <see cref="Pinned.Hold"/>) for as long as it lasts.
+    /// Dispose releases them.</summary>
     internal sealed class Pinned : IDisposable
     {
         private readonly List<SafeFileHandle> _handles;
         internal Pinned(List<SafeFileHandle> handles) => _handles = handles;
+
+        /// <summary>Hold <paramref name="file"/> (<see cref="HoldFile"/>) and
+        /// check the SHA-256 read through the hold against
+        /// <paramref name="expectedSha256"/>.</summary>
+        /// <exception cref="InvalidOperationException">The file could not be
+        /// held, or does not match.</exception>
+        internal void Hold(string file, string expectedSha256)
+        {
+            var h = HoldFile(file, out string sha);
+            if (!sha.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                h.Dispose();
+                throw new InvalidOperationException(
+                    $"{Path.GetFileName(file)} does not match its expected SHA-256. HIDMaestro will not use it.");
+            }
+            _handles.Add(h);
+        }
+
+        /// <summary>Hold <paramref name="file"/> (<see cref="HoldFile"/>) and
+        /// return its SHA-256, read through the hold. For a file this use
+        /// itself just wrote, such as a binary signtool signed.</summary>
+        internal string HoldAndHash(string file)
+        {
+            var h = HoldFile(file, out string sha);
+            _handles.Add(h);
+            return sha;
+        }
+
         public void Dispose()
         {
             foreach (var h in _handles) h.Dispose();
@@ -211,19 +251,33 @@ internal static partial class ProtectedStaging
         }
     }
 
-    /// <summary>Hold every directory from <c>%ProgramData%\HIDMaestro</c>
-    /// down to each of <paramref name="dirs"/> open for listing, sharing read
-    /// and write but not delete, then check each again: a plain directory
-    /// owned by Administrators or SYSTEM that no other principal can write.
-    /// While held, no program can rename or delete one of them, since a
-    /// rename or delete opens the directory for DELETE and every open must be
-    /// compatible with the sharing of the opens already there (CreateFileW,
-    /// FILE_SHARE_DELETE, on Learn). A handle that asks only for READ_CONTROL
-    /// or WRITE_DAC takes no part in that check, which is why these ask for
-    /// FILE_LIST_DIRECTORY. The caller staged and repaired the directories
-    /// first: a repair moves a directory, which a pin would refuse.</summary>
+    /// <summary>Open every directory from <c>%ProgramData%\HIDMaestro</c>
+    /// down to each of <paramref name="dirs"/> (<see cref="OpenLevel"/>), then
+    /// check each through its handle: a plain directory owned by
+    /// Administrators or SYSTEM that no other principal can write.
+    ///
+    /// <para>Two kinds of open, so that no program without elevation can
+    /// make a pin fail. The root and the OpenVR folders grant Users read, so
+    /// any program can hold them open without sharing. They are opened only
+    /// for READ_CONTROL and FILE_READ_ATTRIBUTES, which the sharing check
+    /// does not weigh: an open for those alone succeeds beside a handle that
+    /// shares nothing (tested offline on a scratch directory,
+    /// CoexistCheck.exe offline OF5). <c>Staging</c> and
+    /// every directory below it grant SYSTEM and Administrators alone, so
+    /// only an administrator can open them, and they are held for listing,
+    /// sharing read and write but not delete. While held, no program can
+    /// rename or delete one of them, since that needs an open for DELETE,
+    /// which must be compatible with the sharing of the opens already there
+    /// (CreateFileW, FILE_SHARE_DELETE, on Learn). Nor can the root be
+    /// renamed while <c>Staging</c> is held below it: NTFS refuses to
+    /// rename a directory that has an open handle under it (tested offline
+    /// on a scratch directory, CoexistCheck.exe offline OF5).</para>
+    ///
+    /// <para>The caller staged and repaired the directories first: a repair
+    /// moves a directory, which a pin would refuse. Files are held with
+    /// <see cref="Pinned.Hold"/>.</para></summary>
     /// <exception cref="InvalidOperationException">A directory could not be
-    /// opened, or is not protected once held.</exception>
+    /// opened, or is not protected once opened.</exception>
     internal static Pinned Pin(params string[] dirs)
     {
         string root = Path.GetFullPath(HidMaestroRoot).TrimEnd('\\');
@@ -248,22 +302,11 @@ internal static partial class ProtectedStaging
         try
         {
             foreach (string dir in chain)
-            {
-                var h = CreateFileW(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
-                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
-                if (h.IsInvalid)
-                {
-                    int err = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
-                    h.Dispose();
+                handles.Add(OpenLevel(dir, HoldsLevel(dir)));
+            for (int i = 0; i < chain.Count; i++)
+                if (!IsProtected(handles[i]))
                     throw new InvalidOperationException(
-                        $"HIDMaestro could not hold {dir} open while it uses the files under it (Win32 error {err}).");
-                }
-                handles.Add(h);
-            }
-            foreach (string dir in chain)
-                if (!IsProtected(dir))
-                    throw new InvalidOperationException(
-                        $"{dir} changed between its repair and its use and is not Administrators/SYSTEM-write-only. HIDMaestro will not use the files under it.");
+                        $"{chain[i]} changed between its repair and its use and is not Administrators/SYSTEM-write-only. HIDMaestro will not use the files under it.");
             return pinned;
         }
         catch
@@ -273,10 +316,139 @@ internal static partial class ProtectedStaging
         }
     }
 
-    private const uint FILE_LIST_DIRECTORY = 0x0001;
-    private const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2;
+    /// <summary>True for the levels a pin holds: <see cref="StagingRoot"/>
+    /// and every directory below it, which only SYSTEM and Administrators
+    /// can open. False for the levels Users can read, which a pin opens only
+    /// to check (<see cref="OpenLevel"/>).</summary>
+    internal static bool HoldsLevel(string dir)
+    {
+        string staging = Path.GetFullPath(StagingRoot).TrimEnd('\\');
+        string full = Path.GetFullPath(dir).TrimEnd('\\');
+        return full.Equals(staging, StringComparison.OrdinalIgnoreCase)
+            || full.StartsWith(staging + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Pin the directory of <paramref name="file"/>, and each of
+    /// <paramref name="moreDirs"/>, with every directory above them
+    /// (<see cref="Pin"/>), then hold the file and check it against
+    /// <paramref name="expectedSha256"/> through the hold
+    /// (<see cref="Pinned.Hold"/>). The caller keeps the pin until its
+    /// elevated use of the file is over: until a process it started has
+    /// exited, or pnputil has added the package.</summary>
+    /// <exception cref="InvalidOperationException">A directory or the file
+    /// could not be opened, a directory is not protected, or the file does
+    /// not match.</exception>
+    internal static Pinned PinFile(string file, string expectedSha256, params string[] moreDirs)
+    {
+        var pin = Pin([Path.GetDirectoryName(file)!, .. moreDirs]);
+        try
+        {
+            pin.Hold(file, expectedSha256);
+            return pin;
+        }
+        catch
+        {
+            pin.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Open one directory of a pin. Held
+    /// (<paramref name="hold"/>): FILE_LIST_DIRECTORY, READ_CONTROL and
+    /// FILE_READ_ATTRIBUTES, sharing read and write but not delete, so no
+    /// program can rename or delete it while the handle is open. Not held:
+    /// READ_CONTROL and FILE_READ_ATTRIBUTES only, which the sharing check
+    /// does not weigh, so no handle another program holds can make the open
+    /// fail, and the handle blocks nothing. Either way the directory itself
+    /// is opened, never a link's target, and the handle can read its
+    /// attributes and security (<see cref="Pin"/>).</summary>
+    /// <exception cref="InvalidOperationException">The open failed.</exception>
+    internal static SafeFileHandle OpenLevel(string dir, bool hold)
+    {
+        uint access = READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE | (hold ? FILE_LIST_DIRECTORY : 0);
+        uint share = FILE_SHARE_READ | FILE_SHARE_WRITE | (hold ? 0 : FILE_SHARE_DELETE);
+        var h = CreateFileW(dir, access, share, IntPtr.Zero,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+        if (h.IsInvalid)
+        {
+            int err = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            h.Dispose();
+            throw new InvalidOperationException(
+                $"HIDMaestro could not {(hold ? "hold" : "open")} {dir} while it uses the files under it (Win32 error {err}).");
+        }
+        return h;
+    }
+
+    /// <summary>Open <paramref name="file"/> for reading, sharing read only,
+    /// and return its SHA-256 read through that handle. While the handle is
+    /// open no program can write, rename or delete the file, since each needs
+    /// write or delete access the sharing denies, and a program can still
+    /// read it, run it or load it. Only staged files are held, and only
+    /// SYSTEM and Administrators can open those at all. A link is opened as
+    /// itself, never followed.</summary>
+    /// <exception cref="InvalidOperationException">The open failed.</exception>
+    internal static SafeFileHandle HoldFile(string file, out string sha256)
+    {
+        var h = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, IntPtr.Zero,
+            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, IntPtr.Zero);
+        if (h.IsInvalid)
+        {
+            int err = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            h.Dispose();
+            throw new InvalidOperationException(
+                $"HIDMaestro could not hold {file} while it uses it (Win32 error {err}).");
+        }
+        try
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[81920];
+            long offset = 0;
+            int n;
+            while ((n = RandomAccess.Read(h, buffer, offset)) > 0)
+            {
+                hash.AppendData(buffer, 0, n);
+                offset += n;
+            }
+            sha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            return h;
+        }
+        catch
+        {
+            h.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>True when the directory open as <paramref name="handle"/> is
+    /// what <see cref="IsProtected(string)"/> requires, read through the
+    /// handle, so the directory checked is the directory held.</summary>
+    private static bool IsProtected(SafeFileHandle handle)
+    {
+        try
+        {
+            if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0) return false;
+            var security = new DirectorySecurity();
+            security.SetSecurityDescriptorBinaryForm(
+                new HandleSecurity(handle).GetSecurityDescriptorBinaryForm(),
+                AccessControlSections.Owner | AccessControlSections.Access);
+            return IsProtected(security);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The owner and DACL of an open handle.</summary>
+    private sealed class HandleSecurity : ObjectSecurity<FileSystemRights>
+    {
+        internal HandleSecurity(System.Runtime.InteropServices.SafeHandle handle)
+            : base(true, ResourceType.FileObject, handle, AccessControlSections.Owner | AccessControlSections.Access) { }
+    }
+
+    private const uint FILE_LIST_DIRECTORY = 0x0001, FILE_READ_ATTRIBUTES = 0x0080;
+    private const uint READ_CONTROL = 0x00020000, SYNCHRONIZE = 0x00100000, GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2, FILE_SHARE_DELETE = 0x4;
     private const uint OPEN_EXISTING = 3;
-    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000, FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000,
+        FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
 
     [System.Runtime.InteropServices.LibraryImport("kernel32.dll", StringMarshalling = System.Runtime.InteropServices.StringMarshalling.Utf16, SetLastError = true)]
     private static partial SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
@@ -404,9 +576,10 @@ internal static partial class ProtectedStaging
     }
 
     /// <summary>Throw unless the file at <paramref name="path"/> matches
-    /// <paramref name="expectedSha256"/>. Called immediately before a staged
-    /// file runs elevated or is signed, so a file changed after it was staged
-    /// is caught at the point of use.</summary>
+    /// <paramref name="expectedSha256"/>, read without holding it. Called
+    /// right before a driver binary is signed, which rewrites it, so it
+    /// cannot be held then. Every other staged file is checked through its
+    /// hold (<see cref="Pinned.Hold"/>).</summary>
     internal static void VerifyBeforeUse(string path, string expectedSha256)
     {
         if (!File.Exists(path))
@@ -417,9 +590,8 @@ internal static partial class ProtectedStaging
     }
 
     /// <summary>Throw unless the file at <paramref name="path"/> still matches
-    /// the embedded resource it was staged from. Use it for a tool that runs
-    /// but is never modified: signtool, inf2cat, hmswd. A driver binary is
-    /// checked this way only before signing, which rewrites it.</summary>
+    /// the embedded resource it was staged from (see the overload
+    /// above).</summary>
     internal static void VerifyBeforeUse(string path, System.Reflection.Assembly asm, string logicalName)
         => VerifyBeforeUse(path, EmbeddedSha256(asm, logicalName));
 
@@ -751,28 +923,29 @@ internal static partial class ProtectedStaging
         try
         {
             if (IsReparsePoint(dir)) return false;
-            var security = new DirectoryInfo(dir).GetAccessControl();
-            var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner == null || (!owner.Equals(AdminsSid) && !owner.Equals(SystemSid)))
-                return false;
-
-            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
-            {
-                if (rule.AccessControlType != AccessControlType.Allow) continue;
-                if ((rule.FileSystemRights & WriteRights) == 0) continue;
-                if (rule.IdentityReference is SecurityIdentifier sid && (sid.Equals(AdminsSid) || sid.Equals(SystemSid)))
-                    continue;
-                return false; // a non-admin principal can write
-            }
-            return true;
+            return IsProtected(new DirectoryInfo(dir).GetAccessControl());
         }
         catch { return false; }
     }
 
-    // ── Hashing ─────────────────────────────────────────────────────────
+    private static bool IsProtected(DirectorySecurity security)
+    {
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (owner == null || (!owner.Equals(AdminsSid) && !owner.Equals(SystemSid)))
+            return false;
 
-    /// <summary>The SHA-256 of a file, lowercase hex.</summary>
-    internal static string FileSha256(string path) => Sha256OfFile(path);
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType != AccessControlType.Allow) continue;
+            if ((rule.FileSystemRights & WriteRights) == 0) continue;
+            if (rule.IdentityReference is SecurityIdentifier sid && (sid.Equals(AdminsSid) || sid.Equals(SystemSid)))
+                continue;
+            return false; // a non-admin principal can write
+        }
+        return true;
+    }
+
+    // ── Hashing ─────────────────────────────────────────────────────────
 
     private static string Sha256OfFile(string path)
     {

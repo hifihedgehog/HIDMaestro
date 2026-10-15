@@ -1015,6 +1015,8 @@ internal static partial class DeviceOrchestrator
         int prior = OwnerCensus.ReadControllerIndex(id);
         if (prior < 0 || prior == controllerIndex) return;
         LogDiag($"    companion {id} is on index {prior}; removing it before this create on {controllerIndex}");
+        // A helper that cannot be staged throws here, before any wait, and
+        // the create fails with its reason.
         DeviceManager.RemoveDevice(id, timeoutMs: 30_000, forceFallbacks: true);
     }
 
@@ -2183,15 +2185,27 @@ internal static partial class DeviceOrchestrator
                 {
                     string instId = $@"{enumRoot}\{sub}\{inst}";
 
-                    if (exclusivelyOurs)
+                    // One device whose removal throws (an SWD parent whose
+                    // helper cannot be staged) does not stop the sweep.
+                    try
                     {
-                        DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
-                        continue;
-                    }
+                        if (exclusivelyOurs)
+                        {
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 5000, fast: true, forceFallbacks: true);
+                            continue;
+                        }
 
-                    // Shared: only remove if hardware ID contains "HIDMaestro"
-                    if (DeviceManager.IsHidMaestroOwned(instId))
-                        DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
+                        // Shared: only remove if hardware ID contains "HIDMaestro"
+                        if (DeviceManager.IsHidMaestroOwned(instId))
+                            DeviceManager.RemoveDevice(instId, timeoutMs: 3000, fast: true, forceFallbacks: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A staging failure arrives as InvalidOperationException,
+                        // UnauthorizedAccessException or IOException. Any of them
+                        // leaves this device and the walk goes on to the next.
+                        LogDiag($"    sweep RemoveDevice({instId}) refused: {ex.GetType().Name}: {ex.Message}");
+                    }
                 }
             }
         }
