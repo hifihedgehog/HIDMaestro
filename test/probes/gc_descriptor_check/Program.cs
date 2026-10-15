@@ -399,6 +399,9 @@ internal static class Program
         ("a rule minLength longer than a packet",
             j => Rule(j, 0)["minLength"] = 6,
             "usbConfiguration.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
+        ("a report ID strip with no SET_REPORT commands",
+            j => Protocol(j)["commands"]!["setReport"] = false,
+            "usbConfiguration.protocol.commands.setReportStripsId applies only with setReport true"),
 
         // Protocol values outside their range.
         ("no replies allowed to wait",
@@ -491,6 +494,8 @@ internal static class Program
             j => { NoPorts(j); Out(j)["fields"] = Arr(WideMask); }),
         ("port blocks from byte 0 of a report with no ID",
             j => { In(j)["reportId"] = ""; Ports(j)["offset"] = 0; }),
+        ("output ports past one OUT packet, which a SET_REPORT carries whole",
+            j => { Protocol(j)["commands"]!["setReportStripsId"] = false; Out(j)["size"] = 9; OutPorts(j)["stride"] = 2; }),
         ("an output field past the port blocks, on a device with no protocol",
             j =>
             {

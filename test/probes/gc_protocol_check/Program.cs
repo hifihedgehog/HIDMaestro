@@ -97,7 +97,7 @@ internal static class Program
             Rumble(controller, proto);
             ThrowingHandlers(controller);
             StopAndStall(proto);
-            ControlPath();
+            ControlPath(controller, proto);
             EngineChecks(ctx, gc);
             Clock(controller, proto);
             HaltAndReset(controller, proto);
@@ -380,7 +380,7 @@ internal static class Program
 
     // ── The control path ────────────────────────────────────────────────
 
-    static void ControlPath()
+    static void ControlPath(HMController controller, HMDeviceProtocol proto)
     {
         Console.WriteLine("-- SET_REPORT and GET_REPORT");
         var set = s_usb.Control(0x21, 0x09, 0x0214, 0, 1, new byte[] { 0x14 }, out int err);
@@ -389,9 +389,48 @@ internal static class Program
         s_usb.Control(0x21, 0x09, 0x0213, 0, 1, new byte[] { 0x13 }, out _);
         var r = Read(150);
         Probe.Check("SET_REPORT(Output 0x13) starts them", r?.Length == 37, Show(r));
+
+        // A SET_REPORT's data stage is one report, however many 8-byte
+        // control packets carry it, and the device reads it once. tinyusb
+        // first drops a leading byte that matches wValue's report ID from a
+        // stage longer than one byte (hid_device.c, SET_REPORT), and loopj
+        // reads what is left from its first byte (src/gcca.c:248-252). So
+        // the 0x11 report HID stacks send reads as command 0x01, which
+        // loopj ignores, and with report ID 0 in wValue it reads as 0x11.
+        // Neither halts on the trailing 0x15.
+        while (s_outputs.TryDequeue(out _)) { }
+        set = s_usb.Control(0x21, 0x09, 0x0211, 0, 6, new byte[] { 0x11, 0x01, 0x00, 0x00, 0x00, 0x15 }, out err);
+        Thread.Sleep(100);
+        bool halted = proto.GetState("halted");
+        Probe.Check("SET_REPORT(Output 0x11) of 11 01 00 00 00 15 loses its ID, as tinyusb drops it: command 0x01, no motor, no halt",
+            set != null && controller.Ports[0].GetOutput("rumble") == 0 && s_outputs.IsEmpty && !halted && Read(150)?.Length == 37,
+            $"error {err}, rumble {controller.Ports[0].GetOutput("rumble")}, halted {halted}");
+        if (halted) Recover(controller);
+        set = s_usb.Control(0x21, 0x09, 0x0200, 0, 6, new byte[] { 0x11, 0x01, 0x00, 0x00, 0x00, 0x15 }, out err);
+        bool ran = Probe.WaitFor(() => controller.Ports[0].GetOutput("rumble") == 1, 2000);
+        halted = proto.GetState("halted");
+        Probe.Check("with report ID 0 in wValue the same 6 bytes are one command 0x11: port 1's motor runs, and the 0x15 stops nothing",
+            set != null && ran && !halted && Read(150)?.Length == 37, $"error {err}, rumble {controller.Ports[0].GetOutput("rumble")}, halted {halted}");
+        if (halted) Recover(controller);
+        Send(0x11, 0x00, 0x00, 0x00, 0x00);
+        Probe.WaitFor(() => controller.Ports[0].GetOutput("rumble") == 0, 2000);
+
         var get = s_usb.Control(0xA1, 0x01, 0x0121, 0, 37, null, out int gerr);
         Probe.Check("GET_REPORT(Input 0x21) answers the current report", get != null && r != null && get.AsSpan().SequenceEqual(r),
             get == null ? $"error {gerr}" : Probe.Hex(get));
+    }
+
+    /// <summary>A port reset, as HaltAndReset sends one, and 0x13: the
+    /// adapter answering again after a check that halted it.</summary>
+    static void Recover(HMController controller)
+    {
+        typeof(HIDMaestro.Internal.Usbip.UsbipEmulatedDevice)
+            .GetMethod("ResetDeviceState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(controller.UsbipHandle!.Device, null);
+        s_usb.ResetPipe(In);
+        s_usb.ResetPipe(Out);
+        Send(0x13);
+        Read(150);
     }
 
     // ── The engine on exact clock ticks ─────────────────────────────────

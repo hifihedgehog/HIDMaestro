@@ -113,10 +113,9 @@ internal sealed partial class UsbipEmulatedDevice
         WakeProtocolClock();
     }
 
-    /// <summary>Command bytes from the OUT endpoint, or from a
-    /// SET_REPORT(Output) the protocol reads the same way. They reach the
-    /// device as packets of the OUT endpoint's wMaxPacketSize, each one a
-    /// command, and each goes to the output ring as the host sent it.</summary>
+    /// <summary>Command bytes from the OUT endpoint. They reach the device
+    /// as packets of the endpoint's wMaxPacketSize, each one a command, and
+    /// each goes to the output ring as the host sent it.</summary>
     private void ProtocolHandleCommands(ReadOnlySpan<byte> payload)
     {
         var engine = _engine!;
@@ -129,8 +128,34 @@ internal sealed partial class UsbipEmulatedDevice
             PublishOutput(SourceHidOutput, packet[0], packet[1..]);
             if ((effect & ProtocolEngine.Effect.Halted) != 0) break;
         }
+        ProtocolApply(effect);
+    }
+
+    /// <summary>A SET_REPORT(Output) the protocol reads as a command. Its
+    /// data stage is one report, however many control packets carried it
+    /// (HID 1.11 7.2.2), and the device reads it once, as one command, as
+    /// tinyusb gathers the stage and calls its handler once (hid_device.c,
+    /// SET_REPORT). Under setReportStripsId a stage longer than one byte
+    /// that starts with <paramref name="reportId"/>, wValue's ID, loses
+    /// that byte first, as tinyusb drops it before loopj's handler reads
+    /// the first byte as the command (src/gcca.c:248-252). The command goes
+    /// to the output ring once, as the device read it.</summary>
+    private void ProtocolHandleReport(ReadOnlySpan<byte> report, byte reportId)
+    {
+        if (_engine!.Protocol.SetReportStripsId && reportId != 0 && report.Length > 1 && report[0] == reportId)
+            report = report[1..];
+        if (report.Length == 0) return;
+        var effect = _engine!.HandlePacket(report);
+        PublishOutput(SourceHidOutput, report[0], report[1..]);
+        ProtocolApply(effect);
+    }
+
+    /// <summary>What a command did: a halt fails every parked read, and any
+    /// change wakes the poll clock.</summary>
+    private void ProtocolApply(ProtocolEngine.Effect effect)
+    {
         if ((effect & ProtocolEngine.Effect.Halted) != 0)
-            FailProtocolReads(engine.Protocol.HaltStatus);
+            FailProtocolReads(_engine!.Protocol.HaltStatus);
         if (effect != ProtocolEngine.Effect.None)
             WakeProtocolClock();
     }

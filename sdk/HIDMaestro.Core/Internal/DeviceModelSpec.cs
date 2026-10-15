@@ -207,10 +207,19 @@ public sealed class ProtocolCommandsSpec
     [JsonPropertyName("endpoint")]
     public string Endpoint { get; set; } = "";
 
-    /// <summary>True when a SET_REPORT(Output) on the control endpoint is
-    /// read the same way.</summary>
+    /// <summary>True when a SET_REPORT(Output) on the control endpoint is a
+    /// command too: its whole data stage, report ID first, as one
+    /// command.</summary>
     [JsonPropertyName("setReport")]
     public bool SetReport { get; set; }
+
+    /// <summary>True when the device's USB stack drops a SET_REPORT's report
+    /// ID before the firmware reads it: a data stage longer than one byte
+    /// whose first byte is the ID wValue names loses that byte, and the
+    /// command is what follows. tinyusb does this (hid_device.c,
+    /// SET_REPORT). Applies with <see cref="SetReport"/> only.</summary>
+    [JsonPropertyName("setReportStripsId")]
+    public bool SetReportStripsId { get; set; }
 
     /// <summary>How many replies can wait for the IN endpoint at once. A
     /// reply that finds that many waiting is dropped, and its rule's states

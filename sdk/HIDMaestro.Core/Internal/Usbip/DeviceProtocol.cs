@@ -58,6 +58,9 @@ internal sealed class CompiledProtocol
     public byte CommandEndpoint { get; }
     public int CommandPacketSize { get; }
     public bool CommandsFromSetReport { get; }
+    /// <summary>A SET_REPORT's leading report ID is dropped before it is
+    /// read as a command.</summary>
+    public bool SetReportStripsId { get; }
     public Rule[] Rules { get; }
     /// <summary>How many replies can wait for the IN endpoint.</summary>
     public int PendingReplies { get; } = 1;
@@ -203,6 +206,9 @@ internal sealed class CompiledProtocol
             if (CommandPacketSize == 0)
                 throw Fail($"{root}.commands.endpoint 0x{CommandEndpoint:X2} has a wMaxPacketSize of 0.");
             CommandsFromSetReport = spec.Commands.SetReport;
+            SetReportStripsId = spec.Commands.SetReportStripsId;
+            if (SetReportStripsId && !CommandsFromSetReport)
+                throw Fail($"{root}.commands.setReportStripsId applies only with setReport true.");
             PendingReplies = spec.Commands.PendingReplies ?? 1;
             if (PendingReplies < 1)
                 throw Fail($"{root}.commands.pendingReplies {PendingReplies} must be 1 or more.");
@@ -215,21 +221,24 @@ internal sealed class CompiledProtocol
                 Rules[i] = CompileRule(spec.Commands.Rules[i] ?? throw Fail($"{at} is null."), at);
             }
 
-            // A host's output report reaches the device a packet at a time,
-            // and the ports read each packet as a report of its own. When
-            // both ways a host sends the HID interface an output report, its
-            // interrupt OUT endpoint and SET_REPORT(Output), are commands,
-            // ports that end past one packet are never read.
+            // An output report written to the HID interface's OUT endpoint
+            // reaches the device a packet at a time, and the ports read each
+            // packet as a report of its own. A SET_REPORT(Output) reaches it
+            // whole, through the protocol or, without setReport, as the
+            // report it is. Only a stack that drops the report ID first
+            // leaves no path that delivers the report as written, so ports
+            // that end past one packet are refused there alone.
             var outPorts = PortLayout.Of(profile.ExtendedOutputReport, $"Profile '{profile.Id}': extendedOutputReport", output: true);
-            bool everyOutputIsCommands = CommandsFromSetReport
+            bool noWholeReport = SetReportStripsId
                 && descriptors.Endpoints[CommandEndpoint].InterfaceNumber == descriptors.HidInterfaceNumber;
-            if (everyOutputIsCommands && outPorts != null && outPorts.BlockAt(outPorts.Count) > CommandPacketSize)
+            if (noWholeReport && outPorts != null && outPorts.BlockAt(outPorts.Count) > CommandPacketSize)
                 throw Fail(
                     $"extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
-                    $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers.");
+                    $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers, " +
+                    "and setReportStripsId drops a SET_REPORT's report ID.");
             // The report's own fields, the same way. A CRC with no declared
             // place is read at the end of what arrived.
-            if (everyOutputIsCommands && profile.ExtendedOutputReport is { } outSpec)
+            if (noWholeReport && profile.ExtendedOutputReport is { } outSpec)
             {
                 var outProg = VendorBlobProgram.Get(outSpec);
                 for (int i = 0; i < outProg.Fields.Length; i++)
@@ -240,7 +249,8 @@ internal sealed class CompiledProtocol
                     if (end > CommandPacketSize)
                         throw Fail(
                             $"extendedOutputReport.fields[{i}] ('{f.Src.Type}') ends at byte {end}, past the " +
-                            $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers.");
+                            $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers, " +
+                            "and setReportStripsId drops a SET_REPORT's report ID.");
                 }
             }
         }

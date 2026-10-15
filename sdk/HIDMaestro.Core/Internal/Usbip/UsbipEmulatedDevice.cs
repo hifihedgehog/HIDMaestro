@@ -1231,10 +1231,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             case 0x09 when !deviceToHost && reportType == 0x02
                            && _engine is { Protocol.CommandsFromSetReport: true }: // SET_REPORT(Output)
             {
-                // The protocol reads the data stage as it reads its command
-                // endpoint, report ID first.
+                // The protocol reads the data stage as one command, report
+                // ID first.
                 var payload = outPayload;
-                ProtocolHandleCommands(payload);
+                ProtocolHandleReport(payload, reportId);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
             }
