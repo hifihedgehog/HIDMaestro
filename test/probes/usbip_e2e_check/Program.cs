@@ -17,6 +17,9 @@
 //      UsbAudio.Output delivers the PCM windows (speaker/haptic lanes).
 //   6. Microphone: the SDK's feed is captured by WASAPI as live audio.
 //   7. Teardown detaches cleanly: the devnode and endpoints disappear.
+//   8. A FramesReceived handler can dispose its controller with another,
+//      through DisposeControllersInParallel and then HMContext.Dispose,
+//      without waiting for the audio pump it runs on.
 //
 // Requires elevation. The transport is bundled, so no preinstall is
 // needed: a machine without it exercises the self-deploy path.
@@ -146,6 +149,14 @@ internal static partial class Program
         BusIdReusedDuringStaleSweep(ctx);
         ImportAheadOfAttach(ctx);
 
+        // ── An audio handler that disposes its controller ──────────────
+        // A FramesReceived handler runs on the device's audio pump. Called
+        // there, a set dispose keeps the handler's controller on that
+        // thread, where the audio engine's Dispose skips the join of the
+        // pump the handler holds. On a pool thread it would wait 500 ms.
+        Console.WriteLine("\n-- A FramesReceived handler that disposes its controller and another --");
+        double setMs = AudioHandlerDispose(ctx, viaContext: false, setMs: 0);
+
         // ── Sweep while still holding a live controller (issues #44, #45) ──
         // This could not be tested until #45 was fixed. Sweeping unmaps every
         // shared view the process owns, and a live controller's output poll
@@ -190,6 +201,11 @@ internal static partial class Program
             try { live.Dispose(); Check("dispose after sweep is clean", true); }
             catch (Exception ex) { Check("dispose after sweep is clean", false, ex.GetType().Name); }
         }
+
+        // Last, since it disposes the context: the same handler calls
+        // HMContext.Dispose.
+        Console.WriteLine("\n-- A FramesReceived handler that disposes the context --");
+        AudioHandlerDispose(ctx, viaContext: true, setMs);
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -389,6 +405,111 @@ internal static partial class Program
                 Check("mic stream open observed", micStreamed);
             }
         }
+    }
+
+    /// <summary>A GameCube adapter and a DualSense composite, both on the
+    /// USB/IP backend. A tone plays to the composite's speaker, and its
+    /// first FramesReceived handler call disposes both, through
+    /// DisposeControllersInParallel or through HMContext.Dispose. The set
+    /// dispose reports the thread that disposed each controller, which must
+    /// be the handler's for its own. HMContext.Dispose reports none, so its
+    /// call from the handler must take no more than 250 ms longer than the
+    /// set dispose's (<paramref name="setMs"/>): a pool thread that took the
+    /// composite would wait 500 ms for the pump. Each device's input pump
+    /// waits up to 500 ms for a frame and sees Dispose only when it wakes,
+    /// so a thread sets both devices' input events every millisecond until
+    /// the call returns. Both runs then time the same work, with no wait of
+    /// a random length in either. Returns the handler's call time in ms, or
+    /// NaN when it never ran.</summary>
+    static double AudioHandlerDispose(HMContext ctx, bool viaContext, double setMs)
+    {
+        var gc = ctx.CreateController(ctx.GetProfile("gamecube-adapter")!);
+        var ds = ctx.CreateController(ctx.GetProfile("dualsense-composite")!);
+        var set = new[] { gc, ds };
+        MMDevice? render = null;
+        for (int i = 0; i < 150 && render == null; i++) { Thread.Sleep(100); render = FindEndpoint(DataFlow.Render, "Wireless Controller"); }
+        Check("the composite's render endpoint appears", render != null);
+        if (render == null)
+        {
+            if (viaContext) ctx.Dispose(); else ctx.DisposeControllersInParallel(set);
+            return double.NaN;
+        }
+
+        int fired = 0, handlerThread = 0, ownThread = 0;
+        long started = 0, finished = 0;
+        Exception? thrown = null;
+        using var returned = new ManualResetEventSlim();
+
+        // The probe's own handles keep the two events open after the SDK
+        // closes its handles at Dispose.
+        var indexOf = typeof(HMController).GetProperty("Index", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var inputEvents = set
+            .Select(c => OpenEventW(EVENT_MODIFY_STATE, false, $@"Global\HIDMaestroInputEvent{(int)indexOf.GetValue(c)!}"))
+            .ToArray();
+        Check("both devices' input events open", inputEvents.All(h => h != IntPtr.Zero));
+        var waker = new Thread(() =>
+        {
+            while (!returned.Wait(1))
+                foreach (var h in inputEvents)
+                    if (h != IntPtr.Zero) SetEvent(h);
+        }) { IsBackground = true, Name = "S45 input waker" };
+        waker.Start();
+        ds.UsbAudio!.Output.FramesReceived += (_, _) =>
+        {
+            if (Interlocked.Exchange(ref fired, 1) != 0) return;
+            handlerThread = Environment.CurrentManagedThreadId;
+            started = Stopwatch.GetTimestamp();
+            try
+            {
+                if (viaContext) ctx.Dispose();
+                else ctx.DisposeControllersInParallel(set, (c, _) => { if (c == ds) ownThread = Environment.CurrentManagedThreadId; });
+            }
+            catch (Exception ex) { thrown = ex; }
+            finished = Stopwatch.GetTimestamp();
+            returned.Set();
+        };
+        try
+        {
+            using var wo = new WasapiOut(render, AudioClientShareMode.Shared, false, 50);
+            var tone = new SignalGenerator(48000, 2) { Type = SignalGeneratorType.Sin, Frequency = 440, Gain = 0.5 };
+            wo.Init(tone.Take(TimeSpan.FromMilliseconds(600)));
+            wo.Play();
+            returned.Wait(30_000);
+            try { wo.Stop(); } catch { }
+        }
+        catch (Exception ex)
+        {
+            // The endpoint goes away under the player once the handler runs.
+            Console.WriteLine($"  [note] playback ended with {ex.GetType().Name}");
+        }
+        bool ran = returned.Wait(30_000);
+        if (!ran) returned.Set();
+        waker.Join();
+        foreach (var h in inputEvents)
+            if (h != IntPtr.Zero) CloseHandle(h);
+        if (Volatile.Read(ref fired) == 0)
+        {
+            Check("the composite's FramesReceived handler ran", false, "no PCM reached it");
+            if (viaContext) ctx.Dispose(); else ctx.DisposeControllersInParallel(set);
+            return double.NaN;
+        }
+        double ms = (finished - started) * 1000.0 / Stopwatch.Frequency;
+        Thread.Sleep(2500);
+        bool gone = FindHidDevicePath(0x054C, 0x0CE6) == null;
+        if (viaContext)
+        {
+            Check("a FramesReceived handler calling HMContext.Dispose returns, and takes no more than 250 ms beyond the set dispose",
+                  ran && thrown == null && gone && !double.IsNaN(setMs) && ms < setMs + 250,
+                  $"{ms:F0} ms, set dispose {setMs:F0} ms, threw {thrown?.GetType().Name ?? "nothing"}, composite gone {gone}");
+        }
+        else
+        {
+            Check("a FramesReceived handler calling DisposeControllersInParallel disposes its own controller on its own thread",
+                  ran && thrown == null && gone && ownThread == handlerThread,
+                  $"{ms:F0} ms, own disposed on {(ownThread == handlerThread ? "the handler's thread" : ownThread == 0 ? "no thread" : "another thread")}, " +
+                  $"threw {thrown?.GetType().Name ?? "nothing"}, composite gone {gone}");
+        }
+        return ms;
     }
 
     static string? FindEndpointIdAnyState(DataFlow flow, string nameContains, out DeviceState state)
@@ -984,4 +1105,8 @@ internal static partial class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(IntPtr h, byte[] buf, int len, out int read, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetEvent(IntPtr h);
+    const uint EVENT_MODIFY_STATE = 0x0002;
 }

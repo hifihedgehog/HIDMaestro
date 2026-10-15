@@ -56,6 +56,11 @@ public sealed class HMUsbAudio
     public event EventHandler<HMAudioControlChangedEventArgs>? ControlChanged;
 
     private readonly Dictionary<byte, string> _unitFunctions = new();
+    private readonly UsbAudioEngine _engine;
+
+    /// <summary>True on a thread that raises this device's audio
+    /// events.</summary>
+    internal bool RunsOnCurrentThread => _engine.RunsOnCurrentThread;
 
     internal HMUsbAudio(ControllerProfile profile, UsbipEmulatedDevice device) : this(profile, device.Audio)
     {
@@ -63,6 +68,7 @@ public sealed class HMUsbAudio
 
     internal HMUsbAudio(ControllerProfile profile, UsbAudioEngine engine)
     {
+        _engine = engine;
         var cfg = profile.UsbConfiguration!;
 
         UsbAudioStreamSpec? outStream = null, inStream = null;

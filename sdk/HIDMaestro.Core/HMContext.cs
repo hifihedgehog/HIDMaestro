@@ -233,7 +233,12 @@ public sealed class HMContext : IDisposable
     /// "disposed slot N in M ms" line for each. Use from any caller that
     /// already has a list of HMControllers to dispose together (e.g., a
     /// test harness's end-of-run cleanup); HMContext.Dispose itself uses an
-    /// equivalent path internally.</summary>
+    /// equivalent path internally. Called from a controller's event
+    /// handler, it disposes that controller on the handler's own thread, so
+    /// the controller's Dispose does not wait for that thread. An exception
+    /// <paramref name="perControllerCallback"/> throws comes out as an
+    /// <see cref="AggregateException"/> holding each one thrown, after the
+    /// batch ends.</summary>
     public void DisposeControllersInParallel(
         IEnumerable<HMController> controllers,
         Action<HMController, long>? perControllerCallback = null)
@@ -251,7 +256,7 @@ public sealed class HMContext : IDisposable
         _batchDisposing = true;
         try
         {
-            System.Threading.Tasks.Parallel.ForEach(arr, c =>
+            DisposeConcurrently(arr, c =>
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try { c.Dispose(); } catch { }
@@ -648,6 +653,35 @@ public sealed class HMContext : IDisposable
         if (_disposed) throw new ObjectDisposedException(nameof(HMContext));
     }
 
+    /// <summary>Runs <paramref name="dispose"/> on every controller at
+    /// once. Called from a controller's event handler, it disposes that
+    /// controller on the calling thread, the handler's own, where
+    /// HMController.Dispose skips the wait for its own thread.
+    /// Parallel.ForEach alone could hand that controller to a pool thread,
+    /// which would wait 500 ms for the thread the handler holds.</summary>
+    private static void DisposeConcurrently(HMController[] controllers, Action<HMController> dispose)
+    {
+        int own = Array.FindIndex(controllers, c => c.RunsOnCurrentThread);
+        if (own < 0)
+        {
+            System.Threading.Tasks.Parallel.ForEach(controllers, dispose);
+            return;
+        }
+        var others = controllers.Where((_, i) => i != own).ToArray();
+        var rest = System.Threading.Tasks.Task.Run(() => System.Threading.Tasks.Parallel.ForEach(others, dispose));
+        Exception? ownFailure = null;
+        try { dispose(controllers[own]); }
+        catch (Exception ex) { ownFailure = ex; }
+        // Every failure comes out in one AggregateException, as it does
+        // from Parallel.ForEach alone.
+        try { rest.GetAwaiter().GetResult(); }
+        catch (AggregateException ex) when (ownFailure != null)
+        {
+            throw new AggregateException(ex.InnerExceptions.Prepend(ownFailure));
+        }
+        if (ownFailure != null) throw new AggregateException(ownFailure);
+    }
+
     /// <summary>Disposes every controller this context owns and frees its
     /// resources. Safe to call multiple times.
     ///
@@ -658,6 +692,10 @@ public sealed class HMContext : IDisposable
     /// kernel locks: so we run all dispose calls in parallel and the
     /// wall-clock collapses from sum(N) to max(N). For 4 controllers
     /// that's typically 34s -> ~10s.</para>
+    ///
+    /// <para>Called from a controller's event handler, it disposes that
+    /// controller on the handler's own thread, so the controller's Dispose
+    /// does not wait for that thread.</para>
     /// </summary>
     public void Dispose()
     {
@@ -679,7 +717,7 @@ public sealed class HMContext : IDisposable
         _batchDisposing = true;
         try
         {
-            System.Threading.Tasks.Parallel.ForEach(toDispose, c =>
+            DisposeConcurrently(toDispose, c =>
             {
                 try { c.Dispose(); } catch { /* swallow during shutdown */ }
             });

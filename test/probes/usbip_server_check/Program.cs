@@ -30,7 +30,7 @@
 //     IsStreaming current while a handler blocks, one waiting write per
 //     control while a handler blocks, every handle closed and nothing
 //     thrown to the connection when a thread does not start, a change
-//     queued then raised at Dispose)
+//     queued then raised at Dispose, its event thread known as its own)
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -1125,6 +1125,23 @@ internal static partial class Program
                 Check("the diagnostic log records the failed start and the dropped change",
                       started && dropped, $"failed start {started}, dropped {dropped}");
             }
+        }
+
+        // The engine counts its event thread as its own, which a context's
+        // Dispose asks to keep a handler's controller on the handler's
+        // thread.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            bool onEventThread = false;
+            using var seen = new ManualResetEventSlim();
+            engine.ControlChanged += (_, _, _, _) => { onEventThread = engine.RunsOnCurrentThread; seen.Set(); };
+            engine.HandleUacSet(2, 2, 0, Volume(-1024));
+            bool raised = seen.Wait(2000);
+            bool onCaller = engine.RunsOnCurrentThread;
+            engine.Dispose();
+            Check("the audio engine counts its event thread as its own, and not the caller's",
+                  raised && onEventThread && !onCaller,
+                  $"raised {raised}, event thread {onEventThread}, caller {onCaller}");
         }
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");

@@ -1668,7 +1668,7 @@ function Scenario-Xusb-Wgi-Single {
 
 function Scenario-Usbip-E2E-Composite {
     Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
-                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, teardown, or an attach racing the stale sweep or another import; see probe stdout)' -SkipCodes 2
+                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, teardown, an attach racing the stale sweep or another import, or a FramesReceived handler that disposed its controller and waited for the audio pump), see probe stdout' -SkipCodes 2
 }
 
 # S58: identity derivation (issue #60). No device. The default key
@@ -2001,10 +2001,21 @@ function Scenario-Perf-Budget {
 # An OutputReceived handler still running when Dispose's join gives up: the
 # output thread ends once it returns and meets nothing Dispose released.
 # An OutputReceived handler that disposes its own controller does not wait
-# for its own thread.
+# for its own thread, alone, with two others at once, or through
+# HMContext.Dispose. The probe's offline run, which needs no device, checks
+# the set dispose's threads and its AggregateException. Both runs always
+# run, and a failure of either is reported.
 function Scenario-Handler-Isolation {
-    Invoke-Probe -Dir 'handler_isolation_check' -Exe 'HandlerIsolationCheck.exe' `
-                 -Message 'a throwing event handler stopped another handler or the SDK (see probe stdout)' -SkipCodes 2
+    $failed = @()
+    try {
+        Invoke-Probe -Dir 'handler_isolation_check' -Exe 'HandlerIsolationCheck.exe' -Arguments 'offline' -Tag 'offline' `
+                     -Message 'a set dispose from a handler moved the handler''s controller off its thread, or lost a callback failure from its AggregateException (see probe stdout)'
+    } catch { $failed += $_.Exception.Message }
+    try {
+        Invoke-Probe -Dir 'handler_isolation_check' -Exe 'HandlerIsolationCheck.exe' `
+                     -Message 'a throwing event handler stopped another handler or the SDK, or a handler that disposed its controller waited for its own thread (see probe stdout)' -SkipCodes 2
+    } catch { $failed += $_.Exception.Message }
+    if ($failed.Count -gt 0) { throw ($failed -join ' AND ') }
 }
 
 # S87: interop declarations and the method names in the SDK's text. No

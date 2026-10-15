@@ -520,6 +520,17 @@ internal sealed partial class UsbAudioEngine : IDisposable
         }
     }
 
+    /// <summary>True on the pump or the event thread, the threads that
+    /// raise the engine's events.</summary>
+    internal bool RunsOnCurrentThread
+    {
+        get
+        {
+            var current = Thread.CurrentThread;
+            return current == _thread || current == Volatile.Read(ref _eventThread);
+        }
+    }
+
     public byte GetAltSetting(byte interfaceNumber)
     {
         lock (_lock) return _altSetting.TryGetValue(interfaceNumber, out var a) ? a : (byte)0;

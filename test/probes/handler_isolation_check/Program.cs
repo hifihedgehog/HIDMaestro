@@ -16,7 +16,17 @@
 //
 // An OutputReceived handler that disposes its own controller: Dispose does not
 // wait for the output reader it runs on. Before this release it joined its
-// own thread for the join's full 500 ms.
+// own thread for the join's full 500 ms. The same holds when the handler
+// disposes its controller together with two others through
+// DisposeControllersInParallel, the path HMContext.Dispose takes for two or
+// more controllers, and when it calls HMContext.Dispose. Before this
+// release Parallel.ForEach chose the thread for each controller, and a pool
+// thread waited 500 ms for the reader.
+//
+// "offline" runs the set dispose with controllers that have no device,
+// needing no elevation: the handler's own controller stays on its thread,
+// and every failure of the dispose callback comes out in one
+// AggregateException.
 //
 // The other events raised on SDK threads are tested where their stimulus
 // lives: the adapter ports' OutputChanged in S80, the USB audio events in
@@ -45,8 +55,9 @@ internal static class Program
     static readonly EventHandler<HMOutputDecodedEventArgs> ThrowOnDecoded =
         (_, _) => throw new InvalidOperationException("S85: a throwing OutputDecoded handler");
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "offline") return Offline();
         Console.WriteLine("=== S85: a throwing event handler stops nothing else ===");
         if (Probe.OtherSdkRunning()) return 2;
 
@@ -60,6 +71,9 @@ internal static class Program
         SwitchProRumble(ctx);
         SlowHandlerAtDispose(ctx);
         DisposeFromOutputHandler(ctx);
+        DisposeSetFromOutputHandler(ctx);
+        // Last: it disposes the context.
+        DisposeContextFromOutputHandler(ctx);
         return Probe.Finish("S85");
     }
 
@@ -183,6 +197,173 @@ internal static class Program
         Probe.Check("an OutputReceived handler disposing its own controller does not wait for its own thread",
             ran && handedOver && ms < 250 && ended,
             ran ? $"teardown reached after {ms:F0} ms, reader ended {ended}" : "the handler never ran");
+    }
+
+    // ── A handler that disposes the whole context ──────────────────────
+
+    /// <summary>The handler calls HMContext.Dispose with its controller and
+    /// one other in the context. The other has no handler. The handler's
+    /// own leaves the SDK's output pump registry after its Dispose has
+    /// skipped or finished the join of its reader, which is the thread the
+    /// handler holds.</summary>
+    static void DisposeContextFromOutputHandler(HMContext ctx)
+    {
+        Console.WriteLine("-- dualshock-4-v2 x2: an OutputReceived handler that disposes the context");
+        var profile = ctx.GetProfile("dualshock-4-v2")!;
+        var before = HidPaths(profile.VendorId, profile.ProductId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var other = ctx.CreateController(profile);
+        bool otherUp = Probe.WaitFor(() => HidPaths(profile.VendorId, profile.ProductId).Any(p => !before.Contains(p)), 10_000);
+        // Without it the handler's own device cannot be told apart, and the
+        // check below would return without a result.
+        Probe.Check("the other DualShock 4's HID device appears", otherUp);
+        foreach (var p in HidPaths(profile.VendorId, profile.ProductId)) before.Add(p);
+        var c = ctx.CreateController(profile);
+        int index = (int)typeof(HMController).GetProperty("Index", Any)!.GetValue(c)!;
+        var output = (Thread)typeof(HMController).GetField("_outputThread", Any)!.GetValue(c)!;
+        long started = 0;
+        using var entered = new ManualResetEventSlim();
+        using var returned = new ManualResetEventSlim();
+        c.OutputReceived += (_, p) =>
+        {
+            if (p.ReportId != 0x05 || entered.IsSet) return;
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
+            entered.Set();
+            ctx.Dispose();
+            returned.Set();
+        };
+        bool registered = OutputPumpRegistered(index);
+        using (var h = otherUp ? OpenNew(profile, before) : null)
+        {
+            if (h == null) { ctx.Dispose(); return; }
+            var report = new byte[32];
+            report[0] = 0x05;
+            HidD_SetOutputReport(h, report, report.Length);
+        }
+        bool ran = entered.Wait(3000);
+        bool released = Probe.WaitFor(() => !OutputPumpRegistered(index), 3000);
+        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        bool done = returned.Wait(30_000);
+        bool ended = Probe.WaitFor(() => !output.IsAlive, 10_000);
+        if (!ran) ctx.Dispose();
+        Probe.Check("an OutputReceived handler disposing the context does not wait for its own thread",
+            registered && ran && released && ms < 250 && done && ended,
+            ran ? $"own reader released after {ms:F0} ms, Dispose returned {done}, reader ended {ended}"
+                : $"the handler never ran (registered {registered})");
+    }
+
+    /// <summary>Whether the SDK's output pump registry holds the controller
+    /// at <paramref name="index"/>. HMController.Dispose removes it right
+    /// after the join of the output reader, or after skipping that join on
+    /// the reader's own thread.</summary>
+    static bool OutputPumpRegistered(int index)
+    {
+        var t = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.SharedMemoryIO")!;
+        var pumps = (System.Collections.IDictionary)t.GetField("s_outputPumps", Any)!.GetValue(null)!;
+        lock (pumps) return pumps.Contains(index);
+    }
+
+    // ── Offline: the set dispose's threads and exceptions ──────────────
+
+    /// <summary>HMContext's set dispose on its own, with controllers that
+    /// have no device: one claims the calling thread as its output reader,
+    /// as a handler's controller does, and the dispose callback throws for
+    /// two of the three. Needs no elevation and no driver.</summary>
+    static int Offline()
+    {
+        Console.WriteLine("=== S85, offline: a set disposed from a handler's thread ===");
+        SetErrorMode(QuietErrorMode);
+        var helper = typeof(HMContext).GetMethod("DisposeConcurrently", Any)!;
+        var outputField = typeof(HMController).GetField("_outputThread", Any)!;
+        var set = new HMController[3];
+        for (int i = 0; i < set.Length; i++)
+            set[i] = (HMController)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMController));
+        // The handler's own controller, last in the set.
+        outputField.SetValue(set[2], Thread.CurrentThread);
+        var threads = new ConcurrentDictionary<int, int>();
+        Action<HMController> dispose = c =>
+        {
+            int i = Array.IndexOf(set, c);
+            threads[i] = Environment.CurrentManagedThreadId;
+            Thread.Sleep(50);
+            if (i != 1) throw new InvalidOperationException($"S85 offline: controller {i}");
+        };
+        Exception? caught = null;
+        try { helper.Invoke(null, new object[] { set, dispose }); }
+        catch (TargetInvocationException e) { caught = e.InnerException; }
+        int me = Environment.CurrentManagedThreadId;
+        Probe.Check("the handler's own controller is disposed on the handler's thread, the others too",
+            threads.Count == 3 && threads.TryGetValue(2, out int t2) && t2 == me,
+            string.Join(", ", threads.OrderBy(p => p.Key).Select(p => $"{p.Key}: {(p.Value == me ? "caller" : "pool")}")));
+        var agg = caught as AggregateException;
+        // One level, as Parallel.ForEach throws: no AggregateException
+        // inside it.
+        var inner = agg?.InnerExceptions.ToArray() ?? Array.Empty<Exception>();
+        var messages = inner.Select(x => x.Message).OrderBy(m => m).ToArray();
+        bool flat = inner.All(x => x is InvalidOperationException);
+        Probe.Check("every failure comes out in one flat AggregateException, as from Parallel.ForEach",
+            agg != null && flat && messages.SequenceEqual(new[] { "S85 offline: controller 0", "S85 offline: controller 2" }),
+            $"{caught?.GetType().Name ?? "nothing"}: [{string.Join(", ", messages)}]");
+        return Probe.Finish("S85 offline");
+    }
+
+    const uint QuietErrorMode = 0x0001 | 0x0002 | 0x8000; // SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX
+    [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+
+    // ── A handler that disposes its controller with others ─────────────
+
+    /// <summary>The handler disposes three controllers at once, its own
+    /// last in the set. Without the fix, Parallel.ForEach chooses the
+    /// thread for each, and a pool thread that takes the handler's own
+    /// waits for the reader the handler holds. On the old code the check
+    /// fails only when that happens.</summary>
+    static void DisposeSetFromOutputHandler(HMContext ctx)
+    {
+        Console.WriteLine("-- dualshock-4-v2 x3: an OutputReceived handler that disposes its own controller and two others at once");
+        var profile = ctx.GetProfile("dualshock-4-v2")!;
+        var before = HidPaths(profile.VendorId, profile.ProductId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var first = new[] { ctx.CreateController(profile), ctx.CreateController(profile) };
+        // The two others' HID devices go into the set to skip, so the one
+        // opened below is the third's.
+        bool othersUp = Probe.WaitFor(() => HidPaths(profile.VendorId, profile.ProductId).Count(p => !before.Contains(p)) >= 2, 10_000);
+        // Without them the handler's own device cannot be told apart, and
+        // the check below would return without a result.
+        Probe.Check("the two other DualShock 4s' HID devices appear", othersUp);
+        foreach (var p in HidPaths(profile.VendorId, profile.ProductId)) before.Add(p);
+        var c = ctx.CreateController(profile);
+        var set = new[] { first[0], first[1], c };
+        var output = (Thread)typeof(HMController).GetField("_outputThread", Any)!.GetValue(c)!;
+        long started = 0;
+        using var entered = new ManualResetEventSlim();
+        using var returned = new ManualResetEventSlim();
+        c.OutputReceived += (_, p) =>
+        {
+            if (p.ReportId != 0x05 || entered.IsSet) return;
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
+            entered.Set();
+            ctx.DisposeControllersInParallel(set);
+            returned.Set();
+        };
+        using (var h = othersUp ? OpenNew(profile, before) : null)
+        {
+            if (h == null) { ctx.DisposeControllersInParallel(set); return; }
+            var report = new byte[32];
+            report[0] = 0x05;
+            HidD_SetOutputReport(h, report, report.Length);
+        }
+        bool ran = entered.Wait(3000);
+        // The controller leaves the context where its Dispose hands it to
+        // the context's teardown, after the join Dispose skips on its own
+        // thread.
+        bool handedOver = Probe.WaitFor(() => !ctx.ActiveControllers.Contains(c), 3000);
+        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        bool done = returned.Wait(30_000);
+        bool ended = Probe.WaitFor(() => !output.IsAlive, 10_000);
+        bool allGone = set.All(x => !ctx.ActiveControllers.Contains(x));
+        if (!ran) ctx.DisposeControllersInParallel(set);
+        Probe.Check("an OutputReceived handler disposing its own controller with two others does not wait for its own thread",
+            ran && handedOver && ms < 250 && done && ended && allGone,
+            ran ? $"teardown reached after {ms:F0} ms, the call returned {done}, reader ended {ended}, all three gone {allGone}"
+                : "the handler never ran");
     }
 
     // ── KeyboardLedsChanged ─────────────────────────────────────────────

@@ -1945,6 +1945,11 @@ public sealed partial class HMController : IDisposable
                 $"Profile '{Profile.Id}' builds its own input reports. Use SubmitState.");
     }
 
+    /// <summary>True on a thread that raises this controller's events: its
+    /// output reader, or its USB/IP audio's pump or event thread.</summary>
+    internal bool RunsOnCurrentThread =>
+        Thread.CurrentThread == _outputThread || (UsbAudio?.RunsOnCurrentThread ?? false);
+
     /// <summary>Removes the virtual device from PnP and frees the per-controller
     /// shared memory section. Idempotent: safe to call multiple times. Called
     /// automatically when the owning <see cref="HMContext"/> is disposed.
