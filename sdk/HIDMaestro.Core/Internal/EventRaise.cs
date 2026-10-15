@@ -11,6 +11,15 @@ namespace HIDMaestro.Internal;
 /// run. Walking the handlers allocates nothing.</summary>
 internal static class EventRaise
 {
+    public static void Each<T1>(Action<T1>? handler, T1 a, string eventName)
+    {
+        foreach (var h in Delegate.EnumerateInvocationList(handler))
+        {
+            try { h(a); }
+            catch (Exception ex) { Dropped(eventName, ex); }
+        }
+    }
+
     public static void Each<T1, T2>(Action<T1, T2>? handler, T1 a, T2 b, string eventName)
     {
         foreach (var h in Delegate.EnumerateInvocationList(handler))

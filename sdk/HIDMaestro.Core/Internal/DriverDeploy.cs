@@ -24,13 +24,15 @@ namespace HIDMaestro.Internal;
 /// <see cref="HMDriverVersionException"/> names what holds it.</item>
 /// </list>
 ///
-/// <para>Every deploy, of this driver or of the USB/IP transport, holds the
-/// machine-wide mutex <see cref="MutexObject"/> for the length of one call.
-/// It lives in <see cref="AdminNamespace"/>, so a program that is not
-/// elevated can neither take the name first nor hold the lock. The holder
-/// re-reads the installed state after acquiring it, so of two programs
-/// calling InstallDriver at once, one deploys and the other finds the result
-/// current.</para>
+/// <para>Every deploy of this driver holds the machine-wide mutex
+/// <see cref="MutexObject"/> for the length of one call. It lives in
+/// <see cref="AdminNamespace"/>, so a program that is not elevated can
+/// neither take the name first nor hold the lock. The holder re-reads the
+/// installed state after acquiring it, so of two programs calling
+/// InstallDriver at once, one deploys and the other finds the result
+/// current. The USB/IP transport's install and repair hold a lock of their
+/// own (<see cref="Usbip.UsbipDriverInstaller.TransportMutexObject"/>), so a
+/// UMDF2 create never waits for them.</para>
 /// </summary>
 internal static partial class DriverDeploy
 {

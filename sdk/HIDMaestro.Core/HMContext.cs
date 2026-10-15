@@ -140,7 +140,10 @@ public sealed class HMContext : IDisposable
     /// when a consumer wants the one-time install to happen at a moment
     /// it controls (an onboarding step, a settings toggle) rather than
     /// mid-session. Idempotent, requires elevation, and reports progress
-    /// through <paramref name="progress"/>.</summary>
+    /// through <paramref name="progress"/>, on the calling thread. The
+    /// install runs on a thread of its own, so a callback that blocks holds
+    /// up no other program, and an exception the callback throws is dropped
+    /// and does not change the outcome.</summary>
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// USB/IP transport for this machine's architecture.</exception>
     public static void InstallUsbipBackend(Action<string>? progress = null)

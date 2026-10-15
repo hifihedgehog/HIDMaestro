@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
@@ -101,25 +103,158 @@ internal static partial class UsbipDriverInstaller
         {
             if (IsInstalled) return true;
 
-            // Every transport deploy holds the machine-wide deploy lock and
-            // reads the machine again under it (DriverDeploy): of two
-            // programs whose first composites arrive together, one installs
-            // and the other finds the host controller. Two installers at once
-            // would each create a host controller devnode.
-            using var deploy = DriverDeploy.Acquire();
-            try
-            {
-                if (IsInstalled) return true;
-                return InstallLocked(progress);
-            }
-            finally { deploy.ReleaseMutex(); }
+            // Every transport deploy holds the machine-wide transport lock
+            // and reads the machine again under it: of two programs whose
+            // first composites arrive together, one installs and the other
+            // finds the host controller. Two installers at once would each
+            // create a host controller devnode.
+            return TransportWork.Run(work => IsInstalled || InstallLocked(work), progress);
         }
     }
 
-    /// <summary>The install itself. The caller holds the deploy lock and has
-    /// found no host controller answering.</summary>
-    private static bool InstallLocked(Action<string>? progress)
+    // ── The transport lock ───────────────────────────────────────────────
+
+    /// <summary>The name, in <see cref="AdminNamespace"/>, of the
+    /// machine-wide lock over the transport's install, its repair and the
+    /// move off an older host controller.</summary>
+    internal const string TransportMutexObject = "Transport";
+
+    /// <summary>One piece of transport work: the usbip-win2 install, the
+    /// repair of a host controller that stopped answering, or the move off an
+    /// older one.
+    ///
+    /// <para>It runs on a thread of its own, which holds the machine-wide
+    /// transport lock while the work runs and while any thread the work
+    /// started and left behind still runs (<see cref="HoldLockFor"/>). This
+    /// is not the deploy lock. A UMDF2 create waits for another program's
+    /// driver deploy, and never for a transport install, which can run for
+    /// minutes and changes nothing the UMDF2 driver uses.</para>
+    ///
+    /// <para>The calling thread holds no machine-wide lock. It raises the
+    /// work's progress to the consumer's callback as each message comes, so
+    /// a callback that blocks holds up only its own caller, and an exception
+    /// a callback throws is dropped (<see cref="EventRaise"/>) and changes
+    /// nothing about the outcome.</para></summary>
+    internal sealed class TransportWork
     {
+        private readonly BlockingCollection<string> _progress = new();
+        private readonly List<Thread> _lingering = new();
+
+        /// <summary>Hand a progress message to the calling thread.</summary>
+        internal void Report(string message)
+        {
+            try { _progress.Add(message); }
+            catch (InvalidOperationException) { /* the outcome has gone back already */ }
+        }
+
+        /// <summary>Keep the transport lock, after the outcome has gone back
+        /// to the caller, until <paramref name="thread"/> ends.</summary>
+        internal void HoldLockFor(Thread thread)
+        {
+            lock (_lingering) _lingering.Add(thread);
+        }
+
+        /// <summary>Run <paramref name="work"/> under the transport lock and
+        /// return its result, or throw what it threw. A lock that cannot be
+        /// taken throws as well, and the work does not run.</summary>
+        internal static T Run<T>(Func<TransportWork, T> work, Action<string>? progress)
+        {
+            var job = new TransportWork();
+            T result = default!;
+            ExceptionDispatchInfo? error = null;
+            var worker = new Thread(() =>
+            {
+                Mutex? m = null;
+                try
+                {
+                    m = AcquireTransportLock();
+                    T r = work(job);
+                    lock (job) result = r;
+                }
+                catch (Exception ex)
+                {
+                    lock (job) error = ExceptionDispatchInfo.Capture(ex);
+                }
+                finally
+                {
+                    // The outcome goes back now. The lock stays with this
+                    // thread until every thread the work left behind ends.
+                    job._progress.CompleteAdding();
+                    if (m != null)
+                    {
+                        Thread[] lingering;
+                        lock (job._lingering) lingering = job._lingering.ToArray();
+                        foreach (var t in lingering) t.Join();
+                        m.ReleaseMutex();
+                        m.Dispose();
+                    }
+                }
+            }) { IsBackground = true, Name = "HMUsbipTransport" };
+            worker.Start();
+
+            foreach (string message in job._progress.GetConsumingEnumerable())
+                EventRaise.Each(progress, message, "usbip-win2 install progress");
+            ExceptionDispatchInfo? thrown;
+            lock (job)
+            {
+                thrown = error;
+                if (thrown == null) return result;
+            }
+            thrown.Throw();
+            throw thrown.SourceException; // not reached: Throw does not return
+        }
+    }
+
+    /// <summary>Acquire the transport lock. An abandoned one is acquired,
+    /// and the work reads the machine again before it acts.</summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    private static Mutex AcquireTransportLock()
+    {
+        var m = new Mutex(false, AdminNamespace.Name(TransportMutexObject));
+        try
+        {
+            if (!m.WaitOne(TimeoutScale.Apply(600_000)))
+                throw new InvalidOperationException(
+                    "Another program's HIDMaestro USB transport install or repair held the machine-wide transport lock for ten minutes.");
+        }
+        catch (AbandonedMutexException) { }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        return m;
+    }
+
+    /// <summary>Coexistence probe section Z calls this through reflection:
+    /// <paramref name="work"/> under the transport lock, the way an install
+    /// runs, with its progress raised to <paramref name="progress"/>.</summary>
+    internal static bool RunForProbe(Func<Action<string>, bool> work, Action<string>? progress) =>
+        TransportWork.Run(w => work(w.Report), progress);
+
+    /// <summary>Coexistence probe section Z calls this through reflection:
+    /// the host controller repair under the transport lock, with the
+    /// transport's availability and the PnP restart replaced, since a test
+    /// never restarts a host controller.</summary>
+    internal static bool RepairForProbe(Func<bool> available, Action restart, int budgetMs, Action<string>? progress) =>
+        TransportWork.Run(w => TryRestartHostController(w, available, restart, budgetMs), progress);
+
+    /// <summary>The install itself. The caller holds the transport lock and
+    /// has found no host controller answering.</summary>
+    private static bool InstallLocked(TransportWork work)
+    {
+        // A usbip-win2 installer still running would install beside this
+        // one, as one left by a program killed mid-install does: the
+        // transport lock went with that program, and usbip-win2's script
+        // declares no SetupMutex (setup.iss at v.0.9.8.1). Wait for it to
+        // end, then read the machine again.
+        if (!WaitForRunningInstallers(TimeoutScale.Apply(300_000)))
+            throw new InvalidOperationException(
+                "A usbip-win2 installer another program started is still running after five minutes. " +
+                "Try again once it has finished.");
+        if (IsInstalled) return true;
+
         // A machine can have usbip-win2 already (VIIPER and DS4Windows
         // install the same transport) with its host controller merely
         // not started, or left interface-less by an interrupted PnP
@@ -132,8 +267,8 @@ internal static partial class UsbipDriverInstaller
         // install when the product is genuinely absent.
         if (IsProductInstalled())
         {
-            progress?.Invoke("Repairing the existing USB audio transport...");
-            if (TryRestartHostController(progress)) return true;
+            work.Report("Repairing the existing USB audio transport...");
+            if (TryRestartHostController(work)) return true;
 
             throw new InvalidOperationException(
                 $"usbip-win2 {Version} is installed on this machine but its virtual host " +
@@ -157,7 +292,7 @@ internal static partial class UsbipDriverInstaller
                 "HIDMaestro does not run it. Repair or uninstall usbip-win2 from Settings > Apps, " +
                 "and try again.");
 
-        progress?.Invoke($"Installing USB audio transport (usbip-win2 {Version})...");
+        work.Report($"Installing USB audio transport (usbip-win2 {Version})...");
 
         string exe = ExtractInstaller();
         RunSilentInstall(exe);
@@ -172,7 +307,7 @@ internal static partial class UsbipDriverInstaller
             if (VhciClient.IsAvailable())
             {
                 StampOwnerHardwareId();
-                progress?.Invoke("USB audio transport ready.");
+                work.Report("USB audio transport ready.");
                 return true;
             }
             Thread.Sleep(250);
@@ -244,7 +379,9 @@ internal static partial class UsbipDriverInstaller
             _ => throw new ArgumentOutOfRangeException(nameof(file)),
         };
 
-    private static bool s_legacyChecked;
+    // Set once the check below has run in this process, whatever it found.
+    // Written under s_lock.
+    private static volatile bool s_legacyChecked;
 
     private static void ReplaceLegacyTransportOnce(Action<string>? progress)
     {
@@ -252,23 +389,48 @@ internal static partial class UsbipDriverInstaller
         lock (s_lock)
         {
             if (s_legacyChecked) return;
-            s_legacyChecked = true;
-            // A transport deploy like the install: under the deploy lock, so
-            // two programs never force the host controller's driver at once.
-            using var deploy = DriverDeploy.Acquire();
-            try { ReplaceLegacyTransport(progress); }
+            // The look needs no lock. On a machine whose host controller is
+            // not an older HIDMaestro one, which is every machine once moved,
+            // a composite create takes no machine-wide lock and starts no
+            // thread here.
+            if (InstalledLegacyUde() == null)
+            {
+                s_legacyChecked = true;
+                return;
+            }
+            // The move is a transport deploy like the install: under the
+            // transport lock, so two programs never force the host
+            // controller's driver at once, and read again under it. The
+            // transport answers already, so nothing here fails the create. A
+            // lock this process could not take leaves the move for its next
+            // composite create.
+            bool ran = false;
+            try
+            {
+                TransportWork.Run(work =>
+                {
+                    Volatile.Write(ref ran, true);
+                    ReplaceLegacyTransport(work);
+                    return true;
+                }, progress);
+            }
             catch (Exception ex)
             {
                 // Nothing here removes the old driver before the new one is
                 // on the device, so a failure leaves the transport that was
                 // answering still answering.
-                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: legacy replace stopped: {ex.GetType().Name}: {ex.Message}");
+                DeviceOrchestrator.LogDiag(Volatile.Read(ref ran)
+                    ? $"UsbipDriverInstaller: legacy replace stopped: {ex.GetType().Name}: {ex.Message}"
+                    : $"UsbipDriverInstaller: legacy replace not checked, the transport lock was not taken: {ex.GetType().Name}: {ex.Message}");
             }
-            finally { deploy.ReleaseMutex(); }
+            if (Volatile.Read(ref ran)) s_legacyChecked = true;
         }
     }
 
-    private static void ReplaceLegacyTransport(Action<string>? progress)
+    /// <summary>The older HIDMaestro host controller this machine runs, or
+    /// null when it runs none, or its owner keeps the transport as it is.
+    /// Reads the service's image and nothing else.</summary>
+    private static LegacyUde? InstalledLegacyUde()
     {
         // A machine whose owner wants the transport left as it is, and the
         // battery, which has to be able to run a composite on an older
@@ -276,25 +438,26 @@ internal static partial class UsbipDriverInstaller
         if (Environment.GetEnvironmentVariable("HIDMAESTRO_KEEP_TRANSPORT") == "1")
         {
             DeviceOrchestrator.LogDiag("UsbipDriverInstaller: HIDMAESTRO_KEEP_TRANSPORT=1; not replacing the host controller.");
-            return;
+            return null;
         }
 
         string? sys = InstalledUdeImagePath();
-        if (sys == null || !File.Exists(sys)) return;
+        if (sys == null || !File.Exists(sys)) return null;
         string installed = Sha256Of(sys);
         bool arm64 = RuntimeInformation.OSArchitecture == Architecture.Arm64;
-        LegacyUde? found = null;
         foreach (var legacy in LegacyUdes)
             if (legacy.Arm64 == arm64 && installed.Equals(legacy.SysSha256, StringComparison.OrdinalIgnoreCase))
-                found = legacy;
-        if (found is not LegacyUde old)
-        {
-            DeviceOrchestrator.LogDiag(
-                installed.Equals(PinnedUdeHash("usbip2_ude.sys"), StringComparison.OrdinalIgnoreCase)
-                    ? $"UsbipDriverInstaller: host controller is the pinned {Version}."
-                    : $"UsbipDriverInstaller: host controller {installed[..16]} is not one HIDMaestro installed; leaving it alone.");
-            return;
-        }
+                return legacy;
+        DeviceOrchestrator.LogDiag(
+            installed.Equals(PinnedUdeHash("usbip2_ude.sys"), StringComparison.OrdinalIgnoreCase)
+                ? $"UsbipDriverInstaller: host controller is the pinned {Version}."
+                : $"UsbipDriverInstaller: host controller {installed[..16]} is not one HIDMaestro installed; leaving it alone.");
+        return null;
+    }
+
+    private static void ReplaceLegacyTransport(TransportWork work)
+    {
+        if (InstalledLegacyUde() is not LegacyUde old) return;
 
         // Never change a driver under a device someone is using, ours or
         // another program's. The next process start tries again.
@@ -320,7 +483,7 @@ internal static partial class UsbipDriverInstaller
             return;
         }
 
-        progress?.Invoke($"Updating the USB audio transport to usbip-win2 {Version}...");
+        work.Report($"Updating the USB audio transport to usbip-win2 {Version}...");
         DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: replacing the usbip-win2 {old.Version} host controller with {Version}.");
 
         string inf = StageUdePackage();
@@ -381,7 +544,7 @@ internal static partial class UsbipDriverInstaller
                     DeviceOrchestrator.LogDiag($"UsbipDriverInstaller:   pnputil /delete-driver {oem} -> {rc}");
                 }
                 DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: host controller is {Version} after {sw.ElapsedMilliseconds} ms.");
-                progress?.Invoke("USB audio transport ready.");
+                work.Report("USB audio transport ready.");
                 return;
             }
             Thread.Sleep(250);
@@ -578,6 +741,46 @@ internal static partial class UsbipDriverInstaller
         catch { return false; }
     }
 
+    /// <summary>Wait up to <paramref name="timeoutMs"/> for every running
+    /// usbip-win2 installer to end. Returns false when one still runs. An
+    /// installer is a process whose name starts with <c>USBip-</c>: the
+    /// release installers' own name, and the setup Inno Setup's loader
+    /// extracts and runs under the same name with <c>.tmp</c>
+    /// (issrc Projects/SetupLdr.dpr, the temporary directory and
+    /// <c>PathChangeExt(PathExtractName(SelfFilename), '.tmp')</c>).
+    /// Coexistence probe section Z calls this through reflection.</summary>
+    internal static bool WaitForRunningInstallers(int timeoutMs)
+    {
+        var until = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            var running = new List<Process>();
+            foreach (var p in Process.GetProcesses())
+            {
+                bool installer = false;
+                try { installer = p.Id != Environment.ProcessId && p.ProcessName.StartsWith("USBip-", StringComparison.OrdinalIgnoreCase); }
+                catch (InvalidOperationException) { /* exited while read */ }
+                if (installer) running.Add(p);
+                else p.Dispose();
+            }
+            try
+            {
+                if (running.Count == 0) return true;
+                DeviceOrchestrator.LogDiag($"UsbipDriverInstaller: waiting for a running usbip-win2 installer (pid {running[0].Id}).");
+                foreach (var p in running)
+                {
+                    int left = (int)Math.Max(0, until - Environment.TickCount64);
+                    try { if (!p.WaitForExit(left)) return false; }
+                    catch (InvalidOperationException) { /* not ours to wait on, or gone */ }
+                    catch (System.ComponentModel.Win32Exception) { /* access denied: polled below */ }
+                }
+                if (Environment.TickCount64 >= until) return false;
+            }
+            finally { foreach (var p in running) p.Dispose(); }
+            Thread.Sleep(100);
+        }
+    }
+
     /// <summary>usbip-win2's uninstall entry, from its <c>AppId</c>.</summary>
     private const string UninstallEntryKey =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{199505b0-b93d-4521-a8c7-897818e0205a}_is1";
@@ -656,7 +859,10 @@ internal static partial class UsbipDriverInstaller
     /// silent no-op that would make this repair look like it ran. The
     /// remove-then-setup pair below is the documented restart sequence
     /// and behaves the same on 10 and 11.</para></summary>
-    private static bool TryRestartHostController(Action<string>? progress)
+    private static bool TryRestartHostController(TransportWork work) =>
+        TryRestartHostController(work, VhciClient.IsAvailable, RestartHostControllerDevnode, TimeoutScale.Apply(30_000));
+
+    private static bool TryRestartHostController(TransportWork work, Func<bool> available, Action restart, int budgetMs)
     {
         // Every CfgMgr call here can block indefinitely inside the PnP
         // subsystem: CM_Query_And_Remove_SubTree waits on the driver
@@ -669,62 +875,70 @@ internal static partial class UsbipDriverInstaller
         // CreateController call, so the PnP work runs on a background
         // thread and this method only ever waits a bounded time for the
         // OUTCOME it cares about: the device interface reappearing. If
-        // the thread is still stuck when the budget expires, it is
-        // abandoned (background, so it cannot keep the process alive) and
-        // the repair reports failure.
+        // the thread is still stuck when the budget expires, the repair
+        // reports failure and the thread is left to finish (background, so
+        // it cannot keep the process alive). The transport lock stays held
+        // until it does: a second program waits for it, or gives up after
+        // the lock's timeout, and never repairs the same devnode alongside
+        // it.
         var worker = new Thread(() =>
         {
-            try
-            {
-                // Same instance-number caveat as StampOwnerHardwareId:
-                // the vhci root is not always 0000. Repair the first
-                // present controller that carries the usbip UDE id.
-                uint devInst = 0;
-                bool located = false;
-                for (int n = 0; n < 16 && !located; n++)
-                {
-                    if (CM_Locate_DevNodeW(out devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
-                        continue;
-                    foreach (var hwid in GetMultiSz(devInst, CM_DRP_HARDWAREID))
-                        if (hwid.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { located = true; break; }
-                }
-                if (!located)
-                    return;
-
-                // Start it first. The common broken state is a devnode
-                // that is root-enumerated with its driver loaded but
-                // never started (DN_STARTED clear, no problem code), and
-                // for that a plain setup is the whole fix: cheap, and it
-                // does not block the way a subtree removal does. Only
-                // escalate to remove-and-setup when starting fails.
-                if (CM_Setup_DevNode(devInst, CM_SETUP_DEVNODE_READY) == CR_SUCCESS)
-                    return;
-
-                CM_Query_And_Remove_SubTreeW(devInst, out _, IntPtr.Zero, 0, 0);
-                if (CM_Setup_DevNode(devInst, CM_SETUP_DEVNODE_READY) != CR_SUCCESS
-                    && CM_Locate_DevNodeW(out uint root, null, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
-                {
-                    // Still not up, so ask the root to re-enumerate and
-                    // let PnP rebuild the devnode.
-                    CM_Reenumerate_DevNode(root, 0);
-                }
-            }
+            try { restart(); }
             catch { /* the poll below is the only verdict that matters */ }
         })
         { IsBackground = true, Name = "HMUsbipRepair" };
         worker.Start();
+        work.HoldLockFor(worker);
 
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < TimeoutScale.Apply(30_000))
+        while (sw.ElapsedMilliseconds < budgetMs)
         {
-            if (VhciClient.IsAvailable())
+            if (available())
             {
-                progress?.Invoke("USB audio transport ready.");
+                work.Report("USB audio transport ready.");
                 return true;
             }
             Thread.Sleep(250);
         }
         return false;
+    }
+
+    /// <summary>The restart itself: start the vhci devnode, and when that
+    /// fails, remove and set it up again.</summary>
+    private static void RestartHostControllerDevnode()
+    {
+        // Same instance-number caveat as StampOwnerHardwareId: the vhci root
+        // is not always 0000. Repair the first present controller that
+        // carries the usbip UDE id.
+        uint devInst = 0;
+        bool located = false;
+        for (int n = 0; n < 16 && !located; n++)
+        {
+            if (CM_Locate_DevNodeW(out devInst, $"ROOT\\USB\\{n:D4}", CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS)
+                continue;
+            foreach (var hwid in GetMultiSz(devInst, CM_DRP_HARDWAREID))
+                if (hwid.IndexOf("USBIP_WIN2", StringComparison.OrdinalIgnoreCase) >= 0) { located = true; break; }
+        }
+        if (!located)
+            return;
+
+        // Start it first. The common broken state is a devnode that is
+        // root-enumerated with its driver loaded but never started
+        // (DN_STARTED clear, no problem code), and for that a plain setup is
+        // the whole fix: cheap, and it does not block the way a subtree
+        // removal does. Only escalate to remove-and-setup when starting
+        // fails.
+        if (CM_Setup_DevNode(devInst, CM_SETUP_DEVNODE_READY) == CR_SUCCESS)
+            return;
+
+        CM_Query_And_Remove_SubTreeW(devInst, out _, IntPtr.Zero, 0, 0);
+        if (CM_Setup_DevNode(devInst, CM_SETUP_DEVNODE_READY) != CR_SUCCESS
+            && CM_Locate_DevNodeW(out uint root, null, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
+        {
+            // Still not up, so ask the root to re-enumerate and let PnP
+            // rebuild the devnode.
+            CM_Reenumerate_DevNode(root, 0);
+        }
     }
 
     /// <summary>Additional hardware ID stamped onto the emulated host
