@@ -32,6 +32,15 @@ namespace HIDMaestro.Internal;
 /// before it is used, so a file that does not match the bytes shipped inside
 /// HIDMaestro.Core.dll never runs.</para>
 ///
+/// <para>Lock order. The staging lock (<see cref="StagingMutexObject"/>) is
+/// a leaf. It is taken under the deploy lock (a deploy's prune, every
+/// staging a deploy does, and the usbip-win2 transport's staging), or with
+/// no lock held (a constructor's prewarm, the SWD helper's staging), and
+/// nothing takes another machine-wide lock while holding it.
+/// <see cref="DirFor"/> holds it only around its record note, before its
+/// process-local lock. S81 checks that a staging waits for a holder of the
+/// lock and a deploy completes after it.</para>
+///
 /// <para>The SDDL shapes and the write-aside repair follow Kitsune Input's
 /// Rust setup component, which enforces the same protected setup directory
 /// for the same reason (<c>O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)</c>
@@ -103,8 +112,15 @@ internal static class ProtectedStaging
     {
         // Staging is a machine-wide write: the owner claim and record come
         // first, and the record names this build's directory so a deploy of
-        // another build keeps it while this process runs.
-        MachineClaims.NoteStaging(VersionTag);
+        // another build keeps it while this process runs. The note is
+        // written under the staging lock, which a prune holds from its read
+        // of the records to its last delete, so a directory is either named
+        // before the prune reads or touched only after the prune is done.
+        using (var note = AcquireStagingLock())
+        {
+            try { MachineClaims.NoteStaging(VersionTag); }
+            finally { note.ReleaseMutex(); }
+        }
         lock (s_lock)
         {
             // The shared root cannot be moved aside: the OpenVR path
@@ -119,6 +135,34 @@ internal static class ProtectedStaging
             SweepOrphanedTemps(opDir);
             return opDir;
         }
+    }
+
+    /// <summary>The staging lock's name in <see cref="AdminNamespace"/>.</summary>
+    internal const string StagingMutexObject = "Staging";
+
+    /// <summary>Called by a prune after it reads the owner records and before
+    /// it deletes anything, while it holds the staging lock. A test seam,
+    /// null in a program.</summary>
+    internal static Action? AfterPruneRead;
+
+    /// <summary>Take the staging lock, held by the calling thread until it
+    /// calls <c>ReleaseMutex</c>. An abandoned lock is taken.</summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    internal static System.Threading.Mutex AcquireStagingLock()
+    {
+        var m = new System.Threading.Mutex(false, AdminNamespace.Name(StagingMutexObject));
+        try
+        {
+            if (!m.WaitOne(TimeoutScale.Apply(120_000)))
+            {
+                m.Dispose();
+                throw new InvalidOperationException(
+                    "Another program's HIDMaestro staging prune held the machine-wide staging lock for two minutes.");
+            }
+        }
+        catch (System.Threading.AbandonedMutexException) { }
+        return m;
     }
 
     /// <summary>Stage one embedded resource into <paramref name="dir"/> under
@@ -253,11 +297,21 @@ internal static class ProtectedStaging
     private static readonly Dictionary<(System.Reflection.Assembly, string), string> s_embeddedHashes = new();
 
     /// <summary>Delete staging directories of versions no live owner names,
-    /// keeping this build's. The caller holds the deploy mutex.</summary>
+    /// keeping this build's. The caller holds the deploy mutex.
+    ///
+    /// <para>The staging lock is held from the read of the records to the
+    /// last delete, and every program writes its record's staging note
+    /// under the same lock before it touches its directory
+    /// (<see cref="DirFor"/>). So a program of another build either named
+    /// its directory before this read, and the directory stays, or reaches
+    /// its directory only after the deletes, and recreates it. A program
+    /// whose record names its directory keeps it while it runs.</para></summary>
     internal static void PruneOldVersions()
     {
+        System.Threading.Mutex? held = null;
         try
         {
+            held = AcquireStagingLock();
             if (!Directory.Exists(StagingRoot)) return;
             // A running program's directory, by the tag its record names. A
             // record without one, written by a build before the tag, keeps
@@ -270,6 +324,7 @@ internal static class ProtectedStaging
                 if (!string.IsNullOrEmpty(r.StagingTag)) liveTags.Add(r.StagingTag!);
                 else if (!string.IsNullOrEmpty(r.SdkVersion)) liveVersions.Add(r.SdkVersion!);
             }
+            AfterPruneRead?.Invoke();
 
             foreach (string dir in Directory.EnumerateDirectories(StagingRoot))
             {
@@ -294,6 +349,14 @@ internal static class ProtectedStaging
             }
         }
         catch (Exception ex) { DeviceOrchestrator.LogDiag($"ProtectedStaging: prune skipped: {ex.GetType().Name}"); }
+        finally
+        {
+            if (held != null)
+            {
+                held.ReleaseMutex();
+                held.Dispose();
+            }
+        }
     }
 
     private static void TryDelete(string dir)

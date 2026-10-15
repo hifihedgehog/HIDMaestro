@@ -21,6 +21,10 @@
 //  - a bind while another thread restores under the ledger's lock: the
 //    bind waits for the lock and finishes, where taking the two locks in
 //    the other order deadlocked both threads.
+//  - the staging lock, a leaf below the deploy lock: a thread holds the
+//    deploy lock and then the staging lock, as a deploy's prune does, while
+//    a second thread stages and a third takes the deploy lock and stages.
+//    Both wait for the first and finish.
 //  - a program killed while bound: an adapter that arrives on the same
 //    instance before any reclaim finds WinUSB, as after Zadig, and the
 //    reclaim puts it back on input.inf. When the reclaim comes first, the
@@ -57,6 +61,7 @@ internal static class Program
         BindAndRank(ctx, gc);
         Cycles(ctx, gc);
         LockOrder(ctx, gc);
+        StagingLockOrder();
         Crash(ctx, gc, reclaimFirst: false);
         Crash(ctx, gc, reclaimFirst: true);
         Crash(ctx, gc, reclaimFirst: false, bindArrival: true);
@@ -195,6 +200,69 @@ internal static class Program
         {
             // The two threads hold the machine-wide ledger lock between them.
             // Ending the process is the only way to give it back.
+            Probe.Finish("S81");
+            Environment.Exit(1);
+        }
+    }
+
+    // ── The staging lock ────────────────────────────────────────────────
+
+    /// <summary>The staging lock is taken under the deploy lock and holds no
+    /// other machine-wide lock (ProtectedStaging's lock-order note). A holder
+    /// of both, in that order, delays a staging and a deploy-then-staging on
+    /// two other threads, and both finish once it lets go.</summary>
+    static void StagingLockOrder()
+    {
+        Console.WriteLine("-- a staging and a deploy while another thread holds the deploy and staging locks");
+        DriverBuilder.EnsureExtracted();
+        using var held = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            var deploy = DriverDeploy.Acquire();
+            try
+            {
+                var staging = ProtectedStaging.AcquireStagingLock();
+                try
+                {
+                    held.Set();
+                    Thread.Sleep(1500);
+                }
+                finally { staging.ReleaseMutex(); staging.Dispose(); }
+            }
+            finally { deploy.ReleaseMutex(); deploy.Dispose(); }
+        }) { IsBackground = true };
+        holder.Start();
+        held.Wait(10_000);
+
+        long stagedMs = -1, deployedMs = -1;
+        string stageError = "", deployError = "";
+        var stager = new Thread(() =>
+        {
+            var sw = Stopwatch.StartNew();
+            try { DriverBuilder.EnsureExtracted(); stagedMs = sw.ElapsedMilliseconds; }
+            catch (Exception ex) { stageError = ex.Message; }
+        }) { IsBackground = true };
+        var deployer = new Thread(() =>
+        {
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                var deploy = DriverDeploy.Acquire();
+                try { ProtectedStaging.DirFor(ProtectedStaging.OperationPackage); }
+                finally { deploy.ReleaseMutex(); deploy.Dispose(); }
+                deployedMs = sw.ElapsedMilliseconds;
+            }
+            catch (Exception ex) { deployError = ex.Message; }
+        }) { IsBackground = true };
+        stager.Start();
+        deployer.Start();
+        bool done = holder.Join(20_000) & stager.Join(20_000) & deployer.Join(20_000);
+        Probe.Check("a staging waits for the staging lock's holder, then finishes", stagedMs >= 1000, $"{stagedMs} ms {stageError}");
+        Probe.Check("a deploy that stages waits for the deploy lock's holder, then finishes", deployedMs >= 1000, $"{deployedMs} ms {deployError}");
+        if (!done)
+        {
+            // The threads hold machine-wide locks between them. Ending the
+            // process is the only way to give them back.
             Probe.Finish("S81");
             Environment.Exit(1);
         }

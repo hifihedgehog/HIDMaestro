@@ -38,9 +38,10 @@ public static class DriverBuilder
     /// <c>DriverBuilder.BuildDir</c> for the directory containing
     /// <c>hidmaestro.inf</c>. Now points at the extraction staging dir.
     /// Calls <see cref="EnsureExtracted"/> each time it is read, with its
-    /// cost: a SHA-256 of the 23 staged files, 6.6 MB, measured at 8.9 ms
-    /// p50 and 9.6 to 11.1 ms p95 warm (30 runs, twice). Read it once and
-    /// keep the path.</summary>
+    /// cost: the machine-wide staging lock, which another program's staging
+    /// prune holds for the length of its deletes, and a SHA-256 of the 23
+    /// staged files, 6.6 MB, measured at 8.9 ms p50 and 9.6 to 11.1 ms p95
+    /// warm (30 runs, twice). Read it once and keep the path.</summary>
     public static string BuildDir => EnsureExtracted();
 
     static (int exitCode, string output) Run(string fileName, string arguments,
@@ -199,7 +200,9 @@ public static class DriverBuilder
     /// embedded hashes are computed once per process, so a call costs one
     /// read of the staged files, 6.6 MB: 8.9 ms p50 and 9.6 to 11.1 ms p95
     /// warm (30 runs, twice), against under 1 ms for the two files checked
-    /// before.</para></summary>
+    /// before. Each call also takes the machine-wide staging lock
+    /// (<see cref="ProtectedStaging.StagingMutexObject"/>) for its record
+    /// note, and waits while another program's prune holds it.</para></summary>
     private static readonly object s_extractLock = new();
 
     public static string EnsureExtracted()

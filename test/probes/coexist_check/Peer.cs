@@ -219,6 +219,36 @@ internal static class Peer
                     case "alive":
                         Reply("OK alive");
                         break;
+                    case "pauseprune":
+                    {
+                        // A deploy's staging prune pauses after it reads the
+                        // owner records and before it deletes anything, until
+                        // the probe sends a line.
+                        var f = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.ProtectedStaging")
+                            ?.GetField("AfterPruneRead", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (f == null || f.FieldType != typeof(Action)) { Reply("ERR pauseprune no hook"); break; }
+                        f.SetValue(null, (Action)(() =>
+                        {
+                            f.SetValue(null, null);
+                            Reply("OK paused");
+                            Console.ReadLine();
+                        }));
+                        Reply("OK pauseprune");
+                        break;
+                    }
+                    case "fakebuild":
+                    {
+                        // This process takes the payload hash given, as a
+                        // build with another driver payload would, so its
+                        // staging directory is another build's. Must come
+                        // before anything reads the hash.
+                        var f = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.EmbeddedManifest")
+                            ?.GetField("s_cachedHash", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (f == null) { Reply("ERR fakebuild no hash field"); break; }
+                        f.SetValue(null, a[1]);
+                        Reply("OK fakebuild");
+                        break;
+                    }
                     case "addpackages":
                     {
                         // The deploy policy's add of a package a set lacks,
