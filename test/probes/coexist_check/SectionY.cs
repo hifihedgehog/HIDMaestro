@@ -83,6 +83,10 @@
 //        adoption asks for is refused while the probe holds the HID child
 //        open. The driver watches the new program's pipe, the census reads
 //        its controller as a running program's, and a sweep leaves it.
+//    Y18. The same, with the v1.12.0 program streaming input without a
+//        pause from the moment its create returns, inside the driver's idle
+//        window, so the driver never maps the input section again. The
+//        driver watches the new program's pipe all the same.
 //    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
 //        while its SDK holds the earlier driver's OutputEvent. The probe
 //        writes 31 output reports 100 ms apart and times each one to the
@@ -128,7 +132,8 @@ internal static partial class Program
             SectionYNoSection(user);
             SectionYBadTime(user);
             SectionYWatchWhileWaiting();
-            SectionYAdopted(installed);
+            SectionYAdopted(installed, "Y17", stream: false);
+            SectionYAdopted(installed, "Y18", stream: true);
         }
         finally { Y.CloseHandle(user); }
     }
@@ -408,57 +413,74 @@ internal static partial class Program
         Check("Y16: the driver records the closed pipe while it waits for the input event", recorded, Y.ShowWatch(inst));
     }
 
-    /// <summary>Y17. A gamepad companion a v1.12.0 program adopts after
-    /// its first program died, with the restart refused.</summary>
-    static void SectionYAdopted(string installed)
+    /// <summary>Y17 and Y18. A gamepad companion a v1.12.0 program adopts
+    /// after its first program died, with the restart refused. With
+    /// <paramref name="stream"/> the program streams without a pause from
+    /// its create on.</summary>
+    static void SectionYAdopted(string installed, string y, bool stream)
     {
         Clean();
         using var old = PeerProcess.Start("Y-v1.12.0-adopter", "v1.12.0");
         // Its first controller takes index 0, so this SDK's next create
         // skips that index.
         string first = old.Send("create pad F1FE coexist-y-adopter");
-        if (!Ok(first)) { Check("Y17: the v1.12.0 program creates", false, first); return; }
+        if (!Ok(first)) { Check($"{y}: the v1.12.0 program creates", false, first); return; }
         string inst;
         int t;
         HidCapture? cap;
         using (var p = PeerProcess.Start("Y-adopted"))
         {
             string cp = p.Send("create xinputhid - coexist-y-adopted");
-            if (!Ok(cp)) { Check("Y17: a program creates a gamepad companion", false, cp); return; }
+            if (!Ok(cp)) { Check($"{y}: a program creates a gamepad companion", false, cp); return; }
             inst = PeerProcess.Field(cp, "instance")!;
             t = int.Parse(PeerProcess.Field(cp, "transport")!);
-            Check("Y17: the driver watches the program", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000), Y.ShowWatch(inst));
+            Check($"{y}: the driver watches the program", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000), Y.ShowWatch(inst));
             // A handle on the HID child makes Windows refuse the polite
             // disable a restart begins with, as an XInput handle does.
             var path = WaitPaths(0x045E, 0x0B00, 1, 10_000);
             cap = path.Count == 1 ? HidCapture.Open(path[0]) : null;
-            Check("Y17: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
+            Check($"{y}: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
             p.Kill();
         }
+        var killed = Stopwatch.StartNew();
         try
         {
-            Check("Y17: the driver records the program gone",
+            Check($"{y}: the driver records the program gone",
                   WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000), Y.ShowWatch(inst));
             string second = old.Send("create xinputhid - coexist-y-adopter-2");
-            Check("Y17: the v1.12.0 program's next create adopts the companion on its index",
+            if (stream)
+            {
+                // At once, before the driver's eight idle 500 ms waits end.
+                // Each frame wakes the worker, so it never recycles and never
+                // maps the section again.
+                old.Send("stream 1 0.5 250 1");
+                Check($"{y}: the program attaches and streams inside the driver's idle window",
+                      killed.ElapsedMilliseconds < 3500, $"{killed.ElapsedMilliseconds} ms after the kill");
+                Check($"{y}: its input reaches the device", cap != null && Flows(cap));
+            }
+            Check($"{y}: the v1.12.0 program's next create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
                   && PeerProcess.Field(second, "transport") == t.ToString(), second);
-            Check("Y17: the restart was refused: the probe's handle still reads and the device keeps the installed driver",
+            Check($"{y}: the restart was refused: the probe's handle still reads and the device keeps the installed driver",
                   cap != null && !cap.Broken && Native.DriverVersionOf(inst) == installed,
                   $"read error {cap?.ReadError}, {Native.DriverVersionOf(inst)}, installed {installed}");
             bool watched = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 12_000);
-            Check("Y17: the driver watches the v1.12.0 program's pipe", watched, Y.ShowWatch(inst) + $", program {old.Pid}");
+            Check($"{y}: the driver watches the v1.12.0 program's pipe", watched, Y.ShowWatch(inst) + $", program {old.Pid}");
             var tree = Native.Subtree(inst);
             using var nu = PeerProcess.Start("Y-adopted-sweeper");
             string census = nu.Send("census");
             string? entry = census.Split(' ').FirstOrDefault(e => e.Split('|') is { Length: > 2 } f && f[1] == t.ToString());
-            Check("Y17: the census reads the controller as a running v1.12.0 program's", entry?.Split('|')[2] == "LiveLegacy", entry ?? census);
+            Check($"{y}: the census reads the controller as a running v1.12.0 program's", entry?.Split('|')[2] == "LiveLegacy", entry ?? census);
             nu.Send("sweep");
             Thread.Sleep(2000);
-            Check("Y17: a sweep leaves it", tree.Count > 0 && tree.All(d => !Native.IsGone(d)),
+            Check($"{y}: a sweep leaves it", tree.Count > 0 && tree.All(d => !Native.IsGone(d)),
                   string.Join(", ", tree.Where(Native.IsGone)));
         }
-        finally { cap?.Dispose(); }
+        finally
+        {
+            if (stream) old.Send("stopstream");
+            cap?.Dispose();
+        }
     }
 
     /// <summary>Y10. Values that name a process created after them.</summary>

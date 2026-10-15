@@ -2154,7 +2154,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
          * but writes to a view the driver isn't reading from anymore. */
         ULONG staleWakeups = 0;
         ULONG idleTimeouts = 0;
-        ULONG doorbellTick = 0;
+        ULONG frameTick = 0;
         BOOLEAN recycle = FALSE;
 
         for (;;) {
@@ -2206,14 +2206,26 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                 } else {
                     staleWakeups = 0;
                 }
-                /* A doorbell the device could not make at start, held then
-                 * by a program's object, is retried on a steady input
-                 * stream too, not only on a recycle. A Switch Pro device
-                 * never recycles its mapping, and a streaming consumer never
-                 * idles into one. The attempt runs after the frame, so it
-                 * never adds to that frame's latency. */
-                if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
-                    TryCreateDoorbell(ctx);
+                /* Every 256 frames, after the frame so neither attempt adds
+                 * to its latency, retry what a map would otherwise retry. A
+                 * Switch Pro device never recycles its mapping, and a
+                 * streaming consumer never idles into a recycle.
+                 *   The output doorbell, which the device could not make
+                 *   while a program held the name.
+                 *   The owner watch, while none is connected. A program
+                 *   that starts on the index while the worker still holds
+                 *   the previous program's input event, inside the idle
+                 *   window before a recycle, opens that same event and
+                 *   section, so no map follows. TryOpenOwnerWatch reads the
+                 *   ended marker first, so a squatter's pipe is still
+                 *   refused. While no pipe exists the cost is one failed
+                 *   CreateFileW. */
+                if ((++frameTick & 0xFF) == 0) {
+                    if (ctx->OutputSignalEvent == NULL)
+                        TryCreateDoorbell(ctx);
+                    if (ctx->OwnerPipe == NULL)
+                        TryOpenOwnerWatch(ctx);
+                }
                 continue;
             }
 
