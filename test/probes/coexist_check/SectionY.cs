@@ -539,6 +539,14 @@ internal static partial class Program
             bool readded = Y.RestartDevice(inst) && WaitFor(() => Native.IsStarted(inst), 20_000);
             Check($"{y}: the device is added again, and the new context has no values",
                   readded && WaitFor(() => Y.WatchValues(inst) == null, 5000), Y.ShowWatch(inst));
+            // Each case must reach its own branch of the census's rule.
+            string ackName = $@"Global\HIDMaestroInputAck{t}";
+            if (holdAck)
+                Check($"{y}: the acknowledgement section still carries the driver's ended marker",
+                      Y.AckCapabilities(ackName) is int caps && (caps & unchecked((int)0x80000000)) != 0,
+                      $"capabilities {Y.AckCapabilities(ackName)?.ToString("X") ?? "none"}");
+            else
+                Check($"{y}: the acknowledgement section is gone", !Native.SectionExists(ackName));
             // The new worker maps the held section within its first 200 ms
             // tick. Past that, it has refused the user's pipe.
             Thread.Sleep(3000);
