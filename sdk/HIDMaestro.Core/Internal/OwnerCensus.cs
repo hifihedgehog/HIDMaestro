@@ -213,15 +213,10 @@ internal sealed partial class OwnerCensus
     {
         if (!MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return false;
         // The driver sets the ended marker before it writes OwnerConnected 0,
-        // so the marker is read after the values, never before: a marker
-        // read first could be clear only because the watch ended in between.
-        bool ackRead = false;
-        bool? ackEnded = null;
-        bool? AckEnded()
-        {
-            if (!ackRead) { ackEnded = AckWatchEnded(index); ackRead = true; }
-            return ackEnded;
-        }
+        // so the marker is read after the value it explains, never before:
+        // a marker read first could be clear only because the watch ended
+        // in between. Each read stands for the values read before it, so
+        // it is never reused for a value read later.
         string? gone = null;
         foreach (string id in members())
         {
@@ -234,7 +229,7 @@ internal sealed partial class OwnerCensus
                 // means a program has zeroed the section since, so the
                 // value describes the program before it and the rule below
                 // decides.
-                if (AckEnded() == false) continue;
+                if (AckWatchEnded(index) == false) continue;
                 gone ??= "the watch ended";
                 continue;
             }
@@ -265,7 +260,7 @@ internal sealed partial class OwnerCensus
         // or with the ended marker set (a v1.13.0 driver saw the watch end
         // and no program has started on the index since), the pipe and the
         // input section are a squatter's hold on a dead program's objects.
-        bool? ended = AckEnded();
+        bool? ended = AckWatchEnded(index);
         if (ended != false)
         {
             DeviceOrchestrator.LogDiag(ended == null
