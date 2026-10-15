@@ -70,8 +70,10 @@
 //      and an Xbox 360 controller, which needs it, creates.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
-//   V. Re-attach attempts a killed composite program leaves, when another
-//      program takes its USB/IP server port. SectionV.cs has the detail.
+//   V. USB/IP re-attach attempts and dropped imports of composites: a
+//      killed program's port taken over, sweeps beside live programs, and
+//      a running program's own composite losing its connection.
+//      SectionV.cs has the detail.
 //   S71 runs A to H and J to V.
 //
 // Each program is a peer process (this binary with --peer, or the same

@@ -258,8 +258,17 @@ internal sealed class UsbipServer : IDisposable
         /// by its exact location once the controller closes this
         /// connection: the controller completes the attempt, which re-arms
         /// its timer, before it closes the socket (vhci_ioctl.cpp complete,
-        /// workitem_cleanup). A cancel that lands while the attempt is in
-        /// flight is lost, because the retry's WdfRequestReuse clears it.</summary>
+        /// workitem_cleanup).
+        ///
+        /// <para>This covers an attempt that reaches this server for a bus
+        /// id it does not export, and only one the driver still lists. A
+        /// cancel takes an attempt off the driver's list before it cancels
+        /// the request (persistent.cpp:111, then :561). If an earlier
+        /// cancel, from any program, landed while the attempt was in its
+        /// import handshake, the request ignored it, the retry's
+        /// WdfRequestReuse cleared it, and the attempt runs on with no
+        /// list entry: every later cancel, this one included, finds nothing
+        /// and it retries until the driver gives up.</para></summary>
         private void CancelAttempt(string busid)
         {
             try

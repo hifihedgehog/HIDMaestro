@@ -39,6 +39,8 @@
 //                               name starting with <prefix>
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
+//   quit                        exit without disposing anything, so only
+//                               the SDK's exit handler cleans up
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -200,6 +202,11 @@ internal static class Peer
                         lock (s_live) { foreach (var c in s_live) c.Dispose(); s_live.Clear(); }
                         Reply("OK dispose");
                         break;
+                    case "quit":
+                        StopStream();
+                        Reply("OK quit");
+                        Environment.Exit(0);
+                        return 0;
                     case "exit":
                         StopStream();
                         s_ctx?.Dispose();

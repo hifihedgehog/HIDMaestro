@@ -9,9 +9,12 @@
 //         index 8 (bus id 1-9). A running program that had already swept
 //         then creates its first composite and its server takes the same
 //         port. The killed program's attempt is gone.
-//      2. A program on this SDK is killed the same way, and a v1.12.0
-//         program takes its port. Another program's sweep cancels the
-//         killed program's attempt and leaves the v1.12.0 imports attached.
+//      2. A program on this SDK is killed with composites on indices 0
+//         and 8, and a v1.12.0 program takes its port with bus ids 1-1 and
+//         1-10. Its connections are reset, and another program's sweep
+//         cancels the killed program's attempt for 1-9 and leaves the
+//         v1.12.0 program's re-attach of 1-1, a bus id the killed
+//         program's record names too: both its composites come back.
 //      3. That v1.12.0 program, with composites on slots 0 and 9, is
 //         killed, and a program on this SDK takes its port. Its create
 //         leaves no attempt on bus id 1-1. The attempt on 1-10, which no
@@ -24,6 +27,11 @@
 //         imports the first one again on a new port. The first program's
 //         record names the new port, and its dispose removes its own
 //         composite and leaves the other program's.
+//      5. A running program's composite loses its connection, and the
+//         program's own sweep runs before the host controller's re-attach:
+//         the composite comes back. It loses it again and the program
+//         disposes it, and then again and the program exits without
+//         disposing it: each time no attempt for it is left.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -59,6 +67,8 @@ internal static partial class Program
             VLegacyTakesPort(touched);
             Clean();
             VDroppedImport(touched);
+            Clean();
+            VOwnReattach(touched);
         }
         finally
         {
@@ -112,14 +122,15 @@ internal static partial class Program
         string busId;
         using (var a = PeerProcess.Start("V2-killed"))
         {
+            string c0 = a.Send("createat 0 composite -");
             string ca = a.Send("createat 8 composite -");
-            if (!Ok(ca)) { Check("V2: the program to be killed creates a composite at index 8", false, ca); return; }
+            if (!Ok(c0) || !Ok(ca)) { Check("V2: the program to be killed creates composites at indices 0 and 8", false, $"{c0} / {ca}"); return; }
             busId = "1-" + (int.Parse(PeerProcess.Field(ca, "transport")!) + 1);
             port = RecordUsbipPort(a.Pid);
             touched.Add((port, busId));
             a.Kill();
         }
-        WaitFor(() => !Vhci.Imported().Any(r => r.Port == port && r.BusId == busId), 10_000);
+        WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
 
         Stopwatch dropped;
         using (var old = PeerProcess.Start("V2-v1.12.0", "v1.12.0"))
@@ -133,6 +144,10 @@ internal static partial class Program
             Check($"V2: the v1.12.0 program's server takes the killed program's port {port}", mine.Count == 2,
                   string.Join(", ", Vhci.Imported().Select(r => $"{r.Port}/{r.BusId}")));
 
+            int reset = Tcp.ResetServerEnd(port, old.Pid);
+            Check("V2: the probe resets the v1.12.0 program's connections", reset == 2, $"{reset} reset");
+            WaitFor(() => !Vhci.Imported().Any(r => r.Port == port), 10_000);
+            var resetAt = Stopwatch.StartNew();
             using (var sweeper = PeerProcess.Start("V2-sweeper"))
             {
                 string s = sweeper.Send("sweep");
@@ -140,8 +155,11 @@ internal static partial class Program
             }
             int left = Vhci.Stop("127.0.0.1", port, busId);
             Check($"V2: the sweep cancels the killed program's attempt for {busId} at {port}", left == 0, $"{left} canceled by the probe");
-            Check("V2: and leaves the v1.12.0 program's imports attached",
-                  Vhci.Imported().Count(r => r.Port == port && (r.BusId == "1-1" || r.BusId == "1-10")) == 2);
+            // The host controller's attempts go out 30 s after the reset.
+            Check("V2: and leaves the v1.12.0 program's re-attach: both its composites come back",
+                  WaitFor(() => Vhci.Imported().Count(r => r.Port == port && (r.BusId == "1-1" || r.BusId == "1-10")) == 2,
+                          (int)Math.Max(0, 45_000 - resetAt.ElapsedMilliseconds)),
+                  string.Join(", ", Vhci.Imported().Select(r => $"{r.VhciPort}:{r.Port}/{r.BusId}")));
 
             old.Kill();
             dropped = Stopwatch.StartNew();
@@ -291,6 +309,49 @@ internal static partial class Program
               string.Join(", ", Vhci.Imported().Select(r => $"{r.VhciPort}:{r.Port}/{r.BusId}")));
         Check("V4: the disposed composite is gone",
               WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA && r.BusId == busA), 5000));
+    }
+
+    // ── V5 ─────────────────────────────────────────────────────────────
+
+    static void VOwnReattach(HashSet<(int Port, string BusId)> touched)
+    {
+        using var p = PeerProcess.Start("V5");
+        string c = p.Send("create composite -");
+        if (!Ok(c)) { Check("V5: the program creates a composite", false, c); return; }
+        string bus = "1-" + (int.Parse(PeerProcess.Field(c, "transport")!) + 1);
+        int port = RecordUsbipPort(p.Pid);
+        touched.Add((port, bus));
+        bool Attached() => Vhci.Imported().Any(r => r.Port == port && r.BusId == bus);
+
+        bool Drop(string when)
+        {
+            int n = Tcp.ResetServerEnd(port, p.Pid);
+            bool gone = WaitFor(() => !Attached(), 10_000);
+            Check($"V5: the probe drops the composite's connection {when}", n == 1 && gone, $"{n} reset");
+            return n == 1 && gone;
+        }
+
+        if (!Drop("a first time")) return;
+        var dropped = Stopwatch.StartNew();
+        string s = p.Send("sweep");
+        Check("V5: the program's own sweep runs", Ok(s), s);
+        Check($"V5: its composite {port}/{bus} comes back",
+              WaitFor(Attached, (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds)));
+        if (!Attached()) return;
+
+        if (!Drop("a second time")) return;
+        string d = p.Send("dispose");
+        int afterDispose = Vhci.Stop("127.0.0.1", port, bus);
+        Check("V5: its dispose leaves no re-attach attempt for it", Ok(d) && afterDispose == 0, $"{d}, {afterDispose} canceled by the probe");
+
+        string c2 = p.Send("create composite -");
+        if (!Ok(c2)) { Check("V5: the program creates its composite again", false, c2); return; }
+        if (!Drop("a third time")) return;
+        string q = p.Send("quit");
+        bool exited = WaitFor(() => p.Exited, 20_000);
+        int afterExit = Vhci.Stop("127.0.0.1", port, bus);
+        Check("V5: its exit without a dispose leaves no re-attach attempt for it", exited && afterExit == 0,
+              $"{q}, exited {exited}, {afterExit} canceled by the probe");
     }
 
     /// <summary>The vhci port a program's owner record names for its one

@@ -39,10 +39,6 @@ internal static class UsbipBackend
         SweepStaleOnce(server.Port);
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
-        // A re-attach attempt left for this location by a server that held
-        // the port before would import the device the moment it is
-        // registered, and this create's own attach would then find it busy.
-        VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
         if (identity != null)
             device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
         server.Register(device);
@@ -92,8 +88,10 @@ internal static class UsbipBackend
     /// no longer listens, and cancel the re-attach attempts of servers that
     /// are gone. Covers programs of every version: a v1.12.0 server listens
     /// the same way. This process's own port counts as gone for the
-    /// attempts: whatever the driver keeps against it was left by the
-    /// program that held the port before.</summary>
+    /// attempts, except for the bus ids its server exports: an attempt for
+    /// one of those is its own controller coming back after a dropped
+    /// connection, and any other was left by the program that held the
+    /// port before.</summary>
     internal static void DetachImportsOfDeadServers()
     {
         try
@@ -108,8 +106,8 @@ internal static class UsbipBackend
                 if (port == own || listening.Contains(port)) continue;
                 VhciClient.Detach(row.Port);
             }
-            VhciClient.StopAttachAttempts("127.0.0.1",
-                AttemptLocations(port => port == own || !listening.Contains(port), deadOnly: true));
+            var locations = AttemptLocations(port => port == own || !listening.Contains(port), deadOnly: true);
+            VhciClient.StopAttachAttempts("127.0.0.1", WithoutLiveExports(locations, listening));
         }
         catch { /* best-effort recovery */ }
     }
@@ -124,10 +122,14 @@ internal static class UsbipBackend
     /// once an import has dropped nothing else names its bus id. A server
     /// before v1.13.0 leaves no record, and for the ports
     /// <paramref name="portGone"/> picks, the bus ids that release canceled
-    /// itself are added. Any other attempt is canceled by the server on its
-    /// port when it gets there (<see cref="UsbipServer"/>).
-    /// <paramref name="deadOnly"/> false takes live programs' records too,
-    /// for the sweep that removes everything.</summary>
+    /// itself are added. An attempt none of these name is canceled by a
+    /// server this SDK runs when the attempt reaches it with a bus id the
+    /// server does not export, and by nothing before that, and only while
+    /// the driver still lists it: one an earlier cancel caught in its
+    /// import handshake is listed nowhere and runs until the driver gives
+    /// up (<see cref="UsbipServer"/>). <paramref name="deadOnly"/> false
+    /// takes live programs' records too, for the sweep that removes
+    /// everything.</summary>
     private static List<(int Port, string BusId)> AttemptLocations(Func<int, bool> portGone, bool deadOnly)
     {
         var list = new List<(int, string)>();
@@ -146,6 +148,86 @@ internal static class UsbipBackend
         return list;
     }
 
+    /// <summary>Drop the locations a live server exports from a list of
+    /// re-attach attempts to cancel. A dead program's port and transport
+    /// index both go free when it ends, so a program started since can
+    /// export the same location, and the driver keys an attempt by location
+    /// alone: canceling it would cancel that program's own controller
+    /// coming back. A port whose server does not say what it exports keeps
+    /// all its attempts.</summary>
+    private static List<(int Port, string BusId)> WithoutLiveExports(
+        List<(int Port, string BusId)> locations, HashSet<int> listening)
+    {
+        var exports = new Dictionary<int, HashSet<string>?>();
+        var kept = new List<(int, string)>(locations.Count);
+        int own = UsbipServer.Current?.Port ?? 0;
+        foreach (var (port, busId) in locations)
+        {
+            if (port != own && !listening.Contains(port)) { kept.Add((port, busId)); continue; }
+            if (!exports.TryGetValue(port, out var set)) exports[port] = set = ExportedBusIds(port);
+            if (set != null && !set.Contains(busId)) kept.Add((port, busId));
+        }
+        return kept;
+    }
+
+    /// <summary>The bus ids the server on a loopback port exports now: this
+    /// process's own from its server, another program's from its device
+    /// list (OP_REQ_DEVLIST, which the server of every release answers,
+    /// proto_op.h op_devlist_reply). Null when it does not answer within a
+    /// second.</summary>
+    private static HashSet<string>? ExportedBusIds(int port)
+    {
+        var server = UsbipServer.Current;
+        if (server != null && server.Port == port)
+        {
+            var own = new HashSet<string>();
+            foreach (var device in server.SnapshotDevices()) own.Add(device.BusId);
+            return own;
+        }
+        try
+        {
+            using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+                System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            socket.ReceiveTimeout = 1000;
+            socket.SendTimeout = 1000;
+            var connect = socket.ConnectAsync(System.Net.IPAddress.Loopback, port);
+            if (!connect.Wait(1000)) return null;
+            Span<byte> head = stackalloc byte[8];
+            UsbipProtocol.WriteOpCommon(head, UsbipProtocol.OpReqDevlist, 0);
+            socket.Send(head);
+            Span<byte> reply = stackalloc byte[12];
+            ReceiveExactly(socket, reply);
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(reply[2..]) != UsbipProtocol.OpRepDevlist
+                || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(reply[4..]) != UsbipProtocol.StOk)
+                return null;
+            uint count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(reply[8..]);
+            var set = new HashSet<string>();
+            var device = new byte[UsbipProtocol.UsbipUsbDeviceSize];
+            var interfaces = new byte[4];
+            for (uint i = 0; i < count; i++)
+            {
+                ReceiveExactly(socket, device);
+                set.Add(UsbipProtocol.ReadFixedUtf8(device.AsSpan(UsbipProtocol.DevPathMax, UsbipProtocol.BusIdSize)));
+                // bNumInterfaces is the block's last byte, and one
+                // usbip_usb_interface of 4 bytes follows per interface.
+                for (int n = device[UsbipProtocol.UsbipUsbDeviceSize - 1]; n > 0; n--)
+                    ReceiveExactly(socket, interfaces);
+            }
+            return set;
+        }
+        catch { return null; }
+    }
+
+    private static void ReceiveExactly(System.Net.Sockets.Socket socket, Span<byte> buffer)
+    {
+        for (int got = 0; got < buffer.Length;)
+        {
+            int n = socket.Receive(buffer[got..]);
+            if (n <= 0) throw new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionReset);
+            got += n;
+        }
+    }
+
     /// <summary>One dead program's composite: its import, found by the
     /// server port and bus id it was attached with, and the re-attach
     /// attempts against it. The location alone names it: the vhci port the
@@ -158,12 +240,14 @@ internal static class UsbipBackend
             if (!VhciClient.IsAvailable()) return;
             string busId = UsbipEmulatedDevice.BusIdFor(transportIndex);
             // A port with a listener has a new, live server, whose imports
-            // stay. The attempts go all the same: canceling one never
-            // touches an import, and this record is the last thing that
-            // names the location.
-            if (!ListeningLoopbackPorts().Contains(serverPort))
+            // stay. The attempt goes all the same unless that server exports
+            // the location: canceling one never touches an import, and this
+            // record is the last thing that names the location.
+            var listening = ListeningLoopbackPorts();
+            if (!listening.Contains(serverPort))
                 VhciClient.DetachLocation("127.0.0.1", serverPort, busId);
-            VhciClient.StopAttachAttempts("127.0.0.1", serverPort, busId);
+            VhciClient.StopAttachAttempts("127.0.0.1",
+                WithoutLiveExports(new List<(int, string)> { (serverPort, busId) }, listening));
         }
         catch { }
     }
