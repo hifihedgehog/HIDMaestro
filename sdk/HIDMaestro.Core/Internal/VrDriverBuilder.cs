@@ -284,8 +284,10 @@ internal static class VrDriverBuilder
     {
         // The elevated SDK writes here, and SteamVR loads the result, so
         // every directory on the way is Administrators/SYSTEM-write-only
-        // like the shared root, and one a non-administrator owns or could
-        // re-permission is moved aside (ProtectedStaging.SharedDir). Each
+        // like the shared root (ProtectedStaging.SharedDir): one SYSTEM or
+        // Administrators own is reset where it is, since SteamVR may hold
+        // its files open, and one anyone else owns, or could re-permission
+        // or delete, is moved aside, or refused when it cannot move. Each
         // file goes in through a temporary name and a rename, checked
         // against its embedded SHA-256, so a link planted at a file's path
         // is replaced, not written through.
