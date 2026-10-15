@@ -82,8 +82,10 @@ internal sealed class ControllerLease : IDisposable
                     reclaimed = k;
                 }
 
-            int squattedCount = 0;
-            string? firstSquatted = null;
+            // Indices skipped for an object this release did not create, and
+            // for an object nothing about whose maker was read.
+            int squattedCount = 0, unreadCount = 0;
+            string? firstOwnerRead = null, firstNotOurs = null, firstUnread = null;
             foreach (int n in Candidates(reclaimed >= 0 ? reclaimed : slot))
             {
                 if (used.Contains(n)) continue;
@@ -95,9 +97,13 @@ internal sealed class ControllerLease : IDisposable
                     if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(n))) continue;
                     if (SharedMemoryIO.ForeignObjectAt(n) is { } squatted)
                     {
-                        squattedCount++;
-                        firstSquatted ??= squatted;
-                        DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted}");
+                        switch (squatted.Finding)
+                        {
+                            case SharedMemoryIO.Finding.OwnerRead: squattedCount++; firstOwnerRead ??= squatted.Description; break;
+                            case SharedMemoryIO.Finding.NotOurs: squattedCount++; firstNotOurs ??= squatted.Description; break;
+                            default: unreadCount++; firstUnread ??= squatted.Description; break;
+                        }
+                        DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted.Description}");
                         continue;
                     }
 
@@ -136,9 +142,27 @@ internal sealed class ControllerLease : IDisposable
                     if (!keep) indexClaim.Dispose();
                 }
             }
-            string blocked = squattedCount == 0
-                ? "No transport index is free: every index up to 4096 is held by a running program or a present device."
-                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object this release did not create ({firstSquatted}). Another program made each, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older. The rest are held by a running program or a present device. Close those programs, or create the controller again once they are gone.";
+            string blocked;
+            if (squattedCount == 0 && unreadCount == 0)
+                blocked = "No transport index is free: every index up to 4096 is held by a running program or a present device.";
+            else
+            {
+                var text = new System.Text.StringBuilder("No transport index is free: of the indices up to 4096, ");
+                if (squattedCount > 0)
+                {
+                    // An object whose owner was read is named first, and
+                    // v1.12.0 is offered as a possible maker only when an
+                    // owner it could have left was read.
+                    text.Append($"{squattedCount} carry a Global\\ object this release did not create ({firstOwnerRead ?? firstNotOurs}). ");
+                    text.Append(firstOwnerRead != null
+                        ? "Another program made each, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older. "
+                        : "Another program made each. ");
+                }
+                if (unreadCount > 0)
+                    text.Append($"{(squattedCount > 0 ? "Of the others, " : "")}{unreadCount} carry a Global\\ name whose object showed nothing about its maker ({firstUnread}). ");
+                text.Append("The rest are held by a running program or a present device. Close those programs, or create the controller again once they are gone.");
+                blocked = text.ToString();
+            }
             throw new HMResourceInUseException(blocked, "transport index", null);
         }
         finally

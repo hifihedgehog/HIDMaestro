@@ -184,7 +184,7 @@ internal static partial class Program
             // names it, and names makers only as examples.
             string user = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
             Check("X6: the refusal names the owner it read, and makers only as examples",
-                  c.Contains($"is owned by {user}") && c.Contains("such as one that is not elevated"), c);
+                  c.Contains($"is owned by {user}") && c.Contains("such as one that is not elevated or one built on HIDMaestro 1.12.0 or older"), c);
         }
         finally { sq.Dispose(); }
         Check("X6: nothing the squatter made is left",
@@ -206,6 +206,10 @@ internal static partial class Program
             string c = p.Send("create pad F0EA -");
             Check("X6: the refusal says the object is another kind and claims no owner it did not read",
                   !Ok(c) && c.Contains("is another kind of object") && !c.Contains("owned by"), c);
+            // A v1.12.0 program makes no object of another kind, so the
+            // refusal does not offer it as an example maker.
+            Check("X6: with no owner read, the refusal does not name HIDMaestro 1.12.0 as a possible maker",
+                  !Ok(c) && c.Contains("Another program made each.") && !c.Contains("1.12.0"), c);
         }
         finally { sq.Dispose(); }
         Check("X6: nothing the squatter made is left",

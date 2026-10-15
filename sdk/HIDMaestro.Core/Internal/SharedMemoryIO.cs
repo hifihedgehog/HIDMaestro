@@ -1261,9 +1261,13 @@ internal static partial class SharedMemoryIO
             using (var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(ev, ownsHandle: false))
                 owner = ObjectOwner.OwnerSid(h);
             CloseHandle(ev);
-            string found = owner != null ? $"is owned by {owner}" : "has an owner this process could not read";
+            // v1.12.0 is named as a possible maker only beside an owner it
+            // could have left.
+            string found = owner != null
+                ? $"is owned by {owner}, so this release did not create it and a controller does not use it. Another program made it, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older."
+                : "has an owner this process could not read, so a controller does not use it.";
             throw new HMResourceInUseException(
-                $"{name} {found}, so this release did not create it and a controller does not use it. Another program made it, such as one that is not elevated or one built on HIDMaestro 1.12.0 or older. Create the controller again: it takes another transport index.",
+                $"{name} {found} Create the controller again: it takes another transport index.",
                 name, null);
         }
         return ev;
@@ -1300,29 +1304,46 @@ internal static partial class SharedMemoryIO
     /// owner is Administrators (the SDK) or SYSTEM, or, for the two events
     /// the driver host creates, LocalService (<see cref="ObjectOwner"/>).
     ///
-    /// <para>The result names the object and what was found: its owner,
-    /// or that it did not open as its own kind.</para></summary>
-    internal static string? ForeignObjectAt(int controllerIndex)
+    /// <para>The result names the object, what was found, and what that
+    /// shows (<see cref="Finding"/>). Only an object whose owner was read
+    /// can be a v1.12.0 program's: one of another kind, or one that refuses
+    /// READ_CONTROL, cannot. An open that failed otherwise, or an owner that
+    /// could not be read, shows nothing about who made the object, and the
+    /// index is skipped all the same.</para></summary>
+    internal static ForeignObject? ForeignObjectAt(int controllerIndex)
     {
         foreach (string kind in IndexSections)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (Unacceptable(OpenFileMappingW(READ_CONTROL, false, name), allowLocalService: false) is { } why) return $"{name} {why}";
+            if (Unacceptable(OpenFileMappingW(READ_CONTROL, false, name), allowLocalService: false) is { } why)
+                return why with { Description = $"{name} {why.Description}" };
         }
         foreach (string kind in IndexEvents)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (Unacceptable(OpenEventW(READ_CONTROL, false, name), DriverCreates(kind)) is { } why) return $"{name} {why}";
+            if (Unacceptable(OpenEventW(READ_CONTROL, false, name), DriverCreates(kind)) is { } why)
+                return why with { Description = $"{name} {why.Description}" };
         }
         return null;
     }
+
+    /// <summary>What an index's object showed: an owner other than this
+    /// release's was read, it is not this release's (another kind, or it
+    /// refuses READ_CONTROL), or nothing about its maker was read.</summary>
+    internal enum Finding { OwnerRead, NotOurs, Unread }
+
+    /// <summary>An object that keeps a transport index from use: what was
+    /// found, and what that shows.</summary>
+    internal readonly record struct ForeignObject(string Description, Finding Finding);
 
     /// <summary>Null for an open that found nothing, or found an object of
     /// the expected kind owned by Administrators or SYSTEM, or by
     /// LocalService when <paramref name="allowLocalService"/>. Otherwise
     /// what was found: the owner, or an open refused for access or for the
-    /// kind of object, which also counts as made by someone else.</summary>
-    private static string? Unacceptable(IntPtr handle, bool allowLocalService)
+    /// kind of object, which also counts as made by someone else, or an
+    /// open that failed otherwise or an owner not read, which shows
+    /// nothing about the maker.</summary>
+    private static ForeignObject? Unacceptable(IntPtr handle, bool allowLocalService)
     {
         if (handle == IntPtr.Zero)
         {
@@ -1330,16 +1351,18 @@ internal static partial class SharedMemoryIO
             return err switch
             {
                 ERROR_FILE_NOT_FOUND => null,
-                ERROR_INVALID_HANDLE => "is another kind of object",
-                ERROR_ACCESS_DENIED => "refuses this process READ_CONTROL, so its owner was not read",
-                _ => $"did not open (Win32 error {err})",
+                ERROR_INVALID_HANDLE => new ForeignObject("is another kind of object", Finding.NotOurs),
+                ERROR_ACCESS_DENIED => new ForeignObject("refuses this process READ_CONTROL, so its owner was not read", Finding.NotOurs),
+                _ => new ForeignObject($"did not open (Win32 error {err})", Finding.Unread),
             };
         }
         try
         {
             if (IsOwnedByAdmin(handle, allowLocalService)) return null;
             using var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, ownsHandle: false);
-            return $"is owned by {ObjectOwner.OwnerSid(h) ?? "an owner that cannot be read"}";
+            return ObjectOwner.OwnerSid(h) is { } owner
+                ? new ForeignObject($"is owned by {owner}", Finding.OwnerRead)
+                : new ForeignObject("has an owner that could not be read", Finding.Unread);
         }
         finally { CloseHandle(handle); }
     }
