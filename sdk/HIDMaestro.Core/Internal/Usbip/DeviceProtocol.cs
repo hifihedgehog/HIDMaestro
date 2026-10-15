@@ -72,6 +72,9 @@ internal sealed class CompiledProtocol
 
     public bool AckSetProtocol { get; }
     public bool GetStatusFromDescriptor { get; }
+    /// <summary>GET_REPORT answers the requested report ID alone, rather
+    /// than the input report.</summary>
+    public bool GetReportIdOnly { get; }
     public bool SelfPowered { get; }
 
     public PortLayout? Ports { get; }
@@ -291,6 +294,12 @@ internal sealed class CompiledProtocol
             null => false,
             "descriptor" => true,
             _ => throw Fail($"{root}.getStatus \"{spec.GetStatus}\" is not \"descriptor\"."),
+        };
+        GetReportIdOnly = spec.GetReport switch
+        {
+            null or "input" => false,
+            "reportId" => true,
+            _ => throw Fail($"{root}.getReport \"{spec.GetReport}\" is not one of input, reportId."),
         };
         SelfPowered = (descriptors.ConfigurationDescriptor[7] & 0x40) != 0;
     }
@@ -653,7 +662,8 @@ internal sealed class ProtocolEngine
         _snapshotTaken[port] = false;
     }
 
-    /// <summary>The input report as it stands, for GET_REPORT.</summary>
+    /// <summary>The input report as it stands, for GET_REPORT. The poll
+    /// clock does not take it, and nothing is counted.</summary>
     public byte[] CopyReport()
     {
         lock (_sync) return _report.AsSpan(0, _reportLength).ToArray();

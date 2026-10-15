@@ -136,6 +136,8 @@ internal static partial class Program
             }
         }
 
+        if (!args.Contains("teardown")) DeclaredInputReports(ctx, server);
+        if (!args.Contains("teardown")) ProtocolInputGetReport(ctx, server);
         Teardown(ctx, server);
         if (!args.Contains("teardown")) DisposeTiming(ctx);
 
@@ -322,6 +324,14 @@ internal static partial class Program
         var giRep = cl.ControlIn(0xA1, 0x01, 0x0101, 3, 64);
         Check("GET_REPORT(Input) serves the latest report",
               giRep.Status == 0 && giRep.Data.Skip(1).Take(63).SequenceEqual(data2));
+        // An input report ID the descriptor does not declare, and report ID
+        // 0 on a pad whose reports carry IDs, stall (USB 2.0 9.2.7) and
+        // never answer with report 0x01's bytes.
+        var giOther = cl.ControlIn(0xA1, 0x01, 0x0105, 3, 64);
+        var giZero = cl.ControlIn(0xA1, 0x01, 0x0100, 3, 64);
+        Check("GET_REPORT(Input 0x05) and GET_REPORT(Input 0) stall",
+              giOther.Status == -32 && giOther.Data.Length == 0 && giZero.Status == -32 && giZero.Data.Length == 0,
+              $"{giOther.Status}/{giOther.Data.Length} {giZero.Status}/{giZero.Data.Length}");
 
         // ── HID output: interrupt OUT + SET_REPORT → ring ───────────────
         Console.WriteLine("\n-- HID output --");
@@ -1278,6 +1288,150 @@ internal static partial class Program
         }
         var lines = (stdout.Result + "\n" + stderr.Result).Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
         return (p.ExitCode, lines.LastOrDefault(l => l.StartsWith("CHILD ", StringComparison.Ordinal)) ?? lines.FirstOrDefault() ?? "no output");
+    }
+
+    /// <summary>GET_REPORT(Input) on a persona whose descriptor declares
+    /// several input reports, the Steam Controller (2026): the last report
+    /// of the ID asked for, a declared report not yet sent as its ID and
+    /// zeros at its declared length, a report kept after another ID's
+    /// frame, and a stall for an ID the descriptor does not
+    /// declare.</summary>
+    static void DeclaredInputReports(HMContext ctx, UsbipServer server)
+    {
+        Console.WriteLine("\n-- GET_REPORT(Input) by the descriptor's report IDs --");
+        var profile = ctx.GetProfile("steam-controller-2")!.Inner;
+        var builder = profile.GetOrBuildReportBuilder();
+        var declared = builder.InputReports;
+        Check("the descriptor declares several input reports", declared.Count > 1,
+              string.Join(" ", declared.Select(r => $"{r.Id:X2}:{r.ByteSize}")));
+        var device = new UsbipEmulatedDevice(profile, Index);
+        server.Register(device);
+        try
+        {
+            using var cl = new Client(server.Port);
+            cl.SendImport(device.BusId);
+            cl.ReadExactly(8);
+            cl.ReadExactly(312);
+            ushort iface = device.Descriptors.HidInterfaceNumber;
+
+            IntPtr view = SharedMemoryIO.EnsureInputMapping(Index);
+            IntPtr evt = SharedMemoryIO.GetInputEvent(Index);
+            uint seqNo = ReadSeqNoBase(view);
+            int bodyLength = builder.InputReportByteSize - 1;
+            var body = MakePattern(bodyLength, 0x31);
+            SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, body, bodyLength, null);
+            Thread.Sleep(60);
+
+            byte sent = builder.InputReportId;
+            var got = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | sent), iface, 64);
+            Check($"GET_REPORT(Input 0x{sent:X2}), the report just sent, answers it",
+                  got.Status == 0 && got.Data.Length > 1 && got.Data[0] == sent && got.Data.Skip(1).Take(bodyLength).SequenceEqual(body),
+                  $"status {got.Status}, {got.Data.Length} bytes");
+            // A second declared report, sent whole as an extended frame,
+            // takes its own slot: the first keeps its bytes, and each
+            // answers with its own.
+            var (secondId, secondSize) = declared.First(r => r.Id != sent && r.ByteSize > 1);
+            var second = MakePattern(secondSize, 0x5A);
+            second[0] = secondId;
+            SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, body, bodyLength, null,
+                                           extendedData: second, extendedLen: second.Length);
+            Thread.Sleep(60);
+            var keep = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | sent), iface, 64);
+            Check($"after a frame of report 0x{secondId:X2}, GET_REPORT(Input 0x{sent:X2}) still answers 0x{sent:X2}'s bytes",
+                  keep.Status == 0 && keep.Data.Length > 1 && keep.Data[0] == sent && keep.Data.Skip(1).Take(bodyLength).SequenceEqual(body),
+                  $"status {keep.Status}, {keep.Data.Length} bytes, first {(keep.Data.Length > 0 ? keep.Data[0] : 0):X2}");
+            var own = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | secondId), iface, 64);
+            int ownWant = Math.Min(second.Length, 64);
+            Check($"GET_REPORT(Input 0x{secondId:X2}) answers its own frame",
+                  own.Status == 0 && own.Data.Length == ownWant && own.Data.SequenceEqual(second.Take(ownWant)),
+                  $"status {own.Status}, {own.Data.Length} bytes");
+
+            var unsent = declared.Where(r => r.Id != sent && r.Id != secondId).ToList();
+            var wrong = new List<string>();
+            foreach (var (id, size) in unsent)
+            {
+                var r = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | id), iface, 64);
+                int want = Math.Min(size, 64);
+                if (r.Status != 0 || r.Data.Length != want || r.Data[0] != id || r.Data.Skip(1).Any(b => b != 0))
+                    wrong.Add($"{id:X2}: status {r.Status}, {r.Data.Length} bytes");
+            }
+            Check($"each of the {unsent.Count} declared reports not sent answers its ID and zeros at its length",
+                  unsent.Count > 0 && wrong.Count == 0, string.Join(", ", wrong));
+            var none = cl.ControlIn(0xA1, 0x01, 0x0107, iface, 64);
+            Check("GET_REPORT(Input 0x07), which the descriptor does not declare, stalls",
+                  none.Status == -32 && none.Data.Length == 0, $"status {none.Status}, {none.Data.Length} bytes");
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(Index);
+        }
+    }
+
+    /// <summary>GET_REPORT(Input) on a protocol device with getReport
+    /// "input", a copy of gamecube-adapter: its own report from the engine,
+    /// another declared report as its ID and zeros, and a stall for an ID
+    /// the descriptor does not declare, the rule every other persona
+    /// follows.</summary>
+    static void ProtocolInputGetReport(HMContext ctx, UsbipServer server)
+    {
+        Console.WriteLine("\n-- GET_REPORT(Input) on a protocol device, getReport \"input\" --");
+        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
+        if (name == null)
+        {
+            Check("gamecube-adapter.json is embedded", false);
+            return;
+        }
+        string json;
+        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
+        using (var reader = new StreamReader(stream))
+            json = reader.ReadToEnd();
+        var j = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        j["id"] = "s43-protocol-input";
+        j["usbConfiguration"]!["protocol"]!["getReport"] = "input";
+        string dir = Path.Combine(Path.GetTempPath(), "hm-s43-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        UsbipEmulatedDevice? device = null;
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "s43-protocol-input.json"), j.ToJsonString());
+            ctx.LoadProfilesFromDirectory(dir);
+            var profile = ctx.GetProfile("s43-protocol-input")!.Inner;
+            var declared = profile.GetOrBuildReportBuilder().InputReports;
+            device = new UsbipEmulatedDevice(profile, Index);
+            server.Register(device);
+            using var cl = new Client(server.Port);
+            cl.SendImport(device.BusId);
+            cl.ReadExactly(8);
+            cl.ReadExactly(312);
+            ushort iface = device.Descriptors.HidInterfaceNumber;
+
+            var own = cl.ControlIn(0xA1, 0x01, 0x0121, iface, 64);
+            Check("GET_REPORT(Input 0x21), the engine's report, answers it",
+                  own.Status == 0 && own.Data.Length == 37 && own.Data[0] == 0x21,
+                  $"status {own.Status}, {own.Data.Length} bytes");
+            var (otherId, otherSize) = declared.First(r => r.Id != 0x21);
+            var other = cl.ControlIn(0xA1, 0x01, (ushort)(0x0100 | otherId), iface, 64);
+            int want = Math.Min(otherSize, 64);
+            Check($"GET_REPORT(Input 0x{otherId:X2}), declared and never sent, answers its ID and zeros at its length",
+                  other.Status == 0 && other.Data.Length == want && other.Data[0] == otherId && other.Data.Skip(1).All(b => b == 0),
+                  $"status {other.Status}, {other.Data.Length} bytes");
+            var none = cl.ControlIn(0xA1, 0x01, 0x0107, iface, 64);
+            Check("GET_REPORT(Input 0x07), which the descriptor does not declare, stalls",
+                  none.Status == -32 && none.Data.Length == 0, $"status {none.Status}, {none.Data.Length} bytes");
+        }
+        finally
+        {
+            if (device != null)
+            {
+                server.Unregister(device);
+                device.Dispose();
+            }
+            SharedMemoryIO.DestroyController(Index);
+            try { Directory.Delete(dir, true); } catch (IOException) { }
+        }
     }
 
     /// <summary>The child: one device on its own server, the public audio

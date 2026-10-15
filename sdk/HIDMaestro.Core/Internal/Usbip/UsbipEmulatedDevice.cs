@@ -145,10 +145,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // shared queue would have handed a 64-byte controller report to the
     // 8-byte keyboard pipe.
     private readonly Dictionary<byte, Queue<uint>> _pendingInterruptIn = new();
-    // The latest report, for GET_REPORT(Input), copied in place. Guarded by
-    // _hidLock.
-    private readonly byte[] _lastInputReport;
-    private int _lastInputLength;
+    // The latest report of each input report the descriptor declares, for
+    // GET_REPORT(Input), copied in place: a report never sent reads as its
+    // ID and zeros. _inputSlot maps a report ID to its slot, -1 for one the
+    // descriptor does not declare. Guarded by _hidLock.
+    private readonly byte[][] _inputReports;
+    private readonly int[] _inputReportLength;
+    private readonly int[] _inputSlot = new int[256];
+    private readonly bool _inputReportIds;
     private uint _lastSharedSeqNo;
 
     // The longest report the input section yields: the builder's report,
@@ -295,9 +299,22 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
         _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
         _pumpReport = new byte[_reportCapacity];
-        _lastInputReport = new byte[_reportCapacity];
-        _lastInputLength = Math.Max(1, _builder.InputReportByteSize);
-        if (_builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
+        // One slot per declared input report, and one for the builder's
+        // report when the descriptor declares none the parser read.
+        var declared = _builder.InputReports.Count > 0
+            ? _builder.InputReports
+            : new[] { (Id: _builder.InputReportId, ByteSize: _builder.InputReportByteSize) };
+        _inputReportIds = declared[0].Id != 0;
+        Array.Fill(_inputSlot, -1);
+        _inputReports = new byte[declared.Count][];
+        _inputReportLength = new int[declared.Count];
+        for (int r = 0; r < declared.Count; r++)
+        {
+            _inputReports[r] = new byte[_reportCapacity];
+            _inputReports[r][0] = declared[r].Id;
+            _inputReportLength[r] = Math.Clamp(declared[r].ByteSize, 1, _reportCapacity);
+            _inputSlot[declared[r].Id] = r;
+        }
         if (_switch2 != null) _switch2Report = new byte[Switch2ProDevice.ReportSize];
 
         try
@@ -495,8 +512,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 uint seq;
                 lock (_hidLock)
                 {
-                    report.CopyTo(_lastInputReport);
-                    _lastInputLength = length;
+                    int slot = _inputSlot[_inputReportIds && length > 0 ? report[0] : 0];
+                    if (slot >= 0)
+                    {
+                        report.CopyTo(_inputReports[slot]);
+                        _inputReportLength[slot] = length;
+                    }
                     var pending = PendingFor(_primaryInEndpoint);
                     if (pending.Count > 0)
                     {
@@ -1204,15 +1225,40 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         {
             case 0x01 when deviceToHost: // GET_REPORT
             {
+                if (_engine != null && ProtocolGetReport(cmd, reportType, reportId, wLength))
+                    return;
                 if (reportType == 0x01)
                 {
                     byte[] snapshot;
                     // The Switch 2 Pro persona answers with the report it
                     // would send next, in the layout asked for, and does
                     // not count it.
-                    if (_switch2 != null) snapshot = _switch2.PeekReport(reportId);
-                    else if (_engine != null) snapshot = _engine.CopyReport();
-                    else lock (_hidLock) snapshot = _lastInputReport.AsSpan(0, _lastInputLength).ToArray();
+                    // A report ID the descriptor does not declare is a
+                    // value the request cannot take, which USB 2.0 9.2.7
+                    // answers with a STALL. A firmware stack stalls the
+                    // same way when its class driver cannot answer
+                    // (tinyusb usbd.c, the failed-request path, and
+                    // hid_device.c's TU_ASSERT(xferlen > 0) on an empty
+                    // report). No host in the references asks for an
+                    // undeclared ID. The Switch 2 Pro persona also answers
+                    // report ID 0 with its selected report, as VIIPER's
+                    // ns2pro does (device.go:171-176).
+                    bool declaredId = _switch2 != null && reportId == 0
+                        || (reportId != 0) == _inputReportIds && _inputSlot[reportId] >= 0;
+                    if (!declaredId)
+                    {
+                        SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+                        return;
+                    }
+                    if (_switch2 != null)
+                    {
+                        snapshot = _switch2.PeekReport(reportId);
+                    }
+                    else
+                    {
+                        int slot = _inputSlot[reportId];
+                        lock (_hidLock) snapshot = _inputReports[slot].AsSpan(0, _inputReportLength[slot]).ToArray();
+                    }
                     int n = Math.Min(snapshot.Length, wLength);
                     SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
                     return;

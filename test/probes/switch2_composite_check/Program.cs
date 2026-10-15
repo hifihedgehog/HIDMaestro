@@ -469,6 +469,12 @@ internal static partial class Program
         Check("GET_REPORT(Input) reads the selected report at rest and counts nothing: 0x09, sticks at 0x800",
               peek.Status == 0 && peek.Data.Length == 64 && peek.Data[0] == 0x09 && peek.Data[1] == 0x00
               && peek.Data.AsSpan(6, 6).SequenceEqual(H("000880000880")), X(peek.Data.AsSpan(0, 13)));
+        // VIIPER's ns2pro answers 0x05, 0x09 and 0 (device.go:171-176). An
+        // ID the descriptor does not declare stalls (USB 2.0 9.2.7). No
+        // source shows a real pad's answer.
+        var other = w.ControlIn(0xA1, 0x01, 0x0107, 0, 64);
+        Check("GET_REPORT(Input 0x07), a report the descriptor does not declare, stalls",
+              other.Status == -32 && other.Data.Length == 0, $"status {other.Status}, {other.Data.Length} bytes");
 
         // ── The command table ───────────────────────────────────────────
         Console.WriteLine("\n-- A4 command table, before start --");

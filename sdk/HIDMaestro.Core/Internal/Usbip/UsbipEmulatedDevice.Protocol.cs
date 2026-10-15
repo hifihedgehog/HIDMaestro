@@ -277,6 +277,43 @@ internal sealed partial class UsbipEmulatedDevice
         return false;
     }
 
+    /// <summary>GET_REPORT, as the protocol's getReport declares it. Returns
+    /// false for a request the device's general handling answers.</summary>
+    private bool ProtocolGetReport(in UsbipProtocol.CommandHeader cmd, byte reportType, byte reportId, ushort wLength)
+    {
+        var engine = _engine!;
+        if (engine.Protocol.GetReportIdOnly)
+        {
+            // tinyusb puts a nonzero requested ID in the data stage, adds
+            // what the firmware supplies, and stalls an answer of no bytes
+            // (hid_device.c GET_REPORT, TU_ASSERT(xferlen > 0)). A firmware
+            // that supplies nothing, as loopj's returns 0 (src/gcca.c
+            // tud_hid_get_report_cb), answers the ID alone, whatever the
+            // report type.
+            if (reportId == 0 || wLength <= 1)
+            {
+                SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
+                return true;
+            }
+            Span<byte> id = stackalloc byte[1];
+            id[0] = reportId;
+            SendRetSubmitSpan(cmd.Seqnum, 0, 1, id);
+            return true;
+        }
+        if (reportType != 0x01) return false;
+        // The input report as it stands, for its own ID. Any other ID goes
+        // to the device's general handling: another report the descriptor
+        // declares answers its ID and zeros, since the engine sends only its
+        // own report and never fills the others, and an ID the descriptor
+        // does not declare stalls.
+        if (reportId != engine.Protocol.ReportId)
+            return false;
+        var report = engine.CopyReport();
+        int n = Math.Min(report.Length, wLength);
+        SendRetSubmitSpan(cmd.Seqnum, 0, n, report.AsSpan(0, n));
+        return true;
+    }
+
     /// <summary>The host's poll clock for the input endpoint. A host
     /// controller polls an interrupt endpoint every period while a transfer
     /// is queued, on a grid that starts at attach, and a read that arrives

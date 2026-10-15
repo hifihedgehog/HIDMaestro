@@ -415,9 +415,24 @@ internal static class Program
         Send(0x11, 0x00, 0x00, 0x00, 0x00);
         Probe.WaitFor(() => controller.Ports[0].GetOutput("rumble") == 0, 2000);
 
+        // No source shows a real adapter's answer to GET_REPORT, and no host
+        // sends one. loopj's firmware supplies no report (src/gcca.c:240-244),
+        // and tinyusb then answers a nonzero requested ID with that byte
+        // alone and stalls report ID 0 or a one-byte request
+        // (hid_device.c, GET_REPORT).
         var get = s_usb.Control(0xA1, 0x01, 0x0121, 0, 37, null, out int gerr);
-        Probe.Check("GET_REPORT(Input 0x21) answers the current report", get != null && r != null && get.AsSpan().SequenceEqual(r),
+        Probe.Check("GET_REPORT(Input 0x21) answers the report ID alone", get != null && Probe.Hex(get) == "21",
             get == null ? $"error {gerr}" : Probe.Hex(get));
+        get = s_usb.Control(0xA1, 0x01, 0x0122, 0, 37, null, out gerr);
+        Probe.Check("GET_REPORT(Input 0x22) answers 0x22 alone, no other report's bytes", get != null && Probe.Hex(get) == "22",
+            get == null ? $"error {gerr}" : Probe.Hex(get));
+        get = s_usb.Control(0xA1, 0x01, 0x0100, 0, 37, null, out gerr);
+        Probe.Check("GET_REPORT(Input) of report ID 0 stalls", get == null && gerr != 0,
+            get == null ? $"error {gerr}" : Probe.Hex(get));
+        get = s_usb.Control(0xA1, 0x01, 0x0121, 0, 1, null, out gerr);
+        Probe.Check("a one-byte GET_REPORT stalls", get == null && gerr != 0,
+            get == null ? $"error {gerr}" : Probe.Hex(get));
+        Probe.Check("reports go on after them", Read(150)?.Length == 37, $"error {s_lastError}");
     }
 
     /// <summary>A port reset, as HaltAndReset sends one, and 0x13: the

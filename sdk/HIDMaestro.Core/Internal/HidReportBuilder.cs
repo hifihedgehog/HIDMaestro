@@ -18,6 +18,11 @@ public class HidReportBuilder
 
     public byte InputReportId { get; private set; }
 
+    /// <summary>Every input report the descriptor declares, in declaration
+    /// order: its ID (0 when the descriptor uses none) and its length on
+    /// the wire, the ID's byte included.</summary>
+    public IReadOnlyList<(byte Id, int ByteSize)> InputReports { get; private set; } = Array.Empty<(byte, int)>();
+
     // Issue #58. The layout report is chosen by position, which is right
     // for every descriptor whose gamepad report comes first and wrong for
     // the one that puts a lizard-mode mouse ahead of its controller
@@ -515,6 +520,13 @@ public class HidReportBuilder
             InputFields.AddRange(fieldsByReport[chosenId]);
             InputReportBitSize = bitOffsetByReport[chosenId];
         }
+        var reports = new (byte Id, int ByteSize)[reportOrder.Count];
+        for (int r = 0; r < reports.Length; r++)
+        {
+            byte id = reportOrder[r];
+            reports[r] = (id, (bitOffsetByReport[id] + 7) / 8 + (id != 0 ? 1 : 0));
+        }
+        InputReports = reports;
     }
 
     void ResolveSemantics()

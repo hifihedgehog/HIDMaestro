@@ -407,6 +407,9 @@ internal static class Program
         ("no replies allowed to wait",
             j => Protocol(j)["commands"]!["pendingReplies"] = 0,
             "usbConfiguration.protocol.commands.pendingReplies 0 must be 1 or more"),
+        ("a GET_REPORT answer that is not defined",
+            j => Protocol(j)["getReport"] = "stal",
+            "usbConfiguration.protocol.getReport \"stal\" is not one of input, reportId"),
 
         // A null where a value belongs.
         ("a null match",

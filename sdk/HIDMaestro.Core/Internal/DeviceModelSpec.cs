@@ -148,6 +148,22 @@ public sealed class DeviceProtocolSpec
     /// the configuration says, as every persona before it did.</summary>
     [JsonPropertyName("getStatus")]
     public string? GetStatus { get; set; }
+
+    /// <summary>The HID class GET_REPORT answer. <c>"input"</c>, the
+    /// default: the input report as it stands, for the input report's own
+    /// ID, since HID 1.11 section 7.2 makes GET_REPORT mandatory. Another
+    /// input report the descriptor declares answers its ID and zeros, since
+    /// the protocol sends only its own report, and an ID the descriptor
+    /// does not declare stalls (USB 2.0 section 9.2.7). The other USB/IP
+    /// personas answer a declared ID with a sent report's latest bytes, or
+    /// its ID and zeros before the first, and stall the same way, but for
+    /// the Switch 2 Pro persona, which answers a declared ID with the report
+    /// it would send next and report ID 0 with its selected report.
+    /// <c>"reportId"</c>: the requested report ID alone, and a stall for
+    /// report ID 0 or a one-byte request, the answer tinyusb gives for a
+    /// firmware that supplies no report (hid_device.c, GET_REPORT).</summary>
+    [JsonPropertyName("getReport")]
+    public string? GetReport { get; set; }
 }
 
 public sealed class ProtocolStateSpec
