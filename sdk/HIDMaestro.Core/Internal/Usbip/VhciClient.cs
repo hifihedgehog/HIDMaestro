@@ -239,11 +239,10 @@ internal static partial class VhciClient
     /// many it detached.</summary>
     public static int DetachLocation(string host, int port, string busid)
     {
-        string service = port.ToString();
         int detached = 0;
         foreach (var row in GetImportedDevices())
         {
-            if (row.Host != host || row.Service != service || row.BusId != busid) continue;
+            if (row.Host != host || !SamePort(row.Service, port) || row.BusId != busid) continue;
             Detach(row.Port);
             detached++;
         }
@@ -254,11 +253,24 @@ internal static partial class VhciClient
     /// 0 when nothing is imported there.</summary>
     public static int FindLocation(string host, int port, string busid)
     {
-        string service = port.ToString();
         foreach (var row in GetImportedDevices())
-            if (row.Host == host && row.Service == service && row.BusId == busid) return row.Port;
+            if (row.Host == host && SamePort(row.Service, port) && row.BusId == busid) return row.Port;
         return 0;
     }
+
+    /// <summary>Whether an import's service string names this port. The
+    /// string is whatever the PLUGIN request carried, so "018509" or
+    /// " 18509" can name port 18509 as well as "18509" does. Compared as a
+    /// number, the way the sweeps decide a row is on the SDK's ports
+    /// (UsbipBackend), so every import a sweep picks is one it can detach.
+    /// Re-attach attempts are another matter: the driver keys each by a
+    /// hash of the literal host, service and bus id strings
+    /// (persistent.cpp hash_location), and STOP_ATTACH_ATTEMPTS hashes the
+    /// strings it is given, so <see cref="StopAttachAttempts(string, int, string)"/>
+    /// cancels only attempts written the SDK's way, as
+    /// <c>port.ToString()</c>.</summary>
+    public static bool SamePort(string service, int port) =>
+        int.TryParse(service, out int parsed) && parsed == port;
 
     /// <summary>The vhci port of one exact location's import, looked up as
     /// often as a caller polls without allocating: the location's bytes are

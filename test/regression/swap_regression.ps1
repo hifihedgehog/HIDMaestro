@@ -1663,7 +1663,7 @@ function Scenario-Xusb-Wgi-Single {
 
 function Scenario-Usbip-E2E-Composite {
     Invoke-Probe -Dir 'usbip_e2e_check' -Exe 'UsbipE2ECheck.exe' `
-                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, or teardown; see probe stdout)' -SkipCodes 2
+                 -Message 'a composite persona failed end to end through the real USB stack (enumeration, the owner of the import connection, an import past full handshake slots, HID, audio endpoints, teardown, or an attach racing the stale sweep; see probe stdout)' -SkipCodes 2
 }
 
 # S58: identity derivation (issue #60). No device. The default key

@@ -36,7 +36,7 @@ internal static class UsbipBackend
         UsbipDriverInstaller.EnsureInstalled(progress);
 
         var server = UsbipServer.GetOrStart();
-        SweepStaleOnce(server.Port);
+        SweepStaleOnce(server);
 
         var device = new UsbipEmulatedDevice(profile, index, identity);
         if (identity != null)
@@ -64,25 +64,55 @@ internal static class UsbipBackend
     /// made was left by the program that had the port before. Another
     /// running program's imports, on a port its server still listens on,
     /// are never touched.</summary>
-    private static void SweepStaleOnce(int currentPort)
+    private static void SweepStaleOnce(UsbipServer server)
     {
         if (Interlocked.Exchange(ref s_staleSweepDone, 1) != 0) return;
+        SweepStale(server);
+    }
+
+    /// <summary>The sweep <see cref="SweepStaleOnce"/> runs. Creates on
+    /// other threads pass the once-flag at once, so one can register and
+    /// attach while this runs. The imports are listed before the exports
+    /// are read. A device is registered before anything can import it, so
+    /// an import a create of this process made is of a device the export
+    /// read still sees, unless that device has gone since, and its own
+    /// teardown detaches it. Registrations wait for the whole sweep
+    /// (<see cref="UsbipServer.HoldingRegistrations"/>), so a new device
+    /// that takes a gone device's bus id is never attached at a location
+    /// the sweep then detaches.</summary>
+    internal static void SweepStale(UsbipServer server)
+    {
         try
         {
-            var own = new HashSet<string>();
-            var server = UsbipServer.Current;
-            if (server != null)
+            server.HoldingRegistrations(() =>
+            {
+                DuringStaleSweep?.Invoke("start");
+                var rows = VhciClient.GetImportedDevices();
+                DuringStaleSweep?.Invoke("listed");
+                var own = new HashSet<string>();
                 foreach (var device in server.SnapshotDevices()) own.Add(device.BusId);
-            // The port may be outside the SDK's range when the range was
-            // full (UsbipServer), so the match is on the port alone.
-            string service = currentPort.ToString();
-            foreach (var row in VhciClient.GetImportedDevices())
-                if (row.Host == "127.0.0.1" && row.Service == service && !own.Contains(row.BusId))
-                    VhciClient.Detach(row.Port);
+                DuringStaleSweep?.Invoke("exports read");
+                // By location, as every sweep here detaches: the listing
+                // ages while the loop plugs devices out, and a vhci port it
+                // names can hold another program's device by the time its
+                // row comes up (VhciClient.DetachLocation). The port may be
+                // outside the SDK's range when the range was full
+                // (UsbipServer), so the match is on the port alone.
+                foreach (var row in rows)
+                    if (row.Host == "127.0.0.1" && VhciClient.SamePort(row.Service, server.Port) && !own.Contains(row.BusId))
+                        VhciClient.DetachLocation(row.Host, server.Port, row.BusId);
+            });
         }
         catch { /* best-effort recovery */ }
         DetachImportsOfDeadServers();
     }
+
+    /// <summary>Called inside <see cref="SweepStale"/> with registrations
+    /// held, at "start" before the import listing, at "listed" after it and
+    /// at "exports read" before the detach loop. usbip_e2e_check (S45) sets
+    /// it to attach and dispose devices from other threads at those points.
+    /// Null outside the probe.</summary>
+    internal static Action<string>? DuringStaleSweep;
 
     /// <summary>Plug out every import in the SDK's port range, or on a
     /// port an owner record names, whose server no longer listens, and
@@ -106,7 +136,7 @@ internal static class UsbipBackend
             {
                 if (!IsOurLocation(row.Host, row.Service, recorded, out int port)) continue;
                 if (port == own || listening.Contains(port)) continue;
-                VhciClient.Detach(row.Port);
+                VhciClient.DetachLocation(row.Host, port, row.BusId);
             }
             var locations = AttemptLocations(port => port == own || !listening.Contains(port), deadOnly: true);
             VhciClient.StopAttachAttempts("127.0.0.1", WithoutLiveExports(locations, view));
@@ -367,8 +397,8 @@ internal static class UsbipBackend
             var recorded = RecordedPorts();
             foreach (var row in VhciClient.GetImportedDevices())
             {
-                if (!IsOurLocation(row.Host, row.Service, recorded, out _)) continue;
-                VhciClient.Detach(row.Port);
+                if (!IsOurLocation(row.Host, row.Service, recorded, out int port)) continue;
+                VhciClient.DetachLocation(row.Host, port, row.BusId);
             }
             VhciClient.StopAttachAttempts("127.0.0.1", AttemptLocations(_ => true, deadOnly: false));
         }

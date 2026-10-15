@@ -117,7 +117,28 @@ internal sealed class UsbipServer : IDisposable
 
     public void Register(UsbipEmulatedDevice device)
     {
+        lock (_registerGate)
         lock (_devices) _devices[device.BusId] = device;
+    }
+
+    // Held by HoldingRegistrations. Apart from _devices, so a connection's
+    // lookup never waits for a sweep.
+    private readonly object _registerGate = new();
+
+    /// <summary>Run <paramref name="sweep"/> while <see cref="Register"/>
+    /// waits. The stale sweep of this server's port lists the imports,
+    /// reads what the server exports, and then detaches each listed import
+    /// whose bus id it does not export, by location. A device disposed
+    /// after the listing frees its transport index, and a create on another
+    /// thread can take that index, register the same bus id after the
+    /// export read and attach before the sweep reaches the old row: the
+    /// detach by location would then plug out the new import. No device
+    /// registers until the sweep ends, so none is attached at a location
+    /// the sweep is about to detach. Only the create's own sweep holds it,
+    /// once per process (UsbipBackend).</summary>
+    internal void HoldingRegistrations(Action sweep)
+    {
+        lock (_registerGate) sweep();
     }
 
     public void Unregister(UsbipEmulatedDevice device)

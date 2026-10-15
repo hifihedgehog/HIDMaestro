@@ -101,6 +101,7 @@ internal static partial class Program
                 RunAll(server, device, profile, outFrames, controlWrites);
                 Handshake(server, device);
                 OwnerLookup();
+                LocationMatch();
                 ThrowingHandlers();
             }
             finally

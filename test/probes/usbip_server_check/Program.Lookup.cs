@@ -1,7 +1,8 @@
-// A check that needs no elevation and creates no device, which the
+// Two checks that need no elevation and create no device, which the
 // `offline` argument runs alone: the owner lookup the server admits an
 // import by, while other connections open and close as fast as threads can
-// make them and once the peer has closed.
+// make them and once the peer has closed, and the match of an import's
+// service string to a port that the sweeps detach by.
 
 using System;
 using System.Collections.Generic;
@@ -16,8 +17,9 @@ internal static partial class Program
 {
     static int OfflineOnly()
     {
-        Console.WriteLine("=== USB/IP server: owner lookup ===");
+        Console.WriteLine("=== USB/IP server: owner lookup and location match ===");
         OwnerLookup();
+        LocationMatch();
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
     }
@@ -113,5 +115,17 @@ internal static partial class Program
         Thread.Sleep(200);
         int after = TcpConnectionOwner.OfPeer(accepted);
         Check("once the peer has closed, its end matches no owner", after == -1, $"pid {after}");
+    }
+
+    static void LocationMatch()
+    {
+        Console.WriteLine("\n-- Location match --");
+        // The service string is whatever the PLUGIN request carried. The
+        // sweeps take a row as theirs by its number (IsOurLocation,
+        // int.TryParse), so detaching it must match it the same way.
+        foreach (string written in new[] { "18509", "018509", "+18509", " 18509" })
+            Check($"service \"{written}\" names port 18509", VhciClient.SamePort(written, 18509));
+        foreach (string written in new[] { "18510", "", "1850 9", "port" })
+            Check($"service \"{written}\" does not", !VhciClient.SamePort(written, 18509));
     }
 }

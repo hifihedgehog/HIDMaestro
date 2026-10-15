@@ -142,6 +142,9 @@ internal static partial class Program
 
         ImportPastFullHandshakes(ctx);
 
+        AttachDuringStaleSweep(ctx);
+        BusIdReusedDuringStaleSweep(ctx);
+
         // ── Sweep while still holding a live controller (issues #44, #45) ──
         // This could not be tested until #45 was fixed. Sweeping unmaps every
         // shared view the process owns, and a live controller's output poll
