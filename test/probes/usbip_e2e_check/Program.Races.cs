@@ -1,6 +1,7 @@
 // Races around an attach that only a real import shows: a device attached
-// while the create's stale sweep runs, and a device that reuses a disposed
-// device's bus id during that sweep. Each holds the SDK at the point of the
+// while the create's stale sweep runs, a device that reuses a disposed
+// device's bus id during that sweep, and a device imported between its
+// registration and its own attach. Each holds the SDK at the point of the
 // race through a hook, and each creates one device at a time.
 
 using System;
@@ -15,7 +16,7 @@ internal static partial class Program
 {
     // Far from the indices a running program takes, and from the ones
     // usbip_server_check uses.
-    const int SweepIndex = 62, ReuseIndex = 65;
+    const int SweepIndex = 62, StrayIndex = 63, ReuseIndex = 65;
 
     static void AttachDuringStaleSweep(HMContext ctx)
     {
@@ -153,6 +154,39 @@ internal static partial class Program
                 d.Dispose();
             }
             SharedMemoryIO.DestroyController(ReuseIndex);
+        }
+    }
+
+    static void ImportAheadOfAttach(HMContext ctx)
+    {
+        var profile = ctx.GetProfile("dualsense-composite")!.Inner;
+        var server = UsbipServer.GetOrStart();
+
+        // A device imported between its registration and its own attach,
+        // as a re-attach attempt the host controller still runs for the
+        // location can import it.
+        Console.WriteLine("\n-- A device imported ahead of its attach --");
+        string busId = UsbipEmulatedDevice.BusIdFor(StrayIndex);
+        int strayPort = 0;
+        bool threw = false;
+        UsbipBackend.BeforeAttach = d => strayPort = VhciClient.Attach("127.0.0.1", server.Port, d.BusId);
+        try { UsbipBackend.CreateDevice(profile, StrayIndex).Dispose(); }
+        catch { threw = true; }
+        finally { UsbipBackend.BeforeAttach = null; }
+        try
+        {
+            Check("the create whose device was imported first fails", threw && strayPort > 0, $"stray import on port {strayPort}");
+            var clock = Stopwatch.StartNew();
+            while (VhciClient.FindLocation("127.0.0.1", server.Port, busId) > 0 && clock.ElapsedMilliseconds < 3000)
+                Thread.Sleep(50);
+            Check("and the import that took its device is gone",
+                  VhciClient.FindLocation("127.0.0.1", server.Port, busId) == 0);
+        }
+        finally
+        {
+            VhciClient.DetachLocation("127.0.0.1", server.Port, busId);
+            VhciClient.StopAttachAttempts("127.0.0.1", server.Port, busId);
+            SharedMemoryIO.DestroyController(StrayIndex);
         }
     }
 }

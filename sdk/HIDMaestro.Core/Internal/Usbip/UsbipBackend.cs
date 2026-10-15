@@ -44,16 +44,32 @@ internal static class UsbipBackend
         server.Register(device);
         try
         {
+            BeforeAttach?.Invoke(device);
             device.SetVhciPortIfAttached(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
             return new UsbipBackendHandle(server, device);
         }
         catch
         {
+            // The device was exported from Register on, so a re-attach
+            // attempt the host controller still runs for this location can
+            // have imported it ahead of this attach, which then failed
+            // ST_DEV_BUSY. Remove that import with the device, the way the
+            // handle's Dispose does, or it stays plugged in on a device
+            // that no longer answers.
+            try { VhciClient.DetachLocation("127.0.0.1", server.Port, device.BusId); } catch { }
+            VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
             server.Unregister(device);
             device.Dispose();
             throw;
         }
     }
+
+    /// <summary>Called on the creating thread after the device is
+    /// registered and before its attach. usbip_e2e_check (S45) sets it to
+    /// import the device ahead of the attach, as a stray re-attach attempt
+    /// can: the window is too short to hit any other way. Null outside the
+    /// probe.</summary>
+    internal static Action<UsbipEmulatedDevice>? BeforeAttach;
 
     /// <summary>Once per process: plug out imports whose server is gone and
     /// cancel their re-attach attempts. The vhci driver starts re-attach

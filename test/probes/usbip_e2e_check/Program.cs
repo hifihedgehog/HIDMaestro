@@ -144,6 +144,7 @@ internal static partial class Program
 
         AttachDuringStaleSweep(ctx);
         BusIdReusedDuringStaleSweep(ctx);
+        ImportAheadOfAttach(ctx);
 
         // ── Sweep while still holding a live controller (issues #44, #45) ──
         // This could not be tested until #45 was fixed. Sweeping unmaps every
