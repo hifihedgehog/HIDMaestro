@@ -278,8 +278,9 @@ internal sealed partial class OwnerCensus
                 return null;
             // A value only a KEY_SET_VALUE holder (the driver host or an
             // administrator) can plant could be out of range. Treat an
-            // unreadable write time as no values, which keeps the rule from
-            // before this release (the held pipe counts), never a throw.
+            // unreadable write time as no values, never a throw. With no
+            // values a held pipe counts only beside the program's input
+            // section (LegacyPipeLive).
             if (FileTimeToUtc(written) is not DateTime writtenUtc) return null;
             return new OwnerWatch(true, pid, owner, writtenUtc);
         }
