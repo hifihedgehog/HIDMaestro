@@ -949,6 +949,103 @@ internal static partial class Program
             SharedMemoryIO.DestroyController(TeardownIndex);
         }
 
+        // An interrupt transfer and a control transfer after Dispose, on a
+        // DualSense composite, whose transfers reach no clock: each ends the
+        // connection, and the interrupt OUT writes nothing to the output
+        // ring. Before this release neither got an answer, the connection
+        // stayed open, and the interrupt OUT still wrote the ring.
+        {
+            var ds = ctx.GetProfile("dualsense-composite")!.Inner;
+            IntPtr ring = IntPtr.Zero;
+            foreach (string kind in new[] { "interrupt", "control" })
+            {
+                var (device, cl) = Attach(server, ds);
+                ring = SharedMemoryIO.EnsureOutputMapping(TeardownIndex);
+                uint headBefore = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(ring, 0);
+                server.Unregister(device);
+                device.Dispose();
+                if (kind == "interrupt")
+                {
+                    var report = new byte[48];
+                    report[0] = 0x02;
+                    cl.SendSubmitInterruptOut(cl.NextSeq(), 3, report);
+                }
+                else
+                {
+                    cl.SendControlOut(0x00, 0x09, 0x0001, 0, Array.Empty<byte>());   // SET_CONFIGURATION(1)
+                }
+                string answer = cl.Within(1000);
+                uint headAfter = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(ring, 0);
+                Check($"{(kind == "interrupt" ? "an" : "a")} {kind} transfer after Dispose gets no answer, ends the connection and writes no output",
+                      answer == "closed" && headAfter == headBefore,
+                      $"{answer}, output ring head {headBefore} then {headAfter}");
+                cl.Dispose();
+                NoConnections();
+                SharedMemoryIO.DestroyController(TeardownIndex);
+            }
+        }
+
+        // An import of a device Dispose has already stopped while the server
+        // still lists it: refused. Before this release the claim ran the
+        // protocol's reset into the disposed clock event, and the import got
+        // no answer at all.
+        {
+            var device = new UsbipEmulatedDevice(gc, TeardownIndex);
+            server.Register(device);
+            device.Dispose();
+            using var cl = new Client(server.Port);
+            cl.SendImport(device.BusId);
+            string answer;
+            try
+            {
+                var op = cl.ReadExactly(8);
+                uint status = BinaryPrimitives.ReadUInt32BigEndian(op.AsSpan(4));
+                answer = status == 0 ? "imported" : $"refused, status {status}";
+            }
+            catch (IOException) { answer = "no answer"; }
+            Check("an import of a device Dispose has stopped is refused", answer.StartsWith("refused", StringComparison.Ordinal), answer);
+            server.Unregister(device);
+            cl.Dispose();
+            NoConnections();
+            SharedMemoryIO.DestroyController(TeardownIndex);
+        }
+
+        // The GameCube adapter's protocol clock held past Dispose's join, then
+        // let go with the sections unmapped: it ends on its own and waits on
+        // nothing Dispose released.
+        {
+            var (device, cl) = Attach(server, gc);
+            var clock = (Thread)clockField.GetValue(device)!;
+            object hidLock = hidLockField.GetValue(device)!;
+            var met = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> watch = (_, e) =>
+            {
+                if (Thread.CurrentThread == clock) met.Enqueue($"{e.Exception.GetType().Name}: {e.Exception.Message}");
+            };
+            AppDomain.CurrentDomain.FirstChanceException += watch;
+            bool disposed;
+            Monitor.Enter(hidLock);
+            try
+            {
+                // The clock asks whether a read is parked at least every
+                // 500 ms, and now waits for this lock.
+                Thread.Sleep(700);
+                var disposer = new Thread(() => { server.Unregister(device); device.Dispose(); }) { IsBackground = true };
+                disposer.Start();
+                disposed = disposer.Join(5000);
+                if (disposed) SharedMemoryIO.DestroyController(TeardownIndex);
+            }
+            finally { Monitor.Exit(hidLock); }
+            bool ended = WaitUntil(() => !clock.IsAlive, 3000);
+            AppDomain.CurrentDomain.FirstChanceException -= watch;
+            Check("the protocol clock held past Dispose's join ends without meeting anything Dispose released",
+                  disposed && ended && met.IsEmpty,
+                  !disposed ? "Dispose did not return" : !ended ? "the clock is still running" : met.IsEmpty ? "" : string.Join("; ", met));
+            cl.Dispose();
+            NoConnections();
+            if (!disposed) SharedMemoryIO.DestroyController(TeardownIndex);
+        }
+
         // The Switch 2 Pro report clock held past Dispose's join, then let go
         // with the sections unmapped: it ends on its own and waits on nothing
         // Dispose released.
