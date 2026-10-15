@@ -497,7 +497,6 @@ public sealed class HMContext : IDisposable
             // The device emulator maps the index's sections before its
             // attach, so a failed attach leaves them for the catch below.
             handle = Internal.Usbip.UsbipBackend.CreateDevice(profile.Inner, index, lease.Identity);
-            Internal.MachineClaims.SetControllerValue(lease.Identity.Token, "VhciPort", handle.VhciPort);
             var controller = new HMController(this, slot, lease, profile, instanceId: null, handle, lease.Identity.Key);
             lock (_lock) _controllers[slot] = controller;
             return controller;

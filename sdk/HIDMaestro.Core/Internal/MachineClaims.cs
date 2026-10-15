@@ -217,7 +217,7 @@ internal static partial class MachineClaims
 
     /// <summary>One controller as its owner's record lists it.</summary>
     internal sealed record ControllerEntry(string Token, int TransportIndex, string Backend,
-        string? ProfileId, string? InstanceId, int VhciPort);
+        string? ProfileId, string? InstanceId);
 
     /// <summary>One program's record, and whether its owner claim is held.</summary>
     internal sealed record OwnerRecord(string OwnerId, int Pid, string? Image, long StartTime,
@@ -333,8 +333,7 @@ internal static partial class MachineClaims
                                 c.GetValue("TransportIndex") is int ti ? ti : -1,
                                 c.GetValue("Backend") as string ?? "umdf",
                                 c.GetValue("Profile") as string,
-                                c.GetValue("InstanceId") as string,
-                                c.GetValue("VhciPort") is int vp ? vp : -1));
+                                c.GetValue("InstanceId") as string));
                         }
                 }
                 bool self = string.Equals(id, s_ownerId, StringComparison.OrdinalIgnoreCase);

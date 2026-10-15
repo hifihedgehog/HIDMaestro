@@ -210,6 +210,7 @@ internal sealed class UsbipServer : IDisposable
                 Send(reply);
 
                 _device = device;
+                TrackVhciPort(device);
                 CommandLoop(device);
             }
             catch
@@ -222,6 +223,31 @@ internal sealed class UsbipServer : IDisposable
                 _server.OnConnectionClosed(this);
                 Close();
             }
+        }
+
+        /// <summary>Find the vhci port the driver plugs this import into and
+        /// keep it on the device. The driver takes the port after the
+        /// handshake (vhci_ioctl.cpp connected, plugin), so the lookup runs
+        /// off this thread, which must answer the enumeration at once.</summary>
+        private void TrackVhciPort(UsbipEmulatedDevice device)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    for (int i = 0; i < 200 && device.IsClaimedBy(this); i++)
+                    {
+                        int port = VhciClient.FindLocation("127.0.0.1", _server.Port, device.BusId);
+                        if (port > 0)
+                        {
+                            if (device.IsClaimedBy(this)) device.SetVhciPort(port);
+                            return;
+                        }
+                        Thread.Sleep(25);
+                    }
+                }
+                catch { /* the port is for the record and the WinUSB binding */ }
+            }, null);
         }
 
         /// <summary>An import of a bus id this server does not export is a

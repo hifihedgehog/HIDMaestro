@@ -46,9 +46,25 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     public UsbAudioEngine Audio { get; }
     public string BusId { get; }
 
-    /// <summary>The vhci port this device is attached on, once attached.
-    /// Lets a sweep detach this process's own imports and nobody else's.</summary>
-    internal int VhciPort { get; set; }
+    /// <summary>The vhci port this device is attached on, 0 while it is
+    /// not. The server sets it on every import, the driver's own re-attach
+    /// included, which lands on a new port. Detaching goes by location,
+    /// never by this number (<see cref="VhciClient.DetachLocation"/>).</summary>
+    internal int VhciPort => Volatile.Read(ref _vhciPort);
+    private int _vhciPort;
+
+    /// <summary>Called with the new vhci port whenever it changes, for the
+    /// owner record.</summary>
+    internal Action<int>? VhciPortChanged { get; set; }
+
+    internal void SetVhciPort(int port)
+    {
+        if (Interlocked.Exchange(ref _vhciPort, port) == port) return;
+        try { VhciPortChanged?.Invoke(port); } catch { /* the record is best-effort */ }
+    }
+
+    /// <summary>Whether <paramref name="connection"/> holds the device.</summary>
+    internal bool IsClaimedBy(UsbipServer.Connection connection) => Volatile.Read(ref _connection) == connection;
 
     /// <summary>Controller index, kept so the synthetic pairing MAC in
     /// BuildFeatureStub is stable and unique per controller (#43).</summary>
@@ -270,6 +286,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     public void DetachConnection(UsbipServer.Connection connection)
     {
+        // The import is gone with its connection. Cleared before the
+        // device is released, so the next import's port is never
+        // overwritten.
+        if (IsClaimedBy(connection)) SetVhciPort(0);
         if (Interlocked.CompareExchange(ref _connection, null, connection) != connection)
             return; // a different connection owns the device
         Audio.Clear();

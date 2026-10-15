@@ -163,7 +163,7 @@ internal static class OwnerSweep
         {
             foreach (var c in rec.Controllers)
                 if (string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase))
-                    Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex, c.VhciPort);
+                    Usbip.UsbipBackend.DetachDeadImport(rec.UsbipPort, c.TransportIndex);
             MachineClaims.DeleteRecord(rec.OwnerId);
         }
         Usbip.UsbipBackend.DetachImportsOfDeadServers();

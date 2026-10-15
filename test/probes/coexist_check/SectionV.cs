@@ -18,6 +18,12 @@
 //         record names, reaches the new server once and never again: the
 //         probe listens on the port after that program and hears its own
 //         attempt come back, and none for 1-10.
+//      4. A running program's composite loses its connection: the probe
+//         deletes the server end's TCP entry. Another program's composite
+//         takes the vhci port it had, and the host controller's own attempt
+//         imports the first one again on a new port. The first program's
+//         record names the new port, and its dispose removes its own
+//         composite and leaves the other program's.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -51,6 +57,8 @@ internal static partial class Program
             VTakenOverPort(touched);
             Clean();
             VLegacyTakesPort(touched);
+            Clean();
+            VDroppedImport(touched);
         }
         finally
         {
@@ -234,6 +242,126 @@ internal static partial class Program
             _thread.Join(10_000);
             _listener.Stop();
         }
+    }
+
+    // ── V4 ─────────────────────────────────────────────────────────────
+
+    static void VDroppedImport(HashSet<(int Port, string BusId)> touched)
+    {
+        using var a = PeerProcess.Start("V4-dropped");
+        string ca = a.Send("create composite -");
+        if (!Ok(ca)) { Check("V4: the first program creates a composite", false, ca); return; }
+        string busA = "1-" + (int.Parse(PeerProcess.Field(ca, "transport")!) + 1);
+        int portA = RecordUsbipPort(a.Pid);
+        touched.Add((portA, busA));
+        int x = Vhci.Imported().FirstOrDefault(r => r.Port == portA && r.BusId == busA).VhciPort;
+        Check($"V4: its composite {portA}/{busA} is attached", x > 0);
+        if (x <= 0) return;
+
+        int reset = Tcp.ResetServerEnd(portA, a.Pid);
+        Check("V4: the probe resets the composite's connection", reset == 1, $"{reset} connection(s) reset");
+        Check($"V4: the host controller drops it from vhci port {x}",
+              WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA && r.BusId == busA), 10_000));
+        var dropped = Stopwatch.StartNew();
+
+        using var b = PeerProcess.Start("V4-other");
+        string cb = b.Send("create composite -");
+        if (!Ok(cb)) { Check("V4: another program creates a composite", false, cb); return; }
+        string busB = "1-" + (int.Parse(PeerProcess.Field(cb, "transport")!) + 1);
+        int portB = RecordUsbipPort(b.Pid);
+        touched.Add((portB, busB));
+        bool OnX() => Vhci.Imported().Any(r => r.Port == portB && r.BusId == busB && r.VhciPort == x);
+        Check($"V4: the other program's composite takes vhci port {x}", OnX(),
+              string.Join(", ", Vhci.Imported().Select(r => $"{r.VhciPort}:{r.Port}/{r.BusId}")));
+
+        // The host controller's attempt goes out 30 s after the drop
+        // (persistent.cpp start_attach_attempts, DELAY).
+        int y = 0;
+        WaitFor(() => (y = Vhci.Imported().FirstOrDefault(r => r.Port == portA && r.BusId == busA).VhciPort) > 0,
+                (int)Math.Max(0, 45_000 - dropped.ElapsedMilliseconds));
+        Check($"V4: the host controller imports {busA} again, on another vhci port", y > 0 && y != x, $"vhci port {y}");
+        int recorded = 0;
+        Check("V4: the first program's record names the new vhci port",
+              y > 0 && WaitFor(() => (recorded = RecordVhciPort(a.Pid)) == y, 5000), $"record {recorded}, vhci {y}");
+
+        string d = a.Send("dispose");
+        Check("V4: the first program disposes its controller", Ok(d), d);
+        Thread.Sleep(1000);
+        Check($"V4: the other program's composite is still on vhci port {x}", OnX(),
+              string.Join(", ", Vhci.Imported().Select(r => $"{r.VhciPort}:{r.Port}/{r.BusId}")));
+        Check("V4: the disposed composite is gone",
+              WaitFor(() => !Vhci.Imported().Any(r => r.Port == portA && r.BusId == busA), 5000));
+    }
+
+    /// <summary>The vhci port a program's owner record names for its one
+    /// controller, or 0.</summary>
+    static int RecordVhciPort(int pid)
+    {
+        using var root = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (root == null) return 0;
+        foreach (string id in root.GetSubKeyNames())
+        {
+            using var r = root.OpenSubKey(id);
+            if (r?.GetValue("Pid") is not int p || p != pid) continue;
+            using var cs = r.OpenSubKey("Controllers");
+            if (cs == null) return 0;
+            foreach (string token in cs.GetSubKeyNames())
+            {
+                using var c = cs.OpenSubKey(token);
+                if (c?.GetValue("VhciPort") is int vp) return vp;
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>Deletes TCP connections the way an administrator can from
+    /// outside the program that holds them: SetTcpEntry with
+    /// MIB_TCP_STATE_DELETE_TCB, which resets the connection.</summary>
+    static class Tcp
+    {
+        const int AF_INET = 2, TCP_TABLE_OWNER_PID_CONNECTIONS = 4, MIB_TCP_STATE_ESTAB = 5, MIB_TCP_STATE_DELETE_TCB = 12;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct MIB_TCPROW_OWNER_PID { public uint State, LocalAddr, LocalPort, RemoteAddr, RemotePort, OwningPid; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct MIB_TCPROW { public uint State, LocalAddr, LocalPort, RemoteAddr, RemotePort; }
+
+        /// <summary>Reset every established connection whose local end is
+        /// <paramref name="port"/> in process <paramref name="pid"/>. The
+        /// number reset.</summary>
+        public static int ResetServerEnd(int port, int pid)
+        {
+            int size = 0;
+            GetExtendedTcpTable(IntPtr.Zero, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (GetExtendedTcpTable(buf, ref size, false, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) != 0) return -1;
+                int n = Marshal.ReadInt32(buf), done = 0, rowSize = Marshal.SizeOf<MIB_TCPROW_OWNER_PID>();
+                for (int i = 0; i < n; i++)
+                {
+                    var row = Marshal.PtrToStructure<MIB_TCPROW_OWNER_PID>(buf + 4 + i * rowSize);
+                    int local = (int)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort >> 8) & 0xFF));
+                    if (row.State != MIB_TCP_STATE_ESTAB || row.OwningPid != (uint)pid || local != port) continue;
+                    var del = new MIB_TCPROW
+                    {
+                        State = MIB_TCP_STATE_DELETE_TCB,
+                        LocalAddr = row.LocalAddr, LocalPort = row.LocalPort,
+                        RemoteAddr = row.RemoteAddr, RemotePort = row.RemotePort,
+                    };
+                    if (SetTcpEntry(ref del) == 0) done++;
+                }
+                return done;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        [DllImport("iphlpapi.dll")]
+        static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, int tableClass, uint reserved);
+
+        [DllImport("iphlpapi.dll")]
+        static extern uint SetTcpEntry(ref MIB_TCPROW row);
     }
 
     /// <summary>The USB/IP server port a program's owner record names.</summary>

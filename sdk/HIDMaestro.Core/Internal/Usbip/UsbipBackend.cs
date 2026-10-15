@@ -43,12 +43,13 @@ internal static class UsbipBackend
         // the port before would import the device the moment it is
         // registered, and this create's own attach would then find it busy.
         VhciClient.StopAttachAttempts("127.0.0.1", server.Port, device.BusId);
+        if (identity != null)
+            device.VhciPortChanged = port => MachineClaims.SetControllerValue(identity.Token, "VhciPort", port);
         server.Register(device);
         try
         {
-            int vhciPort = VhciClient.Attach("127.0.0.1", server.Port, device.BusId);
-            device.VhciPort = vhciPort;
-            return new UsbipBackendHandle(server, device, vhciPort);
+            device.SetVhciPort(VhciClient.Attach("127.0.0.1", server.Port, device.BusId));
+            return new UsbipBackendHandle(server, device);
         }
         catch
         {
@@ -72,14 +73,14 @@ internal static class UsbipBackend
         if (Interlocked.Exchange(ref s_staleSweepDone, 1) != 0) return;
         try
         {
-            var own = new HashSet<int>();
+            var own = new HashSet<string>();
             var server = UsbipServer.Current;
             if (server != null)
-                foreach (var device in server.SnapshotDevices()) own.Add(device.VhciPort);
+                foreach (var device in server.SnapshotDevices()) own.Add(device.BusId);
             foreach (var row in VhciClient.GetImportedDevices())
             {
                 if (!IsOurLocation(row.Host, row.Service)) continue;
-                if (row.Service == currentPort.ToString() && !own.Contains(row.Port))
+                if (row.Service == currentPort.ToString() && !own.Contains(row.BusId))
                     VhciClient.Detach(row.Port);
             }
         }
@@ -147,8 +148,9 @@ internal static class UsbipBackend
 
     /// <summary>One dead program's composite: its import, found by the
     /// server port and bus id it was attached with, and the re-attach
-    /// attempts against it.</summary>
-    internal static void DetachDeadImport(int serverPort, int transportIndex, int vhciPort)
+    /// attempts against it. The location alone names it: the vhci port the
+    /// record kept may have changed since.</summary>
+    internal static void DetachDeadImport(int serverPort, int transportIndex)
     {
         if (serverPort <= 0 || transportIndex < 0) return;
         try
@@ -160,10 +162,7 @@ internal static class UsbipBackend
             // touches an import, and this record is the last thing that
             // names the location.
             if (!ListeningLoopbackPorts().Contains(serverPort))
-                foreach (var row in VhciClient.GetImportedDevices())
-                    if (row.Host == "127.0.0.1" && row.Service == serverPort.ToString() && row.BusId == busId
-                        && (vhciPort <= 0 || row.Port == vhciPort))
-                        VhciClient.Detach(row.Port);
+                VhciClient.DetachLocation("127.0.0.1", serverPort, busId);
             VhciClient.StopAttachAttempts("127.0.0.1", serverPort, busId);
         }
         catch { }
@@ -191,9 +190,8 @@ internal static class UsbipBackend
             var locations = new List<(int, string)>();
             foreach (var device in server.SnapshotDevices())
             {
-                int vhciPort = device.VhciPort;
                 try { server.Unregister(device); device.Dispose(); } catch { }
-                if (vhciPort > 0) try { VhciClient.Detach(vhciPort); } catch { }
+                try { VhciClient.DetachLocation("127.0.0.1", server.Port, device.BusId); } catch { }
                 locations.Add((server.Port, device.BusId));
             }
             VhciClient.StopAttachAttempts("127.0.0.1", locations);
@@ -268,20 +266,25 @@ internal sealed class UsbipBackendHandle : IDisposable
 {
     private readonly UsbipServer _server;
     public UsbipEmulatedDevice Device { get; }
-    public int VhciPort { get; }
+
+    /// <summary>The vhci port the device is on now, 0 while it is not
+    /// attached.</summary>
+    public int VhciPort => Device.VhciPort;
     private int _disposed;
 
-    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device, int vhciPort)
+    internal UsbipBackendHandle(UsbipServer server, UsbipEmulatedDevice device)
     {
         _server = server;
         Device = device;
-        VhciPort = vhciPort;
     }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        try { VhciClient.Detach(VhciPort); } catch { }
+        // By location: after a dropped connection the driver plugs the
+        // device in again on a new port, and the port it had may hold
+        // another program's device.
+        try { VhciClient.DetachLocation("127.0.0.1", _server.Port, Device.BusId); } catch { }
         // An import that dropped while the controller lived left an attempt
         // for this location, and no record names it once the controller's
         // entry goes.

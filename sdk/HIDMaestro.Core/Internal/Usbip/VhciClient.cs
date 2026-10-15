@@ -230,6 +230,36 @@ internal static partial class VhciClient
             IntPtr.Zero, 0, out _, IntPtr.Zero);
     }
 
+    /// <summary>Detach the imports of one exact location, wherever the
+    /// driver plugged them in. A vhci port number names whatever device
+    /// holds the port now: an import whose connection dropped is plugged
+    /// out, and the driver's own re-attach attempt plugs it in again on the
+    /// lowest free port (vhci.cpp claim_roothub_port), so a port a program
+    /// remembers can hold another program's device by then. Returns how
+    /// many it detached.</summary>
+    public static int DetachLocation(string host, int port, string busid)
+    {
+        string service = port.ToString();
+        int detached = 0;
+        foreach (var row in GetImportedDevices())
+        {
+            if (row.Host != host || row.Service != service || row.BusId != busid) continue;
+            Detach(row.Port);
+            detached++;
+        }
+        return detached;
+    }
+
+    /// <summary>The vhci port the import of one exact location is on, or
+    /// 0 when nothing is imported there.</summary>
+    public static int FindLocation(string host, int port, string busid)
+    {
+        string service = port.ToString();
+        foreach (var row in GetImportedDevices())
+            if (row.Host == host && row.Service == service && row.BusId == busid) return row.Port;
+        return 0;
+    }
+
     /// <summary>Cancel the driver's background re-attach attempts for one
     /// exact location. Safe to call when none exist. Returns how many it
     /// canceled, or -1 when no host controller answered.</summary>
