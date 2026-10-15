@@ -62,5 +62,27 @@ internal static partial class Program
         Console.WriteLine($"  catalog descriptors with the measured shape: {(shaped.Count == 0 ? "none" : string.Join(", ", shaped))}");
         var clone = new HMProfileBuilder().FromProfile(ctx.GetProfile("dualsense")!).Pid(0xF0A8).Build();
         Check("a code-built clone of a catalog DualSense does not", !GameInputMapping.Applies(clone.Inner));
+
+        LegacyGiveUp();
+    }
+
+    /// <summary>When the ledger lock gives up on v1.12.0's mutex: the five
+    /// cases of LedgerLock.GivesUp, the decision after its wait. A bound of
+    /// INFINITE is an owner read as SYSTEM or Administrators, 5000 ms an
+    /// owner read as neither.</summary>
+    static void LegacyGiveUp()
+    {
+        Console.WriteLine("\n== Offline: when the ledger lock gives up on v1.12.0's mutex ==");
+        const uint Infinite = 0xFFFFFFFF;
+        Check("an owner read as SYSTEM or Administrators, the caller's bound cut the wait: it gives up",
+              LedgerLock.GivesUp(held: false, timeout: 29_990, full: Infinite));
+        Check("an owner read as neither, the caller's bound cut the wait: it gives up, never writing without the mutex",
+              LedgerLock.GivesUp(held: false, timeout: 10, full: 5000));
+        Check("an owner read as neither, the lock's own 5 s ran out: it goes on without the mutex, as with a squatter",
+              !LedgerLock.GivesUp(held: false, timeout: 5000, full: 5000));
+        Check("the mutex taken within a cut wait: it goes on, holding it",
+              !LedgerLock.GivesUp(held: true, timeout: 10, full: 5000));
+        Check("an unbounded wait on an owner read as SYSTEM or Administrators that failed: unchanged, it goes on",
+              !LedgerLock.GivesUp(held: false, timeout: Infinite, full: Infinite));
     }
 }

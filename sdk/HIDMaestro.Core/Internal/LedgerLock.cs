@@ -95,7 +95,12 @@ internal sealed partial class LedgerLock : IDisposable
 
     /// <summary>Take the lock within <paramref name="timeoutMs"/>, both
     /// mutexes included, or throw <see cref="TimeoutException"/> holding
-    /// neither. <see cref="Timeout.Infinite"/> waits as
+    /// neither. When what is left of <paramref name="timeoutMs"/> cuts the
+    /// wait for the v1.12.0 mutex short of the lock's own bound, it throws
+    /// whoever owns the mutex (<see cref="GivesUp"/>). Only a wait that ran
+    /// the lock's own bound, for an owner other than SYSTEM or
+    /// Administrators, goes on without the mutex, as
+    /// <see cref="Acquire()"/> does. <see cref="Timeout.Infinite"/> waits as
     /// <see cref="Acquire()"/> does.</summary>
     internal static LedgerLock Acquire(int timeoutMs)
     {
@@ -185,14 +190,13 @@ internal sealed partial class LedgerLock : IDisposable
             bool marked = s_legacyHeldByOther;
             uint full = administrative ? INFINITE
                 : (uint)TimeoutScale.Apply(marked ? LegacyMarkedWaitMs : LegacyUnknownWaitMs);
-            // A bounded take waits no longer than its caller allows, and
-            // gives up on a v1.12.0 holder rather than go on without it.
+            // A bounded take waits no longer than its caller allows.
             bool bounded = until != long.MaxValue;
             uint timeout = bounded ? (uint)Math.Min(full, Math.Max(0, until - Environment.TickCount64)) : full;
             uint r = WaitForSingleObject(h, timeout);
             _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
-            if (bounded && administrative && !_legacyHeld)
-                throw new TimeoutException($"A HIDMaestro v1.12.0 program held {LegacyMutexName} past the ledger lock's timeout.");
+            if (GivesUp(_legacyHeld, timeout, full))
+                throw new TimeoutException($"{LegacyMutexName} was held past the ledger lock's timeout.");
             if (administrative || _legacyHeld)
                 s_legacyHeldByOther = false;
             else if (!marked && timeout == full)
@@ -208,6 +212,15 @@ internal sealed partial class LedgerLock : IDisposable
             if (sd != IntPtr.Zero) LocalFree(sd);
         }
     }
+
+    /// <summary>True when an acquisition gives up on the v1.12.0 mutex
+    /// and throws: it does not hold it, and the caller's bound cut the wait
+    /// short of the lock's own bound (<paramref name="timeout"/> below
+    /// <paramref name="full"/>), whoever owns the mutex. A scope never
+    /// writes without the mutex because its caller ran short of time. Only
+    /// a wait that ran the lock's own bound for an owner other than SYSTEM
+    /// or Administrators goes on without it, as a squatter's must.</summary>
+    internal static bool GivesUp(bool held, uint timeout, uint full) => !held && timeout < full;
 
     /// <summary>Release both mutexes, the v1.12.0 one first.</summary>
     public void ReleaseMutex()
