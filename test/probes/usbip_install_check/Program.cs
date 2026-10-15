@@ -242,6 +242,7 @@ internal static class Program
 
         // The composite works end to end.
         if (c == null) return;
+        s_controller = c;
         var paths = new List<string>();
         var sw = Stopwatch.StartNew();
         while (paths.Count == 0 && sw.ElapsedMilliseconds < 30_000)
@@ -264,6 +265,54 @@ internal static class Program
         var steady = Hid.CountReports(paths[0], 2000, Submit);
         Record("clean: input keeps arriving once the device has settled",
                steady.ReadError == 0 && steady.Reports * 2 >= steady.Ticks, steady.ToString());
+
+        // The composite streams reports whether or not a state was submitted,
+        // so a count cannot show the submitted state arrived. Three windows:
+        // neutral, buttons and a hat pressed, neutral again. A byte steady
+        // inside each of the first two windows and different between them is
+        // the state. The same comparison between the two neutral windows
+        // must find nothing, which shows it does not take a steady byte that
+        // ignores the state for the state.
+        var idle = ReadWith(paths[0], new HMGamepadState());
+        var held = ReadWith(paths[0], new HMGamepadState
+        {
+            Buttons = HMButton.A | HMButton.B | HMButton.X | HMButton.Y | HMButton.LeftBumper | HMButton.RightBumper | HMButton.Back | HMButton.Start,
+            Hat = HMHat.North,
+        });
+        var idleAgain = ReadWith(paths[0], new HMGamepadState());
+        var changed = SteadyDifferences(idle, held);
+        Record("clean: the submitted state is what the host reads", changed.Count > 0,
+               changed.Count > 0 ? $"byte(s) {string.Join(",", changed)} differ between the neutral and pressed windows"
+                                 : $"no byte that is steady in each window differs between them ({idle.Reports} and {held.Reports} report(s))");
+        var spurious = SteadyDifferences(idle, idleAgain);
+        Record("clean: two neutral windows show no difference", idle.Reports > 0 && idleAgain.Reports > 0 && spurious.Count == 0,
+               spurious.Count == 0 ? "" : $"byte(s) {string.Join(",", spurious)} differ");
+    }
+
+    /// <summary>Submits <paramref name="state"/> for a short settle, then
+    /// reads for 600 ms with it still submitted every 8 ms. The handle opens
+    /// after the settle, so its queue holds only reports of this state.</summary>
+    static Hid.Reading ReadWith(string path, HMGamepadState state)
+    {
+        void Submit() { try { s_controller!.SubmitState(in state); } catch { } }
+        for (int i = 0; i < 40; i++) { Submit(); Thread.Sleep(8); }
+        return Hid.CountReports(path, 600, Submit);
+    }
+
+    static HMController? s_controller;
+
+    /// <summary>The byte positions that hold one value in every report of
+    /// <paramref name="a"/>, one value in every report of <paramref name="b"/>,
+    /// and different values between the two. Reports of different lengths
+    /// are compared over the shortest length.</summary>
+    static List<int> SteadyDifferences(Hid.Reading a, Hid.Reading b)
+    {
+        var found = new List<int>();
+        if (a.Frames == null || b.Frames == null || a.Frames.Count == 0 || b.Frames.Count == 0) return found;
+        int n = Math.Min(a.Frames.Min(r => r.Length), b.Frames.Min(r => r.Length));
+        for (int i = 0; i < n; i++)
+            if (a.Frames.All(r => r[i] == a.Frames[0][i]) && b.Frames.All(r => r[i] == b.Frames[0][i]) && a.Frames[0][i] != b.Frames[0][i]) found.Add(i);
+        return found;
     }
 
     // ── Two programs at once ───────────────────────────────────────────

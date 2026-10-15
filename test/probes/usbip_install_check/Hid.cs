@@ -53,8 +53,9 @@ internal static class Hid
     /// <summary>What a read of the interface saw while <c>tick</c> ran every
     /// 8 ms: the input reports, the submits, and the Win32 error of a read
     /// that failed before the window ended (0 when none did, which tells a
-    /// device that stopped sending from one that went away).</summary>
-    internal readonly record struct Reading(int Reports, int Ticks, int ReadError, long FirstMs, long LastMs)
+    /// device that stopped sending from one that went away). Frames holds the
+    /// bytes of each report read, the report id first.</summary>
+    internal readonly record struct Reading(int Reports, int Ticks, int ReadError, long FirstMs, long LastMs, List<byte[]>? Frames = null)
     {
         public override string ToString() =>
             $"{Reports} report(s) for {Ticks} submit(s), first at {FirstMs} ms, last at {LastMs} ms" +
@@ -78,6 +79,7 @@ internal static class Hid
 
         int count = 0, readError = 0;
         long first = -1, last = -1;
+        var frames = new List<byte[]>();
         var stop = new StopFlag();
         var sw = Stopwatch.StartNew();
         var reader = new Thread(() =>
@@ -92,6 +94,7 @@ internal static class Hid
                 }
                 if (read <= 0) continue;
                 long t = sw.ElapsedMilliseconds;
+                lock (frames) frames.Add(buf[..read]);
                 if (Interlocked.Increment(ref count) == 1) first = t;
                 last = t;
             }
@@ -104,7 +107,7 @@ internal static class Hid
         CancelIoEx(h, IntPtr.Zero);
         reader.Join(2000);
         CloseHandle(h);
-        return new Reading(count, ticks, readError, first, last);
+        lock (frames) return new Reading(count, ticks, readError, first, last, new List<byte[]>(frames));
     }
 
     sealed class StopFlag { public volatile bool Set; }
