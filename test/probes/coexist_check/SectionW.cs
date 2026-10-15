@@ -30,6 +30,18 @@
 //        mapping failed holds it once its program drops the context without
 //        disposing it. After a garbage collection that closes a claim
 //        nothing references, the lease's claims are still held.
+//    W8. A program exits while a create on another thread is held before
+//        its input mapping, and a handler of its own, which runs after the
+//        SDK's, lets the create finish. The device it made is named by the
+//        program's record, and the next sweep removes it.
+//    W9. A program exits with a controller, and a handler of its own,
+//        which runs after the SDK's, creates another. The SDK's handler
+//        removes the first, and the record that names the second carries
+//        the program's process id, so the next sweep removes it.
+//    W10. A program exits with a pad and a composite, and a handler of its
+//        own, which runs after the SDK's, disposes its context: the
+//        composite's device is disposed twice, once by each. The program
+//        ends with exit code 0 and leaves no device and no record.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -59,6 +71,12 @@ internal static partial class Program
         }
         Clean();
         SectionWLease();
+        Clean();
+        SectionWExitMidCreate();
+        Clean();
+        SectionWExitThenCreate();
+        Clean();
+        SectionWExitThenDispose();
     }
 
     /// <summary>W1.</summary>
@@ -214,6 +232,65 @@ internal static partial class Program
         Check("W7: the collection closes a claim nothing references", PeerProcess.Field(r, "control") == "1", r);
         Check("W7: the dropped lease's identity claim is still held", Native.ClaimExists($"HIDMaestro.Identity.{PeerProcess.Field(r, "token")}"), r);
         Check("W7: and its transport index claim", Native.ClaimExists($"HIDMaestro.Index.{PeerProcess.Field(r, "transport")}"), r);
+    }
+
+    /// <summary>W8.</summary>
+    static void SectionWExitMidCreate()
+    {
+        using var p = PeerProcess.Start("W8");
+        string r = p.Send("quitmidcreate pad F20C coexist-w8");
+        if (!Ok(r)) { Check("W8: the program exits with a create in flight", false, r); return; }
+        Check("W8: the program ends", p.WaitExit(120_000));
+        string inst = $@"ROOT\HIDClass\{PeerProcess.Field(r, "token")}";
+        Check("W8: the create in flight made its device before the program ended", Native.IsPresent(inst), inst);
+        var named = Native.RecordsNaming(PeerProcess.Field(r, "token")!);
+        Check("W8: the program's record still names it", named.Count > 0, $"{named.Count} records");
+        using var s = PeerProcess.Start("W8-sweeper");
+        s.Send("sweep");
+        Check("W8: and the next sweep removes it", WaitFor(() => !Native.IsPresent(inst), 15_000));
+    }
+
+    /// <summary>W9.</summary>
+    static void SectionWExitThenCreate()
+    {
+        using var p = PeerProcess.Start("W9");
+        string c = p.Send("create pad F20D -");
+        if (!Ok(c)) { Check("W9: the program creates", false, c); return; }
+        string first = PeerProcess.Field(c, "instance")!;
+        string r = p.Send("quitthencreate pad F20E coexist-w9");
+        if (!Ok(r)) { Check("W9: the program exits", false, r); return; }
+        Check("W9: the program ends", p.WaitExit(120_000));
+        Check("W9: the SDK's exit handler removed the controller the program left", !Native.IsPresent(first), first);
+        string inst = $@"ROOT\HIDClass\{PeerProcess.Field(r, "token")}";
+        Check("W9: the create in the program's own handler, after the SDK's, made its device", Native.IsPresent(inst), inst);
+        var named = Native.RecordsNaming(PeerProcess.Field(r, "token")!);
+        Check("W9: the record that names it carries the program's process id", named.Any(n => n.Pid == p.Pid),
+              string.Join(", ", named.Select(n => $"{n.OwnerId} pid {n.Pid?.ToString() ?? "none"}")));
+        using var s = PeerProcess.Start("W9-sweeper");
+        s.Send("sweep");
+        Check("W9: and the next sweep removes it", WaitFor(() => !Native.IsPresent(inst), 15_000));
+    }
+
+    /// <summary>W10.</summary>
+    static void SectionWExitThenDispose()
+    {
+        var before = Native.HidPaths(0x054C, 0x0CE6);
+        using var p = PeerProcess.Start("W10");
+        string cp = p.Send("create pad F20F coexist-w10");
+        string cc = p.Send("create composite - coexist-w10c");
+        if (!Ok(cp) || !Ok(cc)) { Check("W10: the program creates a pad and a composite", false, $"{cp} / {cc}"); return; }
+        string pad = PeerProcess.Field(cp, "instance")!;
+        WaitPaths(0x054C, 0x0CE6, 1, 20_000, before);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string r = p.Send("quitdispose");
+        bool ended = Ok(r) && p.WaitExit(120_000);
+        Check("W10: the program ends", ended, $"{r}, {sw.ElapsedMilliseconds} ms");
+        if (!ended) return;
+        Check("W10: with exit code 0", p.ExitCode == 0, $"exit code {p.ExitCode}");
+        Check("W10: its pad is gone", WaitFor(() => !Native.IsPresent(pad), 15_000), pad);
+        Check("W10: its composite is gone",
+              WaitFor(() => !Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Any(), 15_000));
+        Check("W10: and its record", !Native.OwnerRecords().ContainsValue(p.Pid));
     }
 
     static bool ConfigExists(string transport)

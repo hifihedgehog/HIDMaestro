@@ -297,6 +297,23 @@ internal static class Native
         return d;
     }
 
+    /// <summary>The owner records with a controller entry for
+    /// <paramref name="token"/>, each with the process id it names, or null
+    /// when it names none.</summary>
+    internal static List<(string OwnerId, int? Pid)> RecordsNaming(string token)
+    {
+        var list = new List<(string, int?)>();
+        using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\HIDMaestroOwners");
+        if (k == null) return list;
+        foreach (var id in k.GetSubKeyNames())
+        {
+            using var r = k.OpenSubKey(id);
+            using var c = r?.OpenSubKey($@"Controllers\{token}");
+            if (c != null) list.Add((id, r!.GetValue("Pid") as int?));
+        }
+        return list;
+    }
+
     /// <summary>A record the way a program on this SDK writes it, with its
     /// staging and its controllers' entries. It is live while someone holds
     /// its owner claim pipe.</summary>

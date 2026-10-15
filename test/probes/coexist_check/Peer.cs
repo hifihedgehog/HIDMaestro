@@ -107,6 +107,17 @@
 //   exit                        dispose the context and exit
 //   quit                        exit without disposing anything, so only
 //                               the SDK's exit handler cleans up
+//   quitmidcreate <kind> <pid> <key|->  start a create on another thread,
+//                               hold it before its input mapping, reply
+//                               index=<n> token=<t> and exit. A handler of
+//                               this program's own, which runs after the
+//                               SDK's, lets the create finish first
+//   quitdispose                 exit, with a handler of this program's own,
+//                               which runs after the SDK's, that disposes
+//                               the context
+//   quitthencreate <kind> <pid> <key|->  reply token=<t> and exit. A
+//                               handler of this program's own, which runs
+//                               after the SDK's, creates the controller
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -574,6 +585,69 @@ internal static class Peer
                         Reply("OK quit");
                         Environment.Exit(0);
                         return 0;
+                    case "quitmidcreate":
+                    {
+                        s_ctx ??= NewContext();
+                        HMContext ctx = s_ctx;
+                        HMProfile profile = Profile(ctx, a[1], a[2]);
+                        string? key = a.Length > 3 && a[3] != "-" ? a[3] : null;
+                        var paused = new ManualResetEventSlim();
+                        var release = new ManualResetEventSlim();
+                        int index = -1;
+                        if (!SetHook("HIDMaestro.Internal.DeviceOrchestrator", "BeforeInputMapping", n =>
+                            {
+                                index = n;
+                                paused.Set();
+                                release.Wait();
+                            }))
+                        {
+                            Reply("ERR quitmidcreate no hook");
+                            break;
+                        }
+                        var create = new Thread(() =>
+                        {
+                            try { ctx.CreateController(profile, key); } catch { }
+                        }) { IsBackground = true };
+                        create.Start();
+                        if (!paused.Wait(60_000)) { Reply("ERR quitmidcreate the create never reached its input mapping"); break; }
+                        // Subscribed after the SDK's handler, which the
+                        // create's claim registered, so it runs after it.
+                        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                        {
+                            release.Set();
+                            create.Join(60_000);
+                        };
+                        Reply($"OK quitmidcreate index={index} token={Token(key, index)}");
+                        Environment.Exit(0);
+                        return 0;
+                    }
+                    case "quitdispose":
+                    {
+                        HMContext? ctx = s_ctx;
+                        // Subscribed after the SDK's handler, which this
+                        // program's earlier creates registered.
+                        AppDomain.CurrentDomain.ProcessExit += (_, _) => ctx?.Dispose();
+                        StopStream();
+                        Reply("OK quitdispose");
+                        Environment.Exit(0);
+                        return 0;
+                    }
+                    case "quitthencreate":
+                    {
+                        s_ctx ??= NewContext();
+                        HMContext ctx = s_ctx;
+                        HMProfile profile = Profile(ctx, a[1], a[2]);
+                        string? key = a.Length > 3 && a[3] != "-" ? a[3] : null;
+                        // The SDK's handler was registered by this program's
+                        // earlier create, so this one runs after it.
+                        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                        {
+                            try { ctx.CreateController(profile, key); } catch { }
+                        };
+                        Reply($"OK quitthencreate token={Token(key, 0)}");
+                        Environment.Exit(0);
+                        return 0;
+                    }
                     case "exit":
                         StopStream();
                         s_ctx?.Dispose();
@@ -747,6 +821,17 @@ internal static class Peer
             parts.Add($"{Get(g, "Key")}|{Get(g, "ControllerIndex")}|{Get(g, "Owner")}|watch={watch}");
         }
         return parts.Count == 0 ? "OK census" : "OK census " + string.Join(' ', parts);
+    }
+
+    /// <summary>The identity token a create of <paramref name="key"/> on
+    /// transport index <paramref name="index"/> takes. A key's token does
+    /// not depend on the index.</summary>
+    static string? Token(string? key, int index)
+    {
+        object? identity = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DeviceIdentity")
+            ?.GetMethod("ForKey", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(string), typeof(int) })
+            ?.Invoke(null, new object?[] { key, index });
+        return identity == null ? null : Get(identity, "Token");
     }
 
     /// <summary>A lease nothing references, then a full collection. A claim

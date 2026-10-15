@@ -16,9 +16,11 @@ namespace HIDMaestro.Internal;
 /// </summary>
 internal static class OwnerSweep
 {
-    /// <summary>This process's creates hold it for reading, the background
-    /// phantom cleanup for writing, so the cleanup never removes the record
-    /// of a devnode this process is in the middle of creating.</summary>
+    /// <summary>This process's creates hold it for reading from their lease
+    /// to their last record write, and the background phantom cleanup and
+    /// the exit handler for writing. So the cleanup never removes the record
+    /// of a devnode this process is in the middle of creating, and the exit
+    /// handler never deletes the record of a create in flight.</summary>
     internal static readonly ReaderWriterLockSlim CreateGate = new(LockRecursionPolicy.SupportsRecursion);
 
     private static int s_sessionSwept;
@@ -103,7 +105,39 @@ internal static class OwnerSweep
         };
     }
 
+    /// <summary>How long the exit handler waits for this process's creates
+    /// in flight, so an exit never waits on a create held in PnP or in a
+    /// driver deploy.</summary>
+    private const int ExitCreateWaitMs = 10_000;
+
+    /// <summary>The runtime raises ProcessExit while the process's other
+    /// threads still run: under .NET on the finalizer thread, under
+    /// NativeAOT on the thread that called Environment.Exit or returned from
+    /// Main. So a create can be in flight here. The handler waits for it through
+    /// <see cref="CreateGate"/>, and holds back the next one until it is
+    /// done. A create that does not finish in the bound keeps the record:
+    /// its entry names the device it may still make, and the next sweep of
+    /// any program removes that device through the dead record.</summary>
     private static void RemoveOwnDevicesAtExit()
+    {
+        bool gated;
+        // TryEnterWriteLock throws LockRecursionException on a thread that
+        // holds the read lock: under NativeAOT, an exit started inside a
+        // create. Under .NET this handler runs on the finalizer thread, and
+        // such an exit waits for the creating thread's read side until the
+        // bound.
+        try { gated = CreateGate.TryEnterWriteLock(TimeoutScale.Apply(ExitCreateWaitMs)); }
+        catch (LockRecursionException) { gated = false; }
+        if (!gated)
+        {
+            DeviceOrchestrator.LogDiag("    exit: a create is still in flight, so the record stays for the next sweep");
+            return;
+        }
+        try { RemoveOwnDevicesAtExitGated(); }
+        finally { CreateGate.ExitWriteLock(); }
+    }
+
+    private static void RemoveOwnDevicesAtExitGated()
     {
         var census = OwnerCensus.Take();
         var own = census.Records.FirstOrDefault(r => r.Self);
@@ -137,7 +171,10 @@ internal static class OwnerSweep
         // the ledger's, and runs no driver install on a present devnode.
         var released = own.Controllers.Where(c => c.TransportIndex >= 0).Select(c => c.TransportIndex).ToList();
         if (released.Count > 0) try { RegistryLedger.Release(released); } catch { }
-        MachineClaims.DeleteRecord(own.OwnerId);
+        // DeleteOwnRecord, so a create after this handler, on another thread
+        // or in a handler that runs after it, writes the record's header
+        // again.
+        MachineClaims.DeleteOwnRecord();
     }
 
     /// <summary>Called once <see cref="Reclaim"/> holds the claims of the

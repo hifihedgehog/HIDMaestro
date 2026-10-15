@@ -103,6 +103,8 @@ internal sealed class PeerProcess : IDisposable
     /// exits it.</summary>
     public bool WaitExit(int timeoutMs) => _p.WaitForExit(timeoutMs);
 
+    public int ExitCode => _p.ExitCode;
+
     /// <summary>TerminateProcess: no Dispose, no exit hook, no finally.</summary>
     public void Kill()
     {

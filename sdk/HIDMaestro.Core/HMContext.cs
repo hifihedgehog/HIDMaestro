@@ -452,6 +452,25 @@ public sealed class HMContext : IDisposable
         // left as well.
         Internal.OwnerSweep.SessionSweepOnce();
 
+        // From the lease to the last write of the controller's entry, so the
+        // exit handler never deletes the record of a create in flight
+        // (OwnerSweep.RegisterExitCleanup). Creates in one process are meant
+        // to run one at a time, since creation order anchors every API's
+        // view of the controllers. A second create on another thread waits
+        // here while the phantom cleanup waits for the write side, since
+        // ReaderWriterLockSlim admits no new reader while a writer is
+        // waiting. This is the gate's only first entry on a create path.
+        // SetupController, called below on this thread, enters it again,
+        // and a thread that already holds the read side enters again at once
+        // under LockRecursionPolicy.SupportsRecursion, a writer waiting or
+        // not (ReaderWriterLockSlim.TryEnterReadLockCore).
+        Internal.OwnerSweep.CreateGate.EnterReadLock();
+        try { return CreateUnderLease(slot, profile, identityKey); }
+        finally { Internal.OwnerSweep.CreateGate.ExitReadLock(); }
+    }
+
+    private HMController CreateUnderLease(int slot, HMProfile profile, string? identityKey)
+    {
         var lease = Internal.ControllerLease.Acquire(slot, identityKey,
             profile.RequiresUsbipBackend ? "usbip" : "umdf", profile.Id);
         try

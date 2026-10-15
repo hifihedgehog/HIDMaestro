@@ -352,7 +352,9 @@ internal static partial class DeviceOrchestrator
     //                  controllers, the caller's own included, stay.
     //
     //   2a. OwnerSweep.RemoveOwnDevicesAtExit
-    //        Trigger:  ProcessExit, registered with the owner claim
+    //        Trigger:  ProcessExit, registered with the owner claim, once
+    //                  this process's creates in flight are done
+    //                  (OwnerSweep.CreateGate)
     //        Scope:    the devices of this process's controllers that it
     //                  did not dispose
     //
