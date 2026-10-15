@@ -82,6 +82,8 @@ internal sealed class ControllerLease : IDisposable
                     reclaimed = k;
                 }
 
+            int squattedCount = 0;
+            string? firstSquatted = null;
             foreach (int n in Candidates(reclaimed >= 0 ? reclaimed : slot))
             {
                 if (used.Contains(n)) continue;
@@ -93,6 +95,8 @@ internal sealed class ControllerLease : IDisposable
                     if (MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(n))) continue;
                     if (SharedMemoryIO.ForeignObjectAt(n) is { } squatted)
                     {
+                        squattedCount++;
+                        firstSquatted ??= squatted;
                         DeviceOrchestrator.LogDiag($"    transport index {n} skipped: {squatted} was made by a program that is not elevated");
                         continue;
                     }
@@ -132,9 +136,10 @@ internal sealed class ControllerLease : IDisposable
                     if (!keep) indexClaim.Dispose();
                 }
             }
-            throw new HMResourceInUseException(
-                "No transport index is free: every index up to 4096 is held by a running program or a present device.",
-                "transport index", null);
+            string blocked = squattedCount == 0
+                ? "No transport index is free: every index up to 4096 is held by a running program or a present device."
+                : $"No transport index is free: of the indices up to 4096, {squattedCount} carry a Global\\ object a program that is not elevated created (such as {firstSquatted}), and the rest are held by a running program or a present device. Close that program, or create the controller again once it is gone.";
+            throw new HMResourceInUseException(blocked, "transport index", null);
         }
         finally
         {

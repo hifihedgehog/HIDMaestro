@@ -34,6 +34,32 @@ internal static partial class Program
         SectionX4();
         Clean();
         SectionX5();
+        Clean();
+        SectionX6();
+    }
+
+    /// <summary>Many indices squatted at once. The create walks past them
+    /// onto a free one, and when every index is taken the refusal names the
+    /// squatter as the cause.</summary>
+    static void SectionX6()
+    {
+        var names = new List<string>();
+        for (int i = 0; i < 4; i++) names.Add($@"Global\HIDMaestroInputEvent{i}");
+        var sq = new Squatter(s => { foreach (var n in names) s.Event(n); });
+        try
+        {
+            Check("X6: a program that is not elevated squats the input event of indices 0 to 3",
+                  names.All(sq.Holds), sq.Describe());
+            using var p = PeerProcess.Start("X6");
+            p.Send("install");
+            string c = p.Send("create pad F0E8 -");
+            int transport = int.TryParse(PeerProcess.Field(c, "transport"), out int tv) ? tv : -1;
+            Check("X6: a keyless create walks past the squatted indices onto a free one",
+                  Ok(c) && transport >= 4, c);
+        }
+        finally { sq.Dispose(); }
+        Check("X6: nothing the squatter made is left",
+              names.All(n => Native.OpenEventW(Native.SYNCHRONIZE, false, n) == IntPtr.Zero));
     }
 
     /// <summary>The owner of the objects HIDMaestro creates, under the
