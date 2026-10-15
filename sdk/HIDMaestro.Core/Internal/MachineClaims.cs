@@ -19,8 +19,24 @@ namespace HIDMaestro.Internal;
 /// with Administrators enabled can create a pipe. Under a plain name a
 /// program that is not elevated could create a claim first, and every
 /// HIDMaestro program would take it for a live owner's for as long as that
-/// program ran.
-/// The handle is not inheritable, and Windows deletes the pipe when the
+/// program ran.</para>
+///
+/// <para>No Learn page describes the prefixes. CreateNamedPipeW says a
+/// pipe name "can include any character other than a backslash", which the
+/// prefix path does not follow, and the one public account (Forshaw, "Named
+/// Pipe Secure Prefixes", 2017) names no Windows version. Nine smss.exe
+/// files and three npfs.sys files were read, named here by their version
+/// resources. Each smss.exe, 10.0.10240.16384, 10586.0, 14393.0,
+/// 15254.158, 16299.192, 17763.107, 19041.5125, 19041.7664 and 26100.1,
+/// creates <c>\Device\NamedPipe\ProtectedPrefix\Administrators</c> among
+/// its prefixes at boot. Windows 10 2004 through 22H2, build 19044 among
+/// them, run 19041.x binaries. Each npfs.sys, 10240.16384, 19041.5125 and
+/// 26100.1, has in Microsoft's public symbols the same prefix routines
+/// (NpCreateNamedPipePrefix, NpOpenNamedPipePrefix, NpFindPrefix,
+/// NpFreeProtectedPrefix, NpUnlinkProtectedPrefix). That a token without
+/// Administrators is refused there was measured on 26200 only.</para>
+///
+/// <para>The handle is not inheritable, and Windows deletes the pipe when the
 /// last handle closes, which it does when the process ends however it ends.
 /// Liveness is a <c>WaitNamedPipe</c> probe, which opens nothing, so a probe
 /// can never keep a dead owner's claim alive. The design note
