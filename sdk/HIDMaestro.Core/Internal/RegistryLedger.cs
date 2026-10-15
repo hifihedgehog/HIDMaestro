@@ -501,9 +501,14 @@ internal static class RegistryLedger
     internal static void Release(int controllerIndex) => Sweep(new[] { HolderName(controllerIndex) });
 
     /// <summary>Teardown of several controllers at once, as at process exit:
-    /// one acquisition of the ledger's lock drops all their holds, so a
-    /// squatted v1.12.0 mutex costs one wait, and the WinUSB devnodes they
-    /// held are put back after the lock is let go, as in every sweep.</summary>
+    /// one acquisition of the ledger's lock drops all their holds and
+    /// restores their GameInput and joy.cpl entries, so a squatted v1.12.0
+    /// mutex costs those one long wait. The N WinUSB entries they held are
+    /// put back after the lock is let go, as in every sweep
+    /// (<see cref="RestoreWinUsbEntries"/>), and take the lock again on their
+    /// own: up to twice per entry and once for the empty keys. With the name
+    /// marked by the long wait, that is up to (2N+1) waits of the short bound
+    /// (<see cref="LedgerLock"/>, 500 ms scaled) after the long one.</summary>
     internal static void Release(IEnumerable<int> controllerIndices) =>
         Sweep(controllerIndices.Select(HolderName).ToArray());
 

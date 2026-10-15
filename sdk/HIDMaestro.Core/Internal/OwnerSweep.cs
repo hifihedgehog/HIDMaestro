@@ -256,10 +256,16 @@ internal static class OwnerSweep
             }
         }
         // Every controller's holds go in one release, which takes the ledger
-        // lock once, so a squatted legacy mutex costs this exit one wait, not
-        // one per controller. Its WinUSB devnodes are put back after the
-        // lock is let go: that work takes the WinUSB lock, which comes before
-        // the ledger's, and runs no driver install on a present devnode.
+        // lock once for the GameInput and joy.cpl restores, so a squatted
+        // legacy mutex costs those one long wait, not one per controller.
+        // The release's N WinUSB entries are put back after that scope ends:
+        // that work takes the WinUSB lock, which comes before the ledger's,
+        // and runs no driver install on a present devnode. Each entry takes
+        // the ledger lock up to twice on its own, to check it and to delete
+        // it or move its follow-up's deadline, and the release once more to
+        // clear empty keys. Once the long wait has marked the name, each of
+        // those (2N+1) acquisitions waits up to the short bound
+        // (LedgerLock.LegacyMarkedWaitMs, 500 ms scaled).
         var released = own.Controllers.Where(c => c.TransportIndex >= 0).Select(c => c.TransportIndex).ToList();
         if (released.Count > 0) try { RegistryLedger.Release(released); } catch { }
         return true;
