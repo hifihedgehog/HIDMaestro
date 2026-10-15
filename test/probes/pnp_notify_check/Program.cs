@@ -46,6 +46,20 @@ internal static class Program
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
+    static (long On, long Without, long NotGone, long Unregistered) Removals() =>
+        (DeviceManager.RemovalsOnNotification, DeviceManager.RemovalsWithoutNotification,
+         DeviceManager.RemovalsNotGone, DeviceManager.RemovalsUnregistered);
+
+    static void CheckRemovals(string profile, (long On, long Without, long NotGone, long Unregistered) before)
+    {
+        var a = Removals();
+        long on = a.On - before.On, without = a.Without - before.Without, notGone = a.NotGone - before.NotGone,
+             unregistered = a.Unregistered - before.Unregistered;
+        Check($"{profile}: every removal test of its dispose ended on DEVICEINSTANCEREMOVED",
+              on > 0 && without == 0 && notGone == 0 && unregistered == 0,
+              $"{on} on the notification, {without} without it, {notGone} not gone, {unregistered} unregistered");
+    }
+
     static int Main(string[] args)
     {
         string mode = args.Length > 0 ? args[0] : "";
@@ -80,6 +94,7 @@ internal static class Program
         ctx.InstallDriver();
         var profile = ctx.GetProfile("dualshock-4-v2")!;
 
+        var removalsBefore = Removals();
         long before = DeviceManager.NotificationsDelivered;
         long interfaceBefore = DeviceManager.InterfaceNotificationsDelivered;
         var window = Task.Run(() => DeviceManager.WaitForHidChild(@"ROOT\HIDMAESTRO\PNP_NOTIFY_CHECK_NO_SUCH_DEVICE", 6000));
@@ -107,6 +122,21 @@ internal static class Program
         Check("device-interface notifications arrive through the interface filter", interfaceAfter > interfaceBefore,
               $"{interfaceAfter - interfaceBefore} delivered: {interfaceAfterCreate - interfaceBefore} by the end of the create, " +
               $"{interfaceAfter - interfaceAfterCreate} after it, through the dispose");
+        CheckRemovals("dualshock-4-v2", removalsBefore);
+
+        // The removal test waits for DEVICEINSTANCEREMOVED for every devnode
+        // in the tree when its removal starts. Each kind of removal the SDK
+        // makes must end its test on it: a ROOT HID device and its child
+        // (SetupDiRemoveDevice), an Xbox 360's ROOT device and its software
+        // XUSB companion (SwDeviceClose through hmswd.exe), and an xinputhid
+        // software device with its HID children.
+        foreach (string id in new[] { "xbox-360-wired", "xbox-series-xs-bt" })
+        {
+            var r0 = Removals();
+            var more = ctx.CreateController(ctx.GetProfile(id)!, "pnp-notify-check-" + id);
+            more.Dispose();
+            CheckRemovals(id, r0);
+        }
 
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");

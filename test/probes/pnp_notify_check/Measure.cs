@@ -130,7 +130,7 @@ internal static unsafe partial class Measure
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        int failed = 0;
+        int failed = 0, missing = 0;
         foreach (string profileId in new[] { "dualsense", "xbox-360-wired", "xbox-series-xs-bt" })
         {
             var profile = ctx.GetProfile(profileId)!;
@@ -227,11 +227,14 @@ internal static unsafe partial class Measure
                 Console.WriteLine($"    {role,-9} REMOVED after Dispose began    {Stats(r.Removed)}");
                 Console.WriteLine($"    {role,-9} record gone after Dispose began {Stats(r.Record)}");
                 if (r.Missing > 0)
-                    Console.WriteLine($"    {role,-9} {r.Missing} devnode(s) with no REMOVED or no departure seen within 10 s of Dispose");
+                    Console.WriteLine($"  [FAIL] {profileId} {role}: {r.Missing} devnode(s) with no REMOVED or no departure seen within 10 s of Dispose");
+                missing += r.Missing;
             }
         }
         Console.WriteLine();
-        Console.WriteLine(failed == 0 ? "=== every cycle ran ===" : $"=== {failed} cycle(s) failed ===");
-        return failed == 0 ? 0 : 1;
+        Console.WriteLine(failed == 0 && missing == 0
+            ? "=== every cycle ran, and every devnode left the tree and got its REMOVED ==="
+            : $"=== {failed} cycle(s) failed, {missing} devnode(s) without a departure or a REMOVED ===");
+        return failed == 0 && missing == 0 ? 0 : 1;
     }
 }

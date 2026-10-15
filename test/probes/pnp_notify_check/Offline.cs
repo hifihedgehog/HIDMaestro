@@ -285,6 +285,8 @@ internal static class Offline
               $"fast 120000 -> {f120}, fast 3000 -> {f3}, fast 1000 -> {f1}, not fast 120000 -> {s120}");
 
         // The waits, through the SDK's own loop.
+        long on0 = DeviceManager.RemovalsOnNotification, without0 = DeviceManager.RemovalsWithoutNotification,
+             notGone0 = DeviceManager.RemovalsNotGone, unreg0 = DeviceManager.RemovalsUnregistered;
         var s1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };
         var w1 = WatchedRemoval(s1, uninstalls: true, 5000);
         Check("removal: out of the tree at 0, REMOVED at 200, record gone at 300 -> removed at 300",
@@ -337,6 +339,17 @@ internal static class Offline
         long w7Ms = s7.Clock.ElapsedMilliseconds;
         Check("WaitForDeviceRemoval on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> removed at 300",
               w7 == Removed && Within(w7Ms, 300), $"{w7} at {w7Ms} ms");
+
+        // The counts S77's live part asserts on: only watches of a devnode
+        // in the tree count. Four ended on the notification (w1, w2, w3,
+        // w7), one without it (w6), one not gone (w6b), one with its
+        // registration refused (w4). The absent id and the phantom count
+        // nothing.
+        long dOn = DeviceManager.RemovalsOnNotification - on0, dWithout = DeviceManager.RemovalsWithoutNotification - without0,
+             dNotGone = DeviceManager.RemovalsNotGone - notGone0, dUnreg = DeviceManager.RemovalsUnregistered - unreg0;
+        Check("the removal counts: 4 on the notification, 1 without it, 1 not gone, 1 unregistered",
+              dOn == 4 && dWithout == 1 && dNotGone == 1 && dUnreg == 1,
+              $"{dOn}, {dWithout}, {dNotGone}, {dUnreg}");
 
         // The registration gate.
         var sG1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };

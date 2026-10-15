@@ -150,6 +150,23 @@ public static partial class DeviceManager
     /// the interface filter itself works. pnp_notify_check reads it.</summary>
     internal static long InterfaceNotificationsDelivered => Interlocked.Read(ref s_interfaceNotificationsDelivered);
 
+    private static long s_removalsOnNotification, s_removalsWithoutNotification, s_removalsNotGone, s_removalsUnregistered;
+
+    /// <summary>Removal tests of a devnode in the tree at their start,
+    /// counted once each when the watch ends, by how they ended: on the
+    /// DEVICEINSTANCEREMOVED notification, gone without it past its bound,
+    /// not gone, or with the notification's registration refused. The
+    /// change that requires the notification rests on Windows sending it
+    /// for every removal the SDK makes, and these counts are where a run
+    /// shows it. pnp_notify_check reads them.</summary>
+    internal static long RemovalsOnNotification => Interlocked.Read(ref s_removalsOnNotification);
+    /// <inheritdoc cref="RemovalsOnNotification"/>
+    internal static long RemovalsWithoutNotification => Interlocked.Read(ref s_removalsWithoutNotification);
+    /// <inheritdoc cref="RemovalsOnNotification"/>
+    internal static long RemovalsNotGone => Interlocked.Read(ref s_removalsNotGone);
+    /// <inheritdoc cref="RemovalsOnNotification"/>
+    internal static long RemovalsUnregistered => Interlocked.Read(ref s_removalsUnregistered);
+
     /// <summary>The symbolic link of an interface event. CM_NOTIFY_EVENT_DATA
     /// is FilterType and Reserved, then a union at offset 8, and an interface
     /// event puts its class GUID there and the link after it, at offset 24.
@@ -489,6 +506,7 @@ public static partial class DeviceManager
         // record), in Stopwatch ticks. The REMOVED bound runs from there, so
         // a second wait on a watch whose bound has passed ends at once.
         private long _goneAt;
+        private RemovalOutcome _last = RemovalOutcome.Pending;
 
         internal bool PresentAtStart { get; private set; }
         internal bool Registered { get; }
@@ -558,9 +576,9 @@ public static partial class DeviceManager
                 bool gone = !o.InTree && !(uninstalls && o.Record);
                 if (gone && _goneAt == 0) _goneAt = now;
                 var r = RemovalComplete(o, uninstalls, removedOverdue: gone && now - _goneAt >= removedTicks);
-                if (r != RemovalOutcome.Pending) return r;
+                if (r != RemovalOutcome.Pending) return _last = r;
                 long until = gone ? _goneAt + removedTicks : deadline;
-                if (until <= now) return RemovalOutcome.NotGone;
+                if (until <= now) return _last = RemovalOutcome.NotGone;
                 _signal.WaitOne((int)Math.Clamp((until - now) * 1000 / freq + 1, 1, RecheckMs));
             }
         }
@@ -572,6 +590,15 @@ public static partial class DeviceManager
         {
             if (_disposed) return;
             _disposed = true;
+            if (PresentAtStart && _last != RemovalOutcome.Pending)
+            {
+                if (!Registered) Interlocked.Increment(ref s_removalsUnregistered);
+                else if (_last == RemovalOutcome.Removed) Interlocked.Increment(ref s_removalsOnNotification);
+                else if (_last == RemovalOutcome.GoneWithoutRemoved) Interlocked.Increment(ref s_removalsWithoutNotification);
+                if (_last == RemovalOutcome.NotGone) Interlocked.Increment(ref s_removalsNotGone);
+                if (_last == RemovalOutcome.GoneWithoutRemoved)
+                    DeviceOrchestrator.LogDiag($"      {_id} left the tree with no REMOVED notification within its bound");
+            }
             if (_registration != IntPtr.Zero) CM_Unregister_Notification(_registration);
             _hooked?.Dispose();
             if (_keep.IsAllocated) _keep.Free();
