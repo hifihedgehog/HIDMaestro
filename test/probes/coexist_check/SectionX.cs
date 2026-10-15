@@ -699,6 +699,56 @@ internal static partial class Program
         long ms = sw.ElapsedMilliseconds;
         holder.Join(5000);
         Check($"X2: a sweep still waits while an elevated program holds {name}", Ok(r2) && ms >= 2500, $"{ms} ms: {r2}");
+
+        // A name whose DACL grants SYNCHRONIZE and MUTEX_MODIFY_STATE and
+        // nothing else. A v1.12.0 program's new Mutex asks for just those
+        // two (with MAXIMUM_ALLOWED), opens it and writes under it. The
+        // sweep, whose first open also asks READ_CONTROL, must open it the
+        // same way and wait out a hold instead of writing beside it.
+        // The peer sweeps twice before the squatter comes, so its sweeps
+        // are warm, and the second one's time is the baseline. The writer
+        // holds the mutex 1 s, and the held sweep must answer no sooner
+        // than that, while the baseline must stay under half of it, so the
+        // check tells a wait from a sweep that is merely slow.
+        const string noReadControl = "D:(A;;0x100001;;;WD)(A;;0x0;;;OW)";
+        const int holdMs = 1000;
+        using var p2 = PeerProcess.Start("X2-noread");
+        p2.Send("sweep", 60_000);
+        var warm = Stopwatch.StartNew();
+        string warmReply = p2.Send("sweep", 60_000);
+        long baseline = warm.ElapsedMilliseconds;
+        Check("X2: a warm sweep with the name free takes well under the writer's hold",
+              Ok(warmReply) && baseline < holdMs / 2, $"{baseline} ms: {warmReply}");
+        var sq2 = new Squatter(s => s.Mutex(name, hold: false, sddl: noReadControl));
+        try
+        {
+            Check($"X2: a program that is not elevated creates {name} granting no READ_CONTROL", sq2.Holds(name), sq2.Describe());
+            IntPtr withRead = Native.OpenMutexW(Native.SYNCHRONIZE | 0x0001 | 0x00020000 /* READ_CONTROL */, false, name);
+            int readError = withRead == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+            if (withRead != IntPtr.Zero) Native.CloseHandle(withRead);
+            IntPtr legacy = Native.OpenMutexW(Native.SYNCHRONIZE | 0x0001 /* MUTEX_MODIFY_STATE */, false, name);
+            Check("X2: it refuses this probe READ_CONTROL and opens for the two rights v1.12.0 asks",
+                  readError == 5 && legacy != IntPtr.Zero, $"open with READ_CONTROL: error {readError}, without: {(legacy != IntPtr.Zero ? "opened" : $"error {Marshal.GetLastWin32Error()}")}");
+            bool holding = legacy != IntPtr.Zero && Native.WaitForSingleObject(legacy, 1000) is 0 or 0x80;
+            Check("X2: a writer holds that mutex as a v1.12.0 program would", holding,
+                  holding ? "" : legacy == IntPtr.Zero ? "the mutex did not open" : "not taken");
+            if (holding)
+            {
+                var heldClock = Stopwatch.StartNew();
+                p2.Post("sweep");
+                string during = p2.Receive("sweep, while the writer holds the mutex", holdMs);
+                Native.ReleaseMutex(legacy);
+                bool waited = during.StartsWith("ERR timeout", StringComparison.Ordinal);
+                string after = waited ? p2.Receive("sweep, once the writer let go", 60_000) : during;
+                long answeredMs = heldClock.ElapsedMilliseconds;
+                Check("X2: the sweep waits for a hold on a mutex that refuses it READ_CONTROL",
+                      waited && Ok(after) && answeredMs >= holdMs,
+                      $"{(waited ? after : $"answered while held: {during}")}, answered after {answeredMs} ms, warm baseline {baseline} ms");
+            }
+            if (legacy != IntPtr.Zero) Native.CloseHandle(legacy);
+        }
+        finally { sq2.Dispose(); }
+        Check("X2: nothing the second squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
     }
 
     /// <summary>The claim pipes.</summary>
@@ -908,9 +958,9 @@ internal static partial class Program
 
         const string OpenToAll = "D:(A;;GA;;;WD)";
 
-        public void Mutex(string name, bool hold)
+        public void Mutex(string name, bool hold, string sddl = OpenToAll)
         {
-            IntPtr sa = Native.Sa(OpenToAll);
+            IntPtr sa = Native.Sa(sddl);
             IntPtr h = Native.CreateMutexW(sa, false, name);
             _errors[name] = h == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
             Native.FreeSa(sa);

@@ -18,7 +18,8 @@ namespace HIDMaestro.Internal;
 /// under <c>Global\HIDMaestro-OEM-Recovery</c>, so the lock takes that
 /// mutex too, after its own. Any program can create that name first and
 /// hold it. When it is owned by SYSTEM or Administrators, the lock waits
-/// for it as v1.12.0 does. When it is owned by anyone else, the lock waits
+/// for it as v1.12.0 does. When its owner is anyone else, or could not be
+/// read because the name refuses this process READ_CONTROL, the lock waits
 /// for it a bounded five seconds and goes on without it after that: a
 /// v1.12.0 program holds it only while it writes registry values, far less
 /// than the bound. A process pays that wait once: when it ran out, later
@@ -28,15 +29,33 @@ namespace HIDMaestro.Internal;
 /// without the mutex does not wait at all: its outer scope already writes
 /// without it.</para>
 ///
-/// <para>Bounded waits leave two ways for this process to write while a
-/// v1.12.0 program holds the mutex. A scope that went on without the mutex
-/// writes for its whole length, and if the squatter lets the mutex go in
-/// that time, a v1.12.0 program can take it and write beside the scope. And
-/// a v1.12.0 hold that outlasts the bound, five seconds on a first wait and
-/// the short bound once a wait has run out (both scaled by
-/// <see cref="TimeoutScale"/>), is not waited out. Only an unbounded wait
-/// closes both, and an unbounded wait lets any program stop every
-/// HIDMaestro program's ledger work by holding the name.</para>
+/// <para>Three ways remain for this process to write while a v1.12.0
+/// program holds the mutex:</para>
+/// <list type="number">
+/// <item>A scope that went on without the mutex writes for its whole
+/// length, and if the squatter lets the mutex go in that time, a v1.12.0
+/// program can take it and write beside the scope. The exit handler's
+/// releases run as one scope, so at exit the window spans all of them.</item>
+/// <item>A v1.12.0 hold that outlasts the bound, five seconds on a first
+/// wait and the short bound once a wait has run out (both scaled by
+/// <see cref="TimeoutScale"/>), is not waited out.</item>
+/// <item>A DACL that grants SYNCHRONIZE and MUTEX_MODIFY_STATE to a
+/// v1.12.0 program's token and refuses them to this process's, such as one
+/// that admits only SYSTEM while the v1.12.0 program runs as a service,
+/// keeps this process out of the mutex on every acquisition.</item>
+/// </list>
+/// <para>Only an unbounded wait closes the first two, and an unbounded wait
+/// lets any program stop every HIDMaestro program's ledger work by holding
+/// the name. The third needs a token this process does not have.</para>
+///
+/// <para>The exit handler's one scope also costs time, not data: it holds
+/// the namespace mutex, and the legacy mutex when taken, across every
+/// release. Each release restores every entry whose holders are all gone
+/// or dead, a dead program's included, and each WinUSB entry restored
+/// waits up to 2 s for its devnode to leave. Another program's ledger
+/// calls, which wait for the namespace mutex without a bound, and a
+/// v1.12.0 program's unbounded wait on the legacy mutex wait for the whole
+/// exit rather than for one release at a time.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {
@@ -113,13 +132,30 @@ internal sealed partial class LedgerLock : IDisposable
                 lpSecurityDescriptor = sd,
                 bInheritHandle = 0,
             }, sa, false);
-            // A name someone created with a DACL that refuses this process,
-            // or as another kind of object, opens nothing: no v1.12.0
-            // program can take it either.
+            // A v1.12.0 program opens the name with new Mutex(false, name),
+            // which asks CreateMutexEx for MAXIMUM_ALLOWED | SYNCHRONIZE |
+            // MUTEX_MODIFY_STATE (dotnet/runtime release/10.0,
+            // Mutex.Windows.cs, AccessRights): any DACL that grants those two
+            // rights admits it, READ_CONTROL or not. So a refusal of the
+            // first open, which also asks READ_CONTROL for the owner check,
+            // is retried with those two rights alone, and the owner is then
+            // not read: the wait is bounded as for any owner other than
+            // SYSTEM or Administrators. A name that opens for neither, or is
+            // another kind of object, is one no v1.12.0 program running
+            // under this token can take either.
             var h = CreateMutexExW(sa, LegacyMutexName, 0, SYNCHRONIZE | MUTEX_MODIFY_STATE | READ_CONTROL);
+            int openError = h.IsInvalid ? Marshal.GetLastPInvokeError() : 0;
+            if (openError == ERROR_ACCESS_DENIED)
+            {
+                h.Dispose();
+                h = CreateMutexExW(sa, LegacyMutexName, 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
+                openError = h.IsInvalid ? Marshal.GetLastPInvokeError() : 0;
+                if (!h.IsInvalid)
+                    DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} refuses READ_CONTROL, opened without it, owner not read");
+            }
             if (h.IsInvalid)
             {
-                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} did not open (Win32 error {Marshal.GetLastPInvokeError()}), not taken");
+                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} did not open (Win32 error {openError}), not taken");
                 h.Dispose();
                 return;
             }
@@ -145,7 +181,7 @@ internal sealed partial class LedgerLock : IDisposable
             else if (!marked)
                 s_legacyHeldByOther = true;
             if (!administrative)
-                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} is owned by neither SYSTEM nor Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");
+                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} has no owner read as SYSTEM or Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");
         }
         finally
         {
@@ -191,6 +227,7 @@ internal sealed partial class LedgerLock : IDisposable
     private const uint SYNCHRONIZE = 0x00100000;
     private const uint MUTEX_MODIFY_STATE = 0x0001;
     private const uint READ_CONTROL = 0x00020000;
+    private const int ERROR_ACCESS_DENIED = 5;
     private const uint INFINITE = 0xFFFFFFFF;
     private const uint WAIT_OBJECT_0 = 0x00000000;
     private const uint WAIT_ABANDONED = 0x00000080;
