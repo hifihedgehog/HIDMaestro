@@ -69,7 +69,8 @@
 //      its main package installed: InstallDriver adds the missing package,
 //      and an Xbox 360 controller, which needs it, creates. With the record
 //      of the install gone, InstallDriver finds this build's packages at
-//      their own stamps.
+//      their own stamps. An older driver missing its XUSB package is
+//      upgraded by a create that never called InstallDriver.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
 //   V. USB/IP re-attach attempts and dropped imports of composites: a
@@ -1339,6 +1340,8 @@ internal static partial class Program
         SectionT1();
         Clean();
         SectionT2();
+        Clean();
+        SectionT3();
     }
 
     static void SectionT1()
@@ -1370,6 +1373,32 @@ internal static partial class Program
         Check("T2: with the record of the install gone, InstallDriver finds this build's packages current",
               PeerProcess.Field(r, "outcome") == "AlreadyCurrent" && MainPackages() == 1 && XusbPackages() == 1,
               $"{r}, {MainPackages()} main, {XusbPackages()} XUSB");
+    }
+
+    /// <summary>An older driver whose XUSB package is gone, and a program
+    /// that creates without calling InstallDriver: the create's deploy gate
+    /// upgrades the driver. Its own record entry, written before the gate,
+    /// holds nothing.</summary>
+    static void SectionT3()
+    {
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        {
+            Check("T3: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        Uninstall();
+        using (var old = PeerProcess.Start("T3-v1.12.0", "v1.12.0"))
+            Check("T3: a v1.12.0 program installs its driver", Ok(old.Send("install")));
+        var xusb = PublishedNames("hidmaestro_xusb.inf");
+        if (xusb.Count == 1) Run("pnputil.exe", $"/delete-driver {xusb[0]}", FileRepository);
+        Check("T3: its XUSB package is deleted and its main package stays",
+              xusb.Count == 1 && XusbPackages() == 0 && MainPackages() == 1, $"{MainPackages()} main, {XusbPackages()} XUSB");
+        using var p = PeerProcess.Start("T3");
+        string c = p.Send("create pad F0F7 -");
+        string v = Ok(c) ? p.Send("driverversion") : "";
+        Check("T3: a create without InstallDriver upgrades the driver and succeeds",
+              Ok(c) && v.Contains(p.SdkVersion.Split('.')[0] + "." + p.SdkVersion.Split('.')[1] + ".", StringComparison.Ordinal),
+              $"{c}; {v}; SDK {p.SdkVersion}");
     }
 
     static byte[]? ReadEmbedded(string logicalName)

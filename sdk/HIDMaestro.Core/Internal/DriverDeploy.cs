@@ -150,8 +150,12 @@ internal static partial class DriverDeploy
         return m;
     }
 
-    /// <summary>Apply the policy. Returns what was done.</summary>
-    internal static HMDriverInstallOutcome Run()
+    /// <summary>Apply the policy. Returns what was done.
+    /// <paramref name="creatingToken"/> is the identity of the create whose
+    /// deploy gate calls this (<see cref="EnsureForCreate"/>). That create's
+    /// own record entry is written before the gate, and it needs the driver
+    /// this call installs, so it does not hold the installed one.</summary>
+    internal static HMDriverInstallOutcome Run(string? creatingToken = null)
     {
         if (DriverBuilder.WillTakeFastPath())
         {
@@ -177,7 +181,9 @@ internal static partial class DriverDeploy
             // what dead programs left. A running program's controller whose
             // devices are not present yet holds the driver too: its record
             // entry comes before its PnP work, and its create waits for this
-            // lock before that work (EnsureForCreate).
+            // lock before that work (EnsureForCreate). The create calling
+            // this through its gate is the exception: it waits for this
+            // call's result, so it holds nothing yet.
             var census = OwnerCensus.Take();
             var holders = census.Devices
                 .Where(d => d.Owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
@@ -186,6 +192,7 @@ internal static partial class DriverDeploy
                 .Where(r => r.Live)
                 .SelectMany(r => r.Controllers.Where(c =>
                         !string.Equals(c.Backend, "usbip", StringComparison.OrdinalIgnoreCase)
+                        && !(r.Self && creatingToken != null && string.Equals(c.Token, creatingToken, StringComparison.OrdinalIgnoreCase))
                         && !holders.Any(h => string.Equals(h.Key, c.Token, StringComparison.OrdinalIgnoreCase)))
                     .Select(c => (Record: r, Controller: c)))
                 .ToList();
@@ -261,8 +268,10 @@ internal static partial class DriverDeploy
     /// packages, or is missing, the driver store is read again, and a
     /// missing driver is deployed by the policy above. A deploy of another
     /// program therefore either finished before this create's PnP work or
-    /// saw its entry. Returns true when this call deployed.</summary>
-    internal static bool EnsureForCreate()
+    /// saw its entry. <paramref name="identityToken"/> is the create's own
+    /// identity, whose entry the policy does not count as a holder. Returns
+    /// true when this call deployed.</summary>
+    internal static bool EnsureForCreate(string identityToken)
     {
         using var mutex = Acquire();
         try
@@ -273,7 +282,7 @@ internal static partial class DriverDeploy
             bool deployed = false;
             if (!DriverBuilder.DriverStoreHasBothPackages())
             {
-                var outcome = Run();
+                var outcome = Run(identityToken);
                 deployed = outcome is HMDriverInstallOutcome.Installed or HMDriverInstallOutcome.Upgraded;
                 if (!DriverBuilder.DriverStoreHasBothPackages())
                     throw new InvalidOperationException(
