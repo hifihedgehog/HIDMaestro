@@ -114,6 +114,7 @@
       "commands": {
         "endpoint": "0x02",
         "setReport": true,
+        "pendingReplies": 1,
         "rules": [
           { "match": "11", "minLength": 5 },
           { "match": "11", "set": { "stalled": true } },

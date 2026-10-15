@@ -400,6 +400,11 @@ internal static class Program
             j => Rule(j, 0)["minLength"] = 6,
             "usbConfiguration.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
 
+        // Protocol values outside their range.
+        ("no replies allowed to wait",
+            j => Protocol(j)["commands"]!["pendingReplies"] = 0,
+            "usbConfiguration.protocol.commands.pendingReplies 0 must be 1 or more"),
+
         // A null where a value belongs.
         ("a null match",
             j => Rule(j, 3)["match"] = null,

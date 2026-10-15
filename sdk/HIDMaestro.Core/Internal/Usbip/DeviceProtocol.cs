@@ -59,6 +59,8 @@ internal sealed class CompiledProtocol
     public int CommandPacketSize { get; }
     public bool CommandsFromSetReport { get; }
     public Rule[] Rules { get; }
+    /// <summary>How many replies can wait for the IN endpoint.</summary>
+    public int PendingReplies { get; } = 1;
 
     public bool HasHalt { get; }
     public StateCondition HaltWhile { get; }
@@ -201,6 +203,9 @@ internal sealed class CompiledProtocol
             if (CommandPacketSize == 0)
                 throw Fail($"{root}.commands.endpoint 0x{CommandEndpoint:X2} has a wMaxPacketSize of 0.");
             CommandsFromSetReport = spec.Commands.SetReport;
+            PendingReplies = spec.Commands.PendingReplies ?? 1;
+            if (PendingReplies < 1)
+                throw Fail($"{root}.commands.pendingReplies {PendingReplies} must be 1 or more.");
             if (spec.Commands.Rules == null)
                 throw Fail($"{root}.commands.rules is null. Give an empty list for a device that ignores every command.");
             Rules = new Rule[spec.Commands.Rules.Count];
@@ -679,7 +684,10 @@ internal sealed class ProtocolEngine
             if (rule == null) return Effect.None;
 
             var effect = Effect.None;
-            if (rule.Reply != null)
+            // A reply that finds the endpoint's replies all waiting is
+            // dropped, as loopj's firmware sends one only while its IN
+            // endpoint is free (src/gcca.c, tud_hid_ready).
+            if (rule.Reply != null && _replies.Count < _p.PendingReplies)
             {
                 _replies.Enqueue(BuildReply(rule, before));
                 effect |= Effect.Reply;

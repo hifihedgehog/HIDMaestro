@@ -480,6 +480,7 @@ internal static class Program
             .ToList();
         Probe.Check("the poll period follows Windows' bInterval tables at full and high speed", wrong.Count == 0, string.Join(", ", wrong));
 
+        Replies(compiled);
         LowSpeed(ctx);
     }
 
@@ -491,6 +492,39 @@ internal static class Program
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
         object second = m.GetParameters()[1].ParameterType == typeof(bool) ? speed >= 3 : speed;
         return (int)m.Invoke(null, new object[] { bInterval, second })!;
+    }
+
+    /// <summary>A reply waits for the IN endpoint, and one that finds the
+    /// endpoint's reply already waiting is dropped, as loopj's firmware
+    /// drops a report while its endpoint is busy (src/gcca.c:165, 181, 193,
+    /// tud_hid_ready). The command's state change still applies.</summary>
+    static void Replies(HIDMaestro.Internal.Usbip.CompiledProtocol compiled)
+    {
+        Console.WriteLine("-- replies while one waits");
+        var engine = new HIDMaestro.Internal.Usbip.ProtocolEngine(compiled);
+        long ms = Stopwatch.Frequency / 1000;
+        long origin = 1000 * ms;
+        var buf = new byte[64];
+        for (int i = 0; i < 8; i++) engine.HandlePacket(new byte[] { 0x12 });
+        var sent = new List<string>();
+        for (int k = 1; k <= 4; k++)
+        {
+            var r = engine.Poll(origin + 8 * k * ms, origin, buf, out int w, out _);
+            sent.Add(r == HIDMaestro.Internal.Usbip.ProtocolEngine.PollResult.Packet ? Probe.Hex(buf.AsSpan(0, Math.Min(w, 2))) : r.ToString());
+        }
+        Probe.Check("eight 0x12 before a read: one reply, then nothing while not polling",
+            sent.SequenceEqual(new[] { "2200", "Nak", "Nak", "Nak" }), string.Join(" ", sent));
+
+        engine.HandlePacket(new byte[] { 0x13 });
+        engine.HandlePacket(new byte[] { 0x12 });
+        engine.HandlePacket(new byte[] { 0x14 });
+        var first = engine.Poll(origin + 48 * ms, origin, buf, out int w1, out _);
+        string got = Probe.Hex(buf.AsSpan(0, w1));
+        var second = engine.Poll(origin + 56 * ms, origin, buf, out _, out _);
+        Probe.Check("0x14 behind a waiting 0x12 reply: its reply dropped, its stop applied",
+            first == HIDMaestro.Internal.Usbip.ProtocolEngine.PollResult.Packet && w1 == 25 && got.StartsWith("22", StringComparison.Ordinal)
+            && second == HIDMaestro.Internal.Usbip.ProtocolEngine.PollResult.Nak && !engine.GetState(0),
+            $"{first} {w1} bytes {got[..Math.Min(4, got.Length)]}, then {second}");
     }
 
     /// <summary>A low-speed copy of the profile, its input endpoint at

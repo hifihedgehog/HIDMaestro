@@ -212,6 +212,16 @@ public sealed class ProtocolCommandsSpec
     [JsonPropertyName("setReport")]
     public bool SetReport { get; set; }
 
+    /// <summary>How many replies can wait for the IN endpoint at once. A
+    /// reply that finds that many waiting is dropped, and its rule's states
+    /// are still set, as a firmware drops a report it cannot queue while
+    /// its endpoint is busy. 1 when absent: the endpoint holds one transfer
+    /// at a time. A reply already part sent, longer than one IN packet,
+    /// does not count, where a firmware's endpoint stays busy until it
+    /// ends.</summary>
+    [JsonPropertyName("pendingReplies")]
+    public int? PendingReplies { get; set; }
+
     /// <summary>Tried in order. The first rule that matches a packet
     /// applies. A packet no rule matches is ignored.</summary>
     [JsonPropertyName("rules")]
