@@ -171,7 +171,11 @@ internal sealed partial class UsbAudioEngine : IDisposable
         }
     }
 
-    private readonly Queue<AudioEvent> _events = new();
+    // At most one control write per control waits here, the newest: a
+    // write to a control that has one waiting replaces it, at the back, so
+    // a host that keeps writing while a handler blocks does not grow the
+    // queue. Stream changes all wait, in order.
+    private readonly List<AudioEvent> _events = new();
     private Thread? _eventThread;
     private readonly AutoResetEvent _eventWake = new(false);
     private bool _eventWakeClosed;
@@ -364,7 +368,19 @@ internal sealed partial class UsbAudioEngine : IDisposable
     private void QueueEventLocked(in AudioEvent e)
     {
         if (_stop || _eventWakeClosed) return;
-        _events.Enqueue(e);
+        if (e.IsControl)
+        {
+            for (int i = 0; i < _events.Count; i++)
+            {
+                var queued = _events[i];
+                if (queued.IsControl && queued.A == e.A && queued.B == e.B && queued.C == e.C)
+                {
+                    _events.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+        _events.Add(e);
         if (_eventThread == null)
         {
             var events = new Thread(EventLoop)
@@ -392,8 +408,10 @@ internal sealed partial class UsbAudioEngine : IDisposable
                 {
                     // Each change the host made before Dispose is raised,
                     // then the thread ends.
-                    any = _events.TryDequeue(out e);
-                    if (!any && _stop) return;
+                    any = _events.Count > 0;
+                    e = any ? _events[0] : default;
+                    if (any) _events.RemoveAt(0);
+                    else if (_stop) return;
                 }
                 if (!any)
                 {

@@ -27,7 +27,8 @@
 //   - "--offline", which needs no elevation and no device: the audio
 //     engine's event thread, driven in process as the connection drives it
 //     (its wake event closed at Dispose, queued events raised at Dispose,
-//     IsStreaming current while a handler blocks)
+//     IsStreaming current while a handler blocks, one waiting write per
+//     control while a handler blocks)
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -864,10 +865,18 @@ internal static partial class Program
                 foreach (short v in new short[] { -4096, -2048, -1024 })
                     cl.ControlOut(0x21, 0x01, 0x0200, 0x0200, new[] { (byte)v, (byte)(v >> 8) });
                 cl.ControlOut(0x01, 0x0B, 0x0000, 0x0001, Array.Empty<byte>());
-                string want = "open, volume -4096, volume -2048, volume -1024, parked";
-                WaitUntil(() => order.Count >= 5, 2000);
-                string got = string.Join(", ", order);
-                Check("the audio events arrive in the order the host caused them", got == want, got);
+                // A write still waiting when the next one to the same control
+                // arrives gives way to it, so the volumes raised are the
+                // sent ones in order, ending with the last.
+                WaitUntil(() => order.Count >= 3 && order.Last() == "parked", 2000);
+                var seen = order.ToArray();
+                var volumes = seen.Skip(1).Take(seen.Length - 2).ToArray();
+                var sent = new[] { "volume -4096", "volume -2048", "volume -1024" };
+                bool inOrder = seen.Length >= 3 && seen[0] == "open" && seen[^1] == "parked"
+                    && volumes.Length > 0 && volumes[^1] == sent[^1]
+                    && volumes.Select(v => Array.IndexOf(sent, v)).Zip(volumes.Select(v => Array.IndexOf(sent, v)).Skip(1), (a, b) => a >= 0 && a < b).All(x => x)
+                    && volumes.All(v => Array.IndexOf(sent, v) >= 0);
+                Check("the audio events arrive in the order the host caused them", inOrder, string.Join(", ", seen));
             }
             finally
             {
@@ -966,6 +975,42 @@ internal static partial class Program
             Check("changes queued before Dispose are still raised, then the event thread ends and closes its wake event",
                   got == "volume -4096, open, parked" && ended && wake.SafeWaitHandle.IsClosed,
                   $"{got}, ended {ended}, wake closed {wake.SafeWaitHandle.IsClosed}");
+        }
+
+        // A burst of volume writes while a handler blocks, with the speaker
+        // stream opened and parked inside it: one write per control waits,
+        // the newest, and the stream changes keep their order.
+        {
+            var engine = new UsbAudioEngine(ds, none);
+            var audio = new HMUsbAudio(ds, engine);
+            var queue = (System.Collections.ICollection)typeof(UsbAudioEngine).GetField("_events", Private)!.GetValue(engine)!;
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var raised = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            audio.ControlChanged += (_, e) =>
+            {
+                raised.Enqueue($"volume {e.RawValue}");
+                if (!entered.IsSet) { entered.Set(); release.Wait(5000); }
+            };
+            audio.Output.StreamingChanged += (_, on) => raised.Enqueue(on ? "open" : "parked");
+            engine.HandleUacSet(2, 2, 0, Volume(-100));
+            bool blocked = entered.Wait(2000);
+            int most = 0;
+            for (short v = -99; v <= -50; v++)
+            {
+                if (v == -80) engine.SetAltSetting(1, 1);
+                if (v == -60) engine.SetAltSetting(1, 0);
+                engine.HandleUacSet(2, 2, 0, Volume(v));
+                lock (engine.GetType().GetField("_lock", Private)!.GetValue(engine)!) most = Math.Max(most, queue.Count);
+            }
+            release.Set();
+            WaitUntil(() => raised.Count >= 4, 2000);
+            Thread.Sleep(100);
+            string got = string.Join(", ", raised);
+            Check("a burst of control writes while a handler blocks waits as the newest per control, stream changes in order",
+                  blocked && got == "volume -100, open, parked, volume -50" && most <= 3,
+                  $"{got}, at most {most} waiting");
+            engine.Dispose();
         }
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");

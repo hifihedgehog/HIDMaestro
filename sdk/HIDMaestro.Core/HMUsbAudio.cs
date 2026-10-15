@@ -38,10 +38,16 @@ public sealed class HMUsbAudio
     /// event thread, in the order the host made the changes, together with
     /// the streams' StreamingChanged. A handler that takes its time delays
     /// the events after it and no transfer: the device goes on answering
-    /// the host. A change the host made before the controller is disposed
-    /// is still raised, after Dispose returns if a handler is still running
-    /// then. Dispose waits for a running handler 500 ms at most. An
-    /// exception a handler throws is caught and dropped.</summary>
+    /// the host. Meanwhile a newer write to a control replaces the one of
+    /// that control still waiting, so a handler gets each control's latest
+    /// value, not every value between. Stream changes are never merged, so
+    /// while a handler blocks the changes waiting are at most one per
+    /// control (mute and volume of each feature unit) plus every stream
+    /// open and park the host makes meanwhile. A change the host made
+    /// before the controller is disposed is still raised, after Dispose
+    /// returns if a handler is still running then. Dispose waits for a
+    /// running handler 500 ms at most. An exception a handler throws is
+    /// caught and dropped.</summary>
     public event EventHandler<HMAudioControlChangedEventArgs>? ControlChanged;
 
     private readonly Dictionary<byte, string> _unitFunctions = new();
@@ -133,10 +139,12 @@ public sealed class HMAudioOutput
     /// about half a second of the last isochronous transfer. Raised on the
     /// device's audio event thread, in order with
     /// <see cref="HMUsbAudio.ControlChanged"/>, so it can come after
-    /// <see cref="IsStreaming"/> has changed. A change the host made before
-    /// the controller is disposed is still raised, after Dispose returns if
-    /// a handler is still running then. An exception a handler throws is
-    /// caught and dropped.</summary>
+    /// <see cref="IsStreaming"/> has changed. Opens and parks wait in the
+    /// queue unmerged, so a host that opens and parks the stream for each
+    /// sound adds two waiting changes per sound while an audio handler
+    /// blocks. A change the host made before the controller is disposed is
+    /// still raised, after Dispose returns if a handler is still running
+    /// then. An exception a handler throws is caught and dropped.</summary>
     public event Action<HMAudioOutput, bool>? StreamingChanged;
 
     private readonly UsbAudioEngine _engine;
