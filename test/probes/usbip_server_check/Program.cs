@@ -19,6 +19,8 @@
 //   - a throwing handler on any public audio event, each in a child
 //     process: the handler after it still runs and the connection still
 //     answers
+//   - the import's port lookup goes on after failed lookups of the host
+//     controller's interface
 //   - teardown: the connection's detach racing the device's Dispose, and a
 //     transfer that arrives after Dispose, neither touching a disposed
 //     object or ending the process ("teardown" runs these alone)
@@ -103,6 +105,7 @@ internal static partial class Program
                 OwnerLookup();
                 LocationMatch();
                 ThrowingHandlers();
+                PortLookup();
             }
             finally
             {
@@ -767,6 +770,35 @@ internal static partial class Program
             Check($"{which}: behind a throwing handler, the next one sees {what}, and the connection still answers",
                   code == 0 && line == $"CHILD {which} seen={want} alive=True", $"exit {code}: {line}");
         }
+    }
+
+    // ── The import's port lookup ────────────────────────────────────────
+
+    /// <summary>Two failed lookups of the host controller's interface path
+    /// in a row, then a real one: the server's port lookup must find the
+    /// path again. Before this release the first failure stopped every
+    /// later lookup for that import.</summary>
+    static void PortLookup()
+    {
+        Console.WriteLine("\n-- the import's port lookup --");
+        const BindingFlags Statics = BindingFlags.Static | BindingFlags.NonPublic;
+        var pathField = typeof(VhciClient).GetField("s_path", Statics)!;
+        var failField = typeof(VhciClient.LocationLookup).GetField("FailPathLookups", Statics)!;
+        object? kept = pathField.GetValue(null);
+        var lookup = new VhciClient.LocationLookup("127.0.0.1", 1, "9-9");
+        pathField.SetValue(null, null);
+        failField.SetValue(null, 2);
+        int calls = 0;
+        while (calls < 40 && pathField.GetValue(null) == null)
+        {
+            lookup.Find();
+            calls++;
+        }
+        bool found = pathField.GetValue(null) != null;
+        failField.SetValue(null, 0);
+        if (!found) pathField.SetValue(null, kept);
+        Check("after two failed interface lookups the port lookup finds the interface again",
+              found, found ? $"after {calls} lookups" : "not after 40 lookups");
     }
 
     static (int Code, string Line) RunChild(string which) => RunChild($"--throwing {which}", null);

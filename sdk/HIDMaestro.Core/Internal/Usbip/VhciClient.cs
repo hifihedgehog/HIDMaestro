@@ -276,18 +276,29 @@ internal static partial class VhciClient
     /// often as a caller polls without allocating: the location's bytes are
     /// encoded once, the listing goes into one buffer kept across lookups,
     /// and the rows are compared as bytes. The device is opened for each
-    /// lookup and closed after it, as <see cref="FindLocation"/> does, since
-    /// the driver's interface opens exclusively. One instance is used on one
-    /// thread at a time.</summary>
+    /// lookup and closed after it, as <see cref="FindLocation"/> does, so no
+    /// lookup holds the host controller open across a driver change.
+    /// usbip-win2 allows any number of opens: device_file_create adds each
+    /// file object to a list (vhci.cpp:526-544, registered at :600-608).
+    /// One instance is used on one thread at a time.</summary>
     internal sealed class LocationLookup
     {
         private readonly byte[] _busId;
         private readonly byte[] _service;
         private readonly byte[] _host;
         private byte[]? _buf;
-        // No host controller answered the first lookup: the ones after it
-        // return at once.
-        private bool _absent;
+        // Lookups left to skip after the interface path could not be found:
+        // a failed path lookup allocates, so it is tried again only every
+        // ninth lookup, 225 ms apart at the server's 25 ms poll, and never
+        // given up on.
+        private int _skip;
+        private const int SkipAfterFailedOpen = 8;
+
+        /// <summary>Path lookups to treat as failed before the next real
+        /// one. usbip_server_check sets it through reflection: no real
+        /// failure of the host controller's interface lookup can be caused
+        /// safely. Zero outside the probe.</summary>
+        internal static int FailPathLookups;
 
         public LocationLookup(string host, int port, string busid)
         {
@@ -300,14 +311,33 @@ internal static partial class VhciClient
         /// host controller answers.</summary>
         public int Find()
         {
-            if (_absent) return 0;
             string? path = Volatile.Read(ref s_path);
             if (path == null)
             {
+                if (_skip > 0)
+                {
+                    _skip--;
+                    return 0;
+                }
                 // The first lookup in this process finds the interface path,
-                // which Open keeps.
-                try { Open().Dispose(); }
-                catch { _absent = true; return 0; }
+                // which Open keeps, and so does the first after a failed
+                // open cleared it.
+                bool opened;
+                if (Volatile.Read(ref FailPathLookups) > 0)
+                {
+                    Interlocked.Decrement(ref FailPathLookups);
+                    opened = false;
+                }
+                else
+                {
+                    try { Open().Dispose(); opened = true; }
+                    catch { opened = false; }
+                }
+                if (!opened)
+                {
+                    _skip = SkipAfterFailedOpen;
+                    return 0;
+                }
                 path = Volatile.Read(ref s_path);
                 if (path == null) return 0;
             }
