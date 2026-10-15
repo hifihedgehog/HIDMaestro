@@ -70,7 +70,9 @@
 //      and an Xbox 360 controller, which needs it, creates. With the record
 //      of the install gone, InstallDriver finds this build's packages at
 //      their own stamps. An older driver missing its XUSB package is
-//      upgraded by a create that never called InstallDriver.
+//      upgraded by a create that never called InstallDriver. A running
+//      v1.12.0 program's XUSB companion stays on its package when this
+//      build's is added.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
 //   V. USB/IP re-attach attempts and dropped imports of composites: a
@@ -1342,6 +1344,8 @@ internal static partial class Program
         SectionT2();
         Clean();
         SectionT3();
+        Clean();
+        SectionT4();
     }
 
     static void SectionT1()
@@ -1399,6 +1403,43 @@ internal static partial class Program
         Check("T3: a create without InstallDriver upgrades the driver and succeeds",
               Ok(c) && v.Contains(p.SdkVersion.Split('.')[0] + "." + p.SdkVersion.Split('.')[1] + ".", StringComparison.Ordinal),
               $"{c}; {v}; SDK {p.SdkVersion}");
+    }
+
+    /// <summary>A running v1.12.0 program's Xbox 360 controller, whose XUSB
+    /// companion runs on the v1.12.0 XUSB package, and the deploy policy's
+    /// add of this build's XUSB package: the companion stays on its own
+    /// package.</summary>
+    static void SectionT4()
+    {
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "legacy", "v1.12.0", "CoexistPeer.exe")))
+        {
+            Check("T4: the v1.12.0 peer is built", false, "build CoexistCheck.csproj");
+            return;
+        }
+        Uninstall();
+        using var old = PeerProcess.Start("T4-v1.12.0", "v1.12.0");
+        old.Send("install");
+        string c = old.Send("create xbox - coexist-t4");
+        Check("T4: the v1.12.0 program creates an Xbox 360 controller", Ok(c), c);
+        if (!Ok(c)) return;
+        List<(string Id, string? Version)> Companions() =>
+            Native.InterfaceList(XusbGuid, null).Select(Native.InstanceOfInterface).Where(id => id != null)
+                .Select(id => (id!, Native.DriverVersionOf(id!))).ToList();
+        List<(string Id, string? Version)> before = new();
+        WaitFor(() => (before = Companions()).Count == 1, 10_000);
+        Check("T4: its XUSB companion runs on the v1.12.0 package",
+              before.Count == 1 && before[0].Version?.StartsWith("1.12.0.", StringComparison.Ordinal) == true,
+              string.Join(", ", before.Select(b => $"{b.Id} {b.Version}")));
+        if (before.Count != 1) return;
+        using (var p = PeerProcess.Start("T4"))
+        {
+            string a = p.Send("addpackages hidmaestro_xusb.inf");
+            Check("T4: this build's XUSB package is added beside it", Ok(a) && XusbPackages() == 2, $"{a}, {XusbPackages()} XUSB");
+        }
+        Thread.Sleep(2000);
+        string? after = Native.DriverVersionOf(before[0].Id);
+        Check("T4: the running program's companion stays on its own package", after == before[0].Version,
+              $"{before[0].Id}: {before[0].Version} before, {after ?? "absent"} after");
     }
 
     static byte[]? ReadEmbedded(string logicalName)

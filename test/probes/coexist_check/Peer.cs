@@ -219,6 +219,23 @@ internal static class Peer
                     case "alive":
                         Reply("OK alive");
                         break;
+                    case "addpackages":
+                    {
+                        // The deploy policy's add of a package a set lacks,
+                        // under the deploy lock as the policy calls it.
+                        var asm = typeof(HMContext).Assembly;
+                        var acquire = asm.GetType("HIDMaestro.Internal.DriverDeploy")
+                            ?.GetMethod("Acquire", BindingFlags.NonPublic | BindingFlags.Static);
+                        var add = asm.GetType("HIDMaestro.Internal.DriverBuilder")
+                            ?.GetMethod("AddPackagesLocked", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (acquire == null || add == null) { Reply("ERR addpackages no method"); break; }
+                        using var m = (Mutex)acquire.Invoke(null, null)!;
+                        try { add.Invoke(null, new object[] { (IReadOnlyCollection<string>)a.Skip(1).ToArray() }); }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                        finally { m.ReleaseMutex(); }
+                        Reply("OK addpackages");
+                        break;
+                    }
                     case "staleport":
                     {
                         HMController? last;

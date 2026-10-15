@@ -496,7 +496,17 @@ public static class DriverBuilder
     /// <summary>Add this build's packages of <paramref name="infs"/> to the
     /// driver store and remove nothing, for a set a deploy left incomplete.
     /// Signed and catalogued as a full deploy does it. The caller holds the
-    /// deploy lock.</summary>
+    /// deploy lock.
+    ///
+    /// <para>Added without <c>/install</c>, which would "install/update
+    /// drivers on any matching devices" (PnPUtil Command Syntax). Both
+    /// callers can run while devices of running programs sit on another
+    /// package of the same INF: the lone XUSB package when the main one is
+    /// missing, and an older XUSB package at the installed driver's own
+    /// stamp. A create binds its own devnode to the best package in the
+    /// store, so nothing here needs a device updated. Only a full deploy,
+    /// which runs when no device of any program is on the driver, adds
+    /// with <c>/install</c>.</para></summary>
     internal static void AddPackagesLocked(IReadOnlyCollection<string> infs)
     {
         if (infs.Count == 0) return;
@@ -510,7 +520,7 @@ public static class DriverBuilder
         {
             var embedded = DriverDeploy.EmbeddedStamp(inf);
             DeviceOrchestrator.LogDiag($"    deploy: adding the missing {inf} of {embedded}");
-            Run(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\" /install", timeoutMs: 30_000);
+            Run(pnputil, $"/add-driver \"{Path.Combine(package, inf)}\"", timeoutMs: 30_000);
             if (!DriverDeploy.InstalledStamps(inf).Any(s => s.CompareTo(embedded) == 0))
                 throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
         }
