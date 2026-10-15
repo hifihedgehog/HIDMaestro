@@ -19,19 +19,38 @@ namespace HIDMaestro.Internal;
 /// alias being the one this process opened it under (CreatePrivateNamespace
 /// on Learn).</para>
 ///
-/// <para>The namespace lasts while any process holds a handle to it.
-/// Measured: with its creator's handle closed it still opened while another
-/// process held one, and after the last handle closed it no longer opened
-/// although a mutex created in it was still held. Each process therefore
-/// opens it once and keeps the handle until it exits. Every holder of a
-/// lock in it holds that handle, so the namespace never ends under a held
-/// lock, and a process that finds it gone creates it again.</para>
+/// <para>Lifetime. Learn says "The handle is also closed when the process
+/// that created the namespace terminates. After the namespace handle is
+/// closed, subsequent calls to OpenPrivateNamespace fail, but all operations
+/// on objects in the namespace succeed." Read strictly, the namespace stops
+/// opening once its creator exits, even while others hold handles. Measured
+/// on this build the opposite: with the creator's handle closed the
+/// namespace still opened while another process held a handle, and only
+/// after the last handle closed did it stop opening, though a mutex made in
+/// it was still held. The code is correct whichever way it falls. Every
+/// process opens the namespace once and keeps the handle until it exits, so
+/// a held lock always has a live namespace. A process that finds the open
+/// gone creates the namespace again, and the create fails with
+/// ERROR_ALREADY_EXISTS while one still exists, so at most one namespace of
+/// this boundary and alias exists at a time and the lock inside it is one
+/// object. If the strict reading held and an open failed, the create retries
+/// below cover it, and a deploy that cannot take the lock simply does not
+/// run rather than running beside another.</para>
+///
+/// <para>The boundary holds the Administrators SID and nothing else. The NS1
+/// example on Learn adds "the current session number" to a boundary on
+/// purpose to scope a namespace to one session, so a boundary without a
+/// session SID, like this one, is not per-session. A session-0 service and a
+/// desktop program therefore share the one namespace. This was not run
+/// across two sessions here: no session-0 process is available to the test.</para>
 /// </summary>
 internal static partial class AdminNamespace
 {
     private const string BoundaryName = "HIDMaestro";
     private const string Alias = "HIDMaestro.Admin";
-    private const string Sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    // Owner Administrators (O:BA), so the owner is fixed whatever the
+    // default-owner policy is.
+    private const string Sddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
     private static readonly object s_lock = new();
     private static volatile bool s_open;
