@@ -293,6 +293,73 @@ internal static partial class Program
         Check("W10: and its record", !Native.OwnerRecords().ContainsValue(p.Pid));
     }
 
+    /// <summary>The removal times behind the exit handler's and the sweep's
+    /// way of removing several controllers: <paramref name="runs"/> times,
+    /// a program creates four Xbox 360 controllers and exits without
+    /// disposing them, timed from its last command to its end, and a program
+    /// creates four and is killed, and another program's sweep is timed.
+    /// Prints p50 and p95 of each. Run as "removaltimes &lt;runs&gt;".</summary>
+    static int RemovalTimes(int runs)
+    {
+        var exit = new List<double>();
+        var sweep = new List<double>();
+        int left = 0;
+        for (int i = 1; i <= runs; i++)
+        {
+            string[]? inst;
+            using (var p = PeerProcess.Start($"T{i}-exit"))
+            {
+                inst = CreateFour(p);
+                if (inst == null) { Check("removal times: four Xbox 360 controllers create", false); return 1; }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                p.Send("quit");
+                if (!p.WaitExit(600_000)) { Check("removal times: the program ends", false); return 1; }
+                exit.Add(sw.Elapsed.TotalMilliseconds);
+            }
+            if (inst.Any(Native.IsPresent)) left++;
+
+            using (var p = PeerProcess.Start($"T{i}-killed"))
+            {
+                inst = CreateFour(p);
+                if (inst == null) { Check("removal times: four Xbox 360 controllers create", false); return 1; }
+                p.Kill();
+            }
+            using (var s = PeerProcess.Start($"T{i}-sweeper"))
+            {
+                s.Send("census");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                s.Send("sweep", 600_000);
+                sweep.Add(sw.Elapsed.TotalMilliseconds);
+            }
+            if (inst.Any(Native.IsPresent)) left++;
+            Console.WriteLine($"    run {i}: exit {exit[^1]:F0} ms, sweep {sweep[^1]:F0} ms");
+        }
+        Console.WriteLine($"  exit handler, four Xbox 360: {Percentiles(exit)}");
+        Console.WriteLine($"  sweep of a killed program's four Xbox 360: {Percentiles(sweep)}");
+        Check("removal times: every device is gone after each removal", left == 0, $"{left} removals left a device");
+        return s_failures == 0 ? 0 : 1;
+    }
+
+    static string[]? CreateFour(PeerProcess p)
+    {
+        var inst = new List<string>();
+        for (int n = 0; n < 4; n++)
+        {
+            string c = p.Send("create xbox - -");
+            if (!Ok(c)) return null;
+            inst.Add(PeerProcess.Field(c, "instance")!);
+        }
+        return inst.ToArray();
+    }
+
+    /// <summary>p50 and p95 by nearest rank, with the run count.</summary>
+    static string Percentiles(List<double> v)
+    {
+        var s = v.OrderBy(x => x).ToArray();
+        double Rank(double q) => s[Math.Max(0, (int)Math.Ceiling(q * s.Length) - 1)];
+        return FormattableString.Invariant($"p50 {Rank(0.50):F0} ms, p95 {Rank(0.95):F0} ms, min {s[0]:F0}, max {s[^1]:F0}, n={s.Length}");
+    }
+
     static bool ConfigExists(string transport)
     {
         using var k = Registry.LocalMachine.OpenSubKey($@"SOFTWARE\HIDMaestro\Controller{transport}");

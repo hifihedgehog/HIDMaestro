@@ -214,6 +214,13 @@ internal static partial class Program
             return 2;
         }
 
+        if (args.Length > 1 && args[0] == "removaltimes")
+        {
+            Clean();
+            int rc = RemovalTimes(int.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture));
+            Clean();
+            return rc;
+        }
         Clean();
         var sections = new (char Id, string Title, Action Body)[]
         {
