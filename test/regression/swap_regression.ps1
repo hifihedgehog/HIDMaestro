@@ -1928,8 +1928,9 @@ function Scenario-Json-Parity {
 # sequences through the SDK's hooks: a removal is complete, and its id may
 # be registered again, only after the REMOVED notification and the PHANTOM
 # record's removal, and no locate cancels a removal. The live part then
-# requires every removal test of three profiles' disposes to end on that
-# notification.
+# requires every removal of three profiles' disposes to end with its devnode
+# gone, and each devnode in the tree when its removal test started to leave
+# on that notification.
 function Scenario-Pnp-Notify {
     Invoke-Probe -Dir 'pnp_notify_check' -Exe 'PnpNotifyCheck.exe' -Arguments 'offline' -Tag 'offline' `
                  -Message 'the removal test or the registration gate answered before a removal was complete (see probe stdout)'

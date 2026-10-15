@@ -13,6 +13,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 using HIDMaestro.Internal;
@@ -198,6 +199,9 @@ internal static class Offline
         finally { s.End(); }
     }
 
+    /// <summary>A removal issued while the devnode is in the tree: the
+    /// watch is started first, as RemoveDevice starts it before its removal
+    /// call, then the sequence begins.</summary>
     static (DeviceManager.RemovalOutcome Outcome, long Ms) WatchedRemoval(Sequence s, bool uninstalls, int budgetMs,
                                                                           int removedMs = DeviceManager.RemovedBoundMs)
     {
@@ -208,6 +212,40 @@ internal static class Offline
             s.Begin();
             var outcome = watch.Wait(uninstalls, budgetMs, removedMs);
             return (outcome, s.Now);
+        }
+        finally { s.End(); }
+    }
+
+    /// <summary>A removal in steps on one devnode, through the SDK's
+    /// StepwiseRemoval as RemoveDeviceLocked makes it: each step's call
+    /// succeeds and does nothing, and the sequence begins with the first
+    /// call. A step whose start time is later than the end of the step
+    /// before it waits for it, as pnputil runs between step 2's test and the
+    /// fallbacks' (the devnode can leave in between). Returns each step's
+    /// outcome, when the last ended, and what the removal added to the
+    /// counters S77 reads.</summary>
+    static (DeviceManager.RemovalOutcome[] Outcomes, long Ms, long On, long NotGone) Stepped(Sequence s, bool uninstalls,
+        params (int BudgetMs, long StartAt)[] steps)
+    {
+        long on0 = DeviceManager.RemovalsOnNotification, notGone0 = DeviceManager.RemovalsNotGone;
+        var outcomes = new DeviceManager.RemovalOutcome[steps.Length];
+        s.Hook();
+        try
+        {
+            using (var removal = new DeviceManager.StepwiseRemoval(Id))
+            {
+                for (int i = 0; i < steps.Length; i++)
+                {
+                    while (s.Now >= 0 && s.Now < steps[i].StartAt) Thread.Sleep(1);
+                    bool first = i == 0;
+                    outcomes[i] = removal.Step(() =>
+                    {
+                        if (first) s.Begin();
+                        return true;
+                    }, uninstalls, steps[i].BudgetMs);
+                }
+            }
+            return (outcomes, s.Now, DeviceManager.RemovalsOnNotification - on0, DeviceManager.RemovalsNotGone - notGone0);
         }
         finally { s.End(); }
     }
@@ -419,19 +457,53 @@ internal static class Offline
         Check("removal that uninstalls but whose record never goes -> not gone when the 400 ms budget ends",
               w6b.Outcome == NotGone && Within(w6b.Ms, 400), $"{w6b.Outcome} at {w6b.Ms} ms");
 
+        // A removal in steps on one devnode counts once, by its last step,
+        // as present when its first step started. A fast removal's
+        // CM_Uninstall_DevNode can leave the devnode in the tree, and the
+        // fallbacks then remove it: the first step is not the removal's end.
+        var st1 = Stepped(new Sequence { LeavesTree = 300, RemovedAt = 350, RecordGoneAt = 350 }, uninstalls: true,
+                          (200, 0), (2000, 0));
+        Check("steps: in the tree past step 2's 200 ms, removed by the fallbacks at 350 with REMOVED -> counted once, on the notification",
+              st1.Outcomes[0] == NotGone && st1.Outcomes[1] == Removed && Within(st1.Ms, 350) && st1.On == 1 && st1.NotGone == 0,
+              $"{string.Join(", ", st1.Outcomes)} at {st1.Ms} ms, {st1.On} on the notification, {st1.NotGone} not gone");
+        // The devnode leaves the tree between the steps but keeps its
+        // record, which the fallbacks cannot delete: the removal ended not
+        // gone, and S77 must see it.
+        var st2 = Stepped(new Sequence { LeavesTree = 300, RecordGoneAt = null, RemovedAt = null }, uninstalls: true,
+                          (200, 0), (400, 0));
+        Check("steps: out of the tree at 300 with its record kept through the fallbacks -> counted once, not gone",
+              st2.Outcomes[0] == NotGone && st2.Outcomes[1] == NotGone && st2.NotGone == 1,
+              $"{string.Join(", ", st2.Outcomes)} at {st2.Ms} ms, {st2.NotGone} not gone");
+        // Its REMOVED notification arrives between step 2's test and the
+        // fallbacks': the watch kept its registration, so it is seen.
+        var st3 = Stepped(new Sequence { LeavesTree = 250, RemovedAt = 250, RecordGoneAt = 250 }, uninstalls: true,
+                          (200, 0), (2000, 300));
+        Check("steps: out of the tree with REMOVED at 250, between step 2's test at 200 and the fallbacks' at 300 -> counted on the notification",
+              st3.Outcomes[0] == NotGone && st3.Outcomes[1] == Removed && st3.On == 1 && st3.NotGone == 0,
+              $"{string.Join(", ", st3.Outcomes)} at {st3.Ms} ms, {st3.On} on the notification, {st3.NotGone} not gone");
+        var thenAnswers = new[]
+        {
+            DeviceManager.Then(NotGone, Removed), DeviceManager.Then(GoneWithout, Removed),
+            DeviceManager.Then(Removed, GoneWithout), DeviceManager.Then(Removed, NotGone),
+            DeviceManager.Then(GoneWithout, NotGone), DeviceManager.Then(Removed, Removed),
+        };
+        Check("a removal in two steps ends as its last step, gone without REMOVED when either step was",
+              thenAnswers.SequenceEqual(new[] { Removed, GoneWithout, GoneWithout, NotGone, NotGone, Removed }),
+              string.Join(", ", thenAnswers));
+
         var w7 = Complete(new Sequence { LeavesTree = 100, RemovedAt = 250, RecordGoneAt = 300 }, uninstalls: true, 5000);
         Check("WaitRemovalComplete on a present devnode: out at 100, REMOVED at 250, record gone at 300 -> finished at 300",
               w7.Done && Within(w7.Ms, 300), $"{w7.Done} at {w7.Ms} ms");
 
         // The counts S77's live part asserts on: only watches of a devnode
-        // in the tree count. Four ended on the notification (w1, w2, w3,
-        // w7), one without it (w6), one not gone (w6b), one with its
-        // registration refused (w4). The absent id and the phantom count
-        // nothing.
+        // in the tree count, once each. Six ended on the notification (w1,
+        // w2, w3, w7, st1, st3), one without it (w6), two not gone (w6b,
+        // st2), one with its registration refused (w4). The absent id and
+        // the phantom count nothing.
         long dOn = DeviceManager.RemovalsOnNotification - on0, dWithout = DeviceManager.RemovalsWithoutNotification - without0,
              dNotGone = DeviceManager.RemovalsNotGone - notGone0, dUnreg = DeviceManager.RemovalsUnregistered - unreg0;
-        Check("the removal counts: 4 on the notification, 1 without it, 1 not gone, 1 unregistered",
-              dOn == 4 && dWithout == 1 && dNotGone == 1 && dUnreg == 1,
+        Check("the removal counts: 6 on the notification, 1 without it, 2 not gone, 1 unregistered",
+              dOn == 6 && dWithout == 1 && dNotGone == 2 && dUnreg == 1,
               $"{dOn}, {dWithout}, {dNotGone}, {dUnreg}");
 
         // WaitRemovalComplete, the sweeps' and the exit's one test, keeps its

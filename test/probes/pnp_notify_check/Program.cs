@@ -50,12 +50,19 @@ internal static class Program
         (DeviceManager.RemovalsOnNotification, DeviceManager.RemovalsWithoutNotification,
          DeviceManager.RemovalsNotGone, DeviceManager.RemovalsUnregistered);
 
+    /// <summary>Fails when a removal of the dispose ended with its devnode
+    /// still there, or a devnode in the tree when its removal's first step
+    /// started left it without DEVICEINSTANCEREMOVED or with the
+    /// notification's registration refused. A removal in steps counts once,
+    /// by its last step: a step that ended not gone and that the fallbacks
+    /// then completed, as after a fast removal's CM_Uninstall_DevNode, is no
+    /// failure.</summary>
     static void CheckRemovals(string profile, (long On, long Without, long NotGone, long Unregistered) before)
     {
         var a = Removals();
         long on = a.On - before.On, without = a.Without - before.Without, notGone = a.NotGone - before.NotGone,
              unregistered = a.Unregistered - before.Unregistered;
-        Check($"{profile}: every removal test of its dispose ended on DEVICEINSTANCEREMOVED",
+        Check($"{profile}: every removal of its dispose ended gone, each devnode in the tree on DEVICEINSTANCEREMOVED",
               on > 0 && without == 0 && notGone == 0 && unregistered == 0,
               $"{on} on the notification, {without} without it, {notGone} not gone, {unregistered} unregistered");
     }
