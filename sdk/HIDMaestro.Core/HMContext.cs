@@ -270,11 +270,15 @@ public sealed class HMContext : IDisposable
             Internal.OwnerSweep.RemoveOrphaned(preserveInstall);
     }
 
-    /// <summary>Disposes a set of controllers concurrently, suppressing the
-    /// per-controller HID orphan sweep and running it once at the end. The
-    /// per-controller wall-clock for each Dispose() call is reported through
+    /// <summary>Disposes a set of controllers from parallel threads,
+    /// suppressing the per-controller HID orphan sweep and running it once at
+    /// the end. Each devnode removal holds a machine-wide lock, so the
+    /// removals themselves run one after another, and the wall clock is
+    /// about the sum of the controllers' removals. The per-controller
+    /// wall-clock for each Dispose() call is reported through
     /// <paramref name="perControllerCallback"/> so callers can log a
-    /// "disposed slot N in M ms" line for each. Use from any caller that
+    /// "disposed slot N in M ms" line for each, and it includes the time
+    /// that controller's removals waited behind the others'. Use from any caller that
     /// already has a list of HMControllers to dispose together (e.g., a
     /// test harness's end-of-run cleanup); HMContext.Dispose itself uses an
     /// equivalent path internally. Called from a controller's event
@@ -773,11 +777,12 @@ public sealed class HMContext : IDisposable
     ///
     /// <para>Per-controller teardown blocks 5-11s waiting on Windows PnP's
     /// synchronous DIF_REMOVE (xinputhid filter unload for BT, XUSB companion
-    /// teardown for non-xinputhid Xbox). The per-controller work is fully
-    /// independent: different devnodes, different ContainerIDs, different
-    /// kernel locks: so we run all dispose calls in parallel and the
-    /// wall-clock collapses from sum(N) to max(N). For 4 controllers
-    /// that's typically 34s -> ~10s.</para>
+    /// teardown for non-xinputhid Xbox). The dispose calls run on parallel
+    /// threads, but every devnode removal holds a machine-wide lock that
+    /// every registration and removal of a program built on this release
+    /// holds, so the removals run one at a time, in this program and across
+    /// programs, and the wall clock is about the sum of the controllers'
+    /// removals.</para>
     ///
     /// <para>Called from a controller's event handler, it disposes that
     /// controller on the handler's own thread, so the controller's Dispose
