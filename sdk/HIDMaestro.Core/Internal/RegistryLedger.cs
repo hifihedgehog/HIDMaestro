@@ -91,12 +91,6 @@ internal static class RegistryLedger
 
     private static LedgerLock Acquire() => LedgerLock.Acquire();
 
-    /// <summary>The ledger's machine-wide lock, held by the calling thread
-    /// until it calls <c>ReleaseMutex</c>, for a caller that must take it
-    /// before a lock of its own. The ledger's own calls inside it take it
-    /// again on the same thread, which a mutex allows.</summary>
-    internal static LedgerLock AcquireLock() => Acquire();
-
     // ── GameInput mapping ────────────────────────────────────────────────
 
     /// <summary>Write the GameInput table for a controller whose profile
@@ -350,7 +344,9 @@ internal static class RegistryLedger
     /// <summary>Record a devnode and the driver it has before
     /// <see cref="WinUsbBinding"/> binds WinUSB to it, and the controller as
     /// holder. Throws when the record cannot be written, so nothing is bound
-    /// that the ledger cannot put back.</summary>
+    /// that the ledger cannot put back. The caller holds the devnode lock
+    /// (<see cref="WinUsbBinding.AcquireDevnodeLock"/>), which a restore
+    /// also holds from its check of the entry to its delete.</summary>
     internal static void ClaimWinUsb(string instanceId, string? priorService, string? priorInf, int controllerIndex)
     {
         string entryPath = $@"{Root}\{WinUsbKind}\{WinUsbEntryName(instanceId)}";
@@ -398,97 +394,207 @@ internal static class RegistryLedger
 
     /// <summary>Teardown of one controller: drop its holds, restore every
     /// entry no live controller holds any more.</summary>
-    internal static void Release(int controllerIndex) => Sweep(HolderName(controllerIndex));
+    internal static void Release(int controllerIndex) => Sweep(new[] { HolderName(controllerIndex) });
+
+    /// <summary>Teardown of several controllers at once, as at process exit:
+    /// one acquisition of the ledger's lock drops all their holds, so a
+    /// squatted v1.12.0 mutex costs one wait, and the WinUSB devnodes they
+    /// held are put back after the lock is let go, as in every sweep.</summary>
+    internal static void Release(IEnumerable<int> controllerIndices) =>
+        Sweep(controllerIndices.Select(HolderName).ToArray());
 
     /// <summary>Restore every entry whose holders are all gone.</summary>
     internal static void PruneDead() => Sweep(null);
 
-    private static void Sweep(string? releasing)
+    private static void Sweep(string[]? releasing)
     {
-        using var m = Acquire();
-        try
+        var winUsb = new List<WinUsbQueued>();
+        using (var m = Acquire())
         {
-            foreach (var kind in AllKinds)
+            try
             {
-                using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
-                if (kindKey == null) continue;
-                foreach (var name in kindKey.GetSubKeyNames())
+                foreach (var kind in AllKinds)
                 {
-                    bool restore;
-                    using (var holders = kindKey.OpenSubKey($@"{name}\{HoldersKey}", writable: true))
+                    using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
+                    if (kindKey == null) continue;
+                    foreach (var name in kindKey.GetSubKeyNames())
                     {
-                        if (holders != null)
-                            foreach (var h in holders.GetValueNames())
-                                if (h == releasing || !HolderAlive(h))
-                                    holders.DeleteValue(h, throwOnMissingValue: false);
-                        restore = holders == null || holders.GetValueNames().Length == 0;
+                        bool restore;
+                        using (var holders = kindKey.OpenSubKey($@"{name}\{HoldersKey}", writable: true))
+                        {
+                            if (holders != null)
+                                foreach (var h in holders.GetValueNames())
+                                    if ((releasing != null && Array.IndexOf(releasing, h) >= 0) || !HolderAlive(h))
+                                        holders.DeleteValue(h, throwOnMissingValue: false);
+                            restore = holders == null || holders.GetValueNames().Length == 0;
+                        }
+                        if (!restore) continue;
+                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb);
+                        else RestoreEntry(kindKey, kind, name);
                     }
-                    if (!restore) continue;
-                    RestoreEntry(kindKey, kind, name, waitGoneMs: releasing != null ? 2000 : 0);
                 }
+                DeleteEmptyKeys();
             }
-            // Leave no trace once nothing is held.
-            using var root = Registry.LocalMachine.OpenSubKey(Root, writable: true);
-            if (root != null)
-            {
-                foreach (var kind in root.GetSubKeyNames())
-                {
-                    bool empty;
-                    using (var k = root.OpenSubKey(kind)) empty = k != null && k.SubKeyCount == 0;
-                    if (empty) root.DeleteSubKey(kind, throwOnMissingSubKey: false);
-                }
-                bool rootEmpty = root.SubKeyCount == 0 && root.GetValueNames().Length == 0;
-                root.Close();
-                if (rootEmpty) Registry.LocalMachine.DeleteSubKey(Root, throwOnMissingSubKey: false);
-            }
+            catch { }
+            finally { m.ReleaseMutex(); }
         }
-        catch { }
-        finally { m.ReleaseMutex(); }
+        // A teardown releases right after its detach, so the devnode gets
+        // that long to leave. One still there then is left as it is and
+        // gets the reinstall flag (WinUsbBinding.RestoreLocked).
+        RestoreWinUsbEntries(winUsb, waitGoneMs: releasing != null ? TimeoutScale.Apply(2000) : 0, ignoreHolders: false);
     }
 
     /// <summary>Restore every entry regardless of holders. The full cleanup
     /// calls this after it has removed every virtual controller.</summary>
     internal static void ReleaseAll()
     {
-        using var m = Acquire();
-        try
+        var winUsb = new List<WinUsbQueued>();
+        using (var m = Acquire())
         {
-            foreach (var kind in AllKinds)
+            try
             {
-                using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
-                if (kindKey == null) continue;
-                foreach (var name in kindKey.GetSubKeyNames())
-                    RestoreEntry(kindKey, kind, name, waitGoneMs: 0);
+                foreach (var kind in AllKinds)
+                {
+                    using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{kind}", writable: true);
+                    if (kindKey == null) continue;
+                    foreach (var name in kindKey.GetSubKeyNames())
+                    {
+                        if (kind == WinUsbKind) TakeWinUsbEntry(kindKey, name, winUsb);
+                        else RestoreEntry(kindKey, kind, name);
+                    }
+                }
+                if (winUsb.Count == 0) Registry.LocalMachine.DeleteSubKeyTree(Root, throwOnMissingSubKey: false);
             }
-            Registry.LocalMachine.DeleteSubKeyTree(Root, throwOnMissingSubKey: false);
+            catch { }
+            finally { m.ReleaseMutex(); }
         }
-        catch { }
-        finally { m.ReleaseMutex(); }
+        RestoreWinUsbEntries(winUsb, waitGoneMs: 0, ignoreHolders: true);
     }
 
-    /// <summary><paramref name="waitGoneMs"/>: how long a WinUSB entry's
-    /// devnode gets to leave after its controller's detach. A teardown
-    /// releases right after the detach. A devnode that is gone needs only
-    /// the reinstall flag <see cref="WinUsbBinding.Restore"/> sets on it,
-    /// which installs it by rank when it next arrives.</summary>
-    private static void RestoreEntry(RegistryKey kindKey, string kind, string name, int waitGoneMs)
+    /// <summary>Restore a GameInput or joy.cpl entry and delete it, under
+    /// the ledger's lock: a few registry writes.</summary>
+    private static void RestoreEntry(RegistryKey kindKey, string kind, string name)
     {
         try
         {
             if (kind == GameInputKind)
                 RestoreGameInput(name);
-            else if (kind == WinUsbKind)
-                using (var entry = kindKey.OpenSubKey(name))
-                {
-                    if (entry?.GetValue(V_InstanceId) is string id)
-                        WinUsbBinding.Restore(id, waitGoneMs);
-                }
             else
                 using (var entry = kindKey.OpenSubKey(name))
                     if (entry != null) RestoreJoystickOem(name, entry);
         }
         catch { }
         try { kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false); } catch { }
+    }
+
+    /// <summary>A WinUSB entry queued for its restore, with the holders it
+    /// had when it was queued.</summary>
+    private readonly record struct WinUsbQueued(string Name, string InstanceId, string[] Seen);
+
+    /// <summary>Queue a WinUSB entry for <see cref="RestoreWinUsbEntries"/>.
+    /// Its devnode work takes seconds, so it runs after the ledger's lock is
+    /// released, and the entry stays until it is done: a process that ends
+    /// in between leaves the entry for the next sweep. An entry with no
+    /// devnode recorded is deleted now. The caller holds the ledger's
+    /// lock.</summary>
+    private static void TakeWinUsbEntry(RegistryKey kindKey, string name, List<WinUsbQueued> queue)
+    {
+        string? id;
+        string[] seen;
+        using (var entry = kindKey.OpenSubKey(name))
+        {
+            id = entry?.GetValue(V_InstanceId) as string;
+            using var holders = entry?.OpenSubKey(HoldersKey);
+            seen = holders?.GetValueNames() ?? Array.Empty<string>();
+        }
+        if (id != null) queue.Add(new WinUsbQueued(name, id, seen));
+        else try { kindKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false); } catch { }
+    }
+
+    /// <summary>Put each queued WinUSB entry's devnode back
+    /// (<see cref="WinUsbBinding.RestoreLocked"/>) and delete the entry.
+    /// Each runs under the machine-wide devnode lock, which every claim also
+    /// takes, and takes the ledger's lock only to read and delete the entry.
+    /// An entry a bind claimed since it was queued stays, also when
+    /// <paramref name="ignoreHolders"/> restores it regardless of the
+    /// holders it had then.</summary>
+    private static void RestoreWinUsbEntries(List<WinUsbQueued> entries, int waitGoneMs, bool ignoreHolders)
+    {
+        if (entries.Count == 0) return;
+        foreach (var (name, id, seen) in entries)
+        {
+            try
+            {
+                WinUsbBinding.WaitGone(id, waitGoneMs);
+                using var devnodes = WinUsbBinding.AcquireDevnodeLock();
+                try
+                {
+                    if (!WinUsbEntryUnheld(name, ignoreHolders, seen)) continue;
+                    WinUsbBinding.RestoreLocked(id);
+                    using var m = Acquire();
+                    try
+                    {
+                        using var kindKey = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}", writable: true);
+                        kindKey?.DeleteSubKeyTree(name, throwOnMissingSubKey: false);
+                    }
+                    finally { m.ReleaseMutex(); }
+                }
+                finally { devnodes.ReleaseMutex(); }
+            }
+            catch (Exception ex)
+            {
+                DeviceOrchestrator.LogDiag($"    ledger: the WinUSB entry of {id} stays for the next sweep: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        try
+        {
+            using var m = Acquire();
+            try { DeleteEmptyKeys(); }
+            finally { m.ReleaseMutex(); }
+        }
+        catch { }
+    }
+
+    /// <summary>True when the WinUSB entry still exists and no live
+    /// controller holds it. With <paramref name="ignoreHolders"/>, true when
+    /// it exists and every live holder is one of <paramref name="seen"/>, the
+    /// holders it had when it was queued: a bind that claimed it since keeps
+    /// it. Holders whose process is gone are dropped. The caller holds the
+    /// devnode lock.</summary>
+    private static bool WinUsbEntryUnheld(string name, bool ignoreHolders, string[] seen)
+    {
+        using var m = Acquire();
+        try
+        {
+            using var entry = Registry.LocalMachine.OpenSubKey($@"{Root}\{WinUsbKind}\{name}");
+            if (entry == null) return false;
+            using var holders = entry.OpenSubKey(HoldersKey, writable: true);
+            if (holders == null) return true;
+            foreach (var h in holders.GetValueNames())
+                if (!HolderAlive(h)) holders.DeleteValue(h, throwOnMissingValue: false);
+            var live = holders.GetValueNames();
+            return ignoreHolders
+                ? live.All(h => seen.Contains(h, StringComparer.Ordinal))
+                : live.Length == 0;
+        }
+        finally { m.ReleaseMutex(); }
+    }
+
+    /// <summary>Leave no trace once nothing is held: delete the empty kind
+    /// keys and an empty root. The caller holds the ledger's lock.</summary>
+    private static void DeleteEmptyKeys()
+    {
+        using var root = Registry.LocalMachine.OpenSubKey(Root, writable: true);
+        if (root == null) return;
+        foreach (var kind in root.GetSubKeyNames())
+        {
+            bool empty;
+            using (var k = root.OpenSubKey(kind)) empty = k != null && k.SubKeyCount == 0;
+            if (empty) root.DeleteSubKey(kind, throwOnMissingSubKey: false);
+        }
+        bool rootEmpty = root.SubKeyCount == 0 && root.GetValueNames().Length == 0;
+        root.Close();
+        if (rootEmpty) Registry.LocalMachine.DeleteSubKey(Root, throwOnMissingSubKey: false);
     }
 
     /// <summary>GameInput keys a live controller holds, which the legacy

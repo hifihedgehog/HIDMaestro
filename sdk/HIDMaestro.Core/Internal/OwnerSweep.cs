@@ -126,30 +126,13 @@ internal static class OwnerSweep
             }
             try { DeviceManager.RemoveOrphanHidChildren(); } catch { }
         }
-        // One ledger lock around every release, which each takes it again
-        // nested, so a squatted legacy mutex costs this exit one wait, not
-        // one per controller. No lock when nothing is released. The lock is
-        // held for the whole loop. Each release restores every entry whose
-        // holders are all gone or dead, a dead program's included, and a
-        // WinUSB entry waits up to 2 s for its devnode to leave. Other
-        // programs' ledger calls, which wait without a bound, and a v1.12.0
-        // program waiting on the legacy mutex wait for the whole exit.
-        LedgerLock? ledger = null;
-        if (own.Controllers.Any(c => c.TransportIndex >= 0))
-            try { ledger = RegistryLedger.AcquireLock(); } catch { }
-        try
-        {
-            foreach (var c in own.Controllers)
-                if (c.TransportIndex >= 0) try { RegistryLedger.Release(c.TransportIndex); } catch { }
-        }
-        finally
-        {
-            if (ledger != null)
-            {
-                ledger.ReleaseMutex();
-                ledger.Dispose();
-            }
-        }
+        // Every controller's holds go in one release, which takes the ledger
+        // lock once, so a squatted legacy mutex costs this exit one wait, not
+        // one per controller. Its WinUSB devnodes are put back after the
+        // lock is let go: that work takes the WinUSB lock, which comes before
+        // the ledger's, and runs no driver install on a present devnode.
+        var released = own.Controllers.Where(c => c.TransportIndex >= 0).Select(c => c.TransportIndex).ToList();
+        if (released.Count > 0) try { RegistryLedger.Release(released); } catch { }
         MachineClaims.DeleteRecord(own.OwnerId);
     }
 

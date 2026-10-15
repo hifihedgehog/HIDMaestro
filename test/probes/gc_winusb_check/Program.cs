@@ -153,15 +153,15 @@ internal static class Program
         Probe.Check("no hold left after them", RegistryLedger.HeldWinUsbDevnodes().Count == 0);
     }
 
-    // ── The ledger's lock and the binding's ─────────────────────────────
+    // ── The devnode lock and the ledger's ───────────────────────────────
 
-    /// <summary>A restore holds the ledger's machine-wide lock and then takes
-    /// the binding's lock (RegistryLedger.Sweep, WinUsbBinding.Restore). A
-    /// bind on another thread must not hold the binding's lock while it
-    /// waits for the ledger's.</summary>
+    /// <summary>A restore holds the machine-wide devnode lock and takes the
+    /// ledger's lock under it (RegistryLedger.RestoreWinUsbEntries,
+    /// WinUsbBinding.RestoreLocked). A bind on another thread waits for the
+    /// devnode lock, then claims under the ledger's, in the same order.</summary>
     static void LockOrder(HMContext ctx, HMProfile gc)
     {
-        Console.WriteLine("-- a bind while another thread restores under the ledger's lock");
+        Console.WriteLine("-- a bind while another thread restores under the devnode lock");
         using var a = ctx.CreateController(gc, "s81-lock-order");
         string? id = Arrived(a);
         Probe.Check("the adapter arrives", id != null, id ?? "");
@@ -170,15 +170,15 @@ internal static class Program
         using var held = new ManualResetEventSlim();
         var restorer = new Thread(() =>
         {
-            var ledger = RegistryLedger.AcquireLock();
+            var devnodes = WinUsbBinding.AcquireDevnodeLock();
             try
             {
                 held.Set();
-                // Long enough for the bind to reach the ledger.
+                // Long enough for the bind to reach the devnode lock.
                 Thread.Sleep(1500);
-                WinUsbBinding.Restore(@"USB\VID_057E&PID_0337\S81_NOT_PRESENT");
+                WinUsbBinding.RestoreLocked(@"USB\VID_057E&PID_0337\S81_NOT_PRESENT");
             }
-            finally { ledger.ReleaseMutex(); ledger.Dispose(); }
+            finally { devnodes.ReleaseMutex(); devnodes.Dispose(); }
         }) { IsBackground = true };
         restorer.Start();
         held.Wait(10_000);
@@ -193,12 +193,12 @@ internal static class Program
         binder.Start();
         bool restored = restorer.Join(20_000);
         bool finished = binder.Join(20_000);
-        Probe.Check("the restore finishes while the bind waits for the ledger", restored);
+        Probe.Check("the restore finishes while the bind waits for the devnode lock", restored);
         Probe.Check("the bind finishes after it and binds WinUSB", finished && bound == HMWinUsbBinding.Bound,
             finished ? $"{bound} {error}" : "both threads still waiting after 20 s");
         if (!restored || !finished)
         {
-            // The two threads hold the machine-wide ledger lock between them.
+            // The two threads hold the machine-wide devnode lock between them.
             // Ending the process is the only way to give it back.
             Probe.Finish("S81");
             Environment.Exit(1);

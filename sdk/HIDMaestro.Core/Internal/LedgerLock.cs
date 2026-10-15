@@ -34,8 +34,9 @@ namespace HIDMaestro.Internal;
 /// <list type="number">
 /// <item>A scope that went on without the mutex writes for its whole
 /// length, and if the squatter lets the mutex go in that time, a v1.12.0
-/// program can take it and write beside the scope. The exit handler's
-/// releases run as one scope, so at exit the window spans all of them.</item>
+/// program can take it and write beside the scope. The exit handler
+/// releases every controller in one scope, so at exit the window spans
+/// all of their registry restores.</item>
 /// <item>A v1.12.0 hold that outlasts the bound, five seconds on a first
 /// wait and the short bound once a wait has run out (both scaled by
 /// <see cref="TimeoutScale"/>), is not waited out.</item>
@@ -49,13 +50,11 @@ namespace HIDMaestro.Internal;
 /// the name. The third needs a token this process does not have.</para>
 ///
 /// <para>The exit handler's one scope also costs time, not data: it holds
-/// the namespace mutex, and the legacy mutex when taken, across every
-/// release. Each release restores every entry whose holders are all gone
-/// or dead, a dead program's included, and each WinUSB entry restored
-/// waits up to 2 s for its devnode to leave. Another program's ledger
-/// calls, which wait for the namespace mutex without a bound, and a
-/// v1.12.0 program's unbounded wait on the legacy mutex wait for the whole
-/// exit rather than for one release at a time.</para>
+/// the namespace mutex, and the legacy mutex when taken, while it drops
+/// every controller's holds and restores the GameInput and joy.cpl entries
+/// nothing holds any more, a dead program's included. Its WinUSB entries
+/// are put back after the scope ends (<see cref="RegistryLedger"/>, the
+/// sweep), so no devnode wait runs under it.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {

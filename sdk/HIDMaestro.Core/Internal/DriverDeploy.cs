@@ -24,8 +24,9 @@ namespace HIDMaestro.Internal;
 /// <see cref="HMDriverVersionException"/> names what holds it.</item>
 /// </list>
 ///
-/// <para>Every deploy of this driver holds the machine-wide mutex
-/// <see cref="MutexObject"/> for the length of one call. It lives in
+/// <para>Every deploy of this driver, and every WinUSB package add, holds
+/// the machine-wide mutex <see cref="MutexObject"/> for the length of one
+/// call. It lives in
 /// <see cref="AdminNamespace"/>, so a program that is not elevated can
 /// neither take the name first nor hold the lock. The holder re-reads the
 /// installed state after acquiring it, so of two programs calling

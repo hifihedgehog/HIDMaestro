@@ -151,10 +151,44 @@ DeviceName = ""{deviceName}""
 ";
     }
 
+    // Guards s_published, and no lock is taken under it.
     private static readonly object s_lock = new();
     // Published name by original INF name, for the packages this process
     // added. Guarded by s_lock.
     private static readonly Dictionary<string, string> s_published = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The name, in <see cref="AdminNamespace"/>, of the
+    /// machine-wide lock over the devnodes a binding changes.</summary>
+    internal const string DevnodeMutexObject = "WinUsb";
+
+    /// <summary>Take the machine-wide lock over the devnodes a binding
+    /// changes, held by the calling thread until it calls
+    /// <c>ReleaseMutex</c>. A bind's ledger claim and install, a restore and
+    /// the uninstall-grade cleanup each run under it, so a restore that finds
+    /// an entry unheld finishes before any bind can claim the devnode.
+    ///
+    /// <para>Lock order: the deploy lock, then this one, then the registry
+    /// ledger's. A bind adds its package under the deploy lock before it
+    /// takes this one, never inside it.</para></summary>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
+    internal static Mutex AcquireDevnodeLock()
+    {
+        var m = new Mutex(false, AdminNamespace.Name(DevnodeMutexObject));
+        try
+        {
+            if (!m.WaitOne(TimeoutScale.Apply(120_000)))
+                throw new InvalidOperationException(
+                    "Another program held HIDMaestro's machine-wide WinUSB lock for two minutes.");
+        }
+        catch (AbandonedMutexException) { }
+        catch
+        {
+            m.Dispose();
+            throw;
+        }
+        return m;
+    }
 
     /// <summary>Bind WinUSB to the controller's virtual device.</summary>
     internal static HMWinUsbBinding Bind(HMController controller)
@@ -162,43 +196,28 @@ DeviceName = ""{deviceName}""
         var handle = controller.UsbipHandle
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' runs on the UMDF2 driver. A WinUSB binding is for a USB/IP device.");
+        return BindDevnode(controller, handle, out _);
+    }
+
+    /// <summary>Bind WinUSB to the devnode of the controller's import.</summary>
+    private static HMWinUsbBinding BindDevnode(HMController controller, Usbip.UsbipBackendHandle handle, out string instanceId)
+    {
         var d = handle.Device.Descriptors;
         var package = PackageFor(controller.Profile.Inner, d)
             ?? throw new InvalidOperationException(
                 $"Profile '{controller.Profile.Id}' declares no usbConfiguration.winUsb, so its device takes no WinUSB binding.");
-        string instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, TimeoutScale.Apply(10_000))
+        instanceId = WaitForDevnode(handle, d.VendorId, d.ProductId, TimeoutScale.Apply(10_000))
             ?? throw new InvalidOperationException(
                 $"The device at 127.0.0.1:{handle.ServerPort} bus id {handle.Device.BusId} did not appear within 10 s.");
         WaitInstalled(instanceId, TimeoutScale.Apply(10_000));
 
-        // The package goes into the driver store first, under this lock
-        // alone, since adding it the first time takes seconds.
         string? published = null;
-        lock (s_lock)
+        while (true)
         {
-            var (service, inf) = DriverOf(instanceId, phantom: false);
-            if (IsLibusbService(service))
+            using (var devnodes = AcquireDevnodeLock())
             {
-                if (!IsOurPackage(inf)) return HMWinUsbBinding.AlreadyBound;
-            }
-            else
-            {
-                if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
-                published = EnsurePackage(package);
-            }
-        }
-
-        // The ledger's machine-wide lock, then this one: the order a
-        // restore takes them in (RegistryLedger.Sweep, then Restore). The
-        // other order deadlocked a bind against a restore on another
-        // thread, and held every program's ledger work with them.
-        using (var ledger = RegistryLedger.AcquireLock())
-        {
-            try
-            {
-                lock (s_lock)
+                try
                 {
-                    // Read again: a restore may have run between the two locks.
                     var (service, inf) = DriverOf(instanceId, phantom: false);
                     if (IsLibusbService(service))
                     {
@@ -211,16 +230,22 @@ DeviceName = ""{deviceName}""
                         return HMWinUsbBinding.AlreadyBound;
                     }
                     if (!IsInboxOrNone(inf)) return HMWinUsbBinding.OtherDriver;
-                    published ??= EnsurePackage(package);
-
-                    // Recorded before the devnode changes, so a crash between
-                    // the two leaves a record whose restore finds the devnode
-                    // as it was.
-                    RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
-                    InstallOn(instanceId, published);
+                    if (published != null)
+                    {
+                        // Recorded before the devnode changes, so a crash
+                        // between the two leaves a record whose restore finds
+                        // the devnode as it was.
+                        RegistryLedger.ClaimWinUsb(instanceId, service, inf, controller.Index);
+                        InstallOn(instanceId, published);
+                        break;
+                    }
                 }
+                finally { devnodes.ReleaseMutex(); }
             }
-            finally { ledger.ReleaseMutex(); }
+            // The package goes into the driver store under the deploy lock
+            // with the devnode lock released, since the first add takes
+            // seconds. The devnode is read again under the devnode lock.
+            published = EnsurePackage(package);
         }
 
         // WinUSB is bound once the devnode reports its service and the
@@ -236,44 +261,47 @@ DeviceName = ""{deviceName}""
         throw new InvalidOperationException($"WinUSB did not start on {instanceId} within 10 s.");
     }
 
-    /// <summary>Put a devnode the ledger recorded back on the driver Windows
-    /// picks by rank. A present devnode is installed again now. A gone one
-    /// gets the reinstall flag, which installs it again by rank when it next
-    /// arrives, and so does a present one whose reinstall failed. A devnode
-    /// on any driver but one of HIDMaestro's WinUSB packages is someone
-    /// else's and is left alone.
-    /// <paramref name="waitGoneMs"/> gives a devnode whose device was just
-    /// detached that long to leave first, since a gone devnode needs nothing
-    /// more.</summary>
-    internal static void Restore(string instanceId, int waitGoneMs = 0)
+    /// <summary>Wait up to <paramref name="waitGoneMs"/> for a devnode whose
+    /// device was just detached to leave, since a gone devnode needs only the
+    /// reinstall flag. No lock is held.</summary>
+    internal static void WaitGone(string instanceId, int waitGoneMs)
     {
         var until = Environment.TickCount64 + waitGoneMs;
         while (waitGoneMs > 0 && Environment.TickCount64 < until
                && CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
             Thread.Sleep(20);
+    }
 
-        lock (s_lock)
+    /// <summary>Put a devnode the ledger recorded back on the driver Windows
+    /// picks by rank. A present devnode is installed again now. A gone one
+    /// gets the reinstall flag, which installs it again by rank when it next
+    /// arrives, and so does a present one whose reinstall failed. A devnode
+    /// on any driver but one of HIDMaestro's WinUSB packages is someone
+    /// else's and is left alone. The caller holds the devnode lock
+    /// (<see cref="AcquireDevnodeLock"/>).</summary>
+    internal static void RestoreLocked(string instanceId)
+    {
+        bool present = CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
+        var (_, inf) = DriverOf(instanceId, phantom: !present);
+        if (!IsOurPackage(inf)) return;
+        if (present)
         {
-            bool present = CM_Locate_DevNodeW(out _, instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
-            var (_, inf) = DriverOf(instanceId, phantom: !present);
-            if (!IsOurPackage(inf)) return;
-            if (present)
-            {
-                try { InstallBestDriver(instanceId); return; }
-                catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb restore of {instanceId} threw {ex.Message}"); }
-            }
-            try { SetReinstallFlag(instanceId); } catch { }
+            try { InstallBestDriver(instanceId); return; }
+            catch (Exception ex) { DeviceOrchestrator.LogDiag($"    winusb restore of {instanceId} threw {ex.Message}"); }
         }
+        try { SetReinstallFlag(instanceId); } catch { }
     }
 
     /// <summary>The uninstall-grade cleanup: every devnode still on one of
     /// the packages goes back to its driver by rank, present ones now, and
     /// gone ones are removed, since a non-present devnode keeps a package in
     /// use. Then the packages leave the driver store. Nothing else is
-    /// touched: a package's provider and original name identify it.</summary>
+    /// touched: a package's provider and original name identify it. The
+    /// caller holds the deploy lock.</summary>
     internal static void RemovePackage()
     {
-        lock (s_lock)
+        using var devnodes = AcquireDevnodeLock();
+        try
         {
             var packages = OurPackages();
             if (packages.Count == 0) return;
@@ -292,20 +320,45 @@ DeviceName = ""{deviceName}""
                 if (!PnputilHelper.DeletePackagePlain(p.PublishedName, out string err))
                     DeviceOrchestrator.LogDiag($"    winusb package {p.PublishedName} not deleted: {err}");
             }
-            s_published.Clear();
+            lock (s_lock) s_published.Clear();
         }
+        finally { devnodes.ReleaseMutex(); }
     }
 
     // ── The packages ─────────────────────────────────────────────────────
 
     /// <summary>Stage, catalog, sign and add one profile's package to the
-    /// driver store, once per process. Returns its published name. Caller
-    /// holds s_lock.</summary>
+    /// driver store, once per process. Returns its published name.
+    ///
+    /// <para>Under the deploy lock. Two programs of one build stage into one
+    /// directory, and the catalog step deletes and writes every catalog in
+    /// it, so their adds take turns. The test certificate's check and create
+    /// is under the same lock (<see cref="DriverBuilder.EnsureTestCertificate"/>),
+    /// and so is <see cref="RemovePackage"/>.</para></summary>
     private static string EnsurePackage(Package p)
     {
-        if (s_published.TryGetValue(p.InfName, out var known) && File.Exists(Path.Combine(InfDirectory, known)))
-            return known;
+        if (Published(p) is string known) return known;
+        using var deploy = DriverDeploy.Acquire();
+        try
+        {
+            // Another thread of this process may have added it while this
+            // one waited.
+            return Published(p) ?? AddPackage(p);
+        }
+        finally { deploy.ReleaseMutex(); }
+    }
 
+    private static string? Published(Package p)
+    {
+        string? known;
+        lock (s_lock)
+            if (!s_published.TryGetValue(p.InfName, out known)) return null;
+        return File.Exists(Path.Combine(InfDirectory, known)) ? known : null;
+    }
+
+    /// <summary>The add itself. The caller holds the deploy lock.</summary>
+    private static string AddPackage(Package p)
+    {
         string dir = ProtectedStaging.DirFor(p.StagingOperation);
         // UTF-16 LE with its byte-order mark, the Unicode form an INF may
         // take, so a product string outside ASCII reaches Device Manager
@@ -322,7 +375,7 @@ DeviceName = ""{deviceName}""
             .FirstOrDefault();
         if (published == null)
             throw new InvalidOperationException($"pnputil did not add {p.InfName} (exit {rc}): {output.Trim()}");
-        s_published[p.InfName] = published;
+        lock (s_lock) s_published[p.InfName] = published;
         return published;
     }
 
@@ -337,13 +390,14 @@ DeviceName = ""{deviceName}""
             .ToList();
 
     /// <summary>True when <paramref name="inf"/> is one of HIDMaestro's
-    /// WinUSB packages. Caller holds s_lock.</summary>
+    /// WinUSB packages.</summary>
     private static bool IsOurPackage(string? inf)
     {
         if (string.IsNullOrEmpty(inf)) return false;
         string file = Path.GetFileName(inf);
-        foreach (var known in s_published.Values)
-            if (string.Equals(file, known, StringComparison.OrdinalIgnoreCase)) return true;
+        lock (s_lock)
+            foreach (var known in s_published.Values)
+                if (string.Equals(file, known, StringComparison.OrdinalIgnoreCase)) return true;
         return OurPackages().Any(r => string.Equals(file, r.PublishedName, StringComparison.OrdinalIgnoreCase));
     }
 

@@ -25,7 +25,6 @@ namespace HIDMaestro.Internal;
 /// </summary>
 public static class DriverBuilder
 {
-    const string CertSubject = "CN=HIDMaestroTestCert";
     const string CertFriendlyName = "HIDMaestroTestCert";
 
     /// <summary>The directory the most recent extraction landed in. Other
@@ -236,21 +235,41 @@ public static class DriverBuilder
 
     /// <summary>Ensures HIDMaestroTestCert exists in LocalMachine\My and is
     /// trusted in Root + TrustedPublisher. Uses the managed
-    /// <see cref="CertificateRequest"/> API: no external tool needed.</summary>
-    public static void EnsureTestCertificate()
-    {
-        // Check LocalMachine\My first.
-        using (var lmMy = new X509Store(StoreName.My, StoreLocation.LocalMachine))
-        {
-            lmMy.Open(OpenFlags.ReadOnly);
-            var existing = lmMy.Certificates.Find(X509FindType.FindBySubjectName, CertFriendlyName, false);
-            if (existing.Count > 0)
-                return;
-        }
+    /// <see cref="CertificateRequest"/> API: no external tool needed.
+    /// The check and the create run under the machine-wide deploy lock, so
+    /// two programs never both find it missing and add two.</summary>
+    public static void EnsureTestCertificate() => EnsureTestCertificate(CertFriendlyName);
 
+    /// <summary>The same for a certificate of another name. Coexistence
+    /// probe section Z calls this through reflection with a name that does
+    /// not contain HIDMaestroTestCert, which the store's subject search and
+    /// signtool's <c>/n</c> both match as a substring.</summary>
+    internal static void EnsureTestCertificate(string name)
+    {
+        // Present, as it is after the first deploy on a machine: no lock.
+        if (HasTestCertificate(name)) return;
+        // A deploy and a WinUSB package add call this with the lock held,
+        // and a mutex its owner takes again does not wait.
+        using var deploy = DriverDeploy.Acquire();
+        try
+        {
+            if (!HasTestCertificate(name)) CreateTestCertificate(name);
+        }
+        finally { deploy.ReleaseMutex(); }
+    }
+
+    private static bool HasTestCertificate(string name)
+    {
+        using var lmMy = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+        lmMy.Open(OpenFlags.ReadOnly);
+        return lmMy.Certificates.Find(X509FindType.FindBySubjectName, name, false).Count > 0;
+    }
+
+    private static void CreateTestCertificate(string name)
+    {
         // Generate fresh self-signed cert with code-signing EKU.
         using var rsa = RSA.Create(2048);
-        var req = new CertificateRequest(CertSubject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var req = new CertificateRequest("CN=" + name, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         req.CertificateExtensions.Add(new X509KeyUsageExtension(
             X509KeyUsageFlags.DigitalSignature, critical: false));
         req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
@@ -260,14 +279,14 @@ public static class DriverBuilder
         var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
         var notAfter = DateTimeOffset.UtcNow.AddYears(10);
         using var cert = req.CreateSelfSigned(notBefore, notAfter);
-        cert.FriendlyName = CertFriendlyName;
+        cert.FriendlyName = name;
 
         // Re-import with PersistKeySet so the private key lives in the machine
         // key store (signtool needs it from LocalMachine\My).
         byte[] pfx = cert.Export(X509ContentType.Pfx, "");
         using var persistableCert = X509CertificateLoader.LoadPkcs12(pfx, "",
             X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
-        persistableCert.FriendlyName = CertFriendlyName;
+        persistableCert.FriendlyName = name;
 
         AddToStore(persistableCert, StoreName.My);
         AddToStore(persistableCert, StoreName.Root);
@@ -661,7 +680,7 @@ public static class DriverBuilder
 
     /// <summary>Add this build's packages of <paramref name="infs"/> to the
     /// driver store and remove nothing, for a set a deploy left incomplete.
-    /// Signed and catalogued as a full deploy does it. The caller holds the
+    /// Signed and cataloged as a full deploy does it. The caller holds the
     /// deploy lock.
     ///
     /// <para>Added without <c>/install</c>, which would "install/update
