@@ -126,7 +126,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     private UsbipServer.Connection? _connection;
 
     private readonly object _hidLock = new();
-    private readonly Queue<byte[]> _frameQueue = new();          // built wire reports awaiting a read
+    // Reports waiting for a read, each in a buffer of _reportCapacity bytes
+    // the device keeps. A buffer goes back to _spareFrames once its read is
+    // answered or the queue drops it, so a frame allocates nothing: at most
+    // MaxFrameQueue + 1 buffers ever exist, the queue's and one the
+    // connection's reader is sending from. Guarded by _hidLock.
+    private readonly Queue<QueuedFrame> _frameQueue = new();
+    private readonly Stack<byte[]> _spareFrames = new();
     // Parked interrupt-IN URBs, keyed by endpoint address (issue #56). A
     // composite with more than one interrupt-IN endpoint must never answer
     // one endpoint's read with another endpoint's data: the Steam Deck
@@ -135,8 +141,28 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // shared queue would have handed a 64-byte controller report to the
     // 8-byte keyboard pipe.
     private readonly Dictionary<byte, Queue<uint>> _pendingInterruptIn = new();
-    private byte[] _lastInputReport;
+    // The latest report, for GET_REPORT(Input), copied in place. Guarded by
+    // _hidLock.
+    private readonly byte[] _lastInputReport;
+    private int _lastInputLength;
     private uint _lastSharedSeqNo;
+
+    // The longest report the input section yields: the builder's report,
+    // or an extended report.
+    private readonly int _reportCapacity;
+    // The input pump's report, rebuilt from the section for each frame.
+    // Only the pump touches it.
+    private readonly byte[] _pumpReport;
+    // The Switch 2 Pro persona's report, built and sent under
+    // _streamSendLock.
+    private readonly byte[]? _switch2Report;
+
+    private readonly struct QueuedFrame
+    {
+        public readonly byte[] Buffer;
+        public readonly int Length;
+        public QueuedFrame(byte[] buffer, int length) { Buffer = buffer; Length = length; }
+    }
 
     // Device state.
     private volatile byte _configurationValue;
@@ -259,8 +285,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         }
 
         _builder = profile.GetOrBuildReportBuilder();
-        _lastInputReport = new byte[Math.Max(1, _builder.InputReportByteSize)];
+        int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
+        _reportCapacity = Math.Max(expectedSize, SharedMemoryIO.EXTENDED_DATA_CAPACITY);
+        _pumpReport = new byte[_reportCapacity];
+        _lastInputReport = new byte[_reportCapacity];
+        _lastInputLength = Math.Max(1, _builder.InputReportByteSize);
         if (_builder.InputReportId != 0) _lastInputReport[0] = _builder.InputReportId;
+        if (_switch2 != null) _switch2Report = new byte[Switch2ProDevice.ReportSize];
 
         try
         {
@@ -356,7 +387,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
-            _frameQueue.Clear();
+            ClearFrameQueue();
         }
         ResetSwitch2State();
         ResetProtocolState();
@@ -426,12 +457,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         catch { }
                     }
                 }
-                byte[] report;
+                int length;
                 lock (_lifetimeLock)
                 {
                     if (_stop) break;
-                    if (!TryReadInputFrame(out report)) continue;
+                    if (!TryReadInputFrame(_pumpReport, out length)) continue;
                 }
+                var report = new ReadOnlySpan<byte>(_pumpReport, 0, length);
 
                 // A declared protocol sends nothing from here either. The
                 // frame is the report its next host poll gets.
@@ -454,7 +486,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 uint seq;
                 lock (_hidLock)
                 {
-                    _lastInputReport = report;
+                    report.CopyTo(_lastInputReport);
+                    _lastInputLength = length;
                     var pending = PendingFor(_primaryInEndpoint);
                     if (pending.Count > 0)
                     {
@@ -465,12 +498,17 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     }
                     else
                     {
-                        if (_frameQueue.Count >= MaxFrameQueue) _frameQueue.Dequeue();
-                        _frameQueue.Enqueue(report);
+                        // A full queue drops its oldest report and takes
+                        // over that report's buffer.
+                        byte[] buffer = _frameQueue.Count >= MaxFrameQueue ? _frameQueue.Dequeue().Buffer
+                            : _spareFrames.Count > 0 ? _spareFrames.Pop()
+                            : new byte[_reportCapacity];
+                        report.CopyTo(buffer);
+                        _frameQueue.Enqueue(new QueuedFrame(buffer, length));
                         continue;
                     }
                 }
-                SendInterruptInReply(seq, report);
+                SendRetSubmitSpan(seq, 0, length, report);
             }
             catch
             {
@@ -483,10 +521,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
     /// <summary>Seqlock read of the shared input section plus the wire
     /// report build, mirroring driver.c ReadSharedInput + the report
-    /// assembly in its worker (driver.c:1240-1296).</summary>
-    private bool TryReadInputFrame(out byte[] report)
+    /// assembly in its worker (driver.c:1240-1296). The report goes into
+    /// <paramref name="report"/>, <see cref="_reportCapacity"/> bytes long.</summary>
+    private bool TryReadInputFrame(Span<byte> report, out int length)
     {
-        report = Array.Empty<byte>();
+        length = 0;
         IntPtr view = _inputView;
         if (view == IntPtr.Zero) return false;
 
@@ -513,7 +552,8 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         int extSize = BitConverter.ToInt32(snap[SharedMemoryIO.EXTENDED_SIZE_OFFSET..]);
         if (extSize > 0 && extSize <= SharedMemoryIO.EXTENDED_DATA_CAPACITY)
         {
-            report = snap.Slice(SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).ToArray();
+            snap.Slice(SharedMemoryIO.EXTENDED_DATA_OFFSET, extSize).CopyTo(report);
+            length = extSize;
             return true;
         }
 
@@ -525,17 +565,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         if (dataLen > SharedMemoryIO.DATA_CAPACITY) dataLen = SharedMemoryIO.DATA_CAPACITY;
         if (dataLen < 0) dataLen = 0;
 
-        var r = new byte[expectedSize];
+        // The report is expectedSize bytes, zero past the data.
+        var r = report[..expectedSize];
+        r.Clear();
         if (hasReportId)
         {
             r[0] = _builder.InputReportId;
-            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r.AsSpan(1));
+            dataLen = Math.Min(dataLen, expectedSize - 1);
+            snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r[1..]);
         }
         else
         {
             snap.Slice(SharedMemoryIO.DATA_OFFSET, dataLen).CopyTo(r);
         }
-        report = r;
+        length = expectedSize;
         return true;
     }
 
@@ -639,7 +682,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 }
 
-                byte[]? frame = null;
+                QueuedFrame frame = default;
                 lock (_hidLock)
                 {
                     // Only the primary HID interface's endpoint has frames.
@@ -654,7 +697,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     else
                         PendingFor(epAddr).Enqueue(cmd.Seqnum);
                 }
-                if (frame != null) SendInterruptInReply(cmd.Seqnum, frame);
+                if (frame.Buffer != null)
+                {
+                    // The buffer is this thread's until it goes back.
+                    SendRetSubmitSpan(cmd.Seqnum, 0, frame.Length, frame.Buffer.AsSpan(0, frame.Length));
+                    lock (_hidLock) _spareFrames.Push(frame.Buffer);
+                }
                 return;
             }
 
@@ -751,7 +799,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     {
         lock (_streamSendLock)
         {
-            byte[] report;
+            int length;
             lock (_hidLock)
             {
                 if (DiagPath != null)
@@ -763,9 +811,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 }
                 _reportOwed = false;
-                report = NextSwitch2Report();
+                length = NextSwitch2Report();
             }
-            SendInterruptInReply(seqnum, report);
+            SendRetSubmitSpan(seqnum, 0, length, _switch2Report.AsSpan(0, length));
         }
     }
 
@@ -779,7 +827,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         lock (_streamSendLock)
         {
             uint seq;
-            byte[] report;
+            int length;
             lock (_hidLock)
             {
                 if (!_switch2!.ReportsOnSince(out long since) || since != startedAt) return;
@@ -790,20 +838,22 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     return;
                 }
                 seq = pending.Dequeue();
-                report = NextSwitch2Report();
+                length = NextSwitch2Report();
             }
-            SendInterruptInReply(seq, report);
+            SendRetSubmitSpan(seq, 0, length, _switch2Report.AsSpan(0, length));
         }
     }
 
-    /// <summary>Caller holds <see cref="_hidLock"/>.</summary>
-    private byte[] NextSwitch2Report()
+    /// <summary>The next report into <see cref="_switch2Report"/>, and its
+    /// length. Caller holds <see cref="_streamSendLock"/>, which keeps the
+    /// buffer until the report is sent, and <see cref="_hidLock"/>.</summary>
+    private int NextSwitch2Report()
     {
-        var report = _switch2!.BuildNextReport();
+        int length = _switch2!.BuildNextReport(_switch2Report);
         if (DiagPath != null)
             _completionsPerEp[_primaryInEndpoint] =
                 _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
-        return report;
+        return length;
     }
 
     /// <summary>The report clock. Parked while reports are off. Once a
@@ -1154,7 +1204,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     // not count it.
                     if (_switch2 != null) snapshot = _switch2.PeekReport(reportId);
                     else if (_engine != null) snapshot = _engine.CopyReport();
-                    else lock (_hidLock) snapshot = _lastInputReport;
+                    else lock (_hidLock) snapshot = _lastInputReport.AsSpan(0, _lastInputLength).ToArray();
                     int n = Math.Min(snapshot.Length, wLength);
                     SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
                     return;
@@ -1422,10 +1472,17 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         lock (_hidLock)
         {
             foreach (var q in _pendingInterruptIn.Values) q.Clear();
-            _frameQueue.Clear();
+            ClearFrameQueue();
         }
         ResetSwitch2State();
         ResetProtocolState();
+    }
+
+    /// <summary>Drop the queued reports and keep their buffers. Caller
+    /// holds <see cref="_hidLock"/>.</summary>
+    private void ClearFrameQueue()
+    {
+        while (_frameQueue.Count > 0) _spareFrames.Push(_frameQueue.Dequeue().Buffer);
     }
 
     private void ResetAltSettings()
@@ -1444,9 +1501,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     // must not take a background thread (and with it the process) down.
     // The connection's own reader thread notices the closed socket and
     // runs the detach path.
-
-    private void SendInterruptInReply(uint seqnum, byte[] frame)
-        => SendRetSubmit(seqnum, 0, frame.Length, frame);
 
     private void SendError(uint seqnum, int status)
         => SendRetSubmit(seqnum, status, 0, null);

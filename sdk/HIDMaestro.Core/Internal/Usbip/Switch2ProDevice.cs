@@ -62,7 +62,8 @@ internal sealed class Switch2ProDevice
     private readonly Queue<byte[]> _replies = new();
     private int _headOffset;
 
-    private byte[] _body = Switch2ProPacker.NeutralBody();
+    // Written in place, so a frame allocates nothing.
+    private readonly byte[] _body = Switch2ProPacker.NeutralBody();
 
     private readonly List<(uint Address, byte[] Data)> _flash;
 
@@ -124,8 +125,7 @@ internal sealed class Switch2ProDevice
     public void SetBody(ReadOnlySpan<byte> body)
     {
         if (body.Length != Switch2ProPacker.BodySize) return;
-        var copy = body.ToArray();
-        lock (_sync) _body = copy;
+        lock (_sync) body.CopyTo(_body);
     }
 
     /// <summary>The bulk OUT payloads seen so far, oldest first.</summary>
@@ -431,10 +431,14 @@ internal sealed class Switch2ProDevice
     /// motion timestamp, which starts at 1 and steps 4000 microseconds. SDL
     /// takes its first set of sensor constants only when the timestamp
     /// advances 3600 to 4399 a report, and reads 0 as no sample. 1 plus a
-    /// multiple of 4000 is never 0.</para></summary>
-    public byte[] BuildNextReport()
+    /// multiple of 4000 is never 0.</para>
+    ///
+    /// <para>The report goes into <paramref name="report"/>, at least
+    /// <see cref="ReportSize"/> bytes, and the return is its length.</para></summary>
+    public int BuildNextReport(Span<byte> report)
     {
-        lock (_sync) return BuildReport(_selectedReport, _reportCount++);
+        lock (_sync) BuildReport(_selectedReport, _reportCount++, report);
+        return ReportSize;
     }
 
     /// <summary>The report a GET_REPORT(Input) reads: what the next report
@@ -442,13 +446,15 @@ internal sealed class Switch2ProDevice
     /// counting it.</summary>
     public byte[] PeekReport(byte reportId)
     {
+        var r = new byte[ReportSize];
         lock (_sync)
-            return BuildReport(reportId == ReportCommon || reportId == ReportPro ? reportId : _selectedReport,
-                               _reportCount);
+            BuildReport(reportId == ReportCommon || reportId == ReportPro ? reportId : _selectedReport,
+                        _reportCount, r);
+        return r;
     }
 
     /// <summary>Caller holds <see cref="_sync"/>.</summary>
-    private byte[] BuildReport(byte reportId, uint n)
+    private void BuildReport(byte reportId, uint n, Span<byte> report)
     {
         var body = _body;
         uint buttons = (uint)(body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24));
@@ -456,12 +462,13 @@ internal sealed class Switch2ProDevice
         ushort lx = (ushort)(body[s] | (body[s + 1] << 8)), ly = (ushort)(body[s + 2] | (body[s + 3] << 8));
         ushort rx = (ushort)(body[s + 4] | (body[s + 5] << 8)), ry = (ushort)(body[s + 6] | (body[s + 7] << 8));
 
-        var r = new byte[ReportSize];
+        var r = report[..ReportSize];
+        r.Clear();
         if (reportId == ReportCommon)
         {
             r[0] = ReportCommon;
             WriteUInt32(r, 0x01, unchecked(n * 4));
-            CommonButtons(buttons, r.AsSpan(0x05, 4));
+            CommonButtons(buttons, r.Slice(0x05, 4));
             PackStick(r, 0x0B, lx, ly);
             PackStick(r, 0x0E, rx, ry);
             r[0x20] = 0xD8; r[0x21] = 0x0E;   // battery, 3800 mV
@@ -471,7 +478,7 @@ internal sealed class Switch2ProDevice
             {
                 WriteUInt32(r, 0x2B, unchecked(1 + n * 4000));
                 // 0x2F: temperature, 0. Then accelerometer and gyro.
-                Array.Copy(body, Switch2ProPacker.MotionOffset, r, 0x31, 12);
+                body.AsSpan(Switch2ProPacker.MotionOffset, 12).CopyTo(r[0x31..]);
             }
         }
         else
@@ -488,7 +495,6 @@ internal sealed class Switch2ProDevice
             // 15: the length of the pad's packed motion block, which no
             // public source decodes. This report carries no motion.
         }
-        return r;
     }
 
     /// <summary>Report 0x05's four button bytes (hid_reports.md "Input
@@ -522,14 +528,14 @@ internal sealed class Switch2ProDevice
 
     /// <summary>Two 12-bit values in three bytes, as stick12-pair packs
     /// them: X low 8, X high 4 with Y low 4, Y high 8.</summary>
-    private static void PackStick(byte[] dst, int offset, ushort x, ushort y)
+    private static void PackStick(Span<byte> dst, int offset, ushort x, ushort y)
     {
         dst[offset] = (byte)(x & 0xFF);
         dst[offset + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
         dst[offset + 2] = (byte)((y >> 4) & 0xFF);
     }
 
-    private static void WriteUInt32(byte[] dst, int offset, uint v)
+    private static void WriteUInt32(Span<byte> dst, int offset, uint v)
     {
         dst[offset] = (byte)v;
         dst[offset + 1] = (byte)(v >> 8);

@@ -21,7 +21,13 @@
 //                  no elevation. Tells a fallback from a skip only while a
 //                  HIDMaestro devnode is present. S84 runs it with an Xbox
 //                  360 up
-//   gate           S84: no submit path allocates, the codec path, consumer
+//   usbip [runs]   a USB/IP device's frames, from the input section to the
+//                  host's reply, on each of its three send paths: bytes the
+//                  process allocated per frame, the time, and lock
+//                  contentions. Then the protocol engine's lock per frame,
+//                  beside an uncontended lock alone
+//   gate           S84: no submit path allocates, a USB/IP device's send
+//                  paths included, the codec path, consumer
 //                  usages, a keyboard's raw reports and an absolute pointer
 //                  included, a long mouse movement leaves 16 frames kept,
 //                  the census's own walk completes and finds what the
@@ -34,16 +40,21 @@
 // Requires elevation, except census. Exit 0 PASS, 1 FAIL (gate, census), 2
 // when another program that embeds HIDMaestro is running.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
 using HIDMaestro;
+using HIDMaestro.Internal;
+using HIDMaestro.Internal.Usbip;
 using Microsoft.Win32.SafeHandles;
 
 internal static class Program
@@ -92,6 +103,7 @@ internal static class Program
             case "create": Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
                 SettleMs(args)); break;
             case "start": Start(runs); break;
+            case "usbip": Usbip(runs, gate: false); break;
 #if !HM_BASE
             case "claim": Claim(runs); break;
             case "census": CensusFallback(); break;
@@ -101,6 +113,7 @@ internal static class Program
                 HidBoolean();
 #endif
                 Frame(3, gate: true);
+                Usbip(5, gate: true);
                 break;
             default:
                 Console.WriteLine($"unknown mode {mode}");
@@ -804,6 +817,264 @@ internal static class Program
         }
     }
 #endif
+
+    // ── A USB/IP device's frames ────────────────────────────────────────
+
+    const int UsbipIndex = 56;   // far from live controller indices
+
+    /// <summary>Frames through USB/IP devices in this process, with this
+    /// probe on the wire in the host controller's place: each frame written
+    /// to the input section as SubmitState writes it, then read back as the
+    /// device's reply to an interrupt IN transfer. One device per send path:
+    /// the input pump's own sends (a DualSense, every other frame waiting in
+    /// the queue for a read), a declared protocol's host poll clock (the
+    /// GameCube adapter) and a clock that builds each report (the Switch 2
+    /// Pro, started with 03/0D). The probe allocates nothing while it counts,
+    /// so the process's count is the device's: its input pump, its clock and
+    /// its connection's reader.</summary>
+    static void Usbip(int runs, bool gate)
+    {
+        using var ctx = new HMContext();
+        ctx.LoadDefaultProfiles();
+        var server = UsbipServer.GetOrStart();
+
+        var ds = new byte[63];
+        UsbipPath(server, ctx.GetProfile(Composite)!.Inner, "input pump, " + Composite, runs, gate ? 2_000 : 1_000,
+            inEp: 4, readLength: 64, frame: ds, extended: false, queueEveryOther: true, start: null, gate);
+
+        var body = new byte[Switch2ProPacker.BodySize];
+        UsbipPath(server, ctx.GetProfile("switch2-pro-controller-composite")!.Inner,
+            "report clock, switch2-pro-controller-composite", runs, gate ? 250 : 50,
+            inEp: 1, readLength: 64, frame: body, extended: true, queueEveryOther: false,
+            start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x03, 0x91, 0x00, 0x0D, 0x00, 0x08, 0x00, 0x00,
+                                                              0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF })), gate);
+#if !HM_BASE
+        var gcProfile = ctx.GetProfile(GameCube)!.Inner;
+        var gcReport = new byte[37];
+        gcReport[0] = 0x21;
+        UsbipPath(server, gcProfile, "protocol clock, " + GameCube, runs, gate ? 125 : 25,
+            inEp: 1, readLength: 37, frame: gcReport, extended: true, queueEveryOther: false,
+            start: w => w.WaitFor(w.SubmitOut(2, new byte[] { 0x13 })), gate);
+        if (!gate) EngineLock(gcProfile, runs);
+#endif
+    }
+
+    static void UsbipPath(UsbipServer server, ControllerProfile profile, string name, int runs, int frames,
+                          uint inEp, int readLength, byte[] frame, bool extended, bool queueEveryOther,
+                          Action<UsbipWire>? start, bool gate)
+    {
+        var device = new UsbipEmulatedDevice(profile, UsbipIndex);
+        server.Register(device);
+        try
+        {
+            using var w = new UsbipWire(server.Port, device.BusId);
+            start?.Invoke(w);
+            IntPtr view = SharedMemoryIO.EnsureInputMapping(UsbipIndex);
+            IntPtr evt = SharedMemoryIO.GetInputEvent(UsbipIndex);
+            uint seqNo = (uint)Marshal.ReadInt32(view, 0);
+            var times = new double[runs * frames];
+            int timed = 0;
+            var bytesPerFrame = new List<double>(runs);
+            var contentions = new List<double>(runs);
+            long worst = 0;
+            void Frames(bool record)
+            {
+                for (int i = 0; i < frames; i++)
+                {
+                    frame[3] = (byte)i;
+                    bool queued = queueEveryOther && (i & 1) == 1;
+                    uint seq = queued ? 0 : w.SubmitIn(inEp, readLength);
+                    long t0 = Stopwatch.GetTimestamp();
+                    if (extended)
+                        SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, Array.Empty<byte>(), 0, null,
+                            dataOffset: 0, extendedData: frame, extendedLen: frame.Length);
+                    else
+                        SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, frame, frame.Length, null);
+                    if (queued)
+                    {
+                        // The pump has queued the frame by now, so the read
+                        // takes it from the queue.
+                        Spin(300);
+                        seq = w.SubmitIn(inEp, readLength);
+                    }
+                    w.WaitFor(seq);
+                    long t1 = Stopwatch.GetTimestamp();
+                    if (record && !queued) times[timed++] = (t1 - t0) * 1e6 / Stopwatch.Frequency;
+                }
+            }
+
+            // Warm up for a second and a half, then give the runtime's
+            // background recompilation of the hot methods time to finish.
+            // With tiered compilation on, that work allocates a few dozen
+            // bytes now and then while it runs, on threads not the device's.
+            var warm = Stopwatch.StartNew();
+            do Frames(record: false);
+            while (warm.ElapsedMilliseconds < 1500);
+            Thread.Sleep(500);
+
+            for (int run = 0; run < runs; run++)
+            {
+                long bytes0 = GC.GetTotalAllocatedBytes(precise: true);
+                long locks0 = Monitor.LockContentionCount;
+                Frames(record: true);
+                long bytes = GC.GetTotalAllocatedBytes(precise: true) - bytes0;
+                long locks = Monitor.LockContentionCount - locks0;
+                worst = Math.Max(worst, bytes);
+                bytesPerFrame.Add((double)bytes / frames);
+                contentions.Add((double)locks / frames);
+            }
+            Report($"USB/IP {name}: bytes the process allocated per frame", bytesPerFrame, runs, $", most in one run of {frames} frames {worst}");
+            Report($"USB/IP {name}: frame written to the host's reply, microseconds", new List<double>(times[..timed]), runs, "");
+            Report($"USB/IP {name}: lock contentions per frame", contentions, runs, "");
+            // Every run carries an allocation a frame makes, so the median
+            // run is zero only when no frame allocates. The runtime's tiered
+            // recompilation adds a few dozen bytes to an odd run, and none
+            // with tiered compilation off.
+            if (gate)
+            {
+                var sorted = bytesPerFrame.OrderBy(x => x).ToList();
+                double median = sorted[sorted.Count / 2];
+                Check($"USB/IP {name}: a frame allocates nothing", median == 0,
+                      $"median run {median * frames:F0} bytes, worst {worst}, over {runs} runs of {frames} frames");
+            }
+        }
+        finally
+        {
+            server.Unregister(device);
+            device.Dispose();
+            SharedMemoryIO.DestroyController(UsbipIndex);
+        }
+    }
+
+#if !HM_BASE
+    /// <summary>What the protocol engine's lock costs a frame: SetReport,
+    /// the one call a frame makes into the engine, timed whole on one
+    /// thread, beside an uncontended lock taken and released alone.</summary>
+    static void EngineLock(ControllerProfile gc, int runs)
+    {
+        var engine = new ProtocolEngine(CompiledProtocol.Compile(gc, new UsbDescriptorSet(gc))!);
+        var report = new byte[37];
+        report[0] = 0x21;
+        long origin = Stopwatch.GetTimestamp();
+        const int Calls = 200_000;
+        for (int i = 0; i < Calls; i++) engine.SetReport(report, origin + i, origin);
+        var set = new List<double>(runs);
+        var bare = new List<double>(runs);
+        object sync = new();
+        int n = 0;
+        for (int run = 0; run < runs; run++)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+            for (int i = 0; i < Calls; i++)
+            {
+                report[3] = (byte)i;
+                engine.SetReport(report, t0 + i * 1000L, origin);
+            }
+            long t1 = Stopwatch.GetTimestamp();
+            for (int i = 0; i < Calls; i++) lock (sync) n++;
+            long t2 = Stopwatch.GetTimestamp();
+            set.Add((t1 - t0) * 1e9 / Stopwatch.Frequency / Calls);
+            bare.Add((t2 - t1) * 1e9 / Stopwatch.Frequency / Calls);
+        }
+        Report("ProtocolEngine.SetReport, lock included, ns per frame", set, runs, "");
+        Report("an uncontended lock taken and released alone, ns", bare, runs, $" ({n} entries)");
+    }
+#endif
+
+    /// <summary>The host controller's side of one USB/IP connection,
+    /// allocating nothing per transfer. IN transfers take odd seqnums and
+    /// OUT transfers even ones, so a reply's seqnum says whether data follows
+    /// it.</summary>
+    sealed class UsbipWire : IDisposable
+    {
+        readonly Socket _s;
+        readonly byte[] _header = new byte[48];
+        readonly byte[] _data = new byte[1024];
+        uint _seq = 1;
+
+        public UsbipWire(int port, string busId)
+        {
+            _s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, ReceiveTimeout = 3000 };
+            _s.Connect(IPAddress.Loopback, port);
+            var import = new byte[8 + 32];
+            BinaryPrimitives.WriteUInt16BigEndian(import, 0x0111);
+            BinaryPrimitives.WriteUInt16BigEndian(import.AsSpan(2), 0x8003);   // OP_REQ_IMPORT
+            System.Text.Encoding.ASCII.GetBytes(busId).CopyTo(import, 8);
+            Send(import);
+            var reply = new byte[8 + 312];
+            Receive(reply);
+            if (BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4)) != 0)
+                throw new InvalidOperationException($"import of {busId} refused");
+        }
+
+        uint Next(bool isIn)
+        {
+            uint s = _seq++;
+            if (((s & 1) == 1) != isIn) s = _seq++;
+            return s;
+        }
+
+        void Submit(uint seq, bool isIn, uint ep, int length)
+        {
+            Array.Clear(_header);
+            BinaryPrimitives.WriteUInt32BigEndian(_header, 1);                  // CMD_SUBMIT
+            BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(4), seq);
+            BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(12), isIn ? 1u : 0u);
+            BinaryPrimitives.WriteUInt32BigEndian(_header.AsSpan(16), ep);
+            BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(24), length);
+            BinaryPrimitives.WriteInt32BigEndian(_header.AsSpan(32), -1);       // not isochronous
+            Send(_header);
+        }
+
+        public uint SubmitIn(uint ep, int length)
+        {
+            uint s = Next(true);
+            Submit(s, true, ep, length);
+            return s;
+        }
+
+        public uint SubmitOut(uint ep, ReadOnlySpan<byte> data)
+        {
+            uint s = Next(false);
+            Submit(s, false, ep, data.Length);
+            Send(data);
+            return s;
+        }
+
+        /// <summary>Read replies up to <paramref name="seq"/>'s and return
+        /// its status.</summary>
+        public int WaitFor(uint seq)
+        {
+            while (true)
+            {
+                Receive(_header);
+                if (BinaryPrimitives.ReadUInt32BigEndian(_header) != 3)
+                    throw new InvalidOperationException("a reply that is not RET_SUBMIT");
+                uint got = BinaryPrimitives.ReadUInt32BigEndian(_header.AsSpan(4));
+                int status = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(20));
+                int actual = BinaryPrimitives.ReadInt32BigEndian(_header.AsSpan(24));
+                if ((got & 1) == 1 && actual > 0) Receive(_data.AsSpan(0, actual));
+                if (got == seq) return status;
+            }
+        }
+
+        void Send(ReadOnlySpan<byte> b)
+        {
+            while (!b.IsEmpty) b = b[_s.Send(b)..];
+        }
+
+        void Receive(Span<byte> b)
+        {
+            while (!b.IsEmpty)
+            {
+                int n = _s.Receive(b);
+                if (n <= 0) throw new IOException("the device closed the connection");
+                b = b[n..];
+            }
+        }
+
+        public void Dispose() => _s.Dispose();
+    }
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
