@@ -480,6 +480,15 @@ internal static class Offline
               g11.Gate == DeviceManager.RegistrationGate.Allowed && g11.Held && g11.Takes == 2,
               $"{g11.Gate}, {g11.Takes} takes");
 
+        // An install pending under the lock is no round of the three: what
+        // came back twice after it still gets its third take.
+        int rc = 0;
+        var g14 = Gate(new Sequence { AbsentBefore = true, BusyUnderFirstLock = true },
+                       rivals: remove => remove || ++rc == 1 || rc >= 4);
+        Check("gate: a pending install, then a rival back twice -> allowed on the fourth take",
+              g14.Gate == DeviceManager.RegistrationGate.Allowed && g14.Held && g14.Takes == 4,
+              $"{g14.Gate}, {g14.Takes} takes");
+
         // A software device's record stays by design: a phantom one is not
         // removed, a prior life in the tree is, and must pass its test.
         var g12 = Gate(new Sequence { OutOfTreeBefore = true, RecordGoneAt = null }, kind: DeviceManager.RegistrationKind.Software);

@@ -700,7 +700,10 @@ public static partial class DeviceManager
         // Rounded up, so the wait never ends a millisecond short of its bound.
         int MsLeft() => (int)Math.Max(0, ((installDeadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 + freq - 1) / freq);
 
-        for (int rounds = 1; ; rounds++)
+        // Rounds sent back by something that came back. A round sent back by
+        // a pending install is bounded by the install wait's time instead.
+        int backs = 0;
+        while (true)
         {
             decision = RegistrationGate.Refused;
             if (clearRivals != null && !clearRivals(true)) return null;
@@ -726,8 +729,8 @@ public static partial class DeviceManager
                 if (back)
                 {
                     hold.Dispose();
-                    if (rounds < GateRounds) continue;
-                    DeviceOrchestrator.LogDiag($"      {instanceId} or a rival of its prefix came back {rounds} times; refusing to register it");
+                    if (++backs < GateRounds) continue;
+                    DeviceOrchestrator.LogDiag($"      {instanceId} or a rival of its prefix came back {backs} times; refusing to register it");
                     return null;
                 }
                 uint now = InstallQueue(0);
