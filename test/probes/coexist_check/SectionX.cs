@@ -381,6 +381,46 @@ internal static partial class Program
             Check("X3: a keyless create takes transport index 0", Ok(c1) && PeerProcess.Field(c1, "transport") == "0", c1);
             string c2 = p.Send($"create pad F0E4 {key}");
             Check($"X3: a create of the key whose identity name it holds succeeds", Ok(c2), c2);
+            // An elevated create under a prefix that does not exist fails
+            // with error 5, as a claim would on a build without the
+            // Administrators prefix. The refusal must state what was read,
+            // error 5 with Administrators enabled, give a missing prefix as
+            // one possible cause, and not ask for elevation the token has.
+            // The type stays UnauthorizedAccessException, the one the
+            // sweeps' TryEnsureOwner turns into a skipped sweep.
+            string r = p.Send("claimrefused");
+            Check("X3: an elevated create under a missing prefix is refused with error 5, stated as read",
+                  Ok(r) && r.Contains("error=5 ") && r.Contains("type=UnauthorizedAccessException")
+                  && r.Contains("Win32 error 5, though the token the call ran under has Administrators enabled")
+                  && r.Contains("A Windows build without that pipe prefix would refuse a claim this way")
+                  && !r.Contains("Run the program elevated") && !r.Contains("does not provide"), r);
+            // The same error read on a thread that impersonates a program
+            // that is not elevated must still ask for elevation.
+            var refused = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.MachineClaims")
+                ?.GetMethod("RefusedClaim", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string medium = refused == null ? "no MachineClaims.RefusedClaim" : "?";
+            if (refused != null)
+            {
+                var t = new Thread(() =>
+                {
+                    IntPtr token = Native.MediumToken();
+                    try
+                    {
+                        if (!Native.SetThreadToken(IntPtr.Zero, token)) { medium = $"SetThreadToken error {Marshal.GetLastWin32Error()}"; return; }
+                        try
+                        {
+                            var ex = (Exception)refused.Invoke(null, new object[] { 5 })!;
+                            medium = $"{ex.GetType().Name}: {ex.Message}";
+                        }
+                        finally { Native.RevertToSelf(); }
+                    }
+                    finally { Native.CloseHandle(token); }
+                });
+                t.Start(); t.Join();
+            }
+            Check("X3: the same error under a token without Administrators enabled says so and asks for elevation",
+                  medium.StartsWith(nameof(UnauthorizedAccessException) + ":", StringComparison.Ordinal)
+                  && medium.Contains("does not have Administrators enabled") && medium.Contains("Run the program elevated"), medium);
         }
         finally { sq.Dispose(); }
         Check("X3: nothing the squatter made is left", !Native.PipeExists(index0) && !Native.PipeExists(identity));

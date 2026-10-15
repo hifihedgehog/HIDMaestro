@@ -98,8 +98,9 @@ internal static partial class MachineClaims
     /// write its record. Every machine-wide write the SDK makes comes after
     /// this. A claim whose record could not be written gets it from the
     /// first call that can write it.</summary>
-    /// <exception cref="UnauthorizedAccessException">The process is not
-    /// elevated, so it can take no claim.</exception>
+    /// <exception cref="UnauthorizedAccessException">The claim was refused
+    /// with ERROR_ACCESS_DENIED: the token lacks Administrators, or, with
+    /// Administrators enabled, for a cause not read (<see cref="RefusedClaim"/>).</exception>
     internal static void EnsureOwner()
     {
         if (s_ownerClaim != null)
@@ -113,23 +114,57 @@ internal static partial class MachineClaims
             string id = Guid.NewGuid().ToString("N");
             SafeFileHandle? h = TryClaim(OwnerPipeName(id));
             // A fresh GUID collides with nothing, so a failure here is a
-            // process that is not elevated, refused by the claim prefix, or
-            // the system refusing pipes outright. Nothing machine-wide can be
-            // arbitrated without the claim.
+            // process that is not elevated, refused by the claim prefix, a
+            // pipe system without that prefix, or the system refusing pipes
+            // outright. Nothing machine-wide can be arbitrated without the
+            // claim.
             if (h == null)
-            {
-                int err = Marshal.GetLastPInvokeError();
-                if (err == ERROR_ACCESS_DENIED)
-                    throw new UnauthorizedAccessException(
-                        "HIDMaestro needs an elevated process: only a token with Administrators enabled can take its ownership claim.");
-                throw new InvalidOperationException(
-                    $"HIDMaestro could not create its ownership claim (Win32 error {err}).");
-            }
+                throw RefusedClaim(Marshal.GetLastPInvokeError());
             s_ownerId = id;
             s_ownerClaim = h;
             OwnerSweep.RegisterExitCleanup();
             TryWriteRecordLocked();
         }
+    }
+
+    /// <summary>The exception for a refused owner claim, stating what was
+    /// read. Every ERROR_ACCESS_DENIED is an UnauthorizedAccessException,
+    /// the type <see cref="TryEnsureOwner"/> turns into a skipped sweep, as
+    /// before. Only the message depends on the token. Without
+    /// Administrators enabled the refusal is the prefix at work, and the
+    /// message asks for elevation. With it enabled, the cause was not read.
+    /// A pipe system without the Administrators prefix is one possible
+    /// cause: a create under a prefix that does not exist fails with
+    /// ERROR_ACCESS_DENIED even with Administrators enabled (measured on
+    /// 26200), though no build read lacks the prefix. Software that filters
+    /// pipe creation is another. When the token could not be read, the
+    /// message says so.</summary>
+    internal static Exception RefusedClaim(int error)
+    {
+        if (error != ERROR_ACCESS_DENIED)
+            return new InvalidOperationException($"HIDMaestro could not create its ownership claim (Win32 error {error}).");
+        return AdministratorsEnabled() switch
+        {
+            false => new UnauthorizedAccessException(
+                "HIDMaestro could not take its ownership claim: the token the call ran under does not have Administrators enabled, which the claim requires. Run the program elevated."),
+            null => new UnauthorizedAccessException(
+                $@"HIDMaestro could not create its ownership claim under \\.\pipe\{ClaimPrefix}: the pipe system refused it with Win32 error {error}, and whether the token the call ran under has Administrators enabled could not be read."),
+            true => new UnauthorizedAccessException(
+                $@"HIDMaestro could not create its ownership claim under \\.\pipe\{ClaimPrefix}: the pipe system refused it with Win32 error {error}, though the token the call ran under has Administrators enabled. A Windows build without that pipe prefix would refuse a claim this way, and so can software that filters pipe creation."),
+        };
+    }
+
+    /// <summary>Whether the token the create ran under, the thread's when it
+    /// impersonates and the process's otherwise, has Administrators enabled,
+    /// which is what the claim prefix requires, or null when that could not
+    /// be read. CheckTokenMembership with no token reads that token.</summary>
+    private static bool? AdministratorsEnabled()
+    {
+        Span<byte> sid = stackalloc byte[SECURITY_MAX_SID_SIZE];
+        uint size = SECURITY_MAX_SID_SIZE;
+        if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, IntPtr.Zero, sid, ref size)) return null;
+        if (!CheckTokenMembership(IntPtr.Zero, sid, out bool member)) return null;
+        return member;
     }
 
     /// <summary><see cref="EnsureOwner"/> for the sweeps, which have
@@ -442,6 +477,17 @@ internal static partial class MachineClaims
     [LibraryImport("kernel32.dll", EntryPoint = "WaitNamedPipeW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool WaitNamedPipe(string name, uint timeout);
+
+    private const int SECURITY_MAX_SID_SIZE = 68;
+    private const int WinBuiltinAdministratorsSid = 26;
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CreateWellKnownSid(int type, IntPtr domainSid, Span<byte> sid, ref uint size);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CheckTokenMembership(IntPtr token, ReadOnlySpan<byte> sid, [MarshalAs(UnmanagedType.Bool)] out bool isMember);
 
     [LibraryImport("advapi32.dll", EntryPoint = "ConvertStringSecurityDescriptorToSecurityDescriptorW", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -57,6 +57,10 @@
 //   sddl <type> <field>         the security descriptor string a
 //                               HIDMaestro.Internal type creates its
 //                               objects with, read from its constant
+//   claimrefused                create a pipe under a protected prefix that
+//                               does not exist, and reply with the error
+//                               and what the SDK's MachineClaims.RefusedClaim
+//                               makes of it
 //   dispose                     dispose every controller
 //   exit                        dispose the context and exit
 //   quit                        exit without disposing anything, so only
@@ -153,6 +157,19 @@ internal static class Peer
                         RemoveEverything(preserveInstall: false);
                         Reply("OK uninstall");
                         break;
+                    case "claimrefused":
+                    {
+                        string name = $@"\\.\pipe\ProtectedPrefix\NoSuchPrefix\CoexistCheck.{Environment.ProcessId}";
+                        IntPtr pipe = CreateNamedPipeW(name, 0x00000001 | 0x00080000, 0x00000008, 1, 0, 0, 0, IntPtr.Zero);
+                        int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                        if (pipe != new IntPtr(-1)) { CloseHandle(pipe); Reply("ERR claimrefused the pipe was created"); break; }
+                        var claims = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.MachineClaims");
+                        var refused = claims?.GetMethod("RefusedClaim", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (refused == null) { Reply($"ERR claimrefused error={err} no MachineClaims.RefusedClaim"); break; }
+                        var ex = (Exception)refused.Invoke(null, new object[] { err })!;
+                        Reply($"OK claimrefused error={err} type={ex.GetType().Name} {ex.Message}");
+                        break;
+                    }
                     case "sddl":
                     {
                         var type = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal." + a[1]);
@@ -550,6 +567,8 @@ internal static class Peer
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     static extern IntPtr OpenEventW(uint access, bool inherit, string name);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateNamedPipeW(string name, uint openMode, uint pipeMode, uint maxInstances, uint outSize, uint inSize, uint timeout, IntPtr sa);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     static extern bool SetEvent(IntPtr h);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
