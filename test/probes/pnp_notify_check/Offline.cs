@@ -52,6 +52,9 @@ internal static class Offline
     sealed class Sequence
     {
         public bool AbsentBefore;
+        /// <summary>Before Begin the devnode is out of the tree, its record
+        /// still there: a phantom.</summary>
+        public bool OutOfTreeBefore;
         public long? LeavesTree = 0, RemovedAt, RecordGoneAt;
         public long? InstallsIdleAt = 0;
         public bool InstallWaitFails, RefuseRegistration;
@@ -86,7 +89,7 @@ internal static class Offline
             }
         }
 
-        bool InTree(long now) => !AbsentBefore && (now < 0 || LeavesTree is not long t || now < t);
+        bool InTree(long now) => !AbsentBefore && !OutOfTreeBefore && (now < 0 || LeavesTree is not long t || now < t);
         bool Record(long now) => !AbsentBefore && (now < 0 || RecordGoneAt is not long t || now < t);
 
         public uint Locate(string id, uint flags)
@@ -242,9 +245,20 @@ internal static class Offline
               $"fast 120000 -> {f120}, fast 3000 -> {f3}, fast 1000 -> {f1}, not fast 120000 -> {s120}");
 
         // The waits, through the SDK's own loop.
-        var w1 = WatchedRemoval(new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 }, uninstalls: true, 5000);
+        var s1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };
+        var w1 = WatchedRemoval(s1, uninstalls: true, 5000);
         Check("removal: out of the tree at 0, REMOVED at 200, record gone at 300 -> removed at 300",
               w1.Outcome == Removed && Within(w1.Ms, 300), $"{w1.Outcome} at {w1.Ms} ms");
+        Check("removal of a devnode in the tree opens one REMOVED registration", s1.Registrations == 1,
+              $"{s1.Registrations} registration(s)");
+
+        // A phantom (out of the tree, record still there) has no removal for
+        // a notification to prove: no registration, and its record decides.
+        var sPh = new Sequence { OutOfTreeBefore = true, RecordGoneAt = 100 };
+        var wPh = WatchedRemoval(sPh, uninstalls: true, 5000);
+        Check("removal of a phantom record gone at 100 -> removed at 100, with no REMOVED registration",
+              wPh.Outcome == Removed && Within(wPh.Ms, 100) && sPh.Registrations == 0,
+              $"{wPh.Outcome} at {wPh.Ms} ms, {sPh.Registrations} registration(s)");
 
         var w2 = WatchedRemoval(new Sequence { LeavesTree = 0, RecordGoneAt = 100, RemovedAt = 200 }, uninstalls: true, 5000);
         Check("removal: record gone at 100 before REMOVED at 200 -> removed at 200",
@@ -285,11 +299,14 @@ internal static class Offline
               w7 == Removed && Within(w7Ms, 300), $"{w7} at {w7Ms} ms");
 
         // The registration gate.
-        var g1 = Gate(new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 });
+        var sG1 = new Sequence { LeavesTree = 0, RemovedAt = 200, RecordGoneAt = 300 };
+        var g1 = Gate(sG1);
         Check("gate: prior life out of the tree at 0, REMOVED at 200, record gone at 300 -> allowed at 300",
               g1.Gate == DeviceManager.RegistrationGate.Allowed && Within(g1.Ms, 300),
               $"{g1.Gate} at {g1.Ms} ms, {g1.Removals} prior-life removal(s)");
         Check("gate: the prior life's removal ran once", g1.Removals == 1, $"{g1.Removals}");
+        Check("gate: a prior life out of the tree at the gate opens no REMOVED registration", sG1.Registrations == 0,
+              $"{sG1.Registrations} registration(s)");
 
         var g2 = Gate(new Sequence { AbsentBefore = true, InstallsIdleAt = 400 });
         Check("gate: no prior life, installs pending until 400 -> allowed at 400",

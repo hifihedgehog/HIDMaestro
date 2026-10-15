@@ -463,10 +463,14 @@ public static partial class DeviceManager
         return removedOverdue ? RemovalOutcome.GoneWithoutRemoved : RemovalOutcome.Pending;
     }
 
-    /// <summary>One instance's removal test. Registered for the instance's
-    /// DEVICEINSTANCEREMOVED notification before it first looks at the
-    /// instance, so a removal that ends between the two still reaches the
-    /// callback.</summary>
+    /// <summary>One instance's removal test. For a devnode in the tree it
+    /// registers for the instance's DEVICEINSTANCEREMOVED notification and
+    /// then looks at the devnode again, so a removal that ends between the
+    /// two still reaches the callback. A devnode out of the tree has no
+    /// removal a notification could prove, and gets no registration: Windows
+    /// refuses one for an id with no devnode anyway (CR_FAILURE, measured
+    /// 2026-10-15), and every registration that works is one more listener
+    /// during a removal.</summary>
     internal sealed class RemovalWatch : IDisposable
     {
         private readonly string _id;
@@ -484,9 +488,10 @@ public static partial class DeviceManager
         internal bool PresentAtStart { get; private set; }
         internal bool Registered { get; }
 
-        private RemovalWatch(string instanceId)
+        private RemovalWatch(string instanceId, bool register)
         {
             _id = instanceId;
+            if (!register) return;
             if (RemovedHook is { } hook)
             {
                 _hooked = hook(instanceId, OnRemoved);
@@ -503,12 +508,13 @@ public static partial class DeviceManager
             Registered = _registration != IntPtr.Zero;
         }
 
-        /// <summary>Register for <paramref name="instanceId"/>'s REMOVED
-        /// notification, then note whether it is in the device tree.</summary>
+        /// <summary>For a devnode in the device tree, register for its
+        /// REMOVED notification, then note whether it is still there.</summary>
         internal static RemovalWatch Start(string instanceId)
         {
-            var watch = new RemovalWatch(instanceId);
-            try { watch.PresentAtStart = Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS; }
+            bool inTree = Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS;
+            var watch = new RemovalWatch(instanceId, register: inTree);
+            try { watch.PresentAtStart = inTree && Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS; }
             catch
             {
                 watch.Dispose();
@@ -1221,12 +1227,13 @@ public static partial class DeviceManager
         // QuickRemovalMs for a call that finishes its work before it
         // returns, a fast removal of any caller among them. Until v1.13.0
         // fast mode waited for nothing, so the next registration could
-        // follow a removal Windows was still processing. Each watch
-        // registers before its removal call, so the REMOVED notification of
-        // a devnode that leaves during the call is not missed.
-        using var parentWatch = RemovalWatch.Start(instanceId);
+        // follow a removal Windows was still processing. Each watch starts
+        // right before its devnode's removal call and ends with its test, so
+        // the REMOVED notification of a devnode that leaves during the call
+        // is not missed, and one registration at most is open at a time.
         int parentBudget = ParentRemovalBudget(fast, timeoutMs);
         var parentOutcome = RemovalOutcome.Pending;
+        var closeOutcome = RemovalOutcome.Removed;
 
         bool isSwdParent = instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase);
 
@@ -1279,10 +1286,14 @@ public static partial class DeviceManager
             // here; the cascade completes asynchronously and Step 2's CM
             // sweep below remains as belt-and-braces for survivors.
             var swFastSw = System.Diagnostics.Stopwatch.StartNew();
-            int hrFast = SwdDeviceFactory.Remove(instanceId);
-            DeviceOrchestrator.LogDiag(
-                $"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hrFast:X8} " +
-                $"(fast mode) in {swFastSw.ElapsedMilliseconds}ms");
+            using (var closeWatch = RemovalWatch.Start(instanceId))
+            {
+                int hrFast = SwdDeviceFactory.Remove(instanceId);
+                closeOutcome = closeWatch.Wait(uninstalls: false, parentBudget);
+                DeviceOrchestrator.LogDiag(
+                    $"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hrFast:X8} " +
+                    $"(fast mode): {closeOutcome} in {swFastSw.ElapsedMilliseconds}ms");
+            }
         }
         else if (isSwdParent && !fast)
         {
@@ -1307,6 +1318,7 @@ public static partial class DeviceManager
             // (verified in the 09:21:18 diag log: present=True after
             // 56 ms hr=0x0).
             var swSw = System.Diagnostics.Stopwatch.StartNew();
+            using var closeWatch = RemovalWatch.Start(instanceId);
             int hr = SwdDeviceFactory.Remove(instanceId);
             // Block until the kernel actually fires the device-removed
             // notification: or the timeout expires. Use the caller's
@@ -1315,7 +1327,7 @@ public static partial class DeviceManager
             // xinputhid cascade budget); cleanup paths may pass less.
             // SwDeviceClose leaves the instance's record, so the record is
             // not waited for.
-            parentOutcome = parentWatch.Wait(uninstalls: false, timeoutMs);
+            parentOutcome = closeWatch.Wait(uninstalls: false, timeoutMs);
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} confirmed_offline={goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
         }
@@ -1361,8 +1373,9 @@ public static partial class DeviceManager
         if (fast)
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
+            using var parentWatch = RemovalWatch.Start(instanceId);
             bool issued = DisableAndUninstall(devInst, instanceId);
-            parentOutcome = parentWatch.Wait(uninstalls: !isSwdParent, issued ? parentBudget : 0);
+            parentOutcome = Worse(closeOutcome, parentWatch.Wait(uninstalls: !isSwdParent, issued ? parentBudget : 0));
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      fast removal of {instanceId}: {parentOutcome} after {waitSw.ElapsedMilliseconds}ms");
         }
@@ -1380,6 +1393,7 @@ public static partial class DeviceManager
         else
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
+            using var parentWatch = RemovalWatch.Start(instanceId);
             bool issued = DifRemoveDevice(instanceId);
             parentOutcome = parentWatch.Wait(uninstalls: true, issued ? parentBudget : 0);
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
@@ -1407,6 +1421,7 @@ public static partial class DeviceManager
             (instanceId.StartsWith("ROOT\\", StringComparison.OrdinalIgnoreCase) ||
              instanceId.StartsWith("HID\\",  StringComparison.OrdinalIgnoreCase)))
         {
+            using var fallbackWatch = RemovalWatch.Start(instanceId);
             bool stillPhantom = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
             if (stillPhantom)
             {
@@ -1504,7 +1519,7 @@ public static partial class DeviceManager
             // The fallbacks are removals too, tested the same way before
             // the PnP lock is let go.
             if (stillPhantom)
-                parentOutcome = parentWatch.Wait(uninstalls: true, QuickRemovalMs);
+                parentOutcome = fallbackWatch.Wait(uninstalls: true, QuickRemovalMs);
         }
 
         // Step 4: Final check
@@ -1512,6 +1527,10 @@ public static partial class DeviceManager
                && CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS;
         return parentOutcome;
     }
+
+    /// <summary>The worse of two decided outcomes of one removal's steps,
+    /// by the order Removed, GoneWithoutRemoved, NotGone.</summary>
+    static RemovalOutcome Worse(RemovalOutcome a, RemovalOutcome b) => (RemovalOutcome)Math.Max((int)a, (int)b);
 
     /// <summary>Locate devcon.exe under the installed WDK. Returns the first
     /// match under C:\Program Files (x86)\Windows Kits\10\Tools\*\&lt;arch&gt;\,
