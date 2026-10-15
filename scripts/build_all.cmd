@@ -9,6 +9,15 @@ setlocal
 ::   HMSkipArm64=true  x64 only: no ARM64 driver, companion or SWD helper,
 ::                     and no ARM64 usbip-win2 installer in the SDK.
 ::   HMSkipUsbip=true  no USB/IP transport in the SDK.
+::
+:: Every INF of both architectures is stamped with one time, taken here
+:: (stamp_inf.ps1). A caller can set HM_STAMP_TIME, yyyy-MM-ddTHH:mm, to
+:: choose it.
+if not defined HM_STAMP_TIME for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-ddTHH:mm', [Globalization.CultureInfo]::InvariantCulture)"`) do set "HM_STAMP_TIME=%%T"
+if not defined HM_STAMP_TIME (
+    echo STAMP TIME NOT READ
+    exit /b 1
+)
 set "HM_ARCHS=x64 arm64"
 if /i "%HMSkipArm64%"=="true" set "HM_ARCHS=x64"
 for %%A in (%HM_ARCHS%) do (

@@ -14,6 +14,15 @@ call "%~dp0native_env.cmd" %1
 if errorlevel 1 exit /b 1
 echo.
 
+:: The time every INF of this build is stamped with, taken once at the
+:: start (stamp_inf.ps1). build_all.cmd sets HM_STAMP_TIME for both
+:: architectures, and a caller can set it to drive the stamp.
+if not defined HM_STAMP_TIME for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-ddTHH:mm', [Globalization.CultureInfo]::InvariantCulture)"`) do set "HM_STAMP_TIME=%%T"
+if not defined HM_STAMP_TIME (
+    echo STAMP TIME NOT READ
+    exit /b 1
+)
+
 :: Generate build\version_gen.h from Directory.Build.props so the
 :: VERSIONINFO in every native binary matches the released version.
 :: Binaries with no version resource read as anonymous to antivirus
@@ -116,17 +125,17 @@ if exist "%DRIVER_DIR%\hmswd\hmswd.c" (
     )
 )
 
-:: Stamp each INF's DriverVer with today's date + HHmm build number.
+:: Stamp each INF's DriverVer with the build's date + HHmm build number.
 :: The committed source INF keeps a stable 1.x.y.0 for review; the build/
 :: INF gets a fresh stamp so every package is uniquely versioned: pnputil
 :: will never see "same version, skip install" against a prior DriverStore
 :: directory (which was the failure mode that hid every driver bugfix in
 :: this session behind a stale already-installed binary).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
-    -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf" -Architecture %HM_ARCH%
+    -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf" -Architecture %HM_ARCH% -Time "%HM_STAMP_TIME%"
 if errorlevel 1 exit /b 1
 if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
-    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf" -Architecture %HM_ARCH%
+    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf" -Architecture %HM_ARCH% -Time "%HM_STAMP_TIME%"
 if errorlevel 1 exit /b 1
 
 echo.

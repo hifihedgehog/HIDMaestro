@@ -2,8 +2,9 @@
 // assembly, and what it refuses when a payload is missing.
 //
 // "complete": the build every release ships. It carries the driver and the
-// USB/IP transport for x64 and ARM64 and the OpenVR driver, and its Inf2Cat
-// set holds only the six files Inf2Cat loads.
+// USB/IP transport for x64 and ARM64 and the OpenVR driver, its Inf2Cat
+// set holds only the six files Inf2Cat loads, and its four INFs carry the
+// one DriverVer stamp the build took.
 //
 // "variant": the copy of this probe the project build puts in variant\,
 // beside an SDK built with HMSkipArm64 and HMSkipUsbip from a tree whose
@@ -104,7 +105,28 @@ internal static class Program
         Check("the Inf2Cat set is the six files Inf2Cat loads",
               inf2cat.SequenceEqual(Inf2CatSet),
               string.Join(", ", inf2cat.Select(n => n["HIDMaestro.Resources.".Length..])));
+
+        // One build, one stamp. build_all.cmd takes the time once for both
+        // architectures, and the companion INF takes the driver INF's stamp.
+        // Through v1.12.0 each script read the clock, so a build whose two
+        // stamps fell in two minutes carried two DriverVers.
+        var stamps = new List<string>();
+        foreach (string arch in new[] { "x64", "arm64" })
+            foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
+                stamps.Add($"{arch} {inf} {EmbeddedDriverVer($"HIDMaestro.Native.{arch}.{inf}") ?? "none"}");
+        var distinct = stamps.Select(s => s[(s.LastIndexOf(' ') + 1)..]).Distinct().ToList();
+        Check("every INF of the build carries one DriverVer stamp",
+              distinct.Count == 1 && distinct[0] != "none", string.Join("; ", stamps));
         return 0;
+    }
+
+    static string? EmbeddedDriverVer(string logicalName)
+    {
+        using var s = typeof(HMContext).Assembly.GetManifestResourceStream(logicalName);
+        if (s == null) return null;
+        using var r = new StreamReader(s);
+        var m = System.Text.RegularExpressions.Regex.Match(r.ReadToEnd(), @"(?m)^\s*DriverVer\s*=\s*(\S+)\s*$");
+        return m.Success ? m.Groups[1].Value : null;
     }
 
     static int Variant()

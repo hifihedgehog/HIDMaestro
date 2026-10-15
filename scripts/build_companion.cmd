@@ -4,6 +4,14 @@ set "DRIVER_DIR=%~dp0..\driver"
 call "%~dp0native_env.cmd" %1
 if errorlevel 1 exit /b 1
 
+:: The time both INFs are stamped with, taken once at the start, as
+:: build.cmd does. build_all.cmd sets HM_STAMP_TIME for the whole build.
+if not defined HM_STAMP_TIME for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "(Get-Date).ToString('yyyy-MM-ddTHH:mm', [Globalization.CultureInfo]::InvariantCulture)"`) do set "HM_STAMP_TIME=%%T"
+if not defined HM_STAMP_TIME (
+    echo STAMP TIME NOT READ
+    exit /b 1
+)
+
 :: Same version resource as the driver (see scripts/build.cmd).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gen_version.ps1" ^
     -PropsPath "%~dp0..\Directory.Build.props" -OutPath "%OUT_DIR%\version_gen.h"
@@ -30,12 +38,18 @@ if errorlevel 1 (echo LINK FAILED & exit /b 1)
 
 copy /y "%OUT_DIR%\HIDMaestroCompanion.dll" "%OUT_DIR%\HMXInput.dll" >nul
 
-:: Also stamp + stage the companion INF so a standalone `build_companion`
-:: invocation leaves build/ in a consistent state (otherwise SDK rebuilds
-:: after this script would pick up whatever hidmaestro_xusb.inf was in
-:: build/ from the last full build: potentially stale).
+:: Stamp both INFs of this architecture with the build's time, so the two
+:: packages carry one DriverVer (stamp_inf.ps1). Under build_all.cmd that
+:: is the time build.cmd stamped with, so nothing changes. Run alone, it is
+:: a new time: the rebuilt companion's package is then newer than the one
+:: installed, so the SDK built from build\ deploys it. Reusing the
+:: installed stamp instead would leave the new HMXInput.dll out of the
+:: driver store.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
+    -Source "%DRIVER_DIR%\hidmaestro.inf" -Dest "%OUT_DIR%\hidmaestro.inf" -Architecture %HM_ARCH% -Time "%HM_STAMP_TIME%"
+if errorlevel 1 exit /b 1
 if exist "%DRIVER_DIR%\hidmaestro_xusb.inf" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stamp_inf.ps1" ^
-    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf" -Architecture %HM_ARCH%
+    -Source "%DRIVER_DIR%\hidmaestro_xusb.inf" -Dest "%OUT_DIR%\hidmaestro_xusb.inf" -Architecture %HM_ARCH% -Time "%HM_STAMP_TIME%"
 if errorlevel 1 exit /b 1
 
 echo BUILD SUCCEEDED

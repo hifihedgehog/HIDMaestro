@@ -52,6 +52,9 @@ rem    smaller SDK. S78 (build_info_check) also fails the battery unless
 rem    the SDK reports itself complete.
 set "HMSkipArm64="
 set "HMSkipUsbip="
+rem    A release is stamped with the time its build starts, never a
+rem    stamp time left in the environment (stamp_inf.ps1).
+set "HM_STAMP_TIME="
 echo [1/4] Building SDK + driver + test apps...
 call scripts\build_all.cmd >nul 2>&1
 if errorlevel 1 (

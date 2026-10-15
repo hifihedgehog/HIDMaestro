@@ -15,6 +15,11 @@
 #       installed kits): builds, and reports taking each root from them.
 #   N4  native build, WDKContentRoot naming a folder without a WDK: fails
 #       and names WDKContentRoot.
+#   N5  native build, HM_STAMP_TIME set for build.cmd, then later for a
+#       separate build_companion.cmd: both INFs carry one stamp each time,
+#       the later one after the companion build. A stamp time later than the
+#       clock, earlier than the sources, or naming no time fails the build,
+#       and pre-tag-validate.cmd clears the setting.
 #   M1  SDK project, NuGet WDK: builds, and embeds the package's Inf2Cat set.
 #   M2  SDK project, HM_WDK_ROOT naming a folder without a WDK: fails and
 #       names HMInf2catBin.
@@ -44,7 +49,8 @@ $wdkPackages = @{
 # Every setting a case controls. Each case starts from none of them, so the
 # environment this script runs in cannot leak into a case.
 $layoutVariables = 'HM_SDK_ROOT', 'HM_WDK_ROOT', 'HM_WDK_ROOT_ARM64', 'HM_WDK_VERSION', 'HMWdkBin', 'HMInf2catBin',
-                   'HMSkipArm64', 'HMSkipUsbip', 'WDKContentRoot', 'WindowsSdkDir', 'Version_Number', 'VSINSTALLDIR'
+                   'HMSkipArm64', 'HMSkipUsbip', 'WDKContentRoot', 'WindowsSdkDir', 'Version_Number', 'VSINSTALLDIR',
+                   'HM_STAMP_TIME'
 
 $script:failures = 0
 function Report([string]$case, [bool]$ok, [string]$detail) {
@@ -242,6 +248,58 @@ Report 'N3 native build in an EWDK prompt''s variables takes every root from the
 $r = Invoke-Layout @{ WDKContentRoot = $emptyRoot } ('call "' + $native + '\scripts\build.cmd" x64') $native
 Report 'N4 native build with WDKContentRoot naming no WDK fails and names WDKContentRoot' `
     ($r.ExitCode -ne 0 -and $r.Output -match 'WDKContentRoot') "exit $($r.ExitCode)"
+
+# ── N5: one stamp per build ─────────────────────────────────────────────
+
+# The time goes in through the scripts' own input, never the clock. The
+# copy's driver sources are dated an hour back first, so the times below are
+# after every source. build.cmd stamps both INFs two minutes back, then
+# build_companion.cmd, run alone with the current minute, stamps both again
+# with it: a companion rebuilt alone is newer than its build and deploys. A
+# time later than the clock, one earlier than the sources, and one that is
+# not a time each fail the build. pre-tag-validate.cmd clears the setting
+# before it builds a release.
+function Get-DriverVer([string]$Inf) {
+    if (!(Test-Path -LiteralPath $Inf)) { return 'missing' }
+    $m = [regex]::Match((Get-Content -LiteralPath $Inf -Raw), '(?m)^DriverVer\s*=\s*(\S+)\s*$')
+    if ($m.Success) { return $m.Groups[1].Value } else { return 'no DriverVer' }
+}
+function Get-StampOf([datetime]$t) {
+    $c = [Globalization.CultureInfo]::InvariantCulture
+    return $t.ToString('MM/dd/yyyy', $c) + ',' + [int]$t.ToString('HHmm', $c)
+}
+$n5ok = $true; $n5detail = @()
+$hourAgo = (Get-Date).AddHours(-1)
+Get-ChildItem -LiteralPath (Join-Path $native 'driver') -Recurse -File | ForEach-Object { $_.LastWriteTime = $hourAgo }
+$minute = Get-Date
+$minute = New-Object DateTime $minute.Year, $minute.Month, $minute.Day, $minute.Hour, $minute.Minute, 0
+$earlier = $minute.AddMinutes(-2)
+$iso = { param($t) $t.ToString('yyyy-MM-ddTHH:mm', [Globalization.CultureInfo]::InvariantCulture) }
+function Test-Stamps([string]$step, [datetime]$t) {
+    $want = Get-StampOf $t
+    foreach ($inf in 'hidmaestro.inf', 'hidmaestro_xusb.inf') {
+        $v = Get-DriverVer (Join-Path $native "build\$inf")
+        $ver = $v -replace '^([^,]+),\d+\.\d+\.\d+\.(\d+)$', '$1,$2'
+        if ($ver -ne $want) { $script:n5ok = $false }
+        $script:n5detail += "$step $inf $v"
+    }
+}
+$r = Invoke-Layout ($n1 + @{ HM_STAMP_TIME = (& $iso $earlier) }) ('call "' + $native + '\scripts\build.cmd" x64') $native
+if ($r.ExitCode -ne 0) { $n5ok = $false; $n5detail += "build.cmd exited $($r.ExitCode)" }
+Test-Stamps 'build.cmd:' $earlier
+$r = Invoke-Layout ($n1 + @{ HM_STAMP_TIME = (& $iso $minute) }) ('call "' + $native + '\scripts\build_companion.cmd" x64') $native
+if ($r.ExitCode -ne 0) { $n5ok = $false; $n5detail += "build_companion.cmd exited $($r.ExitCode)" }
+Test-Stamps 'then build_companion.cmd alone:' $minute
+foreach ($bad in (& $iso $minute.AddDays(1)), '2001-01-01T00:00', 'not-a-time') {
+    $r = Invoke-Layout ($n1 + @{ HM_STAMP_TIME = $bad }) ('call "' + $native + '\scripts\build.cmd" x64') $native
+    if ($r.ExitCode -eq 0) { $n5ok = $false; $n5detail += "HM_STAMP_TIME=$bad built" }
+}
+$pretag = Get-Content -LiteralPath (Join-Path $RepoRoot 'scripts\pre-tag-validate.cmd') -Raw
+$clear = $pretag.IndexOf('set "HM_STAMP_TIME="')
+if ($clear -lt 0 -or $clear -gt $pretag.IndexOf('call scripts\build_all.cmd')) {
+    $n5ok = $false; $n5detail += 'pre-tag-validate.cmd does not clear HM_STAMP_TIME before build_all.cmd'
+}
+Report 'N5 every INF of a build carries the one stamp the build took, and a stale or future one is refused' $n5ok ($n5detail -join '; ')
 
 # ── M1 to M3: the SDK project ───────────────────────────────────────────
 
