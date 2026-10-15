@@ -236,6 +236,44 @@ internal static class Peer
                         Reply("OK addpackages");
                         break;
                     }
+                    case "runtool":
+                    {
+                        // DriverBuilder.Run, the SDK's runner for signtool,
+                        // inf2cat and pnputil, on a tool that exits at once
+                        // and leaves a child that holds the same output for
+                        // a[1] seconds (2 when absent) and then writes its
+                        // last line. "beyond" holds it 5 s past the runner's
+                        // drain bound as this process scales it
+                        // (HIDMAESTRO_TIMEOUT_SCALE), so the two timers move
+                        // together.
+                        var builder = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.DriverBuilder");
+                        var m = builder?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (m == null) { Reply("ERR runtool no DriverBuilder.Run"); break; }
+                        int drain = -1;
+                        int hold = 2;
+                        if (a.Length > 1 && a[1] == "beyond")
+                        {
+                            var drainMs = builder!.GetField("OutputDrainMs", BindingFlags.NonPublic | BindingFlags.Static);
+                            var apply = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.TimeoutScale")
+                                ?.GetMethod("Apply", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, new[] { typeof(int) });
+                            if (drainMs == null || apply == null) { Reply("ERR runtool no drain bound"); break; }
+                            drain = (int)apply.Invoke(null, new object[] { (int)drainMs.GetValue(null)! })!;
+                            hold = drain / 1000 + 5;
+                        }
+                        else if (a.Length > 1) hold = int.Parse(a[1], CultureInfo.InvariantCulture);
+                        string cmd = System.IO.Path.Combine(Environment.SystemDirectory, "cmd.exe");
+                        var sw = Stopwatch.StartNew();
+                        object? r = m.Invoke(null, new object?[]
+                        {
+                            cmd, $"/d /c start \"\" /b \"{cmd}\" /d /c \"ping -n {hold + 1} 127.0.0.1 >nul & echo coexist-last-line\"", null, 30_000,
+                        });
+                        long ms = sw.ElapsedMilliseconds;
+                        object? code = r?.GetType().GetField("Item1")?.GetValue(r);
+                        string output = r?.GetType().GetField("Item2")?.GetValue(r) as string ?? "";
+                        Reply($"OK runtool last={(output.Contains("coexist-last-line", StringComparison.Ordinal) ? "yes" : "no")} " +
+                              $"open={(output.Contains("output still open", StringComparison.Ordinal) ? "yes" : "no")} exit={code} ms={ms} drain={drain}");
+                        break;
+                    }
                     case "staleport":
                     {
                         HMController? last;

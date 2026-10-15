@@ -72,7 +72,8 @@
 //      their own stamps. An older driver missing its XUSB package is
 //      upgraded by a create that never called InstallDriver. A running
 //      v1.12.0 program's XUSB companion stays on its package when this
-//      build's is added.
+//      build's is added. The tool runner returns a tool's output to its
+//      last line, and gives up on output a child of the tool keeps open.
 //   U. A create that fails after it claimed an index and an identity
 //      gives both back. SectionU.cs has the detail.
 //   V. USB/IP re-attach attempts and dropped imports of composites: a
@@ -1346,6 +1347,30 @@ internal static partial class Program
         SectionT3();
         Clean();
         SectionT4();
+        SectionT5();
+    }
+
+    /// <summary>The runner the deploy starts signtool, inf2cat and pnputil
+    /// with, on a tool whose last line arrives after its own process has
+    /// exited, from a child that shares its output: the line is in what the
+    /// runner returns, as a tool's closing error has to be. A child that
+    /// keeps the output open longer holds the runner for a bounded time.</summary>
+    static void SectionT5()
+    {
+        using var p = PeerProcess.Start("T5");
+        string r = p.Send("runtool");
+        Check("T5: the tool runner returns a tool's output to its last line", PeerProcess.Field(r, "last") == "yes", r);
+        // T6. The same child holding the output 5 s past the runner's drain
+        // bound, both as the peer scales them (HIDMAESTRO_TIMEOUT_SCALE): the
+        // runner gives up on the output at the bound, says so, and keeps the
+        // tool's exit code, so the deploy lock is not held until the child
+        // ends.
+        string h = p.Send("runtool beyond", 180_000);
+        int ms = int.TryParse(PeerProcess.Field(h, "ms"), out int v) ? v : -1;
+        int drain = int.TryParse(PeerProcess.Field(h, "drain"), out int d) ? d : -1;
+        Check("T6: a child that keeps the tool's output open holds the runner for the drain bound, not until it ends",
+              drain > 0 && PeerProcess.Field(h, "open") == "yes" && PeerProcess.Field(h, "exit") == "0"
+              && ms >= drain - 1_000 && ms < drain + 4_000, h);
     }
 
     static void SectionT1()

@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Threading;
 
 namespace HIDMaestro.Internal;
 
@@ -69,10 +70,32 @@ public static class DriverBuilder
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
             try { proc.WaitForExit(TimeoutScale.Apply(2000)); } catch { }
-            return (-1, $"timeout after {scaledTimeout} ms (scale={TimeoutScale.Factor})\n{sb}");
+            lock (sb) return (-1, $"timeout after {scaledTimeout} ms (scale={TimeoutScale.Factor})\n{sb}");
         }
-        return (proc.ExitCode, sb.ToString());
+        // The timed wait returns at process exit, before the handlers have
+        // seen the end of both streams, so the tool's last lines, its error
+        // among them, could be missing (Process.Windows.cs WaitForExitCore:
+        // "If we have a hard timeout, we cannot wait for the streams").
+        // WaitForExitAsync waits for both streams' end too (Process.cs,
+        // WaitUntilOutputEOF), and its token bounds that wait: a child the
+        // tool left holding the pipe would otherwise hold this deploy, and
+        // the machine-wide lock with it, until the child ended. Disposing
+        // the process on the way out cancels the readers still pending.
+        using (var drain = new CancellationTokenSource(TimeoutScale.Apply(OutputDrainMs)))
+        {
+            try { proc.WaitForExitAsync(drain.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException)
+            {
+                lock (sb) return (proc.ExitCode,
+                    $"{sb}(output still open {TimeoutScale.Apply(OutputDrainMs)} ms after the tool exited: a process it started holds it)\n");
+            }
+        }
+        lock (sb) return (proc.ExitCode, sb.ToString());
     }
+
+    /// <summary>How long a tool's output may stay open after the tool has
+    /// exited before <see cref="Run"/> returns without its end.</summary>
+    internal const int OutputDrainMs = 10_000;
 
     // ── Extraction ──────────────────────────────────────────────────────────
 
