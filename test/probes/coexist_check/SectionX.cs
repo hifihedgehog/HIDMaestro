@@ -207,13 +207,25 @@ internal static partial class Program
         try
         {
             Check($"X2: a program that is not elevated creates and holds {name}", sq.Holds(name), sq.Describe());
+            var clock = Stopwatch.StartNew();
             p.Post("sweep");
-            string r = p.Receive("sweep", 20_000);
-            Check($"X2: a sweep, which takes the ledger lock, finishes while it holds {name}", Ok(r), r);
+            string r = p.Receive("sweep", 60_000);
+            long first = clock.ElapsedMilliseconds;
+            Check($"X2: a sweep, which takes the ledger lock, finishes while it holds {name}", Ok(r), $"{first} ms: {r}");
             if (!Ok(r))
             {
                 sq.Dispose();
                 p.Receive("sweep, once the name is let go", 120_000);
+            }
+            else
+            {
+                // The process paid the bounded wait once. Its next sweep takes
+                // the ledger lock again, and must not wait on the squatter.
+                clock.Restart();
+                string again = p.Send("sweep", 60_000);
+                long second = clock.ElapsedMilliseconds;
+                Check("X2: the same program's next sweep does not wait on the squatter again",
+                      Ok(again) && second < 2000, $"first {first} ms, second {second} ms: {again}");
             }
         }
         finally { sq.Dispose(); }

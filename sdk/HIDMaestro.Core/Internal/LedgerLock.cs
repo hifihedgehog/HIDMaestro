@@ -21,7 +21,9 @@ namespace HIDMaestro.Internal;
 /// for it as v1.12.0 does. When it is owned by anyone else, the lock waits
 /// for it a bounded five seconds and goes on without it after that: a
 /// v1.12.0 program holds it only while it writes registry values, far less
-/// than the bound.</para>
+/// than the bound. A process pays that wait once: when it ran out, later
+/// acquisitions take the mutex only if it is free, until one finds it free
+/// or owned by SYSTEM or Administrators again.</para>
 /// </summary>
 internal sealed partial class LedgerLock : IDisposable
 {
@@ -31,6 +33,13 @@ internal sealed partial class LedgerLock : IDisposable
     private readonly Mutex _lock;
     private SafeWaitHandle? _legacy;
     private bool _legacyHeld;
+
+    // Set when a bounded wait for a legacy mutex owned by neither SYSTEM nor
+    // Administrators ran out, which v1.12.0, holding it for a few registry
+    // writes, never causes. While set the mutex is taken only if free, so
+    // one squatter costs this process one wait, not one per acquisition,
+    // and a nested acquisition on the same thread does not wait again.
+    private static volatile bool s_legacyHeldByOther;
 
     private LedgerLock(Mutex m) => _lock = m;
 
@@ -92,9 +101,15 @@ internal sealed partial class LedgerLock : IDisposable
             // that this check cannot read as its own under the object-creator
             // policy still serializes, and a squatter costs only the wait.
             bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
-            uint timeout = administrative ? INFINITE : (uint)TimeoutScale.Apply(LegacyUnknownWaitMs);
+            uint timeout = administrative ? INFINITE
+                : s_legacyHeldByOther ? 0
+                : (uint)TimeoutScale.Apply(LegacyUnknownWaitMs);
             uint r = WaitForSingleObject(h, timeout);
             _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
+            if (administrative || _legacyHeld)
+                s_legacyHeldByOther = false;
+            else if (timeout > 0)
+                s_legacyHeldByOther = true;
             if (!administrative)
                 DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} is owned by neither SYSTEM nor Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");
         }
