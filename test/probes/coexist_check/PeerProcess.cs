@@ -106,9 +106,15 @@ internal sealed class PeerProcess : IDisposable
         _p.WaitForExit(10_000);
     }
 
+    bool _disposed;
+
     /// <summary>Ask the peer to dispose and exit, and kill it if it does not.</summary>
     public void Dispose()
     {
+        // A section can end a peer early and leave the using to call this
+        // again.
+        if (_disposed) return;
+        _disposed = true;
         if (!_p.HasExited)
         {
             try

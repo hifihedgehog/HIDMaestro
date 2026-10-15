@@ -2,12 +2,13 @@
 //    identity. The program's record is made to refuse the write the create
 //    needs, once before any device exists and once after the device is
 //    made, and once over an entry it cannot write that is already there.
-//    The index's input event name is taken, so its input mapping fails
-//    partway. A composite's device emulator fails after it mapped the
-//    index's sections, and once more after its input pump started. Each
-//    time the create leaves no claim pipe, no device, no record entry and
-//    no section, the program keeps running, and the same identity creates
-//    again at once, in the same program and in another. Last, a v1.12.0
+//    The index's input event exists, owned by Administrators and closed to
+//    signaling, so its input mapping fails partway. A composite's device
+//    emulator fails the same way after it mapped the index's sections, and
+//    once more after its input pump started. Each time the create leaves
+//    no claim pipe, no device, no record entry and no section, the program
+//    keeps running, and the same identity creates again at once, in the
+//    same program and in another. Last, a v1.12.0
 //    program starts an Xbox 360 controller on the index while a create waits
 //    before its mapping: the create is refused, and the v1.12.0 program's
 //    devices and configuration stay.
@@ -138,13 +139,15 @@ internal static partial class Program
               string.Join(",", Entries(controllers)));
         WaitFor(() => Native.HidPaths(0xBEEF, UPid).Count == 0, 10_000);
 
-        // The input mapping's last step creates the input event. A mutex
-        // squatting its name fails it after the input section exists.
+        // The input mapping's last step creates the input event. An event
+        // of that name owned by Administrators, as HIDMaestro's own are, so
+        // the transport allocator keeps the index, but open to nobody for
+        // signaling fails that step after the input section exists.
         string section = $@"Global\HIDMaestroInput{t}";
         bool sectionGone = WaitFor(() => !Native.SectionExists(section), 10_000);
         Check($"U: before the next create nothing holds {section}", sectionGone);
         string f5;
-        using (var squat = new Mutex(false, $@"Global\HIDMaestroInputEvent{t}"))
+        using (LockedEvent($@"Global\HIDMaestroInputEvent{t}"))
             f5 = a.Send("create pad F1B0 -");
         Check("U: a create whose input event cannot be made fails", !Ok(f5), f5);
         if (sectionGone)
@@ -158,7 +161,8 @@ internal static partial class Program
 
         // A composite's device emulator maps the index's sections, which
         // holds the index's v1.12.0 owner pipe, then creates its output
-        // doorbell. A mutex squatting the doorbell's name fails that step.
+        // doorbell. The same locked event under the doorbell's name fails
+        // that step.
         var before = Native.HidPaths(0x054C, 0x0CE6);
         string c4 = a.Send("create composite - -");
         if (!Ok(c4)) { Check("U: the program creates a composite", false, c4); return; }
@@ -166,7 +170,7 @@ internal static partial class Program
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
         string f4;
-        using (var squat = new Mutex(false, $@"Global\HIDMaestroOutputEvent{tc}"))
+        using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}"))
             f4 = a.Send("create composite - -");
         Check("U: a composite whose device emulator fails is refused", !Ok(f4), f4);
         UnclaimedAndUnrecorded("U: after the failed composite", baseline, controllers, entriesChecked: true);
@@ -189,7 +193,9 @@ internal static partial class Program
         Check("U: the next composite's emulator is set to fail after its pump starts", Ok(a.Send("failpump")));
         string f6 = a.Send("create composite - -");
         Check("U: a composite whose emulator fails after its pump starts is refused", !Ok(f6), f6);
-        string pumps = a.Send($"threads HMUsbipInput_{tc}");
+        // Every composite of this program is disposed, so any input pump
+        // left is the failed one's, whatever index it took.
+        string pumps = a.Send("threads HMUsbipInput_");
         Check("U: no input pump of it is left running", PeerProcess.Field(pumps, "n") == "0", pumps);
         Thread.Sleep(1500);   // three of the pump's 500 ms waits
         string alive = a.Send("alive");
@@ -209,6 +215,9 @@ internal static partial class Program
             Check("U: and still runs after the retry's dispose", Ok(alive2), alive2);
         }
 
+        // A program of its own, after this one exits, so nothing this one
+        // holds moves the next create off the index.
+        a.Dispose();
         using var r = PeerProcess.Start("U6");
         SectionULegacyRace(r, t, baseline);
     }
@@ -282,6 +291,26 @@ internal static partial class Program
             }
         }
         return list;
+    }
+
+    /// <summary>An event owned by Administrators that grants everyone
+    /// READ_CONTROL and nothing else. The transport allocator reads its
+    /// owner and keeps the index. A create, which opens it to signal and
+    /// wait, is refused access. Closed on dispose.</summary>
+    static IDisposable LockedEvent(string name)
+    {
+        IntPtr sa = Native.Sa("O:BAD:P(A;;0x00020000;;;WD)");
+        IntPtr h;
+        try { h = Native.CreateEventW(sa, false, false, name); }
+        finally { Native.FreeSa(sa); }
+        if (h == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error(), $"could not create {name}");
+        return new Handle(h);
+    }
+
+    sealed class Handle(IntPtr h) : IDisposable
+    {
+        public void Dispose() => Native.CloseHandle(h);
     }
 
     static bool Close(RegistryKey k)
