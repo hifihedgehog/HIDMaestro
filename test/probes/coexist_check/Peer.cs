@@ -57,9 +57,11 @@
 //                               frame, so that copy is pointed at a new
 //                               unnamed event, made before the close so its
 //                               value differs: swapped=<controllers>,
-//                               verified=<copies read back>, distinct=0|1
-//   droppedsignal               whether a frame signaled that unnamed
-//                               event since the last ask: signaled=0|1
+//                               verified=<copies read back>,
+//                               matched=<copies that were the closed handle>
+//   droppedsignal <index>       whether a frame signaled that index's
+//                               unnamed event since the last ask:
+//                               signaled=0|1
 //   census                      the SDK's census of present devices, one
 //                               token|index|owner|watch per device group
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
@@ -448,25 +450,32 @@ internal static class Peer
                         bool closed = events.TryGetValue(i, out IntPtr ev) && ev != IntPtr.Zero && CloseHandle(ev);
                         if (closed) events[i] = IntPtr.Zero;
                         var copy = typeof(HMController).GetField("_inputEvent", BindingFlags.NonPublic | BindingFlags.Instance);
-                        int swapped = 0, verified = 0;
+                        int swapped = 0, verified = 0, matched = 0;
                         if (closed && copy != null && fresh != IntPtr.Zero)
                         {
-                            s_dropped = fresh;
                             lock (s_live)
                                 foreach (var c in s_live)
                                     if (Get(c, "TransportIndex") == a[1] || Get(c, "Index") == a[1])
                                     {
+                                        // The copy must have been the handle the SDK
+                                        // closed. A controller with a handle of its own
+                                        // would keep signaling the index's event.
+                                        if (copy.GetValue(c) is IntPtr before && before == ev) matched++;
                                         copy.SetValue(c, fresh);
                                         swapped++;
                                         if (copy.GetValue(c) is IntPtr now && now == fresh) verified++;
                                     }
+                            // A previous drop on this index left its event with
+                            // controllers that now hold the new one.
+                            if (s_dropped.TryGetValue(i, out IntPtr previous)) CloseHandle(previous);
+                            s_dropped[i] = fresh;
                         }
                         else if (fresh != IntPtr.Zero) CloseHandle(fresh);
-                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)} swapped={swapped} verified={verified} distinct={(fresh != IntPtr.Zero && fresh != ev ? 1 : 0)}");
+                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)} swapped={swapped} verified={verified} matched={matched}");
                         break;
                     }
                     case "droppedsignal":
-                        Reply($"OK droppedsignal signaled={(s_dropped != IntPtr.Zero && WaitForSingleObject(s_dropped, 0) == 0 ? 1 : 0)}");
+                        Reply($"OK droppedsignal signaled={(s_dropped.TryGetValue(int.Parse(a[1], CultureInfo.InvariantCulture), out IntPtr d) && WaitForSingleObject(d, 0) == 0 ? 1 : 0)}");
                         break;
                     case "census":
                         Reply(Census());
@@ -698,8 +707,9 @@ internal static class Peer
     static extern bool CloseHandle(IntPtr h);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, string? name);
-    /// <summary>The unnamed event dropinputevent gives the controllers.</summary>
-    static IntPtr s_dropped;
+    /// <summary>The unnamed event dropinputevent gave each index's
+    /// controllers.</summary>
+    static readonly Dictionary<int, IntPtr> s_dropped = new();
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr p);
 

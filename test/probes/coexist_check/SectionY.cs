@@ -401,18 +401,18 @@ internal static partial class Program
         int t = int.Parse(PeerProcess.Field(cp, "transport")!);
         Check("Y16: the driver's watch connects", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000), Y.ShowWatch(inst));
         string drop = p.Send($"dropinputevent {t}");
-        Check("Y16: the program lets go of its input event, and its controller holds a different, unnamed event instead",
+        Check("Y16: the program lets go of its input event: its controller held the handle the SDK closed, and now holds an unnamed event",
               PeerProcess.Field(drop, "closed") == "1" && PeerProcess.Field(drop, "swapped") == "1"
-              && PeerProcess.Field(drop, "verified") == "1" && PeerProcess.Field(drop, "distinct") == "1", drop);
+              && PeerProcess.Field(drop, "matched") == "1" && PeerProcess.Field(drop, "verified") == "1", drop);
         // Frames now signal a live handle that is not the index's event. A
         // program whose frames still reached that event would wake the
         // driver each time, keep it from its idle reset, and fail the
         // next check.
-        p.Send("droppedsignal");
+        p.Send($"droppedsignal {t}");
         p.Send("stream 1 0.5 125 0");
         Thread.Sleep(100);
         p.Send("stopstream");
-        string signaled = p.Send("droppedsignal");
+        string signaled = p.Send($"droppedsignal {t}");
         Check("Y16: the program's frames signal the controller's live handle", PeerProcess.Field(signaled, "signaled") == "1", signaled);
         // Eight idle 500 ms waits, then the driver closes the last handle and
         // waits for the event to come back.
