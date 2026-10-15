@@ -37,7 +37,9 @@
 //      the staging of versions no running program uses, a staging
 //      directory replaced by a link is moved aside rather than followed,
 //      and a temporary file a process left when it ended mid-write is
-//      removed. Battery S72 runs this section.
+//      removed. A running program's staged tool library or manifest,
+//      removed or changed, is restored before its next deploy.
+//      SectionIDeploy.cs has the detail. Battery S72 runs this section.
 //   J. A record a killed program left names a transport index and an
 //      identity that a running program holds now: a v1.12.0 program, and a
 //      program on this SDK whose own record names them too. A sweep leaves
@@ -1146,7 +1148,12 @@ internal static partial class Program
 
     static void SectionI()
     {
-        try { SectionIChecks(); }
+        try
+        {
+            SectionIChecks();
+            Clean();
+            SectionIDeploy();
+        }
         finally
         {
             // I3 makes the staging root writable by others. An SDK that does

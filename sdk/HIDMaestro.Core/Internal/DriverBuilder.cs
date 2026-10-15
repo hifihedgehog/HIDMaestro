@@ -37,7 +37,10 @@ public static class DriverBuilder
     /// <summary>Back-compat shim. Old code referenced
     /// <c>DriverBuilder.BuildDir</c> for the directory containing
     /// <c>hidmaestro.inf</c>. Now points at the extraction staging dir.
-    /// Calls <see cref="EnsureExtracted"/> the first time it's accessed.</summary>
+    /// Calls <see cref="EnsureExtracted"/> each time it is read, with its
+    /// cost: a SHA-256 of the 23 staged files, 6.6 MB, measured at 8.9 ms
+    /// p50 and 9.6 to 11.1 ms p95 warm (30 runs, twice). Read it once and
+    /// keep the path.</summary>
     public static string BuildDir => EnsureExtracted();
 
     static (int exitCode, string output) Run(string fileName, string arguments,
@@ -186,28 +189,25 @@ public static class DriverBuilder
     /// directory was under <c>%TEMP%</c> and reuse trusted a matching file
     /// size.</para>
     ///
-    /// <para>Within a single process, idempotent via the
-    /// <see cref="StagingDir"/> static cache (set on first successful
-    /// extract, never invalidated mid-process).</para></summary>
+    /// <para>Every call checks every staged file again, signtool's and
+    /// Inf2Cat's libraries and manifests included, and restages any that is
+    /// missing or differs, so each deploy and each caller that runs the tools
+    /// uses files verified for that use. Until v1.13.0 the directory was
+    /// cached for the life of the process, and only signtool.exe and
+    /// Inf2Cat.exe were checked again, so a library another program's prune
+    /// or anyone else removed stayed missing for every later deploy. The
+    /// embedded hashes are computed once per process, so a call costs one
+    /// read of the staged files, 6.6 MB: 8.9 ms p50 and 9.6 to 11.1 ms p95
+    /// warm (30 runs, twice), against under 1 ms for the two files checked
+    /// before.</para></summary>
     private static readonly object s_extractLock = new();
 
     public static string EnsureExtracted()
     {
-        // Fast path (no lock): cache hit on the static field.
-        if (StagingDir != null && Directory.Exists(StagingDir))
-            return StagingDir;
-
-        // Slow path: serialize across the (rare) cache-miss case so the
-        // ctor pre-warm task and a foreground InstallDriver call can't
-        // both extract to the same directory and step on each other's
-        // file writes.
+        // Serialized so the constructor's prewarm and a foreground deploy
+        // never stage the same file at once.
         lock (s_extractLock)
         {
-            // Re-check inside the lock: the other thread may have just
-            // populated the cache.
-            if (StagingDir != null && Directory.Exists(StagingDir))
-                return StagingDir;
-
             // A build without this machine's driver stops here, before the
             // staging directory exists.
             HMBuildInfo.ThrowIfMissing(HMPayload.Driver);
@@ -427,12 +427,10 @@ public static class DriverBuilder
     internal static void CatalogAndSignPackage(string packageDir)
     {
         EnsureTestCertificate();
+        // Checks every staged tool file, libraries and manifests included.
         string tools = EnsureExtracted();
-        var asm = typeof(DriverBuilder).Assembly;
         string inf2cat = Path.Combine(tools, "Inf2Cat.exe");
         string signtool = Path.Combine(tools, "signtool.exe");
-        ProtectedStaging.VerifyBeforeUse(signtool, asm, NativePrefix + "signtool.exe");
-        ProtectedStaging.VerifyBeforeUse(inf2cat, asm, "HIDMaestro.Resources.Inf2Cat.exe");
 
         foreach (string cat in Directory.GetFiles(packageDir, "*.cat"))
         {
@@ -590,7 +588,6 @@ public static class DriverBuilder
         // every such host is an orphan.
         DeviceOrchestrator.ReleaseStaleDriverHosts();
         string tools = EnsureExtracted();
-        VerifyStagedBeforeUse(tools);
         string package = PackageLocked(out bool signed);
         PnputilHelper.RemoveAllHidMaestroPackages();
         if (!signed) SignDriversIn(tools, package);
@@ -640,7 +637,6 @@ public static class DriverBuilder
     {
         if (infs.Count == 0) return;
         string tools = EnsureExtracted();
-        VerifyStagedBeforeUse(tools);
         string package = PackageLocked(out bool signed);
         if (!signed) SignDriversIn(tools, package);
         GenerateCatalogsIn(tools, package);
@@ -654,20 +650,6 @@ public static class DriverBuilder
                 throw new InvalidOperationException($"pnputil /add-driver did not add {inf} {embedded} to the driver store.");
         }
         PnputilHelper.InvalidateInstalledCache();
-    }
-
-    /// <summary>Re-check, against the embedded bytes, the signing and
-    /// catalog tools about to run elevated. A staged tool changed since
-    /// <see cref="EnsureExtracted"/> is caught here, before anything runs.
-    /// The package's two binaries are checked the same way just before
-    /// signtool rewrites them (<see cref="SignDriversIn"/>). The signed
-    /// binaries and the generated catalogs are not re-checked afterward,
-    /// because signing and inf2cat change their bytes by design.</summary>
-    private static void VerifyStagedBeforeUse(string dir)
-    {
-        var asm = typeof(DriverBuilder).Assembly;
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "signtool.exe"), asm, NativePrefix + "signtool.exe");
-        ProtectedStaging.VerifyBeforeUse(Path.Combine(dir, "Inf2Cat.exe"), asm, "HIDMaestro.Resources.Inf2Cat.exe");
     }
 
     /// <summary>Record the embedded payload's hash as the installed one,

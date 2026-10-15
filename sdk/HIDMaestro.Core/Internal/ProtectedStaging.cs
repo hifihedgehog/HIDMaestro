@@ -128,10 +128,11 @@ internal static class ProtectedStaging
     /// sees a half-written file.</summary>
     internal static void StageResource(string dir, string fileName, System.Reflection.Assembly asm, string logicalName)
     {
+        string expected = EmbeddedSha256(asm, logicalName);
+        if (Matches(Path.Combine(dir, fileName), expected))
+            return;
         using var src = asm.GetManifestResourceStream(logicalName)
             ?? throw new InvalidOperationException($"Embedded resource '{logicalName}' is missing from HIDMaestro.Core.dll.");
-        string expected = Sha256OfStream(src);
-        src.Position = 0;
         StageStream(dir, fileName, src, expected);
     }
 
@@ -236,10 +237,20 @@ internal static class ProtectedStaging
     /// <summary>SHA-256 of an embedded resource's bytes.</summary>
     internal static string EmbeddedSha256(System.Reflection.Assembly asm, string logicalName)
     {
+        // An assembly's resources never change while it is loaded, so each
+        // is hashed once per process however often its staged copy is
+        // checked.
+        var key = (asm, logicalName);
+        lock (s_embeddedHashes)
+            if (s_embeddedHashes.TryGetValue(key, out string? known)) return known;
         using var src = asm.GetManifestResourceStream(logicalName)
             ?? throw new InvalidOperationException($"Embedded resource '{logicalName}' is missing from HIDMaestro.Core.dll.");
-        return Sha256OfStream(src);
+        string hash = Sha256OfStream(src);
+        lock (s_embeddedHashes) s_embeddedHashes[key] = hash;
+        return hash;
     }
+
+    private static readonly Dictionary<(System.Reflection.Assembly, string), string> s_embeddedHashes = new();
 
     /// <summary>Delete staging directories of versions no live owner names,
     /// keeping this build's. The caller holds the deploy mutex.</summary>
