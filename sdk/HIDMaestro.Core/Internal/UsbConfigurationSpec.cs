@@ -40,12 +40,15 @@ public sealed class UsbConfigurationSpec
     public List<UsbInterfaceSpec> Interfaces { get; set; } = new();
 
     /// <summary>The bus speed the real device enumerates at:
-    /// <c>"high"</c> (DualSense) or <c>"full"</c> (DualShock 4). Reported
-    /// in the USB/IP import reply; usbip-win2 patches a full-speed
-    /// device's endpoint intervals for its high-speed UDE presentation
-    /// itself, so the blobs stay verbatim either way. A full-speed-only
-    /// device also stalls Device_Qualifier and Other_Speed requests, as
-    /// the real pad does.</summary>
+    /// <c>"high"</c> (DualSense), <c>"full"</c> (DualShock 4) or
+    /// <c>"low"</c>. Reported in the USB/IP import reply. usbip-win2
+    /// patches the endpoint intervals of every device below high speed for
+    /// its high-speed UDE presentation itself (wsk_receive.cpp,
+    /// post_control_transfer), so the blobs stay verbatim either way. A
+    /// device below high speed also stalls Device_Qualifier and
+    /// Other_Speed requests, as the real pad does. A low-speed device is
+    /// held to an 8-byte control endpoint, interrupt endpoints of at most
+    /// 8 bytes and no bulk or isochronous ones.</summary>
     [JsonPropertyName("busSpeed")]
     public string BusSpeed { get; set; } = "high";
 

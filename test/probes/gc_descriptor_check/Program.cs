@@ -333,6 +333,64 @@ internal static class Program
                 Rule(j, 2)["reply"]![1]!["bytes"] = "1-1";
             },
             "extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
+        ("a low-speed copy with a 37-byte interrupt endpoint",
+            j => j["usbConfiguration"]!["busSpeed"] = "low",
+            "usbConfiguration.busSpeed \"low\": interface 0 alternate setting 0 endpoint 0x81 has wMaxPacketSize 0x0025, over the 8 bytes a low-speed interrupt endpoint carries"),
+        ("a low-speed copy whose 8-byte endpoint sets wMaxPacketSize bits 11-12",
+            j =>
+            {
+                var usb = j["usbConfiguration"]!.AsObject();
+                usb["busSpeed"] = "low";
+                usb["configurationDescriptor"] = usb["configurationDescriptor"]!.GetValue<string>()
+                    .Replace("0705810325000807", "0705810308080807", StringComparison.OrdinalIgnoreCase);
+                usb["interfaces"]![0]!["altSettings"]![0]!["endpoints"]![0]!["maxPacketSize"] = 0x0808;
+            },
+            "usbConfiguration.busSpeed \"low\": interface 0 alternate setting 0 endpoint 0x81 has wMaxPacketSize 0x0808, over the 8 bytes a low-speed interrupt endpoint carries"),
+        ("a low-speed copy whose alternate setting 0 has a 64-byte endpoint and setting 1 an 8-byte one",
+            j =>
+            {
+                var usb = j["usbConfiguration"]!.AsObject();
+                usb["busSpeed"] = "low";
+                usb["configurationDescriptor"] =
+                    "09024000010100e0fa" +
+                    "090400000203000000" + "09211001000122d600" + "07058103400008" + "07050203050008" +
+                    "090400010203000000" + "07058103080008" + "07050203050008";
+                var alts = usb["interfaces"]![0]!["altSettings"]!.AsArray();
+                alts[0]!["endpoints"]![0]!["maxPacketSize"] = 64;
+                var alt1 = JsonNode.Parse(alts[0]!.ToJsonString())!.AsObject();
+                alt1["altSetting"] = 1;
+                alt1["endpoints"]![0]!["maxPacketSize"] = 8;
+                alts.Add(alt1);
+            },
+            "usbConfiguration.busSpeed \"low\": interface 0 alternate setting 0 endpoint 0x81 has wMaxPacketSize 0x0040, over the 8 bytes a low-speed interrupt endpoint carries"),
+        ("a full-speed copy whose alternate setting 0 has a 64-byte endpoint and setting 1 an 8-byte one",
+            j =>
+            {
+                var usb = j["usbConfiguration"]!.AsObject();
+                usb["configurationDescriptor"] =
+                    "09024000010100e0fa" +
+                    "090400000203000000" + "09211001000122d600" + "07058103400008" + "07050203050008" +
+                    "090400010203000000" + "07058103080008" + "07050203050008";
+                var alts = usb["interfaces"]![0]!["altSettings"]!.AsArray();
+                alts[0]!["endpoints"]![0]!["maxPacketSize"] = 64;
+                var alt1 = JsonNode.Parse(alts[0]!.ToJsonString())!.AsObject();
+                alt1["altSetting"] = 1;
+                alt1["endpoints"]![0]!["maxPacketSize"] = 8;
+                alts.Add(alt1);
+            },
+            "configurationDescriptor endpoint 0x81 is interrupt, wMaxPacketSize 0x0040, bInterval 8, in interface 0 alternate setting 0, and interrupt, wMaxPacketSize 0x0008, bInterval 8, in interface 0 alternate setting 1. An interrupt or bulk endpoint keeps one descriptor across alternate settings"),
+        ("endpoint 0x81 interrupt in alternate setting 0 and isochronous in setting 1",
+            j => TwoSettings(j, ("81", 0x03, 0x40, 8), ("81", 0x01, 0x40, 1)),
+            "configurationDescriptor endpoint 0x81 is interrupt, wMaxPacketSize 0x0040, bInterval 8, in interface 0 alternate setting 0, and isochronous, wMaxPacketSize 0x0040, bInterval 1, in interface 0 alternate setting 1. An endpoint keeps one transfer type across alternate settings"),
+        ("endpoint 0x81 isochronous in alternate setting 0 and interrupt in setting 1",
+            j => TwoSettings(j, ("81", 0x01, 0x40, 1), ("81", 0x03, 0x40, 8)),
+            "configurationDescriptor endpoint 0x81 is isochronous, wMaxPacketSize 0x0040, bInterval 1, in interface 0 alternate setting 0, and interrupt, wMaxPacketSize 0x0040, bInterval 8, in interface 0 alternate setting 1. An endpoint keeps one transfer type across alternate settings"),
+        ("isochronous endpoint 0x83 in both alternate settings, 64 bytes then 32",
+            j => TwoSettings(j, ("81", 0x03, 0x25, 8), ("83", 0x01, 0x40, 1), ("81", 0x03, 0x25, 8), ("83", 0x01, 0x20, 1)),
+            "configurationDescriptor endpoint 0x83 is isochronous, wMaxPacketSize 0x0040, bInterval 1, in interface 0 alternate setting 0, and isochronous, wMaxPacketSize 0x0020, bInterval 1, in interface 0 alternate setting 1. The device serves an isochronous endpoint from the one alternate setting that declares it"),
+        ("isochronous endpoint 0x83 in both alternate settings, alike",
+            j => TwoSettings(j, ("81", 0x03, 0x25, 8), ("83", 0x01, 0x40, 1), ("81", 0x03, 0x25, 8), ("83", 0x01, 0x40, 1)),
+            "configurationDescriptor endpoint 0x83 is isochronous, wMaxPacketSize 0x0040, bInterval 1, in interface 0 alternate setting 0, and isochronous, wMaxPacketSize 0x0040, bInterval 1, in interface 0 alternate setting 1. The device serves an isochronous endpoint from the one alternate setting that declares it"),
 
         // A command rule longer than the OUT endpoint's packets.
         ("a rule match longer than a packet",
@@ -436,6 +494,50 @@ internal static class Program
                 Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}""");
             }),
     };
+
+    /// <summary>Give interface 0 two alternate settings. The first
+    /// endpoints listed go in setting 0 and the rest, as many, in setting 1,
+    /// each beside endpoint 0x02 as the real adapter has it: (address,
+    /// bmAttributes, wMaxPacketSize, bInterval). The configuration
+    /// descriptor and the structured spec agree.</summary>
+    static void TwoSettings(JsonObject j, params (string Address, int Attributes, int MaxPacket, int Interval)[] eps)
+    {
+        int half = eps.Length / 2;
+        var usb = j["usbConfiguration"]!.AsObject();
+        string Ep((string Address, int Attributes, int MaxPacket, int Interval) e) =>
+            $"0705{e.Address}{e.Attributes:x2}{e.MaxPacket & 0xFF:x2}{e.MaxPacket >> 8:x2}{e.Interval:x2}";
+        var alt0 = new StringBuilder();
+        var alt1 = new StringBuilder();
+        for (int i = 0; i < half; i++) alt0.Append(Ep(eps[i]));
+        for (int i = half; i < eps.Length; i++) alt1.Append(Ep(eps[i]));
+        string i0 = $"09040000{half + 1:x2}03000000" + "09211001000122d600" + alt0 + "07050203050008";
+        string i1 = $"09040001{half + 1:x2}03000000" + alt1 + "07050203050008";
+        int total = 9 + i0.Length / 2 + i1.Length / 2;
+        usb["configurationDescriptor"] = $"0902{total & 0xFF:x2}{total >> 8:x2}010100e0fa" + i0 + i1;
+        var alts = usb["interfaces"]![0]!["altSettings"]!.AsArray();
+        JsonArray Endpoints(int from, int to)
+        {
+            var arr = new JsonArray();
+            for (int i = from; i < to; i++)
+            {
+                var e = eps[i];
+                arr.Add(new JsonObject
+                {
+                    ["address"] = Convert.ToInt32(e.Address, 16),
+                    ["transferType"] = (e.Attributes & 3) == 1 ? "isochronous" : "interrupt",
+                    ["maxPacketSize"] = e.MaxPacket,
+                    ["interval"] = e.Interval,
+                });
+            }
+            arr.Add(JsonNode.Parse("""{"address":2,"transferType":"interrupt","maxPacketSize":5,"interval":8}"""));
+            return arr;
+        }
+        alts[0]!["endpoints"] = Endpoints(0, half);
+        var second = JsonNode.Parse(alts[0]!.ToJsonString())!.AsObject();
+        second["altSetting"] = 1;
+        second["endpoints"] = Endpoints(half, eps.Length);
+        alts.Add(second);
+    }
 
     /// <summary>A copy of gamecube-adapter with one report of its own, no
     /// ports and no protocol.</summary>

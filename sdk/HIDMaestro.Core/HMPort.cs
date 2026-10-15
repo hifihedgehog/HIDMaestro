@@ -551,10 +551,10 @@ public sealed class HMDeviceProtocol
     /// descriptor's, the default, or a faster one for a host that polls the
     /// device more often than its descriptor asks, as a host overclocked
     /// with a filter driver does. The descriptors never change. Windows polls
-    /// a full-speed interrupt endpoint every 1, 2, 4, 8, 16 or 32 ms and a
-    /// high-speed one every 125, 250 or 500 microseconds or 1, 2 or 4 ms
-    /// (USB_ENDPOINT_DESCRIPTOR, Microsoft Learn), and the period is one of
-    /// those.</summary>
+    /// a low-speed interrupt endpoint every 8, 16 or 32 ms, a full-speed one
+    /// every 1, 2, 4, 8, 16 or 32 ms and a high-speed one every 125, 250 or
+    /// 500 microseconds or 1, 2 or 4 ms (USB_ENDPOINT_DESCRIPTOR, Microsoft
+    /// Learn), and the period is one of those.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A period Windows does
     /// not schedule at the device's speed.</exception>
     public TimeSpan HostPollInterval
@@ -564,23 +564,28 @@ public sealed class HMDeviceProtocol
         {
             long micros = value.Ticks / 10;
             bool exact = value.Ticks % 10 == 0;
-            bool ok = exact && (_engine.Protocol.HighSpeed
-                ? IsPowerOfTwoTimes(micros, 125, 32)
-                : IsPowerOfTwoTimes(micros, 1000, 32));
+            uint speed = _engine.Protocol.Speed;
+            bool ok = exact && (speed >= 3
+                ? IsPowerOfTwoTimes(micros, 125, 1, 32)
+                : speed == 1
+                    ? IsPowerOfTwoTimes(micros, 1000, 8, 32)
+                    : IsPowerOfTwoTimes(micros, 1000, 1, 32));
             if (!ok)
                 throw new ArgumentOutOfRangeException(nameof(value), value,
-                    _engine.Protocol.HighSpeed
+                    speed >= 3
                         ? "Windows polls a high-speed device every 125, 250 or 500 microseconds or 1, 2 or 4 ms."
-                        : "Windows polls a full-speed device every 1, 2, 4, 8, 16 or 32 ms.");
+                        : speed == 1
+                            ? "Windows polls a low-speed device every 8, 16 or 32 ms."
+                            : "Windows polls a full-speed device every 1, 2, 4, 8, 16 or 32 ms.");
             _engine.HostPollMicros = (int)micros;
         }
     }
 
-    private static bool IsPowerOfTwoTimes(long value, long unit, long maxMultiple)
+    private static bool IsPowerOfTwoTimes(long value, long unit, long minMultiple, long maxMultiple)
     {
         if (value <= 0 || value % unit != 0) return false;
         long m = value / unit;
-        return m <= maxMultiple && (m & (m - 1)) == 0;
+        return m >= minMultiple && m <= maxMultiple && (m & (m - 1)) == 0;
     }
 }
 

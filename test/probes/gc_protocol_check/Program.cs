@@ -21,8 +21,9 @@
 // Everything the persona does is the profile's data run by the SDK's generic
 // port and protocol model, so this probe also tests that model.
 //
-// Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
-// HIDMaestro is running.
+// "--offline" runs the in-process engine and model checks alone, which create
+// no device and need no elevation. Otherwise requires elevation. Exit 0 PASS,
+// 1 FAIL, 2 when another program that embeds HIDMaestro is running.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -44,7 +45,7 @@ internal static class Program
     static readonly ConcurrentQueue<(int Port, string Name, int Value)> s_outputs = new();
     static readonly ConcurrentQueue<IReadOnlyDictionary<string, object>> s_decoded = new();
 
-    static int Main()
+    static int Main(string[] args)
     {
         Console.WriteLine("=== S80: the GameCube adapter persona's protocol ===");
         if (Probe.OtherSdkRunning()) return 2;
@@ -55,6 +56,11 @@ internal static class Program
         if (gc == null || !gc.IsDeployable)
         {
             Probe.Check("create the persona", false, "gamecube-adapter is not deployable");
+            return Probe.Finish("S80");
+        }
+        if (args.Contains("--offline"))
+        {
+            EngineChecks(ctx, gc);
             return Probe.Finish("S80");
         }
 
@@ -92,7 +98,7 @@ internal static class Program
             ThrowingHandlers(controller);
             StopAndStall(proto);
             ControlPath();
-            EngineChecks(gc);
+            EngineChecks(ctx, gc);
             Clock(controller, proto);
             HaltAndReset(controller, proto);
         }
@@ -396,7 +402,7 @@ internal static class Program
     /// (windows_winusb.c:3595-3599), reads whole packets and keeps the rest
     /// for the next read, and hidusb reads the report's own length. So the
     /// transfer-level rules are checked here, with exact arithmetic.</summary>
-    static void EngineChecks(HMProfile gc)
+    static void EngineChecks(HMContext ctx, HMProfile gc)
     {
         Console.WriteLine("-- the protocol engine, transfer by transfer");
         var set = new HIDMaestro.Internal.Usbip.UsbDescriptorSet(gc.Inner);
@@ -467,12 +473,87 @@ internal static class Program
         // USB_ENDPOINT_DESCRIPTOR's bInterval (Microsoft Learn).
         var fs = new[] { (1, 1000), (2, 2000), (3, 2000), (7, 4000), (8, 8000), (15, 8000), (16, 16000), (32, 32000), (255, 32000) };
         var hs = new[] { (1, 125), (2, 250), (3, 500), (4, 1000), (5, 2000), (6, 4000), (7, 4000), (16, 4000) };
-        var wrong = fs.Where(t => HIDMaestro.Internal.Usbip.CompiledProtocol.DescriptorPeriodMicros((byte)t.Item1, false) != t.Item2)
+        var wrong = fs.Where(t => Period((byte)t.Item1, 2) != t.Item2)
             .Select(t => $"FS {t.Item1}")
-            .Concat(hs.Where(t => HIDMaestro.Internal.Usbip.CompiledProtocol.DescriptorPeriodMicros((byte)t.Item1, true) != t.Item2)
+            .Concat(hs.Where(t => Period((byte)t.Item1, 3) != t.Item2)
                 .Select(t => $"HS {t.Item1}"))
             .ToList();
         Probe.Check("the poll period follows Windows' bInterval tables at full and high speed", wrong.Count == 0, string.Join(", ", wrong));
+
+        LowSpeed(ctx);
+    }
+
+    /// <summary>CompiledProtocol.DescriptorPeriodMicros at a USB/IP speed,
+    /// 1 low, 2 full, 3 high, in whichever form the build declares it.</summary>
+    static int Period(byte bInterval, uint speed)
+    {
+        var m = typeof(HIDMaestro.Internal.Usbip.CompiledProtocol).GetMethod("DescriptorPeriodMicros",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+        object second = m.GetParameters()[1].ParameterType == typeof(bool) ? speed >= 3 : speed;
+        return (int)m.Invoke(null, new object[] { bInterval, second })!;
+    }
+
+    /// <summary>A low-speed copy of the profile, its input endpoint at
+    /// bInterval 4. Windows polls a low-speed interrupt endpoint every 8 ms
+    /// for bInterval 0 to 15, 16 ms for 16 to 35 and 32 ms beyond
+    /// (USB_ENDPOINT_DESCRIPTOR, Microsoft Learn), and a host modeled
+    /// faster takes only those periods.</summary>
+    static void LowSpeed(HMContext ctx)
+    {
+        Console.WriteLine("-- a low-speed device");
+        var ls = new[] { (0, 8000), (4, 8000), (15, 8000), (16, 16000), (35, 16000), (36, 32000), (255, 32000) };
+        var wrong = ls.Where(t => Period((byte)t.Item1, 1) != t.Item2).Select(t => $"LS {t.Item1}={Period((byte)t.Item1, 1)}").ToList();
+        Probe.Check("the poll period follows Windows' low-speed bInterval table", wrong.Count == 0, string.Join(", ", wrong));
+
+        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
+        if (name == null)
+        {
+            Probe.Check("gamecube-adapter.json is embedded", false);
+            return;
+        }
+        string json;
+        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
+        using (var reader = new System.IO.StreamReader(stream))
+            json = reader.ReadToEnd();
+        var j = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        j["id"] = "s80-low-speed";
+        var usb = j["usbConfiguration"]!.AsObject();
+        usb["busSpeed"] = "low";
+        usb["configurationDescriptor"] = usb["configurationDescriptor"]!.GetValue<string>()
+            .Replace("0705810325000807", "0705810308000407", StringComparison.OrdinalIgnoreCase);
+        // A low-speed interrupt endpoint carries at most 8 bytes, so the
+        // report goes out in five packets.
+        usb["interfaces"]![0]!["altSettings"]![0]!["endpoints"]![0]!["interval"] = 4;
+        usb["interfaces"]![0]!["altSettings"]![0]!["endpoints"]![0]!["maxPacketSize"] = 8;
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "hm-s80-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "s80-low-speed.json"), j.ToJsonString());
+            ctx.LoadProfilesFromDirectory(dir);
+            var low = ctx.GetProfile("s80-low-speed")!;
+            var set = new HIDMaestro.Internal.Usbip.UsbDescriptorSet(low.Inner);
+            Probe.Check("busSpeed low is low speed in the import reply", set.Speed == 1, $"{set.Speed}");
+            var compiled = HIDMaestro.Internal.Usbip.CompiledProtocol.Compile(low.Inner, set)!;
+            var proto = new HMDeviceProtocol(new HIDMaestro.Internal.Usbip.ProtocolEngine(compiled));
+            Probe.Check("bInterval 4 at low speed is an 8 ms poll", proto.DescriptorPollInterval == TimeSpan.FromMilliseconds(8),
+                $"{proto.DescriptorPollInterval.TotalMilliseconds} ms");
+            var refused = new List<int>();
+            var taken = new List<int>();
+            foreach (int p in new[] { 1, 2, 4, 8, 16, 32 })
+            {
+                try { proto.HostPollInterval = TimeSpan.FromMilliseconds(p); taken.Add(p); }
+                catch (ArgumentOutOfRangeException) { refused.Add(p); }
+            }
+            Probe.Check("a low-speed host poll is 8, 16 or 32 ms, and 1, 2 and 4 ms are refused",
+                taken.SequenceEqual(new[] { 8, 16, 32 }) && refused.SequenceEqual(new[] { 1, 2, 4 }),
+                $"taken {string.Join(",", taken)}, refused {string.Join(",", refused)}");
+        }
+        finally
+        {
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
     }
 
     static int CountReports(HIDMaestro.Internal.Usbip.ProtocolEngine engine, long start, long step, int polls, byte[] buf)

@@ -163,7 +163,12 @@ internal sealed class UsbDescriptorSet
         VendorId = (ushort)(DeviceDescriptor[8] | (DeviceDescriptor[9] << 8));
         ProductId = (ushort)(DeviceDescriptor[10] | (DeviceDescriptor[11] << 8));
         BcdDevice = (ushort)(DeviceDescriptor[12] | (DeviceDescriptor[13] << 8));
-        Speed = cfg.BusSpeed?.Equals("full", StringComparison.OrdinalIgnoreCase) == true ? 2u : 3u;
+        // The import reply's speed, Linux usb_device_speed: 1 low, 2 full,
+        // 3 high. usbip-win2 hands each to UdeCx as that speed
+        // (drivers/ude/device.cpp to_udex_speed).
+        Speed = cfg.BusSpeed?.Equals("full", StringComparison.OrdinalIgnoreCase) == true ? 2u
+            : cfg.BusSpeed?.Equals("low", StringComparison.OrdinalIgnoreCase) == true ? 1u
+            : 3u;
         _iManufacturer = DeviceDescriptor[14];
         _iProduct = DeviceDescriptor[15];
         _iSerial = DeviceDescriptor[16];
@@ -248,6 +253,9 @@ internal sealed class UsbDescriptorSet
         byte hidIface = 0xFF;
         bool sawInterface = false;
         var classByIface = new Dictionary<byte, byte[]>();
+        // Every endpoint descriptor, alternate settings included. _endpoints
+        // keeps one per address, the last one written.
+        var everyEndpoint = new List<EndpointInfo>();
         for (int off = 0; off + 2 <= blob.Length;)
         {
             int len = blob[off];
@@ -271,6 +279,7 @@ internal sealed class UsbDescriptorSet
                 var info = new EndpointInfo(addr, blob[off + 3],
                     (ushort)(blob[off + 4] | (blob[off + 5] << 8)), blob[off + 6], curIface, curAlt);
                 _endpoints[addr] = info;
+                everyEndpoint.Add(info);
             }
             else if (type == 0x21) // HID class descriptor
             {
@@ -315,16 +324,22 @@ internal sealed class UsbDescriptorSet
         _hidClassDescriptor = hidClass;
         HidInterfaceNumber = hidIface;
 
-        // Cross-check the structured spec against the blob's endpoint table.
+        // Cross-check the structured spec against the blob's endpoint
+        // descriptors, each against the one in its own interface and
+        // alternate setting.
         foreach (var iface in cfg.Interfaces)
         {
             foreach (var alt in iface.AltSettings)
             {
                 foreach (var ep in alt.Endpoints)
                 {
-                    if (!_endpoints.TryGetValue(ep.Address, out var found))
+                    int at = everyEndpoint.FindIndex(e => e.Address == ep.Address
+                        && e.InterfaceNumber == iface.InterfaceNumber && e.AltSetting == alt.AltSetting);
+                    if (at < 0)
                         throw new InvalidOperationException(
-                            $"Structured spec endpoint 0x{ep.Address:X2} is absent from the configuration blob.");
+                            $"Structured spec endpoint 0x{ep.Address:X2} is absent from the configuration blob " +
+                            $"(interface {iface.InterfaceNumber}, alternate setting {alt.AltSetting}).");
+                    var found = everyEndpoint[at];
                     bool typeOk = ep.TransferType switch
                     {
                         "isochronous" => found.TransferType == 1,
@@ -339,6 +354,67 @@ internal sealed class UsbDescriptorSet
                             $"disagrees with the blob " +
                             $"(attributes 0x{found.Attributes:X2}, {found.MaxPacketSize}B, interval {found.Interval}).");
                 }
+            }
+        }
+
+        // A low-speed device has an 8-byte control endpoint, no bulk
+        // endpoints and interrupt endpoints of at most 8 bytes (USB 2.0
+        // 5.5.3, 5.8.3 and 5.7.3), and Linux allows it no isochronous ones
+        // (low_speed_maxpacket_maxes, drivers/usb/core/config.c). Every
+        // endpoint descriptor of every alternate setting is checked, as
+        // usb_parse_endpoint checks each, and wMaxPacketSize whole: bits
+        // 12..11 count additional transactions on a high-speed periodic
+        // endpoint alone (USB 2.0 9.6.6), and Linux masks them only there.
+        if (Speed == 1)
+        {
+            string at = $"Profile '{profile.Id}': usbConfiguration.busSpeed \"low\"";
+            if (DeviceDescriptor[7] != 8)
+                throw new InvalidOperationException(
+                    $"{at}: the device descriptor's bMaxPacketSize0 {DeviceDescriptor[7]} is not the 8 bytes a low-speed control endpoint carries.");
+            foreach (var ep in everyEndpoint)
+            {
+                string which = $"interface {ep.InterfaceNumber} alternate setting {ep.AltSetting} endpoint 0x{ep.Address:X2}";
+                if (ep.TransferType is 1 or 2)
+                    throw new InvalidOperationException(
+                        $"{at}: {which} is {(ep.TransferType == 1 ? "isochronous" : "bulk")}, which a low-speed device does not have.");
+                if (ep.TransferType == 3 && ep.MaxPacketSize > 8)
+                    throw new InvalidOperationException(
+                        $"{at}: {which} has wMaxPacketSize 0x{ep.MaxPacketSize:X4}, over the 8 bytes a low-speed interrupt endpoint carries.");
+            }
+        }
+
+        // The device serves each address from one descriptor (_endpoints,
+        // the last one written) and never switches interrupt or bulk
+        // endpoints with SET_INTERFACE. An isochronous URB is stamped with
+        // that descriptor's setting (HandleSubmit), so its stream follows
+        // the one setting that declares it. So an address keeps its
+        // transfer type across alternate settings, an interrupt or bulk
+        // address keeps its whole descriptor, and an isochronous address
+        // is declared in one setting alone.
+        static string TypeName(EndpointInfo e) => e.TransferType switch
+        {
+            0 => "control",
+            1 => "isochronous",
+            2 => "bulk",
+            _ => "interrupt",
+        };
+        static string Shape(EndpointInfo e) =>
+            $"{TypeName(e)}, wMaxPacketSize 0x{e.MaxPacketSize:X4}, bInterval {e.Interval}, " +
+            $"in interface {e.InterfaceNumber} alternate setting {e.AltSetting}";
+        for (int i = 0; i < everyEndpoint.Count; i++)
+        {
+            var first = everyEndpoint[i];
+            for (int k = i + 1; k < everyEndpoint.Count; k++)
+            {
+                var other = everyEndpoint[k];
+                if (other.Address != first.Address) continue;
+                string both = $"Profile '{profile.Id}': configurationDescriptor endpoint 0x{first.Address:X2} is {Shape(first)}, and {Shape(other)}.";
+                if (other.TransferType != first.TransferType)
+                    throw new InvalidOperationException($"{both} An endpoint keeps one transfer type across alternate settings.");
+                if (first.TransferType == 1)
+                    throw new InvalidOperationException($"{both} The device serves an isochronous endpoint from the one alternate setting that declares it.");
+                if (other.Attributes != first.Attributes || other.MaxPacketSize != first.MaxPacketSize || other.Interval != first.Interval)
+                    throw new InvalidOperationException($"{both} An interrupt or bulk endpoint keeps one descriptor across alternate settings.");
             }
         }
 

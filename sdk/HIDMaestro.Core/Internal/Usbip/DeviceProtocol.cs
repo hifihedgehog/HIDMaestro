@@ -45,7 +45,9 @@ internal sealed class CompiledProtocol
     /// <summary>The host poll period the endpoint descriptor gives, in
     /// microseconds.</summary>
     public int DescriptorPollMicros { get; }
-    public bool HighSpeed { get; }
+    /// <summary>The device's speed as the import reply gives it: 1 low, 2
+    /// full, 3 high.</summary>
+    public uint Speed { get; }
 
     /// <summary>The device's own controller poll in milliseconds, 0 when it
     /// has a report for every host poll.</summary>
@@ -139,6 +141,8 @@ internal sealed class CompiledProtocol
         ReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
         ReportSize = profile.ExtendedReport?.Size ?? profile.GetOrBuildReportBuilder().InputReportByteSize;
 
+        Speed = descriptors.Speed;
+
         // Input.
         if (spec.Input != null)
         {
@@ -147,8 +151,7 @@ internal sealed class CompiledProtocol
             InputPacketSize = ep.MaxPacketSize & 0x7FF;
             if (InputPacketSize == 0)
                 throw Fail($"{root}.input.endpoint 0x{InputEndpoint:X2} has a wMaxPacketSize of 0.");
-            HighSpeed = descriptors.Speed >= 3;
-            DescriptorPollMicros = DescriptorPeriodMicros(ep.Interval, HighSpeed);
+            DescriptorPollMicros = DescriptorPeriodMicros(ep.Interval, Speed);
             InputWhile = Condition(spec.Input.While, $"{root}.input.while");
 
             var clock = spec.Input.Clock;
@@ -284,13 +287,17 @@ internal sealed class CompiledProtocol
 
     /// <summary>The poll period Windows gives an interrupt endpoint, as the
     /// tables under USB_ENDPOINT_DESCRIPTOR's bInterval give it (Microsoft
-    /// Learn). Full speed: bInterval frames of 1 ms rounded down to a power
-    /// of two, at most 32. High speed: 2^(bInterval-1) microframes of 125
-    /// microseconds, at most 32 of them.</summary>
-    internal static int DescriptorPeriodMicros(byte bInterval, bool highSpeed)
+    /// Learn), at a USB/IP speed: 1 low, 2 full, 3 high. Low speed: 8 frames
+    /// of 1 ms for bInterval 0 to 15, 16 for 16 to 35, 32 beyond. Full
+    /// speed: bInterval frames rounded down to a power of two, at most 32.
+    /// High speed: 2^(bInterval-1) microframes of 125 microseconds, at most
+    /// 32 of them.</summary>
+    internal static int DescriptorPeriodMicros(byte bInterval, uint speed)
     {
-        if (highSpeed)
+        if (speed >= 3)
             return 125 << (Math.Clamp((int)bInterval, 1, 6) - 1);
+        if (speed == 1)
+            return (bInterval <= 15 ? 8 : bInterval <= 35 ? 16 : 32) * 1000;
         int ms = Math.Max(1, (int)bInterval);
         int pow = 1;
         while (pow * 2 <= ms && pow < 32) pow *= 2;
