@@ -588,8 +588,13 @@ public sealed partial class HMController : IDisposable
         {
             // Publish one frame immediately so the device is already
             // streaming when a driver opens it, then keep the cadence up
-            // whenever the consumer goes quiet.
-            _lastSubmitted = new HMGamepadState();
+            // whenever the consumer goes quiet. A device with ports repeats
+            // the ports' report as it stands, which went out above: a default
+            // state would go to port 1 and plug a controller into it.
+            if (Ports.Count > 0)
+                lock (_submitLock) Ports.RememberReportLocked();
+            else
+                _lastSubmitted = new HMGamepadState();
             _idleThread = new Thread(() => IdleFrameLoop(idleMs))
             {
                 IsBackground = true,
@@ -1043,6 +1048,11 @@ public sealed partial class HMController : IDisposable
         if (_idleThread != null)
             RememberRawFrame(report, extended: true);
     }
+
+    /// <summary>The ports' report for the idle pump, which repeats it as
+    /// it repeats a SubmitRawExtendedReport frame. Caller holds
+    /// <see cref="SubmitLock"/>.</summary>
+    internal void RememberPortsReportLocked(byte[] report) => RememberRawFrame(report, extended: true);
 
     /// <summary>v1.13.0: bind WinUSB to this controller's virtual USB/IP
     /// device, so libusb hosts can open it, for a profile that declares

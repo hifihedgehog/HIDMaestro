@@ -109,6 +109,7 @@ internal static class Program
         }
 
         Recreate(ctx, gc, before);
+        IdleFrames(ctx, before);
         return Probe.Finish("S80");
     }
 
@@ -749,6 +750,58 @@ internal static class Program
             Send(0x13);
             Probe.Check("reports after 0x13", Read(150)?.Length == 37);
         }
+    }
+
+    // ── Idle frames ─────────────────────────────────────────────────────
+
+    /// <summary>A copy of the profile that streams idle frames every 4 ms.
+    /// The pump repeats the ports' report as it stands, so a port the
+    /// program never connected stays empty.</summary>
+    static void IdleFrames(HMContext ctx, List<string> before)
+    {
+        Console.WriteLine("-- idle frames on a device with ports");
+        Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000);
+        string? name = typeof(HMContext).Assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.Replace('\\', '/').EndsWith("/gamecube-adapter.json", StringComparison.Ordinal));
+        if (name == null)
+        {
+            Probe.Check("gamecube-adapter.json is embedded", false);
+            return;
+        }
+        string json;
+        using (var stream = typeof(HMContext).Assembly.GetManifestResourceStream(name)!)
+        using (var reader = new System.IO.StreamReader(stream))
+            json = reader.ReadToEnd();
+        var j = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        j["id"] = "s80-idle-frames";
+        j["extendedReport"]!["idleFrameIntervalMs"] = 4;
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "hm-s80-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(dir);
+        HMController? controller = null;
+        try
+        {
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "s80-idle-frames.json"), j.ToJsonString());
+            ctx.LoadProfilesFromDirectory(dir);
+            controller = ctx.CreateController(ctx.GetProfile("s80-idle-frames")!);
+            Thread.Sleep(100);
+            var engine = controller.UsbipHandle!.Device.Protocol!;
+            byte[] report = engine.CopyReport();
+            Probe.Check("idle frames leave port 1 empty, as created: no controller, status 0x04, data zero",
+                !controller.Ports[0].IsConnected && Probe.Hex(report.AsSpan(1, 9)) == "040000000000000000",
+                $"connected {controller.Ports[0].IsConnected}, port 1 {Probe.Hex(report.AsSpan(1, 9))}");
+            controller.Ports[1].Connect();
+            Thread.Sleep(50);
+            report = engine.CopyReport();
+            Probe.Check("and repeat a port connected since, with port 1 still empty",
+                Probe.Hex(report.AsSpan(1, 18)) == "040000000000000000" + "140000808080800000", Probe.Hex(report.AsSpan(1, 18)));
+        }
+        finally
+        {
+            controller?.Dispose();
+            System.IO.Directory.Delete(dir, recursive: true);
+        }
+        Probe.Check("the device leaves with the controller",
+            Probe.WaitFor(() => Devnodes.PresentAdapters().Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 10_000));
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

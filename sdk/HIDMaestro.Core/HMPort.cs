@@ -116,6 +116,14 @@ public sealed class HMPortSet : IReadOnlyList<HMPort>
         if (_in != null) _controller.WritePortsReportLocked(_report, direct: false);
     }
 
+    /// <summary>Hand the report as it stands to the idle pump, which
+    /// repeats it until the next submit. Caller holds the submit
+    /// lock.</summary>
+    internal void RememberReportLocked()
+    {
+        if (_in != null) _controller.RememberPortsReportLocked(_report);
+    }
+
     internal string ConnectionOf(int port)
     {
         RequireStatus();
