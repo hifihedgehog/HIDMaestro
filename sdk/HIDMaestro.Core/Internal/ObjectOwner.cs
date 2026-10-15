@@ -16,10 +16,15 @@ namespace HIDMaestro.Internal;
 /// </summary>
 internal static partial class ObjectOwner
 {
-    /// <summary>Whether the object's owner is SYSTEM, Administrators or
-    /// LocalService. The handle needs READ_CONTROL. False when the owner
-    /// cannot be read.</summary>
-    internal static bool IsAdministrative(SafeHandle handle)
+    /// <summary>Whether the object's owner is SYSTEM or Administrators, and
+    /// with <paramref name="allowLocalService"/> LocalService too. The
+    /// handle needs READ_CONTROL. False when the owner cannot be read.
+    ///
+    /// <para>LocalService is a low-rights account every service can run as,
+    /// so it is allowed only for the two per-controller events the UMDF2
+    /// driver host creates (it runs as LocalService). For every other name
+    /// a LocalService owner is some other program's, not HIDMaestro's.</para></summary>
+    internal static bool IsOwnedByAdmin(SafeHandle handle, bool allowLocalService)
     {
         uint r = GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
             out IntPtr owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out IntPtr sd);
@@ -28,7 +33,7 @@ internal static partial class ObjectOwner
         {
             return IsWellKnownSid(owner, WinLocalSystemSid)
                 || IsWellKnownSid(owner, WinBuiltinAdministratorsSid)
-                || IsWellKnownSid(owner, WinLocalServiceSid);
+                || (allowLocalService && IsWellKnownSid(owner, WinLocalServiceSid));
         }
         finally { LocalFree(sd); }
     }

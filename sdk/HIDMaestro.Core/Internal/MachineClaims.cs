@@ -56,8 +56,9 @@ internal static partial class MachineClaims
     // SYNCHRONIZE | FILE_READ_ATTRIBUTES for SYSTEM, Administrators and
     // LocalService. Nobody can write or read a claim, and a non-elevated
     // process cannot even open one. Probing needs no access at all, so any
-    // process can still probe a claim under the prefix.
-    private const string ClaimSddl = "D:P(A;;0x00100080;;;SY)(A;;0x00100080;;;BA)(A;;0x00100080;;;LS)";
+    // process can still probe a claim under the prefix. Owner Administrators
+    // (O:BA), so the owner does not depend on the default-owner policy.
+    private const string ClaimSddl = "O:BAD:P(A;;0x00100080;;;SY)(A;;0x00100080;;;BA)(A;;0x00100080;;;LS)";
 
     private static readonly object s_lock = new();
     private static string? s_ownerId;

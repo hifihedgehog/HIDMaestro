@@ -465,6 +465,55 @@ internal static class Native
         return b;
     }
 
+    /// <summary>An impersonation token that keeps this elevated process's
+    /// rights, Administrators enabled, but has the user as its default
+    /// owner. That is the effect of the "System objects: Default owner for
+    /// objects created by members of the Administrators group = Object
+    /// creator" policy (DISA STIG V-3384): an object the token creates is
+    /// owned by the user, not Administrators, unless the SDDL names an owner.</summary>
+    internal static IntPtr UserOwnerToken()
+    {
+        const uint TOKEN_DUPLICATE = 0x2, TOKEN_QUERY = 0x8, TOKEN_ADJUST_DEFAULT = 0x80, MAXIMUM_ALLOWED = 0x02000000;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, out IntPtr own))
+            throw new System.ComponentModel.Win32Exception();
+        try
+        {
+            if (!DuplicateTokenEx(own, MAXIMUM_ALLOWED, IntPtr.Zero, 2, 2, out IntPtr imp))
+                throw new System.ComponentModel.Win32Exception();
+            byte[] user = SidBytes(System.Security.Principal.WindowsIdentity.GetCurrent().User!);
+            var h = System.Runtime.InteropServices.GCHandle.Alloc(user, System.Runtime.InteropServices.GCHandleType.Pinned);
+            IntPtr owner = Marshal.AllocHGlobal(IntPtr.Size);
+            try
+            {
+                Marshal.WriteIntPtr(owner, h.AddrOfPinnedObject());
+                if (!SetTokenInformation(imp, 4 /* TokenOwner */, owner, (uint)IntPtr.Size))
+                    throw new System.ComponentModel.Win32Exception();
+            }
+            finally { Marshal.FreeHGlobal(owner); h.Free(); }
+            return imp;
+        }
+        finally { CloseHandle(own); }
+    }
+
+    /// <summary>Create a mutex with <paramref name="sddl"/> and return its
+    /// owner's SID, then close it. For checking what owner a security
+    /// descriptor produces under the calling thread's token.</summary>
+    internal static string CreateAndReadOwner(string sddl, string name)
+    {
+        IntPtr sa = Sa(sddl);
+        IntPtr h = CreateMutexW(sa, false, name);
+        int err = Marshal.GetLastWin32Error();
+        FreeSa(sa);
+        if (h == IntPtr.Zero) return $"create err {err}";
+        try
+        {
+            if (GetSecurityInfo(h, 6, 1, out IntPtr owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out IntPtr osd) != 0) return "unreadable";
+            try { return new System.Security.Principal.SecurityIdentifier(owner).Value; }
+            finally { LocalFree(osd); }
+        }
+        finally { CloseHandle(h); }
+    }
+
     /// <summary>An impersonation token for this user as a program that is
     /// not elevated runs: Administrators deny-only, medium integrity, the
     /// user as default owner, and only the privileges such a program has.

@@ -82,11 +82,20 @@ internal sealed partial class LedgerLock : IDisposable
                 return;
             }
             _legacy = h;
-            bool administrative = ObjectOwner.IsAdministrative(h);
-            uint r = WaitForSingleObject(h, administrative ? INFINITE : 0);
+            // The owner is SYSTEM or Administrators for a v1.12.0 program's
+            // mutex, whose creator is elevated. A mutex this process made is
+            // owned by Administrators too, from its O:BA. Another owner means
+            // a program that is not elevated took the name. It is waited for,
+            // bounded: longer than v1.12.0 holds the mutex (it holds it only
+            // while it writes a few registry values), so a v1.12.0 holder
+            // that this check cannot read as its own under the object-creator
+            // policy still serializes, and a squatter costs only the wait.
+            bool administrative = ObjectOwner.IsOwnedByAdmin(h, allowLocalService: false);
+            uint timeout = administrative ? INFINITE : (uint)TimeoutScale.Apply(LegacyUnknownWaitMs);
+            uint r = WaitForSingleObject(h, timeout);
             _legacyHeld = r is WAIT_OBJECT_0 or WAIT_ABANDONED;
             if (!administrative)
-                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} was created by a process that is not elevated, {(_legacyHeld ? "taken while free" : "held, not waited on")}");
+                DeviceOrchestrator.LogDiag($"    ledger: {LegacyMutexName} is owned by neither SYSTEM nor Administrators, waited {timeout} ms, {(_legacyHeld ? "taken" : "still held")}");
         }
         finally
         {
@@ -114,8 +123,13 @@ internal sealed partial class LedgerLock : IDisposable
     }
 
     // SYSTEM and Administrators, the security a v1.12.0 program's elevated
-    // default gives the same name.
-    private const string LegacySddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    // default gives the same name. Owner Administrators (O:BA), so a mutex
+    // this process creates reads as administrative whatever the default-owner
+    // policy is.
+    private const string LegacySddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    // How long to wait for a legacy mutex whose owner is neither SYSTEM nor
+    // Administrators. v1.12.0 holds it for a few registry writes.
+    private const int LegacyUnknownWaitMs = 5000;
     private const uint SYNCHRONIZE = 0x00100000;
     private const uint MUTEX_MODIFY_STATE = 0x0001;
     private const uint READ_CONTROL = 0x00020000;

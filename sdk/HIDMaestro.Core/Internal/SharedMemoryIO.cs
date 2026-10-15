@@ -134,9 +134,14 @@ internal static partial class SharedMemoryIO
     // SDDL granting Local System, Builtin Admins, and LocalService full
     // access plus World read. LocalService is what WUDFHost runs as for
     // UMDF2, so the driver/companion need full access to read input and
-    // write output. World read is for non-elevated diagnostic tools.
+    // write output. World read is for non-elevated diagnostic tools. The
+    // owner is set to Administrators (O:BA), so the object's owner is
+    // Administrators whatever the machine's "default owner for objects
+    // created by members of the Administrators group" policy says, and an
+    // owner check tells this object from one a program that is not elevated
+    // made.
     private const string Sddl =
-        "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
+        "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
 
     private const uint PAGE_READWRITE = 0x04;
     private const uint FILE_MAP_READ  = 0x02;
@@ -1157,8 +1162,9 @@ internal static partial class SharedMemoryIO
     /// the dwFlags argument to CreateEventExW is 0 (not MANUAL_RESET).</summary>
     // The owner pipe admits the system, administrators and LocalService,
     // which WUDFHost runs as. No read access for everyone: one stray client
-    // would take the instance the driver needs.
-    private const string OwnerPipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
+    // would take the instance the driver needs. Owner Administrators (O:BA),
+    // as for the sections.
+    private const string OwnerPipeSddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
     private const uint PIPE_ACCESS_OUTBOUND = 0x00000002;
     private const uint PIPE_TYPE_BYTE = 0x00000000;
     private const uint PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
@@ -1241,8 +1247,10 @@ internal static partial class SharedMemoryIO
         // An event that already existed came from a controller of this index
         // before, unless a program that is not elevated made it first, after
         // the transport allocator looked (ForeignObjectAt). Its maker could
-        // wait on it and take the signals meant for the driver.
-        if (error == ERROR_ALREADY_EXISTS && !IsAdministrative(ev))
+        // wait on it and take the signals meant for the driver. Only the
+        // output doorbell may be LocalService-owned (the driver host made
+        // it). The SDK's own events are owned by Administrators.
+        if (error == ERROR_ALREADY_EXISTS && !IsOwnedByAdmin(ev, allowLocalService: name.Contains("OutputEvent", StringComparison.Ordinal)))
         {
             CloseHandle(ev);
             throw new HMResourceInUseException(
@@ -1252,17 +1260,20 @@ internal static partial class SharedMemoryIO
         return ev;
     }
 
-    private static bool IsAdministrative(IntPtr handle)
+    private static bool IsOwnedByAdmin(IntPtr handle, bool allowLocalService)
     {
         using var h = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, ownsHandle: false);
-        return ObjectOwner.IsAdministrative(h);
+        return ObjectOwner.IsOwnedByAdmin(h, allowLocalService);
     }
 
     // A transport index's named sections and events, by the part of the
-    // name before the index. The driver creates StopEvent and OutputEvent,
-    // the SDK the rest.
+    // name before the index. The driver host, which runs as LocalService,
+    // creates StopEvent and OutputEvent. The SDK creates the rest, owned by
+    // Administrators, so only those two may be LocalService-owned.
     private static readonly string[] IndexSections = { "Input", "InputAck", "Output", "PidState", "Version" };
     private static readonly string[] IndexEvents = { "InputEvent", "CompanionInputEvent", "InputAckEvent", "OutputEvent", "StopEvent" };
+
+    private static bool DriverCreates(string eventKind) => eventKind is "OutputEvent" or "StopEvent";
 
     /// <summary>The first of a transport index's named sections and events
     /// that a program that is not elevated made, or null when it made none.
@@ -1271,32 +1282,32 @@ internal static partial class SharedMemoryIO
     /// does, and keep it. The driver and the SDK would then signal and wait
     /// on objects that program holds, or fail to create theirs. The
     /// transport allocator skips such an index. An object that exists and
-    /// opens as its own kind with an owner of SYSTEM, Administrators or
-    /// LocalService is one a controller of the index left
-    /// (<see cref="ObjectOwner"/>).</summary>
+    /// opens as its own kind is one a controller of the index left when its
+    /// owner is Administrators (the SDK) or SYSTEM, or, for the two events
+    /// the driver host creates, LocalService (<see cref="ObjectOwner"/>).</summary>
     internal static string? ForeignObjectAt(int controllerIndex)
     {
         foreach (string kind in IndexSections)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (!Acceptable(OpenFileMappingW(READ_CONTROL, false, name))) return name;
+            if (!Acceptable(OpenFileMappingW(READ_CONTROL, false, name), allowLocalService: false)) return name;
         }
         foreach (string kind in IndexEvents)
         {
             string name = $@"Global\HIDMaestro{kind}{controllerIndex}";
-            if (!Acceptable(OpenEventW(READ_CONTROL, false, name))) return name;
+            if (!Acceptable(OpenEventW(READ_CONTROL, false, name), DriverCreates(kind))) return name;
         }
         return null;
     }
 
     /// <summary>An open that found nothing, or found an object of the
-    /// expected kind owned by SYSTEM, Administrators or LocalService. An
-    /// open refused for access or for the kind of object counts as made by
-    /// someone else.</summary>
-    private static bool Acceptable(IntPtr handle)
+    /// expected kind owned by Administrators or SYSTEM, or by LocalService
+    /// when <paramref name="allowLocalService"/>. An open refused for access
+    /// or for the kind of object counts as made by someone else.</summary>
+    private static bool Acceptable(IntPtr handle, bool allowLocalService)
     {
         if (handle == IntPtr.Zero) return Marshal.GetLastPInvokeError() == ERROR_FILE_NOT_FOUND;
-        try { return IsAdministrative(handle); }
+        try { return IsOwnedByAdmin(handle, allowLocalService); }
         finally { CloseHandle(handle); }
     }
 

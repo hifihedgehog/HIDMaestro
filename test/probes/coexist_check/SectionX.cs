@@ -1,4 +1,5 @@
-// X. Machine-wide names a program that is not elevated creates first.
+// X. Machine-wide names a program that is not elevated creates first,
+// and names HIDMaestro creates whose owner tells them from a squatter.
 //
 // Any local program can create a Global\ mutex or event, or a pipe, under
 // any name no one holds yet, and hold it. The probe plays that program with
@@ -31,6 +32,39 @@ internal static partial class Program
         SectionX3();
         Clean();
         SectionX4();
+        Clean();
+        SectionX5();
+    }
+
+    /// <summary>The owner of the objects HIDMaestro creates, under the
+    /// effect of the "default owner = Object creator" policy. The SDK sets
+    /// O:BA in its security descriptors so the owner is Administrators
+    /// whatever the policy, which the transport allocator and the ledger
+    /// lock then read as HIDMaestro's own and not a squatter's.</summary>
+    static void SectionX5()
+    {
+        // The DACL the SDK's sections and events carry, with and without the
+        // owner it now also sets.
+        const string dacl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GR;;;WD)";
+        string user = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+        string noOwner = "?", withOwner = "?";
+        IntPtr token = Native.UserOwnerToken();
+        var t = new Thread(() =>
+        {
+            if (!Native.SetThreadToken(IntPtr.Zero, token)) { noOwner = $"SetThreadToken err {Marshal.GetLastWin32Error()}"; return; }
+            try
+            {
+                noOwner = Native.CreateAndReadOwner(dacl, @"Global\HIDMaestroX5NoOwner");
+                withOwner = Native.CreateAndReadOwner("O:BA" + dacl, @"Global\HIDMaestroX5Owner");
+            }
+            finally { Native.RevertToSelf(); }
+        });
+        t.Start(); t.Join();
+        Native.CloseHandle(token);
+        Check("X5: the policy's effect is reproduced: without an owner in the descriptor the object is the user's",
+              noOwner == user, $"owner {noOwner}, user {user}");
+        Check("X5: with O:BA, as the SDK sets, the object is owned by Administrators whatever the policy",
+              withOwner == "S-1-5-32-544", $"owner {withOwner}");
     }
 
     /// <summary>The deploy lock.</summary>
