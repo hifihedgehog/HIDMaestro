@@ -234,13 +234,22 @@ public sealed class ControllerProfile
         Backend?.Equals("usbip", StringComparison.OrdinalIgnoreCase) == true;
 
     /// <summary>v1.13.0: check the profile's port blocks. They fit their
-    /// reports, an output report's ports pair with the input report's, and
-    /// every port field compiles. Throws <see cref="InvalidOperationException"/>
-    /// naming the JSON path.</summary>
+    /// reports, an output report's ports pair with the input report's, every
+    /// port field compiles, and a report's own fields leave the blocks to
+    /// them. Throws <see cref="InvalidOperationException"/> naming the JSON
+    /// path.</summary>
     internal void ValidatePorts()
     {
         var input = PortLayout.Of(ExtendedReport, $"Profile '{Id}': extendedReport", output: false);
         var output = PortLayout.Of(ExtendedOutputReport, $"Profile '{Id}': extendedOutputReport", output: true);
+        // The SDK composes a report with ports from the port blocks and the
+        // status flags, and encodes none of the report's own fields: those
+        // take their values from one gamepad state, where each port has its
+        // own. Device-wide status bits are ports.status.flags.
+        if (input != null && ExtendedReport!.Fields is { Count: > 0 } beside)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': extendedReport.fields[0] ('{beside[0].Type}') is beside ports. A report with ports is " +
+                "written from its port blocks alone, so the field would never be written. Move it into ports.fields.");
         if (output == null) return;
         if (input == null)
             throw new InvalidOperationException(
@@ -255,6 +264,19 @@ public sealed class ControllerProfile
             throw new InvalidOperationException(
                 $"Profile '{Id}': extendedOutputReport.ports end at byte {extent}. An output report reaches the SDK " +
                 $"with at most {OutputRingData} bytes after its report ID.");
+        // An output report's own fields are decoded beside its ports, each
+        // under its own name, so none may read a block's bytes.
+        var prog = VendorBlobProgram.Get(ExtendedOutputReport!);
+        int blocksLo = output.Offset, blocksHi = extent - 1;
+        for (int i = 0; i < prog.Fields.Length; i++)
+        {
+            if (prog.Fields[i].Op == VendorBlobProgram.FieldOp.Crc32 && prog.Fields[i].CrcDst < 0) continue;
+            var (lo, hi) = VendorBlobProgram.Extent(in prog.Fields[i], ExtendedOutputReport!.Size);
+            if (lo <= blocksHi && hi >= blocksLo)
+                throw new InvalidOperationException(
+                    $"Profile '{Id}': extendedOutputReport.fields[{i}] ('{prog.Fields[i].Src.Type}') at bytes {lo}-{hi} " +
+                    $"overlaps the port blocks at bytes {blocksLo}-{blocksHi}.");
+        }
         output.PrepareOutput($"Profile '{Id}': extendedOutputReport");
     }
 
@@ -591,8 +613,9 @@ public sealed class ExtendedReportSpec
 
     /// <summary>v1.13.0: the report's repeated per-port blocks, for a device
     /// that carries several controllers in one report (a multi-port adapter,
-    /// a multitap, a receiver). Fields outside the ports stay in
-    /// <see cref="Fields"/>. See <see cref="PortsSpec"/>.</summary>
+    /// a multitap, a receiver). An input report with ports has no fields
+    /// of its own: <see cref="Fields"/> stays empty. An output report's
+    /// own fields sit outside its port blocks. See <see cref="PortsSpec"/>.</summary>
     [JsonPropertyName("ports")]
     public PortsSpec? Ports { get; set; }
 

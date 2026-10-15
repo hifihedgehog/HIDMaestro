@@ -285,6 +285,17 @@ internal static class Program
             j => { Out(j)["reportId"] = ""; OutPorts(j)["offset"] = 0; },
             "extendedOutputReport.ports.offset 0 puts port 1's block on byte 0, which every output path hands the SDK as the report ID. The blocks start at byte 1 or later"),
 
+        // Fields beside the port blocks.
+        ("a report field beside the ports",
+            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftStickX"}"""),
+            "extendedReport.fields[0] ('uint8-axis') is beside ports. A report with ports is written from its port blocks alone, so the field would never be written. Move it into ports.fields"),
+        ("an output field over a port block",
+            j => Out(j)["fields"] = Arr("""{"byte":2,"type":"uint8","semantic":"x"}"""),
+            "extendedOutputReport.fields[0] ('uint8') at bytes 2-2 overlaps the port blocks at bytes 1-4"),
+        ("an output field past the OUT endpoint's packet",
+            j => { Out(j)["size"] = 6; Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}"""); },
+            "extendedOutputReport.fields[0] ('uint8') ends at byte 6, past the 5-byte packets usbConfiguration.protocol.commands.endpoint 0x02 delivers"),
+
         ("a port count that wraps an int",
             j =>
             {
@@ -387,35 +398,53 @@ internal static class Program
 
     /// <summary>Copies that must still compile, as they did at af1e3d4,
     /// because the codec writes them correctly: its defined fallbacks and
-    /// the bounds it clamps.</summary>
+    /// the bounds it clamps. A report with ports is written from its port
+    /// blocks alone, so the copies that test a report's own fields drop
+    /// the ports and the protocol that reads them first.</summary>
     static readonly (string Name, Action<JsonObject> Change)[] s_accepted =
     {
         ("an unaltered copy of gamecube-adapter", j => { }),
         ("a CRC scope past the report's end, which the codec stops at the end",
-            j => In(j)["fields"] = Arr("""{"bytes":"1-4","type":"crc32-le","scope":{"prefix":[],"from":0,"to":99}}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"bytes":"1-4","type":"crc32-le","scope":{"prefix":[],"from":0,"to":99}}"""); }),
         ("touchpad-finger with no semantic, finger 0",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger"}"""); }),
         ("touchpad-finger with another semantic, finger 0",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger","semantic":"touchpad"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"touchpad-finger","semantic":"touchpad"}"""); }),
         ("stick12-pair with no semantic, the left stick",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"stick12-pair"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"stick12-pair"}"""); }),
         ("uint8-axis with no semantic, the center",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis"}"""); }),
         ("uint8-axis with an empty semantic, the center",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":""}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":""}"""); }),
         ("an output CRC with no place in a report past the ring, read at the received end",
-            j => { Out(j)["size"] = 300; Out(j)["fields"] = Arr("""{"type":"crc32-le","scope":{"prefix":[],"from":0,"to":20}}"""); }),
+            j => { NoPorts(j); Out(j)["size"] = 300; Out(j)["fields"] = Arr("""{"type":"crc32-le","scope":{"prefix":[],"from":0,"to":20}}"""); }),
         ("uint8-axis naming another type's value, the center",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftTrigger"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftTrigger"}"""); }),
         ("int16-axis with no semantic, the center",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"int16-axis"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"int16-axis"}"""); }),
         ("uint16-le with no semantic, zero",
-            j => In(j)["fields"] = Arr("""{"byte":1,"type":"uint16-le"}""")),
+            j => { NoPorts(j); In(j)["fields"] = Arr("""{"byte":1,"type":"uint16-le"}"""); }),
         ("an output button mask of 16 bits",
-            j => Out(j)["fields"] = Arr(WideMask)),
+            j => { NoPorts(j); Out(j)["fields"] = Arr(WideMask); }),
         ("port blocks from byte 0 of a report with no ID",
             j => { In(j)["reportId"] = ""; Ports(j)["offset"] = 0; }),
+        ("an output field past the port blocks, on a device with no protocol",
+            j =>
+            {
+                j["usbConfiguration"]!.AsObject().Remove("protocol");
+                Out(j)["size"] = 6;
+                Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}""");
+            }),
     };
+
+    /// <summary>A copy of gamecube-adapter with one report of its own, no
+    /// ports and no protocol.</summary>
+    static void NoPorts(JsonObject j)
+    {
+        In(j).Remove("ports");
+        Out(j).Remove("ports");
+        j["usbConfiguration"]!.AsObject().Remove("protocol");
+    }
 
     const string WideMask = """{"byte":1,"bits":"0-15","type":"button-mask","semantic":"held","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","LeftStick","RightStick","Guide","_","_","_","_","_"]}""";
 

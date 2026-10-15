@@ -219,6 +219,22 @@ internal sealed class CompiledProtocol
                 throw Fail(
                     $"extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
                     $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers.");
+            // The report's own fields, the same way. A CRC with no declared
+            // place is read at the end of what arrived.
+            if (everyOutputIsCommands && profile.ExtendedOutputReport is { } outSpec)
+            {
+                var outProg = VendorBlobProgram.Get(outSpec);
+                for (int i = 0; i < outProg.Fields.Length; i++)
+                {
+                    ref readonly var f = ref outProg.Fields[i];
+                    if (f.Op == VendorBlobProgram.FieldOp.Crc32 && f.CrcDst < 0) continue;
+                    int end = VendorBlobProgram.Extent(in f, outSpec.Size).Hi + 1;
+                    if (end > CommandPacketSize)
+                        throw Fail(
+                            $"extendedOutputReport.fields[{i}] ('{f.Src.Type}') ends at byte {end}, past the " +
+                            $"{CommandPacketSize}-byte packets {root}.commands.endpoint 0x{CommandEndpoint:X2} delivers.");
+                }
+            }
         }
         else
         {
