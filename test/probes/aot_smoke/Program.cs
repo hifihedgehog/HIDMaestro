@@ -20,9 +20,9 @@
 //
 // Usage: AotSmoke.exe aot|trim [--neutral-only]. Requires elevation. Exit 0
 // PASS, 1 FAIL, 2 when another program that embeds HIDMaestro is running.
-// --neutral-only is the negative control for the delivery check: it submits
-// the neutral state in both windows, so reports flow but carry no pressed
-// state, and the check must fail.
+// --neutral-only submits the neutral state in the pressed window as well, so
+// reports flow but carry no pressed state and the delivery check must fail.
+// Every run also compares two neutral windows, which must differ in nothing.
 //
 // AotSmoke.exe --startup prints the milliseconds from process start to the
 // catalog loaded and exits, touching no device: the cold start the
@@ -148,10 +148,17 @@ internal static class Program
                 int readError = idleError != 0 ? idleError : heldError;
                 Check($"{d.Id}: input arrives", idle != null && held != null && idle.Count > 0 && held.Count > 0 && readError == 0,
                       $"{idle?.Count ?? -1} and {held?.Count ?? -1} report(s) in 600 ms each{(readError != 0 ? $", a read failed with Win32 error {readError}" : "")}");
+                var (idleAgain, againError) = ReadWhileSubmitting(c, path, neutral);
                 var changed = idle != null && held != null ? SteadyDifferences(idle, held) : new List<int>();
                 Check($"{d.Id}: the submitted state is what the host reads", changed.Count > 0,
                       changed.Count > 0 ? $"byte(s) {string.Join(",", changed)} differ between the neutral and pressed windows"
                                         : "no byte that is steady in each window differs between them");
+                // The control: the same comparison between two neutral windows
+                // finds nothing, so a steady byte that ignores the state is
+                // not taken for the state.
+                var spurious = idle != null && idleAgain != null ? SteadyDifferences(idle, idleAgain) : new List<int> { -1 };
+                Check($"{d.Id}: two neutral windows show no difference", againError == 0 && idleAgain != null && idleAgain.Count > 0 && spurious.Count == 0,
+                      spurious.Count == 0 ? "" : $"byte(s) {string.Join(",", spurious)} differ");
                 int writeError = Native.WriteOutput(path, d.OutputId, d.Body);
                 bool raised = WaitFor(() => Volatile.Read(ref outputs) > 0 ? "yes" : null, 3000) != null;
                 Check($"{d.Id}: an output report raises OutputReceived", writeError == 0 && raised,
