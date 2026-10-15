@@ -216,9 +216,11 @@ internal static partial class SharedMemoryIO
     /// <summary>The driver watches this controller's owner pipe and sends
     /// the release frames when it closes.</summary>
     public const int INPUT_ACK_CAP_RELEASE = 0x2;
-    // Bit 31 of the capability word is the driver's own: it marks an owner
-    // watch that has ended, and the zeroing at create clears it. An SDK
-    // never sets it and tests the capabilities one bit at a time.
+    /// <summary>Bit 31 of the capability word is the driver's own: it
+    /// marks an owner watch that has ended, and the zeroing at create clears
+    /// it. An SDK never sets it and tests the capabilities one bit at a
+    /// time. The census reads it (OwnerCensus.LegacyPipeLive).</summary>
+    public const int INPUT_ACK_WATCH_ENDED = unchecked((int)0x80000000);
     // Two instances, so a driver that restarts under a live controller can
     // connect again: the SDK never re-arms an instance a client left.
     private const int OWNER_PIPE_INSTANCES = 2;

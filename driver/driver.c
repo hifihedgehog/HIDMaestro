@@ -883,15 +883,22 @@ static VOID
 OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
     CloseOwnerWatch(ctx);
+
+    /* The watch connects only beside the acknowledgement section, so it is
+     * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
+     * the values say so: the census reads OwnerConnected 0 beside a clear
+     * marker as a program that started since (OwnerCensus.LegacyPipeLive). */
+    WdfWaitLockAcquire(ctx->InputLock, NULL);
+    if (ctx->InputAckMemPtr != NULL)
+        InterlockedOr(&((PHIDMAESTRO_INPUT_ACK)ctx->InputAckMemPtr)->Capabilities,
+                      (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
+    WdfWaitLockRelease(ctx->InputLock);
     RecordOwnerGone(ctx);
 
     WdfWaitLockAcquire(ctx->InputLock, NULL);
     volatile HIDMAESTRO_INPUT_ACK *ack = (volatile HIDMAESTRO_INPUT_ACK *)ctx->InputAckMemPtr;
     ULONG count = 0;
     if (ack != NULL) {
-        /* The watch connects only beside this section, so it is mapped
-         * here. Mark the watch ended in it (TryOpenOwnerWatch). */
-        InterlockedOr(&ack->Capabilities, (LONG)HIDMAESTRO_INPUT_ACK_WATCH_ENDED);
         /* Seqlock read. Every version the SDK writes is a set of release
          * frames, so after four torn reads the last copy is still safe to
          * send: at worst an absolute pointer keeps a slightly older

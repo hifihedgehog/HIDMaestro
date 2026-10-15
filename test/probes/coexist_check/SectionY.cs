@@ -26,7 +26,8 @@
 //        the program as its owner pipe's server and then recorded it gone,
 //        so the next sweep of a running program removes the killed one's
 //        devices.
-//    Y4. The same with the driver's values deleted, as a driver that records
+//    Y4. The same with the driver's values deleted and its ended marker in
+//        the acknowledgement section cleared, as a driver that records
 //        nothing leaves them: the pipe keeps the devices, as before this
 //        release.
 //    Y5. A running v1.12.0 program. On its own driver, which records
@@ -87,6 +88,14 @@
 //        pause from the moment its create returns, inside the driver's idle
 //        window, so the driver never maps the input section again. The
 //        driver watches the new program's pipe all the same.
+//    Y19. Y13's squatter, holding the acknowledgement section as well, and
+//        then the dead program's device is added again, so a new driver
+//        context starts with no values. The section still carries the
+//        driver's ended marker, so the census does not count the held pipe,
+//        and a sweep removes the device.
+//    Y20. The same without the acknowledgement section, which goes with the
+//        old context. With no such section the census does not count the
+//        held pipe either.
 //    Y11. A v1.12.0 program's DualShock 4 moved onto the installed driver
 //        while its SDK holds the earlier driver's OutputEvent. The probe
 //        writes 31 output reports 100 ms apart and times each one to the
@@ -134,6 +143,8 @@ internal static partial class Program
             SectionYWatchWhileWaiting();
             SectionYAdopted(installed, "Y17", stream: false);
             SectionYAdopted(installed, "Y18", stream: true);
+            SectionYReAdded(user, "Y19", holdAck: true);
+            SectionYReAdded(user, "Y20", holdAck: false);
         }
         finally { Y.CloseHandle(user); }
     }
@@ -480,6 +491,62 @@ internal static partial class Program
         {
             if (stream) old.Send("stopstream");
             cap?.Dispose();
+        }
+    }
+
+    /// <summary>Y19 and Y20. Y13's squatter, then a re-add of the dead
+    /// program's device. With <paramref name="holdAck"/> the user also holds
+    /// the acknowledgement section.</summary>
+    static void SectionYReAdded(IntPtr user, string y, bool holdAck)
+    {
+        Clean();
+        string inst, tok;
+        int t;
+        using (var p = PeerProcess.Start("Y-readded"))
+        {
+            string cp = p.Send($"create pad {(holdAck ? "F1E0" : "F1E1")} coexist-y-readded");
+            if (!Ok(cp)) { Check($"{y}: a program creates", false, cp); return; }
+            inst = PeerProcess.Field(cp, "instance")!;
+            t = int.Parse(PeerProcess.Field(cp, "transport")!);
+            tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+            WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 5000);
+            p.Kill();
+        }
+        Check($"{y}: the driver records the program gone", WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000), Y.ShowWatch(inst));
+        var tree = Native.Subtree(inst);
+        IntPtr sec = Y.AsUser(user, () => Y.HoldSection($@"Global\HIDMaestroInput{t}"));
+        IntPtr ack = holdAck ? Y.AsUser(user, () => Y.HoldSection($@"Global\HIDMaestroInputAck{t}")) : IntPtr.Zero;
+        IntPtr ev = Y.AsUser(user, () => Y.OpenEventW(Y.READ_CONTROL, false, $@"Global\HIDMaestroInputEvent{t}"));
+        var pipe = Y.AsUser(user, () => Y.FakeOwnerPipe(t));
+        Check($"{y}: the user holds the dead program's section, event and pipe" + (holdAck ? ", and its acknowledgement section" : ""),
+              sec != IntPtr.Zero && ev != IntPtr.Zero && pipe != null && (!holdAck || ack != IntPtr.Zero),
+              $"section {sec != IntPtr.Zero}, ack {ack != IntPtr.Zero}, event {ev != IntPtr.Zero}, pipe {pipe != null}");
+        try
+        {
+            // A disable and enable gives the device a new driver context,
+            // which deletes the previous context's values when it starts.
+            bool readded = Y.RestartDevice(inst) && WaitFor(() => Native.IsStarted(inst), 20_000);
+            Check($"{y}: the device is added again, and the new context has no values",
+                  readded && WaitFor(() => Y.WatchValues(inst) == null, 5000), Y.ShowWatch(inst));
+            // The new worker maps the held section within its first 200 ms
+            // tick. Past that, it has refused the user's pipe.
+            Thread.Sleep(3000);
+            Check($"{y}: the new context does not connect to the user's pipe", Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+            using var nu = PeerProcess.Start("Y-readded-sweeper");
+            string? entry = Y.CensusEntry(nu.Send("census"), tok);
+            Check($"{y}: the census does not count the held pipe as a running program's",
+                  entry != null && entry.Split('|')[2] is "Dead" or "DeadLegacy", entry ?? "no entry");
+            nu.Send("sweep");
+            WaitFor(() => tree.All(Native.IsGone), 5000);
+            Check($"{y}: a sweep removes the dead program's devices", tree.Count > 0 && tree.All(Native.IsGone),
+                  string.Join(", ", tree.Where(d => !Native.IsGone(d))));
+        }
+        finally
+        {
+            if (sec != IntPtr.Zero) Y.CloseHandle(sec);
+            if (ack != IntPtr.Zero) Y.CloseHandle(ack);
+            if (ev != IntPtr.Zero) Y.CloseHandle(ev);
+            pipe?.Dispose();
         }
     }
 
@@ -874,6 +941,7 @@ internal static partial class Program
         tree = Native.Subtree(inst);
         WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000);
         Check("Y4: the driver's values are deleted", Y.DeleteWatchValues(inst) && Y.WatchValues(inst) == null, Y.ShowWatch(inst));
+        Check("Y4: and its ended marker is cleared", Y.ClearAckEnded($@"Global\HIDMaestroInputAck{t}"));
         using (var fake = Y.AsUser(user, () => Y.FakeOwnerPipe(t)))
         {
             Check($"Y4: the user creates \\\\.\\pipe\\HIDMaestroOwner{t}", fake != null);
@@ -1216,6 +1284,43 @@ internal static partial class Program
 
         internal const uint EVENT_MODIFY_STATE = 0x0002, SYNCHRONIZE = 0x00100000, READ_CONTROL = 0x00020000;
         internal const uint EVENT_ALL_ACCESS = 0x1F0003;
+
+        /// <summary>Clear the driver's ended marker, bit 31 of an
+        /// acknowledgement section's capabilities word, as a driver that
+        /// records nothing leaves it. False when the section does not
+        /// exist.</summary>
+        internal static bool ClearAckEnded(string name)
+        {
+            IntPtr h = OpenFileMappingW(0x0002 /*FILE_MAP_WRITE*/, false, name);
+            if (h == IntPtr.Zero) return false;
+            try
+            {
+                IntPtr v = MapViewOfFile(h, 0x0002, 0, 0, (UIntPtr)16);
+                if (v == IntPtr.Zero) return false;
+                try
+                {
+                    Marshal.WriteInt32(v, 4, Marshal.ReadInt32(v, 4) & 0x7FFFFFFF);
+                    return true;
+                }
+                finally { UnmapViewOfFile(v); }
+            }
+            finally { CloseHandle(h); }
+        }
+
+        /// <summary>Disable the device and enable it again, as an
+        /// administrator's disable and enable does. False when the device
+        /// cannot be found or the disable is refused.</summary>
+        internal static bool RestartDevice(string instanceId)
+        {
+            if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return false;
+            if (CM_Disable_DevNode(devInst, 0) != 0) return false;
+            WaitFor(() => !Native.IsStarted(instanceId), 10_000);
+            if (CM_Locate_DevNodeW(out devInst, instanceId, 1 /*CM_LOCATE_DEVNODE_PHANTOM*/) != 0) return false;
+            return CM_Enable_DevNode(devInst, 0) == 0;
+        }
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)] static extern uint CM_Locate_DevNodeW(out uint devInst, string deviceId, uint flags);
+        [DllImport("cfgmgr32.dll")] static extern uint CM_Disable_DevNode(uint devInst, uint flags);
+        [DllImport("cfgmgr32.dll")] static extern uint CM_Enable_DevNode(uint devInst, uint flags);
 
         /// <summary>A held FILE_MAP_READ handle to a named section, or zero.</summary>
         internal static IntPtr HoldSection(string name) => OpenFileMappingW(0x0004 /*FILE_MAP_READ*/, false, name);

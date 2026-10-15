@@ -358,7 +358,8 @@ typedef struct _HIDMAESTRO_SHARED_INPUT {
  * the owner watch it held ends (OwnerGone) and connects a watch only while
  * it is clear. A program that starts on the index creates this section and
  * zeroes it, which clears the bit. A program that is not elevated can only
- * open the section for reading, so it cannot. No SDK tests this bit. */
+ * open the section for reading, so it cannot. The SDK's census reads it
+ * (OwnerCensus.LegacyPipeLive). No SDK tests it as a capability. */
 #define HIDMAESTRO_INPUT_ACK_WATCH_ENDED    0x80000000u
 #pragma pack(push, 1)
 typedef struct _HIDMAESTRO_RELEASE_FRAME {

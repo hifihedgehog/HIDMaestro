@@ -203,19 +203,32 @@ internal sealed partial class OwnerCensus
     /// keeps the pipe counting, trusted or not: a program that made the
     /// name first can leave a v1.12.0 program's watch on its own pipe, and
     /// that proves nothing about the program writing the device's sections.
-    /// A driver that records nothing, one older than v1.13.0 or one whose
-    /// watch has not connected yet, leaves the rule before v1.13.0.
+    /// Where no driver recorded anything, one older than v1.13.0 or one
+    /// whose watch has not connected yet, the held pipe counts only beside
+    /// the index's input section and an acknowledgement section that does
+    /// not carry the driver's ended marker.
     /// <paramref name="members"/> gives the device's devnodes and is called
     /// only when the pipe is held.</summary>
     private static bool LegacyPipeLive(int index, Func<IReadOnlyList<string>> members)
     {
         if (!MachineClaims.IsHeld(MachineClaims.LegacyOwnerPipeName(index))) return false;
+        bool? ackEnded = AckWatchEnded(index);
         string? gone = null;
         foreach (string id in members())
         {
             OwnerWatch? w = ReadOwnerWatch(id);
             if (w == null) continue;
-            if (!w.Connected) { gone ??= "the watch ended"; continue; }
+            if (!w.Connected)
+            {
+                // The driver marks the acknowledgement section before it
+                // writes OwnerConnected 0. A clear marker beside that value
+                // means a program has zeroed the section since, so the
+                // value describes the program before it and the rule below
+                // decides.
+                if (ackEnded == false) continue;
+                gone ??= "the watch ended";
+                continue;
+            }
             ServerCheck c = CheckServer(w);
             if (c.Alive) return true;
             gone ??= $"server {w.ProcessId} no longer runs";
@@ -237,7 +250,38 @@ internal sealed partial class OwnerCensus
             DeviceOrchestrator.LogDiag($"    the v1.12.0 owner pipe of transport index {index} is held with no input section: a squatter, not a running program");
             return false;
         }
+        // Every SDK that makes the owner pipe makes the acknowledgement
+        // section beside the input section and zeroes it. A program that is
+        // not elevated can neither create it nor write it. With no section,
+        // or with the ended marker set (a v1.13.0 driver saw the watch end
+        // and no program has started on the index since), the pipe and the
+        // input section are a squatter's hold on a dead program's objects.
+        if (ackEnded != false)
+        {
+            DeviceOrchestrator.LogDiag(ackEnded == null
+                ? $"    the v1.12.0 owner pipe of transport index {index} is held with no acknowledgement section: a squatter, not a running program"
+                : $"    the v1.12.0 owner pipe of transport index {index} is held after the driver saw its watch end, and no program has started on it since");
+            return false;
+        }
         return true;
+    }
+
+    /// <summary>Whether the driver marked the owner watch of
+    /// <paramref name="index"/> ended in Global\HIDMaestroInputAck&lt;N&gt;
+    /// (SharedMemoryIO.INPUT_ACK_WATCH_ENDED), or null when that section
+    /// does not exist. Everyone may read the section.</summary>
+    private static bool? AckWatchEnded(int index)
+    {
+        IntPtr h = OpenFileMapping(FILE_MAP_READ, false, $@"Global\HIDMaestroInputAck{index}");
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            IntPtr view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, (nuint)(SharedMemoryIO.INPUT_ACK_OFFSET_CAPS + 4));
+            if (view == IntPtr.Zero) return null;
+            try { return (Marshal.ReadInt32(view, SharedMemoryIO.INPUT_ACK_OFFSET_CAPS) & SharedMemoryIO.INPUT_ACK_WATCH_ENDED) != 0; }
+            finally { UnmapViewOfFile(view); }
+        }
+        finally { CloseHandle(h); }
     }
 
     /// <summary>What a device's driver recorded about its owner watch:
@@ -602,6 +646,13 @@ internal sealed partial class OwnerCensus
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(IntPtr handle);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offsetHigh, uint offsetLow, nuint bytes);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool UnmapViewOfFile(IntPtr view);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial IntPtr OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint processId);
