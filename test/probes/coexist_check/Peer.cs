@@ -49,7 +49,13 @@
 //                               StopEvent as the SDK's sweep does
 //   dropinputevent <index>      close this program's handle to the index's
 //                               input event, as a program that let go of
-//                               it would, and keep the owner pipe open
+//                               it would, and keep the owner pipe open.
+//                               Each controller on the index keeps its own
+//                               copy of the handle value and signals it per
+//                               frame, so that copy is pointed at a new
+//                               unnamed event: swapped=<controllers>
+//   droppedsignal               whether a frame signaled that unnamed
+//                               event since the last ask: signaled=0|1
 //   census                      the SDK's census of present devices, one
 //                               token|index|owner|watch per device group
 //   releases <index>            SharedMemoryIO.ReleaseOnExitSupported, the
@@ -428,9 +434,25 @@ internal static class Peer
                         // not close the handle a second time.
                         bool closed = events.TryGetValue(i, out IntPtr ev) && ev != IntPtr.Zero && CloseHandle(ev);
                         if (closed) events[i] = IntPtr.Zero;
-                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)}");
+                        var copy = typeof(HMController).GetField("_inputEvent", BindingFlags.NonPublic | BindingFlags.Instance);
+                        int swapped = 0;
+                        if (closed && copy != null)
+                        {
+                            if (s_dropped == IntPtr.Zero) s_dropped = CreateEventW(IntPtr.Zero, false, false, null);
+                            lock (s_live)
+                                foreach (var c in s_live)
+                                    if (Get(c, "TransportIndex") == a[1] || Get(c, "Index") == a[1])
+                                    {
+                                        copy.SetValue(c, s_dropped);
+                                        swapped++;
+                                    }
+                        }
+                        Reply($"OK dropinputevent closed={(closed ? 1 : 0)} swapped={swapped}");
                         break;
                     }
+                    case "droppedsignal":
+                        Reply($"OK droppedsignal signaled={(s_dropped != IntPtr.Zero && WaitForSingleObject(s_dropped, 0) == 0 ? 1 : 0)}");
+                        break;
                     case "census":
                         Reply(Census());
                         break;
@@ -653,6 +675,10 @@ internal static class Peer
     static extern int GetThreadDescription(IntPtr thread, out IntPtr description);
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr h);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, string? name);
+    /// <summary>The unnamed event dropinputevent gives the controllers.</summary>
+    static IntPtr s_dropped;
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr p);
 
