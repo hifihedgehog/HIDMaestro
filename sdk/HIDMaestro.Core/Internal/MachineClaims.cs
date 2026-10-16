@@ -188,7 +188,9 @@ internal static partial class MachineClaims
     }
 
     /// <summary>Write the record's header if it is not written yet. Caller
-    /// holds s_lock. Non-elevated, the write fails and is tried again later.</summary>
+    /// holds s_lock. The owner claim needs Administrators enabled, so a write
+    /// that fails here was refused for another cause, such as the key's ACL
+    /// or an I/O error. The next EnsureOwner or NoteStaging tries it again.</summary>
     private static void TryWriteRecordLocked()
     {
         if (s_recordWritten || s_ownerId == null) return;
