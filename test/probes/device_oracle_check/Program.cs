@@ -49,6 +49,9 @@
 //          [--plan-change <file>]   instance configuration the tree's SDK
 //                                   writes beyond the kept plan (Case5Driver.cs)
 //   compare <dirA> <dirB>
+//   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]
+//                         the live run against the native harness
+//                         (CompareLive.cs), exit 2 when a step is missing
 // The golden directory defaults to golden\ beside this source. Every run
 // prints its seed. Creates no device and needs no elevation. Exit 0 PASS,
 // 1 FAIL, 2 when replay found no golden files beside this source (a staged
@@ -124,6 +127,8 @@ internal static class Program
         string mode = args[0];
         if (mode == "compare")
             return args.Length == 3 ? CompareDirs(args[1], args[2]) : Usage();
+        if (mode == "compare-live")
+            return CompareLive.Run(args[1..], Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"));
         if (mode != "record" && mode != "replay") return Usage();
 
         ulong seed = DefaultSeed;
@@ -352,6 +357,7 @@ internal static class Program
     {
         Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus]");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
+        Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));
         return 1;
     }
