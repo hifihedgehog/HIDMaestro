@@ -152,10 +152,14 @@ internal static class VrDriverBuilder
         bool current;
         using (var k = Registry.LocalMachine.OpenSubKey(RegKeyPath))
         {
-            // Every file, not the folder alone: a staging repair can move
-            // the whole %ProgramData%\HIDMaestro tree aside (ProtectedStaging),
-            // and the registration names this path, so the files must be
-            // back at it before SteamVR next loads it.
+            // Every file, not the folder alone: a repair moves
+            // %ProgramData%\HIDMaestro, or a folder under it, aside when it
+            // is a reparse point, an account other than SYSTEM or
+            // Administrators owns it, or another account may change its
+            // permissions or owner or delete it or its entries
+            // (ProtectedStaging.SharedDir). The registration names this
+            // path, so the files must be back at it before SteamVR next
+            // loads it.
             current = k?.GetValue(VrManifestRegValue) as string == payloadHash &&
                       names.All(n => File.Exists(Path.Combine(ExtractRoot, RelativePath(n))));
         }
