@@ -465,6 +465,15 @@ public sealed class ControllerProfile
     internal KeyboardMousePacker GetOrBuildKeyboardMousePacker() =>
         _cachedKbmPacker ??= new KeyboardMousePacker(GetDescriptorBytes() ?? Array.Empty<byte>());
 
+    /// <summary>Issue #67. A keyboard or mouse profile gets every frame
+    /// delivered, and so does an "other" profile whose descriptor is a
+    /// mouse or a keyboard, the shape a consumer built before the types
+    /// existed.</summary>
+    internal bool DeliversEveryReport(KeyboardMousePacker kbm) =>
+        IsKeyboardOrMouse
+        || (string.Equals(Type, "other", StringComparison.OrdinalIgnoreCase)
+            && (kbm.HasMouse || kbm.HasKeyboard));
+
     // Lazy-cached parsed descriptor. v1.3.0: GetDescriptorBytes is called
     // multiple times per CreateController (HMController ctor +
     // WriteInstanceConfig + DriverBuilder validation), each time re-running

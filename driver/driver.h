@@ -90,8 +90,13 @@ typedef struct _DEVICE_CONTEXT {
     /* Input report byte length (Report ID + data, from HID caps) */
     ULONG   InputReportByteLength;
 
-    /* First Input Report ID from descriptor (0 if no Report IDs) */
+    /* The input report a data-only frame goes out as (0 if no Report
+     * IDs): the SDK's InputReportId, or without it the first Report ID
+     * item of the descriptor's first Application Collection. */
     UCHAR   FirstInputReportId;
+
+    /* FirstInputReportId came from the registry's InputReportId. */
+    BOOLEAN InputReportIdConfigured;
 
     /* The profile's connection is Bluetooth (registry value Bluetooth,
      * written by the SDK from the profile's "connection"). Sony pads end

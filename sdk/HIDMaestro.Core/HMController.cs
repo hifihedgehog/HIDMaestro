@@ -538,9 +538,7 @@ public sealed partial class HMController : IDisposable
         {
             var kbm = profile.Inner.GetOrBuildKeyboardMousePacker();
             if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
-            _deliverEvery = profile.Inner.IsKeyboardOrMouse
-                || (string.Equals(profile.Type, "other", StringComparison.OrdinalIgnoreCase)
-                    && (kbm.HasMouse || kbm.HasKeyboard));
+            _deliverEvery = profile.Inner.DeliversEveryReport(kbm);
         }
 
         // v1.3.5: pre-allocate vendor-blob buffer + encoder state ONLY when
@@ -926,8 +924,9 @@ public sealed partial class HMController : IDisposable
         //
         //  • Legacy (default, _extendedModeArmed=false or no ExtendedReport):
         //    SDK strips the Report ID byte at position 0 and the driver
-        //    re-prepends ctx->FirstInputReportId. Result: the descriptor's
-        //    first declared input report ID arrives at the kernel HID stack
+        //    re-prepends ctx->FirstInputReportId, the ID the SDK gives it
+        //    (DeviceOrchestrator.DriverInputReport). Result: the report this
+        //    builder fills arrives at the kernel HID stack under its own ID
         //    (e.g. Report 0x01 for Sony BT). joy.cpl, RawInput, and generic
         //    HID consumers see structured X/Y/Rx/Ry per the legacy descriptor.
         //

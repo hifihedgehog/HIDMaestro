@@ -406,7 +406,7 @@ ReadConfigFromRegistry(
     HKEY    hKey = NULL;
     LONG    result;
     DWORD   dwordVal, dwordSize;
-    BYTE    binBuf[HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
+    BYTE    binBuf[5 + HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
     DWORD   binSize;
     DWORD   regType;
 
@@ -559,6 +559,34 @@ ReadConfigFromRegistry(
     if (result == ERROR_SUCCESS && regType == REG_DWORD &&
         dwordVal > 0 && dwordVal <= HIDMAESTRO_MAX_REPORT_SIZE) {
         ctx->InputReportByteLength = dwordVal;
+    }
+
+    /* Read InputReportId (REG_BINARY): the input report the SDK fills in
+     * byte 0, its length in bytes 1-4 (little-endian), then the report
+     * descriptor the SDK read both from. An SDK from before the value
+     * writes none and leaves one an earlier program wrote under this index
+     * in place, with its own InputReportByteLength. So the ID counts only
+     * when the length is the InputReportByteLength just read and the
+     * descriptor is the one in use: never with another program's length.
+     * A left value whose length happens to equal that program's passes.
+     * In the catalog only switch2-pro-controller pairs that way (0x09 at
+     * 64 where v1.12.0 sent 0x05 at 64), and its extendedReport is always
+     * armed, so every frame goes out whole on the extended lane and this
+     * ID never reaches the wire. Without the value DeviceAdd reads the ID
+     * from the descriptor. */
+    binSize = sizeof(binBuf);
+    result = RegQueryValueExW(hKey, L"InputReportId", NULL,
+                              &regType, binBuf, &binSize);
+    if (result == ERROR_SUCCESS && regType == REG_BINARY &&
+        binSize == 5 + ctx->ReportDescriptorSize) {
+        ULONG idLength = (ULONG)binBuf[1] | ((ULONG)binBuf[2] << 8)
+                       | ((ULONG)binBuf[3] << 16) | ((ULONG)binBuf[4] << 24);
+        if (idLength == ctx->InputReportByteLength &&
+            RtlCompareMemory(binBuf + 5, ctx->ReportDescriptor,
+                             ctx->ReportDescriptorSize) == ctx->ReportDescriptorSize) {
+            ctx->FirstInputReportId = binBuf[0];
+            ctx->InputReportIdConfigured = TRUE;
+        }
     }
 
     RegCloseKey(hKey);
@@ -2542,12 +2570,13 @@ EvtDeviceAdd(
     /* Read config from registry (overrides defaults if present) */
     ReadConfigFromRegistry(ctx);
 
-    /* Find first Input Report ID from the FIRST Application Collection only.
-     * For dual-collection descriptors, Col2 may have a Report ID that we
-     * must NOT use for Col1's reports. Stop scanning at the first End Collection
-     * that closes the top-level Application Collection. */
-    ctx->FirstInputReportId = 0;
-    if (ctx->ReportDescriptorSize >= 2) {
+    /* Without the SDK's InputReportId (an SDK from before the value), find
+     * the first Report ID from the FIRST Application Collection only, the
+     * report that SDK measured InputReportByteLength on. For
+     * dual-collection descriptors, Col2 may have a Report ID that we must
+     * NOT use for Col1's reports. Stop scanning at the first End
+     * Collection that closes the top-level Application Collection. */
+    if (!ctx->InputReportIdConfigured && ctx->ReportDescriptorSize >= 2) {
         int colDepth = 0;
         BOOLEAN inFirstCollection = FALSE;
         ULONG ri = 0;

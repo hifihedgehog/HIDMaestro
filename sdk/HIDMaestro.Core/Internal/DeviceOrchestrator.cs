@@ -682,9 +682,7 @@ internal static partial class DeviceOrchestrator
     private static void WriteInstanceConfig(int controllerIndex, ControllerProfile profile)
     {
         byte[] descriptor = profile.GetDescriptorBytes()!;
-        int inputReportLen = (profile.InputReportSize ?? 0) > 0
-            ? profile.InputReportSize!.Value
-            : ComputeInputReportByteLength(descriptor);
+        var (_, inputReportLen, _) = DriverInputReport(profile);
 
         // FunctionMode=1 for non-xinputhid Xbox (XUSB on main device),
         // FunctionMode=0 for everything else. Gated on IsXboxBranded so a
@@ -723,8 +721,15 @@ internal static partial class DeviceOrchestrator
         key.SetValue("Ds3Sixaxis", profile.SixaxisCompatible == true ? 1 : 0, RegistryValueKind.DWord);
         if (profile.ProductString != null)
             key.SetValue("ProductString", profile.ProductString, RegistryValueKind.String);
-        if (inputReportLen > 0)
-            key.SetValue("InputReportByteLength", inputReportLen, RegistryValueKind.DWord);
+        // Both written or cleared every time, so an index another profile
+        // used never keeps its report. The driver keeps its default length
+        // for 0, and without InputReportId reads the ID from the descriptor
+        // as it always has.
+        key.SetValue("InputReportByteLength", inputReportLen, RegistryValueKind.DWord);
+        if (InputReportIdValue(profile) is { } reportIdValue)
+            key.SetValue("InputReportId", reportIdValue, RegistryValueKind.Binary);
+        else
+            key.DeleteValue("InputReportId", throwOnMissingValue: false);
 
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "HIDMaestro Controller";
         key.SetValue("DeviceDescription", displayName, RegistryValueKind.String);
@@ -2611,67 +2616,68 @@ internal static partial class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  ComputeInputReportByteLength
+    //  DriverInputReport
     // ════════════════════════════════════════════════════════════════════
 
-    /// <summary>Compute the input report byte length from a HID descriptor.
-    /// Ported verbatim from the proven pre-SDK test app's implementation.
-    /// Critically: handles multi-Report-ID descriptors (e.g. dualsense which
-    /// declares Report IDs 1, 2, 3, ...) by counting bits ONLY for the first
-    /// encountered Report ID: that's the input report we use. Adds +1 to
-    /// the byte total for descriptors that have any Report ID, accounting
-    /// for the prefix byte the kernel HID stack adds when delivering reports.
-    /// </summary>
-    private static int ComputeInputReportByteLength(byte[] desc)
+    /// <summary>The input report the driver sends a data-only frame as,
+    /// SubmitState's and SubmitRawReport's legacy path, and its length on
+    /// the wire with the report ID byte. It is the report the SDK fills:
+    /// for a keyboard or mouse that gets every report delivered, the
+    /// descriptor's first input report (HMController.SubmitRawReport), and
+    /// for everything else the report HidReportBuilder lays out. Both come
+    /// from HidReportMap, which keeps the global item stack Push and Pop
+    /// work on. A profile's inputReportSize replaces the length, and
+    /// DeclaredLength stays the report's own.
+    ///
+    /// <para>Through v1.12.0 the SDK counted the bits of whichever report
+    /// ID the descriptor named first, input or not, with no Push and Pop,
+    /// and the driver sent the first Report ID item it found. A descriptor
+    /// whose first report is an output report (gamecube-adapter-hid) got a
+    /// 1-byte report under the output report's ID, and one whose layout
+    /// report is not its first input report (the NSO controllers' 0x3F)
+    /// sent the layout's bytes under 0x21.</para></summary>
+    internal static (byte Id, int Length, int DeclaredLength) DriverInputReport(ControllerProfile profile)
     {
-        int totalBits = 0;
-        int reportSize = 0;
-        int reportCount = 0;
-        int currentReportId = 0;
-        int firstInputReportId = 0;
-        bool hasReportIds = false;
-
-        for (int i = 0; i < desc.Length;)
+        byte id;
+        int declared;
+        var kbm = profile.GetOrBuildKeyboardMousePacker();
+        if ((kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) && profile.DeliversEveryReport(kbm))
         {
-            byte prefix = desc[i];
-            int bSize = prefix & 0x03;
-            if (bSize == 3) bSize = 4;
-            int bType = (prefix >> 2) & 0x03;
-            int bTag = (prefix >> 4) & 0x0F;
-
-            int value = 0;
-            if (i + bSize < desc.Length)
-            {
-                for (int j = 0; j < bSize; j++)
-                    value |= desc[i + 1 + j] << (8 * j);
-            }
-
-            if (bType == 1) // Global
-            {
-                if (bTag == 7) reportSize = value;     // Report Size
-                if (bTag == 9) reportCount = value;    // Report Count
-                if (bTag == 8)                          // Report ID
-                {
-                    currentReportId = value;
-                    if (!hasReportIds) firstInputReportId = value;
-                    hasReportIds = true;
-                }
-            }
-            else if (bType == 0) // Main
-            {
-                if (bTag == 8) // Input
-                {
-                    // Count bits for the first report ID encountered (or all
-                    // bits if the descriptor doesn't use Report IDs at all).
-                    if (!hasReportIds || currentReportId == firstInputReportId)
-                        totalBits += reportSize * reportCount;
-                }
-            }
-
-            i += 1 + bSize;
+            id = kbm.FirstInputReportId;
+            declared = kbm.Map.Find(HidReportKind.Input, id)?.FrameBytes ?? 0;
         }
+        else
+        {
+            var builder = profile.GetOrBuildReportBuilder();
+            id = builder.InputReportId;
+            declared = builder.InputReportByteSize;
+        }
+        int length = (profile.InputReportSize ?? 0) > 0 ? profile.InputReportSize!.Value : declared;
+        return (id, length, declared);
+    }
 
-        int totalBytes = (totalBits + 7) / 8;
-        return hasReportIds ? totalBytes + 1 : totalBytes; // +1 for Report ID byte
+    /// <summary>The registry value InputReportId: the report ID, its
+    /// length as a 32-bit little-endian number, then the report descriptor
+    /// both were read from. The driver takes the ID only when the length
+    /// equals InputReportByteLength and the descriptor is the one in use,
+    /// so a value a killed program left under an index never pairs its ID
+    /// with the length a v1.12.0 program writes there for the same
+    /// descriptor (that program writes no InputReportId). Null, and no
+    /// value, when the profile's inputReportSize differs from the report's
+    /// own length: Sony Bluetooth profiles send their 10-byte 0x01 at the
+    /// 78 bytes of 0x31, and switch-pro names 0x31's 362 for a 12-byte
+    /// 0x3F. The driver then reads the ID from the descriptor as before
+    /// this value existed, and no report goes out at another's
+    /// length.</summary>
+    internal static byte[]? InputReportIdValue(ControllerProfile profile)
+    {
+        var (id, length, declared) = DriverInputReport(profile);
+        byte[]? descriptor = profile.GetDescriptorBytes();
+        if (descriptor == null || length <= 0 || length != declared) return null;
+        var value = new byte[5 + descriptor.Length];
+        value[0] = id;
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(value.AsSpan(1, 4), length);
+        descriptor.CopyTo(value, 5);
+        return value;
     }
 }
