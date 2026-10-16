@@ -45,7 +45,9 @@ namespace HIDMaestro.Internal;
 /// as "no restore needed" for that target, which is the safe default
 /// since no new Joystick write happened under that old record.</para>
 ///
-/// <para>All methods require admin (HKLM write). The HKCU write
+/// <para><see cref="Claim"/> needs an elevated process, and so do
+/// <see cref="Release"/> and <see cref="RecoverOrphans"/> when a record is
+/// pending. <see cref="ListActive"/> only reads. The HKCU write
 /// targets the CALLING user's hive. Multi-user systems: the override
 /// is user-scoped for joy.cpl purposes but system-wide for DirectInput.
 /// Single-user workstations (the common case) see consistent behavior

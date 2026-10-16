@@ -47,9 +47,12 @@ namespace HIDMaestro;
 ///
 /// <para><b>Requirements and caveats:</b></para>
 /// <list type="bullet">
-///   <item>All methods require admin (HKLM write access). Throws
-///         <see cref="UnauthorizedAccessException"/> if the caller is not
-///         elevated.</item>
+///   <item><see cref="Set"/> needs an elevated process and throws
+///         <see cref="UnauthorizedAccessException"/> without one.
+///         <see cref="Clear"/> and <see cref="RecoverOrphans"/> need one
+///         only when an override is pending: with nothing pending they
+///         return without taking the lock. <see cref="ListActive"/> only
+///         reads, and needs no elevation.</item>
 ///   <item>The HKLM DirectInput and HKLM Joystick targets are system-wide
 ///         per VID:PID. If a real device with that VID:PID is connected
 ///         while your override is active, DirectInput consumers see the
@@ -81,7 +84,8 @@ public static class HMOemNameOverride
     /// <param name="label">The label to show in joy.cpl / DirectInput UIs.
     /// Must not be null.</param>
     /// <exception cref="ArgumentNullException"><paramref name="label"/> is null.</exception>
-    /// <exception cref="UnauthorizedAccessException">Caller lacks admin.</exception>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated.</exception>
     public static void Set(ushort vid, ushort pid, string label)
     {
         OemNameOverrideStore.Claim(vid, pid, label);
@@ -91,7 +95,8 @@ public static class HMOemNameOverride
     /// If no prior Set is tracked for this VID:PID, this is a no-op.</summary>
     /// <param name="vid">USB Vendor ID.</param>
     /// <param name="pid">USB Product ID.</param>
-    /// <exception cref="UnauthorizedAccessException">Caller lacks admin.</exception>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated, and an override for this VID:PID is pending.</exception>
     public static void Clear(ushort vid, ushort pid)
     {
         OemNameOverrideStore.Release(vid, pid);
@@ -101,7 +106,8 @@ public static class HMOemNameOverride
     /// prior override left behind by a crashed, force-killed, or otherwise
     /// uncleanly-exited consumer. Safe to call on every startup. Returns the
     /// number of overrides restored.</summary>
-    /// <exception cref="UnauthorizedAccessException">Caller lacks admin.</exception>
+    /// <exception cref="UnauthorizedAccessException">The process is not
+    /// elevated, and an override is pending.</exception>
     public static int RecoverOrphans() =>
         OemNameOverrideStore.RecoverOrphans();
 
