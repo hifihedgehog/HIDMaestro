@@ -5,11 +5,12 @@
 // only through its vendor-scoped compatible ID behind fifteen IDs nothing
 // carries, so Windows ranks input.inf above it and never picks it on its
 // own, and binds it with DiInstallDevice on the one devnode. The registry
-// ledger records the binding and puts the devnode back when the controller
-// goes or, after a crash, at the next program's reclaim: a present devnode
-// is installed again by rank, and a gone one gets the reinstall flag, so its
-// next arrival installs by rank. The bound devnode carries no flag, since
-// libusb skips a device whose install state the flag makes nonzero.
+// ledger records the binding and restores the devnode when the controller
+// goes or, after a crash, at the next program's reclaim: a gone devnode gets
+// the reinstall flag, so its next arrival installs by rank, and a present
+// one keeps its driver and its entry until a sweep finds it gone. The bound
+// devnode carries no flag, since libusb skips a device whose install state
+// the flag makes nonzero.
 //
 // Checked here:
 //  - the binding, the package's rank against input.inf's, no flag on the
@@ -27,10 +28,11 @@
 //    Both wait for the first and finish.
 //  - a program killed while bound: an adapter that arrives on the same
 //    instance before any reclaim finds WinUSB, as after Zadig, and the
-//    reclaim puts it back on input.inf. When the reclaim comes first, the
-//    arrival gets input.inf. When the arrival binds, BindWinUsb finds it
-//    already bound and holds it, a sweep leaves it on WinUSB, and its
-//    dispose puts it back.
+//    reclaim leaves it on WinUSB until it leaves, when a sweep flags it.
+//    When the reclaim comes first, the arrival gets input.inf. When the
+//    arrival binds, BindWinUsb finds it already bound and holds it, a sweep
+//    leaves it on WinUSB, and once it is disposed and gone a sweep flags
+//    it.
 //
 // Requires elevation. Exit 0 PASS, 1 FAIL, 2 when another program that embeds
 // HIDMaestro is running.

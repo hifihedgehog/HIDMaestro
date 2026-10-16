@@ -1977,10 +1977,12 @@ function Scenario-GameCube-Protocol {
 }
 
 # S81: BindWinUsb puts WinUSB on one virtual adapter and no real one: the
-# package ranks below input.inf, a second adapter stays on input.inf, the
-# bound devnode carries no reinstall flag, and the binding goes back on
-# dispose and after a killed program, with an adapter arriving before the
-# next program's reclaim and after it.
+# package ranks below input.inf, a second adapter stays on input.inf, and
+# the bound devnode carries no reinstall flag. Dispose, and the reclaim
+# after a killed program, flag the instance once its devnode is gone, so
+# the next adapter on it installs by rank. An adapter arrives before the
+# next program's reclaim and after it: one present before keeps WinUSB
+# until it leaves.
 function Scenario-GameCube-WinUsb {
     Invoke-Probe -Dir 'gc_winusb_check' -Exe 'GcWinUsbCheck.exe' `
                  -Message 'the WinUSB binding reached a device it should not, or was not put back (see probe stdout)' -SkipCodes 2
