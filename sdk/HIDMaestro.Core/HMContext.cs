@@ -177,13 +177,24 @@ public sealed class HMContext : IDisposable
     /// brought the calling process here. A deploy also removes the staging of
     /// SDK versions no running program uses.
     ///
-    /// <para>If the driver is already installed at the same build version,
-    /// this returns immediately without doing any work.</para>
+    /// <para>If this build's driver is already installed with both its
+    /// packages, this returns <see cref="HMDriverInstallOutcome.AlreadyCurrent"/>
+    /// without deploying, and without elevation. In an elevated process the
+    /// controllers of programs that have exited are removed first.</para>
     /// </summary>
-    /// <exception cref="UnauthorizedAccessException">Thrown if the calling
-    /// process is not elevated.</exception>
-    /// <exception cref="InvalidOperationException">Thrown if any step of the
-    /// install fails (cert install, signing, pnputil).</exception>
+    /// <exception cref="UnauthorizedAccessException">The calling process is
+    /// not elevated, and this build's driver is not installed.</exception>
+    /// <exception cref="InvalidOperationException">A step of the install
+    /// failed: staging, the certificate install, signing or pnputil. Staging
+    /// refuses a directory on its path that it can neither reset nor move
+    /// aside, one another program created while HIDMaestro was creating it,
+    /// a staged file that no longer matches its embedded SHA-256, and a TEMP
+    /// directory for its child processes that it cannot protect. Also thrown
+    /// when another program held the deploy lock for ten minutes or the
+    /// staging lock for two.</exception>
+    /// <exception cref="HMDriverVersionException">The installed driver is
+    /// older than this SDK supports, and controllers of running programs
+    /// keep it from being replaced.</exception>
     /// <exception cref="HMPayloadMissingException">This build carries no
     /// driver for this machine's architecture.</exception>
     public void InstallDriver()
@@ -421,8 +432,17 @@ public sealed class HMContext : IDisposable
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
     /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="InvalidOperationException">Driver install failed or
-    /// device node creation failed.</exception>
+    /// <exception cref="InvalidOperationException">The profile's device
+    /// model does not compile: an extended report, a port block, the USB/IP
+    /// protocol or the WinUSB package is mis-authored, and most messages
+    /// name the field. That refusal comes before the create takes anything
+    /// machine-wide. Also thrown when this build lacks the profile's payload
+    /// (<see cref="HMPayloadMissingException"/>), the driver install failed,
+    /// or the device node creation failed.</exception>
+    /// <exception cref="FormatException">A hex string of the profile, its
+    /// HID descriptor or a descriptor under usbConfiguration, holds a
+    /// character that is not a hex digit, or one under usbConfiguration has
+    /// an odd number of digits.</exception>
     public HMController CreateController(HMProfile profile) => CreateController(profile, null);
 
     /// <summary>Create a new virtual controller with a durable identity
@@ -459,8 +479,17 @@ public sealed class HMContext : IDisposable
     /// the identity to its own controller on index N. A controller of a
     /// context this process dropped without disposing holds its key until
     /// the process exits.</exception>
-    /// <exception cref="InvalidOperationException">Driver install failed or
-    /// device node creation failed.</exception>
+    /// <exception cref="InvalidOperationException">The profile's device
+    /// model does not compile: an extended report, a port block, the USB/IP
+    /// protocol or the WinUSB package is mis-authored, and most messages
+    /// name the field. That refusal comes before the create takes anything
+    /// machine-wide. Also thrown when this build lacks the profile's payload
+    /// (<see cref="HMPayloadMissingException"/>), the driver install failed,
+    /// or the device node creation failed.</exception>
+    /// <exception cref="FormatException">A hex string of the profile, its
+    /// HID descriptor or a descriptor under usbConfiguration, holds a
+    /// character that is not a hex digit, or one under usbConfiguration has
+    /// an odd number of digits.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
@@ -612,15 +641,25 @@ public sealed class HMContext : IDisposable
     /// must already be disposed). The controller's transport index is N when
     /// no other program on the machine uses N, and otherwise the lowest free
     /// index (see <see cref="HMController.TransportIndex"/>).</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
+    /// is negative.</exception>
     /// <exception cref="InvalidOperationException">If the slot is already
-    /// in use by another live controller of this context.</exception>
+    /// in use by another live controller of this context, and for the
+    /// reasons <see cref="CreateController(HMProfile)"/> gives.</exception>
+    /// <exception cref="FormatException">As for
+    /// <see cref="CreateController(HMProfile)"/>.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile) => CreateControllerAt(index, profile, null);
 
     /// <summary>Create a controller pinned to a specific slot with a
     /// durable identity key. See <see cref="CreateController(HMProfile, string)"/>
     /// for what the key does. A null or empty key uses the transport index.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
+    /// is negative.</exception>
     /// <exception cref="InvalidOperationException">If the slot is already
-    /// in use by another live controller of this context.</exception>
+    /// in use by another live controller of this context, and for the
+    /// reasons <see cref="CreateController(HMProfile)"/> gives.</exception>
+    /// <exception cref="FormatException">As for
+    /// <see cref="CreateController(HMProfile)"/>.</exception>
     /// <exception cref="HMResourceInUseException">A create whose key another
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.
