@@ -70,6 +70,14 @@
       ],
       "description": "Connection type this profile represents"
     },
+    "bluetoothTransport": {
+      "enum": [ "classic", "le", null ],
+      "description": "v2.0.0, for connection 'bluetooth': the transport a real device of this kind uses, classic (BR/EDR, BTHENUM) or le (HID over GATT, BTHLEDevice). The devnode carries the hardware and compatible IDs a real device of that transport carries. Default classic."
+    },
+    "bluetoothVendorIdSource": {
+      "enum": [ "usb", "bluetooth", null ],
+      "description": "v2.0.0, for connection 'bluetooth': who assigned the VID, the USB-IF (usb, the default) or the Bluetooth SIG (bluetooth). It is the 0002 or 02 in front of the VID in the hardware IDs, 0001 or 01 for the SIG."
+    },
     "descriptor": {
       "type": [
         "string",

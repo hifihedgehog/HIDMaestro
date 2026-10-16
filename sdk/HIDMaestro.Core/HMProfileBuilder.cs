@@ -45,6 +45,8 @@ public sealed class HMProfileBuilder
     private string? _manufacturerString;
     private string _type = "gamepad";
     private string _connection = "usb";
+    private string? _bluetoothTransport;
+    private string? _bluetoothVendorIdSource;
     private string? _driverMode;
     private XInputSpec? _xinput;
     private string? _triggerMode;
@@ -100,6 +102,15 @@ public sealed class HMProfileBuilder
 
     /// <summary>Set the connection type: "usb", "bluetooth", or "wireless-adapter".</summary>
     public HMProfileBuilder Connection(string conn) { _connection = conn; return this; }
+
+    /// <summary>For a Bluetooth profile, the transport a real device of its
+    /// kind uses, "classic" or "le", which picks the hardware and compatible
+    /// IDs its devnode carries. Null means classic.</summary>
+    public HMProfileBuilder BluetoothTransport(string? transport) { _bluetoothTransport = transport; return this; }
+
+    /// <summary>For a Bluetooth profile, who assigned its VID: "usb" (the
+    /// USB-IF, the default) or "bluetooth" (the Bluetooth SIG).</summary>
+    public HMProfileBuilder BluetoothVendorIdSource(string? source) { _bluetoothVendorIdSource = source; return this; }
 
     /// <summary>Set the driver mode: "xinputhid" for Xbox BT controllers, or null for standard HID.</summary>
     public HMProfileBuilder DriverMode(string? mode) { _driverMode = mode; return this; }
@@ -373,6 +384,8 @@ public sealed class HMProfileBuilder
         _manufacturerString = source.ManufacturerString;
         _type = source.Type;
         _connection = source.Connection;
+        _bluetoothTransport = source.Inner.BluetoothTransport;
+        _bluetoothVendorIdSource = source.Inner.BluetoothVendorIdSource;
         _driverMode = source.DriverMode;
         _xinput = source.Inner.XInput?.Clone();
         _triggerMode = source.TriggerMode;
@@ -439,6 +452,8 @@ public sealed class HMProfileBuilder
         inner.ManufacturerString = _manufacturerString;
         inner.Type = _type;
         inner.Connection = _connection;
+        inner.BluetoothTransport = _bluetoothTransport;
+        inner.BluetoothVendorIdSource = _bluetoothVendorIdSource;
         inner.DriverMode = _driverMode;
         inner.XInput = _xinput?.Clone();
         inner.TriggerMode = _triggerMode;

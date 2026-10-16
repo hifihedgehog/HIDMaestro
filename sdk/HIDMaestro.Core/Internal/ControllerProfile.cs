@@ -51,6 +51,23 @@ public sealed class ControllerProfile
     [JsonPropertyName("connection")]
     public string Connection { get; set; } = "";
 
+    /// <summary>v2.0.0: for <c>connection: "bluetooth"</c>, the transport a
+    /// real device of this kind uses, <c>"classic"</c> (BR/EDR, enumerated
+    /// under BTHENUM) or <c>"le"</c> (HID over GATT, under BTHLEDevice). The
+    /// devnode carries the hardware and compatible IDs a real device of that
+    /// transport carries (<see cref="PresentationPlan"/>). Default
+    /// classic.</summary>
+    [JsonPropertyName("bluetoothTransport")]
+    public string? BluetoothTransport { get; set; }
+
+    /// <summary>v2.0.0: who assigned the VID a Bluetooth device reports,
+    /// the Device ID's vendor ID source: <c>"usb"</c> (the USB-IF, source 2,
+    /// the default) or <c>"bluetooth"</c> (the Bluetooth SIG, source 1). It
+    /// is the 0002 or 02 in front of the VID in the device's hardware
+    /// IDs.</summary>
+    [JsonPropertyName("bluetoothVendorIdSource")]
+    public string? BluetoothVendorIdSource { get; set; }
+
     [JsonPropertyName("descriptor")]
     public string? Descriptor { get; set; }
 

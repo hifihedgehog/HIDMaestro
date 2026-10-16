@@ -113,11 +113,16 @@ internal sealed class PresentationPlan
         // ID of the parent, with driverPid where its INF lists another PID,
         // and SDL3 and HIDAPI skip an &IG_00 path and read it through
         // XInput.
+        // A Bluetooth xinputhid device keeps its three hardware IDs: the
+        // inbox xinputhid.inf lists the real pads' Bluetooth hardware IDs
+        // (Bth_Bus, Btle_Bus), and one of them ahead of root\HIDMaestro would
+        // outrank this driver's INF and bind xinputhid's Bluetooth sections
+        // to the devnode. It takes the Bluetooth compatible IDs alone.
+        var bt = bluetooth ? BluetoothIds(profile, vid, pid) : default;
         if (xi.Xinputhid)
         {
             var compat = new List<string>();
-            if (profile.Connection == "bluetooth")
-                compat.Add($"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{vid}_PID&{pid}");
+            if (bluetooth) compat.AddRange(bt.Compatible);
             compat.Add("root\\HIDMaestroGamepad");
             compat.Add("root\\HIDMaestro");
             return new PresentationPlan
@@ -145,7 +150,7 @@ internal sealed class PresentationPlan
         // BTHLEDEVICE in the parent's compatible IDs
         // (hid_internal_detect_bus_type, hid.c:741-808).
         string enumerator, hwId;
-        string[] compatIds = Array.Empty<string>();
+        string[] compatIds = Array.Empty<string>(), btHardware = Array.Empty<string>();
         if (companion)
         {
             enumerator = $"VID_{vid}&PID_{pid}&IG_00";
@@ -157,18 +162,24 @@ internal sealed class PresentationPlan
             enumerator = "HIDClass";
             hwId = $"root\\VID_{vid}&PID_{pid}";
             if (bluetooth)
-                compatIds = new[]
-                {
-                    $"BTHENUM\\Dev_VID&02{vid}_PID&{pid}",
-                    $"BTHENUM\\{{00001124-0000-1000-8000-00805f9b34fb}}_VID&02{vid}_PID&{pid}",
-                };
+            {
+                btHardware = bt.Hardware;
+                compatIds = bt.Compatible;
+            }
         }
+        // root\HIDMaestro, which this driver's INF matches, comes before the
+        // Bluetooth hardware IDs, so no INF that lists one of those can
+        // outrank it (identifier score, Learn, How Windows ranks driver
+        // packages). The HID child takes its hardware IDs from these, as a
+        // real Bluetooth device's child does.
+        var hardwareIds = new List<string> { hwId, "root\\HIDMaestro" };
+        hardwareIds.AddRange(btHardware);
         return new PresentationPlan
         {
             Path = CreatePath.Root,
             Enumerator = enumerator,
             HardwarePid = profile.ProductId,
-            HardwareIds = new[] { hwId, "root\\HIDMaestro" },
+            HardwareIds = hardwareIds,
             CompatibleIds = compatIds,
             UpperFilterTripwire = companion,
             XusbCompanion = companion,
@@ -180,6 +191,64 @@ internal sealed class PresentationPlan
             BusType = BusTypeStamp.EveryDevnodeUsb,
             PresentationSource = xi.Source,
         };
+    }
+
+    /// <summary>The hardware and compatible IDs a real Bluetooth device of
+    /// the profile's transport carries, as the devbox reads them from a
+    /// present DualSense (classic) and Xbox Series pad (LE):
+    /// <c>BTHENUM\{00001124-...}_VID&amp;0002054c_PID&amp;0ce6</c> and
+    /// <c>..._LOCALMFG&amp;0002</c> with compatible IDs <c>BTHENUM\{00001124-...}</c>
+    /// and <c>..._GENERIC</c>, and
+    /// <c>BTHLEDevice\{00001812-...}_Dev_VID&amp;02045e_PID&amp;0b13_REV&amp;0523</c>,
+    /// the same without <c>_REV</c>, and <c>..._LOCALMFG&amp;0002</c> with
+    /// compatible IDs <c>BTHLEDevice\{00001812-...}</c> and
+    /// <c>BTHLEDevice\GenericATTService</c>. The <c>_LOCALMFG</c> ID names
+    /// the host's Bluetooth radio, not the device: every Bluetooth device on
+    /// the devbox, Sony, Nintendo and Valve alike, carries
+    /// <c>_LOCALMFG&amp;0002</c>, and its radio is Intel's
+    /// (<c>USB\VID_8087&amp;PID_0032</c>), whose SIG company identifier is
+    /// 0x0002. HIDMaestro writes that form on every machine, so its
+    /// Bluetooth devnodes claim the devbox's Intel radio wherever they run.
+    /// No INF on the devbox matches a <c>_LOCALMFG</c> ID, so the claim moves no
+    /// driver ranking. The vendor ID source is 2 (the
+    /// USB-IF) or 1 (the Bluetooth SIG), as the Luna's
+    /// <c>_Dev_VID&amp;010171</c> carries (ControllersInfo
+    /// lunacontroller/README.md:11), and the revision is the profile's
+    /// version number. SDL3 and hidapi read the bus as Bluetooth from
+    /// BTHENUM and BTHLEDEVICE in the parent's compatible IDs, and LE from
+    /// the second (hid.c:784-795 at 3.4.18).</summary>
+    static (string[] Hardware, string[] Compatible) BluetoothIds(ControllerProfile profile, string vid, string pid)
+    {
+        string v = vid.ToLowerInvariant(), p = pid.ToLowerInvariant();
+        bool sig = profile.BluetoothVendorIdSource switch
+        {
+            null or "usb" => false,
+            "bluetooth" => true,
+            var s => throw new InvalidOperationException(
+                $"Profile '{profile.Id}': $.bluetoothVendorIdSource is \"{s}\", not \"usb\" or \"bluetooth\"."),
+        };
+        const string Hid = "{00001124-0000-1000-8000-00805f9b34fb}";
+        const string Hogp = "{00001812-0000-1000-8000-00805f9b34fb}";
+        // The vendor ID source (DIS PnP ID: 1 the Bluetooth SIG, 2 the
+        // USB-IF), and the host radio's SIG company identifier the devbox's
+        // Bluetooth devices carry in _LOCALMFG.
+        int source = sig ? 1 : 2;
+        const int LocalRadioCompany = 2;
+        switch (profile.BluetoothTransport)
+        {
+            case null:
+            case "classic":
+                return (new[] { $"BTHENUM\\{Hid}_VID&{source:x4}{v}_PID&{p}", $"BTHENUM\\{Hid}_LOCALMFG&{LocalRadioCompany:x4}" },
+                        new[] { $"BTHENUM\\{Hid}", $"BTHENUM\\{Hid}_GENERIC" });
+            case "le":
+                string rev = $"{profile.VersionNumber ?? 0x0100:x4}";
+                string dev = $"BTHLEDevice\\{Hogp}_Dev_VID&{source:x2}{v}_PID&{p}";
+                return (new[] { $"{dev}_REV&{rev}", dev, $"BTHLEDevice\\{Hogp}_LOCALMFG&{LocalRadioCompany:x4}" },
+                        new[] { $"BTHLEDevice\\{Hogp}", "BTHLEDevice\\GenericATTService" });
+            default:
+                throw new InvalidOperationException(
+                    $"Profile '{profile.Id}': $.bluetoothTransport is \"{profile.BluetoothTransport}\", not \"classic\" or \"le\".");
+        }
     }
 
     /// <summary>Whether <paramref name="enumerator"/> is one a plan creates
