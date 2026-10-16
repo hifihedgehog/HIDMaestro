@@ -68,67 +68,32 @@ internal static class GameInputMapping
             new uint[] { 0x34 },
             new uint[] { 0x39 },
         };
+        // HidReportMap reads the items (HID 1.11, 6.2.2): Push and Pop
+        // restore the Usage Page and Report Count, and a usage keeps the
+        // page it was completed with.
+        var map = HidReportMap.Parse(d);
+        int applications = map.Collections.Count;
+        bool tlcIsGamePad = applications > 0 && map.Collections[0].Is(0x01, 0x05);
+        var reportIds = new HashSet<byte>();
+        foreach (var r in map.Reports) reportIds.Add(r.ReportId);
         var values = new List<uint[]>();
-        var reportIds = new HashSet<uint>();
-        var usages = new List<uint>();
-        uint usagePage = 0, usageMin = 0, reportCount = 0;
-        bool haveMin = false;
-        int applications = 0, buttons = 0;
-        bool tlcIsGamePad = false;
-
-        int i = 0;
-        while (i < d.Length)
+        int buttons = 0;
+        foreach (var r in map.Reports)
         {
-            byte prefix = d[i];
-            if (prefix == 0xFE) return false;   // long items: not a builder descriptor
-            int size = prefix & 0x03;
-            if (size == 3) size = 4;
-            if (i + 1 + size > d.Length) return false;
-            uint data = 0;
-            for (int b = 0; b < size; b++) data |= (uint)d[i + 1 + b] << (8 * b);
-            int type = (prefix >> 2) & 0x03;
-            int tag = prefix >> 4;
-            i += 1 + size;
-
-            switch (type)
+            if (r.Kind != HidReportKind.Input) continue;
+            foreach (var f in r.Fields)
             {
-                case 0:   // Main
-                    if (tag == 0x0A)   // Collection
-                    {
-                        if (data == 0x01)
-                        {
-                            applications++;
-                            if (applications == 1)
-                                tlcIsGamePad = usagePage == 0x01 && usages.Count > 0 && usages[0] == 0x05;
-                        }
-                    }
-                    else if (tag == 0x08)   // Input
-                    {
-                        bool constant = (data & 0x01) != 0;
-                        if (!constant)
-                        {
-                            if (usagePage == 0x09)
-                                buttons += (int)reportCount;
-                            else if (usagePage == 0x01 && usages.Count > 0)
-                                values.Add(usages.ToArray());
-                            else
-                                return false;
-                        }
-                    }
-                    usages.Clear();
-                    haveMin = false;
-                    break;
-                case 1:   // Global
-                    if (tag == 0x00) usagePage = data;
-                    else if (tag == 0x08) reportIds.Add(data);
-                    else if (tag == 0x09) reportCount = data;
-                    break;
-                case 2:   // Local
-                    if (tag == 0x00) usages.Add(size == 4 ? data & 0xFFFF : data);
-                    else if (tag == 0x01) { usageMin = data; haveMin = true; }
-                    else if (tag == 0x02 && haveMin)
-                        for (uint u = usageMin; u <= data && u - usageMin < 256; u++) usages.Add(u);
-                    break;
+                if (f.Constant) continue;
+                if (f.UsagePage == 0x09 && AllOnPage(f, 0x09))
+                    buttons += f.Count;
+                else if (f.Usages.Length > 0 && AllOnPage(f, 0x01))
+                {
+                    var ids = new uint[f.UsageCount];
+                    for (int k = 0; k < ids.Length; k++) ids[k] = HidField.IdOf(f.UsageAt(k));
+                    values.Add(ids);
+                }
+                else
+                    return false;
             }
         }
 
@@ -136,6 +101,13 @@ internal static class GameInputMapping
         if (values.Count != expected.Length) return false;
         for (int k = 0; k < expected.Length; k++)
             if (!values[k].SequenceEqual(expected[k])) return false;
+        return true;
+    }
+
+    private static bool AllOnPage(HidField f, ushort page)
+    {
+        foreach (var u in f.Usages)
+            if (HidField.PageOf(u.Min) != page || HidField.PageOf(u.Max) != page) return false;
         return true;
     }
 

@@ -62,6 +62,10 @@ public sealed class HidDescriptorBuilder
     // descriptor that already worked byte for byte the same.
     private ushort _currentPage = 0xFFFF;
 
+    // The pages Push items in raw bytes saved, which their Pop items put
+    // back (HID 1.11, 6.2.2.7). This builder emits no Push or Pop itself.
+    private readonly Stack<ushort> _pushedPages = new();
+
     // Keyboard and mouse starters (issue #67): complete top-level
     // collections. More than one needs a report ID on each.
     private int _starterCollections;
@@ -595,8 +599,8 @@ public sealed class HidDescriptorBuilder
         return this;
     }
 
-    /// <summary>Follow the Usage Page items in bytes this builder did not
-    /// write itself.</summary>
+    /// <summary>Follow the Usage Page, Push and Pop items in bytes this
+    /// builder did not write itself.</summary>
     private void TrackPage(byte[] bytes)
     {
         int i = 0;
@@ -616,6 +620,10 @@ public sealed class HidDescriptorBuilder
                 for (int k = 0; k < len; k++) v |= (uint)bytes[i + 1 + k] << (8 * k);
                 _currentPage = (ushort)v;
             }
+            else if ((head & 0xFC) == 0xA4)
+                _pushedPages.Push(_currentPage);
+            else if ((head & 0xFC) == 0xB4 && _pushedPages.Count > 0)
+                _currentPage = _pushedPages.Pop();
             i += 1 + len;
         }
     }

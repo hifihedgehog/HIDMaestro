@@ -89,15 +89,20 @@ public static class PidReportIdExtractor
         // same Report ID).
         var found = new Dictionary<(byte lcUsage, Direction dir), byte>();
 
-        // Parser state.
+        // Parser state. Usage Page and Report ID are global items, which
+        // Push saves and Pop restores (HID 1.11, 6.2.2.7).
         ushort usagePage = 0;
-        var usages = new List<ushort>();           // current local-state usages
-        var collectionStack = new List<(byte type, ushort usage)>();
+        byte reportId = 0;
+        var globals = new Stack<(ushort UsagePage, byte ReportId)>();
+        // Local usages with their pages (page << 16 | usage), and each
+        // item's data size: a 4-byte usage names its own page.
+        var usages = new List<uint>();
+        var usageSizes = new List<int>();
+        var collectionStack = new List<(byte type, uint usage)>();
         // We need the most recent Usage Local item that *would* attach to
         // the next Main item (Collection or Input/Output/Feature). HID
         // local items reset on each Main. Track separately so collections
         // don't steal usages from data items.
-        byte reportId = 0;
 
         int i = 0;
         while (i < descriptor.Length)
@@ -123,33 +128,30 @@ public static class PidReportIdExtractor
             switch (bType)
             {
                 case 0: // Main
+                    ConcatenateLastUsagePage(usages, usageSizes, usagePage);
                     switch (bTag)
                     {
-                        case 8: // Input
-                            usages.Clear();
-                            break;
                         case 9: // Output
                             RecordMain(found, collectionStack, reportId, Direction.Output);
-                            usages.Clear();
                             break;
                         case 10: // Begin Collection
                             // Collection type byte follows in `value`. The
                             // most recent Local Usage attaches as the
                             // collection's usage (HID §6.2.2.6).
-                            ushort collUsage = usages.Count > 0 ? usages[0] : (ushort)0;
+                            uint collUsage = usages.Count > 0 ? usages[0] : 0u;
                             collectionStack.Add(((byte)value, collUsage));
-                            usages.Clear();
                             break;
                         case 11: // Feature
                             RecordMain(found, collectionStack, reportId, Direction.Feature);
-                            usages.Clear();
                             break;
                         case 12: // End Collection
                             if (collectionStack.Count > 0)
                                 collectionStack.RemoveAt(collectionStack.Count - 1);
-                            usages.Clear();
                             break;
                     }
+                    // Locals reset after every main item.
+                    usages.Clear();
+                    usageSizes.Clear();
                     break;
 
                 case 1: // Global
@@ -157,6 +159,10 @@ public static class PidReportIdExtractor
                     {
                         case 0: usagePage = (ushort)value; break;
                         case 8: reportId = (byte)value; break; // Report ID
+                        case 10: globals.Push((usagePage, reportId)); break; // Push
+                        case 11: // Pop
+                            if (globals.Count > 0) (usagePage, reportId) = globals.Pop();
+                            break;
                         // Other globals (logical/physical min/max, report
                         // size/count, unit, etc.) don't affect classification.
                     }
@@ -165,7 +171,10 @@ public static class PidReportIdExtractor
                 case 2: // Local
                     switch (bTag)
                     {
-                        case 0: usages.Add((ushort)value); break;
+                        case 0:
+                            usages.Add(bSize == 4 ? (uint)value : ((uint)usagePage << 16) | (ushort)value);
+                            usageSizes.Add(bSize);
+                            break;
                         // Usage Min / Usage Max etc. don't matter for LC
                         // identification: we only key on the first usage
                         // that becomes the Collection or Main item's usage.
@@ -177,13 +186,26 @@ public static class PidReportIdExtractor
         }
 
         Apply(found, ids);
-        _ = usagePage; // suppress unused-warning; reserved for future page-aware checks
         return ids;
+    }
+
+    /// <summary>HID 1.11, 6.2.2.8, as hid-core.c applies it
+    /// (hid_concatenate_last_usage_page) and HidReportMap does: at a main
+    /// item the last Usage Page completes each short usage, walking back
+    /// from the last one until one already has it.</summary>
+    private static void ConcatenateLastUsagePage(List<uint> usages, List<int> sizes, ushort page)
+    {
+        for (int i = usages.Count - 1; i >= 0; i--)
+        {
+            if (sizes[i] == 4) continue;
+            if (HidField.PageOf(usages[i]) == page) break;
+            usages[i] = ((uint)page << 16) | (usages[i] & 0xFFFF);
+        }
     }
 
     private static void RecordMain(
         Dictionary<(byte, Direction), byte> found,
-        List<(byte type, ushort usage)> stack,
+        List<(byte type, uint usage)> stack,
         byte rid,
         Direction dir)
     {
@@ -198,8 +220,12 @@ public static class PidReportIdExtractor
         {
             var (type, usage) = stack[k];
             if (type != 0x02) continue; // we only key on Logical Collections
-            byte u = (byte)usage;
-            // Only canonical PID LC usages we dispatch on.
+            // Only canonical PID LC usages we dispatch on, and only on the
+            // PID page: usage 0x21 of a vendor page is no Set Effect Report.
+            if (HidField.PageOf(usage) != 0x0F) continue;
+            ushort id = HidField.IdOf(usage);
+            if (id > 0xFF) continue;
+            byte u = (byte)id;
             switch (u)
             {
                 case 0x21: case 0x88:                          // Set / New Effect
