@@ -18,9 +18,10 @@
 //     crcValid (locks decode behavior too).
 //
 // Each artifact is SHA-256 hashed. `--dump` prints the golden table to
-// paste below; default mode compares against the embedded goldens and
-// exits 1 on any mismatch. Runs UNELEVATED (pure byte manipulation, no
-// driver, no devices).
+// paste below, `--bytes` each artifact whole, and the default mode compares
+// against the embedded goldens, then runs the codec vocabulary's checks
+// (Vocabulary.cs), and exits 1 on any mismatch. S91 runs it. Runs
+// UNELEVATED (pure byte manipulation, no driver, no devices).
 
 using System;
 using System.Collections.Generic;
@@ -44,6 +45,11 @@ internal static class Program
         // same output report with the same spec, so its output and decode
         // goldens equal dualshock-3-full's.
         "dualshock-3",
+        // v2.0.0: the Valve and Nintendo personas, whose reports are the
+        // codec's from the data-driven design on, a port block for the
+        // GameCube adapter.
+        "steam-controller-2", "steam-controller-composite", "steam-deck-composite",
+        "switch2-pro-controller", "switch2-pro-controller-composite", "gamecube-adapter",
     };
 
     // Golden table captured from the pre-opcode string-switch codec at
@@ -57,6 +63,9 @@ internal static class Program
     // --bytes before and after, each changed report differs only in a
     // uint8-trigger byte, by one count, and in its CRC. Every output and
     // decode row still matches the v1.3.18 capture.
+    // The Valve, Switch 2 Pro and GameCube adapter rows were added in
+    // v2.0.0 and record the one arithmetic and the Triton's accumulating
+    // timestamp.
     static readonly string[] Goldens =
     {
         "golden dualsense in 0 728BEC8461DD20621FBC713B28165DAD10DBB0722B6362B707CB35E3DDA1949D",
@@ -133,6 +142,28 @@ internal static class Program
         "golden dualshock-3 out 1 E39DCB23E21D2275F87D4B91219F8B4B9FA006CA0AC9F619F499BF6DF73DBB51",
         "golden dualshock-3 out 2 3554DA9900A9966F77128BF999984D3012AF0A7C653AC6409522E69D63576FAC",
         "golden dualshock-3 dec 0 C317D8EC38CC58B36E3AFA5C53AF37BF02C90C18CE30EF18E257E45874E08F09",
+        "golden steam-controller-2 in 0 B4445C6EA167593F1C20F35E3D33656DB7FE094363ADB1D51D4A226AF5795C95",
+        "golden steam-controller-2 in 1 8DD02DD914B10B222EC9AE43DEA7849E63948F032BE3C958784E9E77AE226EA0",
+        "golden steam-controller-2 in 2 5B8A6DBC35C7BA7B0D24D4788F7D46F6C99120D878D9635D376DDE5D0B555DF6",
+        "golden steam-controller-composite in 0 0AAE6417DA4F8C0580617E144D0A2964869A371F1B1FFF8DA9B0956EDA11497A",
+        "golden steam-controller-composite in 1 77AEA134B1AA38AD21DE3147A6C868823825763AC8E5866D83919D0DE3DB1195",
+        "golden steam-controller-composite in 2 DE6D75DF05C29F8A221CBD9C72BED28E06B20EAF843C9F9B03DC68FC5DE5B712",
+        "golden steam-deck-composite in 0 9BE9DDFF9D800666C6103903A7D6A2A6D140115FEE4D6B49B3FA0292CFE9EA0A",
+        "golden steam-deck-composite in 1 D3F068736F79CF00525D937DF42FB974832AEA6EDE00F8AB887BE2CA7266A33A",
+        "golden steam-deck-composite in 2 B5FD8C39785E79191FDE05D17E45295DF650240E4ADE6E6E6085B28BED2B5860",
+        "golden switch2-pro-controller in 0 0A5F70A8AB3065F9A3BE2F6AF739BB5E1191210005591FEF7DA3327FE4C919EB",
+        "golden switch2-pro-controller in 1 2E99685BD96B43AE6A312F91DCFDBBDA4AF2FBFAC662F25A15FE7256A415A8C0",
+        "golden switch2-pro-controller in 2 FF6EAF68724CBACD1E31A1AB8A60D7F2120E24F6B122EA9A669322CEFCB3F7D1",
+        "golden switch2-pro-controller-composite in 0 0A5F70A8AB3065F9A3BE2F6AF739BB5E1191210005591FEF7DA3327FE4C919EB",
+        "golden switch2-pro-controller-composite in 1 2E99685BD96B43AE6A312F91DCFDBBDA4AF2FBFAC662F25A15FE7256A415A8C0",
+        "golden switch2-pro-controller-composite in 2 FF6EAF68724CBACD1E31A1AB8A60D7F2120E24F6B122EA9A669322CEFCB3F7D1",
+        "golden gamecube-adapter in 0 FD49E43C4ED431F875514EF5648BD6E5C18F0915F61E9F681351DFEA603FF707",
+        "golden gamecube-adapter in 1 25A0E779F33C7EF1153A29B883FCED2C24940C916937E102225F328ED4089952",
+        "golden gamecube-adapter in 2 038951E8CFD66DC74D4EC568AA7451F8E27DF5DD7369AC63BC4817FC6E4CB2CE",
+        "golden gamecube-adapter out 0 4B227777D4DD1FC61C6F884F48641D02B4D121D3FD328CB08B5531FCACDABF8A",
+        "golden gamecube-adapter out 1 EF2D127DE37B942BAAD06145E54B0C619A1F22327B2EBBCFBEC78F5564AFE39D",
+        "golden gamecube-adapter out 2 E7F6C011776E8DB7CD330B54174FD76F7D0216B612387A5FFCFB81E6F0919683",
+        "golden gamecube-adapter dec 0 AA73C9AA14869500EC1A0E249BC1CD2E72BC55FA719BB61923B7F86FF28C763E",
     };
 
     static int Main(string[] args)
@@ -152,7 +183,9 @@ internal static class Program
             var profile = ctx.GetProfile(id);
             if (profile == null) { lines.Add($"golden {id} MISSING-PROFILE"); continue; }
 
-            var inSpec = profile.ExtendedReport;
+            // A report with ports is written block by block (HMPort), so a
+            // port block is the spec its bytes come from.
+            var inSpec = PortBlock(profile.ExtendedReport, output: false);
             if (inSpec != null)
             {
                 var encState = new VendorBlobCodec.EncoderState();
@@ -169,7 +202,7 @@ internal static class Program
                 }
             }
 
-            var outSpec = profile.ExtendedOutputReport;
+            var outSpec = PortBlock(profile.ExtendedOutputReport, output: true);
             if (outSpec != null)
             {
                 var encState = new VendorBlobCodec.EncoderState();
@@ -215,6 +248,9 @@ internal static class Program
         failures += Vocabulary.Run();
         return failures == 0 ? 0 : 1;
     }
+
+    static ExtendedReportSpec? PortBlock(ExtendedReportSpec? spec, bool output) =>
+        spec?.Ports == null ? spec : PortLayout.Of(spec, "ports", output)!.FieldSpec;
 
     // Deterministic, fully-populated input state. Every input-direction
     // field type across the 9 specs draws from one of these fields.

@@ -2124,6 +2124,11 @@ function Scenario-Device-Oracle {
                  -Message 'a device code path no longer gives the bytes its golden file records (see probe stdout for the stream and output)' -SkipCodes 2
 }
 
+function Scenario-Vendor-Blob-Golden {
+    Invoke-Probe -Dir 'vendor_blob_golden_check' -Exe 'VendorBlobGoldenCheck.exe' -Arguments '' `
+                 -Message 'a vendor-blob report no longer encodes or decodes to its golden bytes, or the codec vocabulary no longer reproduces the code it replaces (see probe stdout)'
+}
+
 function Scenario-Arith-Roundtrip {
     Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
@@ -2227,7 +2232,8 @@ $scenarios = @(
     @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
     @{ Name = 'S88_Device_Shortcut';             Body = ${function:Scenario-Device-Shortcut} },
     @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} },
-    @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} }
+    @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} },
+    @{ Name = 'S91_Vendor_Blob_Golden';          Body = ${function:Scenario-Vendor-Blob-Golden} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
