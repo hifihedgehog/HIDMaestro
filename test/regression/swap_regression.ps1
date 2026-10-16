@@ -2073,6 +2073,40 @@ function Scenario-Interop-Decl {
                  -Message 'the XInput slot count or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
 }
 
+# S88: no device shortcut in the SDK or the drivers. With comments removed,
+# no file or declared name (locals and parameters too) holds a device or
+# vendor word outside the probe's allowed names, each allowed by its exact
+# name in the file its path names. The words come from the catalog at run
+# time (vendor folders, profile ids, names and product strings, less the
+# generic words the probe lists with a reason) and match inside lowercase
+# compounds too. No vendor or product ID is compared, matched, switched on,
+# assigned to an expression named for an ID or passed where the parameter
+# is one, as a literal, an expression of literals, a truncating cast, a
+# parsed hex string, a constant or a local initialized from one, and a
+# local assigned from an ID is an ID whatever its name. No catalog vendor
+# ID appears as a hex literal of four or more digits, and no catalog ID as
+# four bytes in a row, or as two compared bytes or a two-byte list beside
+# or compared with an ID. No VID_ or PID_ digits appear in a string or in
+# an INF model line with its [Strings] tokens read, except the INF lines
+# the probe allows. No device name is compared, searched, given to a name
+# or written into a regular expression, with strings folded across +,
+# interpolation, string.Concat and adjacent C literals. No catalog profile
+# id is a string, and no profile field is set by one catalog profile alone
+# unless the probe's table allows it. No region is exempt: a frozen-compat
+# marker in any spelling fails, and each region of 9bd6279's drivers that
+# v2.0.0 deletes (the 24 device regions and the default device's five)
+# fails while any of its token-stream prints is in a C or C++ source under
+# driver\, third_party and any extension cl.exe takes included. The prints
+# file is pinned by its SHA-256. A catalog profile the SDK embeds and does
+# not load fails too. The probe prints every allowance and what remains of
+# each region. It fails on 9bd6279's tree by design and passes once every
+# device shortcut is profile data and every region is gone. Exit 2 when the
+# source tree is not beside the probe, as on a staged machine.
+function Scenario-Device-Shortcut {
+    Invoke-Probe -Dir 'device_shortcut_check' -Exe 'DeviceShortcutCheck.exe' `
+                 -Message 'device-specific code is in the SDK or a driver outside its allowed names (see probe stdout)' -SkipCodes 2
+}
+
 # S89: the device code still gives 9bd6279's bytes. device_oracle_check
 # replays its nine cases (the SDK's submit and decode paths, the packers,
 # the Switch 2 Pro responder, the USB/IP feature answers and input paths,
@@ -2181,6 +2215,7 @@ $scenarios = @(
     @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
     @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
     @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
+    @{ Name = 'S88_Device_Shortcut';             Body = ${function:Scenario-Device-Shortcut} },
     @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} }
 )
 
