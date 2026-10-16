@@ -151,12 +151,12 @@ void HmVrControllerDevice::EnterStandby()
 {
 }
 
-void *HmVrControllerDevice::GetComponent( const char *pchComponentNameAndVersion )
+void *HmVrControllerDevice::GetComponent( const char * /*pchComponentNameAndVersion*/ )
 {
     return nullptr;
 }
 
-void HmVrControllerDevice::DebugRequest( const char *pchRequest, char *pchResponseBuffer, uint32_t unResponseBufferSize )
+void HmVrControllerDevice::DebugRequest( const char * /*pchRequest*/, char *pchResponseBuffer, uint32_t unResponseBufferSize )
 {
     if ( unResponseBufferSize >= 1 )
         pchResponseBuffer[ 0 ] = 0;
