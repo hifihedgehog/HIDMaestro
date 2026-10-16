@@ -24,7 +24,7 @@ namespace HIDMaestro;
 /// <para><b>Driver install:</b> the UMDF2 driver and its XUSB companion are
 /// embedded as resources inside this assembly. On first run on a given
 /// machine, call <see cref="InstallDriver"/> to stage them under
-/// <c>%ProgramData%\HIDMaestro\Staging</c>, in directories only
+/// <c>%ProgramFiles%\HIDMaestro\Staging</c>, in directories only
 /// Administrators and SYSTEM can write, and register them with Windows via
 /// pnputil. This requires admin and only needs to happen once per machine:
 /// subsequent runs detect that the driver is already in the DriverStore and
@@ -150,7 +150,7 @@ public sealed class HMContext : IDisposable
         => Internal.Usbip.UsbipDriverInstaller.EnsureInstalled(progress);
 
     /// <summary>Stage the embedded driver files under
-    /// <c>%ProgramData%\HIDMaestro\Staging</c>, verifying each against its
+    /// <c>%ProgramFiles%\HIDMaestro\Staging</c>, verifying each against its
     /// embedded SHA-256, install the self-signed code-signing certificate to
     /// the trusted root and trusted publisher stores, sign the driver
     /// binaries, and register them with Windows via pnputil. Requires admin.

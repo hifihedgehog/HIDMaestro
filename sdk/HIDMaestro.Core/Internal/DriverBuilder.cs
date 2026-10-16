@@ -16,7 +16,7 @@ namespace HIDMaestro.Internal;
 /// HMXInput.dll), their INFs, and every external tool needed to sign + catalog
 /// + deploy them (signtool.exe + SXS deps, inf2cat.exe + deps) ship as embedded
 /// resources inside HIDMaestro.Core.dll. At install time the whole payload is
-/// staged under <c>%ProgramData%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\driver</c>
+/// staged under <c>%ProgramFiles%\HIDMaestro\Staging\&lt;version&gt;-&lt;hash&gt;\driver</c>
 /// (<see cref="ProtectedStaging"/>), each file checked against its embedded
 /// SHA-256, and the SDK shells out to the staged tools.
 ///

@@ -33,6 +33,10 @@
 //                               does (DriverBuilder.EnsureExtracted) in this
 //                               process and reply with its directory, last
 //                               on the line so a path with spaces survives
+//   shareddir <relative>        repair the OpenVR folders' path under
+//                               %ProgramData%\HIDMaestro the way the OpenVR
+//                               extraction does (ProtectedStaging.SharedDir)
+//                               and reply with it, last on the line
 //   swdhelper                   stage hmswd.exe the way a device create does
 //                               (SwdDeviceFactory.PinHelper, or
 //                               EnsureHelperExtracted before v1.13.0) and
@@ -291,6 +295,19 @@ internal static class Peer
                         try { dir = (string)ensure.Invoke(null, null)!; }
                         catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
                         Reply($"OK stagingdir path={dir}");
+                        break;
+                    }
+                    case "shareddir":
+                    {
+                        // The OpenVR folders' repair (ProtectedStaging.SharedDir)
+                        // for a path under %ProgramData%\HIDMaestro, a[1].
+                        var shared = typeof(HMContext).Assembly.GetType("HIDMaestro.Internal.ProtectedStaging")
+                            ?.GetMethod("SharedDir", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (shared == null) { Reply("ERR shareddir no ProtectedStaging.SharedDir"); break; }
+                        string dir;
+                        try { dir = (string)shared.Invoke(null, new object[] { a[1] })!; }
+                        catch (TargetInvocationException e) when (e.InnerException != null) { throw e.InnerException; }
+                        Reply($"OK shareddir path={dir}");
                         break;
                     }
                     case "swdhelper":

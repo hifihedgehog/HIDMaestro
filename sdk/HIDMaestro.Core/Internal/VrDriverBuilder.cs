@@ -55,7 +55,26 @@ internal static class VrDriverBuilder
     };
 
     /// <summary>Stable extraction root. See class remarks for why this is
-    /// not the per-version staging directory.</summary>
+    /// not the per-version staging directory.
+    ///
+    /// <para>It stays under %ProgramData%, though the staging tree moved to
+    /// %ProgramFiles% (<see cref="ProtectedStaging"/>), by decision, for two
+    /// reasons. SteamVR loads the driver name "hidmaestro" from one
+    /// registered path only, and a second registration of that name
+    /// conflicts with the first. A v1.12.0 program running beside this one
+    /// registers this path again whenever its manifest hash differs from
+    /// <c>InstalledVrManifestSha256</c> in HKLM, so a driver moved anywhere
+    /// else would be registered twice. The cost: %ProgramData% lets a program
+    /// without elevation create folders. One that creates this path's root or
+    /// a folder on it first and holds a file under it makes
+    /// <see cref="EnsureDriverRegistered"/> throw InvalidOperationException
+    /// naming the folder and what clears it (closing the programs using it,
+    /// SteamVR among them). And because these folders stay readable by Users
+    /// for SteamVR, any program, with no squat, can hold one open for listing
+    /// and make the extraction's rename into place fail: that too throws the
+    /// refusal naming the folder, never a bare IOException
+    /// (<see cref="ProtectedStaging.BusyRefusal"/>). Nothing else HIDMaestro
+    /// does uses this path.</para></summary>
     public static string ExtractRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                      "HIDMaestro", "openvr", "hidmaestro");
@@ -310,7 +329,25 @@ internal static class VrDriverBuilder
         foreach (var (dir, file, name) in targets)
         {
             using var src = asm.GetManifestResourceStream(name)!;
-            ProtectedStaging.StageStream(dir, file, src, ProtectedStaging.EmbeddedSha256(asm, name));
+            try
+            {
+                ProtectedStaging.StageStream(dir, file, src, ProtectedStaging.EmbeddedSha256(asm, name));
+            }
+            // A reader holding this folder, or the file, without sharing
+            // writes makes the rename into place fail with a sharing
+            // violation (IOException). Renaming the new DLL over the old one
+            // while SteamVR has it mapped as an image fails instead with
+            // UnauthorizedAccessException. Both mean a program is using the
+            // driver files, not that this process lacks rights, so when it is
+            // elevated both become the refusal that names the folder and
+            // SteamVR. An unelevated caller's UnauthorizedAccessException is
+            // left alone: it is the signal that the call needs administrator
+            // rights, not a "folder in use" message.
+            catch (Exception e) when (e is IOException
+                || (e is UnauthorizedAccessException && Environment.IsPrivilegedProcess))
+            {
+                throw new InvalidOperationException(ProtectedStaging.BusyRefusal(dir, e.Message.TrimEnd('.')), e);
+            }
         }
     }
 }

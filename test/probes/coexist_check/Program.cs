@@ -29,7 +29,7 @@
 //      ownership claim goes with it, and another program can take the
 //      same identity at once.
 //   I. Staging. The driver payload and hmswd.exe stage under
-//      %ProgramData%\HIDMaestro\Staging, every directory on the path is
+//      %ProgramFiles%\HIDMaestro\Staging, every directory on the path is
 //      Administrators/SYSTEM-write-only, and nothing is left in %TEMP%. A
 //      staging root a non-administrator could write is repaired before use.
 //      A staged tool overwritten with different bytes of the same length
@@ -1221,7 +1221,9 @@ internal static partial class Program
 
     static string ProgramDataRoot =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HIDMaestro");
-    static string StagingRoot => Path.Combine(ProgramDataRoot, "Staging");
+    static string StagingParent =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HIDMaestro");
+    static string StagingRoot => Path.Combine(StagingParent, "Staging");
 
     /// <summary>Reply to a peer "stagingdir" command, whose path runs to the
     /// end of the line so a directory with spaces survives.</summary>
@@ -1262,17 +1264,17 @@ internal static partial class Program
             string r = p.Send("stagingdir");
             driverDir = Ok(r) ? StagingPath(r) : null;
             if (driverDir == null) { Check("I1: the driver payload stages somewhere", false, r); return; }
-            Check("I1: the driver payload stages under %ProgramData%\\HIDMaestro\\Staging",
+            Check("I1: the driver payload stages under %ProgramFiles%\\HIDMaestro\\Staging",
                   driverDir.StartsWith(StagingRoot, StringComparison.OrdinalIgnoreCase), driverDir);
             string? why = Native.WhyWritableByOthers(driverDir);
             Check("I1: its directory is Administrators/SYSTEM-write-only", why == null, why ?? "");
-            // Every ancestor down from %ProgramData%\HIDMaestro.
-            for (string d = driverDir; d.Length >= ProgramDataRoot.Length && d.StartsWith(ProgramDataRoot, StringComparison.OrdinalIgnoreCase);
+            // Every ancestor down from %ProgramFiles%\HIDMaestro.
+            for (string d = driverDir; d.Length >= StagingParent.Length && d.StartsWith(StagingParent, StringComparison.OrdinalIgnoreCase);
                  d = Path.GetDirectoryName(d)!)
             {
                 string? w = Native.WhyWritableByOthers(d);
                 Check($"I1: {Path.GetFileName(d)} on the path denies others write", w == null, $"{d}: {w}");
-                if (string.Equals(d, ProgramDataRoot, StringComparison.OrdinalIgnoreCase)) break;
+                if (string.Equals(d, StagingParent, StringComparison.OrdinalIgnoreCase)) break;
             }
         }
 
@@ -1366,22 +1368,37 @@ internal static partial class Program
         }
 
         // I5. A deploy, which holds the deploy lock, removes the staging
-        // directory of a version no running program uses, and anything a
-        // repair moved aside, and keeps its own version's.
+        // directory of a version no running program uses, keeps its own, and
+        // leaves a moved-aside directory in place rather than delete it by
+        // path. The moved-aside one is planted directly under StagingRoot,
+        // where the prune enumerates it, with a tag no live record names, so
+        // only the prune's skip of a ".untrusted-" name keeps it.
         string stale = Path.Combine(StagingRoot, "0.0.1-0000000000000000");
-        string movedAside = Path.Combine(versionDir, "swd.untrusted-00000000000000000000000000000000");
+        string movedAside = Path.Combine(StagingRoot, "0.0.2-0000000000000000.untrusted-00000000000000000000000000000000");
         Directory.CreateDirectory(Path.Combine(stale, "driver"));
         File.WriteAllText(Path.Combine(stale, "driver", "stale.txt"), "stale");
         Directory.CreateDirectory(movedAside);
-        Uninstall();
-        using (var p = PeerProcess.Start("I5"))
+        try
         {
-            string ri = p.Send("install");
-            Check("I5: a deploy runs", PeerProcess.Field(ri, "outcome") == "Installed", ri);
+            File.WriteAllText(Path.Combine(movedAside, "someone-elses.txt"), "x");
+            Uninstall();
+            using (var p = PeerProcess.Start("I5"))
+            {
+                string ri = p.Send("install");
+                Check("I5: a deploy runs", PeerProcess.Field(ri, "outcome") == "Installed", ri);
+            }
+            Check("I5: the stale version's staging directory is removed", !Directory.Exists(stale), stale);
+            Check("I5: a moved-aside directory is left in place, never deleted by path", Directory.Exists(movedAside), movedAside);
+            Check("I5: this version's staging directory stays", Directory.Exists(versionDir), versionDir);
         }
-        Check("I5: the stale version's staging directory is removed", !Directory.Exists(stale), stale);
-        Check("I5: a moved-aside directory is removed", !Directory.Exists(movedAside), movedAside);
-        Check("I5: this version's staging directory stays", Directory.Exists(versionDir), versionDir);
+        finally
+        {
+            // The probe planted that folder, so the probe removes it, whatever
+            // happened above: the prune never will, and an S72 run must not
+            // leave it under Program Files.
+            try { if (Directory.Exists(movedAside)) Directory.Delete(movedAside, true); }
+            catch (Exception e) { Console.WriteLine($"    could not remove I5's planted folder {movedAside}: {e.Message}"); }
+        }
 
         // I6. A staging directory replaced by a link is moved aside, not
         // followed: the helper lands in a real, protected directory and the

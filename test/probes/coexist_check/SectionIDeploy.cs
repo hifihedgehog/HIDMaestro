@@ -13,14 +13,18 @@
 //        pause. Its staging gives no reply while the prune holds the staging
 //        lock, replies once the prune is done, and its directory then holds
 //        its payload. The other build is this SDK with another payload hash.
-//   I10  %ProgramData%\HIDMaestro as an upgrade finds it: created by an
-//        elevated program, so owned by Administrators with the DACL it
-//        inherits, and the OpenVR driver's file held open as SteamVR holds
-//        it. The SDK resets it where it is and stages, and nothing is
-//        moved. A root a program that is not elevated created
-//        (Native.MediumToken) is moved aside, and hmswd.exe stages under
-//        the new, protected root. The same root with a file under it held
-//        open cannot move, and is refused rather than reset.
+//   I10  %ProgramData%\HIDMaestro, which holds the OpenVR driver, as an
+//        upgrade finds it: created by an elevated program, so owned by
+//        Administrators with the DACL it inherits, and the OpenVR driver's
+//        file held open as SteamVR holds it. The OpenVR folders' repair
+//        resets it where it is, and nothing is moved. A root a program that
+//        is not elevated created (Native.MediumToken) is moved aside, and
+//        the OpenVR path is made under the new, protected root. The same
+//        root with a file under it held open cannot move, and the OpenVR
+//        repair is refused rather than reset. In that state, the squat a
+//        program without elevation can make, the driver payload and
+//        hmswd.exe still stage, under %ProgramFiles%\HIDMaestro\Staging, and
+//        the squatted root is left as it was.
 //   I11  The OpenVR driver's folder present and its files gone: a
 //        registration extracts them again at the path SteamVR has
 //        registered. Skipped where SteamVR is not installed.
@@ -217,8 +221,8 @@ internal static partial class Program
             using (var loaded = new FileStream(dll, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var p = PeerProcess.Start("I10a"))
             {
-                string r = p.Send("stagingdir");
-                Check("I10: with a file under it held open, the driver stages", Ok(r), r);
+                string r = p.Send(@"shareddir openvr\hidmaestro\bin\win64");
+                Check("I10: with a file under it held open, the OpenVR path is repaired", Ok(r), r);
                 Check("I10: the root is reset where it is, Administrators/SYSTEM-write-only",
                       Native.WhyWritableByOthers(root) == null, Native.WhyWritableByOthers(root) ?? "");
                 Check("I10: the held file is still at its path", File.Exists(dll) && loaded.CanRead, dll);
@@ -231,8 +235,7 @@ internal static partial class Program
             SectionI11(root);
 
             // I10b. A root a program that is not elevated created: moved
-            // aside, and the SWD helper an SWD create runs is staged under
-            // the new, protected root.
+            // aside, and the OpenVR path made under the new, protected root.
             Directory.Delete(root, true);
             string made = CreateUnder(Native.MediumToken(), root);
             why = Native.WhyWritableByOthers(root);
@@ -240,15 +243,15 @@ internal static partial class Program
                   made == "created" && why != null && why.StartsWith("owner", StringComparison.Ordinal), $"{made}; {why ?? "protected"}");
             using (var p = PeerProcess.Start("I10b"))
             {
-                string r = p.Send("swdhelper");
-                string? swd = Ok(r) ? StagingPath(r) : null;
+                string r = p.Send(@"shareddir openvr\hidmaestro");
+                string? vr = Ok(r) ? StagingPath(r) : null;
                 var asides = Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").Where(a => !asideBefore.Contains(a)).ToList();
                 Check("I10: that root is moved aside, not reset where it is", asides.Count == 1, string.Join(", ", asides));
                 Check("I10: the new root is Administrators/SYSTEM-write-only",
                       Native.WhyWritableByOthers(root) == null, Native.WhyWritableByOthers(root) ?? "");
-                Check("I10: and hmswd.exe stages under it, in a protected directory",
-                      swd != null && swd.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                      && File.Exists(swd) && Native.WhyWritableByOthers(Path.GetDirectoryName(swd)!) == null, r);
+                Check("I10: and the OpenVR path is made under it, protected",
+                      vr != null && vr.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                      && Directory.Exists(vr) && Native.WhyWritableByOthers(vr) == null, r);
             }
 
             // I10c. The same root with a file under it held open, so it
@@ -260,11 +263,24 @@ internal static partial class Program
             using (var holding = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var p = PeerProcess.Start("I10c"))
             {
-                string r = p.Send("stagingdir");
+                string r = p.Send(@"shareddir openvr\hidmaestro");
                 string? whyAfter = Native.WhyWritableByOthers(root);
-                Check("I10: a root its user owns that cannot be moved is refused, not reset where it is",
+                Check("I10: a root its user owns that cannot be moved is refused for the OpenVR path, not reset where it is",
                       !Ok(r) && r.Contains(root, StringComparison.OrdinalIgnoreCase) && whyAfter != null && whyAfter.StartsWith("owner", StringComparison.Ordinal),
                       $"{made}; {r}; {whyAfter ?? "protected"}");
+
+                // I10d. The same squat does not reach staging.
+                string s = p.Send("stagingdir");
+                string? staged = Ok(s) ? StagingPath(s) : null;
+                Check("I10: with the root squatted, the driver payload still stages, under %ProgramFiles%\\HIDMaestro\\Staging",
+                      staged != null && staged.StartsWith(StagingRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase), s);
+                string h = p.Send("swdhelper");
+                string? swd = Ok(h) ? StagingPath(h) : null;
+                Check("I10: and so does hmswd.exe",
+                      swd != null && swd.StartsWith(StagingRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) && File.Exists(swd), h);
+                whyAfter = Native.WhyWritableByOthers(root);
+                Check("I10: and the squatted root is left as it was",
+                      File.Exists(heldFile) && whyAfter != null && whyAfter.StartsWith("owner", StringComparison.Ordinal), whyAfter ?? "protected");
             }
         }
         finally

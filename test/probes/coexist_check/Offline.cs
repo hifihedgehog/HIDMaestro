@@ -42,6 +42,19 @@
 //        Pin over them holds none: a listing open that shares nothing
 //        succeeds on each level before the pin (the control) and while it
 //        is held. Staging itself needs elevation, so I12 renames it live.
+//   OF9  The moved-aside tree is never deleted by path. OF9a: a hostile
+//        folder where StagingParent would be (one this process owns) is
+//        refused, not moved aside, so another program's folder there is left
+//        whole. OF9b: DeleteMovedAside, MovedAsideLevels and DeleteAsidesIn
+//        no longer exist, so no code recursively deletes a moved-aside tree
+//        a non-administrator may change through a stale grant.
+//   OF8  The squat. Staging lives under %ProgramFiles%\HIDMaestro, and a
+//        thread impersonating a program without elevation
+//        (Native.MediumToken) can create no folder there, the staging
+//        folder's own name included, while it can create one directly under
+//        %ProgramData% (the control, removed after). So the folder-first
+//        squat that makes a %ProgramData% folder refuse (OF4) has nowhere to
+//        stand in front of staging. I10 runs it live against the real root.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -79,6 +92,8 @@ internal static partial class Program
         OfflinePinShape();
         OfflineHeldTools();
         OfflinePinLevels();
+        OfflineSquat();
+        OfflineSweep();
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -271,6 +286,48 @@ internal static partial class Program
         Check("OF7: while Pin holds the OpenVR chain, every level still opens that way: none is held", during == "opened", during);
     }
 
+    static void OfflineSquat()
+    {
+        var staging = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.ProtectedStaging");
+        string? parent = staging?.GetProperty("StagingParent", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as string;
+        string? root = staging?.GetProperty("StagingRoot", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as string;
+        if (parent == null || root == null)
+        {
+            Check("OF8: ProtectedStaging.StagingParent and StagingRoot exist", false);
+            return;
+        }
+        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        Check("OF8: staging is under %ProgramFiles%, directly in its HIDMaestro folder",
+              string.Equals(Path.GetDirectoryName(parent), programFiles, StringComparison.OrdinalIgnoreCase)
+              && string.Equals(Path.GetDirectoryName(root), parent, StringComparison.OrdinalIgnoreCase), $"{parent}, {root}");
+
+        // The staging folder's own name when it is missing, as a squatter
+        // would want it, and a fresh name beside it either way.
+        var targets = new List<string> { Path.Combine(programFiles, "hmsquat" + Guid.NewGuid().ToString("N")[..8]) };
+        if (!Directory.Exists(parent)) targets.Add(parent);
+        foreach (string target in targets)
+        {
+            string made = CreateUnder(Native.MediumToken(), target);
+            bool created = made == "created";
+            if (created) { try { Directory.Delete(target, true); } catch { } }
+            Check($"OF8: a program without elevation cannot create {target}",
+                  !created && made.StartsWith("UnauthorizedAccessException", StringComparison.Ordinal), made);
+        }
+        string control = Path.Combine(programData, "hmsquat" + Guid.NewGuid().ToString("N")[..8]);
+        string madeControl = CreateUnder(Native.MediumToken(), control);
+        string? owner = null;
+        if (Directory.Exists(control))
+        {
+            try { owner = new DirectoryInfo(control).GetAccessControl().GetOwner(typeof(System.Security.Principal.NTAccount))?.Value; } catch { }
+            try { Directory.Delete(control, true); } catch { }
+        }
+        Check("OF8: control: the same thread creates a folder directly under %ProgramData%, owned by its user",
+              madeControl == "created" && owner != null
+              && owner.Equals(System.Security.Principal.WindowsIdentity.GetCurrent().Name, StringComparison.OrdinalIgnoreCase),
+              $"{madeControl}, owner {owner}");
+    }
+
     static void OfflineHeldTools()
     {
         var asm = typeof(HIDMaestro.HMContext).Assembly;
@@ -358,7 +415,87 @@ internal static partial class Program
                   && message.Contains("elevated prompt", StringComparison.Ordinal), message);
             Check("OF4: and the folder is left where it was, its file in place",
                   File.Exists(file) && Directory.GetDirectories(Path.GetTempPath(), Path.GetFileName(dir) + ".untrusted-*").Length == 0, dir);
+
+            // OF4b: the same refusal for a staging directory (StagingSddl)
+            // does not tell the reader to close SteamVR, which holds nothing
+            // under Program Files.
+            var stagingSddl = staging!.GetField("StagingSddl", BindingFlags.NonPublic | BindingFlags.Static);
+            if (stagingSddl == null) { Check("OF4b: ProtectedStaging.StagingSddl exists", false); }
+            else
+            {
+                Exception? t2 = null;
+                using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    try { ensure.Invoke(null, new object[] { dir, stagingSddl.GetValue(null)!, Enum.Parse(repair, "InPlace") }); }
+                    catch (TargetInvocationException e) { t2 = e.InnerException; }
+                }
+                string m2 = t2?.Message ?? "nothing thrown";
+                Check("OF4b: a staging refusal names the folder and the remedy but not SteamVR",
+                      t2 is InvalidOperationException && m2.Contains("could not be moved aside (", StringComparison.Ordinal)
+                      && m2.Contains("try again", StringComparison.Ordinal) && !m2.Contains("SteamVR", StringComparison.Ordinal), m2);
+            }
         }
         finally { Directory.Delete(dir, true); }
+    }
+
+    static void OfflineSweep()
+    {
+        var staging = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.ProtectedStaging");
+        var ensure = staging?.GetMethod("EnsureProtected", BindingFlags.NonPublic | BindingFlags.Static);
+        var repair = staging?.GetNestedType("Repair", BindingFlags.NonPublic);
+        var stagingSddl = staging?.GetField("StagingSddl", BindingFlags.NonPublic | BindingFlags.Static);
+        var parentRepair = staging?.GetProperty("StagingParentRepair", BindingFlags.NonPublic | BindingFlags.Static);
+        var wouldDelete = staging?.GetMethod("PruneWouldDelete", BindingFlags.NonPublic | BindingFlags.Static);
+        if (ensure == null || repair == null || stagingSddl == null || parentRepair == null || wouldDelete == null)
+        {
+            Check("OF9: ProtectedStaging.EnsureProtected, Repair, StagingSddl, StagingParentRepair and PruneWouldDelete exist", false);
+            return;
+        }
+
+        // OF9a: DirFor repairs the folder above Staging with StagingParentRepair.
+        // The test reads that same seam, so a change back to MoveAside flips
+        // it. On a folder this process owns (hostile, owner not Administrators
+        // or SYSTEM) the seam's mode must refuse and leave the folder: with
+        // MoveAside it would instead rename it aside, which these checks
+        // catch.
+        object mode = parentRepair.GetValue(null)!;
+        Check("OF9a: StagingParent's repair mode is InPlaceOrRefuse, not MoveAside",
+              mode.ToString() == "InPlaceOrRefuse", mode.ToString() ?? "null");
+        string dir = Path.Combine(Path.GetTempPath(), "hmof9_" + Guid.NewGuid().ToString("N"));
+        string inner = Path.Combine(dir, "someone-elses-files");
+        Directory.CreateDirectory(inner);
+        File.WriteAllText(Path.Combine(inner, "keep.txt"), "keep");
+        try
+        {
+            Exception? thrown = null;
+            try { ensure.Invoke(null, new object[] { dir, stagingSddl.GetValue(null)!, mode }); }
+            catch (TargetInvocationException e) { thrown = e.InnerException; }
+            string message = thrown?.Message ?? "nothing thrown";
+            Check("OF9a: a hostile StagingParent is refused with InvalidOperationException",
+                  thrown is InvalidOperationException, $"{thrown?.GetType().Name}: {message}");
+            Check("OF9a: the refusal names the folder and says HIDMaestro will not replace it",
+                  message.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
+                  && message.Contains("belongs to another program", StringComparison.Ordinal)
+                  && message.Contains("will not stage under it or move it aside", StringComparison.Ordinal), message);
+            Check("OF9a: the folder and its contents are left in place, no aside made",
+                  Directory.Exists(dir) && File.Exists(Path.Combine(inner, "keep.txt"))
+                  && Directory.GetDirectories(Path.GetTempPath(), Path.GetFileName(dir) + ".untrusted-*").Length == 0, dir);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+
+        // OF9b: the prune's keep/delete decision (PruneWouldDelete), the seam
+        // its loop reads. A moved-aside tag is kept, so reverting the skip
+        // flips it. An own old version with no live record is deleted. This
+        // build's tag, and a live tag or version, are kept.
+        var noLive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var liveV = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "9.9.9" };
+        bool WouldDelete(string tag, HashSet<string> lt, HashSet<string> lv) =>
+            (bool)wouldDelete.Invoke(null, new object[] { tag, lt, lv })!;
+        Check("OF9b: a moved-aside directory is never pruned",
+              !WouldDelete("1.2.3-abcdef0123456789.untrusted-" + Guid.NewGuid().ToString("N"), noLive, noLive));
+        Check("OF9b: an own old version no record names is pruned",
+              WouldDelete("0.0.1-0000000000000000", noLive, noLive));
+        Check("OF9b: a version a live record names is kept",
+              !WouldDelete("9.9.9-1111111111111111", noLive, liveV));
     }
 }

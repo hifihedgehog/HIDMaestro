@@ -1863,7 +1863,7 @@ function Scenario-Coexistence {
 }
 
 # S72: everything the elevated SDK runs or hands to pnputil is staged under
-# %ProgramData%\HIDMaestro\Staging in directories only Administrators and
+# %ProgramFiles%\HIDMaestro\Staging in directories only Administrators and
 # SYSTEM can write, a planted writable staging tree is repaired before use,
 # and a staged file with the right length but the wrong bytes is replaced
 # from the embedded copy. Section I of the coexistence probe, then its
