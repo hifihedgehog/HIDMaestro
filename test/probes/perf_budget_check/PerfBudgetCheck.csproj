@@ -7,8 +7,46 @@
     <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
          measurements, leaving out what b4d29d9 lacks. -->
     <DefineConstants Condition="'$(HmBase)' == 'true'">$(DefineConstants);HM_BASE</DefineConstants>
+    <!-- -p:HmBaselineTree=<checkout> builds this source against the SDK of
+         another checkout, for the "before" measurements of the v2.0.0
+         conversion: a worktree whose SDK, drivers and profiles are
+         $(HmBaselineCommit)'s (lane/B0 at 9bd6279). The probe then runs
+         that SDK, which embeds that checkout's build\ and so deploys its
+         driver. Code for what the baseline lacks goes under
+         #if !HM_BASELINE. CheckBaselineTree refuses a checkout whose
+         sources differ from the commit, committed or not. -->
+    <HmBaselineCommit Condition="'$(HmBaselineCommit)' == ''">9bd6279</HmBaselineCommit>
+    <DefineConstants Condition="'$(HmBaselineTree)' != ''">$(DefineConstants);HM_BASELINE</DefineConstants>
+    <_HmSdkProject Condition="'$(HmBaselineTree)' == ''">..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj</_HmSdkProject>
+    <_HmSdkProject Condition="'$(HmBaselineTree)' != ''">$([MSBuild]::EnsureTrailingSlash('$(HmBaselineTree)'))sdk\HIDMaestro.Core\HIDMaestro.Core.csproj</_HmSdkProject>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <ProjectReference Include="$(_HmSdkProject)" />
   </ItemGroup>
+  <ItemGroup Condition="'$(HmBaselineTree)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>HmBaselineTree</_Parameter1>
+      <_Parameter2>$(HmBaselineTree)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>HmBaselineCommit</_Parameter1>
+      <_Parameter2>$(HmBaselineCommit)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!-- The baseline checkout's SDK, drivers and profiles must be the
+       commit's, both at HEAD and in the working tree. -->
+  <Target Name="CheckBaselineTree" BeforeTargets="ResolveProjectReferences;BeforeBuild" Condition="'$(HmBaselineTree)' != ''">
+    <Error Condition="!Exists('$(_HmSdkProject)')" Text="HmBaselineTree: no SDK project at $(_HmSdkProject)." />
+    <Exec Command="git -C &quot;$(HmBaselineTree)&quot; diff --quiet $(HmBaselineCommit) -- sdk driver profiles" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_HmBaselineDiff" />
+    </Exec>
+    <Error Condition="'$(_HmBaselineDiff)' != '0'" Text="HmBaselineTree: the SDK, drivers or profiles in $(HmBaselineTree) differ from $(HmBaselineCommit) (git diff exit $(_HmBaselineDiff))." />
+    <!-- git diff does not see a file git does not track, which the build
+         would still compile or embed. -->
+    <Exec Command="git -C &quot;$(HmBaselineTree)&quot; status --porcelain --untracked-files=all -- sdk driver profiles" ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_HmBaselineUntracked" />
+    </Exec>
+    <Error Condition="'$(_HmBaselineUntracked)' != ''" Text="HmBaselineTree: $(HmBaselineTree) holds files under sdk, driver or profiles that $(HmBaselineCommit) does not: $(_HmBaselineUntracked)" />
+  </Target>
 </Project>

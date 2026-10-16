@@ -1,7 +1,10 @@
 // The budgets of the v1.13.0 design, measured the same way before and after
 // on one machine: built against this tree, and with -p:HmBase=true against a
 // b4d29d9 tree. The parts that measure what b4d29d9 lacks, the ownership
-// claims and the controller ports, are left out of that build.
+// claims and the controller ports, are left out of that build. The budgets
+// of the v2.0.0 conversion (docs/design/data-driven-devices.md, "Budgets")
+// take their baseline from a 9bd6279 tree: -p:HmBaselineTree=<checkout>
+// builds this source against that checkout's SDK (PerfBudgetCheck.csproj).
 //
 //   frame [runs]   time and bytes allocated per call on each submit path
 //   e2e [runs]     SubmitState to the driver's acknowledgement that a read
@@ -76,6 +79,11 @@ internal static class Program
 
 #if HM_BASE
     const string Build = "b4d29d9";
+#elif HM_BASELINE
+    static readonly string Build = "the baseline, " + string.Join(" at ", typeof(Program).Assembly
+        .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+        .Cast<System.Reflection.AssemblyMetadataAttribute>()
+        .Where(m => m.Key is "HmBaselineTree" or "HmBaselineCommit").OrderByDescending(m => m.Key).Select(m => m.Value));
 #else
     const string Build = "this release";
 #endif
@@ -100,7 +108,9 @@ internal static class Program
 #endif
         if (OtherSdkRunning()) return 2;
 
+        var sdk = typeof(HMContext).Assembly;
         Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
+        Console.WriteLine($"  SDK {sdk.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).Cast<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion} at {sdk.Location}");
         switch (mode)
         {
             case "frame": Frame(runs, gate: false); break;
