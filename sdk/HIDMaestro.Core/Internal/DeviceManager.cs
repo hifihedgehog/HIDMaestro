@@ -1316,10 +1316,10 @@ public static partial class DeviceManager
     /// held by a full driver deploy's pnputil /add-driver /install, which
     /// reinstalls every present devnode the package matches, other
     /// programs' controllers and their HID children included, by the bus
-    /// type pass of every create (DeviceOrchestrator.SetBusTypeGuidUsb),
-    /// which writes a property on every present HIDMaestro devnode on the
-    /// machine and on its first child, by the ghost XUSB interface sweep
-    /// from its presence check through its disable of a phantom.</para>
+    /// type stamp of every create (DeviceOrchestrator.StampBusType), which
+    /// writes or deletes a property on the parent the create made, and by
+    /// the ghost XUSB interface sweep from its presence check through its
+    /// disable of a phantom.</para>
     ///
     /// <para>Not held by these, so not ordered against them. pnp_notify_check's
     /// source check lists each of their calls and fails on one made anywhere

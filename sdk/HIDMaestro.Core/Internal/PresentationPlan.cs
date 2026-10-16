@@ -27,12 +27,20 @@ internal sealed class PresentationPlan
         Usbip,
     }
 
-    /// <summary>Which devnodes a create stamps with GUID_BUS_TYPE_USB.</summary>
+    /// <summary>The bus type GUID a create gives the parent it made, the
+    /// value a real device of the profile's connection carries, read on the
+    /// devbox: GUID_BUS_TYPE_USB on the present USB HID devices, none on
+    /// the present BTHENUM and BTHLEDevice devnodes (wdmguid.h defines no
+    /// Bluetooth bus type). The HID child is left to HidClass, whose
+    /// children carry GUID_BUS_TYPE_HID, and the XUSB companion is not
+    /// stamped.</summary>
     internal enum BusTypeStamp
     {
-        /// <summary>Every present HIDMaestro devnode under ROOT and SWD and
-        /// each one's first child, on every create.</summary>
-        EveryDevnodeUsb,
+        /// <summary>No bus type: a stamp an earlier create left on the
+        /// parent is deleted.</summary>
+        None,
+        /// <summary>GUID_BUS_TYPE_USB on the created parent.</summary>
+        ParentUsb,
     }
 
     public CreatePath Path { get; private init; }
@@ -134,7 +142,7 @@ internal sealed class PresentationPlan
                 CompatibleIds = compat,
                 FunctionMode = 0,
                 WaitsForXInputSlot = true,
-                BusType = BusTypeStamp.EveryDevnodeUsb,
+                BusType = bluetooth ? BusTypeStamp.None : BusTypeStamp.ParentUsb,
                 PresentationSource = xi.Source,
             };
         }
@@ -188,7 +196,7 @@ internal sealed class PresentationPlan
             FunctionMode = companion ? 1 : 0,
             WaitsForXInputSlot = companion,
             PacksGip = companion,
-            BusType = BusTypeStamp.EveryDevnodeUsb,
+            BusType = bluetooth ? BusTypeStamp.None : BusTypeStamp.ParentUsb,
             PresentationSource = xi.Source,
         };
     }

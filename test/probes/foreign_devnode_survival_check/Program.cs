@@ -16,7 +16,7 @@
 //      HKLM\SYSTEM\CurrentControlSet\Control\DeviceClasses.
 //   3. Runs a full HM CreateController(hidmaestro-generic) + Dispose cycle.
 //      This fires every once-per-session sweep in DeviceOrchestrator
-//      (CleanupGhostDevices, DisableGhostXusbInterfaces, SetBusTypeGuidUsb,
+//      (CleanupGhostDevices, DisableGhostXusbInterfaces, StampBusType,
 //      the SYSTEM-companion HM cleanup) plus the pre-UpdateDriver claim-walk
 //      in DeviceNodeCreator and the FinalizeNames pass in DeviceProperties.
 //   4. Re-snapshots and asserts every field matches the pre-state:

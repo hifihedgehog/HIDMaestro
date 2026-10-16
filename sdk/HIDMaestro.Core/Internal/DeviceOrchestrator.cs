@@ -261,10 +261,7 @@ internal static partial class DeviceOrchestrator
     private static partial uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
 
     [LibraryImport("CfgMgr32.dll", SetLastError = true)]
-    private static partial uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, uint propertyType, byte[] propertyBuffer, uint propertyBufferSize, uint ulFlags);
-
-    [LibraryImport("CfgMgr32.dll", SetLastError = true)]
-    private static partial uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+    private static partial uint CM_Set_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY propertyKey, uint propertyType, byte[]? propertyBuffer, uint propertyBufferSize, uint ulFlags);
 
     [LibraryImport("CfgMgr32.dll", SetLastError = true)]
     private static partial uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
@@ -1219,99 +1216,40 @@ internal static partial class DeviceOrchestrator
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  SetBusTypeGuidUsb
+    //  StampBusType
     // ════════════════════════════════════════════════════════════════════
 
-    private static void SetBusTypeGuidUsb()
+    /// <summary>Gives the parent this create made the bus type a real
+    /// device of its connection carries (<see cref="PresentationPlan.BusType"/>):
+    /// GUID_BUS_TYPE_USB, or none, deleting a stamp an earlier life left on
+    /// a record the create took over. Until v2.0.0 every create stamped
+    /// GUID_BUS_TYPE_USB on every HIDMaestro devnode on the machine, another
+    /// program's included, and on each one's first child, Bluetooth
+    /// profiles and HID children too. The stamp came from the WGI
+    /// recognition experiments (668112e, 4b4f230). Under the PnP lock, so
+    /// the write lands on no devnode another program is removing.</summary>
+    private static void StampBusType(string? parentId, PresentationPlan plan)
     {
+        if (parentId == null) return;
         var busTypeKey = new DEVPROPKEY
         {
             fmtid = new Guid(0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0),
             pid = 21 // DEVPKEY_Device_BusTypeGuid
         };
-        byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
-
-        // Every present HIDMaestro devnode on the machine gets the write,
-        // another program's included, with its first child, a HIDClass
-        // devnode. Under the PnP lock, so no locate and write lands on a
-        // devnode another program of this release is removing.
         using var pnp = DeviceManager.HoldPnpLock();
-
-        // T11: trimmed list. The dynamic VID_*/HIDMAESTRO* scan below
-        // (lines 1156+) covers VID_045E&PID_02FF&IG_00, VID_045E&PID_0B13&IG_00,
-        // and HIDMAESTRO automatically: they all match the dynamic prefixes.
-        // Only the non-VID/non-HIDMAESTRO enumerators (HID_IG_00, HIDClass,
-        // XnaComposite) need explicit hardcoded coverage. Cuts 60 redundant
-        // CM_Locate calls per setup (3 enumerators × 2 roots × 10 indices).
-        // Issue #28 (v1.3.16): the shared enumerators (HID_IG_00, HIDClass,
-        // XnaComposite) are not exclusively HIDMaestro: vJoy lives at
-        // ROOT\HIDClass. Gate the property write on IsHidMaestroOwned to
-        // avoid stamping our BusType GUID onto a coexisting third-party
-        // device.
-        foreach (string enumer in new[] { "HID_IG_00", "HIDClass", "XnaComposite" })
+        if (CM_Locate_DevNodeW(out uint devInst, parentId, 0) != 0) return;
+        if (plan.BusType == PresentationPlan.BusTypeStamp.ParentUsb)
         {
-            // Sweep both ROOT and SWD roots for this enumerator. Every
-            // instance name, since ours are identity tokens (issue #60).
-            foreach (var enumRoot in new[] { "ROOT", "SWD" })
-            {
-                string[] instNames;
-                try
-                {
-                    using var ek = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{enumer}");
-                    instNames = ek?.GetSubKeyNames() ?? Array.Empty<string>();
-                }
-                catch { instNames = Array.Empty<string>(); }
-                foreach (var instName in instNames)
-                {
-                    string devId = $@"{enumRoot}\{enumer}\{instName}";
-                    if (CM_Locate_DevNodeW(out uint devInst, devId, 0) != 0) continue;
-                    if (!DeviceManager.IsHidMaestroOwned(devId)) continue;
-                    CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
-                        usbBusGuid, (uint)usbBusGuid.Length, 0);
-                    if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                    {
-                        CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
-                            usbBusGuid, (uint)usbBusGuid.Length, 0);
-                    }
-                }
-            }
+            byte[] usbBusGuid = new Guid("9d7debbc-c85d-11d1-9eb4-006008c3a19a").ToByteArray();
+            CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D /* DEVPROP_TYPE_GUID */,
+                usbBusGuid, (uint)usbBusGuid.Length, 0);
         }
-
-        // Also scan VID_* enumerators dynamically (under both ROOT and SWD).
-        // VID_* is third-party-shared too (any root-enumerated USB-style
-        // device); HIDMAESTRO* is exclusive.
-        foreach (var enumRootPath in new[] { @"SYSTEM\CurrentControlSet\Enum\ROOT", @"SYSTEM\CurrentControlSet\Enum\SWD" })
-        try
+        else
         {
-            using var enumKey = Registry.LocalMachine.OpenSubKey(enumRootPath);
-            if (enumKey != null)
-            {
-                string enumRootPrefix = enumRootPath.EndsWith(@"\SWD") ? "SWD" : "ROOT";
-                foreach (var sub in enumKey.GetSubKeyNames())
-                {
-                    bool isVidForm = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase);
-                    bool isExclusiveOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase)
-                                        || sub.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                    if (!isVidForm && !isExclusiveOurs) continue;
-                    using var vidKey = enumKey.OpenSubKey(sub);
-                    if (vidKey == null) continue;
-                    foreach (var inst in vidKey.GetSubKeyNames())
-                    {
-                        string devId = $@"{enumRootPrefix}\{sub}\{inst}";
-                        if (CM_Locate_DevNodeW(out uint devInst, devId, 0) != 0) continue;
-                        if (!isExclusiveOurs && !DeviceManager.IsHidMaestroOwned(devId)) continue;
-                        CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x0D,
-                            usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        if (CM_Get_Child(out uint childInst, devInst, 0) == 0)
-                        {
-                            CM_Set_DevNode_PropertyW(childInst, ref busTypeKey, 0x0D,
-                                usbBusGuid, (uint)usbBusGuid.Length, 0);
-                        }
-                    }
-                }
-            }
+            // DEVPROP_TYPE_EMPTY with no buffer deletes the property
+            // (Learn, CM_Set_DevNode_PropertyW).
+            CM_Set_DevNode_PropertyW(devInst, ref busTypeKey, 0x00 /* DEVPROP_TYPE_EMPTY */, null, 0, 0);
         }
-        catch { }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -1552,8 +1490,8 @@ internal static partial class DeviceOrchestrator
         }
 
         // ── Step 5: bus type + companions ─────────────────────────────────
-        using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.set_bustype_usb"))
-            SetBusTypeGuidUsb();
+        using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.set_bustype"))
+            StampBusType(mainInstanceId ?? companionId, plan);
 
         // Non-xinputhid Xbox: create XUSB companion for XInput.
         // HIDMAESTRO setup class changed from XnaComposite to System in
