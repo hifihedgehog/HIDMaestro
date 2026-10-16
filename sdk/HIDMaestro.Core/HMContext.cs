@@ -296,15 +296,16 @@ public sealed class HMContext : IDisposable
     /// wall-clock for each Dispose() call is reported through
     /// <paramref name="perControllerCallback"/> so callers can log a
     /// "disposed slot N in M ms" line for each, and it includes the time
-    /// that controller's removals waited behind the others'. Use from any caller that
-    /// already has a list of HMControllers to dispose together (e.g., a
-    /// test harness's end-of-run cleanup); HMContext.Dispose itself uses an
-    /// equivalent path internally. Called from a controller's event
+    /// that controller's removals waited behind the others'. Use from any
+    /// caller that already has a list of HMControllers to dispose together,
+    /// such as a test harness's end-of-run cleanup. HMContext.Dispose itself
+    /// uses an equivalent path internally. Called from a controller's event
     /// handler, it disposes that controller on the handler's own thread, so
     /// the controller's Dispose does not wait for that thread. An exception
-    /// <paramref name="perControllerCallback"/> throws comes out as an
-    /// <see cref="AggregateException"/> holding each one thrown, after the
-    /// batch ends.</summary>
+    /// <paramref name="perControllerCallback"/> throws stops nothing: every
+    /// controller is disposed and the orphan sweep runs, and then the
+    /// exceptions come out as one <see cref="AggregateException"/> holding
+    /// each one thrown.</summary>
     public void DisposeControllersInParallel(
         IEnumerable<HMController> controllers,
         Action<HMController, long>? perControllerCallback = null)
@@ -316,11 +317,15 @@ public sealed class HMContext : IDisposable
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try { arr[0].Dispose(); } catch { }
-            // Wrapped as the pool path wraps it (DisposeConcurrently).
+            // Wrapped as the set path below wraps it.
             try { perControllerCallback?.Invoke(arr[0], sw.ElapsedMilliseconds); }
             catch (Exception ex) { throw new AggregateException(ex); }
             return;
         }
+        // A callback's exception is kept, not thrown in the loop:
+        // Parallel.ForEach starts no new iteration once one has thrown, which
+        // would leave the controllers after it undisposed.
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
         _batchDisposing = true;
         try
         {
@@ -328,11 +333,16 @@ public sealed class HMContext : IDisposable
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try { c.Dispose(); } catch { }
-                perControllerCallback?.Invoke(c, sw.ElapsedMilliseconds);
+                try { perControllerCallback?.Invoke(c, sw.ElapsedMilliseconds); }
+                catch (Exception ex) { failures.Enqueue(ex); }
             });
         }
-        finally { _batchDisposing = false; }
-        Internal.DeviceOrchestrator.RemoveOrphanHidChildrenBatch();
+        finally
+        {
+            _batchDisposing = false;
+            Internal.DeviceOrchestrator.RemoveOrphanHidChildrenBatch();
+        }
+        if (!failures.IsEmpty) throw new AggregateException(failures);
     }
 
     // ════════════════════════════════════════════════════════════════════

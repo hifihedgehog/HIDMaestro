@@ -26,7 +26,9 @@
 // "offline" runs the set dispose with controllers that have no device,
 // needing no elevation: the handler's own controller stays on its thread,
 // and every failure of the dispose callback comes out in one
-// AggregateException, with a set of one controller too.
+// AggregateException, with a set of one controller too, and with a set
+// larger than the pool runs at once, where every controller is still
+// disposed.
 //
 // The other events raised on SDK threads are tested where their stimulus
 // lives: the adapter ports' OutputChanged in S80, the USB audio events in
@@ -304,6 +306,7 @@ internal static class Program
             agg != null && flat && messages.SequenceEqual(new[] { "S85 offline: controller 0", "S85 offline: controller 2" }),
             $"{caught?.GetType().Name ?? "nothing"}: [{string.Join(", ", messages)}]");
         OfflineSingle();
+        OfflineMany();
         return Probe.Finish("S85 offline");
     }
 
@@ -330,6 +333,37 @@ internal static class Program
         Probe.Check("with one controller, the callback's failure comes out in an AggregateException",
             calls == 1 && inner.Length == 1 && inner[0] is InvalidOperationException { Message: "S85 offline: the only controller" },
             $"{calls} call(s), {caught?.GetType().Name ?? "nothing"}: [{string.Join(", ", inner.Select(x => x.Message))}]");
+    }
+
+    /// <summary>DisposeControllersInParallel with more controllers than the
+    /// pool runs at once, and a callback that throws for every one. Each
+    /// controller must still be disposed and reported, and every failure
+    /// must come out in one AggregateException. Parallel.ForEach starts no
+    /// new iteration once one has thrown ("How to: Handle Exceptions in
+    /// Parallel Loops" on Learn), so before this release a throwing
+    /// callback left the controllers after it undisposed.</summary>
+    static void OfflineMany()
+    {
+        const int count = 256;
+        var ctx = (HMContext)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+        var set = new HMController[count];
+        for (int i = 0; i < count; i++)
+            set[i] = (HMController)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMController));
+        int calls = 0;
+        Exception? caught = null;
+        try
+        {
+            ctx.DisposeControllersInParallel(set, (c, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                throw new InvalidOperationException("S85 offline: one of many");
+            });
+        }
+        catch (Exception e) { caught = e; }
+        int inner = (caught as AggregateException)?.InnerExceptions.Count ?? 0;
+        Probe.Check($"a callback that throws for each of {count} controllers stops no dispose, and every failure comes out",
+            calls == count && inner == count && caught is AggregateException,
+            $"{calls} of {count} callbacks ran, {caught?.GetType().Name ?? "nothing"} with {inner} inner");
     }
 
     const uint QuietErrorMode = 0x0001 | 0x0002 | 0x8000; // SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX
