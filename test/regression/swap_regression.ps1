@@ -1690,7 +1690,9 @@ function Scenario-Usbip-E2E-Composite {
 # for the Valve ones. Then the 0xCA rival scan on recorded device trees: a
 # parent on the identity's ParentIdPrefix, or with its token, under any
 # ROOT enumerator HIDMaestro creates parents under is removed, refused when
-# its owner runs, and refused untouched when HIDMaestro does not own it.
+# its owner runs, and refused untouched when HIDMaestro does not own it,
+# and every enumerator a catalog profile's plan makes a parent under is
+# walked by the full cleanup's Device Parameters and HID orphan phases.
 function Scenario-Identity-Derivation {
     Invoke-Probe -Dir 'identity_derivation_check' -Exe 'IdentityDerivationCheck.exe' `
                  -Message 'identity derivation changed: a default id, a keyed id, or a persona serial no longer derives as documented, or the ParentIdPrefix rival scan missed a rival (see probe stdout)'

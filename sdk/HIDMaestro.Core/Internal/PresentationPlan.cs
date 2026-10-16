@@ -290,6 +290,14 @@ internal sealed class PresentationPlan
             && string.Compare(enumerator, 28, "&IG_00", 0, 6, StringComparison.OrdinalIgnoreCase) == 0;
     }
 
+    /// <summary>Whether a HID child's enumerator segment,
+    /// <c>HID\&lt;segment&gt;\...</c>, is one a plan's parent gives its child.
+    /// HidClass takes the segment from the parent's own: ROOT\HIDCLASS\...
+    /// has the child HID\HIDCLASS\... (read from the devbox's registry), and
+    /// so on for each enumerator a plan creates parents under.</summary>
+    public static bool IsHidChildEnumerator(string segment) =>
+        IsRootParentEnumerator(segment) || IsSwdParentEnumerator(segment);
+
     static bool IsHex4(string s, int at)
     {
         for (int i = at; i < at + 4; i++)

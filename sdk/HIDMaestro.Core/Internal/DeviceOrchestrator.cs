@@ -2334,6 +2334,146 @@ internal static partial class DeviceOrchestrator
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
     }
 
+    /// <summary>Whether the HID orphan phase of <see cref="RemoveEverything"/>
+    /// walks the HID children under <c>HID\&lt;segment&gt;</c>: every
+    /// segment a presentation plan gives a child
+    /// (<see cref="PresentationPlan.IsHidChildEnumerator"/>), and HID_IG_*
+    /// for what builds before v1.8.0 left.</summary>
+    internal static bool SweepsOrphanChildren(string segment) =>
+        PresentationPlan.IsHidChildEnumerator(segment)
+        || segment.StartsWith("HID_IG", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Whether the Device Parameters phase of
+    /// <see cref="RemoveEverything"/> walks <c>ROOT</c> or <c>SWD</c>
+    /// <paramref name="enumerator"/>, and whether it is HIDMaestro's alone
+    /// (HIDMAESTRO*), where an instance needs no HardwareID proof. The
+    /// shared ones are every VID_* key, XnaComposite and HID_IG_00, which
+    /// earlier builds made, and HIDClass, which a plan creates parents
+    /// under for every device that is no XInput device.</summary>
+    internal static bool SweepsDeviceParameters(string enumerator, out bool exclusivelyOurs)
+    {
+        exclusivelyOurs = enumerator.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+        return exclusivelyOurs
+            || enumerator.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+            || enumerator.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
+            || enumerator.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase)
+            || enumerator.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Where the HID orphan phase reads a child's ownership: the
+    /// registry, or for identity_derivation_check (S58) a recorded
+    /// tree.</summary>
+    internal interface IOrphanSource
+    {
+        /// <summary>The instance key is in the registry, present or
+        /// phantom.</summary>
+        bool RecordExists(string instanceId);
+        /// <summary>The record carries a HIDMaestro hardware ID
+        /// (<see cref="DeviceManager.IsHidMaestroOwned"/>).</summary>
+        bool Owned(string instanceId);
+        /// <summary>Every ROOT and SWD instance id.</summary>
+        IEnumerable<string> ParentRecords();
+        /// <summary>The record's ParentIdPrefix value, or null.</summary>
+        string? ParentIdPrefix(string instanceId);
+        /// <summary>The identity tokens HIDMaestro's owner records name
+        /// (<see cref="MachineClaims.ReadAll"/>).</summary>
+        IEnumerable<string> RecordedTokens();
+    }
+
+    internal sealed class SystemOrphanSource : IOrphanSource
+    {
+        internal static readonly SystemOrphanSource Instance = new();
+
+        public bool RecordExists(string instanceId)
+        {
+            try { using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}"); return k != null; }
+            catch { return false; }
+        }
+
+        public bool Owned(string instanceId) => DeviceManager.IsHidMaestroOwned(instanceId);
+
+        public IEnumerable<string> ParentRecords()
+        {
+            var ids = new List<string>();
+            foreach (string root in new[] { "ROOT", "SWD" })
+            {
+                try
+                {
+                    using var r = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}");
+                    if (r == null) continue;
+                    foreach (string e in r.GetSubKeyNames())
+                    {
+                        using var ek = r.OpenSubKey(e);
+                        if (ek == null) continue;
+                        foreach (string i in ek.GetSubKeyNames()) ids.Add($@"{root}\{e}\{i}");
+                    }
+                }
+                catch { }
+            }
+            return ids;
+        }
+
+        public string? ParentIdPrefix(string instanceId)
+        {
+            try
+            {
+                using var k = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
+                return k?.GetValue("ParentIdPrefix") as string;
+            }
+            catch { return null; }
+        }
+
+        public IEnumerable<string> RecordedTokens()
+        {
+            try { return MachineClaims.ReadAll().SelectMany(r => r.Controllers).Select(c => c.Token).ToList(); }
+            catch { return Array.Empty<string>(); }
+        }
+    }
+
+    /// <summary>The prefixes a HID child of HIDMaestro's can carry: the
+    /// ParentIdPrefix of every ROOT and SWD record that carries a HIDMaestro
+    /// hardware ID, the prefix each such record's identity token and each
+    /// token an owner record names derive
+    /// (<see cref="DeviceIdentity.ParentIdPrefixOfToken"/>), and the prefix
+    /// of every transport index's default identity, which a parent removed
+    /// with no record left behind still names. <see cref="RemoveEverything"/>
+    /// takes them before its first phase removes the records they come
+    /// from.</summary>
+    internal static HashSet<string> OwnedPrefixes(IOrphanSource src)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? prefix) { if (prefix != null) set.Add(prefix); }
+        foreach (string id in src.ParentRecords())
+        {
+            if (!src.Owned(id)) continue;
+            Add(src.ParentIdPrefix(id));
+            Add(DeviceIdentity.ParentIdPrefixOfToken(id.Substring(id.LastIndexOf('\\') + 1)));
+        }
+        foreach (string token in src.RecordedTokens())
+            Add(DeviceIdentity.ParentIdPrefixOfToken(token));
+        for (int n = 0; n < ControllerLease.IndexLimit; n++)
+            Add(DeviceIdentity.ForIndex(n).ParentIdPrefix);
+        return set;
+    }
+
+    /// <summary>Whether the HID child <paramref name="childInstance"/>
+    /// (the instance name under <c>HID\&lt;segment&gt;</c>) is HIDMaestro's.
+    /// When its parent resolves to a record still in the registry, that
+    /// record must carry a HIDMaestro hardware ID. When it resolves to
+    /// nothing, to <c>HTREE\ROOT\0</c> (what PnP gives a phantom child whose
+    /// parent record is gone) or to a record that is gone, the child's
+    /// prefix, its name without the trailing collection number, must be one
+    /// of <paramref name="ownedPrefixes"/>. Anything else is left
+    /// alone.</summary>
+    internal static bool OrphanChildIsOurs(string childInstance, string? parentId, IOrphanSource src, HashSet<string> ownedPrefixes)
+    {
+        if (parentId != null && !parentId.Equals(@"HTREE\ROOT\0", StringComparison.OrdinalIgnoreCase)
+            && src.RecordExists(parentId))
+            return src.Owned(parentId);
+        int amp = childInstance.LastIndexOf('&');
+        return amp > 0 && ownedPrefixes.Contains(childInstance.Substring(0, amp));
+    }
+
     /// <summary>The uninstall-grade sweep, <see cref="HMCleanupScope.Everything"/>:
     /// every HIDMaestro device and USB/IP import on the machine, whoever made
     /// it, then the ledger, and with <paramref name="preserveInstall"/> false
@@ -2376,6 +2516,12 @@ internal static partial class DeviceOrchestrator
             lastMs = sweepSw.ElapsedMilliseconds;
         }
         LogDiag($">>> SWEEP ENTER preserveInstall={preserveInstall}");
+
+        // The HID orphan phase knows a child whose parent is gone by its
+        // prefix, and the prefixes come from the parent records the
+        // ROOT and SWD walk below removes, so they are read first.
+        var orphanSource = SystemOrphanSource.Instance;
+        var ownedPrefixes = OwnedPrefixes(orphanSource);
 
         SignalStopEventsAndDrain(CollectSweepTargetIndices());
         Phase("stop-drain");
@@ -2464,40 +2610,36 @@ internal static partial class DeviceOrchestrator
             {
                 foreach (var sub in hidEnum.GetSubKeyNames())
                 {
-                    // Issue #28 (v1.3.16): the shape match
-                    // `HID\VID_045E*` collides with real Xbox 360 controller
-                    // phantom records; `HID\HIDCLASS` and `HID\HID_IG_*`
-                    // collide with vJoy's HID child. HID children carry HID
-                    // class hwids (`HID_DEVICE_SYSTEM_GAME`, etc.) not the
-                    // HM signature, so the child's own HardwareID can't
-                    // prove ownership. The ParentIdPrefix → parent
+                    // The child enumerators every presentation plan gives
+                    // a HID child (PresentationPlan.IsHidChildEnumerator:
+                    // HIDCLASS, each VID_xxxx&PID_yyyy&IG_00, each
+                    // HIDMAESTRO_VID_xxxx_PID_yyyy&IG_00), and HID_IG_* for
+                    // what builds before v1.8.0 left. Issue #28 (v1.3.16):
+                    // these shapes are shared, `HID\VID_045E*` with real
+                    // Xbox controllers' records and `HID\HIDCLASS` and
+                    // `HID\HID_IG_*` with vJoy's HID child. HID children
+                    // carry HID class hwids (`HID_DEVICE_SYSTEM_GAME`, etc.)
+                    // not the HM signature, so the child's own HardwareID
+                    // can't prove ownership. The ParentIdPrefix → parent
                     // instance ID lookup proves ownership via the parent's
                     // HardwareID instead.
-                    bool shapeMatch = sub.StartsWith("VID_045E", StringComparison.OrdinalIgnoreCase)
-                        || sub.Equals("HIDCLASS", StringComparison.OrdinalIgnoreCase)
-                        || sub.StartsWith("HID_IG", StringComparison.OrdinalIgnoreCase);
-                    if (!shapeMatch) continue;
+                    if (!SweepsOrphanChildren(sub)) continue;
 
                     using var childEnum = hidEnum.OpenSubKey(sub);
                     if (childEnum == null) continue;
                     foreach (var inst in childEnum.GetSubKeyNames())
                     {
                         string childId = $@"HID\{sub}\{inst}";
-                        // Prove ownership through the parent HM root /
-                        // companion: read the child's ParentIdPrefix, find
-                        // the parent under the appropriate enumerator,
-                        // require IsHidMaestroOwned. If the parent is
-                        // already gone (phantom-orphan case), fall back to
-                        // accepting it: the only legitimate writer of HID
-                        // children with HM-shape hwid + HM-shape parent
-                        // pattern would have been us, and a phantom whose
-                        // parent has been removed can't be matched to a
-                        // live third-party owner.
+                        // A child is HIDMaestro's when its parent's record
+                        // is still in the registry and carries a HIDMaestro
+                        // hardware ID, or, when its parent cannot be found,
+                        // when its prefix is one a HIDMaestro parent holds or
+                        // derives (OrphanChildIsOurs). A parent that is gone
+                        // proves nothing: until v2.0.0 it was taken as proof,
+                        // and these shapes now reach every vendor's IG_00
+                        // children (issue #28: when in doubt, never claim).
                         string? parentId = TryResolveHidChildParent(childEnum, inst);
-                        bool parentIsOurs = parentId != null && DeviceManager.IsHidMaestroOwned(parentId);
-                        bool parentIsGone = parentId == null
-                            || CM_Locate_DevNodeW(out _, parentId, CM_LOCATE_DEVNODE_PHANTOM) != 0;
-                        if (!parentIsOurs && !parentIsGone) continue;
+                        if (!OrphanChildIsOurs(inst, parentId, orphanSource, ownedPrefixes)) continue;
                         if (CM_Locate_DevNodeW(out uint childInst, childId, 0) == 0)
                         {
                             bool parentGone = CM_Get_Parent(out uint _, childInst, 0) != 0;
@@ -2542,11 +2684,7 @@ internal static partial class DeviceOrchestrator
                 if (enumRoot == null) continue;
                 foreach (var sub in enumRoot.GetSubKeyNames())
                 {
-                    bool exclusivelyOurs = sub.StartsWith("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
-                    bool shared = sub.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
-                        || sub.Equals("XnaComposite", StringComparison.OrdinalIgnoreCase)
-                        || sub.Equals("HID_IG_00", StringComparison.OrdinalIgnoreCase);
-                    if (!exclusivelyOurs && !shared) continue;
+                    if (!SweepsDeviceParameters(sub, out bool exclusivelyOurs)) continue;
                     using var subKey = enumRoot.OpenSubKey(sub);
                     if (subKey == null) continue;
                     foreach (var inst in subKey.GetSubKeyNames())

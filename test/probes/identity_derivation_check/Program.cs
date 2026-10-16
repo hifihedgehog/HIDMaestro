@@ -27,6 +27,14 @@
 //      every catalog profile and key form: two on one child path are
 //      refused or harmless, and the released v1.11.0 and v1.12.0 derive
 //      the same token and prefix as v2.0.0 (ChildPaths.cs).
+//   6. Every enumerator a catalog profile's presentation plan creates a
+//      parent under is covered by the rival scan and by the Device
+//      Parameters and HID orphan phases of the full cleanup.
+//   7. The HID orphan phase removes a child only when its parent's record
+//      is HIDMaestro's, or its parent cannot be found and its prefix is one
+//      HIDMaestro holds or derives. A parent that cannot be found is never
+//      proof on its own, now that the phase walks every vendor's IG_00
+//      children.
 //
 // Exit 0 PASS / 1 FAIL.
 
@@ -192,6 +200,16 @@ internal static class Program
         //     (ChildPaths.cs).
         Console.WriteLine("\n--- child paths of v1 and v2.0.0 parents ---");
         ChildPaths.Run((name, ok, detail) => Check(name, ok, detail));
+
+        // 6. Every enumerator a catalog plan makes a parent under is swept
+        //    (SweepCoverage.cs).
+        Console.WriteLine("\n--- sweep coverage ---");
+        SweepCoverage.Run((name, ok, detail) => Check(name, ok, detail));
+
+        // 7. The HID orphan phase removes only HIDMaestro's children
+        //    (OrphanOwnership.cs).
+        Console.WriteLine("\n--- orphan ownership ---");
+        OrphanOwnership.Run((name, ok, detail) => Check(name, ok, detail));
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} {(s_failures == 0 ? "PASS" : "FAIL")} ===");
         return s_failures == 0 ? 0 : 1;
