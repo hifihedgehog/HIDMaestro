@@ -15,6 +15,8 @@
 //                  CreateController and Dispose for five kinds of device, or
 //                  the ones named, with the SDK's own step timings
 //                  (HIDMAESTRO_TIMING), each controller up for <ms> first
+//   install        InstallDriver, then proof that the driver installed is
+//                  the one this SDK embeds (exit 4 when it is not)
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -43,7 +45,8 @@
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
 // Requires elevation, except census. Exit 0 PASS, 1 FAIL (gate, census), 2
-// when another program that embeds HIDMaestro is running.
+// when another program that embeds HIDMaestro is running, 3 when install
+// runs without elevation, 4 when install finds another driver installed.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -62,7 +65,7 @@ using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
 using Microsoft.Win32.SafeHandles;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -118,6 +121,9 @@ internal static class Program
             case "output": Output(runs); break;
             case "create": Create(runs, args.Skip(2).Where(a => !a.StartsWith("--settle=", StringComparison.Ordinal)).ToArray(),
                 SettleMs(args)); break;
+#if !HM_BASE
+            case "install": return Install();
+#endif
             case "start": Start(runs); break;
             case "usbip": Usbip(runs, gate: false); break;
 #if !HM_BASE
