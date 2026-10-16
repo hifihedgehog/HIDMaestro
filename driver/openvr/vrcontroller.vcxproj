@@ -25,15 +25,20 @@
     <OutDir>$(SolutionDir)build\openvr\hidmaestro\bin\win64\</OutDir>
     <IntDir>$(SolutionDir)build\openvr\obj\</IntDir>
     <TargetName>driver_hidmaestro</TargetName>
+    <!-- Valve's openvr_driver.h is copied unedited. As an external include
+         directory with ExternalWarningLevel off, its C4100 stubs stay quiet
+         and our own sources keep Level4, as in scripts\build_openvr.cmd. -->
+    <ExternalIncludePath>$(ProjectDir)third_party\openvr;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;_USRDLL;WIN32_LEAN_AND_MEAN;NOMINMAX;_USE_MATH_DEFINES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)third_party\openvr;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>MaxSpeed</Optimization>

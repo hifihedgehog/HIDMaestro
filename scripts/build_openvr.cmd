@@ -53,9 +53,19 @@ if not exist "%OUT_DIR%\obj" mkdir "%OUT_DIR%\obj"
 
 echo Compiling driver_hidmaestro.dll ...
 
+:: third_party\openvr holds Valve's openvr_driver.h, copied unedited. At
+:: /W4 its interface stubs raise C4100 (unreferenced parameter) in every
+:: source that includes it, and the header is not ours to change.
+:: /external:I adds that directory to the include path and marks every
+:: header under it external. A header included from an external header is
+:: external too, wherever it lives. No HIDMaestro header is included that
+:: way today, and none may be. /external:W0 turns warnings off in external
+:: headers only. Our own sources and headers stay at /W4. Microsoft Learn,
+:: "/external (External headers diagnostics)": the options need no
+:: /experimental:external from Visual Studio 2019 16.10 on.
 cl.exe /nologo /W4 /O2 /EHsc /MD /std:c++17 ^
     /DNDEBUG /D_WINDOWS /D_USRDLL /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_USE_MATH_DEFINES ^
-    /I"%SRC_DIR%\third_party\openvr" /I"%SRC_DIR%\src" ^
+    /external:I"%SRC_DIR%\third_party\openvr" /external:W0 /I"%SRC_DIR%\src" ^
     /Fo"%OUT_DIR%\obj\\" /Fe"%PKG_DIR%\bin\win64\driver_hidmaestro.dll" ^
     "%SRC_DIR%\src\controller_device.cpp" ^
     "%SRC_DIR%\src\device_provider.cpp" ^
