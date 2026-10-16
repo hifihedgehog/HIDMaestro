@@ -12,6 +12,13 @@
 //                  CreateController and Dispose for five kinds of device, or
 //                  the ones named, with the SDK's own step timings
 //                  (HIDMAESTRO_TIMING), each controller up for <ms> first
+//   report [runs] [calls]
+//                  offline, no elevation: one launch of the hot path's cost
+//                  under the one arithmetic, BuildReportInto, EncodeInput and
+//                  SubmitState on an offline controller, each variant's
+//                  median ns per call (ReportCost.cs). A script takes p50 and
+//                  p95 over 30 launches or more, this tree's and the tree's
+//                  before
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -98,6 +105,12 @@ internal static class Program
         // The usbip mode plays the host controller from this process.
         UsbipServer.AdmitImportsFromThisProcess = true;
 #endif
+        // Offline: no device, so another program's devices do not matter.
+        if (mode == "report")
+        {
+            ReportCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
         if (OtherSdkRunning()) return 2;
 
         Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
@@ -231,6 +244,24 @@ internal static class Program
             bool flip = false;
             Measure("SubmitState, " + Ds3 + " (the report codec)", runs, 20_000, () => { ds3.SubmitState(flip ? a : b); flip = !flip; }, gate);
         }
+        // The rest of the budget table of the data-driven design
+        // (docs/design/data-driven-devices.md, Budgets): the centered Luna
+        // sticks, the armed codec, the USB/IP codec and packer, and a
+        // GameCube port. The armed DualSense is armed as the output reader
+        // arms it when a host reads its feature report. Not in the gate,
+        // which measures the USB/IP send paths in its usbip mode.
+        if (!gate)
+            foreach (var (id, armed) in new[]
+            {
+                ("amazon-luna-usb", false), ("amazon-luna-ble", false), ("dualsense-bt", true),
+                ("steam-controller-2", false), ("switch2-pro-controller-composite", false), ("gamecube-adapter", false),
+            })
+            {
+                using var c = ctx.CreateController(ctx.GetProfile(id)!);
+                if (armed) typeof(HMController).GetField("_extendedModeArmed", Any)!.SetValue(c, true);
+                bool flip = false;
+                Measure($"SubmitState, {id}{(armed ? " armed" : "")}", runs, 20_000, () => { c.SubmitState(flip ? a : b); flip = !flip; }, gate);
+            }
         using (var mk = ctx.CreateController(ctx.GetProfile(MagicKeyboard)!))
         {
             var playPause = new ushort[] { 0x00CD };
