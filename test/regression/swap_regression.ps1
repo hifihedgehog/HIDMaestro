@@ -290,31 +290,11 @@ function Get-DevnodeState {
     return 'GONE'
 }
 
-# Enumerate every HIDMaestro-named devnode in registry, return only
-# those in PRESENT state. PHANTOM entries are registry residue from
-# prior sessions; harmless to consumers, ignored here.
-function Get-HMPresentDevnodes {
-    $present = @()
-    foreach ($root in 'ROOT','SWD','HID') {
-        $rootKey = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $root
-        if (-not (Test-Path $rootKey)) { continue }
-        Get-ChildItem $rootKey -ErrorAction SilentlyContinue | Where-Object {
-            $_.PSChildName -match 'HIDMAESTRO|HMCOMPANION' -or
-            $_.PSChildName -match 'VID_045E&PID_028E' -or  # Xbox 360 wired ROOT main HID
-            $_.PSChildName -match 'VID_BEEF&PID_F000'      # PadForge-style custom profile
-        } | ForEach-Object {
-            $sub = $_.PSChildName
-            $insts = Get-ChildItem $_.PSPath -ErrorAction SilentlyContinue
-            foreach ($i in $insts) {
-                $iid = $root + '\' + $sub + '\' + $i.PSChildName
-                if ((Get-DevnodeState $iid) -eq 'PRESENT') {
-                    $present += $iid
-                }
-            }
-        }
-    }
-    return ,$present
-}
+# Get-HMPresentDevnodes and Get-HMLeftovers: every HIDMaestro controller
+# devnode in the PRESENT state, proved by its hardware ID under any
+# enumerator, and what a scenario left of them. devnode_owner_check.ps1
+# checks both offline.
+. (Join-Path $scriptDir 'HMDevnodes.ps1')
 
 function Start-HMTestProcess {
     param(
@@ -610,7 +590,7 @@ function Test-Scenario {
 
     # Anything PRESENT after that was not PRESENT before is a leftover
     # (the scenario created it and did not clean it up).
-    $leftovers = @($after | Where-Object { $baseline -notcontains $_ })
+    $leftovers = @(Get-HMLeftovers -Baseline $baseline -After $after)
 
     $sw.Stop()
     $result = [PSCustomObject]@{

@@ -1699,24 +1699,46 @@ partial class Program
     const uint IOCTL_XUSB_GET_CAPABILITIES = 0x8000E004;
     const uint IOCTL_XUSB_SET_STATE = 0x8000A010;
 
+    // Labels an XUSB interface by its bus and by whether HIDMaestro made
+    // the device. Ownership is proved by hardware ID, as
+    // DeviceManager.IsHidMaestroOwned proves it: the XUSB companion
+    // carries root\HIDMaestroXUSB, and an xinputhid controller's HID child
+    // is HIDMaestro's through its parent, which carries root\HIDMaestro. A
+    // label read from the VID and PID named three Xbox identities only, and
+    // gave a real pad of one of them the same label as a virtual.
     static string ClassifyXusbPath(string path)
     {
         string lower = path.ToLowerInvariant();
         bool usb = lower.StartsWith(@"\\?\usb#");
         bool hid = lower.StartsWith(@"\\?\hid#");
         bool bthle = lower.Contains(@"#{00001812-");
-        bool vid045e = lower.Contains("vid_045e");
-        bool pid028e = lower.Contains("pid_028e");
-        bool pid0b13 = lower.Contains("pid_0b13");
-        bool pid02ff = lower.Contains("pid_02ff");
         var tags = new List<string>();
         if (usb) tags.Add("USB");
         else if (hid && bthle) tags.Add("HID-BTHLE");
         else if (hid) tags.Add("HID-CHILD");
-        if (vid045e && pid028e) tags.Add("045E:028E Xbox360-wired");
-        else if (vid045e && pid0b13) tags.Add("045E:0B13 XboxSeries");
-        else if (vid045e && pid02ff) tags.Add("045E:02FF XboxOne");
+        string? id = InstanceIdOfInterface(path);
+        tags.Add(id != null && IsHidMaestroDevnode(id) ? "HIDMaestro" : "not HIDMaestro");
+        if (id != null) tags.Add(id);
         return string.Join(" ", tags);
+    }
+
+    // An interface path is \\?\ and the device's instance ID with each
+    // backslash written as #, then # and the interface class GUID.
+    static string? InstanceIdOfInterface(string path)
+    {
+        if (!path.StartsWith(@"\\?\", StringComparison.Ordinal)) return null;
+        string rest = path.Substring(4);
+        int guid = rest.LastIndexOf("#{", StringComparison.Ordinal);
+        return guid > 0 ? rest.Substring(0, guid).Replace('#', '\\') : null;
+    }
+
+    static bool IsHidMaestroDevnode(string instanceId)
+    {
+        if (DeviceManager.IsHidMaestroOwned(instanceId)) return true;
+        string[] parts = instanceId.Split('\\');
+        if (parts.Length != 3 || !parts[0].Equals("HID", StringComparison.OrdinalIgnoreCase)) return false;
+        string? parent = DeviceManager.GetRegistryParentId(@"SYSTEM\CurrentControlSet\Enum\HID", parts[1], parts[2]);
+        return parent != null && DeviceManager.IsHidMaestroOwned(parent);
     }
 
     static SafeFileHandle OpenXusbLikeChrome(string path)

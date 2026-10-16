@@ -151,9 +151,18 @@ not run elevated.
 
 Per scenario:
 
-1. Snapshot every `HIDMAESTRO*` / `VID_045E&PID_028E*` PnP devnode that
+1. Snapshot every HIDMaestro controller devnode that
    `CM_Locate_DevNodeW(NORMAL)` reports as `PRESENT` BEFORE the scenario
-   runs (the baseline).
+   runs (the baseline): each `ROOT` or `SWD` parent whose hardware IDs
+   include `root\HIDMaestro`, `root\HIDMaestroGamepad` or
+   `root\HIDMaestroXUSB`, whatever its enumerator (`ROOT\HIDClass`, any
+   `ROOT\VID_xxxx&PID_yyyy&IG_00`, `SWD\HIDMAESTRO*`), and its children.
+   The usbip-win2 host controllers (`ROOT\HIDMAESTRO_UDE`) are the
+   transport and are left out. `HMDevnodes.ps1` holds the rule, and
+   `devnode_owner_check.ps1` checks it offline (no device, no
+   elevation): a `ROOT\HIDClass` parent and an `IG_00` parent other than
+   045E:028E are reported with their HID children, and a foreign
+   `ROOT\HIDClass` device, a phantom and the host controller are not.
 2. Run the scenario, then call `Wait-CascadeSettle`: wait for the devnode
    set to change, then for two consecutive 200 ms samples to agree (about
    600 ms on a fast box, 60 s scaled cap).
