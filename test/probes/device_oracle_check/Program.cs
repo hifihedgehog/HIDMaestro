@@ -48,6 +48,8 @@
 //                                   (ChangeList.cs)
 //          [--plan-change <file>]   instance configuration the tree's SDK
 //                                   writes beyond the kept plan (Case5Driver.cs)
+//   either mode: [--dump <dir>]   also writes every output whole to
+//                                   <dir>\<case>.bin (GoldenCase.DumpDir)
 //   compare <dirA> <dirB>
 //   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]
 //                         the live run against the native harness
@@ -150,6 +152,7 @@ internal static class Program
                 case "--changes": changeFiles.Add(Path.GetFullPath(Value())); break;
                 case "--corpus-root": Case9PhysicalCorpus.CorpusRoot = Path.GetFullPath(Value()); break;
                 case "--skip-corpus": skipCorpus = true; break;
+                case "--dump": GoldenCase.DumpDir = Path.GetFullPath(Value()); break;
                 default: return Usage();
             }
         }
@@ -204,10 +207,11 @@ internal static class Program
         foreach (var c in selected)
         {
             var sw = Stopwatch.StartNew();
-            var g = new GoldenCase(c.Name, seed);
+            var g = new GoldenCase(c.Name, seed, dump: true);
             try
             {
-                c.Record(g, options);
+                try { c.Record(g, options); }
+                finally { g.CloseDump(); }
                 Console.WriteLine($"  {c.Name}: {g.Streams.Count} streams, {g.Outputs} outputs, {sw.Elapsed.TotalSeconds:F1} s");
                 if (mode == "record")
                 {
@@ -355,7 +359,7 @@ internal static class Program
 
     static int Usage()
     {
-        Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus]");
+        Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus] [--dump <dir>]");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));

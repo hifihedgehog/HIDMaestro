@@ -88,10 +88,34 @@ internal sealed class GoldenCase
     readonly HashSet<string> _names = new(StringComparer.Ordinal);
     GoldenStream? _current;
 
-    public GoldenCase(string name, ulong seed)
+    /// <summary>When set, every case run also writes each output it gives,
+    /// whole, to &lt;dir&gt;\&lt;case&gt;.bin in the native harness's record
+    /// format (NativeStreamReader), so a lane can hold a changed tree's
+    /// outputs against these one by one (Explain.cs).</summary>
+    public static string? DumpDir { get; set; }
+    BinaryWriter? _dump;
+
+    /// <summary>A case's recording. Only the run of a case passes
+    /// <paramref name="dump"/>, so a recording a case keeps for its own
+    /// comparison, or one read back from its file, writes no dump.</summary>
+    public GoldenCase(string name, ulong seed, bool dump = false)
     {
         Name = name;
         Seed = seed;
+        if (dump && DumpDir != null)
+        {
+            Directory.CreateDirectory(DumpDir);
+            _dump = new BinaryWriter(new BufferedStream(File.Create(Path.Combine(DumpDir, name + ".bin")), 1 << 20), Encoding.ASCII);
+        }
+    }
+
+    /// <summary>Ends the dump file with its end record.</summary>
+    public void CloseDump()
+    {
+        if (_dump == null) return;
+        _dump.Write((byte)'E');
+        _dump.Dispose();
+        _dump = null;
     }
 
     /// <summary>Start a stream. Outputs go to it until the next one starts.</summary>
@@ -100,6 +124,13 @@ internal sealed class GoldenCase
         if (!_names.Add(name)) throw new ArgumentException($"Case {Name} has stream {name} twice.");
         _current = new GoldenStream(name);
         Streams.Add(_current);
+        if (_dump != null)
+        {
+            var n = Encoding.ASCII.GetBytes(name);
+            _dump.Write((byte)'S');
+            _dump.Write((ushort)n.Length);
+            _dump.Write(n);
+        }
         return _current;
     }
 
@@ -111,8 +142,16 @@ internal sealed class GoldenCase
     public void Out(string tag, ReadOnlySpan<byte> data)
     {
         if (_current == null) throw new InvalidOperationException($"Case {Name}: an output before any stream.");
-        if (Redact != null) _current.Add(tag, Redact(data.ToArray()));
-        else _current.Add(tag, data);
+        if (Redact != null) data = Redact(data.ToArray());
+        _current.Add(tag, data);
+        if (_dump != null)
+        {
+            _dump.Write((byte)'O');
+            _dump.Write((byte)tag.Length);
+            _dump.Write(Encoding.ASCII.GetBytes(tag));
+            _dump.Write((uint)data.Length);
+            _dump.Write(data);
+        }
     }
 
     public long Outputs => Streams.Sum(s => s.Count);
@@ -148,7 +187,7 @@ internal sealed class GoldenCase
             return line.Substring(key.Length + 1);
         }
         if (Next() != "device-oracle golden 1") throw new InvalidDataException("Not a device-oracle golden file.");
-        var c = new GoldenCase(Field("case"), ulong.Parse(Field("seed")));
+        var c = new GoldenCase(Field("case"), ulong.Parse(Field("seed")), dump: false);
         while (i < lines.Length && lines[i].Length > 0)
         {
             string name = Field("stream");
