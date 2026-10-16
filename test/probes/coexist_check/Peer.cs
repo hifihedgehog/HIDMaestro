@@ -13,8 +13,24 @@
 //   create gc - <key|->         gamecube-adapter (USB/IP)
 //   create xinputhid - <key|->  xbox-elite-v2, a gamepad companion
 //   create xboxbt - <key|->     xbox-series-xs-bt, a gamepad companion
+//   create profile <id> <key|-> the catalog profile with that id
 //   createat <slot> <kind> <pid|->  CreateControllerAt(slot, profile), the
 //                               same kinds as create, no identity key
+//   submit <n> <state> <count>  submit the scripted state of that name
+//                               (Scripted below) <count> times, 40 ms
+//                               apart, to the controller this program
+//                               created <n>-th, counting from 0
+//   outlog <n> on               keep every OutputReceived packet of that
+//                               controller: its source, report id and bytes
+//   outlog <n> clear            forget the packets kept for it
+//   outlog <n> <source> <id|-> <ms> [hex]
+//                               wait up to <ms> for a kept packet of that
+//                               source (HMOutputSource as a number) and
+//                               report id (hex), with the bytes <hex> when
+//                               given: hit=<0|1>, n=<kept packets of that
+//                               source and id>, data=<the hit's bytes, or
+//                               ->. Then forget every packet kept for the
+//                               controller
 //   stream <btn> <x> <hz> <ramp>  submit at <hz> to every live controller:
 //                               button <btn> held, X at <x>, and with
 //                               ramp 1, X stepping by one count a frame
@@ -221,6 +237,22 @@ internal static class Peer
                         Reply($"OK createat index={index} transport={Get(c, "TransportIndex") ?? index} key={c.IdentityKey} ms={ms}");
                         break;
                     }
+                    case "submit":
+                    {
+                        HMController c = Slot(a[1]);
+                        HMGamepadState state = Scripted(a[2], c.Profile);
+                        int count = int.Parse(a[3], CultureInfo.InvariantCulture);
+                        for (int i = 0; i < count; i++)
+                        {
+                            if (i > 0) Thread.Sleep(40);
+                            c.SubmitState(in state);
+                        }
+                        Reply($"OK submit n={count}");
+                        break;
+                    }
+                    case "outlog":
+                        Reply(OutLog(a));
+                        break;
                     case "stream":
                         StartStream(int.Parse(a[1]), float.Parse(a[2], CultureInfo.InvariantCulture), int.Parse(a[3]), a[4] == "1");
                         Reply("OK stream");
@@ -795,8 +827,120 @@ internal static class Peer
         "ds4" => ctx.GetProfile("dualshock-4-v2")!,
         "xinputhid" => ctx.GetProfile("xbox-elite-v2")!,
         "xboxbt" => ctx.GetProfile("xbox-series-xs-bt")!,
+        "profile" => ctx.GetProfile(pid) ?? throw new ArgumentException($"no profile {pid} in the catalog"),
         _ => throw new ArgumentException(kind),
     };
+
+    /// <summary>The controller this program created <paramref name="n"/>-th.</summary>
+    static HMController Slot(string n)
+    {
+        lock (s_live) return s_live[int.Parse(n, CultureInfo.InvariantCulture)];
+    }
+
+    /// <summary>The states the v1 capture submits, by name. They
+    /// are fixed here, so a program on any release submits the same values,
+    /// and the axes go through the profile's own stick and trigger slots.</summary>
+    static HMGamepadState Scripted(string name, HMProfile p) => name switch
+    {
+        "neutral" => new HMGamepadState { Axes = HMGamepadStateHelpers.StandardAxes(p) },
+        // ds3_sixaxis_check's test state (TestState and LiveState): pressure
+        // on pressed and released buttons, 1 g on X, a yaw rate, battery 7.
+        "ds3-a" => new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(p, 0.25f, 0.75f, 0.5f, 0.0f, 0.5f, 0.0f),
+            Buttons = HMButton.A | HMButton.Y | HMButton.LeftBumper | HMButton.Start | HMButton.Guide,
+            Hat = HMHat.NorthEast,
+            PressureB = 77, PressureY = 200, PressureDpadRight = 50,
+            AccelX = 8192, AccelY = -4096, AccelZ = 2048, GyroYaw = 1440,
+            BatteryLevel = 7,
+        },
+        "ds3-b" => new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(p, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f),
+            Buttons = HMButton.X | HMButton.RightBumper,
+            Hat = HMHat.SouthWest,
+            PressureX = 255, PressureRightBumper = 1, PressureDpadDown = 128, PressureDpadLeft = 64,
+            AccelX = -8192, AccelY = 8192, AccelZ = -2048, GyroYaw = -1440,
+            BatteryLevel = 2, BatteryCharging = true,
+        },
+        "ds3-c" => new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(p, 0.0f, 1.0f, 1.0f, 0.5f, 1.0f, 0.25f),
+            Buttons = HMButton.B | HMButton.Back | HMButton.LeftStick | HMButton.RightStick,
+            Hat = HMHat.West,
+            PressureA = 10, PressureLeftBumper = 254, PressureDpadUp = 3,
+            AccelX = 16384, AccelY = -16384, AccelZ = 0, GyroYaw = 30000,
+            BatteryLevel = 10, BatteryFull = true,
+        },
+        // switch_pro_check's round-trip state: two buttons, the left stick
+        // full right and up, gravity on the SDL Y axis and a yaw rate.
+        "switch-a" => new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(p, 1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f),
+            Buttons = HMButton.B | HMButton.Start,
+            Hat = HMHat.North,
+            AccelGY = 1.0f, GyroDpsY = 100.0f,
+        },
+        "xbox-a" => new HMGamepadState
+        {
+            Axes = HMGamepadStateHelpers.StandardAxes(p, 0.25f, 0.75f, 1.0f, 0.0f, 0.5f, 1.0f),
+            Buttons = HMButton.A | HMButton.LeftBumper | HMButton.Start | HMButton.Guide,
+            Hat = HMHat.East,
+        },
+        _ => throw new ArgumentException($"no scripted state {name}"),
+    };
+
+    /// <summary>OutputReceived packets kept by "outlog on", with the
+    /// controller each came from.</summary>
+    static readonly List<(int Slot, byte Source, byte ReportId, byte[] Data)> s_outlog = new();
+
+    static string OutLog(string[] a)
+    {
+        int slot = int.Parse(a[1], CultureInfo.InvariantCulture);
+        HMController c = Slot(a[1]);
+        if (a[2] == "on")
+        {
+            // The SDK reuses the packet's buffer, so the bytes are copied.
+            c.OutputReceived += (_, p) =>
+            {
+                byte[] d = p.Data.ToArray();
+                lock (s_outlog)
+                {
+                    s_outlog.Add((slot, (byte)p.Source, p.ReportId, d));
+                    Monitor.PulseAll(s_outlog);
+                }
+            };
+            return "OK outlog on";
+        }
+        if (a[2] == "clear")
+        {
+            lock (s_outlog) s_outlog.RemoveAll(e => e.Slot == slot);
+            return "OK outlog clear";
+        }
+        byte source = byte.Parse(a[2], CultureInfo.InvariantCulture);
+        int id = a[3] == "-" ? -1 : Convert.ToByte(a[3], 16);
+        int ms = int.Parse(a[4], CultureInfo.InvariantCulture);
+        byte[]? want = a.Length > 5 ? Convert.FromHexString(a[5]) : null;
+        bool Kind((int Slot, byte Source, byte ReportId, byte[] Data) e) =>
+            e.Slot == slot && e.Source == source && (id < 0 || e.ReportId == id);
+        bool Hit((int Slot, byte Source, byte ReportId, byte[] Data) e) =>
+            Kind(e) && (want == null || e.Data.AsSpan().SequenceEqual(want));
+        var sw = Stopwatch.StartNew();
+        lock (s_outlog)
+        {
+            while (!s_outlog.Any(Hit))
+            {
+                long left = ms - sw.ElapsedMilliseconds;
+                if (left <= 0) break;
+                Monitor.Wait(s_outlog, (int)left);
+            }
+            var kind = s_outlog.Where(Kind).ToList();
+            int hit = kind.FindIndex(e => Hit(e));
+            byte[]? data = hit >= 0 ? kind[hit].Data : null;
+            s_outlog.RemoveAll(e => e.Slot == slot);
+            return $"OK outlog hit={(hit >= 0 ? 1 : 0)} n={kind.Count} data={(data == null || data.Length == 0 ? "-" : Convert.ToHexString(data))}";
+        }
+    }
 
     /// <summary>A gamepad nothing else on a machine has: VID BEEF, one stick, eight buttons.</summary>
     public static HMProfile Pad(ushort pid) =>

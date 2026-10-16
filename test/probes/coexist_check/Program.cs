@@ -128,6 +128,10 @@
 //      SectionZ.cs has the detail.
 //   S71 runs A to H and J to Z.
 //
+// "capture <out dir>" records what the driver answers a v1.12.0 program,
+// and what it does with the values a killed v2.0.0 program leaves, in
+// device_oracle_check's golden format. V1Capture.cs has the detail.
+//
 // Each program is a peer process (this binary with --peer, or the same
 // source built against an older release under legacy\). Requires
 // elevation, except "offline", which runs the checks in Offline.cs. Exit 0 PASS / 1 FAIL / 2 when another program that embeds
@@ -210,6 +214,7 @@ internal static partial class Program
         if (args.Length > 1 && args[0] == "firstcall-child") return FirstCallChild(args[1], args.Contains("inexit"));
         // Its SDK loads only where the child asks for it.
         if (args.Length > 1 && args[0] == "exitcut-child") return ExitCutChild(args[1] == "early");
+        if (args.Length > 0 && args[0] == "capture") return Capture(args);
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
         string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVWXYZ";

@@ -10,6 +10,10 @@
   <ItemGroup>
     <Compile Remove="legacy_peer\**" />
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <!-- The capture mode writes device_oracle_check's golden format, so
+         that probe's compare reads what it records. -->
+    <Compile Include="..\device_oracle_check\Golden.cs" Link="Golden.cs" />
+    <Compile Include="..\device_oracle_check\LeftValues.cs" Link="LeftValues.cs" />
   </ItemGroup>
 
   <!-- Releases the mixed-version section runs against. The zip hash is
