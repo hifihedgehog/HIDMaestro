@@ -80,9 +80,10 @@ namespace HIDMaestro.Internal;
 /// below it down to the one in use are held open without delete sharing,
 /// which no rename or delete of them can get past, and the folder above
 /// <c>Staging</c> cannot be renamed while they are held. That folder, the
-/// shared root and the OpenVR folders, which Users may be able to read, are
-/// opened only to be checked, so that no program
-/// without elevation can make a pin fail. Each directory is checked through
+/// shared root and the OpenVR folders are opened only to be checked, so
+/// that no program without elevation can make a pin fail: the shared root
+/// and the OpenVR folders grant Users read, and the folder above
+/// <c>Staging</c> grants Users nothing. Each directory is checked through
 /// its handle. Each file HIDMaestro ships is held for reading with read
 /// sharing only, which no write, rename or delete can get past, and checked
 /// against its SHA-256 through the hold (<see cref="Pinned.Hold"/>). A
@@ -242,8 +243,10 @@ internal static partial class ProtectedStaging
 
     /// <summary>Point an elevated child process's TEMP and TMP at a protected
     /// folder, so it writes its temporary files there and not in the user's
-    /// own %TEMP%, a folder any of the user's programs can change. The one
-    /// helper every elevated child the SDK starts goes through. With
+    /// own %TEMP%, a folder any of the user's programs can change. Every
+    /// elevated child the SDK starts goes through it, except reg.exe and
+    /// sc.exe, which DeviceOrchestrator.RunProcess starts with the
+    /// process's own environment. With
     /// <paramref name="protectedDir"/> it uses that folder, the child's own
     /// staging directory (hmswd, the usbip-win2 installer, signtool and
     /// Inf2Cat run from one). Without it the folder is
@@ -415,10 +418,12 @@ internal static partial class ProtectedStaging
     /// Administrators or SYSTEM that no other principal can write.
     ///
     /// <para>Two kinds of open, so that no program without elevation can
-    /// make a pin fail. The root and the OpenVR folders grant Users read, so
-    /// any program can hold them open without sharing. They are opened only
-    /// for READ_CONTROL and FILE_READ_ATTRIBUTES, which the sharing check
-    /// does not weigh: an open for those alone succeeds beside a handle that
+    /// make a pin fail. The folder above <c>Staging</c>, the shared root and
+    /// the OpenVR folders are opened only for READ_CONTROL and
+    /// FILE_READ_ATTRIBUTES. The shared root and the OpenVR folders grant
+    /// Users read, so any program can hold them open without sharing, and
+    /// the sharing check does not weigh those two rights: an open for them
+    /// alone succeeds beside a handle that
     /// shares nothing (tested offline on a scratch directory,
     /// CoexistCheck.exe offline OF5). <c>Staging</c> and
     /// every directory below it grant SYSTEM and Administrators alone, so
@@ -486,8 +491,9 @@ internal static partial class ProtectedStaging
 
     /// <summary>True for the levels a pin holds: <see cref="StagingRoot"/>
     /// and every directory below it, which only SYSTEM and Administrators
-    /// can open. False for the levels Users can read, which a pin opens only
-    /// to check (<see cref="OpenLevel"/>).</summary>
+    /// can open. False for the folder above <c>Staging</c>, the shared root
+    /// and the OpenVR folders, which a pin opens only to check
+    /// (<see cref="OpenLevel"/>).</summary>
     internal static bool HoldsLevel(string dir)
     {
         string staging = Path.GetFullPath(StagingRoot).TrimEnd('\\');

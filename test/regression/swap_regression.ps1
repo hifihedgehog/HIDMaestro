@@ -1870,7 +1870,8 @@ function Scenario-Coexistence {
 # offline checks: whether a directory may be reset where it is, the refusal
 # of one that may not be and cannot move, T6 at timeout scales 1, 1.5 and
 # 2, the pin's opens and holds, the deploy's tools running from held files,
-# the moved-aside sweep's levels, and diagnostic files written as the user.
+# the refusal of a foreign folder above Staging, the prune's keep-or-delete
+# decision, and diagnostic files written as the user.
 function Scenario-Protected-Staging {
     Invoke-Probe -Dir 'coexist_check' -Exe 'CoexistCheck.exe' -Arguments 'I' -Tag 'staging' `
                  -Message 'a staged file the elevated SDK runs was writable by a non-administrator or not checked by hash (see probe stdout)' -SkipCodes 2

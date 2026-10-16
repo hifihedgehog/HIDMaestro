@@ -23,7 +23,8 @@
 //        of the helper's chain: root\Staging\<version>\swd\hmswd.exe, with
 //        whoami.exe standing in for the helper. A handle on the root that
 //        shares nothing, for listing and for DELETE, as any program can
-//        open the real root, does not stop the root's open, and stops the
+//        open the shared root and the OpenVR folders, which grant Users
+//        read, does not stop the root's open, and stops the
 //        open a held level uses (the control). With the chain open the way
 //        Pin opens it and the file held, no rename of any level, no
 //        recursive delete of the root, and no write, rename or delete of the
@@ -45,9 +46,10 @@
 //   OF9  The moved-aside tree is never deleted by path. OF9a: a hostile
 //        folder where StagingParent would be (one this process owns) is
 //        refused, not moved aside, so another program's folder there is left
-//        whole. OF9b: DeleteMovedAside, MovedAsideLevels and DeleteAsidesIn
-//        no longer exist, so no code recursively deletes a moved-aside tree
-//        a non-administrator may change through a stale grant.
+//        whole. OF9b: the prune's keep-or-delete decision
+//        (ProtectedStaging.PruneWouldDelete): a moved-aside directory is
+//        never pruned, an old version no record names is, and a version a
+//        live record names is kept.
 //   OF10 Diagnostic files. The usbip-win2 installer's own start info
 //        (BuildInstallerStartInfo) points TEMP and TMP at its staging
 //        folder (ProtectedStaging.ConfineChildTemp), not the user's
