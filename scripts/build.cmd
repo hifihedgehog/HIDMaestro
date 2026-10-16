@@ -42,13 +42,21 @@ set "SHARED_INC=%HM_SDK_DIR%\Include\%WDK_VER%\shared"
 set "KM_INC=%HM_WDK_DIR%\Include\%WDK_VER%\km"
 set "WDF_INC=%HM_WDK_DIR%\Include\wdf\umdf\%UMDF_VER%"
 
-cl.exe /nologo /W4 /GS /Gz /wd4324 ^
+:: In the kit's wdfrequest.h, the POINTER_ALIGNMENT members of the Create
+:: parameters in WDF_REQUEST_PARAMETERS raise C4324 (structure padded due
+:: to alignment specifier) at /W4. /external:I marks the UMDF headers
+:: external and /external:W0 turns warnings off in them only, so C4324 and
+:: every other /W4 warning still reports in our own sources. A header
+:: included from an external header is external too, wherever it lives. No
+:: HIDMaestro header is included that way today, and none may be. Microsoft
+:: Learn, "/external (External headers diagnostics)".
+cl.exe /nologo /W4 /GS /Gz ^
     /D %HM_ARCH_DEFINE% /D _WIN64 /D UNICODE /D _UNICODE ^
     /D UMDF_VERSION_MAJOR=2 /D UMDF_VERSION_MINOR=15 ^
     "/I%UM_INC%" ^
     "/I%SHARED_INC%" ^
     "/I%KM_INC%" ^
-    "/I%WDF_INC%" ^
+    "/external:I%WDF_INC%" /external:W0 ^
     "/I%INC_DIR%" ^
     "/I%OUT_DIR%" ^
     "/Fo%OUT_DIR%\\" ^
