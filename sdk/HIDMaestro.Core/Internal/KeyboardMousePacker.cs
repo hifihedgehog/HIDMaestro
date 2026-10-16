@@ -435,9 +435,11 @@ internal sealed class KeyboardMousePacker
 
     // ── Release ──────────────────────────────────────────────────────────
 
-    /// <summary>The input report ID a data-only frame (SubmitRawReport)
-    /// goes out under: the descriptor's first input report, 0 without IDs.
-    /// The driver prefixes the same one.</summary>
+    /// <summary>The descriptor's first input report, 0 without IDs: the
+    /// report a data-only frame (SubmitRawReport) goes out under unless the
+    /// profile names a dataReportId
+    /// (ControllerProfile.KeyboardMouseDataReportId). The driver prefixes
+    /// the same one.</summary>
     public byte FirstInputReportId
     {
         get

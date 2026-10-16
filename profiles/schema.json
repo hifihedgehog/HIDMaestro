@@ -84,6 +84,14 @@
       ],
       "description": "Size of the input report in bytes (excluding report ID). Null if unknown."
     },
+    "dataReportId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^0x[0-9A-Fa-f]{2}$",
+      "description": "The input report a data-only frame (SubmitRawReport, and SubmitState's legacy path) fills and the driver sends it as, for a device where the SDK's own choice is wrong. The SDK lays out the first input report with gamepad fields, and for a keyboard or mouse the descriptor's first input report. Must name an input report the descriptor declares. Null: the SDK's choice."
+    },
     "deviceDescription": {
       "type": [
         "string",

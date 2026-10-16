@@ -56,6 +56,16 @@ public sealed class ControllerProfile
     [JsonPropertyName("inputReportSize")]
     public int? InputReportSize { get; set; }
 
+    /// <summary>The input report a data-only frame fills, SubmitRawReport's
+    /// and SubmitState's legacy path, and the driver sends it as, for a
+    /// device where the SDK's own choice is wrong: the report
+    /// HidReportBuilder lays out, and for a keyboard or mouse that gets
+    /// every report delivered, the descriptor's first input report. A hex
+    /// byte such as "0x01", naming an input report the descriptor
+    /// declares.</summary>
+    [JsonPropertyName("dataReportId")]
+    public string? DataReportId { get; set; }
+
     /// <summary>v1.3.5: HID device version (the <c>bcdDevice</c> field returned
     /// by <c>HidD_GetAttributes</c>). Defaults to 0x0100 when omitted, which is
     /// what most generic gamepad consumers expect for USB devices. Real Sony
@@ -285,6 +295,27 @@ public sealed class ControllerProfile
     /// HIDMAESTRO_OUTPUT_SLOT_DATA_CAP).</summary>
     private const int OutputRingData = SharedMemoryIO.OUTPUT_SLOT_SIZE - SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA;
 
+    /// <summary>A dataReportId must be a hex byte that names an input report
+    /// of the profile's descriptor, and is refused beside an always-armed
+    /// extendedReport, whose report the data frames fill instead.</summary>
+    private void ValidateDataReport()
+    {
+        if (DataReportId == null) return;
+        if (ExtendedReport is { AlwaysArmed: true })
+            throw new InvalidOperationException(
+                $"Profile '{Id}': dataReportId \"{DataReportId}\" is ignored beside extendedReport.alwaysArmed, " +
+                $"whose report {ExtendedReport.ReportId} data frames fill. Remove dataReportId.");
+        byte id;
+        try { id = ReportIds.Parse(DataReportId); }
+        catch (Exception e) when (e is FormatException or OverflowException)
+        {
+            throw new InvalidOperationException($"Profile '{Id}': dataReportId \"{DataReportId}\" is not a hex byte.");
+        }
+        if (HidReportMap.Parse(GetDescriptorBytes() ?? Array.Empty<byte>()).Find(HidReportKind.Input, id) == null)
+            throw new InvalidOperationException(
+                $"Profile '{Id}': dataReportId 0x{id:X2} is not an input report of the profile's descriptor.");
+    }
+
     /// <summary>v1.13.0: check the profile's vendor-blob reports, the top
     /// level of <see cref="ExtendedReport"/> and <see cref="ExtendedOutputReport"/>,
     /// with the field rules <see cref="VendorBlobProgram.Check"/> applies to
@@ -356,6 +387,7 @@ public sealed class ControllerProfile
         // The HID descriptor first: a string that is not whole hex bytes
         // throws FormatException here rather than after the lease.
         _ = GetDescriptorBytes();
+        ValidateDataReport();
         ValidateExtendedReports();
         ValidatePorts();
         var cfg = UsbConfiguration;
@@ -474,6 +506,12 @@ public sealed class ControllerProfile
         || (string.Equals(Type, "other", StringComparison.OrdinalIgnoreCase)
             && (kbm.HasMouse || kbm.HasKeyboard));
 
+    /// <summary>The report a keyboard or mouse that gets every report
+    /// delivered sends a data-only frame as: its dataReportId, else the
+    /// descriptor's first input report.</summary>
+    internal byte KeyboardMouseDataReportId(KeyboardMousePacker kbm) =>
+        DataReportId != null ? ReportIds.Parse(DataReportId) : kbm.FirstInputReportId;
+
     // Lazy-cached parsed descriptor. v1.3.0: GetDescriptorBytes is called
     // multiple times per CreateController (HMController ctor +
     // WriteInstanceConfig + DriverBuilder validation), each time re-running
@@ -544,8 +582,10 @@ public sealed class ControllerProfile
         // arms on demand keeps position-based selection, because its
         // pre-arm report is a different, real report that joy.cpl and
         // RawInput read (every Sony BT profile depends on that).
+        // A dataReportId names the report a data-only frame fills.
         byte preferredRid = ExtendedReport is { AlwaysArmed: true }
-            ? ExtendedReport.ReportIdByte : (byte)0;
+            ? ExtendedReport.ReportIdByte
+            : DataReportId != null ? ReportIds.Parse(DataReportId) : (byte)0;
         var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap, preferredRid);
         b.ButtonMap = ButtonMap;
         b.TriggerButtons = TriggerButtons;

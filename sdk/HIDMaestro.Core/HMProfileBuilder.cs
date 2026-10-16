@@ -49,6 +49,7 @@ public sealed class HMProfileBuilder
     private string? _triggerMode;
     private string? _descriptorHex;
     private int? _inputReportSize;
+    private string? _dataReportId;
     private string? _deviceDescription;
     private string? _notes;
     private int[]? _buttonMap;
@@ -165,6 +166,7 @@ public sealed class HMProfileBuilder
         _triggerMode = source.TriggerMode;
         _descriptorHex = source.DescriptorHex;
         _inputReportSize = source.InputReportSize > 0 ? source.InputReportSize : null;
+        _dataReportId = source.Inner.DataReportId;
         _deviceDescription = source.Inner.DeviceDescription;
         _notes = source.Notes;
         _buttonMap = source.ButtonMap;
@@ -195,6 +197,7 @@ public sealed class HMProfileBuilder
             TriggerMode = _triggerMode,
             Descriptor = _descriptorHex,
             InputReportSize = _inputReportSize,
+            DataReportId = _dataReportId,
             DeviceDescription = _deviceDescription,
             Notes = _notes,
             ButtonMap = _buttonMap,

@@ -2623,8 +2623,9 @@ internal static partial class DeviceOrchestrator
     /// SubmitState's and SubmitRawReport's legacy path, and its length on
     /// the wire with the report ID byte. It is the report the SDK fills:
     /// for a keyboard or mouse that gets every report delivered, the
-    /// descriptor's first input report (HMController.SubmitRawReport), and
-    /// for everything else the report HidReportBuilder lays out. Both come
+    /// profile's dataReportId or the descriptor's first input report
+    /// (HMController.SubmitRawReport), and for everything else the report
+    /// HidReportBuilder lays out, which a dataReportId also names. Both come
     /// from HidReportMap, which keeps the global item stack Push and Pop
     /// work on. A profile's inputReportSize replaces the length, and
     /// DeclaredLength stays the report's own.
@@ -2643,7 +2644,7 @@ internal static partial class DeviceOrchestrator
         var kbm = profile.GetOrBuildKeyboardMousePacker();
         if ((kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) && profile.DeliversEveryReport(kbm))
         {
-            id = kbm.FirstInputReportId;
+            id = profile.KeyboardMouseDataReportId(kbm);
             declared = kbm.Map.Find(HidReportKind.Input, id)?.FrameBytes ?? 0;
         }
         else

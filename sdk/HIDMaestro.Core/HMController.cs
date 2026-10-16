@@ -163,6 +163,10 @@ public sealed partial class HMController : IDisposable
     // click's press, a key tap and every relative delta arrive. Gamepads
     // keep latest-wins, which is right for state. Guarded by _submitLock.
     private KeyboardMousePacker? _kbm;
+    // The report a data-only frame of a keyboard or mouse goes out as: the
+    // profile's dataReportId or the descriptor's first input report,
+    // resolved once at create.
+    private byte _kbmDataReportId;
     // The frames and lists the packer works in, this controller's own.
     // Guarded by _submitLock.
     private KeyboardMouseBuffers? _kbmBuffers;
@@ -539,6 +543,7 @@ public sealed partial class HMController : IDisposable
             var kbm = profile.Inner.GetOrBuildKeyboardMousePacker();
             if (kbm.HasMouse || kbm.HasKeyboard || kbm.HasConsumer) _kbm = kbm;
             _deliverEvery = profile.Inner.DeliversEveryReport(kbm);
+            _kbmDataReportId = profile.Inner.KeyboardMouseDataReportId(kbm);
         }
 
         // v1.3.5: pre-allocate vendor-blob buffer + encoder state ONLY when
@@ -1138,9 +1143,10 @@ public sealed partial class HMController : IDisposable
             NoteFrameWritten();
             if (_deliverEvery && _kbm != null)
             {
-                // The driver sends this lane's data under the descriptor's
-                // first input report ID.
-                byte id = _kbm.FirstInputReportId;
+                // The driver sends this lane's data under the profile's
+                // dataReportId or the descriptor's first input report ID
+                // (DeviceOrchestrator.DriverInputReport).
+                byte id = _kbmDataReportId;
                 if (id == 0) NoteReleaseFrame(report);
                 else
                 {
