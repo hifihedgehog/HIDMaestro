@@ -2073,6 +2073,23 @@ function Scenario-Interop-Decl {
                  -Message 'the XInput slot count or a SetupDiGetClassDevsW caller failed on a live controller (see probe stdout)' -SkipCodes 2
 }
 
+# S89: the device code still gives 9bd6279's bytes. device_oracle_check
+# replays its nine cases (the SDK's submit and decode paths, the packers,
+# the Switch 2 Pro responder, the USB/IP feature answers and input paths,
+# the UMDF2 driver and companion compiled natively, and the physical
+# descriptors of the reference clones as an extraction builds them) and
+# compares every stream with its golden file. A difference passes only when
+# changes.txt beside the probe lists it with the lane that made it and the
+# reason, and a listed change that does not happen fails.
+# Offline. Exit 2 when the golden files are not beside the probe, as on a
+# staged machine. With the golden files present, a machine without the
+# reference clones case 9 reads fails the scenario (exit 1), so the battery
+# never passes with case 9 unreplayed.
+function Scenario-Device-Oracle {
+    Invoke-Probe -Dir 'device_oracle_check' -Exe 'DeviceOracleCheck.exe' -Arguments 'replay' `
+                 -Message 'a device code path no longer gives the bytes its golden file records (see probe stdout for the stream and output)' -SkipCodes 2
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2163,7 +2180,8 @@ $scenarios = @(
     @{ Name = 'S83_GameCube_Sdl';                Body = ${function:Scenario-GameCube-Sdl} },
     @{ Name = 'S84_Perf_Budget';                 Body = ${function:Scenario-Perf-Budget} },
     @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
-    @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} }
+    @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
+    @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

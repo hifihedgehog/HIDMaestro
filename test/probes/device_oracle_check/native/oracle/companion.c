@@ -1,0 +1,1045 @@
+﻿/*
+ * HIDMaestro Companion: UMDF2 driver for XUSB XInput + WinExInput.
+ * Registers XUSB and WinExInput device interfaces.
+ * Reads gamepad state from a per-instance pagefile-backed shared section
+ * (Global\HIDMaestroInput<N>): RAM-only, no disk I/O.
+ * No HID, no filter mode: runs as System-class function driver.
+ */
+
+#define WIN32_NO_STATUS
+#include <windows.h>
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
+#include <wdf.h>
+#include <sddl.h>     /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
+#include <aclapi.h>   /* GetSecurityInfo */
+
+DRIVER_INITIALIZE DriverEntry;
+EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
+EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
+EVT_WDF_TIMER CompanionPumpTimer;
+static DWORD WINAPI CompanionInputPumpProc(LPVOID param);
+struct _COMPANION_CTX;
+static BOOLEAN ReadGipDataLocked(struct _COMPANION_CTX *ctx, UCHAR gipOut[14]);
+
+static const GUID XUSB_GUID =
+    { 0xEC87F1E3, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
+
+#define IOCTL_XUSB_GET_INFORMATION   0x80006000
+#define IOCTL_XUSB_GET_CAPABILITIES  0x8000E004
+#define IOCTL_XUSB_GET_LED_STATE     0x8000E008
+#define IOCTL_XUSB_GET_STATE         0x8000E00C
+#define IOCTL_XUSB_SET_STATE         0x8000A010
+#define IOCTL_XUSB_WAIT_GUIDE        0x8000E014
+#define IOCTL_XUSB_GET_BATTERY_INFO  0x8000E018
+#define IOCTL_XUSB_GET_INFORMATION_EX 0x8000E3FC
+#define IOCTL_XUSB_WAIT_FOR_INPUT    0x8000E3AC
+#define IOCTL_XUSB_POWER_INFO        0x80006380
+
+typedef struct _COMPANION_CTX {
+    ULONG PacketCount;
+    USHORT VendorId;
+    USHORT ProductId;
+    ULONG ControllerIndex;
+    WCHAR ConfigRegPath[64];   /* e.g. L"SOFTWARE\HIDMaestro\Controller0" */
+    WCHAR SharedMappingName[64]; /* e.g. L"Global\HIDMaestroInput0" */
+    WCHAR OutputMappingName[64]; /* e.g. L"Global\HIDMaestroOutput0" */
+    WCHAR OutputEventName[64];   /* e.g. L"Global\HIDMaestroOutputEvent0" */
+    HANDLE OutputSignalEvent;    /* Output-ring doorbell (issue #34), lazy */
+    WCHAR CompanionInputEventName[64]; /* Global\HIDMaestroCompanionInputEvent<N> */
+    HANDLE CompanionInputEvent;  /* input doorbell (perf audit 2026-07-21), lazy */
+    HANDLE PumpStopEvent;        /* stops the input-doorbell thread */
+    HANDLE PumpThread;           /* completes parked WAIT_FOR_INPUT on doorbell */
+    UCHAR  LastGoodGip[14];      /* last valid GIP payload (revalidation serve) */
+    BOOLEAN HaveGoodGip;
+    BOOLEAN GipChanged;          /* payload differed from LastGoodGip this read */
+    CRITICAL_SECTION GipLock;    /* serializes ReadGipData's shared state:
+                                  * timer callback, doorbell thread, and
+                                  * GET_STATE dispatch all read concurrently */
+    BOOLEAN GipLockInit;
+    HANDLE SharedMemHandle;    /* OpenFileMapping handle (lazy) */
+    PVOID SharedMemPtr;        /* MapViewOfFile pointer (lazy) */
+    HANDLE OutputMemHandle;    /* CreateFileMapping handle for output (lazy) */
+    PVOID OutputMemPtr;        /* MapViewOfFile RW pointer for output */
+    ULONG OutputWriteCount;    /* Stale-detection: total writes since last re-open */
+    ULONG LastGipSeqNo;        /* Stale-detection: last SeqNo seen from GIP shared memory */
+    ULONG GipStaleCount;       /* Consecutive reads with unchanged SeqNo */
+
+    /* Throttled live-swap VID gate (IOCTL_XUSB_SET_STATE). The registry
+     * VendorId is re-read at most every 500 ms instead of every IOCTL, so
+     * a per-frame XInputSetState no longer forces a per-frame registry
+     * round-trip. A live-swap that re-profiles this index is still caught
+     * within one throttle window (a transient phantom is bounded). */
+    ULONGLONG LastVidCheckTick;
+    BOOLEAN   CachedIsXbox;
+    BOOLEAN   VidCheckValid;
+    /* Async XUSB input pump: holds pended IOCTL_XUSB_WAIT_FOR_INPUT
+     * requests. WGI's XusbDevice::QueueInputBuffer (Windows.Gaming.Input.dll
+     * @ 0x18006af0c) issues this IOCTL async via InputOutputIoctlAsync and
+     * waits for the 29-byte XUSB state to arrive. Completing it synchronously,
+     * or with an error, kills the pump, and Gamepad::SendControllerVibration
+     * silently bails at the flag_0x184 gate because OnInputResumed never fires
+     * on the WGI Gamepad's IGameControllerInputSink. See Ghidra decomp. */
+    WDFQUEUE WaitForInputQueue;
+    WDFTIMER PumpTimer;
+} COMPANION_CTX, *PCOMPANION_CTX;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(COMPANION_CTX, GetCompanionCtx)
+
+/* Append the decimal representation of a ULONG to a wide-string buffer.
+ * Self-contained: companion doesn't link MSVCRT, no swprintf available.
+ * Lets the section/registry-path builders support indices > 9 so the
+ * test app and SDK aren't capped at 4 controllers. */
+static VOID
+AppendUlongDecimal(WCHAR *dest, ULONG value, SIZE_T maxChars)
+{
+    SIZE_T len = 0;
+    while (len < maxChars && dest[len] != 0) len++;
+    if (len + 1 >= maxChars) return;
+
+    WCHAR tmp[16];
+    int n = 0;
+    if (value == 0) {
+        tmp[n++] = L'0';
+    } else {
+        while (value > 0 && n < 15) {
+            tmp[n++] = L'0' + (WCHAR)(value % 10);
+            value /= 10;
+        }
+    }
+    while (n > 0 && len + 1 < maxChars) {
+        dest[len++] = tmp[--n];
+    }
+    dest[len] = 0;
+}
+
+#pragma pack(push, 1)
+/* Must stay in sync with HIDMAESTRO_SHARED_INPUT in driver/driver.h.
+ * Data[] widened from 64 to 256 bytes 2026-04-23 to carry full DualSense
+ * BT / Switch Pro gyro-bearing reports through the shared memory pipe
+ * without truncation. v1.3.5: added ExtendedReportSize/ExtendedReportData
+ * tail for Sony BT vendor-blob mode-switch path. Companion only reads
+ * SeqNo + GipData; the tail is unused here but mirrored so any
+ * MapViewOfFile sizing or future field offset reuses driver.h's layout. */
+typedef struct {
+    ULONG SeqNo;
+    ULONG DataSize;
+    UCHAR Data[256];
+    UCHAR GipData[14];
+    ULONG ExtendedReportSize;
+    UCHAR ExtendedReportData[80];
+} SHARED_INPUT;
+
+/* Mirror of HIDMAESTRO_SHARED_OUTPUT (v1.1.40 ring) in driver.h. Companion
+ * doesn't include driver.h (separate context type, no HID headers), so the
+ * layout is duplicated here. Must stay byte-compatible with driver.h. */
+#define HM_OUTPUT_RING_SLOTS     64u
+#define HM_OUTPUT_SLOT_DATA_CAP  256u
+
+typedef struct {
+    volatile ULONG  SeqNo;           /* Per-slot. == Head value at write time. */
+    UCHAR           Source;          /* OUT_SOURCE_XINPUT etc. */
+    UCHAR           ReportId;
+    USHORT          DataSize;
+    UCHAR           Data[HM_OUTPUT_SLOT_DATA_CAP];
+} HM_OUTPUT_SLOT;
+
+typedef struct {
+    volatile ULONG  Head;            /* Monotonic total writes. */
+    ULONG           _Reserved;
+    HM_OUTPUT_SLOT  Slots[HM_OUTPUT_RING_SLOTS];
+} SHARED_OUTPUT;
+#pragma pack(pop)
+
+#define OUT_SOURCE_XINPUT      2
+
+NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
+{
+    WDF_DRIVER_CONFIG config;
+    WDF_DRIVER_CONFIG_INIT(&config, CompanionDeviceAdd);
+    return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE);
+}
+
+static BOOLEAN ReadGipData(PCOMPANION_CTX ctx, UCHAR gipOut[14])
+{
+    /* Serialize against the other completers. The timer callback, the
+     * input-doorbell thread, and GET_STATE dispatch all land here; the
+     * mapping handles, LastGoodGip, and the stale counters are shared
+     * ctx state, and interleaved byte-copies into LastGoodGip would blend
+     * two frames into one served payload. Uncontended cost is tens of ns. */
+    EnterCriticalSection(&ctx->GipLock);
+    BOOLEAN ok = ReadGipDataLocked(ctx, gipOut);
+    LeaveCriticalSection(&ctx->GipLock);
+    return ok;
+}
+
+static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
+{
+    /* Lazy-open named section. RAM-only, no disk fallback. */
+    if (ctx->SharedMemPtr == NULL) {
+        HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, ctx->SharedMappingName);
+        if (h == NULL) return FALSE;
+        PVOID v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(SHARED_INPUT));
+        if (v == NULL) { CloseHandle(h); return FALSE; }
+        ctx->SharedMemHandle = h;
+        ctx->SharedMemPtr = v;
+        ctx->LastGipSeqNo = 0;
+        ctx->GipStaleCount = 0;
+    }
+
+    /* Seqlock read: retry if writer was mid-update */
+    volatile SHARED_INPUT* src = (volatile SHARED_INPUT*)ctx->SharedMemPtr;
+    ULONG seq1, seq2;
+    int retries = 4;
+    UCHAR tmp[14];
+    do {
+        seq1 = src->SeqNo;
+        MemoryBarrier();
+        for (int i = 0; i < 14; i++) tmp[i] = src->GipData[i];
+        MemoryBarrier();
+        seq2 = src->SeqNo;
+    } while ((seq1 != seq2 || (seq1 & 1)) && --retries > 0);
+
+    /* Perf audit 2026-07-21 (I6): an odd SeqNo is mid-write and an
+     * unequal pair is torn. Serve the last known-good payload instead of
+     * half-written bytes; with no prior good read, report no data. */
+    if (seq1 != seq2 || (seq1 & 1)) {
+        if (!ctx->HaveGoodGip) return FALSE;
+        for (int i = 0; i < 14; i++) gipOut[i] = ctx->LastGoodGip[i];
+        ctx->GipChanged = FALSE;
+        return TRUE;
+    }
+
+    /* (I8) Track payload changes so the XInput packet number can advance
+     * only on real state changes, matching physical xusb behavior. */
+    ctx->GipChanged = !ctx->HaveGoodGip
+        || RtlCompareMemory(tmp, ctx->LastGoodGip, 14) != 14;
+    for (int i = 0; i < 14; i++) ctx->LastGoodGip[i] = tmp[i];
+    ctx->HaveGoodGip = TRUE;
+    for (int i = 0; i < 14; i++) gipOut[i] = tmp[i];
+
+    /* Stale-handle recovery (issue #1): if the SDK tore down and recreated
+     * the shared memory section (RemoveAllVirtualControllers → Cleanup →
+     * EnsureInputMapping), our cached handle points at the old destroyed
+     * section. SeqNo will never advance. After 500 consecutive stale reads
+     * (~2s at typical XInput polling rate), close and re-open. */
+    if (seq1 == ctx->LastGipSeqNo) {
+        if (++ctx->GipStaleCount > 500) {
+            UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL;
+            CloseHandle(ctx->SharedMemHandle);  ctx->SharedMemHandle = NULL;
+            ctx->GipStaleCount = 0;
+            /* Perf audit 2026-07-21 (I4): gipOut already holds the last
+             * valid payload (unchanged SeqNo means unchanged bytes), so
+             * report it as valid rather than returning FALSE and letting
+             * the state builders emit one NEUTRAL frame per revalidation
+             * cycle (every ~4 s at 125 Hz on an idle-but-held controller).
+             * The next call still lazy-opens the fresh section. */
+            return ctx->HaveGoodGip;
+        }
+    } else {
+        ctx->LastGipSeqNo = seq1;
+        ctx->GipStaleCount = 0;
+    }
+    return TRUE;
+}
+
+void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
+{
+    PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
+    if (ctx->PumpThread) {
+        if (ctx->PumpStopEvent) SetEvent(ctx->PumpStopEvent);
+        WaitForSingleObject(ctx->PumpThread, 2000);
+        CloseHandle(ctx->PumpThread);
+        ctx->PumpThread = NULL;
+    }
+    if (ctx->PumpStopEvent)      { CloseHandle(ctx->PumpStopEvent);      ctx->PumpStopEvent = NULL; }
+    if (ctx->CompanionInputEvent){ CloseHandle(ctx->CompanionInputEvent); ctx->CompanionInputEvent = NULL; }
+    if (ctx->PumpTimer) { WdfTimerStop(ctx->PumpTimer, TRUE); ctx->PumpTimer = NULL; }
+    /* After the doorbell thread is joined and the timer is stopped
+     * (synchronously, above): no ReadGipData caller can remain. */
+    if (ctx->GipLockInit) { DeleteCriticalSection(&ctx->GipLock); ctx->GipLockInit = FALSE; }
+    if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
+    if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
+    if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
+    if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
+    if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
+}
+
+/* The output doorbell's descriptor and its check on an existing object,
+ * as driver.c's CreateHostEvent with takeOverNullDacl set: SYSTEM,
+ * Administrators and LocalService. An object that exists already is used
+ * when one of those three owns it under a DACL, or LocalService or SYSTEM
+ * owns it under the NULL DACL a driver before v1.13.0 gave it, which is
+ * then replaced with the descriptor above. The doorbell is read-only to a
+ * consumer, so a program holding it from before the takeover gains nothing.
+ * driver.c keeps refusing the StopEvent for the opposite reason. NULL when
+ * the name is unusable or the create fails. */
+static const WCHAR g_HostEventSddl[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
+
+static HANDLE CreateHostEvent(BOOL manualReset, BOOL takeOverNullDacl, LPCWSTR name)
+{
+    PSECURITY_DESCRIPTOR sd = NULL;
+    SECURITY_ATTRIBUTES sa;
+    HANDLE ev;
+    BOOL usable = FALSE;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            g_HostEventSddl, SDDL_REVISION_1, &sd, NULL))
+        return NULL;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+    ev = CreateEventW(&sa, manualReset, FALSE, name);
+    if (ev == NULL || GetLastError() != ERROR_ALREADY_EXISTS) {
+        LocalFree(sd);
+        return ev;
+    }
+
+    {
+        PSID owner = NULL;
+        PACL dacl = NULL;
+        PSECURITY_DESCRIPTOR found = NULL;
+        if (GetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                            &owner, NULL, &dacl, NULL, &found) == ERROR_SUCCESS) {
+            BOOL hostOwner = owner != NULL
+                && (IsWellKnownSid(owner, WinLocalServiceSid) || IsWellKnownSid(owner, WinLocalSystemSid));
+            BOOL adminOwner = owner != NULL && IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
+            if (dacl != NULL) {
+                usable = hostOwner || adminOwner;
+            } else if (hostOwner && takeOverNullDacl) {
+                /* The output doorbell. A driver before v1.13.0 made it with
+                 * a NULL DACL, and a program still holds it, the SDK's output
+                 * reader most often. A program that is not elevated cannot
+                 * own an object as LocalService or SYSTEM. The owner's
+                 * account may rewrite the DACL, so this host, which runs as
+                 * that account, gives the object the descriptor above. A new
+                 * open by name is then checked against it. A handle opened
+                 * before keeps its access, which is harmless on a doorbell a
+                 * consumer only reads. */
+                PACL ours = NULL;
+                BOOL present = FALSE, defaulted = FALSE;
+                usable = GetSecurityDescriptorDacl(sd, &present, &ours, &defaulted) && present && ours != NULL
+                    && SetSecurityInfo(ev, SE_KERNEL_OBJECT,
+                                       DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                       NULL, NULL, ours, NULL) == ERROR_SUCCESS;
+            }
+            LocalFree(found);
+        }
+    }
+    LocalFree(sd);
+    if (!usable) {
+        CloseHandle(ev);
+        ev = NULL;
+    }
+    return ev;
+}
+
+/* Create the output doorbell if there is none yet. Two threads call this:
+ * an output IOCTL opening the mapping (the XUSB queue dispatches in
+ * parallel) and the input pump. The handle is published only if the field
+ * is still NULL, so a second creator closes its own handle instead of
+ * leaking one. PublishOutput reads NULL or the handle, nothing else. */
+static VOID TryCreateDoorbell(PCOMPANION_CTX ctx)
+{
+    if (ctx->OutputSignalEvent != NULL) return;
+    HANDLE ev = CreateHostEvent(FALSE /* auto reset */, TRUE /* take over a NULL-DACL doorbell */, ctx->OutputEventName);
+    if (ev != NULL
+        && InterlockedCompareExchangePointer((PVOID volatile *)&ctx->OutputSignalEvent, ev, NULL) != NULL)
+        CloseHandle(ev);
+}
+
+/* Open the per-controller output section. The test app pre-creates it with
+ * a permissive SDDL; we just attach. WUDFHost runs as LocalService and
+ * cannot create Global\ sections itself (no SeCreateGlobalPrivilege).
+ *
+ * Stale-handle recovery (issue #2, output side of #1): if the SDK tears
+ * down and recreates the output section between sessions, our cached
+ * handle points at the old (destroyed) kernel object. Writes go nowhere.
+ * Every 500 writes (~2s at typical XInput polling rate), close and
+ * re-open to pick up the fresh section. */
+static BOOLEAN EnsureOutputMapping(PCOMPANION_CTX ctx)
+{
+    /* Periodic re-open: close stale mapping every 500 writes */
+    if (ctx->OutputMemPtr != NULL) {
+        if (++ctx->OutputWriteCount < 500) return TRUE;
+        /* Time to re-validate: close and re-open */
+        UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL;
+        CloseHandle(ctx->OutputMemHandle);  ctx->OutputMemHandle = NULL;
+        ctx->OutputWriteCount = 0;
+    }
+
+    HANDLE h = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE,
+                                ctx->OutputMappingName);
+    if (h == NULL) return FALSE;
+
+    PVOID v = MapViewOfFile(h, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(SHARED_OUTPUT));
+    if (v == NULL) { CloseHandle(h); return FALSE; }
+
+    /* Output-ring doorbell (issue #34), acquired BEFORE the mapping
+     * pointer becomes visible (audit of #34): the XUSB queue dispatches
+     * IOCTLs in parallel, so a sibling callback that fast-paths on
+     * OutputMemPtr must already see the event handle, or its first
+     * publish would skip the signal and wait on the SDK's safety
+     * timeout. CreateEventW creates the auto-reset event if we're first
+     * or opens the HID child driver's existing object otherwise, so
+     * ordering between the two hosts doesn't matter. The event object's
+     * lifetime is the device session (unlike the SDK-recreated section),
+     * so a live handle is kept across the 500-write mapping recycles and
+     * only re-attempted while NULL, here and by the input pump on a steady
+     * input stream (CompanionInputPumpProc). Non-fatal, an unusable name
+     * included: on failure PublishOutput skips the signal and the SDK's
+     * safety timeout drains the ring. */
+    TryCreateDoorbell(ctx);
+
+    ctx->OutputMemHandle = h;
+    MemoryBarrier();
+    ctx->OutputMemPtr = v;
+    ctx->OutputWriteCount = 0;
+    return TRUE;
+}
+
+static VOID PublishOutput(PCOMPANION_CTX ctx, UCHAR source, UCHAR reportId,
+                          const UCHAR *data, ULONG dataSize)
+{
+    if (!EnsureOutputMapping(ctx)) return;
+    if (dataSize > HM_OUTPUT_SLOT_DATA_CAP) dataSize = HM_OUTPUT_SLOT_DATA_CAP;
+
+    volatile SHARED_OUTPUT *dst = (volatile SHARED_OUTPUT *)ctx->OutputMemPtr;
+
+    /* v1.1.40 ring writer (matches driver.c PublishOutput). The companion's
+     * XUSB queue serializes IOCTLs per device so concurrent PublishOutput
+     * calls within the companion can't race; the driver-side writer and
+     * the companion-side writer can target different slots concurrently
+     * but each slot uses MemoryBarrier-fenced SeqNo for torn-write detection.
+     *
+     * Multi-producer reservation (audit of #34, pre-existing bug): the
+     * old max(Head, local)+1 read-modify-write could mint the same
+     * sequence as the main HID driver publishing concurrently from its
+     * own process, silently overwriting a slot. InterlockedIncrement on
+     * the shared Head reserves a unique sequence across both producers;
+     * the fenced slot.SeqNo store below remains the publish gate the
+     * reader validates (a reserved-but-unwritten slot is retried on the
+     * reader's next wake). Mirrors driver.c PublishOutput. */
+    ULONG newSeq = (ULONG)InterlockedIncrement((volatile LONG *)&dst->Head);
+    ULONG slotIdx = (newSeq - 1) % HM_OUTPUT_RING_SLOTS;
+    volatile HM_OUTPUT_SLOT *slot = &dst->Slots[slotIdx];
+
+    slot->Source = source;
+    slot->ReportId = reportId;
+    slot->DataSize = (USHORT)dataSize;
+    for (ULONG i = 0; i < dataSize; i++) slot->Data[i] = data[i];
+    MemoryBarrier();
+    slot->SeqNo = newSeq;
+
+    /* Doorbell LAST (issue #34): Head is published, so a reader woken by
+     * this signal always sees the new packet. Mirrors driver.c. */
+    if (ctx->OutputSignalEvent) SetEvent(ctx->OutputSignalEvent);
+}
+
+NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
+{
+    NTSTATUS status;
+    WDFDEVICE device;
+    WDF_OBJECT_ATTRIBUTES attributes;
+    WDF_IO_QUEUE_CONFIG queueConfig;
+
+    UNREFERENCED_PARAMETER(Driver);
+
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
+    attributes.EvtCleanupCallback = CompanionDeviceCleanup;
+    status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
+    if (!NT_SUCCESS(status)) return status;
+
+    {
+        PCOMPANION_CTX ctx = GetCompanionCtx(device);
+        ctx->PacketCount = 0;
+        ctx->VendorId = 0x045E;
+        ctx->ProductId = 0x028E;
+        ctx->ControllerIndex = 0;
+
+        /* Read ControllerIndex from Device Parameters.
+         * Try WDF API first, fall back to direct registry via device instance ID
+         * parsed from WdfDeviceGetDeviceProperty. */
+        {
+            NTSTATUS rkStatus;
+            WDFKEY hkDevice;
+            rkStatus = WdfDeviceOpenRegistryKey(device, PLUGPLAY_REGKEY_DEVICE,
+                KEY_READ, WDF_NO_OBJECT_ATTRIBUTES, &hkDevice);
+            if (NT_SUCCESS(rkStatus))
+            {
+                UNICODE_STRING valueName;
+                RtlInitUnicodeString(&valueName, L"ControllerIndex");
+                ULONG idx = 0;
+                if (NT_SUCCESS(WdfRegistryQueryULong(hkDevice, &valueName, &idx)))
+                    ctx->ControllerIndex = idx;
+                WdfRegistryClose(hkDevice);
+            }
+        }
+
+        /* Build per-instance paths. Multi-digit indices supported. */
+        {
+            static const WCHAR prefix[] = L"SOFTWARE\\HIDMaestro\\Controller";
+            SIZE_T cap = sizeof(ctx->ConfigRegPath) / sizeof(WCHAR);
+            for (int i = 0; prefix[i]; i++) ctx->ConfigRegPath[i] = prefix[i];
+            ctx->ConfigRegPath[(sizeof(prefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->ConfigRegPath, ctx->ControllerIndex, cap);
+        }
+        {
+            static const WCHAR mapPrefix[] = L"Global\\HIDMaestroInput";
+            SIZE_T cap = sizeof(ctx->SharedMappingName) / sizeof(WCHAR);
+            for (int i = 0; mapPrefix[i]; i++) ctx->SharedMappingName[i] = mapPrefix[i];
+            ctx->SharedMappingName[(sizeof(mapPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->SharedMappingName, ctx->ControllerIndex, cap);
+        }
+        {
+            static const WCHAR outPrefix[] = L"Global\\HIDMaestroOutput";
+            SIZE_T cap = sizeof(ctx->OutputMappingName) / sizeof(WCHAR);
+            for (int i = 0; outPrefix[i]; i++) ctx->OutputMappingName[i] = outPrefix[i];
+            ctx->OutputMappingName[(sizeof(outPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->OutputMappingName, ctx->ControllerIndex, cap);
+        }
+        {
+            static const WCHAR evPrefix[] = L"Global\\HIDMaestroOutputEvent";
+            SIZE_T cap = sizeof(ctx->OutputEventName) / sizeof(WCHAR);
+            for (int i = 0; evPrefix[i]; i++) ctx->OutputEventName[i] = evPrefix[i];
+            ctx->OutputEventName[(sizeof(evPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->OutputEventName, ctx->ControllerIndex, cap);
+        }
+        {
+            static const WCHAR ciPrefix[] = L"Global\\HIDMaestroCompanionInputEvent";
+            SIZE_T cap = sizeof(ctx->CompanionInputEventName) / sizeof(WCHAR);
+            for (int i = 0; ciPrefix[i]; i++) ctx->CompanionInputEventName[i] = ciPrefix[i];
+            ctx->CompanionInputEventName[(sizeof(ciPrefix) / sizeof(WCHAR)) - 1] = L'\0';
+            AppendUlongDecimal(ctx->CompanionInputEventName, ctx->ControllerIndex, cap);
+        }
+
+        /* Read VID/PID from per-instance registry (falls back to global) */
+        HKEY hKey;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->VendorId = (USHORT)val;
+            sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->ProductId = (USHORT)val;
+            RegCloseKey(hKey);
+        } else if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\HIDMaestro", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD val, sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->VendorId = (USHORT)val;
+            sz = sizeof(val);
+            if (RegQueryValueExW(hKey, L"ProductId", NULL, NULL, (LPBYTE)&val, &sz) == ERROR_SUCCESS)
+                ctx->ProductId = (USHORT)val;
+            RegCloseKey(hKey);
+        }
+    }
+
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+    queueConfig.EvtIoDeviceControl = CompanionIoControl;
+    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, NULL);
+    if (!NT_SUCCESS(status)) return status;
+
+    /* Manual-dispatch queue for pended IOCTL_XUSB_WAIT_FOR_INPUT. */
+    {
+        WDF_IO_QUEUE_CONFIG manualCfg;
+        WDF_IO_QUEUE_CONFIG_INIT(&manualCfg, WdfIoQueueDispatchManual);
+        PCOMPANION_CTX ctx = GetCompanionCtx(device);
+        status = WdfIoQueueCreate(device, &manualCfg, WDF_NO_OBJECT_ATTRIBUTES,
+                                  &ctx->WaitForInputQueue);
+        if (!NT_SUCCESS(status)) return status;
+
+        /* Must precede WdfTimerStart: the first tick can land 8 ms later
+         * and takes GipLock inside ReadGipData. */
+        InitializeCriticalSection(&ctx->GipLock);
+        ctx->GipLockInit = TRUE;
+
+        WDF_TIMER_CONFIG timerCfg;
+        WDF_TIMER_CONFIG_INIT_PERIODIC(&timerCfg, CompanionPumpTimer, 8);
+        WDF_OBJECT_ATTRIBUTES timerAttrs;
+        WDF_OBJECT_ATTRIBUTES_INIT(&timerAttrs);
+        timerAttrs.ParentObject = device;
+        status = WdfTimerCreate(&timerCfg, &timerAttrs, &ctx->PumpTimer);
+        if (!NT_SUCCESS(status)) return status;
+        WdfTimerStart(ctx->PumpTimer, WDF_REL_TIMEOUT_IN_MS(8));
+
+        /* Input-doorbell thread (perf audit 2026-07-21): see
+         * CompanionInputPumpProc. Non-fatal on failure; the 8 ms timer
+         * remains the pump. */
+        ctx->PumpStopEvent = CreateEventW(NULL, TRUE /* manual reset */, FALSE, NULL);
+        if (ctx->PumpStopEvent != NULL) {
+            ctx->PumpThread = CreateThread(NULL, 0, CompanionInputPumpProc,
+                                           (LPVOID)device, 0, NULL);
+            if (ctx->PumpThread == NULL) {
+                CloseHandle(ctx->PumpStopEvent);
+                ctx->PumpStopEvent = NULL;
+            }
+        }
+    }
+
+    /* HIDMAESTRO publishes ONLY GUID_DEVINTERFACE_XUSB. With our INF's
+     * UpperFilters="xinputhid" tripwire, ProviderManagerWorker::OnPnpDeviceAdded
+     * sees cVar3=true AND interface==XUSB {ec87f1e3}, and dispatches via the
+     * XUSB path (LAB_18005f241). Publishing additional interfaces (WinExInput,
+     * speculative WGI_UNK1) produces extra PnpDevice arrivals that confuse WGI
+     * into classifying our one logical controller as multiple WGI entities
+     * the known hang mode documented in
+     * memory:feedback-one-wgi-device-per-controller.md. */
+    WdfDeviceCreateDeviceInterface(device, (LPGUID)&XUSB_GUID, NULL);
+
+    return STATUS_SUCCESS;
+}
+
+static void CopyToRequest(WDFREQUEST Request, const void* data, size_t len)
+{
+    PVOID outBuf; size_t outLen;
+    if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, len, &outBuf, &outLen))) {
+        RtlCopyMemory(outBuf, data, len);
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, len);
+    } else {
+        WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+    }
+}
+
+/* Derive the XInput button/trigger/stick values from the current
+ * shared-memory GIP frame. Output is a packed XINPUT_GAMEPAD-like tuple the
+ * two 29-byte formatters below position at different offsets. */
+static VOID DecodeGipToXInput(
+    PCOMPANION_CTX ctx,
+    USHORT *outButtons, UCHAR *outLT, UCHAR *outRT,
+    SHORT *outLX, SHORT *outLY, SHORT *outRX, SHORT *outRY,
+    BOOLEAN *outValid)
+{
+    *outButtons = 0; *outLT = 0; *outRT = 0;
+    *outLX = 0; *outLY = 0; *outRX = 0; *outRY = 0;
+    *outValid = FALSE;
+
+    UCHAR gip[14];
+    if (!ReadGipData(ctx, gip)) return;
+
+    PUCHAR d = gip;
+    UCHAR btnLow = d[12], btnHigh = d[13];
+    UCHAR hat = (btnHigh >> 2) & 0x0F;
+    USHORT buttons = 0;
+    if (btnLow & 0x01) buttons |= 0x1000;
+    if (btnLow & 0x02) buttons |= 0x2000;
+    if (btnLow & 0x04) buttons |= 0x4000;
+    if (btnLow & 0x08) buttons |= 0x8000;
+    if (btnLow & 0x10) buttons |= 0x0100;
+    if (btnLow & 0x20) buttons |= 0x0200;
+    if (btnLow & 0x40) buttons |= 0x0040;
+    if (btnLow & 0x80) buttons |= 0x0080;
+    if (btnHigh & 0x01) buttons |= 0x0020;
+    if (btnHigh & 0x02) buttons |= 0x0010;
+    if (btnHigh & 0x40) buttons |= 0x0400;
+    switch (hat) {
+        case 1: buttons |= 0x0001; break; case 2: buttons |= 0x0009; break;
+        case 3: buttons |= 0x0008; break; case 4: buttons |= 0x000A; break;
+        case 5: buttons |= 0x0002; break; case 6: buttons |= 0x0006; break;
+        case 7: buttons |= 0x0004; break; case 8: buttons |= 0x0005; break;
+    }
+    *outButtons = buttons;
+    *outLT = (UCHAR)((*(USHORT*)&d[8] & 0x03FF) * 255 / 1023);
+    *outRT = (UCHAR)((*(USHORT*)&d[10] & 0x03FF) * 255 / 1023);
+    *outLX = (SHORT)((int)(*(USHORT*)&d[0]) - 32768);
+    *outLY = (SHORT)(32767 - (int)(*(USHORT*)&d[2]));
+    *outRX = (SHORT)((int)(*(USHORT*)&d[4]) - 32768);
+    *outRY = (SHORT)(32767 - (int)(*(USHORT*)&d[6]));
+    *outValid = TRUE;
+}
+
+/* 29-byte IOCTL_XUSB_GET_STATE response layout: this is what xinput1_4
+ * parses. Empirically verified: buttons at state[0x0B], triggers at
+ * state[0x0D]/[0x0E], sticks at state[0x0F..0x16]. DO NOT rearrange without
+ * re-verifying XInput/DirectInput/HIDAPI. */
+static VOID BuildXusbStateForGetState(PCOMPANION_CTX ctx, UCHAR state[29])
+{
+    RtlZeroMemory(state, 29);
+    *(USHORT*)&state[0] = 0x0103;
+    state[2] = 0x01;
+
+    USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    /* Perf audit 2026-07-21 (I8): the packet number advances only when
+     * the state actually changed, matching physical xusb22 behavior so
+     * consumers can skip unchanged-state processing. */
+    if (valid && ctx->GipChanged) ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
+    if (!valid) return;
+
+    *(USHORT*)&state[0x0B] = buttons;
+    state[0x0D] = lt;
+    state[0x0E] = rt;
+    *(SHORT*)&state[0x0F] = lx;
+    *(SHORT*)&state[0x11] = ly;
+    *(SHORT*)&state[0x13] = rx;
+    *(SHORT*)&state[0x15] = ry;
+}
+
+/* 29-byte IOCTL_XUSB_WAIT_FOR_INPUT response layout: WGI's expected format.
+ * Derived from Ghidra decomp of XusbDevice::ProcessInput (all-xusb.c:~9551):
+ *   - state[2]  (this+0x28a): state indicator. 3 = RESUMED (triggers
+ *     LAB_18006aac2 which toggles this+0x2c8 to 1, enabling subsequent
+ *     UpdateInputSinks calls to dispatch OnInputResumed on newly-registered
+ *     sinks: clearing Gamepad::flag_0x184).
+ *   - state[9]  (this+0x291): reportId passed to sink.OnInputReceived.
+ *   - state[10] (this+0x292): gate: if zero, dispatch is SKIPPED at
+ *     all-xusb.c:9647. Real xusb22 puts the payload-size marker (0x14) here
+ *     as the first byte of the 0x13-byte payload that is handed to
+ *     sink.OnInputReceived(eventId, reportId=state[9], size=0x13,
+ *     data=&state[10]).
+ *   - state[11..] : XINPUT_GAMEPAD starts here in the SAME layout as
+ *     IOCTL_XUSB_GET_STATE (wButtons[11-12], LT[13], RT[14], sticks[15-22]).
+ *     Gamepad::OnInputReceived at 0x180029d30 reads data[2] = state[12]
+ *     = wButtons.high to extract the GUIDE bit. */
+static VOID BuildXusbStateForWaitInput(PCOMPANION_CTX ctx, UCHAR state[29])
+{
+    RtlZeroMemory(state, 29);
+    *(USHORT*)&state[0] = 0x0103;
+    state[2] = 0x03;                    /* RESUMED */
+    /* (I8) Packet number advances on change only; the decode below
+     * refreshes ctx->GipChanged, and the increment happens after it. */
+    /* state[9]  = reportId passed to sink.OnInputReceived (caps non-zero per
+     *   dispatch arg at all-xusb.c:9657).
+     * state[10] = first byte of the 0x13-byte payload passed to the sink,
+     *   AND the gate byte checked at all-xusb.c:9647. In XUSB internal
+     *   convention this byte is the XINPUT_STATE packet-type marker (0x14
+     *   = XINPUT packet). The XusbInputParser expects the remaining payload
+     *   (wButtons, triggers, sticks) at data[1..] = state[11..22]. */
+    /* state[9] = reportId. XusbInputParser template expects 0: confirmed
+     * empirically 2026-04-23 via diagnostic fingerprint: setting 0 makes
+     * GetCurrentReading return actual parsed values; setting 0x14 produced
+     * all-zero readings. */
+    state[9]  = 0x00;
+    state[10] = 0x14;                 /* payload size gate (XInput packet len) */
+
+    USHORT buttons; UCHAR lt, rt; SHORT lx, ly, rx, ry; BOOLEAN valid;
+    DecodeGipToXInput(ctx, &buttons, &lt, &rt, &lx, &ly, &rx, &ry, &valid);
+    if (valid && ctx->GipChanged) ctx->PacketCount++;
+    *(DWORD*)&state[5] = ctx->PacketCount;
+    if (!valid) return;
+
+    /* XINPUT_GAMEPAD layout confirmed reading offsets in the XusbInputParser
+     * template (2026-04-23 fingerprint test): LT at state[13], RT at state[14],
+     * LX at state[15-16], LY at state[17-18], RX at state[19-20], RY at
+     * state[21-22]. Buttons at state[11-12] (wButtons little-endian). */
+    *(USHORT*)&state[11] = buttons;
+    state[13] = lt;
+    state[14] = rt;
+    *(SHORT*)&state[15] = lx;
+    *(SHORT*)&state[17] = ly;
+    *(SHORT*)&state[19] = rx;
+    *(SHORT*)&state[21] = ry;
+}
+
+/* Periodic pump for pended IOCTL_XUSB_WAIT_FOR_INPUT requests. WGI
+ * (Windows.Gaming.Input.dll XusbDevice::QueueInputBuffer @ 0x18006af0c)
+ * issues this IOCTL async and waits on the OVERLAPPED. If we never complete
+ * it, ProcessInput -> UpdateInputSinks -> OnInputResumed never fires, and
+ * Gamepad::SendControllerVibrationCommand silently bails at the flag_0x184
+ * gate (non-GIP dispatch requires flag_0x184 == 0, which only OnInputResumed
+ * sets). Completing one pended request per tick with the current 29-byte
+ * state mirrors a real xusb22 device's behavior.
+ *
+ * 8ms period roughly matches a wired Xbox 360's 125Hz USB polling cadence.
+ * Only one pending request is completed per tick; if WGI's pump is deep
+ * enough it'll re-queue immediately and the next tick picks it up. */
+/* Complete at most one parked WAIT_FOR_INPUT with the current state. The
+ * manual queue's retrieve-next is the atomic claim, so the 8 ms timer and
+ * the doorbell thread can both call this without double-completion. */
+static VOID CompanionPumpOnce(_In_ PCOMPANION_CTX ctx)
+{
+    if (ctx->WaitForInputQueue == NULL) return;
+
+    WDFREQUEST req;
+    NTSTATUS s = WdfIoQueueRetrieveNextRequest(ctx->WaitForInputQueue, &req);
+    if (!NT_SUCCESS(s)) return;  /* nothing pended */
+
+    UCHAR state[29];
+    BuildXusbStateForWaitInput(ctx, state);
+    CopyToRequest(req, state, 29);
+}
+
+VOID CompanionPumpTimer(_In_ WDFTIMER Timer)
+{
+    WDFDEVICE device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
+    CompanionPumpOnce(GetCompanionCtx(device));
+}
+
+/* Input-doorbell thread (perf audit 2026-07-21). The SDK signals
+ * Global\HIDMaestroCompanionInputEvent<N> per GIP-carrying frame, so a
+ * parked WAIT_FOR_INPUT completes at frame arrival (sub-millisecond)
+ * instead of waiting for the 8 ms timer tick that put a 0-8 ms phase
+ * delay on the WGI/GameInput input path. The timer keeps running as the
+ * unconditional fallback (old SDKs never create the event; a stale event
+ * object after an SDK restart goes quiet), and the manual queue's atomic
+ * retrieve arbitrates between the two completers. The 2 s wait timeout
+ * doubles as the re-open cadence so a fresh SDK session's recreated
+ * event object is picked up within ~2 s; until then the timer serves. */
+static DWORD WINAPI CompanionInputPumpProc(LPVOID param)
+{
+    WDFDEVICE device = (WDFDEVICE)param;
+    PCOMPANION_CTX ctx = GetCompanionCtx(device);
+    ULONG doorbellTick = 0;
+
+    for (;;) {
+        if (ctx->CompanionInputEvent == NULL) {
+            ctx->CompanionInputEvent = OpenEventW(SYNCHRONIZE, FALSE,
+                                                  ctx->CompanionInputEventName);
+            if (ctx->CompanionInputEvent == NULL) {
+                if (WaitForSingleObject(ctx->PumpStopEvent, 500) == WAIT_OBJECT_0)
+                    return 0;
+                continue;
+            }
+        }
+
+        HANDLE waits[2] = { ctx->PumpStopEvent, ctx->CompanionInputEvent };
+        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 2000);
+        if (rc == WAIT_OBJECT_0)
+            return 0;
+        /* A doorbell this device could not make, while a program held its
+         * name, is retried on a steady input stream every 256 frames and
+         * on each 2 s idle wake, as the main driver's worker does. Output
+         * writes alone retry it only every 500 publishes. On a frame the
+         * attempt runs after the frame, so it never adds to its latency. */
+        if (rc == WAIT_OBJECT_0 + 1) {
+            CompanionPumpOnce(ctx);
+            if (ctx->OutputSignalEvent == NULL && (++doorbellTick & 0xFF) == 0)
+                TryCreateDoorbell(ctx);
+            continue;
+        }
+        if (ctx->OutputSignalEvent == NULL)
+            TryCreateDoorbell(ctx);
+        /* Timeout or failure: drop the handle and re-open so a recreated
+         * event object (new SDK session, same name) gets picked up. */
+        CloseHandle(ctx->CompanionInputEvent);
+        ctx->CompanionInputEvent = NULL;
+    }
+}
+
+void CompanionIoControl(
+    _In_ WDFQUEUE Queue,
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _In_ size_t InputBufferLength,
+    _In_ ULONG IoControlCode)
+{
+    PCOMPANION_CTX ctx = GetCompanionCtx(WdfIoQueueGetDevice(Queue));
+    UNREFERENCED_PARAMETER(InputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+
+    switch (IoControlCode)
+    {
+    case IOCTL_XUSB_GET_INFORMATION: {
+        /* OutDeviceInfos_t: 12 bytes (matches driver.c format exactly) */
+        UCHAR info[12];
+        RtlZeroMemory(info, sizeof(info));
+        *(USHORT*)&info[0] = 0x0103;  /* XUSBVersion 0x0103. 2026-04-23 empirical: 0x0101 lets WGI poll state but not dispatch put_Vibration; 0x0103 matches physical Xbox 360 USB and HIDMaestro BT (both work): flip to unblock SET_STATE dispatch. */
+        info[2] = 0x01; /* device count: always 1 (each companion hosts one controller) */
+        /* Revert to 0: pre-regression value (before commit a19861b). Setting
+         * this to 0x01 during the WGI vibration work was my speculative change
+         * ("may read it as 'device is usable' flag"), and empirical testing
+         * 2026-04-23 showed it didn't actually affect vibration dispatch while
+         * it DID coincide with the 4-player XInput slot-1 regression.
+         * Per-instance uniqueness tested (ControllerIndex+1): no effect.
+         * Out-of-range value tested (0x09): no effect. Testing the straight
+         * revert to 0x00 to confirm this single byte is the regression. */
+        info[3] = 0x00;
+        info[4] = 0x00;                /* unk2: bit 7 clear = don't skip */
+        *(USHORT*)&info[8] = ctx->VendorId;
+        *(USHORT*)&info[10] = ctx->ProductId;
+        CopyToRequest(Request, info, 12);
+        break;
+    }
+
+    case IOCTL_XUSB_GET_CAPABILITIES: {
+        /* GamepadCapabilities0101: 24-byte wire: [0-1]Version, then the
+         * XINPUT_CAPABILITIES struct starting at [2]:
+         *   [2]Type [3]SubType [4-5]Flags [6-7]wButtons [8]LT [9]RT
+         *   [10-17]sThumbLX/LY/RX/RY (4xi16) [18-19]wLeftMotorSpeed
+         *   [20-21]wRightMotorSpeed [22-23]reserved.
+         *
+         * Prior bug: motors were at [22-23] and wButtons at [4-5]. WGI
+         * read motor maxes from [18-21] -> zeros -> ForceFeedbackMotors=0
+         * -> silently dropped put_Vibration. */
+        /* Two distinct wire formats, verified 2026-04-23 against a live
+         * physical Xbox 360 wired controller's xusb22.sys 36-byte response.
+         * V1 (24-byte) layout: subtype/flags/buttons/triggers/axes/motors.
+         * V2 (36-byte) layout: 16-byte header + V1 struct at byte 16.
+         * When WGI calls GET_CAPABILITIES with output size 36, it expects V2
+         * extended format. Returning V1-shaped data in a 36-byte buffer makes
+         * WGI read garbage at the V2 field offsets and the device looks
+         * malformed. */
+        /* Motor max speed fields set to 0xFFFF to advertise rumble capability.
+         * Previous zero values made WGI's QueryDeviceCapabilities report
+         * supportedRumble=0x3 but mappedRumble=0x0 (motors detected but not
+         * wired to an actuator). */
+        UCHAR caps_v1[24] = {
+            0x03, 0x01,
+            0x00, 0x01,
+            0xFF, 0xF7,
+            0xFF, 0xFF,
+            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
+            0x00, 0x00,                /* pad */
+            0xFF, 0xFF                 /* trailer */
+        };
+        UCHAR caps_v2[36] = {
+            0x03, 0x01,
+            0x01, 0x01,
+            0x0C, 0x00,
+            (UCHAR)(ctx->VendorId & 0xFF), (UCHAR)((ctx->VendorId >> 8) & 0xFF),
+            (UCHAR)(ctx->ProductId & 0xFF), (UCHAR)((ctx->ProductId >> 8) & 0xFF),
+            0x10, 0x01,
+            (UCHAR)(ctx->ControllerIndex & 0xFF), 0xFA, 0x34, 0x22,
+            0xFF, 0xF7,
+            0xFF,
+            0xFF,
+            0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF, 0xC0, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF,    /* LeftMotor, RightMotor max speeds */
+            0x00, 0x00,                /* pad */
+            0xFF, 0xFF                 /* motor-present trailer */
+        };
+        PVOID outBuf; size_t outLen;
+        if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, 24, &outBuf, &outLen))) {
+            SIZE_T copy;
+            if (outLen >= 36) {
+                copy = 36;
+                RtlCopyMemory(outBuf, caps_v2, copy);
+            } else {
+                copy = outLen > 24 ? 24 : outLen;
+                RtlCopyMemory(outBuf, caps_v1, copy);
+            }
+            WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, copy);
+        } else {
+            WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL);
+        }
+        break;
+    }
+
+    case IOCTL_XUSB_GET_STATE: {
+        UCHAR state[29];
+        BuildXusbStateForGetState(ctx, state);
+        CopyToRequest(Request, state, 29);
+        break;
+    }
+
+    case IOCTL_XUSB_SET_STATE: {
+        /* XInput rumble. Forward the wire-format vibration packet to the
+         * output shared section as source=XInput. The consumer interprets
+         * the bytes (typical packet is 5 bytes: cmd + size + lo motor +
+         * hi motor + reserved, or 4 bytes for the raw XINPUT_VIBRATION).
+         *
+         * CRITICAL: a stale-HIDMAESTRO-after-live-swap gate. When the user
+         * live-swaps from Xbox 360 → DS4, TeardownController removes the
+         * Xbox 360 HIDMAESTRO, but devcon can return "Removed on reboot"
+         * and the companion persists as a phantom still serving IOCTLs.
+         * xinput1_4 / GameInputSvc keep sending IOCTL_XUSB_SET_STATE here;
+         * without this gate we publish Source=XInput to the SAME shared
+         * output section that the new DS4 is reading from: so the user's
+         * DS4 SDK surfaces phantom XInput rumble packets. Fix: re-read the
+         * CURRENT registry VendorId for this ControllerIndex every IOCTL.
+         * If the index has been re-profiled to a non-Xbox controller, the
+         * current VendorId will not be 0x045E and we silently drop. Safer
+         * than sampling ONCE at init because live-swap DOES update the
+         * registry before creating the new controller. Throttled to one
+         * read per 500 ms so a per-frame XInputSetState (many games call
+         * it every frame regardless of rumble change) does not force a
+         * per-frame registry round-trip; a re-profiled index is still
+         * caught within one window. */
+        BOOLEAN isXboxNow;
+        {
+            ULONGLONG now = GetTickCount64();
+            if (!ctx->VidCheckValid || (now - ctx->LastVidCheckTick) >= 500) {
+                BOOLEAN xbox = FALSE;
+                HKEY hKey;
+                DWORD val = 0, sz = sizeof(val);
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ctx->ConfigRegPath,
+                                  0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                    if (RegQueryValueExW(hKey, L"VendorId", NULL, NULL,
+                                         (LPBYTE)&val, &sz) == ERROR_SUCCESS) {
+                        if ((USHORT)val == 0x045E) xbox = TRUE;
+                    }
+                    RegCloseKey(hKey);
+                }
+                ctx->CachedIsXbox = xbox;
+                ctx->VidCheckValid = TRUE;
+                ctx->LastVidCheckTick = now;
+            }
+            isXboxNow = ctx->CachedIsXbox;
+        }
+
+        PVOID rumbleBuf; size_t rumbleSize;
+        if (NT_SUCCESS(WdfRequestRetrieveInputBuffer(Request, 1, &rumbleBuf, &rumbleSize))
+            && rumbleSize >= 1) {
+            if (isXboxNow) {
+                PublishOutput(ctx, OUT_SOURCE_XINPUT, 0,
+                              (const UCHAR*)rumbleBuf, (ULONG)rumbleSize);
+            }
+        }
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+        break;
+    }
+
+    case IOCTL_XUSB_POWER_INFO:
+        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+        break;
+
+    case IOCTL_XUSB_GET_LED_STATE: {
+        UCHAR led[3] = { 0, 0, 0x06 };
+        CopyToRequest(Request, led, 3);
+        break;
+    }
+
+    case IOCTL_XUSB_GET_BATTERY_INFO: {
+        /* XUSBVersion occupies bytes 0-1 and the type and level follow it,
+         * the same header the LED reply above uses. Callers copy from
+         * &OutBuffer.BatteryType, so packing the pair at 1 and 2 read back
+         * as NIMH/EMPTY: SDL maps any type that is not WIRED, UNKNOWN or
+         * DISCONNECTED to on-battery, and EMPTY to 10 percent, so every
+         * SDL game showed a virtual pad as a flat battery. WIRED/FULL is
+         * the same answer OpenXInput fabricates for a device with no
+         * battery to report. The version word is left zero because no
+         * caller reads it back. */
+        UCHAR batt[4] = { 0, 0, 0x01, 0x03 };
+        CopyToRequest(Request, batt, 4);
+        break;
+    }
+
+    case IOCTL_XUSB_WAIT_FOR_INPUT: {
+        /* Pend the request; CompanionPumpTimer completes one per tick with
+         * the current 29-byte XUSB state. WGI's XusbDevice::ProcessInput
+         * expects exactly 0x1D bytes from the async read and re-queues after
+         * each completion. */
+        NTSTATUS s = WdfRequestForwardToIoQueue(Request, ctx->WaitForInputQueue);
+        if (!NT_SUCCESS(s)) {
+            WdfRequestComplete(Request, s);
+        }
+        break;
+    }
+
+    case IOCTL_XUSB_WAIT_GUIDE:
+        /* No Guide-button async notification surface yet. xinput1_4 falls
+         * back to GET_STATE polling when this returns INVALID_DEVICE_REQUEST. */
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+        break;
+
+    case IOCTL_XUSB_GET_INFORMATION_EX: {
+        UCHAR infoEx[64];
+        RtlZeroMemory(infoEx, sizeof(infoEx));
+        *(USHORT*)&infoEx[0] = 0x0103;      /* Version 0x0103: match GET_INFORMATION. */
+        infoEx[2] = 0x01;
+        infoEx[3] = 0x01;  /* slot/capability marker: mirror GET_INFORMATION */
+        *(USHORT*)&infoEx[8] = ctx->VendorId;
+        *(USHORT*)&infoEx[10] = ctx->ProductId;
+        ULONG outLen = OutputBufferLength < 64 ? (ULONG)OutputBufferLength : 64;
+        CopyToRequest(Request, infoEx, outLen);
+        break;
+    }
+
+    default:
+        WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
+        break;
+    }
+}

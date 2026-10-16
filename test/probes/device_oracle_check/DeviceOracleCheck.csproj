@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <AssemblyName>DeviceOracleCheck</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The golden directory and the native harness sources, found from the
+         probe's own directory whatever the output directory is. -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>ProbeDir</_Parameter1>
+      <_Parameter2>$(MSBuildProjectDirectory)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <!-- The driver harness, built twice by native\build.ps1: once from the
+       9bd6279 sources kept in native\oracle and once from the tree's
+       driver. The script skips a harness whose sources have not changed. -->
+  <Target Name="BuildDriverHarness" AfterTargets="Build" Condition="'$(SkipNativeHarness)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\native\build.ps1&quot; -Out &quot;$(MSBuildProjectDirectory)\$(OutDir)native&quot;" />
+  </Target>
+</Project>

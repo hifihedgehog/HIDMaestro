@@ -1,0 +1,660 @@
+﻿/*
+ * HIDMaestro: UMDF2 Virtual HID Minidriver (driver-internal header)
+ *
+ * This is a lower filter driver under MsHidUmdf.sys. The pass-through
+ * driver handles HID class registration; we just respond to IOCTLs.
+ *
+ * UMDF2 differences from KMDF:
+ *   - Compiles as a DLL, not .sys
+ *   - Uses EvtIoDeviceControl (not InternalDeviceControl)
+ *   - HID_XFER_PACKET is marshalled differently (IOCTL_UMDF_HID_*)
+ *   - Includes <windows.h> instead of <ntddk.h>
+ */
+
+#ifndef DRIVER_H
+#define DRIVER_H
+
+#define WIN32_NO_STATUS
+#include <windows.h>
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
+#include <wdf.h>
+#include <hidport.h>
+#include <devpropdef.h>
+
+/* Hard caps on the descriptor and report buffers the driver allocates.
+ * Previously lived in include/hidmaestro.h alongside an old IOCTL-based
+ * design that's now obsolete (the driver and SDK communicate via shared
+ * memory, not IOCTLs). Inlined here so the obsolete header can go away. */
+#define HIDMAESTRO_MAX_DESCRIPTOR_SIZE  4096
+#define HIDMAESTRO_MAX_REPORT_SIZE      1024
+
+/* Release frames in the delivery acknowledgement (HIDMAESTRO_INPUT_ACK). */
+#define HIDMAESTRO_RELEASE_SLOTS         8
+#define HIDMAESTRO_RELEASE_FRAME_CAP     80
+
+/*
+ * Common definitions shared with the vhidmini2 sample.
+ * These must match what MsHidUmdf.sys expects.
+ */
+/*
+ * v1.1.39: IOCTL_UMDF_HID_* corrected values per WDK
+ * <hidport.h> (10.0.26100/km/hidport.h:196-200):
+ *
+ *   #define IOCTL_UMDF_HID_SET_FEATURE        HID_CTL_CODE(20)  = 0x000B0053
+ *   #define IOCTL_UMDF_HID_GET_FEATURE        HID_CTL_CODE(21)  = 0x000B0057
+ *   #define IOCTL_UMDF_HID_SET_OUTPUT_REPORT  HID_CTL_CODE(22)  = 0x000B005B
+ *   #define IOCTL_UMDF_HID_GET_INPUT_REPORT   HID_CTL_CODE(23)  = 0x000B005F
+ *
+ * Pre-1.1.39, this header defined fabricated values (0x210003, 0x210007,
+ * 0x21000B, 0x21000F) that DO NOT match what mshidumdf delivers. Every
+ * SetFeature/GetFeature/SetOutputReport/GetInputReport handler we
+ * shipped since v1.1.35 has compiled but never fired: the case
+ * statement constants didn't match the framework's IoControlCode, so
+ * dispatch fell through to default and returned STATUS_NOT_IMPLEMENTED.
+ *
+ * <hidport.h> already provides the right values via <hidclass.h> +
+ * HID_CTL_CODE; we just include hidport.h in driver.h above. These
+ * #ifndef guards are kept only as a safety net in case the WDK header
+ * is unavailable, but should never actually fire on a current WDK.
+ */
+#ifndef IOCTL_UMDF_HID_SET_FEATURE
+#define IOCTL_UMDF_HID_SET_FEATURE          HID_CTL_CODE(20)
+#endif
+#ifndef IOCTL_UMDF_HID_GET_FEATURE
+#define IOCTL_UMDF_HID_GET_FEATURE          HID_CTL_CODE(21)
+#endif
+#ifndef IOCTL_UMDF_HID_SET_OUTPUT_REPORT
+#define IOCTL_UMDF_HID_SET_OUTPUT_REPORT    HID_CTL_CODE(22)
+#endif
+#ifndef IOCTL_UMDF_HID_GET_INPUT_REPORT
+#define IOCTL_UMDF_HID_GET_INPUT_REPORT     HID_CTL_CODE(23)
+#endif
+
+/* ------------------------------------------------------------------ */
+/*  Device context                                                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct _DEVICE_CONTEXT {
+
+    WDFDEVICE   Device;
+
+    /* HID report descriptor (set by user-mode, returned to HID class) */
+    UCHAR   ReportDescriptor[HIDMAESTRO_MAX_DESCRIPTOR_SIZE];
+    ULONG   ReportDescriptorSize;
+
+    /* HID device descriptor (wraps ReportDescriptorSize) */
+    HID_DESCRIPTOR          HidDescriptor;
+    HID_DEVICE_ATTRIBUTES   HidDeviceAttributes;
+
+    /* Input report byte length (Report ID + data, from HID caps) */
+    ULONG   InputReportByteLength;
+
+    /* First Input Report ID from descriptor (0 if no Report IDs) */
+    UCHAR   FirstInputReportId;
+
+    /* The profile's connection is Bluetooth (registry value Bluetooth,
+     * written by the SDK from the profile's "connection"). Sony pads end
+     * their Bluetooth feature reports with a CRC-32 that USB forms do not
+     * carry, so the feature stubs append one only when this is set
+     * (issue #64). */
+    BOOLEAN Bluetooth;
+
+    /* A DualShock 3 in the form Sony's sixaxis.sys and DsHidMini's SXS mode
+     * present (registry value Ds3Sixaxis, from the profile's
+     * "sixaxisCompatible"). The SDK sends the native 49-byte DS3 report as
+     * the extended report. The driver keeps the latest one for the report 0
+     * feature reply PCSX2 (through SDL) and RPCS3 poll, derives the 12-byte
+     * joystick input report from it, and folds report 0 output commands into
+     * a native output report body. Ds3Raw and Ds3OutBody are guarded by
+     * InputLock. */
+    BOOLEAN Ds3Sixaxis;
+    UCHAR   Ds3Raw[49];
+    UCHAR   Ds3OutBody[48];
+
+    /* Latest raw input report for HID READ_REPORT (native descriptor format) */
+    UCHAR   InputReport[HIDMAESTRO_MAX_REPORT_SIZE];
+    ULONG   InputReportSize;
+    BOOLEAN InputReportReady;
+
+    /* Product string (returned on IOCTL_HID_GET_STRING / HID_STRING_ID_IPRODUCT) */
+    WCHAR   ProductString[128];
+    ULONG   ProductStringBytes; /* size in bytes including null terminator */
+
+    /* Serial number string (returned on IOCTL_HID_GET_STRING / HID_STRING_ID_ISERIALNUMBER).
+     * Built per-instance from ControllerIndex so SDL3/HIDAPI/PadForge can
+     * disambiguate two virtual controllers that share VID/PID/ProductString
+     * (e.g. 2× DualSense). Without a unique serial, hid_enumerate buckets
+     * them as one device. */
+    WCHAR   SerialString[64];
+    ULONG   SerialStringBytes;
+
+    /* Queues */
+    WDFQUEUE    DefaultQueue;        /* Parallel: HID IOCTLs + our custom IOCTLs */
+    WDFQUEUE    ManualQueue;         /* Manual: pending IOCTL_HID_READ_REPORT */
+
+    /* Synchronization */
+    WDFWAITLOCK InputLock;
+    WDFWAITLOCK OutputLock;
+
+    /* Shared memory data injection (bypasses upper filter drivers) */
+    HANDLE  SharedMemHandle;     /* CreateFileMapping handle */
+    PVOID   SharedMemPtr;        /* MapViewOfFile pointer */
+    ULONG   SharedMemSeqNo;      /* Last sequence number we processed */
+
+    /* Sequence-number gate for IOCTL_HID_READ_REPORT. The READ_REPORT
+     * handler returns a cached input report immediately ONLY when there's
+     * new data since the last delivery (SharedMemSeqNo > LastDeliveredSeqNo).
+     * Otherwise the request is parked in ManualQueue and the worker thread
+     * completes it on the next ProcessSharedInput tick. Without this gate,
+     * HIDClass hammers READ_REPORT in a tight loop because every call
+     * returns instantly with stale data: the original CPU saturation
+     * culprit. */
+    ULONG   LastDeliveredInputSeqNo;
+
+    /* Event-driven IPC: SDK signals InputDataEvent after every seqlock write,
+     * the worker thread (WorkerThread) waits on (StopEvent, InputDataEvent)
+     * and processes frames. Replaces the old 1ms WdfTimer busy-poll which
+     * saturated CPU cores at scale. A 50 ms safety timeout on WaitForMultiple
+     * Objects keeps things moving if a signal is ever dropped. */
+    HANDLE  InputDataEvent;      /* OpenEvent on Global\HIDMaestroInputEvent<N> */
+    HANDLE  StopEvent;            /* Named: Global\HIDMaestroStopEvent<N>, or
+                                  * unnamed when that name is unusable
+                                  * (CreateHostEvent) */
+    volatile LONG TearingDown;   /* issue #38: set by EvtDeviceContextCleanup
+                                  * BEFORE it signals StopEvent. StopEvent is
+                                  * a named object shared with every other
+                                  * context at this index and with foreign
+                                  * processes' sweeps, so a signal alone does
+                                  * not mean THIS device is going away. The
+                                  * worker exits only when this flag is set;
+                                  * any other StopEvent wake is absorbed
+                                  * (reset + recycle), so a live device can
+                                  * never be left worker-less. */
+    HANDLE  WorkerThread;        /* CreateThread handle */
+
+    /* Delivery acknowledgement (issue #67). The SDK pre-creates
+     * Global\HIDMaestroInputAck<N> (HIDMAESTRO_INPUT_ACK) and the auto-reset
+     * Global\HIDMaestroInputAckEvent<N> beside the input section. When a
+     * READ_REPORT completes with a frame, the driver notes that frame's
+     * SeqNo (AckPending). When HID class sends its next READ_REPORT, which
+     * it does only after its completion routine has put that frame in its
+     * buffer, the driver stores the SeqNo and signals the event. A keyboard
+     * or mouse writer holds the next frame until then, so a click's press,
+     * a key tap and every relative delta arrive, and arrive in order:
+     * acknowledging at completion let the next frame's completion overtake
+     * this one's on a busy machine. Opened with the input section, best
+     * effort. An SDK that does not create them gets the latest-wins
+     * behavior every gamepad uses. Every access is under InputLock, which
+     * the read path already holds. */
+    BOOLEAN AckPending;
+    ULONG   AckPendingSeqNo;
+    HANDLE  InputAckMemHandle;
+    volatile LONG *InputAckMemPtr;
+    HANDLE  InputAckEvent;
+    WCHAR   InputAckMappingName[64];  /* e.g. L"Global\\HIDMaestroInputAck0" */
+    WCHAR   InputAckEventName[64];    /* e.g. L"Global\\HIDMaestroInputAckEvent0" */
+
+    /* Owner watch (issue #67). The SDK holds the server end of
+     * \\.\pipe\HIDMaestroOwner<N> for as long as the controller lives. The
+     * worker connects and keeps one read pending, which completes when that
+     * end closes, on Dispose or when the consumer's process ends however
+     * it ends. The worker then queues the release frames from the
+     * acknowledgement section. Opened and closed by the worker only. */
+    HANDLE  OwnerPipe;
+    HANDLE  OwnerReadEvent;               /* manual reset, the read's OVERLAPPED event */
+    OVERLAPPED OwnerOverlapped;
+    UCHAR   OwnerReadByte;
+    WCHAR   OwnerPipeName[64];            /* e.g. L"\\\\.\\pipe\\HIDMaestroOwner0" */
+
+    /* Version handshake (v1.13.0). The SDK creates
+     * Global\HIDMaestroVersion<N> (HIDMAESTRO_VERSION_INFO) beside the input
+     * section with its own half filled in. The driver writes its half each
+     * time it opens the input section, then lets go of the section. An SDK
+     * that predates it creates no section, and the open fails quietly. */
+    WCHAR   VersionMappingName[64];       /* e.g. L"Global\\HIDMaestroVersion0" */
+
+    /* Release frames waiting for a READ_REPORT, under InputLock. */
+    UCHAR   ReleaseFrames[HIDMAESTRO_RELEASE_SLOTS][HIDMAESTRO_RELEASE_FRAME_CAP];
+    ULONG   ReleaseSizes[HIDMAESTRO_RELEASE_SLOTS];
+    ULONG   ReleaseCount;
+    ULONG   ReleaseNext;
+
+    WCHAR   InputEventName[64];  /* e.g. L"Global\\HIDMaestroInputEvent0" */
+    WCHAR   StopEventName[64];   /* e.g. L"Global\\HIDMaestroStopEvent0" */
+    WCHAR   OutputEventName[64]; /* e.g. L"Global\\HIDMaestroOutputEvent0" */
+
+    /* Output-ring doorbell (issue #34). Auto-reset named event created at
+     * EvtDeviceAdd; PublishOutput signals it after the ring Head is
+     * published so the SDK's reader can block instead of polling every
+     * 8 ms. NULL when creation failed; publish simply skips the signal
+     * and an event-less SDK falls back to its poll cadence. While NULL the
+     * worker tries again each time it maps the input section, on each idle
+     * timeout and every 256 frames (TryCreateDoorbell). */
+    HANDLE  OutputSignalEvent;
+
+    /* Multi-instance: controller index (0, 1, 2, 3) */
+    ULONG   ControllerIndex;
+    WCHAR   ConfigRegPath[64];      /* e.g. L"SOFTWARE\\HIDMaestro\\Controller0" */
+    WCHAR   SharedMappingName[64];  /* e.g. L"Global\\HIDMaestroInput0" */
+    WCHAR   OutputMappingName[64];  /* e.g. L"Global\\HIDMaestroOutput0" */
+
+    /* Output channel: host→device pass-through (rumble, haptics, FFB, LED).
+     * Driver/companion are dumb pass-throughs; the consumer (PadForge or test
+     * app) opens this section read-only and decodes by (Source, ReportId). */
+    HANDLE  OutputMemHandle;
+    PVOID   OutputMemPtr;
+    ULONG   OutputWriteCount;       /* Stale-detection: writes since last re-open (#2) */
+
+    /* PID FFB state channel. Consumer→driver state for HidD_GetFeature
+     * responses on the canonical PID Report IDs (0x12 Block Load, 0x13
+     * Pool, 0x14 State). Driver reads via seqlock on IOCTL_UMDF_HID_GET_
+     * FEATURE; consumer writes via HMController.PublishPid* methods.
+     * Lazy-mapped: NULL until the SDK creates Global\HIDMaestroPidState<N>. */
+    HANDLE  PidStateMemHandle;
+    PVOID   PidStateMemPtr;
+    WCHAR   PidStateMappingName[64]; /* e.g. L"Global\\HIDMaestroPidState0" */
+
+    /* ── Switch Pro protocol responder (issue #33) ─────────────────────
+     * Keyed on VID 0x057E PID 0x2009 at config-read time. The host
+     * (SDL's HIDAPI_DriverSwitch, Steam, BetterJoy) drives a Nintendo
+     * init + subcommand stream that a generic pass-through cannot
+     * answer; this state machine implements the device side per the
+     * cloned references (nxbt protocol.py, dekuNukem notes, SDL as the
+     * client under test).
+     *
+     * Reply injection: WRITE_REPORT synthesizes 0x81/0x21 input reports
+     * into a small ring; READ_REPORT serves ring entries ahead of the
+     * stream. The ring + state bytes are guarded by InputLock (same
+     * lock READ_REPORT already takes). SwitchStreamThread streams at
+     * ~60 Hz from the latest shared-memory body: 12-byte 0x3F
+     * simple-mode frames pre-handshake, 49-byte BT full-mode 0x30
+     * after (issue #37 BT wire sizes via SwitchReportLen). */
+    BOOLEAN SwitchProtocol;         /* VID 0x057E && PID 0x2009 */
+    BOOLEAN SwitchProtocolSeen;     /* issues #35/#37: any 0x80 USB
+                                     * command or 0x01 subcommand
+                                     * arrived. Until then the stream is
+                                     * genuine 12-byte 0x3F simple-mode
+                                     * (the only report DirectInput can
+                                     * parse under the BT descriptor);
+                                     * after, permanently the 49-byte BT
+                                     * full-mode 0x30. Monotonic
+                                     * FALSE->TRUE; benign cross-thread
+                                     * race (one frame). */
+    BOOLEAN SwitchProtocolHold;     /* TTL-gated test hook (2026-07-21
+                                     * audit): HKLM\SOFTWARE\HIDMaestro
+                                     * value SwitchDescriptorIdleHold
+                                     * (REG_QWORD FILETIME), read at
+                                     * DeviceAdd and honored only within
+                                     * 60 s of its write. While set,
+                                     * protocol traffic is answered but
+                                     * never flips the stream to
+                                     * full-mode 0x30, so the 0x3F-idle
+                                     * probe can verify
+                                     * its idle phases hermetically even
+                                     * when a Chromium browser (a
+                                     * legitimate Switch-protocol host)
+                                     * handshakes every new pad within
+                                     * ms. WUDFHost (LOCAL SERVICE)
+                                     * cannot delete the value; the TTL
+                                     * plus the probe's own delete keep
+                                     * a crashed probe from wedging
+                                     * later creates. */
+    UCHAR   SwitchInputMode;        /* 0x30 full / 0x3F simple; starts 0x30 */
+    BOOLEAN SwitchImuEnabled;       /* subcommand 0x40 arg */
+    UCHAR   SwitchTimer;            /* timer byte, ++ per served report */
+    UCHAR   SwitchMac[6];           /* fabricated, stable per index */
+#define HIDMAESTRO_SWITCH_REPLY_SLOTS 4
+    UCHAR   SwitchReplies[HIDMAESTRO_SWITCH_REPLY_SLOTS][64];
+    ULONG   SwitchReplyCount;       /* pending replies in the ring */
+    ULONG   SwitchReplyRead;        /* next slot to serve */
+    HANDLE  SwitchStreamThread;
+    HANDLE  SwitchStreamStop;       /* unnamed manual-reset event */
+
+} DEVICE_CONTEXT, *PDEVICE_CONTEXT;
+
+/* Shared memory layout: written by user-mode, read by driver
+ * Contains BOTH native HID report data AND GIP data for XUSB GET_STATE.
+ * Total size: 4 + 4 + 256 + 14 = 278 bytes.
+ *
+ * Data[] is 256 bytes to cover every HID input report size in the profile
+ * database without truncation. DualSense BT report 0x31 is 78 bytes;
+ * Switch Pro standard input reports can run to ~64; gyro/accelerometer
+ * passthrough on these pads writes motion values LATE in the report, so
+ * the prior 64-byte pipe clipped exactly the motion fields consumers
+ * (Dolphin, Cemu, yuzu/Citron, RetroArch) need. 256 matches the mirror
+ * in SHARED_OUTPUT and gives headroom for custom profile descriptors. */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_INPUT {
+    volatile ULONG  SeqNo;           /* Incremented each write */
+    ULONG           DataSize;        /* HID input report data size (excluding Report ID) */
+    UCHAR           Data[256];       /* HID input report data (native descriptor format) */
+    UCHAR           GipData[14];     /* GIP-format data for XUSB GET_STATE (always 14 bytes) */
+    /* v1.3.5: vendor-blob mode-switch path. Driver passes
+     * ExtendedReportData verbatim when ExtendedReportSize > 0. */
+    ULONG           ExtendedReportSize;
+    UCHAR           ExtendedReportData[80];
+} HIDMAESTRO_SHARED_INPUT, *PHIDMAESTRO_SHARED_INPUT;
+#pragma pack(pop)
+
+/* Delivery acknowledgement, Global\HIDMaestroInputAck<N> (issue #67). A
+ * separate section, so no existing layout changes: readers of the input,
+ * output and PID sections never see it. The SDK creates and zeroes it, and the
+ * driver sets Capabilities when it opens the section and stores each
+ * delivered frame's SeqNo in DeliveredSeqNo. A writer that finds
+ * Capabilities zero is talking to a driver without acknowledgement and
+ * must not wait for one.
+ *
+ * Release frames: for a keyboard or mouse, the SDK keeps here, per input
+ * report, the report that lets go of everything the last one held (keys and
+ * buttons up, relative motion zero, absolute axes where they were). The
+ * driver sends them when the consumer's end of the owner pipe closes,
+ * whether by Dispose or because its process ended, so a key held at that
+ * moment does not repeat until the device is removed. ReleaseSeq is a
+ * seqlock, odd while the SDK rewrites the frames. */
+#define HIDMAESTRO_INPUT_ACK_CAP_DELIVERED  0x00000001u
+#define HIDMAESTRO_INPUT_ACK_CAP_RELEASE    0x00000002u  /* owner pipe is watched */
+/* Driver state, not a capability. The driver sets it in Capabilities when
+ * the owner watch it held ends (OwnerGone) and connects a watch only while
+ * it is clear. A program that starts on the index creates this section and
+ * zeroes it, which clears the bit. A program that is not elevated can only
+ * open the section for reading, so it cannot. The SDK's census reads it
+ * (OwnerCensus.LegacyPipeLive). No SDK tests it as a capability. */
+#define HIDMAESTRO_INPUT_ACK_WATCH_ENDED    0x80000000u
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_RELEASE_FRAME {
+    ULONG           Size;
+    UCHAR           Data[HIDMAESTRO_RELEASE_FRAME_CAP];   /* report ID first when used */
+} HIDMAESTRO_RELEASE_FRAME;
+
+typedef struct _HIDMAESTRO_INPUT_ACK {
+    volatile LONG   DeliveredSeqNo;  /* SeqNo of the last frame a READ_REPORT carried */
+    volatile LONG   Capabilities;    /* HIDMAESTRO_INPUT_ACK_CAP_* */
+    volatile LONG   ReleaseSeq;
+    volatile LONG   ReleaseCount;    /* frames in Release, at most HIDMAESTRO_RELEASE_SLOTS */
+    HIDMAESTRO_RELEASE_FRAME Release[HIDMAESTRO_RELEASE_SLOTS];
+} HIDMAESTRO_INPUT_ACK, *PHIDMAESTRO_INPUT_ACK;
+
+/* Version handshake (v1.13.0): Global\HIDMaestroVersion<N>, 64 bytes,
+ * created by the SDK. The SDK writes the first 20 bytes before the device
+ * exists. The driver writes the next 16 whenever it opens the input
+ * section: DriverVersion first, DriverProtocol last, so a reader that sees
+ * a nonzero protocol sees the version that goes with it.
+ *
+ * Protocol 1: the input and output sections, the events and the PID state,
+ *             through v1.11.0.
+ * Protocol 2: adds InputAck and the owner pipe, v1.12.0.
+ * Protocol 3: adds this section, v1.13.0.
+ * A driver keeps every older layout, so an SDK runs on any driver whose
+ * protocol is at least its SdkProtocolMin. */
+#define HIDMAESTRO_VERSION_LAYOUT    1
+#define HIDMAESTRO_DRIVER_PROTOCOL   3
+typedef struct _HIDMAESTRO_VERSION_INFO {
+    volatile LONG   LayoutVersion;       /* SDK: HIDMAESTRO_VERSION_LAYOUT */
+    volatile LONG   SdkProtocolMin;      /* SDK: the oldest driver protocol it runs on */
+    volatile LONG   SdkProtocolMax;      /* SDK: the protocol it speaks */
+    USHORT          SdkVersion[4];       /* SDK: major, minor, patch, 0 */
+    volatile LONG   DriverProtocol;      /* driver: 0 until it has written its half */
+    USHORT          DriverVersion[4];    /* driver: major, minor, patch, 0 */
+    volatile LONG   DriverCapabilities;  /* driver: HIDMAESTRO_INPUT_ACK_CAP_* it supports */
+    LONG            Reserved[7];
+} HIDMAESTRO_VERSION_INFO, *PHIDMAESTRO_VERSION_INFO;
+C_ASSERT(sizeof(HIDMAESTRO_VERSION_INFO) == 64);
+#pragma pack(pop)
+
+/* Output passthrough section: written by driver/companion, read by consumer.
+ * Game sends rumble/haptics/FFB → we capture bytes and publish here.
+ * Latest-wins (no ring): old commands are stale and shouldn't be replayed.
+ * Total size: 4 + 1 + 1 + 2 + 256 = 264 bytes
+ *
+ * Source enum tells the consumer which API the game used:
+ *   0 = HID output report  (HidD_SetOutputReport, dinput8 PID, HIDAPI write)
+ *   1 = HID feature report (HidD_SetFeature)
+ *   2 = XInput rumble      (XInputSetState: companion-side)
+ *
+ * For Source=HID*, ReportId is the HID Report ID byte (0 if none).
+ * For Source=XInputRumble, ReportId is reserved (0); Data is the 5-byte
+ *   XINPUT_VIBRATION-style payload from the IOCTL_XUSB_SET_STATE input buffer.
+ *
+ * Consumer is expected to interpret bytes per (profile, Source, ReportId).
+ * The driver does NOT classify rumble vs haptic vs adaptive trigger: that
+ * distinction is semantic and lives in the consumer. */
+#define HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT       0
+#define HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE      1
+#define HIDMAESTRO_OUTPUT_SOURCE_XINPUT           2
+/* v1.3.5: feature READ (Get_Feature). Notifies the SDK that the host
+ * issued IOCTL_HID_GET_FEATURE for this report ID. Used by the
+ * extendedReport.armOn watcher to flip vendor-blob emission on Sony BT. */
+#define HIDMAESTRO_OUTPUT_SOURCE_HID_FEATURE_READ 3
+
+/* Output channel: RING BUFFER as of v1.1.40.
+ *
+ * Pre-1.1.40 was a single slot, latest-write-wins. That coalesced
+ * pid.dll's tight three-packet PID FFB write bursts (Set Effect,
+ * Set Constant Force / Set Periodic, Effect Operation Start) within
+ * 1-3 ms vs the SDK's 8 ms poll interval: middle packets dropped,
+ * magnitude never reached the consumer. See issue #16.
+ *
+ * Now: 64-slot ring with monotonic seqlock per slot. Writer (this
+ * driver, multiple threads via OutputLock) increments a global Head
+ * counter, writes slot[(Head-1) % N], readers (the SDK's poll loop)
+ * track LastSeen and process slots from LastSeen+1 to Head.
+ *
+ * Slot capacity 256 bytes covers DualSense reports (78 bytes) and
+ * any current PID FFB Output (largest is Set Effect at 22 bytes).
+ *
+ * Single-producer (driver IOCTL handler thread) → single-consumer
+ * (SDK poll thread) ring; OutputLock serializes producer races.
+ * Reader uses per-slot SeqNo for torn-write detection within a slot.
+ * If reader falls behind by more than N writes, the oldest packets
+ * get overwritten: that's a real lossy edge case, but with N=64
+ * and a 1-3 ms burst pattern it would take a 512 ms reader stall
+ * to start losing packets. */
+#define HIDMAESTRO_OUTPUT_RING_SLOTS     64u
+#define HIDMAESTRO_OUTPUT_SLOT_DATA_CAP  256u
+
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_OUTPUT_SLOT {
+    volatile ULONG  SeqNo;           /* Per-slot. Equal to Head value at the time of write. */
+    UCHAR           Source;          /* HIDMAESTRO_OUTPUT_SOURCE_* */
+    UCHAR           ReportId;        /* HID Report ID (0 if descriptor uses no IDs) */
+    USHORT          DataSize;        /* Bytes valid in Data[] */
+    UCHAR           Data[HIDMAESTRO_OUTPUT_SLOT_DATA_CAP];
+} HIDMAESTRO_OUTPUT_SLOT, *PHIDMAESTRO_OUTPUT_SLOT;
+
+typedef struct _HIDMAESTRO_SHARED_OUTPUT {
+    /* Monotonically-increasing total writes by the driver. The slot at
+     * index ((Head - 1) % HIDMAESTRO_OUTPUT_RING_SLOTS) holds the most
+     * recent write. SeqNo=0 is reserved for "never written": first
+     * write is SeqNo=1. */
+    volatile ULONG  Head;
+
+    /* Reserved for future use (e.g., a layout version field if the slot
+     * struct ever grows again). */
+    ULONG           _Reserved;
+
+    HIDMAESTRO_OUTPUT_SLOT Slots[HIDMAESTRO_OUTPUT_RING_SLOTS];
+} HIDMAESTRO_SHARED_OUTPUT, *PHIDMAESTRO_SHARED_OUTPUT;
+#pragma pack(pop)
+
+/* PID Force-Feedback state section: written by SDK consumer
+ * (HMController.PublishPid*), read by driver on IOCTL_UMDF_HID_GET_FEATURE.
+ * Single-slot last-write-wins per the HID PID 1.0 spec (Block Load Report
+ * is "the result of the most recent Create New Effect"). Mirrors vJoy's
+ * device-extension PID storage shape, but on the user side of the shared
+ * mapping because HIDMaestro is UMDF2 (driver runs in user-mode WUDFHost).
+ *
+ * PidEnabled gate: zero-initialized when the SDK creates the section.
+ * First call to HMController.PublishPidPool flips it to 1, atomic with
+ * the Pool fields write under the same seqlock cycle. Driver checks
+ * PidEnabled before reading any other field: when 0, returns
+ * STATUS_NO_SUCH_DEVICE for Pool (matches vJoy's "FFB not enabled"
+ * convention) and STATUS_NOT_SUPPORTED for Block Load / State.
+ *
+ * Wire layout matches the PID 1.0 report formats so the driver can copy
+ * fields straight into the IOCTL output buffer with minimal packing. */
+#pragma pack(push, 1)
+typedef struct _HIDMAESTRO_SHARED_PID_STATE {
+    volatile ULONG  SeqNo;           /* Incremented each write: seqlock */
+    UCHAR           PidEnabled;      /* 0 until first PublishPidPool */
+    UCHAR           _pad0[3];
+
+    /* Block Load Report (Report ID 0x12, per HID PID 1.0 §5.5) */
+    UCHAR           BL_EffectBlockIndex;
+    UCHAR           BL_LoadStatus;        /* 1=Success, 2=Full, 3=Error */
+    USHORT          BL_RAMPoolAvailable;
+
+    /* PID Pool Report (Report ID 0x13, per HID PID 1.0 §5.7) */
+    USHORT          Pool_RAMPoolSize;
+    UCHAR           Pool_MaxSimultaneousEffects;
+    UCHAR           Pool_MemoryManagement;  /* bit0=DeviceManagedPool, bit1=SharedParamBlocks */
+
+    /* PID State Report (Report ID 0x14, per HID PID 1.0 §5.8) */
+    UCHAR           State_EffectBlockIndex;
+    UCHAR           State_Flags;
+    UCHAR           _pad1[2];
+
+    /* v1.1.37: driver-side EBI free-list. Bit N (0..31) set ⇒ EBI N+1
+     * is allocated. Driver atomically allocates next free EBI on
+     * SetFeature(0x11 Create New Effect) inside the IOCTL handler so
+     * dinput8's follow-up GetFeature(0x12) reads consistent state.
+     * Mirrors vJoy's `Ffb_GetNextFreeEffect`. The 32-bit width caps
+     * us at 32 simultaneous effects, well above any consumer-pool
+     * value we'd realistically advertise via Pool_MaxSimultaneousEffects.
+     *
+     * Update protocol: driver uses InterlockedOr/And to flip bits;
+     * the field is OUTSIDE the seqlock'd block intentionally so EBI
+     * alloc/free never has to synchronize with PublishPid* writers.
+     * BL_* fields ARE inside the seqlock and the driver writes them
+     * atomically with SeqNo increment after a successful allocation. */
+    volatile ULONG  EbiAllocBitmap;
+
+    /* v1.1.37: driver tracks EBI count for fast pool-exhaustion check.
+     * Updated atomically alongside EbiAllocBitmap. */
+    volatile ULONG  EbiAllocatedCount;
+
+    /* v1.3.7: descriptor-driven PID Report ID overrides. SDK populates
+     * these by walking the profile's HID descriptor at controller-create
+     * time (see PidReportIdExtractor) so the driver can serve PID
+     * Pool/State/BlockLoad and dispatch SetFeature handlers for vendor
+     * descriptors that use non-canonical Report IDs.
+     *
+     * Example: real Microsoft SideWinder Force Feedback 2 firmware uses
+     * Pool=0x03, BlockLoad=0x02, Set Effect=0x01 (Microsoft's chosen
+     * IDs from the SideWinder design pre-PID-1.0-spec); dinput8
+     * enumerates by usage and queries HidD_GetFeature on those exact
+     * RIDs. Pre-v1.3.7 the driver hardcoded 0x12/0x13/0x14 and any
+     * non-canonical RID hit STATUS_NOT_SUPPORTED, breaking FFB
+     * enumeration on the SideWinder virtual.
+     *
+     * Zero means "use canonical default": every existing profile built
+     * via HidDescriptorBuilder.AddPidFfbBlock keeps the original 0x11/
+     * 0x12/0x13/0x14/0x1B/0x1C IDs and unchanged behavior. */
+    UCHAR PoolReportId;
+    UCHAR StateReportId;
+    UCHAR BlockLoadReportId;
+    UCHAR CreateNewEffectReportId;
+    UCHAR BlockFreeReportId;
+    UCHAR DeviceControlReportId;
+    UCHAR _pad2[2];
+} HIDMAESTRO_SHARED_PID_STATE, *PHIDMAESTRO_SHARED_PID_STATE;
+#pragma pack(pop)
+
+/* Default PID Report IDs per the canonical HID PID 1.0 descriptor.
+ * Profiles may use different IDs; the driver falls back to STATUS_NOT_SUPPORTED
+ * for unknown IDs, preserving today's behavior. */
+#define HIDMAESTRO_PID_CREATE_NEW_EFFECT_REPORT_ID  0x11
+/* PID Block Free Report: 0x1B (NOT 0x1F as v1.1.37 had).
+ * vJoy emits BLKFRREP+0x10*TLID = 0x0B+0x10 = 0x1B for TLID=1
+ * (vJoy-Brunner/driver/sys/hidReportDescSingle.h:558). PadForge's
+ * transcribed descriptor uses the same ID at HMaestroFfbDescriptor.cs:220.
+ * The v1.1.37 0x1F constant was a guess and FreeEbi was dead code on
+ * the hot path. */
+#define HIDMAESTRO_PID_BLOCK_FREE_REPORT_ID         0x1B
+/* PID Device Control Report: 0x1C. vJoy handles CTRL_DEVRST=4 by
+ * resetting the entire PID state (vJoy-Brunner/driver/sys/hid.c:2849).
+ * dinput8's IDirectInputDevice8::SendForceFeedbackCommand(DISFFC_RESET)
+ * lands here. */
+#define HIDMAESTRO_PID_DEVICE_CONTROL_REPORT_ID     0x1C
+#define HIDMAESTRO_PID_BLOCK_LOAD_REPORT_ID  0x12
+#define HIDMAESTRO_PID_POOL_REPORT_ID        0x13
+#define HIDMAESTRO_PID_STATE_REPORT_ID       0x14
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
+
+/* ------------------------------------------------------------------ */
+/*  Default HID descriptor (bare minimum until user-mode sets one)     */
+/* ------------------------------------------------------------------ */
+
+/* Xbox 360 gamepad descriptor: 6 axes (16-bit), 10 buttons, 1 hat */
+static const UCHAR G_DefaultReportDescriptor[] = {
+    0x05, 0x01,                     /* Usage Page (Generic Desktop) */
+    0x09, 0x05,                     /* Usage (Game Pad) */
+    0xA1, 0x01,                     /* Collection (Application) */
+    0x85, 0x01,                     /*   Report ID (1) */
+    /* Left stick X, Y */
+    0x09, 0x30,                     /*   Usage (X) */
+    0x09, 0x31,                     /*   Usage (Y) */
+    0x15, 0x00,                     /*   Logical Minimum (0) */
+    0x27, 0xFF, 0xFF, 0x00, 0x00,   /*   Logical Maximum (65535) */
+    0x75, 0x10,                     /*   Report Size (16) */
+    0x95, 0x02,                     /*   Report Count (2) */
+    0x81, 0x02,                     /*   INPUT (Data, Var, Abs) */
+    /* Right stick X, Y */
+    0x09, 0x33,                     /*   Usage (Rx) */
+    0x09, 0x34,                     /*   Usage (Ry) */
+    0x81, 0x02,                     /*   INPUT (Data, Var, Abs) */
+    /* Triggers */
+    0x09, 0x32,                     /*   Usage (Z) */
+    0x09, 0x35,                     /*   Usage (Rz) */
+    0x81, 0x02,                     /*   INPUT (Data, Var, Abs) */
+    /* Buttons 1-10 */
+    0x05, 0x09,                     /*   Usage Page (Button) */
+    0x19, 0x01,                     /*   Usage Minimum (1) */
+    0x29, 0x0A,                     /*   Usage Maximum (10) */
+    0x15, 0x00,                     /*   Logical Minimum (0) */
+    0x25, 0x01,                     /*   Logical Maximum (1) */
+    0x75, 0x01,                     /*   Report Size (1) */
+    0x95, 0x0A,                     /*   Report Count (10) */
+    0x81, 0x02,                     /*   INPUT (Data, Var, Abs) */
+    /* 6-bit padding */
+    0x75, 0x06,                     /*   Report Size (6) */
+    0x95, 0x01,                     /*   Report Count (1) */
+    0x81, 0x01,                     /*   INPUT (Cnst) */
+    /* Hat switch */
+    0x05, 0x01,                     /*   Usage Page (Generic Desktop) */
+    0x09, 0x39,                     /*   Usage (Hat switch) */
+    0x15, 0x01,                     /*   Logical Minimum (1) */
+    0x25, 0x08,                     /*   Logical Maximum (8) */
+    0x35, 0x00,                     /*   Physical Minimum (0) */
+    0x46, 0x3B, 0x01,               /*   Physical Maximum (315) */
+    0x66, 0x14, 0x00,               /*   Unit (Degrees) */
+    0x75, 0x04,                     /*   Report Size (4) */
+    0x95, 0x01,                     /*   Report Count (1) */
+    0x81, 0x42,                     /*   INPUT (Data, Var, Abs, Null) */
+    /* 4-bit padding */
+    0x75, 0x04, 0x95, 0x01,
+    0x15, 0x00, 0x25, 0x00,
+    0x35, 0x00, 0x45, 0x00, 0x65, 0x00,
+    0x81, 0x03,                     /*   INPUT (Cnst, Var) */
+    /* Feature report for user-mode → driver data channel */
+    0x85, 0x02,                     /*   Report ID (2) */
+    0x06, 0x00, 0xFF,               /*   Usage Page (Vendor Defined) */
+    0x09, 0x01,                     /*   Usage (0x01) */
+    0x15, 0x00,                     /*   Logical Minimum (0) */
+    0x26, 0xFF, 0x00,               /*   Logical Maximum (255) */
+    0x75, 0x08,                     /*   Report Size (8) */
+    0x95, 0x0E,                     /*   Report Count (14) */
+    0xB1, 0x02,                     /*   FEATURE (Data, Var, Abs) */
+    0xC0                            /* End Collection */
+};
+
+/* ------------------------------------------------------------------ */
+/*  Function prototypes                                                */
+/* ------------------------------------------------------------------ */
+
+DRIVER_INITIALIZE                   DriverEntry;
+EVT_WDF_DRIVER_DEVICE_ADD           EvtDeviceAdd;
+EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL  EvtIoDeviceControl;
+
+#endif /* DRIVER_H */
