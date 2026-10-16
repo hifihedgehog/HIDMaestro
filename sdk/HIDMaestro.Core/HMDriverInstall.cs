@@ -7,10 +7,14 @@ namespace HIDMaestro;
 /// it found installed.</summary>
 public enum HMDriverInstallOutcome
 {
-    /// <summary>The installed driver is this SDK's. Nothing changed.</summary>
+    /// <summary>The installed driver is this SDK's. No driver package
+    /// changed.</summary>
     AlreadyCurrent = 0,
 
-    /// <summary>No driver was installed. This SDK installed its own.</summary>
+    /// <summary>The driver's main package (hidmaestro.inf) was not
+    /// installed, or this same build's driver was missing a package. This
+    /// SDK installed its own driver, or added only the missing
+    /// packages.</summary>
     Installed = 1,
 
     /// <summary>An older driver was installed and nothing was running on
