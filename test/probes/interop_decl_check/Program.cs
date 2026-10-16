@@ -65,6 +65,13 @@ internal static class Program
         return null;
     }
 
+    // A LibraryImport attribute at the start of a line: short or namespace
+    // qualified, with or without the Attribute suffix, alone in its bracket
+    // or after other attributes in it.
+    static readonly Regex s_libraryImportRx = new(
+        @"^[ \t]*\[(?:[^\]\r\n]*,\s*)?(?:global::)?(?:System\.Runtime\.InteropServices\.)?LibraryImport(?:Attribute)?\(",
+        RegexOptions.Multiline);
+
     static IEnumerable<string> SdkSources(string sdk) =>
         Directory.EnumerateFiles(sdk, "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar)
@@ -98,9 +105,18 @@ internal static class Program
         Check("no DllImport or extern declaration in the SDK", legacy.Count == 0, string.Join(", ", legacy));
 
         int libraryImports = 0;
-        var liRx = new Regex(@"^\s*\[LibraryImport\(", RegexOptions.Multiline);
-        foreach (string f in sources) libraryImports += liRx.Matches(File.ReadAllText(f)).Count;
+        foreach (string f in sources) libraryImports += s_libraryImportRx.Matches(File.ReadAllText(f)).Count;
         Console.WriteLine($"  info: {libraryImports} LibraryImport declarations");
+        // Each spelling of the attribute the compiler accepts at the start
+        // of a line counts, and one in a comment does not.
+        const string spellings =
+            "    [LibraryImport(\"a.dll\")]\n" +
+            "    [System.Runtime.InteropServices.LibraryImport(\"a.dll\")]\n" +
+            "    [global::System.Runtime.InteropServices.LibraryImportAttribute(\"a.dll\")]\n" +
+            "    [SuppressGCTransition, LibraryImport(\"a.dll\")]\n" +
+            "    /" + "/ [LibraryImport(\"a.dll\")]\n"; // split so a comment scan skips this code line
+        int counted = s_libraryImportRx.Matches(spellings).Count;
+        Check("the LibraryImport count reads the short, qualified and shared-bracket forms", counted == 4, $"{counted} of 4");
 
         // 2. The Enumerator parameter is a pointer, not a uint.
         var asm = typeof(HMContext).Assembly;
