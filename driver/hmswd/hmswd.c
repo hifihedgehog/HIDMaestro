@@ -47,7 +47,6 @@
 #include <windows.h>
 #include <stdio.h>
 #include <wchar.h>
-#include <stdarg.h>
 #include <initguid.h>
 #include <swdevice.h>
 #include <cfgmgr32.h>
@@ -58,33 +57,6 @@
 static HANDLE  g_done;
 static HRESULT g_cb_hr = E_FAIL;
 static WCHAR   g_inst_id[256];
-
-/* Self-log: write every step's hresult to %TEMP%\HIDMaestro\hmswd_self.log
- * so we can diagnose silent no-ops (exit=0 is not proof of effect when PnP
- * refuses the operation). Appended, never truncated: rotate manually if
- * it grows. */
-static void self_log(const wchar_t *fmt, ...)
-{
-    wchar_t path[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"TEMP", path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    wcscat_s(path, MAX_PATH, L"\\HIDMaestro\\hmswd_self.log");
-
-    FILE *f = NULL;
-    if (_wfopen_s(&f, path, L"a, ccs=UTF-8") != 0 || !f) return;
-
-    SYSTEMTIME st; GetLocalTime(&st);
-    fwprintf(f, L"[%04d-%02d-%02d %02d:%02d:%02d.%03d] ",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfwprintf(f, fmt, ap);
-    va_end(ap);
-
-    fwprintf(f, L"\n");
-    fclose(f);
-}
 
 static VOID WINAPI CreationCallback(
     HSWDEVICE hSwDevice,
@@ -194,9 +166,6 @@ usage:
     if (isCreate) ci.CapabilityFlags |= SWDeviceCapabilitiesDriverRequired;
     ci.pszDeviceDescription = desc;
 
-    self_log(L"==== %s %s\\%s container=%s ====",
-        isCreate ? L"CREATE" : L"REMOVE", enumerator, suffix, guid_str);
-
     g_done = CreateEventW(NULL, TRUE, FALSE, NULL);
     HSWDEVICE hDev = NULL;
 
@@ -207,8 +176,6 @@ usage:
         CreationCallback, NULL,
         &hDev);
 
-    self_log(L"  SwDeviceCreate hr=0x%08X hDev=%p", hr, hDev);
-
     if (FAILED(hr)) {
         fwprintf(stderr, L"ERR SwDeviceCreate: 0x%08X\n", hr);
         free(hw_multi);
@@ -216,38 +183,22 @@ usage:
         return 2;
     }
 
-    /* Poll BOTH the callback event AND CM_Locate_DevNodeW / CM_Get_DevNode_Status
-     * so we can observe exactly when the device transitions into the PnP
-     * tree even if the callback never fires. Log every 500ms so we can
-     * diagnose the phantom-15s-wait on subsequent-run SwDeviceCreates. */
+    /* Poll BOTH the callback event AND CM_Locate_DevNodeW / CM_Get_DevNode_Status,
+     * so a create whose device reaches the PnP tree started is seen even if
+     * the callback never fires. */
     DWORD wait = WAIT_TIMEOUT;
     wchar_t expectedInstId[512];
     swprintf_s(expectedInstId, 512, L"SWD\\%s\\%s", enumerator, suffix);
-    DWORD startTick = GetTickCount();
-    DWORD lastLogTick = startTick;
-    int firstSeenAt = -1;
     for (int polled = 0; polled < 600; polled++) {     /* 60s upper bound */
         if (WaitForSingleObject(g_done, 100) == WAIT_OBJECT_0) {
             wait = WAIT_OBJECT_0;
-            self_log(L"  callback fired at %dms", GetTickCount() - startTick);
             break;
         }
         DEVINST di;
         CONFIGRET cr = CM_Locate_DevNodeW(&di, expectedInstId, CM_LOCATE_DEVNODE_NORMAL);
         ULONG devStatus = 0, problem = 0;
-        if (cr == CR_SUCCESS) {
+        if (cr == CR_SUCCESS)
             CM_Get_DevNode_Status(&devStatus, &problem, di, 0);
-            if (firstSeenAt < 0) {
-                firstSeenAt = (int)(GetTickCount() - startTick);
-                self_log(L"  CM_Locate found device at +%dms  status=0x%08X problem=%u", firstSeenAt, devStatus, problem);
-            }
-        }
-        /* Log heartbeat every 2s so we see the stall in real time. */
-        if (GetTickCount() - lastLogTick > 2000) {
-            lastLogTick = GetTickCount();
-            self_log(L"  poll +%dms  cm=%d devStatus=0x%08X problem=%u",
-                lastLogTick - startTick, (int)cr, devStatus, problem);
-        }
         /* Treat "live in PnP tree with DN_STARTED set" as authoritative
          * success: but only for CREATE. The fast path was added for
          * the subsequent-run SwDeviceCreate reuse-fast-path scenario
@@ -266,15 +217,11 @@ usage:
             wait = WAIT_OBJECT_0;
             g_cb_hr = S_OK;
             wcsncpy_s(g_inst_id, 256, expectedInstId, _TRUNCATE);
-            self_log(L"  device DN_STARTED at +%dms (callback did not fire)", GetTickCount() - startTick);
             break;
         }
     }
     free(hw_multi);
     free(compat_multi);
-
-    self_log(L"  callback wait=%u cb_hr=0x%08X inst_id=%s",
-        wait, g_cb_hr, g_inst_id[0] ? g_inst_id : L"(null)");
 
     if (wait != WAIT_OBJECT_0) {
         fwprintf(stderr, L"ERR callback timeout\n");
@@ -307,14 +254,12 @@ usage:
      * documented path that tears down SWDeviceLifetimeParentPresent devices
      * stuck in FAILEDINSTALL state. */
     hr = SwDeviceSetLifetime(hDev, SWDeviceLifetimeHandle);
-    self_log(L"  SwDeviceSetLifetime(Handle) hr=0x%08X", hr);
     if (FAILED(hr)) {
         fwprintf(stderr, L"ERR SwDeviceSetLifetime: 0x%08X\n", hr);
         SwDeviceClose(hDev);
         return 5;
     }
     SwDeviceClose(hDev);
-    self_log(L"  SwDeviceClose returned: device should now be removed");
     wprintf(L"OK REMOVED\n");
     fflush(stdout);
     return 0;

@@ -48,11 +48,10 @@
 //        whole. OF9b: DeleteMovedAside, MovedAsideLevels and DeleteAsidesIn
 //        no longer exist, so no code recursively deletes a moved-aside tree
 //        a non-administrator may change through a stale grant.
-//   OF10 Diagnostic files. hmswd.exe's TEMP and TMP point at its own
-//        staging folder (ProtectedStaging.ConfineChildTemp), so its
-//        self-log never reaches the user's %TEMP%, and the usbip-win2
-//        installer's own start info (BuildInstallerStartInfo) confines TEMP
-//        the same way. A diagnostic log the SDK
+//   OF10 Diagnostic files. The usbip-win2 installer's own start info
+//        (BuildInstallerStartInfo) points TEMP and TMP at its staging
+//        folder (ProtectedStaging.ConfineChildTemp), not the user's
+//        %TEMP%. A diagnostic log the SDK
 //        opens (DeviceOrchestrator.OpenUserLog) is created with its folder
 //        and is appendable. Its owner is the user only when the process is
 //        elevated (RunAsUser is a no-op otherwise), so that part is a live
