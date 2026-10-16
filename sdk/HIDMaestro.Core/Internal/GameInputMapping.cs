@@ -273,8 +273,10 @@ internal static class GameInputMapping
     }
 
     /// <summary>Delete every key that holds exactly the table HIDMaestro
-    /// wrote through v1.11.0 and that the ledger does not hold for a live
-    /// virtual. Those keys were never removed, and they misread every real
+    /// wrote through v1.11.0 and is not in <paramref name="heldKeys"/>: the
+    /// keys the ledger holds for a live virtual and, from a sweep, the keys
+    /// a running program may read through (RegistryLedger.RemoveLegacyTables).
+    /// Those keys were never removed, and they misread every real
     /// pad of the same identity that is not shaped like the table. Any key
     /// whose content differs from the table is someone else's and stays.
     /// Returns the number removed.</summary>

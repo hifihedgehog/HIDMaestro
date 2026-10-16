@@ -458,7 +458,8 @@ public sealed class HMContext : IDisposable
     /// <para>A null or empty key uses the controller's transport index (see
     /// <see cref="HMController.TransportIndex"/>), which is what
     /// <see cref="CreateController(HMProfile)"/> does. That index is the
-    /// slot number when no other program on the machine uses it, so a
+    /// slot number when no other program on the machine uses it and no
+    /// program built on HIDMaestro 1.12.0 has a controller present, so a
     /// keyless controller's index and default identity can differ between
     /// runs when other programs that embed HIDMaestro are running. Pass a
     /// key for paths that must stay put. The form <c>index:&lt;N&gt;</c> is
@@ -640,7 +641,10 @@ public sealed class HMContext : IDisposable
     /// must be free in this context (the previous controller at that slot
     /// must already be disposed). The controller's transport index is N when
     /// no other program on the machine uses N, and otherwise the lowest free
-    /// index (see <see cref="HMController.TransportIndex"/>).</summary>
+    /// index. While a program built on HIDMaestro 1.12.0 has a controller
+    /// present, it is 64 plus N when that is free. A keyed create first takes
+    /// back the index of a device a closed program left under its identity
+    /// (see <see cref="HMController.TransportIndex"/>).</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/>
     /// is negative.</exception>
     /// <exception cref="InvalidOperationException">If the slot is already

@@ -17,8 +17,9 @@ namespace HIDMaestro.Internal;
 internal static class OwnerSweep
 {
     /// <summary>This process's creates hold it for reading from their lease
-    /// to their last record write, and the background phantom cleanup and
-    /// the exit handler for writing. So the cleanup never removes the record
+    /// to their last record write, and the background phantom cleanup, the
+    /// exit handler and DeviceOrchestrator.RemoveEverything for writing. So
+    /// the cleanup never removes the record
     /// of a devnode this process is in the middle of creating, and the exit
     /// handler never deletes the record of a create in flight.</summary>
     internal static readonly ReaderWriterLockSlim CreateGate = new(LockRecursionPolicy.SupportsRecursion);

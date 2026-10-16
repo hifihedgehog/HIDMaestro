@@ -336,7 +336,8 @@ internal static partial class DeviceOrchestrator
     //        Trigger:  RemoveAllVirtualControllers() and (bool), which
     //                  PadForge calls in its launch sweep, at engine start
     //                  and from its ProcessExit handler
-    //        Scope:    (1), then the packages only when no device of any
+    //        Scope:    (1), the v1.11.0 GameInput tables no running program
+    //                  uses, then the packages only when no device of any
     //                  program is left on the driver. A running program's
     //                  controllers, the caller's own included, stay.
     //
@@ -390,7 +391,9 @@ internal static partial class DeviceOrchestrator
     //                  (OwnerSweep.StartPhantomCleanupOnce)
     //        Scope:    HIDMaestro records of devnodes that are not
     //                  present, except one whose identity claim another
-    //                  program holds, and their interface registrations
+    //                  program holds or whose default identity's index a
+    //                  v1.12.0 program's owner pipe holds, and their
+    //                  interface registrations
     // ════════════════════════════════════════════════════════════════════
 
     // Issue #28 (v1.3.16): resolve a HID child's parent instance ID so the

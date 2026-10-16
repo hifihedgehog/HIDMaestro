@@ -16,12 +16,15 @@ namespace HIDMaestro.Internal;
 /// key of the controller, and is the <c>ControllerIndex</c> the driver
 /// reads. It is the controller's slot number when that index is free on the
 /// machine, so a program running alone gets the numbers it always got, and
-/// the lowest free index otherwise. While a v1.12.0 program runs, whose next
-/// create takes the lowest index free among its own controllers, the search
-/// starts at <see cref="LegacyClearance"/>. An index is free when its claim
-/// can be taken, no v1.12.0 program holds its owner pipe, no present device
-/// records it, no USB/IP import of a program without an owner record uses
-/// it, and none of its named sections and events was made by a program that
+/// the lowest free index otherwise. A keyed create whose identity has a
+/// device a dead or unknown owner left tries that device's index first,
+/// when it is at or above the floor and no one else uses it. While a v1.12.0
+/// program runs, whose next create takes the lowest index free among its
+/// own controllers, the floor is <see cref="LegacyClearance"/>: the search
+/// tries it plus the slot first, then goes upward from it, then below it.
+/// An index is free when its claim can be taken, no v1.12.0 program holds
+/// its owner pipe, no present device records it, no USB/IP import of a
+/// program without an owner record uses it, and none of its named sections and events was made by a program that
 /// is not elevated. Whether its input section exists says nothing: the driver host
 /// of a removed device can hold a section after the removal, until a
 /// process that called XInput on the device polls XInput again or exits.</para>
@@ -57,7 +60,9 @@ internal sealed class ControllerLease : IDisposable
     /// <summary>Take a transport index and an identity for a controller at
     /// <paramref name="slot"/>, and record it.</summary>
     /// <exception cref="HMResourceInUseException">A live program holds the
-    /// identity, or every candidate index is held.</exception>
+    /// identity, a v1.12.0 program's present device has it, the key is
+    /// <c>index:&lt;N&gt;</c> with N below the floor a running v1.12.0
+    /// program sets, or every candidate index is held.</exception>
     public static ControllerLease Acquire(int slot, string? identityKey, string backend, string profileId)
     {
         MachineClaims.EnsureOwner();

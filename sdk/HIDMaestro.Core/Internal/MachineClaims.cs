@@ -87,8 +87,8 @@ internal static partial class MachineClaims
     // program's.
     private static SafeFileHandle? s_ownerClaim;
     private static bool s_recordWritten;
-    // This process's start time for its record, read once: a record goes
-    // when its last controller does and comes back with the next one.
+    // This process's start time for its record, read once. The record stays
+    // until the process exits (RemoveController, DeleteOwnRecord).
     private static long s_startTimeUtc;
 
     /// <summary>This process's owner id, a GUID drawn once.</summary>

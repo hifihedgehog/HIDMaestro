@@ -603,8 +603,8 @@ internal sealed partial class OwnerCensus
 
     /// <summary>How many transport indices the legacy-table check probes
     /// for an input section. v1.11.0 takes the lowest index its own context
-    /// has free, and a create of this release starts at 64 at most while a
-    /// v1.12.0 program runs.</summary>
+    /// has free. A create of this release needs no probe: its record entry,
+    /// written before its sections, accounts for its index.</summary>
     private const int SectionProbeLimit = 128;
 
     /// <summary>The GameInput key names (<see cref="GameInputMapping.KeyName"/>)

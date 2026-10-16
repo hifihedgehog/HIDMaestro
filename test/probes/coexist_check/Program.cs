@@ -99,8 +99,9 @@
 //      the records, a device no record names whose claims a running
 //      program holds, a sweep whose create of another program lands
 //      between its census and its removal, a v1.12.0 program's later
-//      creates, a lease nothing references, and an exit while a create is
-//      in flight. SectionW.cs has the detail.
+//      creates, a lease nothing references, an exit while a create is in
+//      flight, a program's own exit handler that creates or disposes, and
+//      the removal of v1.11.0 GameInput tables. SectionW.cs has the detail.
 //   X. Machine-wide names a program that is not elevated creates first:
 //      the deploy lock, the registry ledger's lock, the claim pipes, and a
 //      transport index's events and sections. Each is created by a thread
