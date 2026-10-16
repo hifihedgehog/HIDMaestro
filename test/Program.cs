@@ -77,8 +77,13 @@ partial class Program
         bool readOnlyCmd = args.Length > 0 && args[0].ToLowerInvariant() is
             "list" or "search" or "info" or
             "build-descriptor" or "extract-profile" or
-            "probe-xusb" or "xusb-vibrate" or
+            "probe-xusb" or "xusb-vibrate" or "verify-payload" or
             "make-custom-profile";  // pure file-IO + descriptor synthesis, no PnP
+
+        // sdl-list creates its own controllers and refuses on its own without
+        // elevation, so a batch run never meets an elevation prompt. It stops
+        // no other process and purges nothing it did not create.
+        if (args.Length > 0 && args[0].ToLowerInvariant() == "sdl-list") readOnlyCmd = true;
 
         // Single-instance: kill any other HIDMaestroTest processes: but NEVER for
         // read-only probes, which must coexist with a running emulate.
@@ -136,6 +141,7 @@ partial class Program
             Console.WriteLine("  HIDMaestroTest search <query>          Search profiles by name/vendor");
             Console.WriteLine("  HIDMaestroTest info <id>               Show profile details");
             Console.WriteLine("  HIDMaestroTest cleanup                 Remove all HIDMaestro virtual devices");
+            Console.WriteLine("  HIDMaestroTest cleanup --keep-install  The same, with the installed driver packages kept");
             Console.WriteLine("  HIDMaestroTest sdk-demo [id]           Minimal SDK consumer demo (5s)");
             Console.WriteLine("  HIDMaestroTest latency [id] [iters]    Measure input latency (SubmitState -> XInput)");
             Console.WriteLine("  HIDMaestroTest oem set <vid> <pid> <label>");
@@ -150,6 +156,12 @@ partial class Program
             Console.WriteLine("  HIDMaestroTest make-custom-profile <out-dir> [id] [vid-hex] [pid-hex]");
             Console.WriteLine("                                        Write a sample custom profile JSON (read-only)");
             Console.WriteLine("  HIDMaestroTest probe-xusb             Probe live xinputhid XUSB IOCTL codes (read-only)");
+            Console.WriteLine("  HIDMaestroTest probe-xusb --record <out-dir> <profile-id>");
+            Console.WriteLine("                                        Record the HIDMaestro companion's answers (read-only)");
+            Console.WriteLine("  HIDMaestroTest verify-payload <HIDMaestro.Core.dll> <build-dir>");
+            Console.WriteLine("                                        Compare an SDK build's driver with the build directory (read-only)");
+            Console.WriteLine("  HIDMaestroTest sdl-list <out-dir> <SDL3.dll> <id>...");
+            Console.WriteLine("                                        Record SDL 3.4.18's joystick list per profile");
             Console.WriteLine("  HIDMaestroTest xusb-vibrate <index> [hex9]");
             Console.WriteLine("                                        Send an XUSB rumble to an XInput slot (read-only)");
             Console.WriteLine("  HIDMaestroTest issue6-repro           Reproduce the issue #6 PID-FFB coalescing case");
@@ -164,7 +176,7 @@ partial class Program
             "list"     => ListProfiles(),
             "search"   => SearchProfiles(args.Length > 1 ? args[1] : ""),
             "info"     => ShowProfile(args.Length > 1 ? args[1] : ""),
-            "cleanup"  => RunCleanup(),
+            "cleanup"  => RunCleanup(args.Skip(1).ToArray()),
             "sdk-demo" => SdkDemo(args.Skip(1).ToArray()),
             "oem"      => OemCommand(args.Skip(1).ToArray()),
             "build-descriptor" => BuildDescriptorCommand(args.Skip(1).ToArray()),
@@ -172,8 +184,10 @@ partial class Program
             "extract-profile" => ExtractProfileCommand(args.Skip(1).ToArray()),
             "emulate-file" => EmulateFileCommand(args.Skip(1).ToArray()),
             "make-custom-profile" => MakeCustomProfile(args.Skip(1).ToArray()),
-            "probe-xusb" => ProbeXusb(),
+            "probe-xusb" => ProbeXusb(args.Skip(1).ToArray()),
             "xusb-vibrate" => XusbVibrate(args.Skip(1).ToArray()),
+            "verify-payload" => VerifyPayload(args.Skip(1).ToArray()),
+            "sdl-list" => SdlList(args.Skip(1).ToArray()),
             "latency"  => LatencyBench(args.Skip(1).ToArray()),
             _          => Error($"Unknown command: {args[0]}")
         };
@@ -1173,13 +1187,20 @@ partial class Program
 
     // ── cleanup ──
 
-    static int RunCleanup()
+    static int RunCleanup(string[] args)
     {
         // Uninstall-grade: every HIDMaestro controller on the machine,
         // whoever made it, then the driver packages. The overload without a
         // scope leaves running programs' controllers alone since v1.13.0.
-        Console.WriteLine("Removing all HIDMaestro virtual devices...");
-        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: false);
+        // --keep-install removes the same controllers and keeps the driver
+        // packages and the install record, so a bench run that installed
+        // the build under test cleans up without losing it.
+        bool keepInstall = args.Length == 1 && args[0] == "--keep-install";
+        if (args.Length > 0 && !keepInstall) return Error("Usage: cleanup [--keep-install]");
+        Console.WriteLine(keepInstall
+            ? "Removing all HIDMaestro virtual devices, keeping the installed driver packages..."
+            : "Removing all HIDMaestro virtual devices...");
+        HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: keepInstall);
         Console.WriteLine("  OK");
         return 0;
     }
@@ -1746,8 +1767,10 @@ partial class Program
         _ => "?"
     };
 
-    static int ProbeXusb()
+    static int ProbeXusb(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--record") return ProbeXusbRecord(args[1], args[2]);
+        if (args.Length != 0) return Error("Usage: probe-xusb [--record <out-dir> <profile-id>]");
         Console.WriteLine("=== XUSB interface probe ===\n");
         var paths = EnumXusbInterfaces();
         if (paths.Count == 0)
@@ -1803,6 +1826,84 @@ partial class Program
             Console.WriteLine();
         }
         Console.WriteLine("To vibrate: HIDMaestroTest xusb-vibrate <index> [hex_9_bytes]");
+        return 0;
+    }
+
+    // probe-xusb --record <out-dir> <profile-id>: the answers of the one
+    // HIDMaestro XUSB companion present, for device_oracle_check's
+    // compare-live mode, in its golden format (case live-xusb-<profile-id>).
+    // The caller holds a controller of that profile while this runs. The
+    // companion's interface is SWD#HIDMAESTRO#<token>#{EC87F1E3-...}
+    // (SwdDeviceFactory.Create with enumerator HIDMAESTRO,
+    // DeviceOrchestrator.cs:909-916), so a real XInput pad is never
+    // recorded. Fails unless exactly one is present.
+    //
+    // Stream xusb/<profile-id>/<ioctl> per IOCTL: request (the input bytes),
+    // ok, error (u32, 0 on success), returned (u32), bytes (the returned
+    // bytes). The IOCTLs are the three the text mode sends, and the battery
+    // and base-bus reads xinput sends, with OpenXInput's buffers (6af3c14
+    // OpenXinput.cpp): battery in {XUSBVersion 0x0102, user index 0,
+    // BATTERY_DEVTYPE_GAMEPAD} out 4 (GetBatteryInformation, 2684-2710,
+    // structs 327-338), base bus in {XUSBVersion 0x0104, 2} padded to 36,
+    // out 949 (GetBaseBusInformation, 2643-2662, structs 284-325).
+    const uint IOCTL_XUSB_GET_BATTERY_INFORMATION = 0x8000E018;
+    const uint IOCTL_XUSB_GET_INFORMATION_EX = 0x8000E3FC;
+
+    static int ProbeXusbRecord(string outDir, string profileId)
+    {
+        Console.WriteLine($"=== XUSB companion answers for {profileId}, recorded for device_oracle_check ===");
+        // The interface can arrive after the create returns, so wait for it.
+        List<string> ours;
+        var wait = Stopwatch.StartNew();
+        while ((ours = EnumXusbInterfaces()
+                   .Where(p => p.Contains("#HIDMAESTRO#", StringComparison.OrdinalIgnoreCase)).ToList()).Count == 0
+               && wait.ElapsedMilliseconds < 10000)
+            Thread.Sleep(200);
+        if (ours.Count != 1)
+            return Error($"{ours.Count} HIDMaestro XUSB interfaces are present, the record needs exactly one");
+        using var h = OpenXusbLikeChrome(ours[0]);
+        if (h.IsInvalid)
+            return Error($"CreateFile failed, error {Marshal.GetLastWin32Error()}");
+
+        var baseBus = new byte[36];
+        baseBus[0] = 0x04; baseBus[1] = 0x01; baseBus[2] = 0x02;
+        var requests = new (string name, uint code, byte[] input, int outLen)[]
+        {
+            ("get-information", IOCTL_XUSB_GET_INFORMATION, Array.Empty<byte>(), 12),
+            ("get-capabilities-24", IOCTL_XUSB_GET_CAPABILITIES, new byte[] { 0x01, 0x01, 0x00 }, 24),
+            ("get-capabilities-36", IOCTL_XUSB_GET_CAPABILITIES, new byte[] { 0x02, 0x01, 0x00 }, 36),
+            ("get-battery-information", IOCTL_XUSB_GET_BATTERY_INFORMATION, new byte[] { 0x02, 0x01, 0x00, 0x00 }, 4),
+            ("get-information-ex", IOCTL_XUSB_GET_INFORMATION_EX, baseBus, 949),
+        };
+        using var rec = new LiveRecorder(outDir, "live-xusb-" + profileId);
+        foreach (var (name, code, input, outLen) in requests)
+        {
+            var inBuf = new byte[Math.Max(input.Length, 1)];
+            input.CopyTo(inBuf, 0);
+            var outBuf = new byte[outLen];
+            var inPin = GCHandle.Alloc(inBuf, GCHandleType.Pinned);
+            var outPin = GCHandle.Alloc(outBuf, GCHandleType.Pinned);
+            bool ok;
+            int err;
+            uint ret;
+            try
+            {
+                ok = DeviceIoControl(h, code,
+                    input.Length == 0 ? IntPtr.Zero : inPin.AddrOfPinnedObject(), (uint)input.Length,
+                    outPin.AddrOfPinnedObject(), (uint)outLen, out ret, IntPtr.Zero);
+                err = ok ? 0 : Marshal.GetLastWin32Error();
+            }
+            finally { inPin.Free(); outPin.Free(); }
+            rec.Stream($"xusb/{profileId}/{name}");
+            rec.Out("request", input);
+            rec.OutByte("ok", ok ? (byte)1 : (byte)0);
+            rec.OutU32("error", (uint)err);
+            rec.OutU32("returned", ret);
+            rec.Out("bytes", outBuf.AsSpan(0, (int)Math.Min(ret, (uint)outLen)));
+            Console.WriteLine($"    {name}: ok={ok} err={err} returned={ret} bytes={HexSlice(outBuf, (int)ret)}");
+        }
+        rec.Save();
+        Console.WriteLine($"  wrote {outDir}");
         return 0;
     }
 

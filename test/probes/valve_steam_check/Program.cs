@@ -32,6 +32,12 @@
 // here would type into whatever window has focus.
 //
 // Exit 0 PASS, 1 FAIL, 2 SKIP (no Steam install, or it would not start).
+//
+// record-switch-pro <out dir> hands switch-pro to Steam the same way and
+// records what Steam does with it, for device_oracle_check (see
+// RecordSwitchPro below). Exit 0 recorded, 1 a step failed or bad arguments,
+// 2 SKIP as above, 3 refused without elevation, before anything is created
+// or started.
 
 using System;
 using System.Collections.Generic;
@@ -123,19 +129,12 @@ static class ValveSteamCheck
         _                         => $"0x{id:X2}",
     };
 
-    static int Main()
+    /// <summary>Start Steam to the tray when it is not running, and wait
+    /// until it writes its controller log. False, with the reason printed as
+    /// a SKIP, when it cannot.</summary>
+    static bool StartSteam(string root, string log, out bool startedHere)
     {
-        string? root = SteamRoot();
-        if (root == null)
-        {
-            Console.WriteLine("[SKIP] no Steam client installed on this machine.");
-            return 2;
-        }
-        string log = Path.Combine(root, "logs", "controller.txt");
-        Console.WriteLine("=== Valve personas against the real Steam client ===");
-        Console.WriteLine($"  Steam: {root}");
-
-        bool startedHere = false;
+        startedHere = false;
         if (!SteamRunning())
         {
             // -silent starts Steam to the tray with no window, so a battery
@@ -155,7 +154,7 @@ static class ValveSteamCheck
             catch (Exception ex)
             {
                 Console.WriteLine($"[SKIP] could not start Steam: {ex.Message}");
-                return 2;
+                return false;
             }
             // Steam has to be far enough up to be writing its controller
             // log before any of this means anything.
@@ -170,13 +169,66 @@ static class ValveSteamCheck
         if (!SteamRunning())
         {
             Console.WriteLine("[SKIP] Steam did not come up.");
-            return 2;
+            return false;
         }
         if (!File.Exists(log))
         {
             Console.WriteLine("[SKIP] Steam is running but writes no controller log here.");
+            return false;
+        }
+        return true;
+    }
+
+    static void ShutdownSteam(string root)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  shutting Steam back down (this run started it)");
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = Path.Combine(root, "steam.exe"),
+                Arguments = "-shutdown",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            // Wait for the whole tree, steam.exe and its helpers, then let
+            // the device claims actually drop. The next scenario
+            // creates Valve personas and reads them through stock
+            // SDL, and it cannot see one Steam still owns.
+            for (int i = 0; i < 120 && AnySteamRunning(); i++) Thread.Sleep(500);
+            Thread.Sleep(3000);
+            Console.WriteLine(AnySteamRunning()
+                ? "  WARNING: Steam processes still present after shutdown"
+                : "  Steam is fully down");
+        }
+        catch { }
+    }
+
+    static int Main(string[] args)
+    {
+        if (args.Length == 2 && args[0] == "record-switch-pro") return RecordSwitchPro(args[1]);
+        if (args.Length != 0)
+        {
+            Console.WriteLine("usage: ValveSteamCheck [record-switch-pro <out dir>]");
+            return 1;
+        }
+        return Checks();
+    }
+
+    static int Checks()
+    {
+        string? root = SteamRoot();
+        if (root == null)
+        {
+            Console.WriteLine("[SKIP] no Steam client installed on this machine.");
             return 2;
         }
+        string log = Path.Combine(root, "logs", "controller.txt");
+        Console.WriteLine("=== Valve personas against the real Steam client ===");
+        Console.WriteLine($"  Steam: {root}");
+
+        if (!StartSteam(root, log, out bool startedHere)) return 2;
 
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
@@ -336,31 +388,7 @@ static class ValveSteamCheck
         }
         finally
         {
-            if (startedHere)
-            {
-                Console.WriteLine();
-                Console.WriteLine("  shutting Steam back down (this run started it)");
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = Path.Combine(root, "steam.exe"),
-                        Arguments = "-shutdown",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                    });
-                    // Wait for the whole tree, not just steam.exe, then let
-                    // the device claims actually drop. The next scenario
-                    // creates Valve personas and reads them through stock
-                    // SDL, and it cannot see one Steam still owns.
-                    for (int i = 0; i < 120 && AnySteamRunning(); i++) Thread.Sleep(500);
-                    Thread.Sleep(3000);
-                    Console.WriteLine(AnySteamRunning()
-                        ? "  WARNING: Steam processes still present after shutdown"
-                        : "  Steam is fully down");
-                }
-                catch { }
-            }
+            if (startedHere) ShutdownSteam(root);
         }
 
         Console.WriteLine();
@@ -368,5 +396,157 @@ static class ValveSteamCheck
             ? "=== STEAM CLAIMS AND CLASSIFIES ALL THREE VALVE PERSONAS ==="
             : $"=== {s_fail} check(s) FAILED ===");
         return s_fail == 0 ? 0 : 1;
+    }
+
+    // record-switch-pro: Steam's claim of the Switch Pro persona.
+    //
+    // Steam claims a Switch Pro through SDL's HIDAPI Switch driver, which
+    // runs the Bluetooth init against the device's responder, and logs it in
+    // controller.txt the way it logs a Valve device. Its lines for the
+    // persona, from this machine's controller.txt on 2026-08-21: "type: 057e
+    // 2009", "Product:      Nintendo Switch Pro Controller", "!! Steam
+    // controller device opened for index <n>.", "Controller using HIDAPI
+    // driver, vid=0x057e, pid=0x2009", "Nintendo Controller subtype 3" and
+    // the config sets configset_controller_switch_pro.vdf and
+    // configset_NSP<MAC>.vdf, the MAC the driver serves. Nothing is
+    // submitted, as above.
+    //
+    // Case live-steam-switch-pro, streams:
+    //   steam/switch-pro/index<N>/log     found, product, opened, driver,
+    //                                     subtype, configsets (sorted, comma
+    //                                     separated) and closed: each the
+    //                                     line's text after the timestamp or
+    //                                     its absence as an empty output, and
+    //                                     closed 1 when Steam logged a
+    //                                     hid_read failure close after the
+    //                                     open
+    //   steam/switch-pro/index<N>/writes  every output report Steam wrote,
+    //                                     as runs: write (the source, the
+    //                                     report ID and the data, with the
+    //                                     packet counter of reports 0x01 and
+    //                                     0x10 zeroed) and repeat (u32)
+    // How many writes arrive and the counter depend on time: a comparison
+    // masks repeat. The counter is the low nibble of the first data byte,
+    // which SDL increments per packet (SDL_hidapi_switch.c:476 and 482 at
+    // SDL-reference 804cf65).
+
+    static int RecordSwitchPro(string outDir)
+    {
+        Console.WriteLine("=== Steam's claim of switch-pro, recorded for device_oracle_check ===");
+        using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
+        {
+            if (!new System.Security.Principal.WindowsPrincipal(id)
+                    .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+            {
+                Console.WriteLine("  [REFUSED] record-switch-pro creates a controller and needs elevation. Nothing was created or started");
+                return 3;
+            }
+        }
+        string? root = SteamRoot();
+        if (root == null)
+        {
+            Console.WriteLine("[SKIP] no Steam client installed on this machine.");
+            return 2;
+        }
+        string log = Path.Combine(root, "logs", "controller.txt");
+        if (!StartSteam(root, log, out bool startedHere)) return 2;
+
+        using var rec = new LiveRecorder(outDir, "live-steam-switch-pro");
+        var written = new List<byte[]>();
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            var prof = ctx.GetProfile("switch-pro") ?? throw new InvalidOperationException("switch-pro is not in the catalog");
+            long baseline = LogLength(log);
+            string fresh = string.Empty;
+            int index;
+            using (var c = ctx.CreateController(prof))
+            {
+                index = c.TransportIndex;
+                c.OutputReceived += (_, pkt) =>
+                {
+                    var w = new byte[pkt.Data.Length + 2];
+                    w[0] = (byte)pkt.Source;
+                    w[1] = pkt.ReportId;
+                    pkt.Data.Span.CopyTo(w.AsSpan(2));
+                    if ((pkt.ReportId == 0x01 || pkt.ReportId == 0x10) && w.Length > 2) w[2] &= 0xF0;
+                    lock (written) written.Add(w);
+                };
+
+                bool opened = false;
+                for (int i = 0; i < 90 && !opened; i++)
+                {
+                    Thread.Sleep(1000);
+                    fresh = ReadLogFrom(log, baseline);
+                    opened = fresh.Contains("type: 057e 2009", StringComparison.OrdinalIgnoreCase)
+                          && fresh.Contains("Steam controller device opened", StringComparison.Ordinal);
+                }
+                if (!opened) throw new InvalidOperationException("Steam did not open switch-pro in 90 s");
+                // Hold it while Steam configures it, as the Valve personas
+                // are held above, so its writes and config sets land.
+                Thread.Sleep(15000);
+                fresh = ReadLogFrom(log, baseline);
+            }
+
+            string head = $"steam/switch-pro/index{index}";
+            rec.Stream(head + "/log");
+            string Line(string contains)
+            {
+                foreach (var l in fresh.Split('\n'))
+                {
+                    int at = l.IndexOf(contains, StringComparison.Ordinal);
+                    if (at >= 0) return l.Substring(at).TrimEnd('\r');
+                }
+                return string.Empty;
+            }
+            void Text(string tag, string s) => rec.Out(tag, System.Text.Encoding.ASCII.GetBytes(s));
+            Text("found", Line("type: 057e 2009"));
+            Text("product", Line("Product:      Nintendo"));
+            Text("opened", fresh.Contains("Steam controller device opened", StringComparison.Ordinal) ? "opened" : "");
+            Text("driver", Line("Controller using HIDAPI driver, vid=0x057e, pid=0x2009"));
+            Text("subtype", Line("Nintendo Controller subtype"));
+            var sets = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var l in fresh.Split('\n'))
+            {
+                int at = l.IndexOf("configset_", StringComparison.Ordinal);
+                if (at < 0 || !l.Contains("found config set file on-disk", StringComparison.Ordinal)) continue;
+                int end = l.IndexOf(".vdf", at, StringComparison.Ordinal);
+                if (end > at) sets.Add(l.Substring(at, end + 4 - at));
+            }
+            Text("configsets", string.Join(",", sets));
+            int openAt = fresh.IndexOf("Steam controller device opened", StringComparison.Ordinal);
+            rec.OutByte("closed", (byte)(openAt >= 0 && fresh.IndexOf("closed after hid_read failure", openAt, StringComparison.Ordinal) >= 0 ? 1 : 0));
+
+            rec.Stream(head + "/writes");
+            List<byte[]> all;
+            lock (written) all = new List<byte[]>(written);
+            byte[]? last = null;
+            uint count = 0;
+            foreach (var w in all)
+            {
+                if (last != null && w.AsSpan().SequenceEqual(last)) { count++; continue; }
+                if (last != null) { rec.Out("write", last); rec.OutU32("repeat", count); }
+                last = w;
+                count = 1;
+            }
+            if (last != null) { rec.Out("write", last); rec.OutU32("repeat", count); }
+            Console.WriteLine($"  Steam opened switch-pro and wrote {all.Count} output report(s)");
+
+            rec.Save();
+            Console.WriteLine($"  wrote {outDir}");
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  [FAIL] {e.GetType().Name}: {e.Message}");
+            return 1;
+        }
+        finally
+        {
+            Thread.Sleep(3000);
+            if (startedHere) ShutdownSteam(root);
+        }
     }
 }

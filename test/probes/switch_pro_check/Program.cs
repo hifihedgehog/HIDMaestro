@@ -17,8 +17,14 @@
 // Runs fully headless: no Steam, no SDL, no physical hardware. Creates
 // the controller, drives it, asserts, cleans up. Exit 0 PASS / 1 FAIL.
 // Requires elevation (CreateController).
+//
+// record <out dir> instead records the same init and 3 s of the stream for
+// device_oracle_check's compare-live mode (see Record below). Exit 0
+// recorded, 1 a step failed, 2 bad arguments, 3 refused without elevation,
+// before anything is created.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -85,18 +91,33 @@ internal static class Program
 
     // Exact-length write for negative tests (the 64-byte SDL USB framing
     // must FAIL under the BT descriptor).
-    static bool HidWriteRaw(byte[] buf, int len)
+    static bool HidWriteRaw(byte[] report, int len)
     {
+        var buf = GC.AllocateArray<byte>(len, pinned: true);
+        Array.Copy(report, buf, len);
         var ov = new NativeOverlapped { EventHandle = s_writeEvent };
         if (!WriteFile(s_hid, buf, (uint)len, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997 /* ERROR_IO_PENDING */)
             return false;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint written, 1000, false))
         {
-            CancelIoEx(s_hid, IntPtr.Zero);
+            CancelAndWait(ref ov);
             return false;
         }
         return written == (uint)len;
+    }
+
+    // A canceled read or write still completes, and the system writes its
+    // status into the OVERLAPPED and its bytes into the buffer when it does.
+    // CancelIoEx on Microsoft Learn: "The application must not free or reuse
+    // the OVERLAPPED structure associated with the canceled I/O operations
+    // until they have completed." The OVERLAPPED lives in the caller's
+    // frame, so this waits for the completion before the frame returns, and
+    // the buffers are pinned so the collector cannot move them meanwhile.
+    static void CancelAndWait(ref NativeOverlapped ov)
+    {
+        CancelIoEx(s_hid, IntPtr.Zero);
+        GetOverlappedResultEx(s_hid, ref ov, out _, 0xFFFFFFFF /* INFINITE */, false);
     }
 
     // BT descriptor: InputReportByteLength is 362 (the 0x31-0x33 family).
@@ -106,14 +127,14 @@ internal static class Program
     // length so shape asserts can guard descriptor drift.
     static byte[]? HidRead(int timeoutMs)
     {
-        var buf = new byte[362];
+        var buf = GC.AllocateArray<byte>(362, pinned: true);
         var ov = new NativeOverlapped { EventHandle = s_readEvent };
         if (!ReadFile(s_hid, buf, 362, IntPtr.Zero, ref ov)
             && Marshal.GetLastWin32Error() != 997)
             return null;
         if (!GetOverlappedResultEx(s_hid, ref ov, out uint read, (uint)timeoutMs, false))
         {
-            CancelIoEx(s_hid, IntPtr.Zero);
+            CancelAndWait(ref ov);
             return null;
         }
         s_lastReadLen = (int)read;
@@ -158,7 +179,15 @@ internal static class Program
         return ReadUntil(0x21, timeoutMs, r => r[14] == id && (r[13] & 0x80) != 0);
     }
 
-    static int Main()
+    static int Main(string[] args)
+    {
+        if (args.Length == 0) return Checks();
+        if (args.Length == 2 && args[0] == "record") return Record(args[1]);
+        Console.WriteLine("usage: SwitchProCheck [record <out dir>]");
+        return 2;
+    }
+
+    static int Checks()
     {
         Console.WriteLine("=== Switch Pro protocol responder check (issues #33/#36/#37) ===");
 
@@ -421,5 +450,297 @@ internal static class Program
         pump.Join(500);
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return 1;
+    }
+
+    // ── record: the init and the stream for device_oracle_check ─────────
+    //
+    // The same pad, pump and writes as phases 1 and 2 above, then 3 s of
+    // the stream, with every read the host makes recorded in order. Case
+    // live-switch-pro, streams:
+    //   switch-pro/index<N>/state          body: the 48-byte body the pump
+    //                                      submits (SwitchProPacker.BuildBody
+    //                                      of the neutral state, whose sticks
+    //                                      resolve to 0.5, HMController.cs:997)
+    //   switch-pro/index<N>/pre-handshake  300 ms of reads before any write
+    //   switch-pro/index<N>/init           per write, in order: write (the
+    //                                      bytes written), writeOk, writeError
+    //                                      (u32, 0 on success), written (u32),
+    //                                      the frames read before the reply,
+    //                                      then reply and timer, or noReply
+    //   switch-pro/index<N>/stream         3 s of reads after the init, then
+    //                                      timerSteps
+    //
+    // What depends on time, and how it is kept apart so a comparison can
+    // mask exactly it. The driver's timer byte (byte 1 of 0x21 and 0x30,
+    // driver.c:1631 and 1855) counts every reply and every stream frame,
+    // so its value depends on how many frames streamed first: a reply is
+    // recorded with byte 1 zeroed under reply and the byte itself under
+    // timer. How many frames arrive in a window, and whether any arrive
+    // ahead of a reply, depends on the 15 ms stream clock (driver.c:1819):
+    // reads are recorded as runs, the frame with byte 1 zeroed under frame
+    // (or skipped, ahead of a reply) and the run's length under repeat (or
+    // skippedRepeat). timerSteps lists the distinct differences between
+    // consecutive stream timers in first-seen order. A comparison masks
+    // timer, repeat, skipped, skippedRepeat and timerSteps, and every other
+    // byte must match. Reads are the HID class's whole completions, 362
+    // bytes under the Bluetooth descriptor.
+
+    /// <summary>A record-mode write: the BOOLEAN, the error and the count,
+    /// where <see cref="HidWriteRaw"/> folds them into one bool.</summary>
+    static (bool ok, uint error, uint written) RecordWrite(byte[] report, int len)
+    {
+        var buf = GC.AllocateArray<byte>(len, pinned: true);
+        Array.Copy(report, buf, len);
+        var ov = new NativeOverlapped { EventHandle = s_writeEvent };
+        if (!WriteFile(s_hid, buf, (uint)len, IntPtr.Zero, ref ov))
+        {
+            int err = Marshal.GetLastWin32Error();
+            if (err != 997 /* ERROR_IO_PENDING */) return (false, (uint)err, 0);
+        }
+        if (!GetOverlappedResultEx(s_hid, ref ov, out uint written, 1000, false))
+        {
+            int err = Marshal.GetLastWin32Error();
+            CancelAndWait(ref ov);
+            return (false, (uint)err, 0);
+        }
+        return (true, 0, written);
+    }
+
+    /// <summary>Consecutive identical reads folded into one frame and a
+    /// count, byte 1 zeroed where it is the timer.</summary>
+    sealed class Runs
+    {
+        readonly LiveRecorder _rec;
+        readonly string _frameTag, _repeatTag;
+        byte[]? _last;
+        uint _count;
+
+        public Runs(LiveRecorder rec, string frameTag, string repeatTag)
+        {
+            _rec = rec; _frameTag = frameTag; _repeatTag = repeatTag;
+        }
+
+        public void Add(byte[] masked)
+        {
+            if (_last != null && masked.AsSpan().SequenceEqual(_last)) { _count++; return; }
+            Flush();
+            _last = masked;
+            _count = 1;
+        }
+
+        public void Flush()
+        {
+            if (_last == null) return;
+            _rec.Out(_frameTag, _last);
+            _rec.OutU32(_repeatTag, _count);
+            _last = null;
+        }
+    }
+
+    static bool HasTimer(byte reportId) => reportId == 0x21 || reportId == 0x30;
+
+    /// <summary>The read as the host got it, with the timer byte zeroed.</summary>
+    static byte[] Masked(byte[] r, int len)
+    {
+        var m = r.AsSpan(0, len).ToArray();
+        if (HasTimer(m[0])) m[1] = 0;
+        return m;
+    }
+
+    static bool IsElevated()
+    {
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(id)
+            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
+    static int Record(string outDir)
+    {
+        Console.WriteLine("=== Switch Pro init and stream, recorded for device_oracle_check ===");
+        if (!IsElevated())
+        {
+            Console.WriteLine("  [REFUSED] record creates a controller and needs elevation. Nothing was created");
+            return 3;
+        }
+
+        using var rec = new LiveRecorder(outDir, "live-switch-pro");
+        var pumpStop = false;
+        Thread? pump = null;
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            var profile = ctx.GetProfile("switch-pro")
+                ?? throw new InvalidOperationException("switch-pro profile missing");
+            using var ctrl = ctx.CreateController(profile);
+            string head = $"switch-pro/index{ctrl.TransportIndex}";
+
+            var neutral = new HMGamepadState();
+            // The controller is disposed when the try block ends, before the
+            // finally stops this thread, so a submit can meet a disposed
+            // controller on the way out.
+            pump = new Thread(() =>
+            {
+                try
+                {
+                    while (!Volatile.Read(ref pumpStop))
+                    {
+                        ctrl.SubmitState(neutral);
+                        Thread.Sleep(8);
+                    }
+                }
+                catch (ObjectDisposedException) { }
+            })
+            { IsBackground = true };
+            pump.Start();
+
+            rec.Stream(head + "/state");
+            var body = new byte[SwitchProPacker.BodySize];
+            SwitchProPacker.BuildBody(in neutral, 0.5, 0.5, 0.5, 0.5, body);
+            rec.Out("body", body);
+
+            string? path = null;
+            for (int i = 0; i < 50 && path == null; i++)
+            {
+                path = HidDeviceEnumerator.Enumerate()
+                    .FirstOrDefault(d => d.VendorId == 0x057E && d.ProductId == 0x2009
+                        && d.SerialNumberString != null
+                        && d.SerialNumberString.StartsWith("HM-CTL-"))?.DevicePath;
+                if (path == null) Thread.Sleep(100);
+            }
+            if (path == null) throw new InvalidOperationException("the virtual pad's HID interface did not appear");
+            s_readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+            s_writeEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+            s_hid = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_RW,
+                                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+            if (s_hid.IsInvalid) throw new InvalidOperationException($"CreateFile failed, error {Marshal.GetLastWin32Error()}");
+
+            // Before any protocol traffic the driver streams 0x3F simple
+            // frames (driver.c:1843-1849, SwitchBuildSimpleFrame).
+            rec.Stream(head + "/pre-handshake");
+            var pre = new Runs(rec, "frame", "repeat");
+            for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 300;)
+            {
+                var r = HidRead(100);
+                if (r != null) pre.Add(Masked(r, s_lastReadLen));
+            }
+            pre.Flush();
+
+            rec.Stream(head + "/init");
+            var skipped = new Runs(rec, "skipped", "skippedRepeat");
+
+            // Phase 1: SDL's BTrySetupUSB opens with the 0x80 0x02 handshake
+            // at the 64-byte USB size (SDL-reference 804cf65
+            // SDL_hidapi_switch.c:707-714). Under the Bluetooth descriptor
+            // HidClass rejects it, or no 0x81 comes back.
+            var cmd80 = new byte[64]; cmd80[0] = 0x80; cmd80[1] = 0x02;
+            RecordExchange(rec, skipped, cmd80, 64, 0x81, 400, _ => true);
+
+            // Phase 2: SDL's Bluetooth init, in phase 2's order and bytes.
+            // At SDL-reference 804cf65 SDL_hidapi_switch.c: device info
+            // (BReadDeviceInfo, 676), the SPI reads of LoadStickCalibration
+            // (979, user 0x8010 at 991-995 then factory 0x603D at 1020) and
+            // LoadIMUCalibration (0x6020, 1106-1115), the stick parameters
+            // (0x6086, issue #36), SetVibrationEnabled (0x48, 731),
+            // SetIMUEnabled (0x40, 973), player lights (0x30), an unknown
+            // subcommand (0x50) and SetInputMode 0x30 (0x03, 735). Packets
+            // as ConstructSubcommand builds them (469-484) at the 49-byte
+            // output size, each reply matched on its ID and ACK bit as
+            // ReadSubcommandReply does (414-424).
+            var subcommands = new (byte id, byte[] args)[]
+            {
+                (0x02, Array.Empty<byte>()),
+                (0x10, new byte[] { 0x10, 0x80, 0x00, 0x00, 22 }),
+                (0x10, new byte[] { 0x3D, 0x60, 0x00, 0x00, 18 }),
+                (0x10, new byte[] { 0x20, 0x60, 0x00, 0x00, 24 }),
+                (0x10, new byte[] { 0x86, 0x60, 0x00, 0x00, 18 }),
+                (0x48, new byte[] { 0x01 }),
+                (0x40, new byte[] { 0x01 }),
+                (0x30, new byte[] { 0x01 }),
+                (0x50, Array.Empty<byte>()),
+                (0x03, new byte[] { 0x30 }),
+            };
+            s_counter = 0;
+            foreach (var (id, a) in subcommands)
+            {
+                var pkt = new byte[49];
+                pkt[0] = 0x01;
+                pkt[1] = (byte)(s_counter++ & 0xF);
+                pkt[2] = 0x00; pkt[3] = 0x01; pkt[4] = 0x40; pkt[5] = 0x40;
+                pkt[6] = 0x00; pkt[7] = 0x01; pkt[8] = 0x40; pkt[9] = 0x40;
+                pkt[10] = id;
+                Array.Copy(a, 0, pkt, 11, a.Length);
+                if (!RecordExchange(rec, skipped, pkt, 49, 0x21, 500, r => r[14] == id && (r[13] & 0x80) != 0))
+                    throw new InvalidOperationException($"subcommand 0x{id:X2} got no reply in 500 ms");
+            }
+
+            // 3 s of the stream in mode 0x30 with the IMU on.
+            rec.Stream(head + "/stream");
+            var stream = new Runs(rec, "frame", "repeat");
+            var steps = new List<byte>();
+            int lastTimer = -1;
+            for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 3000;)
+            {
+                var r = HidRead(100);
+                if (r == null) continue;
+                stream.Add(Masked(r, s_lastReadLen));
+                if (!HasTimer(r[0])) continue;
+                if (lastTimer >= 0 && !steps.Contains((byte)(r[1] - lastTimer))) steps.Add((byte)(r[1] - lastTimer));
+                lastTimer = r[1];
+            }
+            stream.Flush();
+            rec.Out("timerSteps", steps.ToArray());
+
+            rec.Save();
+            Console.WriteLine($"  wrote {outDir}");
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  [FAIL] {e.GetType().Name}: {e.Message}");
+            return 1;
+        }
+        finally
+        {
+            Volatile.Write(ref pumpStop, true);
+            pump?.Join(1000);
+            s_hid?.Dispose();
+            if (s_readEvent != IntPtr.Zero) CloseHandle(s_readEvent);
+            if (s_writeEvent != IntPtr.Zero) CloseHandle(s_writeEvent);
+            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+        }
+    }
+
+    /// <summary>Write, then read until the wanted report arrives or the time
+    /// is up, recording every read. True when the reply arrived.</summary>
+    static bool RecordExchange(LiveRecorder rec, Runs skipped, byte[] pkt, int len,
+                               byte replyId, int timeoutMs, Func<byte[], bool> accept)
+    {
+        rec.Out("write", pkt.AsSpan(0, len));
+        var (ok, error, written) = RecordWrite(pkt, len);
+        rec.OutByte("writeOk", ok ? (byte)1 : (byte)0);
+        rec.OutU32("writeError", error);
+        rec.OutU32("written", written);
+        if (ok)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                var r = HidRead((int)Math.Max(1, timeoutMs - sw.ElapsedMilliseconds));
+                if (r == null) continue;
+                if (r[0] == replyId && accept(r))
+                {
+                    skipped.Flush();
+                    rec.Out("reply", Masked(r, s_lastReadLen));
+                    rec.OutByte("timer", HasTimer(r[0]) ? r[1] : (byte)0);
+                    return true;
+                }
+                skipped.Add(Masked(r, s_lastReadLen));
+            }
+        }
+        skipped.Flush();
+        rec.Out("noReply", ReadOnlySpan<byte>.Empty);
+        return false;
     }
 }

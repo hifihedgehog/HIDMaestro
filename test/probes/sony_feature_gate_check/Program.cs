@@ -25,8 +25,16 @@
 //     Before the gate it did; that is the exact collision D3 fixes.
 //
 // Requires elevation (CreateController). Exit 0 PASS / 1 FAIL.
+//
+// record <out dir> instead records the feature matrix device_oracle_check's
+// case 5 records from the native driver harness, as the live driver answers
+// it, for its compare-live mode (see Record below). Exit 0 recorded, 1 a
+// step failed, 2 bad arguments, 3 refused without elevation, before
+// anything is created.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -185,7 +193,15 @@ internal static class Program
         return c == got;
     }
 
-    static int Main()
+    static int Main(string[] args)
+    {
+        if (args.Length == 0) return Checks();
+        if (args.Length == 2 && args[0] == "record") return Record(args[1]);
+        Console.WriteLine("usage: SonyFeatureGateCheck [record <out dir>]");
+        return 2;
+    }
+
+    static int Checks()
     {
         Console.WriteLine("=== Sony feature-stub VID gate (audit D3) ===");
         using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -481,5 +497,340 @@ internal static class Program
         try { HMContext.RemoveAllVirtualControllers(); } catch { }
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
+    }
+
+    // ── record: the feature matrix for device_oracle_check ──────────────
+    //
+    // For every catalog profile with vendor 0x054C on the UMDF2 backend, and
+    // for heusinkveld-ultimate-pedals as the positive control of the vendor
+    // gate, one controller at a time and disposed before the next:
+    // HidD_GetFeature at every buffer length from 0 to one past the
+    // profile's FeatureReportByteLength, and at least to 65 (RecordLengths),
+    // for every feature report ID the descriptor declares and for the seven
+    // IDs driver.c's Sony block answers (0x02, 0x05, 0x09, 0x12, 0x20, 0x22,
+    // 0xA3), byte 0 of the buffer the report ID and the rest zero. Every
+    // profile so has calls at and above the length from which the HID class
+    // passes a declared ID to the driver, which compare-live holds a refusal
+    // to, 548 on the two 547-byte Bluetooth profiles.
+    //
+    // Case live-s46-sony-features, streams per controller:
+    //   feature/<profile>/index<N>/setup   declared (the descriptor's feature
+    //                                      IDs), featureLength (the HID
+    //                                      class's FeatureReportByteLength,
+    //                                      u32), attribution (1 and the
+    //                                      fence's ID, or 0 for a fixed
+    //                                      window)
+    //   feature/<profile>/index<N>/id<XX>  per length, in order: ok (the
+    //                                      BOOLEAN), error (GetLastError when
+    //                                      it failed, else 0, u32), buffer
+    //                                      (the length's bytes after the
+    //                                      call), notify (the report IDs of
+    //                                      the feature-read notifications the
+    //                                      call raised), then other (source
+    //                                      and report ID of any other packet
+    //                                      it raised) and overrun (bytes past
+    //                                      the length that changed), each only
+    //                                      when not empty
+    //   feature/<profile>/index<N>/end     unattributed: notification IDs no
+    //                                      call claimed
+    //
+    // A successful call's thread error code is whatever an earlier call left
+    // (GetLastError documents no value on success), so error is 0 then.
+    //
+    // A feature-read notification reaches OutputReceived on the SDK's reader
+    // thread some time after the call returns. To tie each one to its call,
+    // every call is followed by a fence: HidD_SetFeature of a declared
+    // feature report carrying 0xFE and a counter, which the driver publishes
+    // as an HidFeature packet on the same output ring (driver.c
+    // IOCTL_UMDF_HID_SET_FEATURE) after anything the call published
+    // (PublishOutput runs before the GET_FEATURE completes, driver.c:3368).
+    // The ring is read in order, so the packets ahead of the fence's belong
+    // to the call. The fence avoids the PID report IDs the SET_FEATURE path
+    // acts on (PidReportIdExtractor, and the canonical defaults it returns).
+    // A profile with no usable feature report, such as one that declares
+    // none, waits a fixed window after each call instead, and its setup
+    // stream says so.
+
+    static readonly byte[] SonyBlockIds = { 0x02, 0x05, 0x09, 0x12, 0x20, 0x22, 0xA3 };
+    const int RecordMinLength = 65;
+
+    /// <summary>The longest buffer a profile is swept to: one past the
+    /// larger of FeatureReportByteLength as the descriptor gives it (the
+    /// longest feature report's data bytes plus the ID byte) and as the HID
+    /// class reports it, and never below 65, the length hidapi and SDL read
+    /// Sony reports into. device_oracle_check's CompareLive.FeatureSweepMax
+    /// computes the same.</summary>
+    static int RecordLengths(IEnumerable<HidReportLayout> declared, int featLen) =>
+        Math.Max(RecordMinLength, Math.Max(declared.Select(r => r.DataBytes + 1).DefaultIfEmpty(0).Max(), featLen) + 1);
+    const int GuardBytes = 16;
+    const int FenceTimeoutMs = 2000;
+    const int WindowMs = 25;
+    const byte FenceMark = 0xFE;
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buffer, int bufferLength);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
+    [DllImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")]
+    static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
+
+    /// <summary>HIDP_CAPS.FeatureReportByteLength, at byte 8 of the struct
+    /// (after Usage, UsagePage, InputReportByteLength and
+    /// OutputReportByteLength).</summary>
+    static int FeatureReportByteLength(SafeFileHandle h)
+    {
+        if (!HidD_GetPreparsedData(h, out IntPtr pp)) return -1;
+        try
+        {
+            var caps = new byte[64];
+            HidP_GetCaps(pp, caps);
+            return caps[8] | (caps[9] << 8);
+        }
+        finally { HidD_FreePreparsedData(pp); }
+    }
+
+    /// <summary>The output packets one controller raised, in the order the
+    /// SDK's reader raised them.</summary>
+    sealed class OutputTap : IDisposable
+    {
+        readonly object _lock = new();
+        readonly List<(HMOutputSource Source, byte ReportId, byte[] Whole)> _seen = new();
+        readonly AutoResetEvent _arrived = new(false);
+
+        public void On(HMController _, HMOutputPacket p)
+        {
+            // The report as the host wrote it: the report ID, then the data.
+            var whole = new byte[p.Data.Length + 1];
+            whole[0] = p.ReportId;
+            p.Data.Span.CopyTo(whole.AsSpan(1));
+            lock (_lock) _seen.Add((p.Source, p.ReportId, whole));
+            _arrived.Set();
+        }
+
+        /// <summary>The packets ahead of the fence carrying <paramref
+        /// name="mark"/>, removed with it, or null when the fence did not
+        /// arrive in time. With no report IDs the HID class may hand the
+        /// driver the report without its 0, so the mark is looked for at
+        /// byte 1 and at byte 0.</summary>
+        public List<(HMOutputSource Source, byte ReportId, byte[] Whole)>? TakeUntilFence(uint mark, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            for (;;)
+            {
+                lock (_lock)
+                {
+                    for (int i = 0; i < _seen.Count; i++)
+                    {
+                        if (_seen[i].Source != HMOutputSource.HidFeature || !IsFence(_seen[i].Whole, mark)) continue;
+                        var before = _seen.GetRange(0, i);
+                        _seen.RemoveRange(0, i + 1);
+                        return before;
+                    }
+                }
+                long left = timeoutMs - sw.ElapsedMilliseconds;
+                if (left <= 0) return null;
+                _arrived.WaitOne((int)Math.Min(left, 50));
+            }
+        }
+
+        public List<(HMOutputSource Source, byte ReportId, byte[] Whole)> TakeAll()
+        {
+            lock (_lock)
+            {
+                var all = new List<(HMOutputSource, byte, byte[])>(_seen);
+                _seen.Clear();
+                return all;
+            }
+        }
+
+        static bool IsFence(byte[] w, uint mark)
+        {
+            for (int at = 0; at <= 1; at++)
+                if (w.Length >= at + 5 && w[at] == FenceMark
+                    && (uint)(w[at + 1] | (w[at + 2] << 8) | (w[at + 3] << 16) | (w[at + 4] << 24)) == mark)
+                    return true;
+            return false;
+        }
+
+        public void Dispose() => _arrived.Dispose();
+    }
+
+    static bool IsElevated()
+    {
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(id)
+            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
+    static int Record(string outDir)
+    {
+        Console.WriteLine("=== Sony feature matrix, recorded for device_oracle_check ===");
+        if (!IsElevated())
+        {
+            Console.WriteLine("  [REFUSED] record creates controllers and needs elevation. Nothing was created");
+            return 3;
+        }
+
+        using var rec = new LiveRecorder(outDir, "live-s46-sony-features");
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+
+            var subjects = ctx.AllProfiles
+                .Where(p => p.VendorId == 0x054C && p.Backend == "umdf2")
+                .OrderBy(p => p.Id, StringComparer.Ordinal)
+                .ToList();
+            subjects.Add(ctx.GetProfile("heusinkveld-ultimate-pedals")
+                ?? throw new InvalidOperationException("heusinkveld-ultimate-pedals is not in the catalog"));
+            Console.WriteLine($"  {subjects.Count} profiles: {string.Join(", ", subjects.Select(p => p.Id))}");
+
+            uint mark = 0;
+            foreach (var prof in subjects)
+            {
+                var sw = Stopwatch.StartNew();
+                RecordProfile(ctx, prof, rec, ref mark);
+                // The next profile may share this one's VID, PID and index,
+                // and so its interface path. Its snapshot must not catch
+                // this device on the way out.
+                if (!WaitGone(prof.VendorId, prof.ProductId, 30000))
+                    throw new InvalidOperationException($"{prof.Id}: its HID interface was still present 30 s after the dispose");
+                Console.WriteLine($"  [OK] {prof.Id} recorded in {sw.Elapsed.TotalSeconds:F1} s");
+            }
+            rec.Save();
+            Console.WriteLine($"  wrote {outDir}");
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  [FAIL] {e.GetType().Name}: {e.Message}");
+            return 1;
+        }
+        finally
+        {
+            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+        }
+    }
+
+    /// <summary>True once no device of the VID and PID is present beyond
+    /// what <see cref="SnapshotPreexistingHid"/> recorded.</summary>
+    static bool WaitGone(ushort vid, ushort pid, int ms)
+    {
+        var sw = Stopwatch.StartNew();
+        while (HidDeviceEnumerator.Enumerate().Any(d => d.VendorId == vid && d.ProductId == pid
+                                                     && !s_preexistingHid.Contains(d.DevicePath)))
+        {
+            if (sw.ElapsedMilliseconds >= ms) return false;
+            Thread.Sleep(100);
+        }
+        return true;
+    }
+
+    static void RecordProfile(HMContext ctx, HMProfile prof, LiveRecorder rec, ref uint mark)
+    {
+        var map = HidReportMap.Parse(prof.GetDescriptorBytes()
+            ?? throw new InvalidOperationException($"{prof.Id} has no descriptor"));
+        var declared = map.Reports.Where(r => r.Kind == HidReportKind.Feature).ToList();
+        var pid = PidReportIdExtractor.Extract(prof.GetDescriptorBytes());
+        var pidIds = new HashSet<byte>
+        {
+            pid.PoolReportId, pid.StateReportId, pid.BlockLoadReportId, pid.CreateNewEffectReportId,
+            pid.BlockFreeReportId, pid.DeviceControlReportId, 0x11, 0x12, 0x13, 0x14, 0x1B, 0x1C,
+        };
+        var ids = declared.Select(r => r.ReportId).Concat(SonyBlockIds).Distinct().OrderBy(b => b).ToList();
+
+        // Declared ahead of the controller, so the controller is disposed
+        // first and its reader never raises into a disposed tap.
+        using var tap = new OutputTap();
+        SnapshotPreexistingHid(prof.VendorId, prof.ProductId);
+        using var ctrl = ctx.CreateController(prof);
+        ctrl.OutputReceived += tap.On;
+        using var h = Open(prof.VendorId, prof.ProductId)
+            ?? throw new InvalidOperationException($"{prof.Id}: the HID interface did not open");
+        int featLen = FeatureReportByteLength(h);
+        string head = $"feature/{prof.Id}/index{ctrl.TransportIndex}";
+
+        // The fence: the first declared feature report outside the PID IDs
+        // whose SET_FEATURE comes back, reports of six bytes or more first so
+        // the mark fits whatever length the HID class passes on.
+        byte? fenceId = null;
+        foreach (var r in declared.Where(r => !pidIds.Contains(r.ReportId)).OrderBy(r => r.FrameBytes >= 6 ? 0 : 1))
+        {
+            if (featLen < 6) break;
+            uint m = ++mark;
+            if (SendFence(h, r.ReportId, featLen, m) && tap.TakeUntilFence(m, FenceTimeoutMs) != null)
+            {
+                fenceId = r.ReportId;
+                break;
+            }
+        }
+        tap.TakeAll();
+
+        rec.Stream(head + "/setup");
+        rec.Out("declared", declared.Select(r => r.ReportId).ToArray());
+        rec.OutU32("featureLength", (uint)Math.Max(featLen, 0));
+        rec.Out("attribution", fenceId is byte f ? new byte[] { 1, f } : new byte[] { 0 });
+
+        int maxLength = RecordLengths(declared, featLen);
+        var buf = new byte[maxLength + GuardBytes];
+        foreach (byte rid in ids)
+        {
+            rec.Stream($"{head}/id{rid:X2}");
+            for (int len = 0; len <= maxLength; len++)
+            {
+                Array.Clear(buf);
+                buf[0] = rid;
+                bool ok = HidD_GetFeature(h, buf, len);
+                int err = ok ? 0 : Marshal.GetLastPInvokeError();
+
+                List<(HMOutputSource Source, byte ReportId, byte[] Whole)> raised;
+                if (fenceId is byte fid)
+                {
+                    uint m = ++mark;
+                    if (!SendFence(h, fid, featLen, m))
+                        throw new InvalidOperationException($"{prof.Id}: the fence on 0x{fid:X2} failed, error {Marshal.GetLastPInvokeError()}");
+                    raised = tap.TakeUntilFence(m, FenceTimeoutMs)
+                        ?? throw new InvalidOperationException($"{prof.Id}: the fence on 0x{fid:X2} did not come back in {FenceTimeoutMs} ms");
+                }
+                else
+                {
+                    Thread.Sleep(WindowMs);
+                    raised = tap.TakeAll();
+                }
+
+                rec.OutByte("ok", ok ? (byte)1 : (byte)0);
+                rec.OutU32("error", (uint)err);
+                rec.Out("buffer", buf.AsSpan(0, len));
+                rec.Out("notify", raised.Where(p => p.Source == HMOutputSource.HidFeatureRead).Select(p => p.ReportId).ToArray());
+                var other = raised.Where(p => p.Source != HMOutputSource.HidFeatureRead)
+                    .SelectMany(p => new[] { (byte)p.Source, p.ReportId }).ToArray();
+                if (other.Length > 0) rec.Out("other", other);
+                int guardFrom = Math.Max(len, 1);
+                if (buf.AsSpan(guardFrom, len + GuardBytes - guardFrom).IndexOfAnyExcept((byte)0) >= 0)
+                    rec.Out("overrun", buf.AsSpan(guardFrom, len + GuardBytes - guardFrom));
+            }
+        }
+
+        Thread.Sleep(300);
+        rec.Stream(head + "/end");
+        rec.Out("unattributed", tap.TakeAll().Where(p => p.Source == HMOutputSource.HidFeatureRead)
+            .Select(p => p.ReportId).ToArray());
+    }
+
+    /// <summary>HidD_SetFeature of <paramref name="reportId"/> at the HID
+    /// class's feature length, carrying the fence mark and counter.</summary>
+    static bool SendFence(SafeFileHandle h, byte reportId, int featLen, uint mark)
+    {
+        var f = new byte[featLen];
+        f[0] = reportId;
+        f[1] = FenceMark;
+        BitConverter.TryWriteBytes(f.AsSpan(2, 4), mark);
+        return HidD_SetFeature(h, f, featLen);
     }
 }

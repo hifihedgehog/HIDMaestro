@@ -8,4 +8,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- record mode writes device_oracle_check's golden format. -->
+    <Compile Include="..\device_oracle_check\Golden.cs" Link="Golden.cs" />
+    <Compile Include="..\device_oracle_check\LiveRecorder.cs" Link="LiveRecorder.cs" />
+  </ItemGroup>
 </Project>

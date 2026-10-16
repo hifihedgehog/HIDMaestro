@@ -21,6 +21,8 @@
 // v1.12.0 a create replaces or removes that table
 // (DeviceOrchestrator.ApplyGameInputMapping), so on this SDK no pad reads
 // through it.
+// `--record <out dir> [<profile>...]` records the same readings for
+// device_oracle_check (Record.cs).
 //
 // Requires elevation.
 
@@ -32,7 +34,7 @@ using HIDMaestro;
 using Microsoft.Win32;
 using Windows.Gaming.Input;
 
-internal static class Program
+internal static partial class Program
 {
     const string OverrideRoot = @"SYSTEM\CurrentControlSet\Control\GameInput\Devices";
 
@@ -543,6 +545,9 @@ internal static class Program
         Gamepad.GamepadAdded += (_, _) => { };
         RawGameController.RawGameControllerAdded += (_, _) => { };
 
+        if (args.Length >= 2 && args[0] == "--record")
+            return Record(args[1], args.Skip(2).ToList());
+
         if (args.Contains("--list"))
         {
             // Read-only: no SDK call, nothing created or removed.
@@ -581,6 +586,7 @@ internal static class Program
             Console.WriteLine("       WgiMappingCheck --list               read-only WGI listing");
             Console.WriteLine("       WgiMappingCheck --sweep [--legacy|--absent] [--only=a,b]");
             Console.WriteLine("       WgiMappingCheck --explore [--absent] [--xinput] [--settle=ms] <profile>...");
+            Console.WriteLine("       WgiMappingCheck --record <out dir> [<profile>...]");
             return 2;
         }
 

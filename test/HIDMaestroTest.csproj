@@ -21,4 +21,11 @@
     <Compile Remove="sandbox\**\*.cs" />
     <None Remove="sandbox\**\*" />
   </ItemGroup>
+  <!-- The record option of probe-xusb writes device_oracle_check's golden
+       format. Listed after the removal above, which drops every file under
+       probes\. -->
+  <ItemGroup>
+    <Compile Include="probes\device_oracle_check\Golden.cs" Link="Golden.cs" />
+    <Compile Include="probes\device_oracle_check\LiveRecorder.cs" Link="LiveRecorder.cs" />
+  </ItemGroup>
 </Project>

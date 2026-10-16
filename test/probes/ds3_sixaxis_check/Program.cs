@@ -29,6 +29,11 @@
 //
 // B, C and D need elevation. Exit 0 PASS, 1 FAIL, 2 when everything that ran
 // passed and C was skipped for want of a stock SDL3.dll.
+//
+// record <out dir> instead records part B's states, the report 0 feature and
+// the sixaxis.sys output commands for device_oracle_check's compare-live mode
+// (see Record below). Exit 0 recorded, 1 a step failed, 2 bad arguments, 3
+// refused without elevation, before anything is created.
 
 using System;
 using System.Collections.Generic;
@@ -829,7 +834,15 @@ internal static class Program
         }
     }
 
-    static int Main()
+    static int Main(string[] args)
+    {
+        if (args.Length == 0) return Checks();
+        if (args.Length == 2 && args[0] == "record") return Record(args[1]);
+        Console.WriteLine("usage: Ds3SixaxisCheck [record <out dir>]");
+        return 2;
+    }
+
+    static int Checks()
     {
         Console.WriteLine("=== DualShock 3 with pressure-sensitive buttons (PadForge discussion 476) ===");
         using var ctx = new HMContext();
@@ -860,5 +873,342 @@ internal static class Program
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         if (s_failures > 0) return 1;
         return elevated && sdlRan ? 0 : 2;
+    }
+
+    // ── record: states, report 0 and output commands for device_oracle_check
+    //
+    // The dualshock-3-full persona, live, recorded so device_oracle_check can
+    // hold the native harness's Ds3BuildSixaxisInput, Ds3BuildSixaxisFeature
+    // and Ds3HandleSixaxisOutput against the live driver. Case
+    // live-ds3-sixaxis, streams:
+    //   ds3/dualshock-3-full/index<N>/state/<name>
+    //       native: the 49-byte report the codec encodes from the state,
+    //       the bytes the SDK writes to the extended lane, which
+    //       driver.c:1966-1974 reads. Then the input reports ReadFile
+    //       returns, as runs: input and repeat (u32). Then the report 0
+    //       feature as each reader asks for it: request (the ID and the
+    //       length, u16), ok, error (u32, 0 on success), buffer (the
+    //       length's bytes after the call)
+    //   ds3/dualshock-3-full/index<N>/output/<api>/cmd<NN>
+    //       per length: write (the bytes passed), ok, error, then packets
+    //       (u32) and one output per packet the SDK raised: its source, its
+    //       report ID and its data
+    //
+    // How many input reports a state produces depends on how many submits
+    // the driver saw while the HID class had a read parked, so the reads
+    // are runs and a comparison masks repeat. The HID class's buffer is
+    // flushed before each state, after the previous state's submits have
+    // settled, so the first run is the new state's.
+    //
+    // The states are part B's and part A's edge values: the test state, the
+    // charging and charged batteries, 4 g with the gyro at its negative
+    // limit, the gyro at its positive limit, digital presses only, and a
+    // neutral pad. Each is submitted six times 40 ms apart, as Drive does.
+    //
+    // Feature reads, as the readers send them: SDL's sixaxis driver tries
+    // 0xF2 into 64 bytes at init and polls 0x00 into 64 (SDL-reference
+    // 804cf65 SDL_hidapi_ps3.c:1155-1160, 1398, ReadFeatureReport 145-150
+    // puts the ID in byte 0 of a zeroed buffer), and RPCS3 on Windows reads
+    // 0xF2 into 255 bytes, then polls it into 64 (c82221f
+    // ds3_pad_handler.cpp:250-253, 301-305).
+    //
+    // Output commands 1, 2, 3, 9 and 10 (SDL_hidapi_ps3.c:50-74), each laid
+    // out as SDL lays its effects out: report ID 0 in byte 0, the command in
+    // byte 1, padding to byte 4, parameters from byte 5 (UpdateLEDsSonySixaxis
+    // 1462-1478 with player 0, UpdateRumbleSonySixaxis 1440-1460 with the
+    // small motor on and the large at 200, BlockLEDs' byte 5 set). Bytes 9
+    // on carry 0x80 plus their offset, so the body a set-motors command
+    // leaves shows how many bytes the driver took. Each goes through
+    // WriteFile and HidD_SetOutputReport at the lengths around every
+    // boundary Ds3HandleSixaxisOutput draws on the length it is handed
+    // (driver.c:1294-1324: none, at least 1, more than 3, at least 8, 48
+    // and 49 led by 0x00, more than 51 clamped), whether or not the HID
+    // class strips the ID byte first.
+    //
+    // A packet reaches OutputReceived on the SDK's reader thread after the
+    // call returns. Each call is followed by a fence, HidD_SetFeature of
+    // report 0 carrying 0xFE and a counter, which the driver publishes as
+    // an HidFeature packet on the same output ring after anything the call
+    // published (driver.c IOCTL_UMDF_HID_SET_FEATURE, not gated on
+    // Ds3Sixaxis). The packets ahead of the fence's belong to the call.
+
+    static readonly int[] RecordOutputLengths = { 0, 1, 2, 3, 4, 5, 7, 8, 9, 48, 49, 50, 51, 52, 53, 64, 65 };
+    static readonly byte[] RecordCommands = { 1, 2, 3, 9, 10 };
+    const byte FenceMark = 0xFE;
+    const int FenceTimeoutMs = 2000;
+
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_SetFeature(SafeFileHandle h, byte[] buf, int len);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    static extern bool HidD_FlushQueue(SafeFileHandle h);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "ReadFile")]
+    static extern bool ReadFileOverlapped(SafeFileHandle h, byte[] buf, uint n, IntPtr read, ref NativeOverlapped ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetOverlappedResultEx(SafeFileHandle h, ref NativeOverlapped ov, out uint transferred, uint timeoutMs, bool alertable);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CancelIoEx(SafeFileHandle h, IntPtr ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateEventW(IntPtr attrs, bool manual, bool initial, IntPtr name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    /// <summary>The output packets the controller raised, in the order the
+    /// SDK's reader raised them, each as its source, report ID and data.</summary>
+    sealed class OutputTap : IDisposable
+    {
+        readonly object _lock = new();
+        readonly List<(HMOutputSource Source, byte[] Packet)> _seen = new();
+        readonly AutoResetEvent _arrived = new(false);
+
+        public void On(HMController _, HMOutputPacket p)
+        {
+            var packet = new byte[p.Data.Length + 2];
+            packet[0] = (byte)p.Source;
+            packet[1] = p.ReportId;
+            p.Data.Span.CopyTo(packet.AsSpan(2));
+            lock (_lock) _seen.Add((p.Source, packet));
+            _arrived.Set();
+        }
+
+        /// <summary>The packets ahead of the fence carrying <paramref
+        /// name="mark"/>, removed with it, or null when it did not arrive in
+        /// time. The descriptor declares no report IDs, so the mark is looked
+        /// for where the report's first byte lands whether or not the HID
+        /// class kept the 0 in front of it.</summary>
+        public List<byte[]>? TakeUntilFence(uint mark, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            for (;;)
+            {
+                lock (_lock)
+                {
+                    for (int i = 0; i < _seen.Count; i++)
+                    {
+                        if (_seen[i].Source != HMOutputSource.HidFeature || !IsFence(_seen[i].Packet, mark)) continue;
+                        var before = _seen.GetRange(0, i).Select(x => x.Packet).ToList();
+                        _seen.RemoveRange(0, i + 1);
+                        return before;
+                    }
+                }
+                long left = timeoutMs - sw.ElapsedMilliseconds;
+                if (left <= 0) return null;
+                _arrived.WaitOne((int)Math.Min(left, 50));
+            }
+        }
+
+        public void Clear() { lock (_lock) _seen.Clear(); }
+
+        // Packet byte 1 is the report ID the driver published, byte 2 on its
+        // data: the mark is at 1 when the HID class dropped the 0, at 2 when
+        // it kept it.
+        static bool IsFence(byte[] p, uint mark)
+        {
+            for (int at = 1; at <= 2; at++)
+                if (p.Length >= at + 5 && p[at] == FenceMark
+                    && (uint)(p[at + 1] | (p[at + 2] << 8) | (p[at + 3] << 16) | (p[at + 4] << 24)) == mark)
+                    return true;
+            return false;
+        }
+
+        public void Dispose() => _arrived.Dispose();
+    }
+
+    static bool IsElevated()
+    {
+        using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(id)
+            .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
+    /// <summary>A scripted state, with the floats the SDK resolves its axes
+    /// to, which the offline encode takes as arguments.</summary>
+    sealed record ScriptedState(string Name, HMGamepadState State, float Lx, float Ly, float Rx, float Ry, float Lt, float Rt);
+
+    static List<ScriptedState> RecordStates(HMProfile prof)
+    {
+        HMGamepadState With(HMGamepadState st, float lx, float ly, float rx, float ry, float lt, float rt)
+        {
+            st.Axes = HMGamepadStateHelpers.StandardAxes(prof, lx, ly, rx, ry, lt, rt);
+            return st;
+        }
+        var charging = TestState(); charging.BatteryCharging = true;
+        var charged = TestState(); charged.BatteryFull = true;
+        var big = TestState(); big.AccelX = 32767; big.GyroYaw = -32768;
+        var neg = TestState(); neg.GyroYaw = 32767;
+        var dig = new HMGamepadState { Buttons = HMButton.X | HMButton.RightBumper, Hat = HMHat.SouthWest };
+        return new List<ScriptedState>
+        {
+            new("test", With(TestState(), LX, LY, RX, RY, LT, RT), LX, LY, RX, RY, LT, RT),
+            new("charging", With(charging, LX, LY, RX, RY, LT, RT), LX, LY, RX, RY, LT, RT),
+            new("charged", With(charged, LX, LY, RX, RY, LT, RT), LX, LY, RX, RY, LT, RT),
+            new("accel-max-gyro-min", With(big, LX, LY, RX, RY, LT, RT), LX, LY, RX, RY, LT, RT),
+            new("gyro-max", With(neg, LX, LY, RX, RY, LT, RT), LX, LY, RX, RY, LT, RT),
+            new("digital", With(dig, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f), 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f),
+            new("neutral", With(new HMGamepadState(), 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f), 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f),
+        };
+    }
+
+    /// <summary>The bytes a command is written with: report ID 0, the
+    /// command, padding, its parameters from byte 5, and 0x80 plus the
+    /// offset from byte 9 on.</summary>
+    static byte[] CommandBytes(byte cmd)
+    {
+        var b = new byte[65];
+        b[1] = cmd;
+        switch (cmd)
+        {
+            case 1: b[8] = 1; break;                                   // LED 1 on (player 0)
+            case 2: b[5] = 0xFF; b[6] = 1; b[7] = 0xFF; b[8] = 200; break; // small on, large 200
+            case 3: b[5] = 1; break;                                   // block LEDs
+        }
+        for (int i = 9; i < b.Length; i++) b[i] = (byte)(0x80 + i);
+        return b;
+    }
+
+    static int Record(string outDir)
+    {
+        Console.WriteLine("=== DualShock 3 sixaxis form, recorded for device_oracle_check ===");
+        if (!IsElevated())
+        {
+            Console.WriteLine("  [REFUSED] record creates a controller and needs elevation. Nothing was created");
+            return 3;
+        }
+
+        using var rec = new LiveRecorder(outDir, "live-ds3-sixaxis");
+        IntPtr readEvent = IntPtr.Zero;
+        try
+        {
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.InstallDriver();
+            var prof = ctx.GetProfile(ProfileId) ?? throw new InvalidOperationException($"{ProfileId} is not in the catalog");
+            var spec = prof.Inner.ExtendedReport ?? throw new InvalidOperationException($"{ProfileId} has no extended report");
+            // Declared ahead of the controller, so the controller is
+            // disposed first and its reader never raises into a disposed tap.
+            using var tap = new OutputTap();
+            var before = Present();
+            using var c = ctx.CreateController(prof);
+            c.OutputReceived += tap.On;
+            var dev = WaitForNew(before, 15000) ?? throw new InvalidOperationException("the persona's HID interface did not appear");
+            using var h = Open(dev.DevicePath);
+            using var hr = Open(dev.DevicePath, overlapped: true);
+            if (h.IsInvalid || hr.IsInvalid) throw new InvalidOperationException($"CreateFile failed, error {Marshal.GetLastWin32Error()}");
+            var (inLen, _, featLen) = Caps(dev.DevicePath);
+            if (inLen <= 0 || featLen < 6) throw new InvalidOperationException($"unexpected HID lengths, input {inLen}, feature {featLen}");
+            readEvent = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+            string head = $"ds3/{ProfileId}/index{c.TransportIndex}";
+
+            uint mark = 0;
+            List<byte[]> Fence()
+            {
+                uint m = ++mark;
+                var f = new byte[featLen];
+                f[1] = FenceMark;
+                BitConverter.TryWriteBytes(f.AsSpan(2, 4), m);
+                if (!HidD_SetFeature(h, f, featLen))
+                    throw new InvalidOperationException($"the fence failed, error {Marshal.GetLastPInvokeError()}");
+                return tap.TakeUntilFence(m, FenceTimeoutMs)
+                    ?? throw new InvalidOperationException($"the fence did not come back in {FenceTimeoutMs} ms");
+            }
+            Fence();
+            tap.Clear();
+
+            foreach (var s in RecordStates(prof))
+            {
+                rec.Stream($"{head}/state/{s.Name}");
+                var native = new byte[49];
+                var state = s.State;
+                VendorBlobCodec.EncodeInput(spec, in state, s.Lx, s.Ly, s.Rx, s.Ry, s.Lt, s.Rt, native, new VendorBlobCodec.EncoderState());
+                rec.Out("native", native);
+
+                // Let the previous state's submits reach the HID class, drop
+                // what it buffered, then submit this one.
+                Thread.Sleep(200);
+                HidD_FlushQueue(hr);
+                Drive(c, s.State);
+
+                byte[]? last = null;
+                uint count = 0;
+                // Pinned, and a canceled read waited out: the system writes the
+                // buffer and the OVERLAPPED when the read completes, canceled
+                // or not (CancelIoEx, Microsoft Learn).
+                var buf = GC.AllocateArray<byte>(inLen, pinned: true);
+                for (;;)
+                {
+                    Array.Clear(buf);
+                    var ov = new NativeOverlapped { EventHandle = readEvent };
+                    if (!ReadFileOverlapped(hr, buf, (uint)inLen, IntPtr.Zero, ref ov) && Marshal.GetLastWin32Error() != 997)
+                        throw new InvalidOperationException($"ReadFile failed, error {Marshal.GetLastWin32Error()}");
+                    if (!GetOverlappedResultEx(hr, ref ov, out uint n, 300, false))
+                    {
+                        CancelIoEx(hr, IntPtr.Zero);
+                        GetOverlappedResultEx(hr, ref ov, out _, 0xFFFFFFFF /* INFINITE */, false);
+                        break;
+                    }
+                    var got = buf.AsSpan(0, (int)n).ToArray();
+                    if (last != null && got.AsSpan().SequenceEqual(last)) { count++; continue; }
+                    if (last != null) { rec.Out("input", last); rec.OutU32("repeat", count); }
+                    last = got;
+                    count = 1;
+                }
+                if (last == null) throw new InvalidOperationException($"state {s.Name}: no input report arrived");
+                rec.Out("input", last);
+                rec.OutU32("repeat", count);
+
+                foreach (var (id, len) in new (byte, int)[] { (0xF2, 64), (0x00, 64), (0xF2, 255) })
+                {
+                    var f = new byte[len];
+                    f[0] = id;
+                    bool ok = HidD_GetFeature(h, f, len);
+                    uint err = ok ? 0u : (uint)Marshal.GetLastPInvokeError();
+                    rec.Out("request", new byte[] { id, (byte)len, (byte)(len >> 8) });
+                    rec.OutByte("ok", ok ? (byte)1 : (byte)0);
+                    rec.OutU32("error", err);
+                    rec.Out("buffer", f);
+                }
+            }
+
+            foreach (string api in new[] { "WriteFile", "HidD_SetOutputReport" })
+            {
+                foreach (byte cmd in RecordCommands)
+                {
+                    rec.Stream($"{head}/output/{api}/cmd{cmd:D2}");
+                    var bytes = CommandBytes(cmd);
+                    foreach (int len in RecordOutputLengths)
+                    {
+                        var b = (byte[])bytes.Clone();
+                        bool ok = api == "WriteFile"
+                            ? WriteFile(h, b, len, out _, IntPtr.Zero)
+                            : HidD_SetOutputReport(h, b, len);
+                        uint err = ok ? 0u : (uint)Marshal.GetLastPInvokeError();
+                        var raised = Fence();
+                        rec.Out("write", bytes.AsSpan(0, len));
+                        rec.OutByte("ok", ok ? (byte)1 : (byte)0);
+                        rec.OutU32("error", err);
+                        rec.OutU32("packets", (uint)raised.Count);
+                        foreach (var p in raised) rec.Out("output", p);
+                    }
+                }
+            }
+
+            rec.Save();
+            Console.WriteLine($"  wrote {outDir}");
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"  [FAIL] {e.GetType().Name}: {e.Message}");
+            return 1;
+        }
+        finally
+        {
+            if (readEvent != IntPtr.Zero) CloseHandle(readEvent);
+            try { HMContext.RemoveAllVirtualControllers(); } catch { }
+        }
     }
 }
