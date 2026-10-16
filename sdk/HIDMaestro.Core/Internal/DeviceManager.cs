@@ -2109,105 +2109,218 @@ public static partial class DeviceManager
         catch { return false; }
     }
 
-    /// <summary>
-    /// Clears every other parent under <paramref name="enumRoot"/>\<paramref name="enumerator"/>
-    /// that holds <paramref name="prefix"/> as its ParentIdPrefix, and says
-    /// whether the way is clear. With <paramref name="remove"/> false it only
-    /// checks, and a rival it would remove makes the way not clear: the
-    /// registration gate's check under the PnP lock. Two parents of one enumerator with one
-    /// prefix make hidclass build the same HID child id twice, which PnP
-    /// answers with bugcheck 0xCA (duplicate PDO). A ROOT record is
-    /// re-enumerated at every boot, live or not, so it is removed either
-    /// way and a boot loop is what is at stake. An SWD record only
-    /// enumerates while its creator holds it, so only a live one counts.
-    /// False means a rival is still there and the caller must not create.
-    /// </summary>
-    internal static bool ClearParentIdPrefixRivals(string enumRoot, string enumerator, string token, string prefix,
-                                                   bool remove = true)
+    /// <summary>Where the rival scan reads the device tree and what it
+    /// does to a rival: the registry and PnP, or for
+    /// identity_derivation_check (S58) a recorded tree it sets through
+    /// <see cref="RivalSourceHook"/>.</summary>
+    internal interface IRivalSource
     {
-        string enumPath = $@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{enumerator}";
-        string[] names;
-        try
-        {
-            using var k = Registry.LocalMachine.OpenSubKey(enumPath);
-            names = k?.GetSubKeyNames() ?? Array.Empty<string>();
-        }
-        catch { names = Array.Empty<string>(); }
+        /// <summary>The enumerator keys under Enum\<paramref name="enumRoot"/>.</summary>
+        string[] Enumerators(string enumRoot);
+        /// <summary>The instance keys under Enum\<paramref name="enumRoot"/>\<paramref name="enumerator"/>.</summary>
+        string[] Instances(string enumRoot, string enumerator);
+        /// <summary>The instance key's ParentIdPrefix value, or null.</summary>
+        string? ParentIdPrefix(string instanceId);
+        /// <summary>The devnode is in the device tree.</summary>
+        bool Live(string instanceId);
+        /// <summary>The devnode carries a HIDMaestro hardware ID (<see cref="IsHidMaestroOwned"/>).</summary>
+        bool Owned(string instanceId);
+        OwnerCensus.Owner Classify(string instanceId);
+        /// <summary>Removes the devnode, as <see cref="RemoveDevice"/> does.</summary>
+        void Remove(string instanceId);
+        /// <summary>The instance key is still in the registry.</summary>
+        bool RecordExists(string instanceId);
+        /// <summary>Writes the existing instance key's ParentIdPrefix, as
+        /// <see cref="DeviceIdentity.ApplyParentIdPrefix"/> does without
+        /// creating the key. True when the key now holds it.</summary>
+        bool SetParentIdPrefix(string instanceId, string prefix);
+    }
 
-        bool root = string.Equals(enumRoot, "ROOT", StringComparison.OrdinalIgnoreCase);
-        bool clear = true;
-        foreach (string name in names)
+    /// <summary>Stands in for the registry and PnP in the rival scan. Set by
+    /// identity_derivation_check's offline part, null outside it.</summary>
+    internal static IRivalSource? RivalSourceHook;
+
+    sealed class SystemRivalSource : IRivalSource
+    {
+        internal static readonly SystemRivalSource Instance = new();
+
+        static string[] SubKeys(string path)
         {
-            if (string.Equals(name, token, StringComparison.OrdinalIgnoreCase)) continue;
-            string? held;
             try
             {
-                using var ik = Registry.LocalMachine.OpenSubKey($@"{enumPath}\{name}");
-                held = ik?.GetValue("ParentIdPrefix") as string;
+                using var k = Registry.LocalMachine.OpenSubKey(path);
+                return k?.GetSubKeyNames() ?? Array.Empty<string>();
             }
-            catch { continue; }
-            if (!string.Equals(held, prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            catch { return Array.Empty<string>(); }
+        }
 
-            string rival = $@"{enumRoot}\{enumerator}\{name}";
-            bool live = CM_Locate_DevNodeW(out _, rival, 0) == CR_SUCCESS;
-            if (!root && !live) continue;
+        public string[] Enumerators(string enumRoot) => SubKeys($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}");
+        public string[] Instances(string enumRoot, string enumerator) => SubKeys($@"SYSTEM\CurrentControlSet\Enum\{enumRoot}\{enumerator}");
 
-            if (!IsHidMaestroOwned(rival))
+        public string? ParentIdPrefix(string instanceId)
+        {
+            try
             {
-                DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix} and is not HIDMaestro-owned; refusing to create beside it");
-                clear = false;
-                continue;
+                using var ik = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
+                return ik?.GetValue("ParentIdPrefix") as string;
             }
+            catch { return null; }
+        }
 
-            // A present rival is removed only when its owner is provably
-            // gone. One that belongs to a running program, here or
-            // elsewhere, or to a program whose state cannot be known,
-            // stays, and this create is refused instead: either way there
-            // is never a second parent on one prefix.
-            if (live)
+        public bool Live(string instanceId) => CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
+        public bool Owned(string instanceId) => IsHidMaestroOwned(instanceId);
+        public OwnerCensus.Owner Classify(string instanceId) => OwnerCensus.Classify(instanceId);
+        // An SWD rival whose helper cannot be staged throws here, and the
+        // create fails with the reason instead of returning no device.
+        public void Remove(string instanceId) => RemoveDevice(instanceId, timeoutMs: 120_000, forceFallbacks: true);
+
+        public bool RecordExists(string instanceId)
+        {
+            try { using var ik = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}"); return ik != null; }
+            catch { return true; }
+        }
+
+        public bool SetParentIdPrefix(string instanceId, string prefix)
+        {
+            DeviceIdentity.ApplyParentIdPrefix(instanceId, prefix, createKey: false);
+            return string.Equals(ParentIdPrefix(instanceId), prefix, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// Clears every other parent whose HID child would take the device
+    /// instance path this create's child takes, and says whether the way is
+    /// clear. With <paramref name="remove"/> false it only checks, and a
+    /// rival it would remove makes the way not clear: the registration
+    /// gate's check under the PnP lock.
+    ///
+    /// <para>hidclass names a HID child <c>HID\&lt;segment&gt;\&lt;prefix&gt;&amp;&lt;collection&gt;</c>:
+    /// the segment is the parent's enumerator, the second field of its
+    /// device ID (<c>ROOT\HIDClass\HM_0000</c> gives <c>HID\HIDCLASS\...</c>),
+    /// and the prefix is the parent's ParentIdPrefix. Two parents whose
+    /// children share that path make PnP report a duplicate PDO, bugcheck
+    /// 0xCA. Two parents under different enumerators give their children
+    /// different paths whatever their prefixes. So a rival is a parent
+    /// under <paramref name="enumerator"/>, in either root, whose prefix is
+    /// one this create's child can arrive under: <paramref name="prefix"/>,
+    /// and with <paramref name="rewriteOwnRecord"/> the value the create's
+    /// own retained record still holds when it cannot be rewritten first.
+    /// SwDeviceCreate starts the child under the record's value before the
+    /// SDK can write it, so an SWD create passes true and the record is
+    /// rewritten before the scan. A ROOT record is re-enumerated at every
+    /// boot, live or not, so it counts either way. An SWD record only
+    /// enumerates while its creator holds it, so only a live one
+    /// counts.</para>
+    ///
+    /// <para>The scan walks every enumerator HIDMaestro creates parents
+    /// under, ROOT (<see cref="PresentationPlan.IsRootParentEnumerator"/>)
+    /// and SWD (<see cref="PresentationPlan.IsSwdParentEnumerator"/>), beside
+    /// <paramref name="enumerator"/>. Under ROOT a parent with
+    /// <paramref name="token"/> under another enumerator is the same
+    /// controller left where an older presentation put it, and is a rival
+    /// whatever its prefix. The instance of <paramref name="token"/> under
+    /// <paramref name="enumerator"/> is the create's own prior life, which
+    /// the registration gate removes first.</para>
+    ///
+    /// <para>A rival that is not HIDMaestro's is never touched, and the
+    /// create is refused. A present rival whose owner runs, here or in
+    /// another program, or cannot be known, is refused with
+    /// <see cref="HMResourceInUseException"/>. Any other rival is
+    /// removed. False means a rival is still there and the caller must not
+    /// create.</para>
+    /// </summary>
+    internal static bool ClearParentIdPrefixRivals(string enumRoot, string enumerator, string token, string prefix,
+                                                   bool remove = true, bool rewriteOwnRecord = false)
+    {
+        var src = RivalSourceHook ?? SystemRivalSource.Instance;
+        static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        bool root = Same(enumRoot, "ROOT");
+
+        var childPrefixes = new List<string> { prefix };
+        string own = $@"{enumRoot}\{enumerator}\{token}";
+        if (rewriteOwnRecord && src.RecordExists(own) && src.ParentIdPrefix(own) is { } kept && !Same(kept, prefix)
+            && !src.SetParentIdPrefix(own, prefix))
+        {
+            DeviceOrchestrator.LogDiag($"      {own} keeps ParentIdPrefix {kept}, and its child arrives under it first");
+            childPrefixes.Add(kept);
+        }
+
+        bool clear = true;
+        foreach (string r in new[] { "ROOT", "SWD" })
+        {
+            bool rRoot = Same(r, "ROOT");
+            var enumerators = src.Enumerators(r).Where(e => Same(e, enumerator)
+                || (rRoot ? PresentationPlan.IsRootParentEnumerator(e) : PresentationPlan.IsSwdParentEnumerator(e))).ToList();
+            if (Same(r, enumRoot) && !enumerators.Exists(e => Same(e, enumerator)))
+                enumerators.Add(enumerator);
+            foreach (string e in enumerators)
             {
-                var owner = OwnerCensus.Classify(rival);
-                if (owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
+                bool sameSegment = Same(e, enumerator);
+                foreach (string name in src.Instances(r, e))
                 {
-                    DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix} and its owner is {owner}; refusing to create beside it");
-                    string who = owner switch
+                    bool sameToken = Same(name, token);
+                    if (sameSegment && sameToken && Same(r, enumRoot)) continue;
+                    string rival = $@"{r}\{e}\{name}";
+                    string? held = src.ParentIdPrefix(rival);
+                    bool sameChildPath = sameSegment && held != null && childPrefixes.Exists(p => Same(p, held));
+                    bool leftover = root && rRoot && sameToken && !sameSegment;
+                    if (!sameChildPath && !leftover) continue;
+                    string why = sameChildPath
+                        ? $"would give its HID child the path HID\\{e.ToUpperInvariant()}\\{held}&..., this controller's child's"
+                        : $"is this controller's parent left under {e}";
+
+                    bool live = src.Live(rival);
+                    if (!rRoot && !live) continue;
+
+                    if (!src.Owned(rival))
                     {
-                        OwnerCensus.Owner.Unknown =>
-                            "a program built on HIDMaestro older than 1.12.0, which may still be running. " +
-                            "If it is not, remove the device with HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true)",
-                        OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
-                        _ => "a running program",
-                    };
-                    throw new HMResourceInUseException(
-                        $"The device {rival} holds the ParentIdPrefix {prefix} this controller's identity derives, and it belongs to {who}. " +
-                        "Two devices on one prefix stop Windows from booting, so this create is refused.",
-                        $"ParentIdPrefix {prefix}", null);
+                        DeviceOrchestrator.LogDiag($"      {rival} {why} and is not HIDMaestro-owned; refusing to create beside it");
+                        clear = false;
+                        continue;
+                    }
+
+                    // A present rival is removed only when its owner is
+                    // provably gone. One that belongs to a running program,
+                    // here or elsewhere, or to a program whose state cannot
+                    // be known, stays, and this create is refused instead:
+                    // either way no two children ever share a path.
+                    if (live)
+                    {
+                        var owner = src.Classify(rival);
+                        if (owner is not (OwnerCensus.Owner.Dead or OwnerCensus.Owner.DeadLegacy))
+                        {
+                            DeviceOrchestrator.LogDiag($"      {rival} {why} and its owner is {owner}; refusing to create beside it");
+                            string who = owner switch
+                            {
+                                OwnerCensus.Owner.Unknown =>
+                                    "a program built on HIDMaestro older than 1.12.0, which may still be running. " +
+                                    "If it is not, remove the device with HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true)",
+                                OwnerCensus.Owner.LiveLegacy => "a running program built on HIDMaestro 1.12.0",
+                                _ => "a running program",
+                            };
+                            throw new HMResourceInUseException(
+                                $"The device {rival} {why}, and it belongs to {who}. " +
+                                "Two HID children on one device instance path stop Windows from booting, so this create is refused.",
+                                $"ParentIdPrefix {held ?? prefix}", null);
+                        }
+                    }
+
+                    if (!remove)
+                    {
+                        DeviceOrchestrator.LogDiag($"      {rival} {why} again");
+                        clear = false;
+                        continue;
+                    }
+                    DeviceOrchestrator.LogDiag($"      {rival} {why}; removing it before create");
+                    src.Remove(rival);
+
+                    bool stillThere = rRoot ? src.RecordExists(rival) : src.Live(rival);
+                    if (stillThere)
+                    {
+                        DeviceOrchestrator.LogDiag($"      {rival} survived removal; refusing to create beside it");
+                        clear = false;
+                    }
                 }
-            }
-
-            if (!remove)
-            {
-                DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix} again");
-                clear = false;
-                continue;
-            }
-            DeviceOrchestrator.LogDiag($"      {rival} holds ParentIdPrefix {prefix}; removing it before create");
-            // An SWD rival whose helper cannot be staged throws here, and the
-            // create fails with the reason instead of returning no device.
-            RemoveDevice(rival, timeoutMs: 120_000, forceFallbacks: true);
-
-            bool stillThere;
-            if (root)
-            {
-                try { using var ik = Registry.LocalMachine.OpenSubKey($@"{enumPath}\{name}"); stillThere = ik != null; }
-                catch { stillThere = true; }
-            }
-            else stillThere = CM_Locate_DevNodeW(out _, rival, 0) == CR_SUCCESS;
-
-            if (stillThere)
-            {
-                DeviceOrchestrator.LogDiag($"      {rival} survived removal; refusing to create a second parent on {prefix}");
-                clear = false;
             }
         }
         return clear;

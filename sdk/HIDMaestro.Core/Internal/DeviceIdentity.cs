@@ -132,6 +132,26 @@ internal sealed class DeviceIdentity
     /// <summary>The key a caller gets when it passes none.</summary>
     public static string DefaultKey(int index) => $"index:{index}";
 
+    /// <summary>The ParentIdPrefix a HIDMaestro parent named
+    /// <paramref name="token"/> holds, the one every release since v1.8.0
+    /// derives for it: from the index for <c>HM_NNNN</c>, from the hash for
+    /// <c>HM_</c> and 16 hex digits. Null for a name that is no identity
+    /// token. The sweeps read it to know a HID child whose parent is gone
+    /// as HIDMaestro's.</summary>
+    public static string? ParentIdPrefixOfToken(string token)
+    {
+        if (!IsIdentityToken(token)) return null;
+        string rest = token.Substring(TokenPrefix.Length);
+        ulong hash;
+        if (rest.Length == 4 && int.TryParse(rest, System.Globalization.NumberStyles.None,
+                                             System.Globalization.CultureInfo.InvariantCulture, out int index))
+            hash = Hash(DefaultKey(index));
+        else if (rest.Length != 16 || !ulong.TryParse(rest, System.Globalization.NumberStyles.AllowHexSpecifier,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out hash))
+            return null;
+        return $"1&{(uint)(hash >> 32):x}&0";
+    }
+
     public static DeviceIdentity ForIndex(int index)
         => new(DefaultKey(index), true, index, Hash(DefaultKey(index)));
 

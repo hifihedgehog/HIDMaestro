@@ -1687,10 +1687,13 @@ function Scenario-Usbip-E2E-Composite {
 # reproduces the index-shaped ids, a consumer key derives deterministic
 # and collision-free ids, and the USB serial a persona serves follows
 # the identity: synthesized for the Sony composites, captured and varied
-# for the Valve ones.
+# for the Valve ones. Then the 0xCA rival scan on recorded device trees: a
+# parent on the identity's ParentIdPrefix, or with its token, under any
+# ROOT enumerator HIDMaestro creates parents under is removed, refused when
+# its owner runs, and refused untouched when HIDMaestro does not own it.
 function Scenario-Identity-Derivation {
     Invoke-Probe -Dir 'identity_derivation_check' -Exe 'IdentityDerivationCheck.exe' `
-                 -Message 'identity derivation changed: a default id, a keyed id, or a persona serial no longer derives as documented (see probe stdout)'
+                 -Message 'identity derivation changed: a default id, a keyed id, or a persona serial no longer derives as documented, or the ParentIdPrefix rival scan missed a rival (see probe stdout)'
 }
 
 # S59: identity battery (issue #60). One controller per family across

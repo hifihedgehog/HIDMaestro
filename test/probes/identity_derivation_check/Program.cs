@@ -16,6 +16,14 @@
 //      served string descriptor carries it; a profile with a captured
 //      serial (the Valve personas) keeps it byte for byte at index 0 and
 //      varies its trailing digit run per identity.
+//   5. The 0xCA rival scan (DeviceManager.ClearParentIdPrefixRivals) on
+//      recorded device trees: a parent whose HID child would take the
+//      create's child's device instance path (the create's enumerator and
+//      a prefix its child can arrive under), or the same token under
+//      another HIDMaestro ROOT enumerator, is found and removed, refused
+//      when its owner runs, and left alone with the create refused when
+//      HIDMaestro does not own it. An SWD create rewrites its retained
+//      record first.
 //
 // Exit 0 PASS / 1 FAIL.
 
@@ -172,6 +180,10 @@ internal static class Program
         Check("InstanceSerial: index 0 leaves a serial alone", UsbDescriptorSet.InstanceSerial("FX1A00000001", 0) == "FX1A00000001");
         Check("InstanceSerial: carries across a digit run", UsbDescriptorSet.InstanceSerial("AB0099", 1) == "AB0100");
         Check("InstanceSerial: stops at the first non-digit", UsbDescriptorSet.InstanceSerial("ABC", 7) == "ABC");
+
+        // 5. The 0xCA rival scan on recorded trees (RivalScan.cs).
+        Console.WriteLine("\n--- ParentIdPrefix rivals ---");
+        RivalScan.Run((name, ok, detail) => Check(name, ok, detail));
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} {(s_failures == 0 ? "PASS" : "FAIL")} ===");
         return s_failures == 0 ? 0 : 1;

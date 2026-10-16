@@ -161,6 +161,44 @@ internal sealed class PresentationPlan
         };
     }
 
+    /// <summary>Whether <paramref name="enumerator"/> is one a plan creates
+    /// ROOT parents under: <c>HIDClass</c>, or
+    /// <c>VID_xxxx&amp;PID_yyyy&amp;IG_00</c> with four hex digits each. The
+    /// rival scan (<see cref="DeviceManager.ClearParentIdPrefixRivals"/>)
+    /// covers every one of them.</summary>
+    public static bool IsRootParentEnumerator(string enumerator)
+    {
+        if (string.Equals(enumerator, "HIDClass", StringComparison.OrdinalIgnoreCase)) return true;
+        // VID_xxxx&PID_yyyy&IG_00: 4 + 4 + 5 + 4 + 6 characters.
+        if (enumerator.Length != 23) return false;
+        return enumerator.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)
+            && IsHex4(enumerator, 4)
+            && string.Compare(enumerator, 8, "&PID_", 0, 5, StringComparison.OrdinalIgnoreCase) == 0
+            && IsHex4(enumerator, 13)
+            && string.Compare(enumerator, 17, "&IG_00", 0, 6, StringComparison.OrdinalIgnoreCase) == 0;
+    }
+
+    /// <summary>Whether <paramref name="enumerator"/> is one a plan creates
+    /// SWD parents under, <c>HIDMAESTRO_VID_xxxx_PID_yyyy&amp;IG_00</c>
+    /// (the xinputhid path).</summary>
+    public static bool IsSwdParentEnumerator(string enumerator)
+    {
+        // HIDMAESTRO_VID_xxxx_PID_yyyy&IG_00: 15 + 4 + 5 + 4 + 6 characters.
+        if (enumerator.Length != 34) return false;
+        return enumerator.StartsWith("HIDMAESTRO_VID_", StringComparison.OrdinalIgnoreCase)
+            && IsHex4(enumerator, 15)
+            && string.Compare(enumerator, 19, "_PID_", 0, 5, StringComparison.OrdinalIgnoreCase) == 0
+            && IsHex4(enumerator, 24)
+            && string.Compare(enumerator, 28, "&IG_00", 0, 6, StringComparison.OrdinalIgnoreCase) == 0;
+    }
+
+    static bool IsHex4(string s, int at)
+    {
+        for (int i = at; i < at + 4; i++)
+            if (!Uri.IsHexDigit(s[i])) return false;
+        return true;
+    }
+
     /// <summary>The plan as text, one field to a line, for the golden
     /// record layout_audit_check keeps.</summary>
     public string Describe(string profileId)

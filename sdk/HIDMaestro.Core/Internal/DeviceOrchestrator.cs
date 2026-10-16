@@ -871,7 +871,7 @@ internal static partial class DeviceOrchestrator
             SwdDeviceFactory.Result result;
             using (var pnp = DeviceManager.EnterRegistrationGate(gpSwdId, DeviceManager.RegistrationKind.Software,
                        () => DeviceManager.IsHidMaestroOwned(gpSwdId) ? DeviceManager.RemovePriorLife(gpSwdId, timeoutMs: 120_000) : null,
-                       remove => DeviceManager.ClearParentIdPrefixRivals("SWD", gpSwdEnumerator, identity.Token, identity.ParentIdPrefix, remove),
+                       remove => ClearGamepadParentRivals(gpSwdEnumerator, identity, remove),
                        out _))
             {
                 if (pnp == null)
@@ -940,6 +940,15 @@ internal static partial class DeviceOrchestrator
 
         return gpInstId;
     }
+
+    /// <summary>The registration gate's rival step for a gamepad
+    /// companion's SWD parent: its retained record is rewritten to the
+    /// identity's ParentIdPrefix first, since SwDeviceCreate starts the HID
+    /// child under the record's value, and no other parent may hold a prefix
+    /// the child can arrive under (<see cref="DeviceManager.ClearParentIdPrefixRivals"/>).</summary>
+    internal static bool ClearGamepadParentRivals(string swdEnumerator, DeviceIdentity identity, bool remove)
+        => DeviceManager.ClearParentIdPrefixRivals("SWD", swdEnumerator, identity.Token, identity.ParentIdPrefix,
+                                                   remove, rewriteOwnRecord: true);
 
     // ════════════════════════════════════════════════════════════════════
     //  CreateXusbCompanion (non-xinputhid Xbox path)
