@@ -451,8 +451,9 @@ public sealed class HMContext : IDisposable
     /// or the device node creation failed.</exception>
     /// <exception cref="FormatException">A hex string of the profile, its
     /// HID descriptor or a descriptor under usbConfiguration, holds a
-    /// character that is not a hex digit, or one under usbConfiguration has
-    /// an odd number of digits.</exception>
+    /// character that is not a hex digit or an odd number of digits. The
+    /// HID descriptor's refusal names the profile and comes before the
+    /// create takes anything machine-wide.</exception>
     public HMController CreateController(HMProfile profile) => CreateController(profile, null);
 
     /// <summary>Create a new virtual controller with a durable identity
@@ -499,8 +500,9 @@ public sealed class HMContext : IDisposable
     /// or the device node creation failed.</exception>
     /// <exception cref="FormatException">A hex string of the profile, its
     /// HID descriptor or a descriptor under usbConfiguration, holds a
-    /// character that is not a hex digit, or one under usbConfiguration has
-    /// an odd number of digits.</exception>
+    /// character that is not a hex digit or an odd number of digits. The
+    /// HID descriptor's refusal names the profile and comes before the
+    /// create takes anything machine-wide.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));

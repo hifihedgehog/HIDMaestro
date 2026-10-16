@@ -32,7 +32,9 @@
 // JSON path and the limit broken: an unknown field type or semantic, a field
 // wider than its block or report, a report larger than the extended lane, a
 // command rule longer than the OUT endpoint's packets, a null where a value
-// belongs, and their siblings.
+// belongs, and their siblings. A HID descriptor string with an odd number
+// of hex digits, or a character that is not one, is refused the same way
+// with a FormatException that names the profile and the descriptor field.
 //
 // Members newer than b4d29d9 are reached by reflection, so the probe builds
 // against b4d29d9 and fails there at run time.
@@ -468,6 +470,18 @@ internal static class Program
             "extendedReport.ports.fields[3] is null"),
     };
 
+    /// <summary>A HID descriptor string that is not whole hex bytes, and the
+    /// text its FormatException must carry after the profile's name. Before
+    /// this release an odd count dropped the last digit and loaded the
+    /// profile a byte short.</summary>
+    static readonly (string Name, Func<string, string> Break, string Expect)[] s_badHex =
+    {
+        ("a HID descriptor with an odd number of hex digits",
+            d => d + "0", "descriptor has an odd number of hex digits"),
+        ("a HID descriptor with a character that is not a hex digit",
+            d => "zz" + d, "descriptor holds a character that is not a hex digit"),
+    };
+
     /// <summary>Copies that must still compile, as they did at af1e3d4,
     /// because the codec writes them correctly: its defined fallbacks and
     /// the bounds it clamps. A report with ports is written from its port
@@ -722,6 +736,13 @@ internal static class Program
                 s_malformed[i].Break(j);
                 File.WriteAllText(Path.Combine(dir, $"s79-malformed-{i}.json"), j.ToJsonString());
             }
+            for (int i = 0; i < s_badHex.Length; i++)
+            {
+                var j = JsonNode.Parse(json)!.AsObject();
+                j["id"] = $"s79-badhex-{i}";
+                j["descriptor"] = s_badHex[i].Break((string)j["descriptor"]!);
+                File.WriteAllText(Path.Combine(dir, $"s79-badhex-{i}.json"), j.ToJsonString());
+            }
             // The positive controls: copies the codec writes correctly.
             for (int i = 0; i < s_accepted.Length; i++)
             {
@@ -767,6 +788,30 @@ internal static class Program
                     var e = ex.InnerException!;
                     Probe.Check($"refused: {title}",
                         e.GetType() == typeof(InvalidOperationException) && e.Message.StartsWith(want, StringComparison.Ordinal),
+                        $"{e.GetType().Name}: {e.Message}");
+                }
+            }
+            for (int i = 0; i < s_badHex.Length; i++)
+            {
+                var (title, _, expect) = s_badHex[i];
+                string id = $"s79-badhex-{i}";
+                var p = ctx.GetProfile(id);
+                if (p == null)
+                {
+                    Probe.Check($"refused: {title}", false, "the profile did not load");
+                    continue;
+                }
+                string want = $"Profile '{id}': {expect}";
+                try
+                {
+                    validate.Invoke(inner.GetValue(p), null);
+                    Probe.Check($"refused: {title}", false, $"accepted, {p.GetDescriptorBytes()?.Length} bytes");
+                }
+                catch (TargetInvocationException ex)
+                {
+                    var e = ex.InnerException!;
+                    Probe.Check($"refused: {title}",
+                        e.GetType() == typeof(FormatException) && e.Message.StartsWith(want, StringComparison.Ordinal),
                         $"{e.GetType().Name}: {e.Message}");
                 }
             }

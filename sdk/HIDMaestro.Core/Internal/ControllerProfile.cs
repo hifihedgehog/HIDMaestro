@@ -353,6 +353,9 @@ public sealed class ControllerProfile
     /// profile is refused with nothing to undo.</summary>
     internal void ValidateDeviceModel()
     {
+        // The HID descriptor first: a string that is not whole hex bytes
+        // throws FormatException here rather than after the lease.
+        _ = GetDescriptorBytes();
         ValidateExtendedReports();
         ValidatePorts();
         var cfg = UsbConfiguration;
@@ -474,7 +477,12 @@ public sealed class ControllerProfile
     private bool _descriptorCached;
 
     /// <summary>Parses the hex descriptor string into raw bytes. Result is
-    /// cached on the instance after the first call; safe to call repeatedly.</summary>
+    /// cached on the instance after the first call, so it is safe to call
+    /// repeatedly. Spaces and dashes between digits are ignored.</summary>
+    /// <exception cref="FormatException">The string holds a character that
+    /// is not a hex digit, or an odd number of digits, whose last byte would
+    /// be incomplete. The message names the profile and its descriptor
+    /// field.</exception>
     public byte[]? GetDescriptorBytes()
     {
         if (_descriptorCached) return _cachedDescriptor;
@@ -485,9 +493,18 @@ public sealed class ControllerProfile
             return null;
         }
         var hex = Descriptor.Replace(" ", "").Replace("-", "");
-        var bytes = new byte[hex.Length / 2];
-        for (int i = 0; i < bytes.Length; i++)
-            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        // Refused whole, never cut to whole bytes: until v1.13.0 an odd
+        // count dropped the last digit and the device served a descriptor a
+        // byte short.
+        if (hex.Length % 2 != 0)
+            throw new FormatException(
+                $"Profile '{Id}': descriptor has an odd number of hex digits ({hex.Length}), so its last byte is incomplete.");
+        byte[] bytes;
+        try { bytes = Convert.FromHexString(hex); }
+        catch (FormatException)
+        {
+            throw new FormatException($"Profile '{Id}': descriptor holds a character that is not a hex digit.");
+        }
         _cachedDescriptor = bytes;
         _descriptorCached = true;
         return bytes;

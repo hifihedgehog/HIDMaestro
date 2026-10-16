@@ -95,6 +95,9 @@ public sealed class HMProfile
     /// <summary>The raw HID report descriptor bytes. Returns a copy: modifying
     /// the returned array does not affect the profile. Returns null if the
     /// profile has no descriptor (not deployable).</summary>
+    /// <exception cref="FormatException">The profile's descriptor string
+    /// holds a character that is not a hex digit, or an odd number of
+    /// digits.</exception>
     public byte[]? GetDescriptorBytes()
     {
         var src = Inner.GetDescriptorBytes();
