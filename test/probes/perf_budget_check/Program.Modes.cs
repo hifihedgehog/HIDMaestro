@@ -1,7 +1,7 @@
 // The modes the v2.0.0 conversion's baselines need beside the v1.13.0
-// ones: feature answers on both transports, the driver install a baseline
-// session starts with, and the offline self-test of the parsing these
-// modes share.
+// ones: feature answers on both transports, a device-built USB/IP report,
+// the driver install a baseline session starts with, and the offline
+// self-test of the parsing these modes share.
 //
 // A profile argument is a catalog id, optionally followed by reports in
 // hex, each after an @, report ID first:
@@ -295,6 +295,62 @@ internal static partial class Program
         if (failedBefore > 0) Check($"{name}: the SET before each GET", false, $"{failedBefore} refused, last error {errorBefore}");
         if (allocations) Report($"{name}: bytes the process allocated per call", perCall, runs, "");
     }
+
+#if !HM_BASE
+    // ── A report the device builds ───────────────────────────────────────
+
+    const int ReportBuildCalls = 100_000;
+
+    delegate void BuildReportFn(Switch2ProDevice device, byte reportId, uint n, Span<byte> report);
+
+    /// <summary>The Switch 2 Pro composite's device-built report, each of
+    /// its two layouts, two ways: as the device's 4 ms report clock builds
+    /// it (Switch2ProDevice.BuildNextReport, its lock included), and the
+    /// build alone (BuildReport, through a delegate made once). The time per
+    /// report and the bytes the calling thread allocated. Offline: no
+    /// device, no section, no elevation. The layout is selected as a host's
+    /// 03/0A command would select it, by its field.</summary>
+    static void ReportBuild(int runs)
+    {
+        var device = new Switch2ProDevice(null, "perf");
+        var selected = typeof(Switch2ProDevice).GetField("_selectedReport", Any)!;
+        var build = typeof(Switch2ProDevice).GetMethod("BuildReport", Any)!.CreateDelegate<BuildReportFn>();
+        var bodyA = Switch2ProPacker.NeutralBody();
+        var bodyB = (byte[])bodyA.Clone();
+        bodyB[0] ^= 0x01;
+        var report = new byte[Switch2ProDevice.ReportSize];
+        foreach (byte id in new[] { Switch2ProDevice.ReportCommon, Switch2ProDevice.ReportPro })
+        {
+            selected.SetValue(device, id);
+            TimeReports($"Switch2ProDevice.BuildNextReport, report 0x{id:X2}", runs, bodyA, bodyB, device, report,
+                (d, r, _) => d.BuildNextReport(r));
+            Check($"report-build 0x{id:X2}: BuildNextReport's report carries ID 0x{id:X2}", report[0] == id, $"byte 0 is 0x{report[0]:X2}");
+            TimeReports($"Switch2ProDevice.BuildReport, report 0x{id:X2}", runs, bodyA, bodyB, device, report,
+                (d, r, n) => build(d, id, n, r));
+            Check($"report-build 0x{id:X2}: BuildReport's report carries ID 0x{id:X2}", report[0] == id, $"byte 0 is 0x{report[0]:X2}");
+        }
+    }
+
+    delegate void ReportCall(Switch2ProDevice device, Span<byte> report, uint n);
+
+    static void TimeReports(string name, int runs, byte[] bodyA, byte[] bodyB, Switch2ProDevice device, byte[] report, ReportCall call)
+    {
+        for (int i = 0; i < ReportBuildCalls; i++) call(device, report, (uint)i);
+        var perCall = new List<double>(runs);
+        long worst = 0;
+        for (int run = 0; run < runs; run++)
+        {
+            device.SetBody((run & 1) == 0 ? bodyA : bodyB);
+            long bytes0 = GC.GetAllocatedBytesForCurrentThread();
+            long t0 = Stopwatch.GetTimestamp();
+            for (int i = 0; i < ReportBuildCalls; i++) call(device, report, (uint)i);
+            long t1 = Stopwatch.GetTimestamp();
+            worst = Math.Max(worst, GC.GetAllocatedBytesForCurrentThread() - bytes0);
+            perCall.Add((t1 - t0) * 1e9 / Stopwatch.Frequency / ReportBuildCalls);
+        }
+        Report($"{name}: ns per report", perCall, runs, $", most bytes allocated in one run of {ReportBuildCalls} reports {worst}");
+    }
+#endif
 
     // ── Offline self-test ────────────────────────────────────────────────
 

@@ -31,6 +31,9 @@
 //                  the catalog profiles named, with the SDK's own step
 //                  timings (HIDMAESTRO_TIMING), each controller up for <ms>
 //                  first
+//   report-build [runs]
+//                  the Switch 2 Pro composite's device-built report in each
+//                  layout, offline
 //   install        InstallDriver, then proof that the driver installed is
 //                  the one this SDK embeds (exit 4 when it is not)
 //   selftest       the parsing the modes above share, offline
@@ -61,8 +64,9 @@
 // --trace prints wall-clock times around each Dispose, to set beside the
 // SDK's diag log. Every measurement prints one line with p50 and p95 over
 // all samples.
-// Requires elevation, except census and selftest. Exit 0 PASS, 1 FAIL
-// (gate, census, selftest) or an argument refused before anything ran, 2 when another program that embeds HIDMaestro is running, 3
+// Requires elevation, except census, report-build and selftest. Exit 0
+// PASS, 1 FAIL (gate, census, selftest) or an argument refused before
+// anything ran, 2 when another program that embeds HIDMaestro is running, 3
 // when a mode that needs elevation runs without it, 4 when install finds
 // another driver installed, 5 when a measured devnode runs a driver other
 // than the one this SDK embeds.
@@ -130,9 +134,17 @@ internal static partial class Program
         // The usbip mode plays the host controller from this process.
         UsbipServer.AdmitImportsFromThisProcess = true;
 #endif
-        // selftest touches no device, so another program's controllers do
-        // not matter to it.
+        // The offline modes touch no device, so another program's
+        // controllers do not matter to them.
         if (mode == "selftest") return SelfTest();
+#if !HM_BASE
+        if (mode == "report-build")
+        {
+            Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
+            ReportBuild(runs);
+            return s_failures == 0 ? 0 : 1;
+        }
+#endif
         if (OtherSdkRunning()) return 2;
 
         var sdk = typeof(HMContext).Assembly;
