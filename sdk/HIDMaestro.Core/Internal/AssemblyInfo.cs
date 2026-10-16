@@ -46,6 +46,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Switch2CompositeCheck")]
 [assembly: InternalsVisibleTo("RegistryOwnershipCheck")]
 [assembly: InternalsVisibleTo("KbmOfflineCheck")]
+[assembly: InternalsVisibleTo("ReportLengthCheck")]
 [assembly: InternalsVisibleTo("KbmLiveCheck")]
 [assembly: InternalsVisibleTo("BuildInfoCheck")]
 [assembly: InternalsVisibleTo("InteropDeclCheck")]

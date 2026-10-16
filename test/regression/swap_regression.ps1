@@ -149,6 +149,7 @@ if ($verMatch.Success) {
         Join-Path $scriptDir '..\probes\sidewinder_ffb_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\axis_addressing_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\layout_audit_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
+        Join-Path $scriptDir '..\probes\report_length_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\sony_bt_axis_role_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\foreign_devnode_survival_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
         Join-Path $scriptDir '..\probes\xbox_combined_trigger_check\bin\Release\net10.0-windows10.0.26100.0\HIDMaestro.Core.dll'
@@ -1431,10 +1432,21 @@ function Scenario-Axis-Addressing-Check {
 # layout block (when authored) schema-validates against the descriptor and
 # every axis/button reference resolves. For profiles WITHOUT a layout
 # block, asserts the classifier-fallback Sticks/Triggers lists are
-# coherent. No driver install, no virtual device.
+# coherent. Then every catalog report descriptor's input, output and
+# feature lengths against hid-tools', the report and length the driver is
+# given for each profile, and hand-made descriptors for Push and Pop, long
+# items and the other items a descriptor walker can get wrong. Those parts
+# need no device. Last, live, with three controllers read in one window:
+# genesis-nso as 0x3F, never 0x21, and microsoft-designer-keyboard's raw
+# frame as its keyboard report 0x01 (Raw Input), beside dualshock-4-v2's
+# unchanged 0x01. Then the 5-byte wingman report.
 function Scenario-Layout-Audit-Check {
     Invoke-Probe -Dir 'layout_audit_check' -Exe 'LayoutAuditCheck.exe' `
                  -Message 'layout schema/descriptor mismatch (see probe stdout)'
+    Invoke-Probe -Dir 'report_length_check' -Exe 'ReportLengthCheck.exe' `
+                 -Message 'a report length or ID the SDK reads from a descriptor differs from the independent parser (see probe stdout)'
+    Invoke-Probe -Dir 'report_length_check' -Exe 'ReportLengthCheck.exe' -Arguments 'live' -Tag 'live' `
+                 -Message 'the driver sent a data-only frame under another report or at another length (see probe stdout)'
 }
 
 # S38: Sony BT axis-role regression (v1.3.13, #23). Asserts the Sony
