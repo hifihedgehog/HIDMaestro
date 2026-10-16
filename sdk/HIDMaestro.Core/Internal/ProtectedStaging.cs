@@ -194,6 +194,102 @@ internal static partial class ProtectedStaging
     internal static string VersionTag =>
         $"{MachineClaims.SdkVersion}-{EmbeddedManifest.Sha256Hex[..16]}";
 
+    private static string? s_childTemp;
+
+    /// <summary>How many times this process has tried to make its child-temp
+    /// folder. A seam the coexistence probe reads: an unelevated process
+    /// never tries, and a failed try is not remembered, so each later call
+    /// tries again.</summary>
+    internal static int ChildTempAttempts;
+
+    /// <summary><c>%ProgramFiles%\HIDMaestro\childtemp</c>, which holds one
+    /// folder per process for its elevated children's TEMP and TMP. It sits
+    /// beside <see cref="StagingRoot"/> under a parent only an administrator
+    /// can write, with the staging DACL. <see cref="PruneOldVersions"/>
+    /// removes the folder of a process that is no longer running.</summary>
+    internal static string ChildTempRoot => Path.Combine(StagingParent, "childtemp");
+
+    /// <summary>The name of a process's child-temp folder:
+    /// <c>&lt;process id&gt;-&lt;start time in UTC ticks&gt;</c>. The start time
+    /// tells a process apart from a later one given the same id, so the prune
+    /// never takes a running process's folder for a dead one's.</summary>
+    internal static string ChildTempName(int pid, DateTime startTime) =>
+        pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "-" +
+        startTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>This process's folder for an elevated child's TEMP and TMP,
+    /// <c>childtemp\&lt;process id&gt;-&lt;start time&gt;</c>. A made folder is
+    /// kept for the life of the process. A failure is not kept: the next call
+    /// tries again, so a transient failure does not leave every later tool
+    /// unable to run. Requires elevation.</summary>
+    internal static string ChildTempDir()
+    {
+        lock (s_lock)
+        {
+            if (s_childTemp != null) return s_childTemp;
+            ChildTempAttempts++;
+            EnsureProtected(StagingParent, StagingSddl, StagingParentRepair);
+            EnsureProtected(ChildTempRoot, StagingSddl, Repair.MoveAside);
+            DateTime started;
+            using (var self = System.Diagnostics.Process.GetCurrentProcess()) started = self.StartTime;
+            string dir = Path.Combine(ChildTempRoot, ChildTempName(Environment.ProcessId, started));
+            EnsureProtected(dir, StagingSddl, Repair.MoveAside);
+            s_childTemp = dir;
+            return dir;
+        }
+    }
+
+    /// <summary>Point an elevated child process's TEMP and TMP at a protected
+    /// folder, so it writes its temporary files there and not in the user's
+    /// own %TEMP%, a folder any of the user's programs can change. The one
+    /// helper every elevated child the SDK starts goes through. With
+    /// <paramref name="protectedDir"/> it uses that folder, the child's own
+    /// staging directory (hmswd, the usbip-win2 installer, signtool and
+    /// Inf2Cat run from one). Without it the folder is
+    /// <see cref="ChildTempDir"/>, for a child that has none of its own
+    /// (pnputil, devcon). A process that is not elevated starts no elevated
+    /// child: TEMP is left as it is and nothing is tried, since an unelevated
+    /// child writing to the user's own %TEMP% is no elevation path. An
+    /// elevated process that cannot make the folder does not run the tool with
+    /// the user's TEMP: this logs the reason and throws
+    /// <see cref="ChildTempUnavailableException"/>. An operation that needs
+    /// the tool fails with that reason. A best-effort cleanup that catches it
+    /// skips the tool, and the reason stays in the diagnostic log. The next
+    /// call tries the folder again.</summary>
+    /// <exception cref="ChildTempUnavailableException">The process is
+    /// elevated and its child-temp folder could not be made.</exception>
+    internal static void ConfineChildTemp(System.Diagnostics.ProcessStartInfo psi, string? protectedDir = null) =>
+        ConfineChildTemp(psi, protectedDir, Environment.IsPrivilegedProcess);
+
+    /// <summary><see cref="ConfineChildTemp(System.Diagnostics.ProcessStartInfo, string?)"/>
+    /// with the elevation given rather than read, a seam the coexistence
+    /// probe calls with <paramref name="elevated"/> true from an unelevated
+    /// process, where the folder cannot be made, to see the tool refused.</summary>
+    internal static void ConfineChildTemp(System.Diagnostics.ProcessStartInfo psi, string? protectedDir, bool elevated)
+    {
+        if (protectedDir == null && !elevated) return;
+        string dir;
+        try { dir = protectedDir ?? ChildTempDir(); }
+        catch (Exception ex)
+        {
+            string message =
+                $"HIDMaestro did not run {Path.GetFileName(psi.FileName)}: its protected temporary folder could not be made ({ex.Message.TrimEnd('.')}). " +
+                "An elevated tool is never run with the user's own %TEMP%.";
+            DeviceOrchestrator.LogDiag("ProtectedStaging: " + message);
+            throw new ChildTempUnavailableException(message, ex);
+        }
+        psi.Environment["TEMP"] = dir;
+        psi.Environment["TMP"] = dir;
+    }
+
+    /// <summary>Thrown when an elevated process cannot make the protected
+    /// folder an elevated tool needs for its TEMP, so the tool is not run
+    /// (<see cref="ConfineChildTemp(System.Diagnostics.ProcessStartInfo, string?)"/>).</summary>
+    internal sealed class ChildTempUnavailableException : InvalidOperationException
+    {
+        internal ChildTempUnavailableException(string message, Exception inner) : base(message, inner) { }
+    }
+
     /// <summary>How the folder above <see cref="StagingRoot"/> is repaired:
     /// reset in place when it passes the owner check, otherwise refused,
     /// never moved aside, because HIDMaestro creates it itself and a hostile
@@ -746,6 +842,7 @@ internal static partial class ProtectedStaging
                 // as the link, not followed.
                 DeleteOwnVersion(dir);
             }
+            PruneChildTemp();
         }
         catch (Exception ex) { DeviceOrchestrator.LogDiag($"ProtectedStaging: prune skipped: {ex.GetType().Name}"); }
         finally
@@ -777,14 +874,77 @@ internal static partial class ProtectedStaging
         return true;
     }
 
-    /// <summary>Delete one of HIDMaestro's own old version directories after
-    /// confirming, through a handle opened without following links, that it
-    /// is a real directory only Administrators and SYSTEM can write. A
-    /// version directory replaced by a link, or one a non-administrator can
-    /// change, is left alone. Only Administrators and SYSTEM can rename or
-    /// replace an entry under <see cref="StagingRoot"/>, and a link swapped in
-    /// after the check is removed by the recursive delete as the link, not
-    /// followed.</summary>
+    /// <summary>Remove the per-process folders under <see cref="ChildTempRoot"/>
+    /// of processes that are no longer running, under the rules the version
+    /// prune follows: <see cref="ChildTempRoot"/> is checked through a handle
+    /// opened without following a link and left alone unless only
+    /// Administrators and SYSTEM can write it, and each folder is checked the
+    /// same way before it is deleted (<see cref="DeleteOwnVersion"/>). A folder
+    /// whose name is not <c>&lt;pid&gt;-&lt;ticks&gt;</c>, or whose process is
+    /// still running with that start time, stays
+    /// (<see cref="ChildTempWouldDelete"/>).
+    /// The caller holds the staging lock and the pin on
+    /// <see cref="StagingRoot"/>, whose check covers the folder above
+    /// both.</summary>
+    private static void PruneChildTemp()
+    {
+        string root = ChildTempRoot;
+        if (!Directory.Exists(root)) return;
+        try
+        {
+            bool ours;
+            using (var h = OpenLevel(root, hold: false)) ours = IsProtected(h);
+            if (!ours)
+            {
+                DeviceOrchestrator.LogDiag("ProtectedStaging: prune left childtemp, not Administrators/SYSTEM-write-only or a link");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"ProtectedStaging: prune left childtemp, could not open it: {ex.Message}");
+            return;
+        }
+        foreach (string dir in Directory.EnumerateDirectories(root))
+            if (ChildTempWouldDelete(Path.GetFileName(dir)))
+                DeleteOwnVersion(dir);
+    }
+
+    /// <summary>Whether the prune deletes the child-temp folder named
+    /// <paramref name="name"/>. Only a <c>&lt;process id&gt;-&lt;start time&gt;</c>
+    /// name is ever deleted, and only when no running process has that id and
+    /// that start time. A process given a reused id has a different start
+    /// time, so its folder is never taken for the dead process's, and a
+    /// process whose start time cannot be read counts as running. A seam the
+    /// prune and the coexistence probe both read.</summary>
+    internal static bool ChildTempWouldDelete(string name)
+    {
+        int dash = name.IndexOf('-');
+        if (dash <= 0) return false;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (!int.TryParse(name.AsSpan(0, dash), System.Globalization.NumberStyles.None, inv, out int pid)) return false;
+        if (!long.TryParse(name.AsSpan(dash + 1), System.Globalization.NumberStyles.None, inv, out long ticks)) return false;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            if (p.HasExited) return true;
+            return p.StartTime.ToUniversalTime().Ticks != ticks;
+        }
+        catch (ArgumentException) { return true; } // no process has that id
+        catch { return false; } // cannot tell: keep the folder
+    }
+
+    /// <summary>Delete a protected staging or child-temp folder HIDMaestro
+    /// made: an old version directory under <see cref="StagingRoot"/>, or a
+    /// dead process's folder under <see cref="ChildTempRoot"/>. First it
+    /// confirms, through a handle opened without following links, that the
+    /// folder is a real directory only Administrators and SYSTEM can write. A
+    /// folder replaced by a link, or one a non-administrator can change, is
+    /// left alone. Only Administrators and SYSTEM can rename or replace an
+    /// entry in either parent, and a link swapped in after the check is
+    /// removed by the recursive delete as the link, not followed. A version
+    /// directory's parent is held by the prune's pin. The child-temp parent is
+    /// not held: PruneChildTemp checks it through a handle instead.</summary>
     private static void DeleteOwnVersion(string dir)
     {
         SafeFileHandle handle;
@@ -804,11 +964,11 @@ internal static partial class ProtectedStaging
         TryDelete(dir);
     }
 
-    /// <summary>Recursively delete one of HIDMaestro's own staging
-    /// directories: a version folder it created with the protected DACL,
-    /// under %ProgramFiles%, which no non-administrator can change or plant a
-    /// link in. Called only by <see cref="DeleteOwnVersion"/>, which checks
-    /// it through a handle first, under a pin on <see cref="StagingRoot"/>.</summary>
+    /// <summary>Recursively delete a protected staging or child-temp folder
+    /// HIDMaestro created with the staging DACL under %ProgramFiles%, which
+    /// no non-administrator can change or plant a link in. Called only by
+    /// <see cref="DeleteOwnVersion"/>, which checks it through a handle
+    /// first.</summary>
     private static void TryDelete(string dir)
     {
         try { Directory.Delete(dir, recursive: true); }

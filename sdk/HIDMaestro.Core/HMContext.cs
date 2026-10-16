@@ -104,13 +104,32 @@ public sealed class HMContext : IDisposable
     // ════════════════════════════════════════════════════════════════════
 
     /// <summary>True if the HIDMaestro driver is registered in the Windows
-    /// driver store. Does not require admin to check.</summary>
+    /// driver store. Does not require admin to check. It answers from what it
+    /// can read, and a driver store it cannot read answers false: pnputil
+    /// that cannot start or fails, or, in an elevated process, pnputil's
+    /// protected temporary folder that cannot be made. The reason goes to the
+    /// diagnostic log, and <see cref="InstallDriver"/> then reports it.</summary>
+    /// <exception cref="ObjectDisposedException">The context was
+    /// disposed.</exception>
     public bool IsDriverInstalled
     {
         get
         {
             ThrowIfDisposed();
-            return DriverBuilder.IsDriverInstalled();
+            return AnswerInstalled(DriverBuilder.IsDriverInstalled);
+        }
+    }
+
+    /// <summary>The getter's answer from <paramref name="check"/>: false, with
+    /// the reason logged, when the check throws. Coexistence probe OF11
+    /// calls it through reflection with checks that throw.</summary>
+    internal static bool AnswerInstalled(Func<bool> check)
+    {
+        try { return check(); }
+        catch (Exception ex)
+        {
+            DeviceOrchestrator.LogDiag($"IsDriverInstalled: answered false, the driver store could not be read: {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
     }
 

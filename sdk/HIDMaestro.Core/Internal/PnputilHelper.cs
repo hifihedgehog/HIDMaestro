@@ -85,6 +85,8 @@ internal static class PnputilHelper
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
+        ProtectedStaging.ConfineChildTemp(psi);
+
         using var p = Process.Start(psi)!;
         // Drain streams concurrently: ReadToEnd blocks until EOF, which only
         // happens at process exit: so a synchronous read here would hang past
@@ -122,7 +124,8 @@ internal static class PnputilHelper
     /// its output is not a whole listing. A caller that acts on what the
     /// listing leaves out tells a failed listing from an empty one.
     /// <paramref name="run"/> stands in for the pnputil run in
-    /// registry_ownership_check's offline part.</summary>
+    /// registry_ownership_check's offline part and coexistence probe
+    /// OF11.</summary>
     internal static List<DriverRecord>? TryEnumerateDrivers(Func<(int ExitCode, string Output)>? run = null)
     {
         var (exitCode, output) = (run ?? (() => Run("/enum-drivers /format xml")))();
@@ -131,11 +134,14 @@ internal static class PnputilHelper
 
     /// <summary>The records of one pnputil run's listing, or null when it
     /// did not exit with 0 or its output does not parse.
-    /// registry_ownership_check's offline part checks it.</summary>
+    /// registry_ownership_check's offline part and coexistence probe OF11
+    /// check it.</summary>
     internal static List<DriverRecord>? ListingOf(int exitCode, string output) =>
         exitCode == 0 ? ParseDrivers(output) : null;
 
     /// <summary>The records of a listing, or null when it does not parse.
+    /// A listing with no package parses: pnputil prints its root element
+    /// around a line that says none were found.
     /// registry_ownership_check's offline part checks it.</summary>
     internal static List<DriverRecord>? ParseDrivers(string output)
     {
@@ -161,18 +167,16 @@ internal static class PnputilHelper
         return records;
     }
 
-    /// <summary>Returns only the enumerated records that belong to HIDMaestro,
+    /// <summary>Returns only the listed records that belong to HIDMaestro,
     /// using a strict <c>Provider Name == "HIDMaestro"</c> filter combined
-    /// with an allow-list of original INF names. This is the function callers
-    /// should use rather than substring-matching pnputil output.</summary>
-    public static List<DriverRecord> FindHidMaestroPackages()
-    {
-        return EnumerateDrivers()
+    /// with an allow-list of original INF names, rather than
+    /// substring-matching pnputil output.</summary>
+    private static List<DriverRecord> HidMaestroPackagesIn(List<DriverRecord> listing) =>
+        listing
             .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
                      && HidMaestroInfNames.Any(n => string.Equals(r.OriginalName, n,
                                                                   StringComparison.OrdinalIgnoreCase)))
             .ToList();
-    }
 
     // v1.3.0: per-process positive cache. Once we've confirmed the driver
     // is installed in this process (or successfully installed it), every
@@ -188,6 +192,10 @@ internal static class PnputilHelper
     /// <summary>True iff a HIDMaestro package matching every entry in
     /// <see cref="HidMaestroInfNames"/> is currently in the driver store.
     /// Replaces the previous substring grep on enum output.</summary>
+    /// <exception cref="InvalidOperationException">The driver store's folders
+    /// did not show the packages and pnputil's listing failed. The message
+    /// names the failure. A failed listing is never read as "not
+    /// installed".</exception>
     public static bool IsHidMaestroDriverInstalled()
     {
         if (s_installedConfirmed) return true;
@@ -227,7 +235,16 @@ internal static class PnputilHelper
         }
         catch { /* fall through to pnputil enum */ }
 
-        var pkgs = FindHidMaestroPackages();
+        var (exitCode, output) = Run("/enum-drivers /format xml");
+        return InstalledFrom(exitCode, output);
+    }
+
+    /// <summary><see cref="IsHidMaestroDriverInstalled"/>'s answer from one
+    /// pnputil run's listing. Throws, naming the failure, when the listing
+    /// failed. Coexistence probe OF11 calls it through reflection.</summary>
+    internal static bool InstalledFrom(int exitCode, string output)
+    {
+        var pkgs = HidMaestroPackagesIn(ListingOrThrow((exitCode, output)));
         bool ok = HidMaestroInfNames.All(name =>
             pkgs.Any(p => string.Equals(p.OriginalName, name, StringComparison.OrdinalIgnoreCase)));
         if (ok) s_installedConfirmed = true;
@@ -285,15 +302,23 @@ internal static class PnputilHelper
 
     /// <summary>Removes every HIDMaestro package from the driver store and
     /// verifies they're actually gone. Throws <see cref="InvalidOperationException"/>
-    /// if any package can't be removed. This is the strict version that
-    /// prevents the "stale entry blocks reinstall" failure mode.</summary>
-    public static void RemoveAllHidMaestroPackages()
+    /// if any package can't be removed, or if the driver store cannot be
+    /// listed before the removal or after it: a failed listing is not an
+    /// empty one, so it never reads as nothing to remove or nothing left.
+    /// This is the strict version that prevents the "stale entry blocks
+    /// reinstall" failure mode.</summary>
+    public static void RemoveAllHidMaestroPackages() => RemoveAllHidMaestroPackages(() => Run("/enum-drivers /format xml"));
+
+    /// <summary>The same, with <paramref name="run"/> for each pnputil
+    /// listing. Coexistence probe OF11 calls it through reflection with a
+    /// listing that failed, which throws before any delete.</summary>
+    internal static void RemoveAllHidMaestroPackages(Func<(int ExitCode, string Output)> run)
     {
         // Removal busts the per-process positive cache; the next
         // IsHidMaestroDriverInstalled call will re-enumerate.
         InvalidateInstalledCache();
 
-        var cleanup = EnumerateDrivers()
+        var cleanup = ListingOrThrow(run())
             .Where(r => r.ProviderName.Equals("HIDMaestro", StringComparison.OrdinalIgnoreCase)
                      && HidMaestroInfNamesForCleanup.Any(n => string.Equals(r.OriginalName, n,
                                                                              StringComparison.OrdinalIgnoreCase)))
@@ -313,7 +338,7 @@ internal static class PnputilHelper
         // Re-enumerate to verify nothing remains. If something does, throw
         // with detail rather than letting the caller silently proceed and
         // load a stale binary on the next install.
-        var remaining = FindHidMaestroPackages();
+        var remaining = HidMaestroPackagesIn(ListingOrThrow(run()));
         if (remaining.Count > 0)
         {
             string detail = string.Join("; ", remaining.Select(r =>
@@ -324,4 +349,18 @@ internal static class PnputilHelper
                 $"Failed to remove all HIDMaestro driver packages. Still in store: {detail}.{failDetail}");
         }
     }
+
+    private static List<DriverRecord> ListingOrThrow((int ExitCode, string Output) run) =>
+        ListingOf(run.ExitCode, run.Output) ?? throw new InvalidOperationException(
+            "HIDMaestro could not list the driver store's packages: " + ListingFailure(run.ExitCode) + ".");
+
+    /// <summary>Why a listing <see cref="ListingOf"/> refused failed, from its
+    /// exit code. <see cref="RunTool"/> leaves -1 for a run it ended at its
+    /// timeout.</summary>
+    private static string ListingFailure(int exitCode) => exitCode switch
+    {
+        0 => "pnputil /enum-drivers exited 0 but printed no listing it could read",
+        -1 => "pnputil /enum-drivers did not finish in time (exit -1)",
+        _ => $"pnputil /enum-drivers exited {exitCode}",
+    };
 }

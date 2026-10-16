@@ -475,6 +475,12 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                         _diagLastDump = now;
                         try
                         {
+                            // Build the line under the lock, which the counters
+                            // need, then release it before the write. The write
+                            // impersonates the user and touches the disk
+                            // (DeviceOrchestrator.OpenUserLog), neither of which
+                            // belongs under the lock the send path takes.
+                            string line;
                             lock (_hidLock)
                             {
                                 var sb = new System.Text.StringBuilder();
@@ -485,8 +491,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                                 sb.Append($"  queued={_frameQueue.Count}");
                                 foreach (var kv in _pendingInterruptIn)
                                     sb.Append($" parked[0x{kv.Key:X2}]={kv.Value.Count}");
-                                System.IO.File.AppendAllText(DiagPath, sb.ToString() + Environment.NewLine);
+                                line = sb.ToString();
                             }
+                            // Written as the user: the path comes from the
+                            // environment, and the SDK runs elevated.
+                            using (var fs = DeviceOrchestrator.OpenUserLog(
+                                       System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(DiagPath))!, DiagPath))
+                            using (var w = new System.IO.StreamWriter(fs))
+                                w.WriteLine(line);
                         }
                         catch { }
                     }

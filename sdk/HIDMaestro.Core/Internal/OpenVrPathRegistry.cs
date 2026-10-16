@@ -873,7 +873,7 @@ internal static partial class OpenVrPathRegistry
     private static void BackToProcessToken()
     {
         if (!RevertToSelf())
-            Environment.FailFast("HIDMaestro: RevertToSelf failed after writing the OpenVR path registry.");
+            Environment.FailFast("HIDMaestro: RevertToSelf failed after work ran on the user's token (RunAsUser).");
     }
 
     /// <summary>Whether this thread runs on a token of its own.</summary>

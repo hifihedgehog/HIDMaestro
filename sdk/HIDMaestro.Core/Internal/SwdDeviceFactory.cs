@@ -132,6 +132,7 @@ internal static class SwdDeviceFactory
             // directory a non-administrator can write.
             WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
         };
+        ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helperPath)!);
         psi.ArgumentList.Add("create");
         psi.ArgumentList.Add(enumName);
         psi.ArgumentList.Add(instanceIdSuffix);
@@ -163,14 +164,14 @@ internal static class SwdDeviceFactory
                 string stdoutLocal = proc.StandardOutput.ReadToEnd();
                 string stderrLocal = proc.StandardError.ReadToEnd();
 
-                try
-                {
-                    string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    Directory.CreateDirectory(dir);
-                    File.WriteAllText(Path.Combine(dir, $"hmswd_{enumName.Replace('\\','_').Replace('&','_').Replace('/','_')}_{instanceIdSuffix}.log"),
-                        $"Exit={proc.ExitCode}\nSTDOUT:\n{stdoutLocal}\nSTDERR:\n{stderrLocal}\nArgs: {string.Join(" | ", psi.ArgumentList)}\n");
-                }
-                catch { }
+                // The helper's output goes to the diagnostic log, which is
+                // written as the user (DeviceOrchestrator.LogDiag). Until
+                // v1.13.0 it went to its own file under %TEMP%\HIDMaestro,
+                // written elevated into a folder the user's programs can
+                // change.
+                DeviceOrchestrator.LogDiag(
+                    $"      hmswd create {enumName}\\{instanceIdSuffix}: exit={proc.ExitCode} " +
+                    $"stdout=[{stdoutLocal.Trim()}] stderr=[{stderrLocal.Trim()}]");
 
                 if (proc.ExitCode == 0)
                 {
@@ -303,6 +304,7 @@ internal static class SwdDeviceFactory
             // directory a non-administrator can write.
             WorkingDirectory       = Path.GetDirectoryName(helperPath)!,
         };
+        ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helperPath)!);
         psi.ArgumentList.Add("remove");
         psi.ArgumentList.Add(enumerator);
         psi.ArgumentList.Add(suffix);

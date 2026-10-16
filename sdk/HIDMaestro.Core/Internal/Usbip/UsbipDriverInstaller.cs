@@ -515,6 +515,7 @@ internal static partial class UsbipDriverInstaller
                 RedirectStandardError = true,
                 WorkingDirectory = Path.GetDirectoryName(helper)!,
             };
+            ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(helper)!);
             psi.ArgumentList.Add("force-driver");
             psi.ArgumentList.Add(inf);
             psi.ArgumentList.Add(UdeHardwareId);
@@ -759,15 +760,39 @@ internal static partial class UsbipDriverInstaller
     /// <summary>True when usbip-win2's driver package is already in the
     /// driver store, whether or not its host controller is currently
     /// usable. Distinguishes "never installed here" from "installed but
-    /// not working", which need different remedies.</summary>
-    private static bool IsProductInstalled()
+    /// not working", which need different remedies.
+    ///
+    /// <para>False only on a whole listing, one that exited with 0 and
+    /// parses, that names no usbip2_ude.inf. Any other result is unknown, and
+    /// unknown is never "absent": absent leads to the vendor installer, which
+    /// must not run over an existing install. A pnputil that could not start,
+    /// exited with an error, timed out or printed no listing it could read,
+    /// or whose protected temporary folder could not be made, throws with the
+    /// reason, and nothing is installed.</para></summary>
+    /// <exception cref="InvalidOperationException">The driver store could not
+    /// be read.</exception>
+    private static bool IsProductInstalled() =>
+        IsProductInstalled(() => PnputilHelper.Run("/enum-drivers /format xml", timeoutMs: 30_000));
+
+    /// <summary>The same, with <paramref name="run"/> for the pnputil run.
+    /// Coexistence probe OF11 calls it through reflection with runs that
+    /// fail.</summary>
+    internal static bool IsProductInstalled(Func<(int ExitCode, string Output)> run)
     {
-        try
+        int rc;
+        string output;
+        try { (rc, output) = run(); }
+        catch (InvalidOperationException) { throw; }
+        catch (Exception ex)
         {
-            var (_, output) = PnputilHelper.Run("/enum-drivers", timeoutMs: 30_000);
-            return output.Contains("usbip2_ude.inf", StringComparison.OrdinalIgnoreCase);
+            throw new InvalidOperationException(
+                $"HIDMaestro could not read the driver store to tell whether usbip-win2 is installed ({ex.Message.TrimEnd('.')}), so it does not install it.", ex);
         }
-        catch { return false; }
+        var listing = PnputilHelper.ListingOf(rc, output)
+            ?? throw new InvalidOperationException(rc != 0
+                ? $"HIDMaestro could not read the driver store to tell whether usbip-win2 is installed (pnputil /enum-drivers exited {rc}), so it does not install it."
+                : "HIDMaestro could not read the driver store to tell whether usbip-win2 is installed (pnputil /enum-drivers printed no listing it could read), so it does not install it.");
+        return listing.Exists(r => string.Equals(r.OriginalName, "usbip2_ude.inf", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Wait up to <paramref name="timeoutMs"/> for every running
@@ -1209,14 +1234,15 @@ internal static partial class UsbipDriverInstaller
     internal const string InstallerArguments =
         "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /COMPONENTS=main,client /TASKS=vcredist /NOICONS";
 
-    /// <summary>Run the Inno Setup installer silently with
-    /// <see cref="InstallerArguments"/>.</summary>
-    private static void RunSilentInstall(string exePath)
+    /// <summary>The installer's <see cref="ProcessStartInfo"/>: its arguments,
+    /// no window, its working directory and TEMP and TMP confined to its own
+    /// protected staging folder. Its loader extracts and runs its setup
+    /// program inside TEMP (issrc SetupLdr.dpr, GetTempDir reads TMP first),
+    /// so confining TEMP keeps that in a folder only an administrator can
+    /// reach. A seam <see cref="RunSilentInstall"/> and the coexistence probe
+    /// both use, so dropping the confinement shows in the test.</summary>
+    internal static ProcessStartInfo BuildInstallerStartInfo(string exePath)
     {
-        // Point-of-use check under a pin held until the installer exits: the
-        // staged installer still matches the pinned hash, and its directory
-        // cannot be renamed or replaced while it runs elevated.
-        using var pin = ProtectedStaging.PinFile(exePath, InstallerSha256);
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
@@ -1225,6 +1251,19 @@ internal static partial class UsbipDriverInstaller
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(exePath)!,
         };
+        ProtectedStaging.ConfineChildTemp(psi, Path.GetDirectoryName(exePath)!);
+        return psi;
+    }
+
+    /// <summary>Run the Inno Setup installer silently with
+    /// <see cref="InstallerArguments"/>.</summary>
+    private static void RunSilentInstall(string exePath)
+    {
+        // Point-of-use check under a pin held until the installer exits: the
+        // staged installer still matches the pinned hash, and its directory
+        // cannot be renamed or replaced while it runs elevated.
+        using var pin = ProtectedStaging.PinFile(exePath, InstallerSha256);
+        var psi = BuildInstallerStartInfo(exePath);
 
         using var p = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start the usbip-win2 installer.");

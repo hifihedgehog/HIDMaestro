@@ -54,6 +54,22 @@ internal static partial class DeviceOrchestrator
     internal static bool DiagEnabled => s_diagEnabled;
     private static StreamWriter? s_diagWriter;
 
+    /// <summary>Open a diagnostic log under the user's %TEMP% for appending,
+    /// creating its folder, with the user's own rights
+    /// (<see cref="OpenVrPathRegistry.RunAsUser{T}"/>). The SDK usually runs
+    /// elevated, and %TEMP% is a folder any of the user's programs can
+    /// change, so the folder and file are opened as the user: whatever that
+    /// folder resolves to, the open reaches nothing the user could not write
+    /// already. The handle keeps working after the impersonation
+    /// ends.</summary>
+    internal static FileStream OpenUserLog(string dir, string path) =>
+        OpenVrPathRegistry.RunAsUser(() =>
+        {
+            Directory.CreateDirectory(dir);
+            return new FileStream(path, FileMode.Append, FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
+        });
+
     internal static void LogDiag(string message)
     {
         if (!s_diagEnabled) return;
@@ -64,7 +80,6 @@ internal static partial class DeviceOrchestrator
                 if (s_diagWriter == null)
                 {
                     string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    Directory.CreateDirectory(dir);
                     string diagPath = Path.Combine(dir, "teardown_diag.log");
                     // T32-2: keep the StreamWriter open across LogDiag calls
                     // and flush per write. Was File.AppendAllText (open/write/
@@ -74,8 +89,7 @@ internal static partial class DeviceOrchestrator
                     // the file AND the harness's per-run Remove-Item can clear
                     // it even if a prior HIDMaestroTest writer didn't drain
                     // its ProcessExit cleanly.
-                    var fs = new FileStream(diagPath, FileMode.Append, FileAccess.Write,
-                        FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
+                    var fs = OpenUserLog(dir, diagPath);
                     s_diagWriter = new StreamWriter(fs) { AutoFlush = true };
                     AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                     {
@@ -116,10 +130,8 @@ internal static partial class DeviceOrchestrator
                 if (s_timingWriter == null)
                 {
                     string dir = Path.Combine(Path.GetTempPath(), "HIDMaestro");
-                    Directory.CreateDirectory(dir);
                     string timingPath = Path.Combine(dir, "setup_timing.log");
-                    var fs = new FileStream(timingPath, FileMode.Append, FileAccess.Write,
-                        FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
+                    var fs = OpenUserLog(dir, timingPath);
                     s_timingWriter = new StreamWriter(fs) { AutoFlush = true };
                     AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                     {

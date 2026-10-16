@@ -984,6 +984,7 @@ public static partial class DeviceManager
                         RedirectStandardError = true,
                         CreateNoWindow = true
                     };
+                    ProtectedStaging.ConfineChildTemp(psi);
                     using var proc = System.Diagnostics.Process.Start(psi);
                     if (proc != null)
                     {
@@ -1033,6 +1034,7 @@ public static partial class DeviceManager
                             RedirectStandardError = true,
                             CreateNoWindow = true
                         };
+                        ProtectedStaging.ConfineChildTemp(psi);
                         using var proc = System.Diagnostics.Process.Start(psi);
                         if (proc != null)
                         {

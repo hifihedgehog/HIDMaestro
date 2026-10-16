@@ -61,6 +61,11 @@ public static class DriverBuilder
             CreateNoWindow = true,
         };
         if (workingDir != null) psi.WorkingDirectory = workingDir;
+        // signtool and Inf2Cat run with workingDir set to the protected tools
+        // folder and keep their temporary files there. pnputil runs with no
+        // working directory and gets this process's protected child-temp
+        // folder. If that folder cannot be made the tool does not run.
+        ProtectedStaging.ConfineChildTemp(psi, workingDir);
 
         using var proc = Process.Start(psi)!;
         var sb = new System.Text.StringBuilder();
@@ -828,6 +833,8 @@ public static class DriverBuilder
     /// check (~1 ms); (3) pnputil enum-drivers /format xml (~200–500 ms).
     /// Most calls hit (1) or (2); pnputil is only consulted when neither
     /// shortcut applies, e.g. cold start with no prior HKLM hash.</para></summary>
+    /// <exception cref="InvalidOperationException">The pnputil listing
+    /// failed. The message names the failure.</exception>
     public static bool IsDriverInstalled()
     {
         // Perf audit 2026-07-21: PnputilHelper.IsHidMaestroDriverInstalled

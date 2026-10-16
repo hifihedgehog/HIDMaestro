@@ -48,6 +48,15 @@
 //        whole. OF9b: DeleteMovedAside, MovedAsideLevels and DeleteAsidesIn
 //        no longer exist, so no code recursively deletes a moved-aside tree
 //        a non-administrator may change through a stale grant.
+//   OF10 Diagnostic files. hmswd.exe's TEMP and TMP point at its own
+//        staging folder (ProtectedStaging.ConfineChildTemp), so its
+//        self-log never reaches the user's %TEMP%, and the usbip-win2
+//        installer's own start info (BuildInstallerStartInfo) confines TEMP
+//        the same way. A diagnostic log the SDK
+//        opens (DeviceOrchestrator.OpenUserLog) is created with its folder
+//        and is appendable. Its owner is the user only when the process is
+//        elevated (RunAsUser is a no-op otherwise), so that part is a live
+//        check, not one this offline run can fail.
 //   OF8  The squat. Staging lives under %ProgramFiles%\HIDMaestro, and a
 //        thread impersonating a program without elevation
 //        (Native.MediumToken) can create no folder there, the staging
@@ -55,6 +64,18 @@
 //        %ProgramData% (the control, removed after). So the folder-first
 //        squat that makes a %ProgramData% folder refuse (OF4) has nowhere to
 //        stand in front of staging. I10 runs it live against the real root.
+//   OF11 An unread driver-store listing is never taken for "absent". The
+//        usbip-win2 check (UsbipDriverInstaller.IsProductInstalled, given a
+//        stand-in run) throws on a nonzero exit, on empty or unparseable
+//        output and on a run that cannot start, rethrows the pnputil
+//        refusal unchanged, and answers from a whole listing only.
+//        PnputilHelper.ListingOf tells a failed listing from an empty one.
+//        RemoveAllHidMaestroPackages, given a failed listing, throws before
+//        any delete, and HIDMaestro's own installed check
+//        (PnputilHelper.InstalledFrom) throws on one, both naming the
+//        failure. HMContext.IsDriverInstalled's answer
+//        (HMContext.AnswerInstalled) is false, not a throw, for each way the
+//        driver store's read fails.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -94,6 +115,8 @@ internal static partial class Program
         OfflinePinLevels();
         OfflineSquat();
         OfflineSweep();
+        OfflineDiagFiles();
+        OfflineListings();
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
@@ -436,6 +459,247 @@ internal static partial class Program
             }
         }
         finally { Directory.Delete(dir, true); }
+    }
+
+    static void OfflineDiagFiles()
+    {
+        var asm = typeof(HIDMaestro.HMContext).Assembly;
+        var build = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller")?.GetMethod("BuildInstallerStartInfo", BindingFlags.NonPublic | BindingFlags.Static);
+        var open = asm.GetType("HIDMaestro.Internal.DeviceOrchestrator")?.GetMethod("OpenUserLog", BindingFlags.NonPublic | BindingFlags.Static);
+        if (build == null || open == null)
+        {
+            Check("OF10: UsbipDriverInstaller.BuildInstallerStartInfo and DeviceOrchestrator.OpenUserLog exist", false);
+            return;
+        }
+        // The installer's own ProcessStartInfo, built the way RunSilentInstall
+        // builds it, so dropping the confinement there fails this. TEMP and
+        // TMP must be the installer's protected staging folder, not the
+        // user's %TEMP%.
+        string exe = Path.Combine(Path.GetTempPath(), "hmof10", "usbip", "installer.exe");
+        var psi = Call<System.Diagnostics.ProcessStartInfo>(build, new object[] { exe });
+        string want = Path.GetDirectoryName(exe)!;
+        string userTemp = Path.GetTempPath().TrimEnd('\\');
+        Check("OF10: the installer's TEMP and TMP are its own staging folder, not the user's %TEMP%",
+              psi.Environment["TEMP"] == want && psi.Environment["TMP"] == want
+              && !string.Equals(psi.Environment["TEMP"], userTemp, StringComparison.OrdinalIgnoreCase),
+              $"TEMP={psi.Environment["TEMP"]}, TMP={psi.Environment["TMP"]}");
+
+        // A process that is not elevated confines nothing when no folder is
+        // given and does not even try to make the folder: ConfineChildTemp
+        // checks elevation first, which ChildTempAttempts shows. And a failed
+        // try is not remembered: two calls to ChildTempDir are two tries, each
+        // failing on the Program Files create, not one try and a remembered
+        // answer. Elevated, as S72 runs it, these checks do not apply.
+        var ps = asm.GetType("HIDMaestro.Internal.ProtectedStaging");
+        var confine = ps?.GetMethod("ConfineChildTemp", BindingFlags.NonPublic | BindingFlags.Static, null,
+            new[] { typeof(System.Diagnostics.ProcessStartInfo), typeof(string) }, null);
+        var confineAs = ps?.GetMethod("ConfineChildTemp", BindingFlags.NonPublic | BindingFlags.Static, null,
+            new[] { typeof(System.Diagnostics.ProcessStartInfo), typeof(string), typeof(bool) }, null);
+        var childTempDir = ps?.GetMethod("ChildTempDir", BindingFlags.NonPublic | BindingFlags.Static);
+        var attempts = ps?.GetField("ChildTempAttempts", BindingFlags.NonPublic | BindingFlags.Static);
+        if (confine == null || childTempDir == null || attempts == null)
+            Check("OF10: ProtectedStaging.ConfineChildTemp, ChildTempDir and ChildTempAttempts exist", false);
+        else if (!Environment.IsPrivilegedProcess)
+        {
+            var plain = new System.Diagnostics.ProcessStartInfo("pnputil.exe");
+            string? before = plain.Environment["TEMP"];
+            int tries = (int)attempts.GetValue(null)!;
+            try { Call<object?>(confine, new object?[] { plain, null }); }
+            catch (Exception e) { Console.WriteLine($"    ConfineChildTemp threw {e.GetType().Name}: {e.Message}"); }
+            Check("OF10: without elevation, a child with no folder of its own keeps the inherited TEMP and nothing is tried",
+                  plain.Environment["TEMP"] == before && (int)attempts.GetValue(null)! == tries,
+                  $"TEMP={plain.Environment["TEMP"]}, tries {tries} -> {attempts.GetValue(null)}");
+            var thrown = new List<string>();
+            for (int i = 0; i < 2; i++)
+            {
+                try { Call<string>(childTempDir, Array.Empty<object>()); thrown.Add("none"); }
+                catch (Exception e) { thrown.Add(e.GetType().Name); }
+            }
+            Check("OF10: a failed try at the child-temp folder is not remembered, the next call tries again",
+                  (int)attempts.GetValue(null)! == tries + 2 && !thrown.Contains("none"),
+                  $"tries {tries} -> {attempts.GetValue(null)}, thrown {string.Join(", ", thrown)}");
+
+            // Fail closed: called as an elevated process would be, where the
+            // folder cannot be made (this one is not elevated, so the Program
+            // Files create fails), ConfineChildTemp refuses the tool with the
+            // reason rather than leave it on the user's TEMP.
+            if (confineAs == null) Check("OF10: ProtectedStaging.ConfineChildTemp(psi, dir, elevated) exists", false);
+            else
+            {
+                var tool = new System.Diagnostics.ProcessStartInfo("pnputil.exe");
+                string? temp = tool.Environment["TEMP"];
+                Exception? refused = null;
+                try { Call<object?>(confineAs, new object?[] { tool, null, true }); }
+                catch (Exception e) { refused = e; }
+                Check("OF10: an elevated tool whose temporary folder cannot be made is refused, with the reason, and its TEMP is not set",
+                      refused is InvalidOperationException && refused.GetType().Name == "ChildTempUnavailableException"
+                      && refused.InnerException != null
+                      && refused.Message.Contains("did not run pnputil.exe", StringComparison.Ordinal)
+                      && tool.Environment["TEMP"] == temp,
+                      refused == null ? "returned normally" : $"{refused.GetType().Name}: {refused.Message}");
+            }
+        }
+
+        // The prune's keep-or-delete decision for a child-temp folder
+        // (ChildTempWouldDelete). This process's own name, and its id with
+        // its real start time, are kept. Its id with another start time, a
+        // reused id, is deleted. A process that has exited is deleted. A name
+        // that is not "<pid>-<ticks>" is kept.
+        var wouldDelete = ps?.GetMethod("ChildTempWouldDelete", BindingFlags.NonPublic | BindingFlags.Static);
+        var nameOf = ps?.GetMethod("ChildTempName", BindingFlags.NonPublic | BindingFlags.Static);
+        if (wouldDelete == null || nameOf == null)
+            Check("OF10: ProtectedStaging.ChildTempWouldDelete and ChildTempName exist", false);
+        else
+        {
+            bool Del(string n) => Call<bool>(wouldDelete, new object[] { n });
+            DateTime started;
+            using (var self = System.Diagnostics.Process.GetCurrentProcess()) started = self.StartTime;
+            string own = Call<string>(nameOf, new object[] { Environment.ProcessId, started });
+            string reused = Call<string>(nameOf, new object[] { Environment.ProcessId, started.AddSeconds(-1) });
+            var gone = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c exit 0") { UseShellExecute = false, CreateNoWindow = true })!;
+            int gonePid = gone.Id;
+            DateTime goneStart = gone.StartTime;
+            gone.WaitForExit(10_000);
+            gone.Dispose();
+            string dead = Call<string>(nameOf, new object[] { gonePid, goneStart });
+            Check("OF10: the prune keeps a running process's child-temp folder", !Del(own), own);
+            Check("OF10: and deletes the folder of an earlier process given the same id", Del(reused), reused);
+            Check("OF10: and deletes the folder of a process that has exited", Del(dead), dead);
+            Check("OF10: and keeps a folder whose name is not <pid>-<ticks>", !Del("1234") && !Del("abc-1"));
+        }
+
+        // OpenUserLog creates the folder and the log and returns a usable
+        // handle. Its point, impersonating the user, only runs when the
+        // process is elevated (RunAsUser is a no-op otherwise), which this
+        // offline run is not, so whether the file ends up owned by the user
+        // rather than by an elevated token is a live check (S72, elevated),
+        // not one this can fail. Here it confirms the log is created and
+        // written, with its own folder made.
+        string dir = Path.Combine(Path.GetTempPath(), "hmof10log" + Guid.NewGuid().ToString("N")[..8]);
+        string log = Path.Combine(dir, "x.log");
+        try
+        {
+            using (var fs = Call<FileStream>(open, new object[] { dir, log }))
+            using (var w = new StreamWriter(fs)) w.WriteLine("x");
+            Check("OF10: OpenUserLog creates its folder and an appendable log",
+                  Directory.Exists(dir) && File.Exists(log) && new FileInfo(log).Length > 0, log);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+    static void OfflineListings()
+    {
+        var asm = typeof(HIDMaestro.HMContext).Assembly;
+        var installer = asm.GetType("HIDMaestro.Internal.Usbip.UsbipDriverInstaller");
+        var pnputil = asm.GetType("HIDMaestro.Internal.PnputilHelper");
+        var refusalType = asm.GetType("HIDMaestro.Internal.ProtectedStaging+ChildTempUnavailableException");
+        var runType = typeof(Func<(int, string)>);
+        var isProduct = installer?.GetMethod("IsProductInstalled", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { runType }, null);
+        var listingOf = pnputil?.GetMethod("ListingOf", BindingFlags.NonPublic | BindingFlags.Static);
+        var removeAll = pnputil?.GetMethod("RemoveAllHidMaestroPackages", BindingFlags.NonPublic | BindingFlags.Static, null, new[] { runType }, null);
+        var installedFrom = pnputil?.GetMethod("InstalledFrom", BindingFlags.NonPublic | BindingFlags.Static);
+        var answer = typeof(HIDMaestro.HMContext).GetMethod("AnswerInstalled", BindingFlags.NonPublic | BindingFlags.Static);
+        var refusalCtor = refusalType?.GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null,
+            new[] { typeof(string), typeof(Exception) }, null);
+        if (isProduct == null || listingOf == null || removeAll == null || installedFrom == null || answer == null || refusalCtor == null)
+        {
+            Check("OF11: UsbipDriverInstaller.IsProductInstalled(run), PnputilHelper.ListingOf, RemoveAllHidMaestroPackages(run), InstalledFrom, HMContext.AnswerInstalled and the refusal's type exist", false);
+            return;
+        }
+
+        // pnputil's own shapes, as /enum-drivers /format xml prints them: an
+        // empty listing is the root element around a line saying none were found.
+        const string empty = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<PnpUtil Version=\"10.0.26200\" Command=\"/enum-drivers /format xml\">\r\nNo published driver packages were found on the system.\r\n</PnpUtil>\r\n";
+        static string Listing(string provider, params string[] originals)
+        {
+            var sb = new System.Text.StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<PnpUtil Version=\"10.0.26200\" Command=\"/enum-drivers /format xml\">\r\n");
+            int n = 40;
+            foreach (string original in originals)
+                sb.Append($"<Driver DriverName=\"oem{n++}.inf\"><OriginalName>{original}</OriginalName><ProviderName>{provider}</ProviderName><DriverVersion>01/01/2026 1.0.0.0</DriverVersion></Driver>\r\n");
+            return sb.Append("</PnpUtil>\r\n").ToString();
+        }
+        static string With(string original) => Listing("Someone", original);
+        var refusal = (Exception)refusalCtor.Invoke(new object[] { "HIDMaestro did not run pnputil.exe: test", new UnauthorizedAccessException("test") });
+
+        string Product(Func<(int, string)> run, out Exception? thrown)
+        {
+            thrown = null;
+            try { return Call<bool>(isProduct, new object[] { run }) ? "installed" : "not installed"; }
+            catch (Exception e) { thrown = e; return $"{e.GetType().Name}: {e.Message}"; }
+        }
+        Exception? t;
+        string r;
+        r = Product(() => (1, empty), out t);
+        Check("OF11: the usbip-win2 check throws on a listing that exited 1, never \"not installed\"",
+              t is InvalidOperationException && t.Message.Contains("exited 1", StringComparison.Ordinal), r);
+        r = Product(() => (-1, ""), out t);
+        Check("OF11: and on a timed-out run (exit -1, no output)", t is InvalidOperationException, r);
+        r = Product(() => (0, ""), out t);
+        Check("OF11: and on exit 0 with no output", t is InvalidOperationException && t.Message.Contains("no listing", StringComparison.Ordinal), r);
+        r = Product(() => (0, "Microsoft PnP Utility\r\nusbip2"), out t);
+        Check("OF11: and on exit 0 with output that is not a listing", t is InvalidOperationException, r);
+        r = Product(() => throw new System.ComponentModel.Win32Exception(5), out t);
+        Check("OF11: and on a run that cannot start, wrapped with its cause",
+              t is InvalidOperationException && t.InnerException is System.ComponentModel.Win32Exception, r);
+        r = Product(() => throw refusal, out t);
+        Check("OF11: and rethrows the pnputil refusal unchanged", ReferenceEquals(t, refusal), r);
+        r = Product(() => (0, empty), out t);
+        Check("OF11: a whole listing with no package answers \"not installed\"", t == null && r == "not installed", r);
+        r = Product(() => (0, With("usbip2_ude.inf")), out t);
+        Check("OF11: a whole listing that names usbip2_ude.inf answers \"installed\"", t == null && r == "installed", r);
+        r = Product(() => (0, With("usbip2_filter.inf")), out t);
+        Check("OF11: and one that names another package answers \"not installed\"", t == null && r == "not installed", r);
+
+        int? Count(int exitCode, string output) =>
+            Call<object?>(listingOf, new object[] { exitCode, output }) is System.Collections.ICollection c ? c.Count : null;
+        Check("OF11: ListingOf gives no listing for a nonzero exit, a timeout or no output, and an empty one for none found",
+              Count(1, With("x.inf")) == null && Count(-1, "") == null && Count(0, "") == null && Count(0, "garbage") == null
+              && Count(0, empty) == 0 && Count(0, With("x.inf")) == 1,
+              $"{Count(1, With("x.inf"))?.ToString() ?? "null"}, {Count(-1, "")?.ToString() ?? "null"}, {Count(0, "")?.ToString() ?? "null"}, {Count(0, "garbage")?.ToString() ?? "null"}, {Count(0, empty)}, {Count(0, With("x.inf"))}");
+
+        Exception? removal = null;
+        try { Call<object?>(removeAll, new object[] { (Func<(int, string)>)(() => (1, "")) }); }
+        catch (Exception e) { removal = e; }
+        Check("OF11: the HIDMaestro package removal throws on a failed listing, naming it, never reading it as nothing to remove",
+              removal is InvalidOperationException && removal.Message.Contains("could not list", StringComparison.Ordinal)
+              && removal.Message.Contains("exited 1", StringComparison.Ordinal),
+              removal == null ? "returned normally" : $"{removal.GetType().Name}: {removal.Message}");
+
+        // HIDMaestro's own installed check, past the folder shortcut: a
+        // failed listing throws with its failure, so a deploy's post-add
+        // check names it, and is never "not installed".
+        string Installed(int exitCode, string output)
+        {
+            try { return Call<bool>(installedFrom, new object[] { exitCode, output }) ? "installed" : "not installed"; }
+            catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
+        }
+        string i1 = Installed(1, empty), iTimeout = Installed(-1, ""), iNone = Installed(0, ""), iGarbage = Installed(0, "garbage");
+        Check("OF11: HIDMaestro's installed check throws on a failed listing and names it, never \"not installed\"",
+              i1.StartsWith("InvalidOperationException", StringComparison.Ordinal) && i1.Contains("exited 1", StringComparison.Ordinal)
+              && iTimeout.StartsWith("InvalidOperationException", StringComparison.Ordinal) && iTimeout.Contains("did not finish in time", StringComparison.Ordinal)
+              && iNone.StartsWith("InvalidOperationException", StringComparison.Ordinal) && iNone.Contains("no listing it could read", StringComparison.Ordinal)
+              && iGarbage.StartsWith("InvalidOperationException", StringComparison.Ordinal),
+              $"{i1} | {iTimeout} | {iNone} | {iGarbage}");
+        string iEmpty = Installed(0, empty), iOne = Installed(0, Listing("HIDMaestro", "hidmaestro.inf")),
+               iBoth = Installed(0, Listing("HIDMaestro", "hidmaestro.inf", "hidmaestro_xusb.inf"));
+        Check("OF11: and answers from a whole listing: none or one package is \"not installed\", both are \"installed\"",
+              iEmpty == "not installed" && iOne == "not installed" && iBoth == "installed", $"{iEmpty} | {iOne} | {iBoth}");
+
+        string Answer(Func<bool> check)
+        {
+            try { return Call<bool>(answer, new object[] { check }).ToString(); }
+            catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
+        }
+        var answers = new[]
+        {
+            Answer(() => throw refusal),
+            Answer(() => throw new System.ComponentModel.Win32Exception(5)),
+            Answer(() => throw new AggregateException(new IOException("pipe"))),
+            Answer(() => throw new InvalidOperationException("listing")),
+        };
+        Check("OF11: IsDriverInstalled answers false, not a throw, when the driver store cannot be read",
+              Array.TrueForAll(answers, a => a == "False"), string.Join(" | ", answers));
+        Check("OF11: control: it answers true from a check that does", Answer(() => true) == "True");
     }
 
     static void OfflineSweep()
