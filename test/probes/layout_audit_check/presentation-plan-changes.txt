@@ -1,0 +1,4 @@
+# Intended changes to the presentation plan record (presentation-plan.txt,
+# master 3dd5e2a's decisions). One line each:
+#   <case id> <field>=<new value> | <lane> | <reason>
+# <absent> as the value for a line the change removes.

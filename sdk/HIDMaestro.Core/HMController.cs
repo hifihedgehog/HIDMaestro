@@ -555,14 +555,13 @@ public sealed partial class HMController : IDisposable
         _canonicalLt = ResolveCanonicalAxis(profile.Inner.AxisMap, "lefttrigger", HMAxis.Z);
         _canonicalRt = ResolveCanonicalAxis(profile.Inner.AxisMap, "righttrigger", HMAxis.Rz);
 
-        // Only profiles with an XUSB companion (HMXInput.dll) read the
-        // GIP-format buffer slice on IOCTL_XUSB_GET_STATE. xinputhid-bound
-        // Xbox profiles publish XInput through the upper filter, not the
-        // companion, so the GIP slice is unused. Microsoft-VID non-Xbox
-        // profiles (SideWinder etc.) don't speak XInput at all. Skip the
-        // 14-byte packing for both: gated on the same predicate that
-        // controls XUSB companion creation in DeviceOrchestrator.
-        _packsGipBuffer = profile.Inner.RequiresXusbCompanion;
+        // Only a controller with an XUSB companion (HMXInput.dll) has a
+        // reader of the GIP-format slice, on IOCTL_XUSB_GET_STATE. An
+        // xinputhid controller publishes XInput through the upper filter,
+        // and every other controller has no XInput at all, so the 14-byte
+        // packing is skipped for them: the presentation plan decides it
+        // with the companion it makes (PresentationPlan.PacksGip).
+        _packsGipBuffer = PresentationPlan.Of(profile.Inner).PacksGip;
         _inputView = SharedMemoryIO.EnsureInputMapping(index);
         _inputEvent = SharedMemoryIO.GetInputEvent(index);
         _companionInputEvent = _packsGipBuffer

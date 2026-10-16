@@ -1412,10 +1412,14 @@ function Scenario-Axis-Addressing-Check {
 # layout block (when authored) schema-validates against the descriptor and
 # every axis/button reference resolves. For profiles WITHOUT a layout
 # block, asserts the classifier-fallback Sticks/Triggers lists are
-# coherent. Then every catalog report descriptor's input, output and
-# feature lengths against hid-tools', the report and length the driver is
-# given for each profile, and hand-made descriptors for Push and Pop, long
-# items and the other items a descriptor walker can get wrong. Those parts
+# coherent, and the presentation plan of every catalog profile and of the
+# builder cases (enumerator, hardware and compatible IDs, the companion
+# and the steps around it) equals the probe's golden record but for the
+# changes its change list names. Then every catalog report descriptor's
+# input, output and feature lengths against hid-tools', the report and
+# length the driver is given for each profile, and hand-made descriptors
+# for Push and Pop, long items and the other items a descriptor walker can
+# get wrong. Those parts
 # need no device. Last, live, with three controllers read in one window:
 # genesis-nso as 0x3F, never 0x21, and microsoft-designer-keyboard's raw
 # frame as its keyboard report 0x01 (Raw Input), beside dualshock-4-v2's

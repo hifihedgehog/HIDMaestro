@@ -11,11 +11,15 @@
 //   4. profile.Layout.Kind matches profile.Type ordering: wheel-typed
 //      profiles, when authored, declare kind=Wheel etc. (advisory; doesn't
 //      fail when the profile has no layout block).
+//   5. The presentation plan of every catalog profile and of the builder
+//      cases (PresentationPlanCheck.cs) equals presentation-plan.txt but
+//      for the changes presentation-plan-changes.txt lists.
 //
 // This probe runs against the in-process catalog only: no driver
 // install, no virtual device. Exit 0 on PASS, 1 on FAIL.
 
 using System;
+using System.IO;
 using System.Linq;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -32,8 +36,22 @@ internal static class Program
         Console.WriteLine($"  [{(cond ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
-    static int Main()
+    static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--record-plan")
+        {
+            using var rec = new HMContext();
+            rec.LoadDefaultProfiles();
+            File.WriteAllText(args[1], PresentationPlanCheck.Record(rec));
+            Console.WriteLine($"wrote {args[1]}");
+            return 0;
+        }
+        if (args.Length != 0)
+        {
+            Console.WriteLine("usage: LayoutAuditCheck [--record-plan <file>]");
+            return 2;
+        }
+
         Console.WriteLine("=== Layout audit (v1.3.9) ===");
 
         using var ctx = new HMContext();
@@ -131,6 +149,15 @@ internal static class Program
         }
         Console.WriteLine($"  XUSB-companion expected true:  {xusbExpectedTrue}");
         Console.WriteLine($"  XUSB-companion expected false: {xusbExpectedFalse}");
+
+        // How every profile's devnodes present themselves (PresentationPlan),
+        // against the record of master 3dd5e2a and the listed changes.
+        Console.WriteLine();
+        Console.WriteLine("--- presentation plan ---");
+        PresentationPlanCheck.Compare(ctx,
+            Path.Combine(AppContext.BaseDirectory, "presentation-plan.txt"),
+            Path.Combine(AppContext.BaseDirectory, "presentation-plan-changes.txt"),
+            (name, ok, detail) => Check(name, ok, detail));
 
         Console.WriteLine();
         Console.WriteLine($"  Catalog: {totalProfiles} deployable profiles");

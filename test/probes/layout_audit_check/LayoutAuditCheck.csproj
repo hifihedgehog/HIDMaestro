@@ -8,6 +8,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The presentation plan's golden record and change list, read beside
+         the exe so a staged probe finds them (PresentationPlanCheck.cs). -->
+    <None Include="presentation-plan.txt;presentation-plan-changes.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
   </ItemGroup>
 </Project>

@@ -692,14 +692,9 @@ internal static partial class DeviceOrchestrator
     /// and any PnP work.</summary>
     private static void WriteInstanceConfig(int controllerIndex, ControllerProfile profile, DeviceIdentity identity)
     {
+        var plan = PresentationPlan.Of(profile);
         byte[] descriptor = profile.GetDescriptorBytes()!;
         var (_, inputReportLen, _) = DriverInputReport(profile);
-
-        // FunctionMode=1 for non-xinputhid Xbox (XUSB on main device),
-        // FunctionMode=0 for everything else. Gated on IsXboxBranded so a
-        // SideWinder / FF wheel / other Microsoft-VID non-Xbox device does
-        // not get its main HID treated as an XInput function.
-        bool funcMode = profile.RequiresXusbCompanion;
 
         string instancePath = RegPathForIndex(controllerIndex);
         Registry.LocalMachine.DeleteSubKeyTree(instancePath, throwOnMissingSubKey: false);
@@ -709,7 +704,7 @@ internal static partial class DeviceOrchestrator
         // (OwnerCensus.GameInputKeysInUse).
         key.SetValue("VendorId", (int)profile.VendorId, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)profile.ProductId, RegistryValueKind.DWord);
-        key.SetValue("FunctionMode", funcMode ? 1 : 0, RegistryValueKind.DWord);
+        key.SetValue("FunctionMode", plan.FunctionMode, RegistryValueKind.DWord);
         key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         // v1.3.5: VersionNumber default 0x0100 (real Sony USB convention).
         // BT profiles that emulate a real Sony controller need 0 here so
@@ -795,12 +790,10 @@ internal static partial class DeviceOrchestrator
         });
 
     private static string? CreateGamepadCompanion(int controllerIndex, ControllerProfile profile,
-                                                  DeviceIdentity identity)
+                                                  PresentationPlan plan, DeviceIdentity identity)
     {
         string gpVid = $"{profile.VendorId:X4}";
-        string gpPid = $"{profile.ProductId:X4}";
-        string hwPid = profile.ResolvedDriverPid != null
-            ? $"{Convert.ToUInt16(profile.ResolvedDriverPid, 16):X4}" : gpPid;
+        string hwPid = $"{plan.HardwarePid:X4}";
         string gpEnumeratorLegacy = $"VID_{gpVid}&PID_{hwPid}&IG_00";                 // ROOT\… path
         // SWD enumerator: `HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00`. The only
         // load-bearing detail vs the pre-experiment `HIDMAESTRO_VID_xxx&PID_yyy&IG_00`
@@ -811,7 +804,7 @@ internal static partial class DeviceOrchestrator
         // VID and PID breaks the substring match without losing HIDMAESTRO
         // branding or the `&IG_` suffix (load-bearing for HIDAPI/SDL3
         // blocklist + xinputhid INF match).
-        string gpEnumeratorSwd    = $"HIDMAESTRO_VID_{gpVid}_PID_{hwPid}&IG_00";      // SWD\… path
+        string gpEnumeratorSwd    = plan.Enumerator!;                                  // SWD\… path
 
         // 1. Look for an existing companion claimed by THIS controllerIndex
         //    check new SWD path first, then legacy ROOT path.
@@ -836,19 +829,8 @@ internal static partial class DeviceOrchestrator
             // &IG_00 suffix is load-bearing for SDL3 / HIDAPI blocklist
             // (makes those APIs route through XInput instead of trying to
             // read native HID).
-            string[] hardwareIds = new[]
-            {
-                $"root\\VID_{gpVid}&PID_{hwPid}&IG_00",
-                "root\\HIDMaestroGamepad",
-                "root\\HIDMaestro",
-            };
-            var compatList = new List<string> { "root\\HIDMaestroGamepad", "root\\HIDMaestro" };
-            if (profile.Connection == "bluetooth")
-            {
-                // Prepend the BTH-LE spoof alias so devices keying off a BT
-                // hardware descriptor still match.
-                compatList.Insert(0, $"BTHLEDEVICE\\{{00001812-0000-1000-8000-00805f9b34fb}}_Dev_VID&02{gpVid}_PID&{gpPid}");
-            }
+            string[] hardwareIds = new List<string>(plan.HardwareIds).ToArray();
+            string[] compatIds = new List<string>(plan.CompatibleIds).ToArray();
 
             // Enumerator: `HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00`. Two pieces
             // meet at the HID child's instance path:
@@ -898,7 +880,7 @@ internal static partial class DeviceOrchestrator
                 result = SwdDeviceFactory.Create(
                     instanceSuffix,
                     hardwareIds,
-                    compatList.ToArray(),
+                    compatIds,
                     identity.ContainerId,
                     companionDesc,
                     driverRequired: true,
@@ -964,7 +946,7 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
 
     private static string? CreateXusbCompanion(int controllerIndex, ControllerProfile profile,
-                                               DeviceIdentity identity)
+                                               PresentationPlan plan, DeviceIdentity identity)
     {
         // Look for a live HIDMAESTRO already claimed by THIS controllerIndex.
         // The "HIDMAESTRO" enumerator name is load-bearing for WGI's
@@ -1001,15 +983,8 @@ internal static partial class DeviceOrchestrator
             // Hardware IDs exactly match the previous SetupDi path so the
             // existing hidmaestro_xusb.inf [Models] entries (root\VID_045E&
             // PID_028E&XI_00, root\HIDMaestroXUSB) still bind.
-            string vidHw = $"root\\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&XI_00";
-            string[] hardwareIds = new[] { vidHw, "root\\HIDMaestroXUSB" };
-            string[] compatIds = new[]
-            {
-                "USB\\MS_COMP_XUSB10",
-                "USB\\Class_FF&SubClass_5D&Prot_01",
-                "USB\\Class_FF&SubClass_5D",
-                "USB\\Class_FF",
-            };
+            string[] hardwareIds = new List<string>(plan.CompanionHardwareIds).ToArray();
+            string[] compatIds = new List<string>(plan.CompanionCompatibleIds).ToArray();
             string companionDesc = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
             // The identity's token, fixed across lives (issue #60). The
             // companion has no HID child, so its XUSB interface path is
@@ -1361,6 +1336,7 @@ internal static partial class DeviceOrchestrator
             throw new ArgumentException(
                 $"Profile '{profile.Id}' has no HID descriptor.", nameof(profile));
         identity ??= DeviceIdentity.ForIndex(controllerIndex);
+        var plan = PresentationPlan.Of(profile);
 
         // Defense-in-depth gate: block until any in-flight TeardownController
         // for this controllerIndex has fully completed (including
@@ -1378,7 +1354,7 @@ internal static partial class DeviceOrchestrator
         WaitForPriorTeardown(controllerIndex);
 
         var setupTotalSw = Stopwatch.StartNew();
-        LogDiag($">>> SETUP  ENTER ctrl={controllerIndex} profile={profile.Id} vid=0x{profile.VendorId:X4} pid=0x{profile.ProductId:X4} uses_upper_filter={profile.UsesUpperFilter} companion_only={profile.CompanionOnly} identity={identity}");
+        LogDiag($">>> SETUP  ENTER ctrl={controllerIndex} profile={profile.Id} vid=0x{profile.VendorId:X4} pid=0x{profile.ProductId:X4} path={plan.Path} enumerator={plan.Enumerator ?? "-"} xusb_companion={plan.XusbCompanion} identity={identity}");
         string? returnedId = null;
         bool configWritten = false;
         try {
@@ -1386,7 +1362,7 @@ internal static partial class DeviceOrchestrator
 
         // A companion an earlier life of this identity left on another
         // index goes before the slot count, so the count does not include it.
-        if (profile.RequiresXusbCompanion)
+        if (plan.XusbCompanion)
             RemoveCompanionOnOtherIndex(identity.Token, controllerIndex);
 
         // Snapshot XInput slot count BEFORE any setup so the post-setup wait
@@ -1395,8 +1371,7 @@ internal static partial class DeviceOrchestrator
         // not raw Microsoft VID. SideWinder (045E, no companion, no upper
         // filter) never claims a slot and paid the full 500 ms wait on
         // every create.
-        int slotsBefore = (profile.UsesUpperFilter || profile.RequiresXusbCompanion)
-            ? CountConnectedXInputSlots() : -1;
+        int slotsBefore = plan.WaitsForXInputSlot ? CountConnectedXInputSlots() : -1;
         bool xinputFull = slotsBefore >= 4;
 
         // ── Step 0: pre-flight environment ───────────────────────────────
@@ -1454,20 +1429,20 @@ internal static partial class DeviceOrchestrator
         string? mainInstanceId = null;
         string? companionId = null;
 
-        if (profile.UsesUpperFilter)
+        if (plan.Path == PresentationPlan.CreatePath.XinputhidGamepad)
         {
             // xinputhid path: companion-only (no main HID device)
             var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_gamepad_companion");
-            companionId = CreateGamepadCompanion(controllerIndex, profile, identity);
+            companionId = CreateGamepadCompanion(controllerIndex, profile, plan, identity);
             LogDiag($"    CreateGamepadCompanion -> {(companionId ?? "(null)")} in {createSw.ElapsedMilliseconds}ms");
         }
-        else if (!profile.CompanionOnly)
+        else if (plan.Path == PresentationPlan.CreatePath.Root)
         {
             // Plain HID or non-xinputhid Xbox: create main device node
             var createSw = Stopwatch.StartNew();
             using var _ts = new TimingScope(controllerIndex, profile.Id, "3.create_main_devnode");
-            var result = DeviceNodeCreator.CreateDeviceNode(profile, controllerIndex, identity);
+            var result = DeviceNodeCreator.CreateDeviceNode(profile, plan, controllerIndex, identity);
             if (!result.Success || result.InstanceId == null)
             {
                 LogDiag($"    DeviceNodeCreator.CreateDeviceNode FAILED after {createSw.ElapsedMilliseconds}ms");
@@ -1578,13 +1553,13 @@ internal static partial class DeviceOrchestrator
         // Gamepad and hang WGI). xinput1_4 discovery still finds it via the
         // {EC87F1E3} XUSB device interface class.
         string? xusbCompanionId = null;
-        if (profile.RequiresXusbCompanion)
+        if (plan.XusbCompanion)
         {
             var xusbSw = Stopwatch.StartNew();
             using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.create_xusb_companion"))
-                xusbCompanionId = CreateXusbCompanion(controllerIndex, profile, identity);
+                xusbCompanionId = CreateXusbCompanion(controllerIndex, profile, plan, identity);
             LogDiag($"    CreateXusbCompanion -> {(xusbCompanionId ?? "(null)")} in {xusbSw.ElapsedMilliseconds}ms");
-            if (profile.CompanionOnly && companionId == null)
+            if (plan.Path == PresentationPlan.CreatePath.CompanionOnly && companionId == null)
                 companionId = xusbCompanionId;
 
             // Profiles with an HIDMAESTRO XUSB companion need the HID parent

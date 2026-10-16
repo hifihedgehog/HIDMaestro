@@ -80,48 +80,20 @@ internal static partial class DeviceNodeCreator
     ///       setup can start without racing PnP)</item>
     /// </list>
     /// </summary>
-    public static Result CreateDeviceNode(ControllerProfile profile, int controllerIndex,
+    public static Result CreateDeviceNode(ControllerProfile profile, PresentationPlan plan, int controllerIndex,
                                           DeviceIdentity? identity = null)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
+        if (plan == null) throw new ArgumentNullException(nameof(plan));
         identity ??= DeviceIdentity.ForIndex(controllerIndex);
 
-        string vid = $"{profile.VendorId:X4}";
-        string pid = $"{profile.ProductId:X4}";
-
-        // driverPid: alternate PID in the hardware ID used for driver matching only
-        // (e.g. xinputhid's INF matches PID 0x02FF). Apps still see the real PID via
-        // HID attributes: the driver returns it from IOCTL_HID_GET_DEVICE_ATTRIBUTES.
-        string hwPid = profile.ResolvedDriverPid != null
-            ? $"{Convert.ToUInt16(profile.ResolvedDriverPid, 16):X4}" : pid;
-
+        // The plan names the enumerator and the hardware and compatible IDs
+        // (PresentationPlan.Of). An &IG_00 enumerator is what makes HIDAPI
+        // and SDL3 skip the device and read it through XInput instead.
         string desc = profile.ProductString;
-        string enumerator, hwId;
-
-        if (profile.UsesUpperFilter)
-        {
-            // xinputhid path. The &IG_00 in the path is what causes HIDAPI/SDL3 to
-            // skip the device (HIDAPI's GAMECONTROLLER blocklist), forcing them to
-            // use XInput instead: which is what we want for Xbox Series.
-            enumerator = $"VID_{vid}&PID_{hwPid}&IG_00";
-            hwId = $"root\\VID_{vid}&PID_{hwPid}&IG_00";
-        }
-        else if (profile.VendorId == 0x045E)
-        {
-            // Xbox legacy path (e.g. Xbox 360 wired). Same &IG_00 filtering plus
-            // FunctionMode=1 in the registry enables WinExInput on the main device
-            // so WGI fires GamepadAdded for it.
-            enumerator = $"VID_{vid}&PID_{pid}&IG_00";
-            hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
-        }
-        else
-        {
-            // Standard HID device: DualSense, generic third-party gamepads, etc.
-            // No upper filter, plain HID class.
-            enumerator = "HIDClass";
-            hwId = $"root\\VID_{vid}&PID_{pid}";
-        }
-        string hwMulti = $"{hwId}\0root\\HIDMaestro\0\0";
+        string enumerator = plan.Enumerator!;
+        string hwId = plan.HardwareIds[0];
+        string hwMulti = string.Join("\0", plan.HardwareIds) + "\0\0";
 
         // Issue #60. The instance id is the identity's, not a number Windows
         // generates, so this parent has the same name on every life and the
@@ -247,7 +219,7 @@ internal static partial class DeviceNodeCreator
                 // child (a re-arrival) was gated correctly every time. So
                 // it goes through SetupDi on the devinfo element, exactly
                 // like the hardware id above, before registration exists.
-                if (profile.RequiresXusbCompanion)
+                if (plan.UpperFilterTripwire)
                 {
                     byte[] ufBytes = Encoding.Unicode.GetBytes("xinputhid\0\0");
                     if (!SetupDiSetDeviceRegistryPropertyW(dis, devInfoHandle.AddrOfPinnedObject(),
@@ -257,46 +229,11 @@ internal static partial class DeviceNodeCreator
                             "WGI may double this controller (issue #59)");
                 }
 
-                // Compatible IDs serve two purposes:
-                //   1. WGI / GameInputSvc identifies Xbox controllers via
-                //      USB\MS_COMP_XUSB10. Only set for non-xinputhid Xbox.
-                //   2. SDL3 / hidapi (used by Steam Input + every SDL-based
-                //      game) walks up to the parent devnode and substring-greps
-                //      DEVPKEY_Device_CompatibleIds for "USB", "BTHENUM",
-                //      "BTHLEDEVICE", etc. to set is_bluetooth. Without a
-                //      BTHENUM compat ID on a profile declaring connection
-                //      "bluetooth", SDL falls through to bus_type=UNKNOWN
-                //      → is_bluetooth=false → SDL_hidapi_ps5 picks USB
-                //      Report 0x02 effects framing. Steam then misclassifies
-                //      a virtual DualSense BT as USB, breaking effect
-                //      passthrough and the "Bluetooth" badge in the Steam
-                //      Input config UI.
-                //   The BTHENUM string only needs to exist as a substring;
-                //   real BT HID HCI form is `BTHENUM\Dev_VID&02xxxx_PID&yyyy`.
-                //   We mint a matching string from the profile's VID/PID;
-                //   nothing on Windows side actually walks up to a real BT
-                //   radio so the form just has to satisfy hidapi's check.
-                string compatMulti = null!;
-                if (!profile.UsesUpperFilter && profile.VendorId == 0x045E)
-                {
-                    compatMulti = "USB\\MS_COMP_XUSB10\0USB\\Class_FF&SubClass_5D&Prot_01\0USB\\Class_FF&SubClass_5D\0\0";
-                }
-                else if (!profile.UsesUpperFilter
-                      && string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Gated on !UsesUpperFilter so xinputhid profiles (Xbox
-                    // Series BT, Xbox Elite v2 BT, Xbox One BT) keep their
-                    // existing BTHLEDEVICE compat ID on the gamepad-companion
-                    // devnode (DeviceOrchestrator.CreateGamepadCompanion) and
-                    // never get a SECOND, different-shaped BT compat ID on
-                    // the main device. BLE-keyed consumers (Settings →
-                    // Devices "Bluetooth", browser Gamepad API) keep working
-                    // unchanged. Sony BT and any generic non-Xbox BT profile
-                    // (which doesn't go through the xinputhid path) gets the
-                    // BTHENUM string here so SDL3/hidapi's bus-type
-                    // substring-match resolves to BLUETOOTH.
-                    compatMulti = $"BTHENUM\\Dev_VID&02{vid}_PID&{pid}\0BTHENUM\\{{00001124-0000-1000-8000-00805f9b34fb}}_VID&02{vid}_PID&{pid}\0\0";
-                }
+                // The compatible IDs the plan gives (PresentationPlan.Of): the
+                // XUSB ones WGI and GameInputSvc read, or the Bluetooth ones
+                // SDL3 and hidapi read from the parent for the bus type.
+                string? compatMulti = plan.CompatibleIds.Count > 0
+                    ? string.Join("\0", plan.CompatibleIds) + "\0\0" : null;
                 if (compatMulti != null)
                 {
                     byte[] compatBytes = Encoding.Unicode.GetBytes(compatMulti);
@@ -395,15 +332,9 @@ internal static partial class DeviceNodeCreator
             }
 
             // Wait for the HID interface to arrive: this is what the Phase 1 loop
-            // races against. The enumerator MUST match the one we created the device
-            // under (xinputhid uses the &IG_00 form, plain HID uses HIDClass).
-            string devEnumer;
-            if (profile.UsesUpperFilter)
-                devEnumer = $"VID_{profile.VendorId:X4}&PID_{(profile.ResolvedDriverPid != null ? Convert.ToUInt16(profile.ResolvedDriverPid, 16) : profile.ProductId):X4}&IG_00";
-            else if (profile.VendorId == 0x045E)
-                devEnumer = $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00";
-            else
-                devEnumer = "HIDClass";
+            // races against. The enumerator is the one the device was created
+            // under.
+            string devEnumer = enumerator;
 
             // T23-2: fast-path the instance-ID lookup. The pre-DIF_REGISTERDEVICE
             // walk above already discovered our newly-created devnode. After
