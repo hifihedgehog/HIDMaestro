@@ -311,7 +311,7 @@ public sealed class ControllerProfile
         {
             throw new InvalidOperationException($"Profile '{Id}': dataReportId \"{DataReportId}\" is not a hex byte.");
         }
-        if (HidReportMap.Parse(GetDescriptorBytes() ?? Array.Empty<byte>()).Find(HidReportKind.Input, id) == null)
+        if (GetOrBuildReportMap().Find(HidReportKind.Input, id) == null)
             throw new InvalidOperationException(
                 $"Profile '{Id}': dataReportId 0x{id:X2} is not an input report of the profile's descriptor.");
     }
@@ -495,7 +495,15 @@ public sealed class ControllerProfile
     /// <summary>The keyboard, mouse and consumer-control packer for this
     /// profile's descriptor, built once.</summary>
     internal KeyboardMousePacker GetOrBuildKeyboardMousePacker() =>
-        _cachedKbmPacker ??= new KeyboardMousePacker(GetDescriptorBytes() ?? Array.Empty<byte>());
+        _cachedKbmPacker ??= new KeyboardMousePacker(GetOrBuildReportMap());
+
+    [JsonIgnore]
+    private HidReportMap? _cachedReportMap;
+
+    /// <summary>The descriptor's reports, parsed once and read by both
+    /// the report builder and the keyboard and mouse packer.</summary>
+    internal HidReportMap GetOrBuildReportMap() =>
+        _cachedReportMap ??= HidReportMap.Parse(GetDescriptorBytes() ?? Array.Empty<byte>());
 
     /// <summary>Issue #67. A keyboard or mouse profile gets every frame
     /// delivered, and so does an "other" profile whose descriptor is a
@@ -586,7 +594,7 @@ public sealed class ControllerProfile
         byte preferredRid = ExtendedReport is { AlwaysArmed: true }
             ? ExtendedReport.ReportIdByte
             : DataReportId != null ? ReportIds.Parse(DataReportId) : (byte)0;
-        var b = HidReportBuilder.Parse(GetDescriptorBytes()!, AxisMap, preferredRid);
+        var b = HidReportBuilder.Parse(GetOrBuildReportMap(), AxisMap, preferredRid);
         b.ButtonMap = ButtonMap;
         b.TriggerButtons = TriggerButtons;
         // v1.3.9: when the profile authors a layout block, its role-tagged

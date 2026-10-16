@@ -137,11 +137,17 @@ public class HidReportBuilder
     /// honored, so a stale declaration falls back rather than naming a
     /// report that does not exist (issue #58).</param>
     public static HidReportBuilder Parse(byte[] descriptor, Dictionary<string, string>? axisMap = null,
-                                         byte preferredReportId = 0)
+                                         byte preferredReportId = 0) =>
+        Parse(HidReportMap.Parse(descriptor), axisMap, preferredReportId);
+
+    /// <summary>The same over a parse already made, the one a profile
+    /// shares with its keyboard and mouse packer.</summary>
+    internal static HidReportBuilder Parse(HidReportMap map, Dictionary<string, string>? axisMap = null,
+                                           byte preferredReportId = 0)
     {
         var builder = new HidReportBuilder();
         builder._preferredReportId = preferredReportId;
-        builder.ParseDescriptor(descriptor);
+        builder.ReadInputReports(map);
         builder.ResolveSemantics();
         if (axisMap != null)
         {
@@ -340,7 +346,7 @@ public class HidReportBuilder
         }
     }
 
-    void ParseDescriptor(byte[] desc)
+    void ReadInputReports(HidReportMap map)
     {
         // HidReportMap reads the items as HID 1.11 section 6.2.2 defines
         // them and hid-core.c applies them: Push and Pop save and restore
@@ -350,7 +356,6 @@ public class HidReportBuilder
         // used to walk the items itself and missed Push and Pop, so a
         // descriptor using them (logitech-wingman-formula-gp) came out 3
         // bytes long where it declares 5, with Y read as six 1-bit fields.
-        var map = HidReportMap.Parse(desc);
 
         // Fields per input report, in declaration order. The parser
         // historically kept only the FIRST input report, which held for
@@ -363,19 +368,29 @@ public class HidReportBuilder
         foreach (var r in map.Reports)
         {
             if (r.Kind != HidReportKind.Input) continue;
-            var fields = new List<InputField>();
+            // Sized up front: the elements of every field, at most 65536.
+            // A 4-byte Report Count can read negative or past that.
+            long elements = 0;
+            foreach (var f in r.Fields) elements += Math.Max(0, f.Count);
+            var fields = new List<InputField>((int)Math.Min(elements, 1 << 16));
             foreach (var f in r.Fields)
             {
                 // One InputField per element. Element i takes the field's
                 // i-th usage, and elements past the last usage repeat it
                 // (HID 1.11, 6.2.2.8). A field that names no usage, most
-                // often padding, keeps the page in force.
+                // often padding, keeps the page in force. The usages are
+                // walked range by range rather than looked up per element.
+                var ranges = f.Usages;
+                int range = 0;
+                uint next = ranges.Length > 0 ? ranges[0].Min : 0;
                 for (int c = 0; c < f.Count; c++)
                 {
                     ushort page = f.UsagePage, usage = 0;
-                    if (f.Usages.Length > 0)
+                    if (ranges.Length > 0)
                     {
-                        uint u = f.UsageAt(c);
+                        uint u = next;
+                        if (next < ranges[range].Max) next++;
+                        else if (range + 1 < ranges.Length) next = ranges[++range].Min;
                         page = HidField.PageOf(u);
                         usage = HidField.IdOf(u);
                     }

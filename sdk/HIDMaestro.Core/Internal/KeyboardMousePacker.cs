@@ -93,9 +93,13 @@ internal sealed class KeyboardMousePacker
     /// <summary>Highest button number SubmitMouse can reach.</summary>
     public int ButtonCount => _mouseButtonMax + _extraButtons.Count;
 
-    public KeyboardMousePacker(byte[] descriptor)
+    public KeyboardMousePacker(byte[] descriptor) : this(HidReportMap.Parse(descriptor)) { }
+
+    /// <summary>A packer over a parse already made, the one its profile
+    /// shares with HidReportBuilder.</summary>
+    public KeyboardMousePacker(HidReportMap map)
     {
-        Map = HidReportMap.Parse(descriptor);
+        Map = map;
 
         var mouse = Map.FirstCollection(PageGenericDesktop, 0x02);
         if (mouse != null)
