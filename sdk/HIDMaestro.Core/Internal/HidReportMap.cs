@@ -26,6 +26,9 @@ internal sealed class HidField
     public bool Constant;
     public bool Variable;
     public bool Relative;
+    /// <summary>The Usage Page in force at the main item, the page of a
+    /// field that names no usage.</summary>
+    public ushort UsagePage;
     public int Collection = -1;
     public HidUsageRange[] Usages = Array.Empty<HidUsageRange>();
 
@@ -335,6 +338,7 @@ internal sealed class HidReportMap
             Constant = (flags & 0x01) != 0,
             Variable = (flags & 0x02) != 0,
             Relative = (flags & 0x04) != 0,
+            UsagePage = g.UsagePage,
             Collection = tlc,
             Usages = ResolveUsages(locals),
         };
