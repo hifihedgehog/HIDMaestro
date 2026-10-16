@@ -26,7 +26,7 @@
 // "offline" runs the set dispose with controllers that have no device,
 // needing no elevation: the handler's own controller stays on its thread,
 // and every failure of the dispose callback comes out in one
-// AggregateException.
+// AggregateException, with a set of one controller too.
 //
 // The other events raised on SDK threads are tested where their stimulus
 // lives: the adapter ports' OutputChanged in S80, the USB audio events in
@@ -303,7 +303,33 @@ internal static class Program
         Probe.Check("every failure comes out in one flat AggregateException, as from Parallel.ForEach",
             agg != null && flat && messages.SequenceEqual(new[] { "S85 offline: controller 0", "S85 offline: controller 2" }),
             $"{caught?.GetType().Name ?? "nothing"}: [{string.Join(", ", messages)}]");
+        OfflineSingle();
         return Probe.Finish("S85 offline");
+    }
+
+    /// <summary>DisposeControllersInParallel with one controller takes its
+    /// own path, without the pool. A throwing callback must still come out
+    /// as an AggregateException, as the method's documentation says. Before
+    /// this release the callback's exception escaped unwrapped.</summary>
+    static void OfflineSingle()
+    {
+        var ctx = (HMContext)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+        var one = (HMController)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(HMController));
+        int calls = 0;
+        Exception? caught = null;
+        try
+        {
+            ctx.DisposeControllersInParallel(new[] { one }, (c, _) =>
+            {
+                calls++;
+                throw new InvalidOperationException("S85 offline: the only controller");
+            });
+        }
+        catch (Exception e) { caught = e; }
+        var inner = (caught as AggregateException)?.InnerExceptions.ToArray() ?? Array.Empty<Exception>();
+        Probe.Check("with one controller, the callback's failure comes out in an AggregateException",
+            calls == 1 && inner.Length == 1 && inner[0] is InvalidOperationException { Message: "S85 offline: the only controller" },
+            $"{calls} call(s), {caught?.GetType().Name ?? "nothing"}: [{string.Join(", ", inner.Select(x => x.Message))}]");
     }
 
     const uint QuietErrorMode = 0x0001 | 0x0002 | 0x8000; // SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX

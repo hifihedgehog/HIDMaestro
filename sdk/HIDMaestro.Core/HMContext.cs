@@ -305,7 +305,9 @@ public sealed class HMContext : IDisposable
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try { arr[0].Dispose(); } catch { }
-            perControllerCallback?.Invoke(arr[0], sw.ElapsedMilliseconds);
+            // Wrapped as the pool path wraps it (DisposeConcurrently).
+            try { perControllerCallback?.Invoke(arr[0], sw.ElapsedMilliseconds); }
+            catch (Exception ex) { throw new AggregateException(ex); }
             return;
         }
         _batchDisposing = true;
