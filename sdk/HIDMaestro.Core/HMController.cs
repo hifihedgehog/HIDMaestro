@@ -695,9 +695,9 @@ public sealed partial class HMController : IDisposable
         if (axes != null)
         {
             if (axes.TryGetValue(canonical, out var vCanon))
-                return Math.Clamp(vCanon, 0f, 1f);
+                return WireArith.Normalized(vCanon, 0.0);
             if (slot < triggers.Count && axes.TryGetValue(triggers[slot].Axis, out var vField))
-                return Math.Clamp(vField, 0f, 1f);
+                return WireArith.Normalized(vField, 0.0);
             // A descriptor with no declared triggers (every Valve state
             // packet, both Switch 2 Pro profiles) has no field to fall back
             // to. The canonical axis above is the whole answer, and it is
@@ -886,12 +886,21 @@ public sealed partial class HMController : IDisposable
         // is also skipped via the gipData=null path in WriteInputFrame.
         if (_packsGipBuffer)
         {
-            ushort gipLx = (ushort)(mlx * 65535);
-            ushort gipLy = (ushort)(mly * 65535);
-            ushort gipRx = (ushort)(mrx * 65535);
-            ushort gipRy = (ushort)(mry * 65535);
-            ushort gipLt = (ushort)(mlt * 1023);
-            ushort gipRt = (ushort)(mrt * 1023);
+            // The one arithmetic (WireArith) on XInput's own ranges. A thumb
+            // X is 0..65535 here, which companion.c reads as g - 32768.
+            // XInput's thumb Y grows upward, the other way from the SDK's Y,
+            // so it is an inverted field, sThumbY = Linear(v, -32768, 32767,
+            // invert), and the slice carries 32767 - sThumbY, which
+            // companion.c turns back. A trigger is the XInput byte t the
+            // rule gives, carried as the smallest 10-bit g whose
+            // g * 255 / 1023 (companion.c's integer decode) is t, so every
+            // companion reads back the byte the rule chose.
+            ushort gipLx = (ushort)WireArith.Linear(mlx, 0, 65535, invert: false, rest: 0.5);
+            ushort gipLy = (ushort)(32767 - WireArith.Linear(mly, -32768, 32767, invert: true, rest: 0.5));
+            ushort gipRx = (ushort)WireArith.Linear(mrx, 0, 65535, invert: false, rest: 0.5);
+            ushort gipRy = (ushort)(32767 - WireArith.Linear(mry, -32768, 32767, invert: true, rest: 0.5));
+            ushort gipLt = XusbTrigger(mlt);
+            ushort gipRt = XusbTrigger(mrt);
             _gipBuf[0]  = (byte)(gipLx & 0xFF); _gipBuf[1]  = (byte)(gipLx >> 8);
             _gipBuf[2]  = (byte)(gipLy & 0xFF); _gipBuf[3]  = (byte)(gipLy >> 8);
             _gipBuf[4]  = (byte)(gipRx & 0xFF); _gipBuf[5]  = (byte)(gipRx >> 8);
@@ -977,6 +986,11 @@ public sealed partial class HMController : IDisposable
         return ElapsedMicros(startTicks);
     }
 
+    /// <summary>The XUSB slice's 10-bit trigger for <paramref name="v"/>:
+    /// the smallest g whose g * 255 / 1023 is the 8-bit XInput trigger the
+    /// one arithmetic gives.</summary>
+    internal static ushort XusbTrigger(double v) => (ushort)((WireArith.Linear(v, 0, 255, invert: false, rest: 0) * 1023 + 254) / 255);
+
     private static long ElapsedMicros(long startTicks) => startTicks == 0 ? 0
         : (System.Diagnostics.Stopwatch.GetTimestamp() - startTicks) * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;
 
@@ -991,7 +1005,7 @@ public sealed partial class HMController : IDisposable
     {
         var axes = state.Axes;
         double GetAxis(HMAxis ax, double def) =>
-            axes != null && axes.TryGetValue(ax, out var v) ? Math.Clamp(v, 0f, 1f) : def;
+            axes != null && axes.TryGetValue(ax, out var v) ? WireArith.Normalized(v, def) : def;
 
         // Cached at construction: Profile.Sticks / Profile.Triggers are
         // uncached computed properties that each allocate a List plus

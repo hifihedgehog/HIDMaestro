@@ -57,3 +57,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("GcSdlCheck")]
 [assembly: InternalsVisibleTo("PerfBudgetCheck")]
 [assembly: InternalsVisibleTo("DeviceOracleCheck")]
+[assembly: InternalsVisibleTo("ArithRoundtripCheck")]

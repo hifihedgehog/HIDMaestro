@@ -1,0 +1,301 @@
+// roundtrip: every raw integer a consumer can read from a device of each
+// width the catalog uses, and of every width from 1 to 16 bits, signed and
+// unsigned, normalized the three ways a consumer normalizes one (double
+// division, float division, float times the reciprocal), sent through the
+// SDK's own code path for the site and read back. Each must return as the
+// raw value it started as.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using HIDMaestro;
+using HIDMaestro.Internal;
+using HIDMaestro.Internal.Usbip;
+
+internal static class RoundTrip
+{
+    /// <summary>Raw values, of every conversion, that do not return.</summary>
+    public sealed record Result(string Key, long Values, long[] Misses, int FirstMiss);
+
+    public static int Run()
+    {
+        Inventory.Build();
+        var sites = new SortedDictionary<string, Site>(StringComparer.Ordinal);
+        foreach (var (k, s) in Inventory.SiteByKey)
+            if (!k.Contains("DIGITAL") && !k.Contains("ZL/ZR")) sites[k] = s;
+        foreach (var s in Extra()) sites.TryAdd(s.Key, s);
+
+        using var rig = new Rig();
+        int fail = 0;
+        Console.WriteLine($"roundtrip: {sites.Count} conversions, three normalizations each, through the SDK's code for the site");
+        Console.WriteLine("  conversion | raw values | values that do not return: double division, float division, float reciprocal | first");
+        foreach (var s in sites.Values)
+        {
+            var tree = rig.TreeOf(s);
+            var r = Check(s, tree);
+            bool ok = r.Misses.All(m => m == 0);
+            if (!ok) fail++;
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {s.Key} | {r.Values} | {string.Join(", ", r.Misses)} | {(r.FirstMiss == int.MinValue ? "-" : r.FirstMiss.ToString())}");
+        }
+        foreach (var imu in ImuScale.All)
+        {
+            var (values, misses, first) = rig.ImuRoundTrip(imu);
+            bool ok = misses.All(m => m == 0);
+            if (!ok) fail++;
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] imu {imu.Key} | {values} | {string.Join(", ", misses)} | {(first == int.MinValue ? "-" : first.ToString())}");
+        }
+        Console.WriteLine(fail == 0 ? "roundtrip: PASS, every raw value returns" : $"roundtrip: FAIL, {fail} conversion(s) lose raw values");
+        return fail;
+    }
+
+    /// <summary>Every unsigned width from 1 to 16 bits and its two signed
+    /// forms, the codec's types, the XUSB slice and the two packers.</summary>
+    static IEnumerable<Site> Extra()
+    {
+        for (int bits = 1; bits <= 16; bits++)
+        {
+            yield return Sites.Descriptor(0, (1 << bits) - 1);
+            if (bits >= 2)
+            {
+                yield return Sites.Descriptor(-(1 << (bits - 1)), (1 << (bits - 1)) - 1);
+                yield return Sites.Descriptor(-((1 << (bits - 1)) - 1), (1 << (bits - 1)) - 1);
+            }
+        }
+        yield return Sites.U8Axis(128, false);
+        yield return Sites.U8Axis(128, true);
+        yield return Sites.U8Trigger();
+        yield return Sites.Stick12();
+        yield return Sites.I16Axis(false);
+        yield return Sites.I16Axis(true);
+        yield return Sites.U16Trigger();
+        yield return Sites.GipStickX();
+        yield return Sites.GipStickY();
+        yield return Sites.GipTrigger();
+        yield return Sites.SwitchStick(false);
+        yield return Sites.SwitchStick(true);
+        yield return Sites.Switch2Stick(false);
+        yield return Sites.Switch2Stick(true);
+    }
+
+    static Result Check(Site s, Func<float, int> tree)
+    {
+        var misses = new long[3];
+        int first = int.MinValue;
+        long values = 0;
+        for (long r = s.RawLo; r <= s.RawHi; r++)
+        {
+            var (k, range) = s.Normal((int)r);
+            float n1 = (float)((double)k / range);
+            float n2 = k / (float)range;
+            float n3 = k * (1f / range);
+            values++;
+            if (tree(n1) != r) { misses[0]++; if (first == int.MinValue) first = (int)r; }
+            if (tree(n2) != r) { misses[1]++; if (first == int.MinValue) first = (int)r; }
+            if (tree(n3) != r) { misses[2]++; if (first == int.MinValue) first = (int)r; }
+        }
+        return new Result(s.Key, values, misses, first);
+    }
+
+    /// <summary>The SDK's code paths: a report builder on a one-axis
+    /// descriptor, the codec on a one-field report, an offline Xbox 360
+    /// controller's XUSB slice, and the two packers.</summary>
+    sealed class Rig : IDisposable
+    {
+        const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
+        const BindingFlags Static = BindingFlags.Static | BindingFlags.NonPublic;
+
+        readonly IntPtr _view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        readonly byte[] _section = new byte[SharedMemoryIO.SHARED_INPUT_SIZE];
+        HMController? _xbox;
+        HMAxis _lx, _ly, _lt;
+        const int XboxIndex = 7900;
+
+        public Func<float, int> TreeOf(Site s)
+        {
+            string k = s.Key;
+            if (k.StartsWith("hid-descriptor", StringComparison.Ordinal)) return Descriptor(s.RawLo, s.RawHi);
+            if (k.StartsWith("codec uint8-axis", StringComparison.Ordinal))
+                return Codec(new FieldSpec { Byte = 1, Type = "uint8-axis", Semantic = "leftStickX", Center = k.Contains("center 128") ? null : int.Parse(k.Split(' ')[3]), Invert = k.EndsWith("invert") ? true : null },
+                    (b, _) => b[1], stick: true);
+            if (k == "codec uint8-trigger")
+                return Codec(new FieldSpec { Byte = 1, Type = "uint8-trigger", Semantic = "leftTrigger" }, (b, _) => b[1], stick: false);
+            if (k == "codec stick12-pair")
+                return Codec(new FieldSpec { Byte = 1, Type = "stick12-pair", Semantic = "leftStick" }, (b, _) => b[1] | ((b[2] & 0x0F) << 8), stick: true);
+            if (k.StartsWith("codec int16-axis", StringComparison.Ordinal))
+                return Codec(new FieldSpec { Byte = 1, Type = "int16-axis", Semantic = k.Contains("Y") ? "leftStickY" : "leftStickX" },
+                    (b, _) => (short)(b[1] | (b[2] << 8)), stick: true, y: k.Contains("Y"));
+            if (k == "codec uint16-trigger")
+                return Codec(new FieldSpec { Byte = 1, Type = "uint16-trigger", Semantic = "leftTrigger" }, (b, _) => b[1] | (b[2] << 8), stick: false);
+            if (k == "xusb slice stick X") return v => Companion.StickX(Gip(v, 0));
+            if (k == "xusb slice stick Y") return v => Companion.StickY(Gip(v, 1));
+            if (k == "xusb slice trigger") return v => Companion.Trigger(Gip(v, 2));
+            if (k.StartsWith("switch-pro stick", StringComparison.Ordinal))
+            {
+                bool y = k.EndsWith("Y");
+                var body = new byte[SwitchProPacker.BodySize];
+                var st = new HMGamepadState();
+                return v =>
+                {
+                    SwitchProPacker.BuildBody(in st, y ? 0.5 : v, y ? v : 0.5, 0.5, 0.5, body);
+                    return y ? (body[6] >> 4) | (body[7] << 4) : body[5] | ((body[6] & 0x0F) << 8);
+                };
+            }
+            if (k.StartsWith("switch2 composite stick", StringComparison.Ordinal))
+            {
+                bool y = k.EndsWith("Y");
+                var body = new byte[Switch2ProPacker.BodySize];
+                var st = new HMGamepadState();
+                return v =>
+                {
+                    Switch2ProPacker.BuildBody(in st, y ? 0.5 : v, y ? v : 0.5, 0.5, 0.5, 0, 0, body);
+                    int at = Switch2ProPacker.SticksOffset + (y ? 2 : 0);
+                    return body[at] | (body[at + 1] << 8);
+                };
+            }
+            throw new InvalidOperationException($"No code path for {k}.");
+        }
+
+        /// <summary>A one-axis descriptor of X with the given logical range,
+        /// in a report field just wide enough, padded to a byte.</summary>
+        static Func<float, int> Descriptor(int min, int max)
+        {
+            int bits = 1;
+            if (min < 0) while (min < -(1L << (bits - 1)) || max > (1L << (bits - 1)) - 1) bits++;
+            else while (max > (1L << bits) - 1) bits++;
+            var d = new List<byte> { 0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x09, 0x30 };
+            Item(d, 0x14, min);
+            Item(d, 0x24, max);
+            d.AddRange(new byte[] { 0x75, (byte)bits, 0x95, 0x01, 0x81, 0x02 });
+            int pad = (8 - bits % 8) % 8;
+            if (pad != 0) d.AddRange(new byte[] { 0x75, (byte)pad, 0x95, 0x01, 0x81, 0x03 });
+            d.Add(0xC0);
+            var b = HidReportBuilder.Parse(d.ToArray());
+            if (!b.AxisFields.TryGetValue(HMAxis.X, out var f))
+                throw new InvalidOperationException($"The builder found no X axis in the descriptor for {min}..{max}.");
+            var report = new byte[b.InputReportByteSize];
+            var axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0 };
+            int off = f.BitOffset + (b.InputReportId != 0 ? 8 : 0);
+            return v =>
+            {
+                axes[HMAxis.X] = v;
+                b.BuildReportInto(report, axes);
+                long raw = 0;
+                for (int i = 0; i < f.BitSize; i++)
+                    if (((report[(off + i) >> 3] >> ((off + i) & 7)) & 1) != 0) raw |= 1L << i;
+                if (f.LogicalMin < 0 && (raw & (1L << (f.BitSize - 1))) != 0) raw -= 1L << f.BitSize;
+                return (int)raw;
+            };
+
+            // A short item with a signed value in the fewest bytes.
+            static void Item(List<byte> d, byte tag, int value)
+            {
+                if (value >= sbyte.MinValue && value <= sbyte.MaxValue) { d.Add((byte)(tag | 1)); d.Add((byte)value); }
+                else if (value >= short.MinValue && value <= short.MaxValue) { d.Add((byte)(tag | 2)); d.Add((byte)value); d.Add((byte)(value >> 8)); }
+                else { d.Add((byte)(tag | 3)); d.AddRange(BitConverter.GetBytes(value)); }
+            }
+        }
+
+        /// <summary>The codec on a report with one field at byte 1.</summary>
+        static Func<float, int> Codec(FieldSpec field, Func<byte[], int, int> read, bool stick, bool y = false)
+        {
+            var spec = new ExtendedReportSpec { ReportId = "0x01", Size = 8, Fields = new List<FieldSpec> { field } };
+            var buf = new byte[spec.Size];
+            var enc = new VendorBlobCodec.EncoderState();
+            var st = new HMGamepadState();
+            return v =>
+            {
+                if (stick) VendorBlobCodec.EncodeInput(spec, in st, y ? 0.5f : v, y ? v : 0.5f, 0.5f, 0.5f, 0f, 0f, buf, enc);
+                else VendorBlobCodec.EncodeInput(spec, in st, 0.5f, 0.5f, 0.5f, 0.5f, v, 0f, buf, enc);
+                return read(buf, 0);
+            };
+        }
+
+        /// <summary>The XUSB slice's value <paramref name="which"/> (0 left
+        /// thumb X, 1 left thumb Y, 2 left trigger) after an offline
+        /// xbox-360-wired controller takes a state with that axis at
+        /// <paramref name="v"/>.</summary>
+        int Gip(float v, int which)
+        {
+            var c = Xbox();
+            var axes = new Dictionary<HMAxis, float> { [_lx] = 0.5f, [_ly] = 0.5f, [_lt] = 0f };
+            axes[which == 0 ? _lx : which == 1 ? _ly : _lt] = v;
+            c.SubmitState(new HMGamepadState { Axes = axes });
+            Marshal.Copy(_view, _section, 0, _section.Length);
+            int at = SharedMemoryIO.GIP_DATA_OFFSET + (which == 0 ? 0 : which == 1 ? 2 : 8);
+            return _section[at] | (_section[at + 1] << 8);
+        }
+
+        /// <summary>The SDK's own controller, built offline on a buffer of
+        /// this probe's as device_oracle_check's case 1 builds it: no section,
+        /// event or driver is created.</summary>
+        HMController Xbox()
+        {
+            if (_xbox != null) return _xbox;
+            var p = new HMProfile(ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "xbox-360-wired"));
+            _lx = p.Sticks[0].XAxis;
+            _ly = p.Sticks[0].YAxis;
+            _lt = HMController.ResolveCanonicalAxis(p.Inner.AxisMap, "lefttrigger", HMAxis.Z);
+            Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, _view, SharedMemoryIO.SHARED_INPUT_SIZE);
+            Cache("s_inputViews")[XboxIndex] = _view;
+            Cache("s_outputViews")[XboxIndex] = IntPtr.Zero;
+            var ctor = typeof(HMController).GetConstructor(Instance, new[]
+            {
+                typeof(HMContext), typeof(int), typeof(HMProfile), typeof(string), typeof(UsbipBackendHandle), typeof(string),
+            }) ?? throw new MissingMethodException("HMController's private constructor changed.");
+            var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
+            _xbox = (HMController)ctor.Invoke(new object?[] { context, XboxIndex, p, null, null, null });
+            return _xbox;
+        }
+
+        static Dictionary<int, IntPtr> Cache(string field) =>
+            (Dictionary<int, IntPtr>)typeof(SharedMemoryIO).GetField(field, Static)!.GetValue(null)!;
+
+        /// <summary>Every int16 count through a packer's motion field: the
+        /// count normalized to g or degrees per second three ways, packed,
+        /// read back.</summary>
+        public (long Values, long[] Misses, int First) ImuRoundTrip(ImuScale s)
+        {
+            bool pro = s.Key.StartsWith("switch-pro", StringComparison.Ordinal);
+            bool gyro = s.Key.Contains("gyro");
+            var body = new byte[Math.Max(SwitchProPacker.BodySize, Switch2ProPacker.BodySize)];
+            var misses = new long[3];
+            int first = int.MinValue;
+            int Pack(float value)
+            {
+                var st = new HMGamepadState();
+                // Fields the packers carry with no sign change: the Switch
+                // Pro's wire Z from the SDK's Y, the Switch 2 Pro's wire X
+                // from the SDK's X.
+                if (pro && gyro) st.GyroDpsY = value;
+                else if (pro) st.AccelGY = value;
+                else if (gyro) st.GyroDpsX = value;
+                else st.AccelGX = value;
+                int at;
+                if (pro) { SwitchProPacker.BuildBody(in st, 0.5, 0.5, 0.5, 0.5, body); at = 12 + (gyro ? 10 : 4); }
+                else { Switch2ProPacker.BuildBody(in st, 0.5, 0.5, 0.5, 0.5, 0, 0, body); at = Switch2ProPacker.MotionOffset + (gyro ? 6 : 0); }
+                return (short)(body[at] | (body[at + 1] << 8));
+            }
+            double d = s.Scale;
+            float fd = (float)d;
+            for (int r = short.MinValue; r <= short.MaxValue; r++)
+            {
+                if (Pack((float)(r / d)) != r) { misses[0]++; if (first == int.MinValue) first = r; }
+                if (Pack(r / fd) != r) { misses[1]++; if (first == int.MinValue) first = r; }
+                if (Pack(r * (1f / fd)) != r) { misses[2]++; if (first == int.MinValue) first = r; }
+            }
+            return (65536, misses, first);
+        }
+
+        public void Dispose()
+        {
+            if (_xbox != null)
+            {
+                Cache("s_inputViews").Remove(XboxIndex);
+                Cache("s_outputViews").Remove(XboxIndex);
+            }
+            Marshal.FreeHGlobal(_view);
+        }
+    }
+}

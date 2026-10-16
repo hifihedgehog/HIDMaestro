@@ -90,16 +90,16 @@ internal static class SwitchProPacker
         //   wireX = -sdlZ, wireY = -sdlX, wireZ = +sdlY
         // and a consumer-submitted SDL-frame vector round-trips to the
         // identical SDL-frame vector on the client.
-        short ax = ImuRaw(-state.AccelGZ, 4096.0f);
-        short ay = ImuRaw(-state.AccelGX, 4096.0f);
-        short az = ImuRaw(state.AccelGY, 4096.0f);
+        short ax = WireArith.Scaled(-state.AccelGZ, 4096, 1);
+        short ay = WireArith.Scaled(-state.AccelGX, 4096, 1);
+        short az = WireArith.Scaled(state.AccelGY, 4096, 1);
         // Gyro raw = deg/s x 13371/936: the exact inverse of SDL's
         // LoadIMUCalibration scale with the coefficients the driver's
-        // fabricated SPI image serves (0x343B, zero origin).
-        const float gyroScale = 13371.0f / 936.0f;
-        short gx = ImuRaw(-state.GyroDpsZ, gyroScale);
-        short gy = ImuRaw(-state.GyroDpsX, gyroScale);
-        short gz = ImuRaw(state.GyroDpsY, gyroScale);
+        // fabricated SPI image serves (0x343B, zero origin). The ratio is
+        // one exact product and one rounded division (WireArith.Scaled).
+        short gx = WireArith.Scaled(-state.GyroDpsZ, 13371, 936);
+        short gy = WireArith.Scaled(-state.GyroDpsX, 13371, 936);
+        short gz = WireArith.Scaled(state.GyroDpsY, 13371, 936);
         for (int frame = 0; frame < 3; frame++)
         {
             int o = 12 + frame * 12;
@@ -136,13 +136,11 @@ internal static class SwitchProPacker
         left = d > 202.5 && d < 337.5;
     }
 
+    /// <summary>0x800 +/- 0x600 by the one arithmetic (WireArith): 0x200
+    /// at 0 and 0xE00 at 1, or the other way inverted. Until v2.0.0 this
+    /// truncated toward the center.</summary>
     private static ushort StickRaw(double v, bool invert)
-    {
-        double centered = (Math.Clamp(v, 0.0, 1.0) * 2.0) - 1.0;  // -1..+1
-        if (invert) centered = -centered;
-        int raw = 0x800 + (int)(centered * 0x600);
-        return (ushort)Math.Clamp(raw, 0, 0xFFF);
-    }
+        => (ushort)WireArith.Linear(v, 0x200, 0xE00, invert, rest: 0.5);
 
     /// <summary>12-bit little-nibble pair packing, the inverse of SDL's
     /// extraction (x = b0 | ((b1 &amp; 0xF) &lt;&lt; 8); y = (b1 &gt;&gt; 4) | (b2 &lt;&lt; 4)).</summary>
@@ -152,9 +150,6 @@ internal static class SwitchProPacker
         dst[offset + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
         dst[offset + 2] = (byte)(y >> 4);
     }
-
-    private static short ImuRaw(float value, float scale)
-        => (short)Math.Clamp((int)MathF.Round(value * scale), short.MinValue, short.MaxValue);
 
     private static void WriteInt16(byte[] dst, int offset, short v)
     {

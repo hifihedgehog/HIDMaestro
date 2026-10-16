@@ -705,18 +705,21 @@ public class HidReportBuilder
 
         int idOffset = InputReportId != 0 ? 8 : 0; // Bit offset for Report ID byte
 
+        // Decision (a) of the data-driven design: nearest, ties to even, in
+        // double (WireArith). Until v2.0.0 this truncated, which sent a
+        // value a consumer normalized from a raw count one count low.
         void WriteField(InputField? field, double normalized)
         {
             if (field == null) return;
-            int rawValue = (int)(normalized * (field.LogicalMax - field.LogicalMin) + field.LogicalMin);
-            rawValue = Math.Clamp(rawValue, field.LogicalMin, field.LogicalMax);
-            WriteBits(report, field.BitOffset + idOffset, field.BitSize, rawValue);
+            WriteBits(report, field.BitOffset + idOffset, field.BitSize,
+                      WireArith.Linear(normalized, field.LogicalMin, field.LogicalMax, invert: false, rest: 0));
         }
 
         double GetAxisValue(HMAxis key, double def)
         {
+            // A NaN writes the field's rest, what an unwritten one takes.
             if (axes != null && axes.TryGetValue(key, out var v))
-                return Math.Clamp(v, 0f, 1f);
+                return WireArith.Normalized(v, def);
             return def;
         }
 
@@ -775,9 +778,9 @@ public class HidReportBuilder
                 if (axes != null)
                 {
                     if (axes.TryGetValue(canonical, out var vCanon))
-                        return Math.Clamp(vCanon, 0f, 1f);
+                        return WireArith.Normalized(vCanon, def);
                     if (axes.TryGetValue(fieldKey, out var vField))
-                        return Math.Clamp(vField, 0f, 1f);
+                        return WireArith.Normalized(vField, def);
                 }
                 return def;
             }

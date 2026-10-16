@@ -76,7 +76,9 @@ internal static class Program
         // SideWinder Slider: bit 40 (byte 6 with the RID prefix at byte 0),
         // 7 bits, range [0..127].
         WireCheck(ctx, "sidewinder-force-feedback-2", HMAxis.Slider, 1.0f,  6, 0x7F);
-        WireCheck(ctx, "sidewinder-force-feedback-2", HMAxis.Slider, 0.5f,  6, 0x3F);
+        // 0.5 x 127 is 63.5, which rounds half to even to 64 (decision (a) of
+        // the data-driven design). Truncation wrote 0x3F until v2.0.0.
+        WireCheck(ctx, "sidewinder-force-feedback-2", HMAxis.Slider, 0.5f,  6, 0x40);
         WireCheck(ctx, "sidewinder-force-feedback-2", HMAxis.Slider, 0.0f,  6, 0x00);
 
         // G29 has report ID = 0x00 (no RID prefix). 8-bit pedals at bits 48/56/64.
@@ -123,9 +125,11 @@ internal static class Program
         });
 
         Check("Builder Slider wire byte = 0xFF",   built[rb.AxisFields[HMAxis.Slider].BitOffset / 8]   == 0xFF);
-        Check("Builder Rudder wire byte = 0x7F",   built[rb.AxisFields[HMAxis.Rudder].BitOffset / 8]   == 0x7F);
+        // 0.5 x 255 = 127.5 rounds to 128 and 0.25 x 255 = 63.75 to 64 by the
+        // one arithmetic. Truncation wrote 0x7F and 0x3F until v2.0.0.
+        Check("Builder Rudder wire byte = 0x80",   built[rb.AxisFields[HMAxis.Rudder].BitOffset / 8]   == 0x80);
         Check("Builder Throttle wire byte = 0xBF", built[rb.AxisFields[HMAxis.Throttle].BitOffset / 8] == 0xBF);
-        Check("Builder Brake wire byte = 0x3F",    built[rb.AxisFields[HMAxis.Brake].BitOffset / 8]    == 0x3F);
+        Check("Builder Brake wire byte = 0x40",    built[rb.AxisFields[HMAxis.Brake].BitOffset / 8]    == 0x40);
         Check("Builder Clutch wire byte = 0x00",   built[rb.AxisFields[HMAxis.Clutch].BitOffset / 8]   == 0x00);
 
         // ── Phase 4: Last-write-wins on the unified Axes dict ─────────────

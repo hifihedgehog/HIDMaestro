@@ -112,10 +112,9 @@ internal static class VendorBlobCodec
                     // "invert" for a wire axis that grows the other way
                     // from the SDK's, which runs 0 at the left and the top,
                     // such as a stick Y that grows upward.
-                    if (f.Invert) v = 1f - Math.Clamp(v, 0f, 1f);
-                    int raw = (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
-                    if (f.Center != 128)
-                        raw = f.Center + (int)Math.Round((Math.Clamp(v, 0f, 1f) - 0.5f) * 254);
+                    int raw = f.Center == 128
+                        ? WireArith.Linear(v, 0, 255, f.Invert, rest: 0.5)
+                        : WireArith.Linear(v, f.Center - 127, f.Center + 127, f.Invert, rest: 0.5);
                     buffer[f.B] = (byte)Math.Clamp(raw, 0, 255);
                     break;
                 }
@@ -128,7 +127,7 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightTrigger => rightTrigger,
                         _ => 0f,
                     };
-                    buffer[f.B] = (byte)Math.Clamp((int)Math.Round(Math.Clamp(v, 0f, 1f) * 255), 0, 255);
+                    buffer[f.B] = (byte)WireArith.Linear(v, 0, 255, invert: false, rest: 0);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.Stick12Pair:
@@ -149,8 +148,8 @@ internal static class VendorBlobCodec
                     // 0..1 maps onto the full 12-bit range. VIIPER centers a
                     // resting stick at 0x0800 (StickCenter), which is what
                     // 0.5f produces here after rounding.
-                    int x = Math.Clamp((int)Math.Round(Math.Clamp(vx, 0f, 1f) * 4095), 0, 4095);
-                    int y = Math.Clamp((int)Math.Round(Math.Clamp(vy, 0f, 1f) * 4095), 0, 4095);
+                    int x = WireArith.Linear(vx, 0, 4095, invert: false, rest: 0.5);
+                    int y = WireArith.Linear(vy, 0, 4095, invert: false, rest: 0.5);
                     buffer[f.B]     = (byte)(x & 0xFF);
                     buffer[f.B + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
                     buffer[f.B + 2] = (byte)((y >> 4) & 0xFF);
@@ -268,10 +267,7 @@ internal static class VendorBlobCodec
                     // therefore negated here so up reads as up.
                     bool yAxis = f.Source is VendorBlobProgram.SrcOp.LeftStickY
                                            or VendorBlobProgram.SrcOp.RightStickY;
-                    float centered = Math.Clamp(sv, 0f, 1f) - 0.5f;
-                    if (yAxis) centered = -centered;
-                    short sraw = (short)Math.Clamp(
-                        (int)Math.Round(centered * 2f * 32767f), -32767, 32767);
+                    short sraw = (short)WireArith.Linear(sv, -32767, 32767, invert: yAxis, rest: 0.5);
                     buffer[f.B]     = (byte)(sraw & 0xFF);
                     buffer[f.B + 1] = (byte)((sraw >> 8) & 0xFF);
                     break;
@@ -316,10 +312,7 @@ internal static class VendorBlobCodec
                     {
                         float sv = isLeft ? (isY ? leftStickY : leftStickX)
                                           : (isY ? rightStickY : rightStickX);
-                        float centered = Math.Clamp(sv, 0f, 1f) - 0.5f;
-                        if (isY) centered = -centered;
-                        praw = (short)Math.Clamp(
-                            (int)Math.Round(centered * 2f * 32767f), -32767, 32767);
+                        praw = (short)WireArith.Linear(sv, -32767, 32767, invert: isY, rest: 0.5);
                     }
                     else
                     {
@@ -357,7 +350,7 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightTrigger => rightTrigger,
                         _ => 0f,
                     };
-                    int traw = (int)Math.Round(Math.Clamp(tv, 0f, 1f) * 32767f);
+                    int traw = WireArith.Linear(tv, 0, 32767, invert: false, rest: 0);
                     buffer[f.B]     = (byte)(traw & 0xFF);
                     buffer[f.B + 1] = (byte)((traw >> 8) & 0xFF);
                     break;
@@ -622,9 +615,12 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || field.Semantic == null) break;
                     if (fields.TryGetValue(field.Semantic, out var val))
                     {
+                        // A signed value in [-1, 1] about the center, by the
+                        // one arithmetic: one product in double and one
+                        // rounding, half to even. A NaN rests at the center.
                         int sign = f.Invert ? -1 : 1;
-                        if (val is float fv) buffer[f.B] = (byte)Math.Clamp(f.Center + sign * (int)Math.Round(fv * 127), 0, 255);
-                        else if (val is double d) buffer[f.B] = (byte)Math.Clamp(f.Center + sign * (int)Math.Round(d * 127), 0, 255);
+                        if (val is float fv) buffer[f.B] = OutputAxisByte(fv, f.Center, sign);
+                        else if (val is double d) buffer[f.B] = OutputAxisByte(d, f.Center, sign);
                         else buffer[f.B] = ToByte(val);
                     }
                     else
@@ -638,8 +634,9 @@ internal static class VendorBlobCodec
                     if (f.B < 0 || field.Semantic == null) break;
                     if (fields.TryGetValue(field.Semantic, out var val))
                     {
-                        if (val is float fv) buffer[f.B] = (byte)Math.Clamp((int)Math.Round(fv * 255), 0, 255);
-                        else if (val is double d) buffer[f.B] = (byte)Math.Clamp((int)Math.Round(d * 255), 0, 255);
+                        // The one arithmetic. A NaN rests at 0.
+                        if (val is float fv) buffer[f.B] = (byte)WireArith.Linear(fv, 0, 255, invert: false, rest: 0);
+                        else if (val is double d) buffer[f.B] = (byte)WireArith.Linear(d, 0, 255, invert: false, rest: 0);
                         else buffer[f.B] = ToByte(val);
                     }
                     break;
@@ -831,9 +828,15 @@ internal static class VendorBlobCodec
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
+    /// <summary>An output uint8-axis byte: <c>center + sign x RoundHalfEven(v
+    /// x 127)</c> in double, clamped to a byte, and the center for NaN.</summary>
+    private static byte OutputAxisByte(double v, int center, int sign) =>
+        double.IsNaN(v) ? (byte)Math.Clamp(center, 0, 255)
+            : (byte)Math.Clamp(center + sign * Math.Round(Math.Clamp(v, -2.0, 2.0) * 127), 0, 255);
+
     /// <summary>The 8-bit value a <c>uint8-trigger</c> field writes for
     /// <paramref name="v"/>, by the same arithmetic.</summary>
-    private static int TriggerByte(float v) => (int)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
+    private static int TriggerByte(float v) => WireArith.Linear(v, 0, 255, invert: false, rest: 0);
 
     /// <summary>A pressure-sensitive button's byte: the consumer's pressure
     /// when it sets one, otherwise 255 while the button is pressed and 0

@@ -2124,6 +2124,16 @@ function Scenario-Device-Oracle {
                  -Message 'a device code path no longer gives the bytes its golden file records (see probe stdout for the stream and output)' -SkipCodes 2
 }
 
+function Scenario-Arith-Roundtrip {
+    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'roundtrip' `
+                 -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
+    # Every float in [0, 1] through each catalog conversion, against the
+    # design note's table: a range a descriptor brings in, or a change of
+    # arithmetic, that the table does not list fails here. About 9 minutes.
+    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'diff' -Tag 'diff' `
+                 -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2216,7 +2226,8 @@ $scenarios = @(
     @{ Name = 'S85_Handler_Isolation';           Body = ${function:Scenario-Handler-Isolation} },
     @{ Name = 'S87_Interop_Decl';                Body = ${function:Scenario-Interop-Decl} },
     @{ Name = 'S88_Device_Shortcut';             Body = ${function:Scenario-Device-Shortcut} },
-    @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} }
+    @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} },
+    @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()

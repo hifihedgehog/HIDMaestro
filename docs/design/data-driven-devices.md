@@ -453,7 +453,7 @@ The test ran offline on the devbox, and the plan carries it into the tree as `ar
 
 Truncation fails because a float a consumer normalizes from a raw integer can land a hair under it. The codec's float products return every raw value. They disagree with double only on inputs that are no device's raw value, and one arithmetic serves every profile, so they move to double with the rest. Some ranges, 0..255 among them, return every raw value under truncation too, and for those the change is the value at 0.5.
 
-Every byte that changes, from every float in [0, 1] through each catalog conversion, old against new. The probe prints the same table per profile and per report byte, 806 rows:
+Every byte that changes, from every float in [0, 1] through each catalog conversion, old against new. The probe prints the same table per profile and per report byte, 816 rows over 185 profiles:
 
 | Conversion | Profiles, fields | Inputs that change, of 1,065,353,217 | At 0.5, old to new |
 |---|---|---|---|
@@ -465,7 +465,8 @@ Every byte that changes, from every float in [0, 1] through each catalog convers
 | descriptor -127..127 | 54, 78 | 419,595,522 | 0, unchanged |
 | descriptor -32767..32767 and -32768..32767 | 27, 57 and 14, 30 | 385,876,990 and 385,876,288 | 0, unchanged |
 | descriptor -2047..2047, -512..511, -128..127, -32..31, -1800..1800, -1..1 | 1 to 5 each | 402 to 449 million | 0, unchanged |
-| descriptor 0..1792, 0..768, 1..255, 1..32767, 0..2, 0..1 | 1 or 2 each | 8.4 to 71.3 million | unchanged |
+| descriptor 0..32767 | 1, 2 | 71,301,888 | 16383 to 16384 |
+| descriptor 0..768, 1..255, 1..32767, 0..2, 0..1 | 1 or 2 each | 8.4 to 71.3 million | unchanged |
 | XInput thumb X | 10, 10 | 75,496,896 | -1 to 0 |
 | XInput thumb Y | 10, 10 | 75,496,895 | 0, unchanged |
 | XInput trigger byte | 10, 10 | 54,128,256 | 127 to 128 |

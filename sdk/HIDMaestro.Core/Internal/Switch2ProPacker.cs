@@ -41,13 +41,14 @@ internal static class Switch2ProPacker
                       BitC = 1u << 20;
 
     /// <summary>The pad's accelerometer counts per g at its default 8 g
-    /// range, as SDL reads them (accel_scale = g * 8 / INT16_MAX).</summary>
-    private const float AccelCountsPerG = 32767.0f / 8.0f;
+    /// range, as SDL reads them (accel_scale = g * 8 / INT16_MAX): the
+    /// ratio 32767 / 8.</summary>
+    private const double AccelCountsPerG = 32767.0, AccelPerG = 8.0;
 
     /// <summary>Gyro counts per degree/second, 16.4337. SDL reads a count
     /// as 34.8 / INT16_MAX radians/second, so this is
-    /// (pi / 180) * 32767 / 34.8.</summary>
-    private const float GyroCountsPerDps = (float)(Math.PI / 180.0 * 32767.0 / 34.8);
+    /// (pi / 180) * 32767 / 34.8, in double.</summary>
+    private const double GyroCountsPerDps = Math.PI / 180.0 * 32767.0 / 34.8;
 
     /// <summary>Build the 24-byte body. Buttons follow the names the
     /// switch2-pro-controller profile's report 0x09 field list uses, so the
@@ -107,12 +108,12 @@ internal static class Switch2ProPacker
         WriteUInt16(dst, SticksOffset + 4, StickRaw(rx, invert: false));
         WriteUInt16(dst, SticksOffset + 6, StickRaw(ry, invert: true));
 
-        WriteInt16(dst, MotionOffset + 0, ImuRaw(state.AccelGX, AccelCountsPerG));
-        WriteInt16(dst, MotionOffset + 2, ImuRaw(-state.AccelGZ, AccelCountsPerG));
-        WriteInt16(dst, MotionOffset + 4, ImuRaw(state.AccelGY, AccelCountsPerG));
-        WriteInt16(dst, MotionOffset + 6, ImuRaw(state.GyroDpsX, GyroCountsPerDps));
-        WriteInt16(dst, MotionOffset + 8, ImuRaw(-state.GyroDpsZ, GyroCountsPerDps));
-        WriteInt16(dst, MotionOffset + 10, ImuRaw(state.GyroDpsY, GyroCountsPerDps));
+        WriteInt16(dst, MotionOffset + 0, WireArith.Scaled(state.AccelGX, AccelCountsPerG, AccelPerG));
+        WriteInt16(dst, MotionOffset + 2, WireArith.Scaled(-state.AccelGZ, AccelCountsPerG, AccelPerG));
+        WriteInt16(dst, MotionOffset + 4, WireArith.Scaled(state.AccelGY, AccelCountsPerG, AccelPerG));
+        WriteInt16(dst, MotionOffset + 6, WireArith.Scaled(state.GyroDpsX, GyroCountsPerDps, 1));
+        WriteInt16(dst, MotionOffset + 8, WireArith.Scaled(-state.GyroDpsZ, GyroCountsPerDps, 1));
+        WriteInt16(dst, MotionOffset + 10, WireArith.Scaled(state.GyroDpsY, GyroCountsPerDps, 1));
     }
 
     /// <summary>The body of a pad at rest: no buttons, both sticks at
@@ -128,20 +129,13 @@ internal static class Switch2ProPacker
 
     /// <summary>The 8-bit trigger value VendorBlobCodec's LT_DIGITAL and
     /// RT_DIGITAL test for being nonzero.</summary>
-    private static int TriggerByte(double v) => (int)Math.Round(Math.Clamp(v, 0.0, 1.0) * 255);
+    private static int TriggerByte(double v) => WireArith.Linear(v, 0, 255, invert: false, rest: 0);
 
     /// <summary>0..1 onto the full 12-bit range, the scale stick12-pair
-    /// uses. 0.5 lands on 0x800 in either direction, the center the
-    /// persona's flash calibration states.</summary>
-    private static ushort StickRaw(double v, bool invert)
-    {
-        double c = Math.Clamp(v, 0.0, 1.0);
-        if (invert) c = 1.0 - c;
-        return (ushort)Math.Clamp((int)Math.Round(c * 4095.0), 0, 4095);
-    }
-
-    private static short ImuRaw(float value, float scale)
-        => (short)Math.Clamp((int)MathF.Round(value * scale), short.MinValue, short.MaxValue);
+    /// uses, by the one arithmetic (WireArith). 0.5 lands on 0x800 in
+    /// either direction, the center the persona's flash calibration
+    /// states.</summary>
+    private static ushort StickRaw(double v, bool invert) => (ushort)WireArith.Linear(v, 0, 4095, invert, rest: 0.5);
 
     private static void WriteUInt16(byte[] dst, int offset, ushort v)
     {
