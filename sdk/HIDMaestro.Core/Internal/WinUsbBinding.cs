@@ -744,7 +744,8 @@ DeviceName = ""{deviceName}""
     /// locks, since a program that adds a package takes its name out of the
     /// note under the deploy lock. A package a gone devnode keeps stays in
     /// the driver store, ranked below the driver Windows gives the device,
-    /// until a cleanup finds no devnode on it.</para></summary>
+    /// until a cleanup, or the first sweep of a later program with no
+    /// WinUSB entry, finds no devnode on it.</para></summary>
     internal static void RemovePackage(bool deferred = false)
     {
         using var devnodes = AcquireDevnodeLock();
@@ -804,8 +805,9 @@ DeviceName = ""{deviceName}""
             else lock (s_lock) s_published.Remove(p.OriginalName);
         }
         // A package kept for a devnode goes once the restore of the last
-        // entry is done (RegistryLedger.RestoreWinUsbEntries), if no
-        // devnode keeps it then.
+        // entry is done (RegistryLedger.RestoreWinUsbEntries), or at the
+        // first sweep of a later program with no WinUSB entry
+        // (RegistryLedger.PruneDead), if no devnode keeps it then.
         RegistryLedger.NoteWinUsbPackagesLeft(NoteAfterRemoval(deferred, noted, kept));
     }
 

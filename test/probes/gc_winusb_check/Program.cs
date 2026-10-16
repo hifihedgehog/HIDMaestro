@@ -19,9 +19,9 @@
 //    bound itself.
 //  - dispose leaves no ledger hold, and the gone devnode gets the flag.
 //  - five create-bind-dispose cycles, each binding on the first call.
-//  - a bind while another thread restores under the ledger's lock: the
-//    bind waits for the lock and finishes, where taking the two locks in
-//    the other order deadlocked both threads.
+//  - a bind while another thread restores under the devnode lock: the
+//    bind waits for the lock and finishes, where taking the devnode and
+//    ledger locks in the other order deadlocked both threads.
 //  - the staging lock, a leaf below the deploy lock: a thread holds the
 //    deploy lock and then the staging lock, as a deploy's prune does, while
 //    a second thread stages and a third takes the deploy lock and stages.
@@ -163,9 +163,11 @@ internal static class Program
     // ── The devnode lock and the ledger's ───────────────────────────────
 
     /// <summary>A restore holds the machine-wide devnode lock and takes the
-    /// ledger's lock under it (RegistryLedger.RestoreWinUsbEntries,
-    /// WinUsbBinding.RestoreLocked). A bind on another thread waits for the
-    /// devnode lock, then claims under the ledger's, in the same order.</summary>
+    /// ledger's lock under it to delete the entry
+    /// (RegistryLedger.RestoreWinUsbEntries). Here a thread holds the devnode
+    /// lock and runs WinUsbBinding.RestoreLocked, which takes no ledger lock.
+    /// A bind on another thread waits for the devnode lock, then claims
+    /// under the ledger's, in the same order.</summary>
     static void LockOrder(HMContext ctx, HMProfile gc)
     {
         Console.WriteLine("-- a bind while another thread restores under the devnode lock");

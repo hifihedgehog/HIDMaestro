@@ -671,9 +671,9 @@ internal static class RegistryLedger
     /// threads (<see cref="FollowUp"/>) take that mutex too, one scope at a
     /// time, with 250 ms between laps. Each scope holds it for a few registry
     /// reads and its own wait for v1.12.0's mutex: the short bound once the
-    /// name is marked, up to 5 s scaled before that, and up to its 30 s
-    /// scaled bound against an owner read as SYSTEM or Administrators. The
-    /// per-entry acquisitions give up
+    /// name is marked, up to 5 s scaled before that, and, against an owner
+    /// read as SYSTEM or Administrators, as long as the acquisition's own
+    /// bound allows. The per-entry acquisitions give up
     /// after <see cref="RestoreLedgerTimeoutMs"/> (30 s scaled) and leave the
     /// entry for the next sweep. The first acquisition and the one for the
     /// empty keys wait with no bound of their own.</para></summary>

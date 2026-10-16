@@ -289,11 +289,12 @@ internal static class OwnerSweep
         // program's WinUSB follow-up threads take it too, one scope at a
         // time, with 250 ms between laps. Each scope holds it for a few
         // registry reads and its own wait for v1.12.0's mutex: the short
-        // bound once the name is marked, up to 5 s scaled before that, and
-        // up to its 30 s scaled bound against an owner read as SYSTEM or
-        // Administrators. The per-entry acquisitions give up after 30 s scaled
-        // (RegistryLedger.RestoreLedgerTimeoutMs) and leave the entry for the
-        // next sweep. The one for the empty keys has no bound of its own.
+        // bound once the name is marked, up to 5 s scaled before that, and,
+        // against an owner read as SYSTEM or Administrators, as long as the
+        // acquisition's own bound allows. The per-entry acquisitions give up
+        // after 30 s scaled (RegistryLedger.RestoreLedgerTimeoutMs) and leave
+        // the entry for the next sweep. The one for the empty keys has no
+        // bound of its own.
         var released = own.Controllers.Where(c => c.TransportIndex >= 0).Select(c => c.TransportIndex).ToList();
         if (released.Count > 0) try { RegistryLedger.Release(released); } catch { }
         return true;

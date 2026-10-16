@@ -32,7 +32,8 @@ namespace HIDMaestro.Internal;
 /// length, and if the squatter lets the mutex go in that time, a v1.12.0
 /// program can take it and write beside the scope. The exit handler
 /// releases every controller in one scope, so at exit the window spans
-/// all of their registry restores.</item>
+/// all of their GameInput and joy.cpl restores. Their WinUSB entries are
+/// checked and deleted in scopes of their own after it.</item>
 /// <item>A v1.12.0 hold that outlasts the bound, five seconds on a first
 /// wait and the short bound once a wait has run out (both scaled by
 /// <see cref="TimeoutScale"/>), is not waited out.</item>
