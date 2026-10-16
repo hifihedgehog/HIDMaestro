@@ -253,11 +253,14 @@ internal sealed class ControllerLease : IDisposable
     private static IEnumerable<int> Candidates(int first, int floor)
     {
         yield return first;
-        for (int n = floor; n < 4096; n++)
+        for (int n = floor; n < IndexLimit; n++)
             if (n != first) yield return n;
         for (int n = 0; n < floor; n++)
             if (n != first) yield return n;
     }
+
+    /// <summary>One past the highest transport index a create takes.</summary>
+    internal const int IndexLimit = 4096;
 
     /// <summary>The first transport index a create takes while a v1.12.0
     /// program runs. Such a program reaches it only with this many

@@ -131,6 +131,11 @@
 //      SectionZ.cs has the detail.
 //   S71 runs A to H and J to Z.
 //
+// "child-paths" [sandbox] checks the 0xCA invariant, no two HID children
+// on one device instance path, while a v1.12.0 program and this release
+// create one identity key in turn, and runs only inside lane T's Windows
+// Sandbox. ChildPathRivals.cs has the detail.
+//
 // "capture <out dir>" records what the driver answers a v1.12.0 program,
 // and what it does with the values a killed v2.0.0 program leaves, in
 // device_oracle_check's golden format. V1Capture.cs has the detail.
@@ -248,6 +253,7 @@ internal static partial class Program
         // Its SDK loads only where the child asks for it.
         if (args.Length > 1 && args[0] == "exitcut-child") return ExitCutChild(args[1] == "early");
         if (args.Length > 0 && args[0] == "capture") return Capture(args);
+        if (args.Length > 0 && args[0] == "child-paths") return ChildPathRivals();
 
         Console.WriteLine("=== Programs that embed HIDMaestro, side by side ===");
         string only = args.Length > 0 ? args[0].ToUpperInvariant() : "ABCDEFGHIJKLMNOPQRSTUVWXYZ";

@@ -176,7 +176,62 @@
         "string",
         "null"
       ],
-      "description": "Special driver binding, e.g. 'xinputhid' for Xbox-family kernel-filter profiles."
+      "description": "'xinputhid' binds Microsoft's xinputhid above the HID child. An alias for xinput.via 'xinputhid'."
+    },
+    "xinput": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "description": "v2.0.0: how the device reaches XInput and what its XUSB companion answers. Absent, the presentation comes from driverMode or the identity defaults (profiles/models/identity-defaults.json). An empty object means no XInput.",
+      "properties": {
+        "via": {
+          "enum": [ "xusbCompanion", "xinputhid" ],
+          "description": "xusbCompanion: an XUSB companion devnode beside the HID device, as xusb22 presents a wired Xbox 360 pad. xinputhid: Microsoft's xinputhid binds above the HID child. Absent: no XInput."
+        },
+        "subType": {
+          "type": "string",
+          "description": "XINPUT_DEVSUBTYPE: gamepad (default), wheel, arcadeStick, flightStick, dancePad, guitar, guitarAlternate, drumKit, guitarBass, arcadePad, unknown, or a number 0 to 255 (decimal or 0x hex)."
+        },
+        "flags": {
+          "type": "array",
+          "items": { "enum": [ "ffb", "wireless", "voice", "pmd", "noNavigation" ] },
+          "description": "The 36-byte GET_CAPABILITIES flags. Default voice and pmd. Give them here or in capabilities.flags."
+        },
+        "battery": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "enum": [ "disconnected", "wired", "alkaline", "nimh", "unknown" ] },
+            "level": { "enum": [ "empty", "low", "medium", "full" ] }
+          },
+          "description": "What GET_BATTERY_INFORMATION reports. Default wired, full."
+        },
+        "information": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [ "vid", "pid" ],
+          "properties": {
+            "vid": { "type": "string" },
+            "pid": { "type": "string" }
+          },
+          "description": "The IDs GET_INFORMATION and GET_INFORMATION_EX carry and the companion's hardware ID takes, when they differ from the HID child's."
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vid": { "type": "string" },
+            "pid": { "type": "string" },
+            "flags": {
+              "type": "array",
+              "items": { "enum": [ "ffb", "wireless", "voice", "pmd", "noNavigation" ] }
+            }
+          },
+          "description": "The IDs and flags of the 36-byte GET_CAPABILITIES reply, when they differ from the HID child's and the block's."
+        }
+      }
     },
     "driverPid": {
       "type": [
@@ -236,13 +291,6 @@
           }
         }
       }
-    },
-    "companionOnly": {
-      "type": [
-        "boolean",
-        "null"
-      ],
-      "description": "If true, this profile creates only the XUSB companion, no HID child. No shipped profile currently sets it."
     },
     "backend": {
       "type": "string",

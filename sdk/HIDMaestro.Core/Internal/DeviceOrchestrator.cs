@@ -1568,8 +1568,6 @@ internal static partial class DeviceOrchestrator
             using (var _ts = new TimingScope(controllerIndex, profile.Id, "5.create_xusb_companion"))
                 xusbCompanionId = CreateXusbCompanion(controllerIndex, profile, plan, identity);
             LogDiag($"    CreateXusbCompanion -> {(xusbCompanionId ?? "(null)")} in {xusbSw.ElapsedMilliseconds}ms");
-            if (plan.Path == PresentationPlan.CreatePath.CompanionOnly && companionId == null)
-                companionId = xusbCompanionId;
 
             // Profiles with an HIDMAESTRO XUSB companion need the HID parent
             // gated out of WGI's HidClient classifier via xinputhid tripwire

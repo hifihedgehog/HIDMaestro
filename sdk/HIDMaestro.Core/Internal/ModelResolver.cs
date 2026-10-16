@@ -22,7 +22,7 @@ internal enum ModelGroup
     /// UMDF2 profiles carry none yet, so the group resolves to nothing.</summary>
     Protocol = 1,
 
-    /// <summary><c>driverPid</c>.</summary>
+    /// <summary><c>driverPid</c> and <c>xinput</c>.</summary>
     Presentation = 2,
 }
 
@@ -34,6 +34,7 @@ internal sealed class DeviceModel
     public FeatureStubSpec? FeatureStubs { get; init; }
     public Dictionary<string, ValueSourceSpec>? ValueSources { get; init; }
     public string? DriverPid { get; init; }
+    public XInputSpec? XInput { get; init; }
 
     public static readonly DeviceModel Empty = new();
 
@@ -43,32 +44,36 @@ internal sealed class DeviceModel
     {
         ModelGroup.Answers => FeatureStubs != null || ValueSources != null,
         ModelGroup.Protocol => false,
-        ModelGroup.Presentation => DriverPid != null,
+        ModelGroup.Presentation => DriverPid != null || XInput != null,
         _ => false,
     };
 
     public bool IsEmpty => !Groups.Any(Covers);
 
-    /// <summary>The keys a profile carries itself.</summary>
+    /// <summary>The keys a profile carries itself. A <c>driverMode</c> of
+    /// <c>xinputhid</c> or <c>xusb22</c> states the presentation as
+    /// <c>"xinput": { "via": "xinputhid" }</c> does
+    /// (<see cref="XInputPresentation.OwnBlock"/>).</summary>
     public static DeviceModel OwnOf(ControllerProfile p) =>
-        new() { FeatureStubs = p.FeatureStubs, ValueSources = p.ValueSources, DriverPid = p.DriverPid };
+        new() { FeatureStubs = p.FeatureStubs, ValueSources = p.ValueSources, DriverPid = p.DriverPid,
+                XInput = XInputPresentation.OwnBlock(p) };
 
     public static DeviceModel Of(DeviceModelFile f) =>
-        new() { FeatureStubs = f.FeatureStubs, ValueSources = f.ValueSources, DriverPid = f.DriverPid };
+        new() { FeatureStubs = f.FeatureStubs, ValueSources = f.ValueSources, DriverPid = f.DriverPid, XInput = f.XInput };
 
     /// <summary>One group of this model, the others empty.</summary>
     public DeviceModel Only(ModelGroup g) => g switch
     {
         ModelGroup.Answers => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources },
-        ModelGroup.Presentation => new() { DriverPid = DriverPid },
+        ModelGroup.Presentation => new() { DriverPid = DriverPid, XInput = XInput },
         _ => Empty,
     };
 
     /// <summary>This model with one group's keys taken from another.</summary>
     public DeviceModel With(ModelGroup g, DeviceModel from) => g switch
     {
-        ModelGroup.Answers => new() { FeatureStubs = from.FeatureStubs, ValueSources = from.ValueSources, DriverPid = DriverPid },
-        ModelGroup.Presentation => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources, DriverPid = from.DriverPid },
+        ModelGroup.Answers => new() { FeatureStubs = from.FeatureStubs, ValueSources = from.ValueSources, DriverPid = DriverPid, XInput = XInput },
+        ModelGroup.Presentation => new() { FeatureStubs = FeatureStubs, ValueSources = ValueSources, DriverPid = from.DriverPid, XInput = from.XInput },
         _ => this,
     };
 
@@ -146,6 +151,10 @@ internal sealed class DeviceModelFile
 
     [JsonPropertyName("driverPid")]
     public string? DriverPid { get; set; }
+
+    /// <summary>The <c>xinput</c> block of the presentation group.</summary>
+    [JsonPropertyName("xinput")]
+    public XInputSpec? XInput { get; set; }
 }
 
 /// <summary><c>identity-defaults.json</c>: what a profile with no keys of
@@ -432,7 +441,8 @@ internal sealed class ModelRegistry
     /// file, when no file filled that group.</summary>
     private static string? FileAt(IReadOnlyDictionary<ModelGroup, string> files, string path)
     {
-        var g = path == "$.driverPid" ? ModelGroup.Presentation : ModelGroup.Answers;
+        var g = path == "$.driverPid" || path.StartsWith("$.xinput", StringComparison.Ordinal)
+            ? ModelGroup.Presentation : ModelGroup.Answers;
         return files.TryGetValue(g, out var f) ? f : null;
     }
 
@@ -647,8 +657,10 @@ internal sealed class ModelRegistry
 /// it loads and a model it takes when it resolves: the answers and their
 /// value sources (<see cref="Usbip.FeatureStubTable.Validate"/>), the
 /// answers against the profile's descriptor
-/// (<see cref="Usbip.FeatureStubTable.ValidateAgainst"/>), and the driver
-/// PID. Throws <see cref="ProfileDefectException"/> with the JSON path.</summary>
+/// (<see cref="Usbip.FeatureStubTable.ValidateAgainst"/>), the driver
+/// PID and the <c>xinput</c> block (<see cref="XInputPresentation.Validate"/>).
+/// Throws <see cref="ProfileDefectException"/> or an exception whose message
+/// names the JSON path.</summary>
 internal static class AnswerModels
 {
     internal static void Validate(ControllerProfile p, DeviceModel m, bool taken, List<string> notes)
@@ -657,5 +669,6 @@ internal static class AnswerModels
         if (m.FeatureStubs != null && p.HasDescriptor)
             Usbip.FeatureStubTable.ValidateAgainst(p, m.FeatureStubs, taken, notes);
         if (m.DriverPid != null) _ = ModelRegistry.ParseId(m.DriverPid, "$.driverPid");
+        if (m.XInput != null) XInputPresentation.Validate(p.Id, m.XInput, "$.xinput");
     }
 }

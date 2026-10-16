@@ -212,8 +212,8 @@ internal static class Program
         // reports (verified empirically: xbox-360-wheel-v1 caps report
         // Output/FeatureReportByteLength = 0), so the dual-producer
         // scenario is reachable only through the custom-profile surface.
-        // Build exactly that: an 045E custom wheel (id/name carry "xbox"
-        // so IsXboxBranded admits the XUSB companion) whose descriptor
+        // Build exactly that: an 045E custom wheel (id/name carry "xbox",
+        // so the identity default gives it the XUSB companion) whose descriptor
         // carries a PID FFB block (feature 0x11 + output set) so the MAIN
         // driver publishes feature/output packets while the XUSB
         // companion publishes XInput rumble into the same ring.

@@ -48,6 +48,12 @@
       "comment": "The same over USB, no CRC.",
       "match": { "vid": "0x054C" },
       "model": "sony-dualsense"
+    },
+    {
+      "name": "microsoft-xbox-named",
+      "comment": "An XUSB companion beside the HID device, the presentation of xbox-360-wired, for a Microsoft profile with xbox in its id, name or product string. The SDK made the companion for VID 045E with xbox in one of those three, unless the profile bound xinputhid (ControllerProfile.RequiresXusbCompanion at 9bd6279). A profile with driverMode xinputhid or xusb22 states its presentation itself, so the entry fills nothing for it. Windows names the HID children of XInput devices itself, Controller (XBOX 360 For Windows) for 028E, 028F and 0719 and Controller (Xbox One For Windows) for the Xbox One and Series PIDs (Wine dlls/hidclass.sys/device.c:379-393 at 2df1ee2), so a pad extracted on Windows matches.",
+      "match": { "vid": "0x045E", "textContains": "xbox", "textFields": [ "id", "name", "productString" ] },
+      "model": "xbox-360-wired"
     }
   ]
 }

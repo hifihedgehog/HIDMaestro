@@ -61,6 +61,16 @@ public sealed class HMProfile
     /// Microsoft's xinputhid.sys, or null for standard HID profiles.</summary>
     public string? DriverMode => Inner.DriverMode;
 
+    /// <summary>A copy of the profile's own <c>xinput</c> block: how the
+    /// device reaches XInput and what its XUSB companion answers, or null
+    /// when the profile has none and takes its presentation from
+    /// <see cref="DriverMode"/> or the identity defaults. The type is the
+    /// profile JSON's object model (<see cref="HIDMaestro.Internal"/>), which
+    /// follows the schema. Each read returns a new copy, so changing it
+    /// changes no profile. <see cref="HMProfileBuilder.XInput"/> takes a
+    /// changed block into a new one.</summary>
+    public XInputSpec? XInput => Inner.XInput?.Clone();
+
     /// <summary>Trigger axis layout: "combined" (Xbox 360 shared Z axis),
     /// "separate" (independent LT/RT), or null (non-gamepad).</summary>
     public string? TriggerMode => Inner.TriggerMode;

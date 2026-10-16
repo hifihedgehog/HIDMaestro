@@ -443,18 +443,19 @@ internal sealed class Case5Driver : IOracleCase
     /// DeviceNodeCreator otherwise (DeviceOrchestrator.cs:1360-1373). The
     /// xinputhid path's is SWD\HIDMAESTRO_VID_vvvv_PID_pppp&amp;IG_00 with the
     /// driver PID when the profile has one (:748-761, 818-836).
-    /// DeviceNodeCreator's is ROOT\VID_vvvv&amp;PID_pppp&amp;IG_00 for
-    /// Microsoft's vendor ID and ROOT\HIDClass otherwise
+    /// DeviceNodeCreator's is ROOT\VID_vvvv&amp;PID_pppp&amp;IG_00 for a
+    /// profile that presents an XUSB companion and ROOT\HIDClass otherwise
+    /// (PresentationPlan.Of from v2.0.0, where at 9bd6279 Microsoft's vendor
+    /// ID chose the first)
     /// (DeviceNodeCreator.cs:89-133). Instance IDs compare without regard
     /// to case, and the ROOT enumerator is given in capitals.</summary>
     internal static string DevnodePrefix(ControllerProfile p)
     {
-        string vid = $"{p.VendorId:X4}";
-        string pid = $"{p.ProductId:X4}";
-        string hwPid = p.DriverPid != null ? $"{Convert.ToUInt16(p.DriverPid, 16):X4}" : pid;
-        if (p.UsesUpperFilter) return $@"SWD\HIDMAESTRO_VID_{vid}_PID_{hwPid}&IG_00";
-        if (p.VendorId == 0x045E) return $@"ROOT\VID_{vid}&PID_{pid}&IG_00";
-        return @"ROOT\HIDCLASS";
+        // v2.0.0: the SDK's presentation plan picks the enumerator
+        // (PresentationPlan.Of), from the profile's xinput block.
+        var plan = PresentationPlan.Of(p);
+        if (plan.Path == PresentationPlan.CreatePath.XinputhidGamepad) return $@"SWD\{plan.Enumerator}";
+        return $@"ROOT\{plan.Enumerator!.ToUpperInvariant()}";
     }
 
     // ── WriteInstanceConfig against a hive the case owns ─────────────────
@@ -666,7 +667,10 @@ internal sealed class Case5Driver : IOracleCase
             var rec = new byte[id.Length + 4];
             id.CopyTo(rec, 0);
             rec[id.Length + 1] = (byte)(p.RequiresXusbCompanion ? 1 : 0);
-            rec[id.Length + 2] = (byte)(p.IsXboxBranded ? 1 : 0);
+            // v2.0.0: the resolved XInput presentation, 0 none, 1 an XUSB
+            // companion, 2 xinputhid, where 9bd6279 recorded IsXboxBranded.
+            var xi = XInputPresentation.Resolve(p);
+            rec[id.Length + 2] = (byte)(xi.XusbCompanion ? 1 : xi.Xinputhid ? 2 : 0);
             rec[id.Length + 3] = (byte)(p.IsKeyboardOrMouse ? 1 : 0);
             golden.Out("profile", rec);
         }

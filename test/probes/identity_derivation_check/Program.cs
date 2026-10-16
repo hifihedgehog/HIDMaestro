@@ -23,7 +23,10 @@
 //      another HIDMaestro ROOT enumerator, is found and removed, refused
 //      when its owner runs, and left alone with the create refused when
 //      HIDMaestro does not own it. An SWD create rewrites its retained
-//      record first.
+//      record first. Then every pair of parents v1 and v2.0.0 create for
+//      every catalog profile and key form: two on one child path are
+//      refused or harmless, and the released v1.11.0 and v1.12.0 derive
+//      the same token and prefix as v2.0.0 (ChildPaths.cs).
 //
 // Exit 0 PASS / 1 FAIL.
 
@@ -184,6 +187,11 @@ internal static class Program
         // 5. The 0xCA rival scan on recorded trees (RivalScan.cs).
         Console.WriteLine("\n--- ParentIdPrefix rivals ---");
         RivalScan.Run((name, ok, detail) => Check(name, ok, detail));
+
+        // 5b. Every pair of v1 and v2.0.0 parents on one HID child path
+        //     (ChildPaths.cs).
+        Console.WriteLine("\n--- child paths of v1 and v2.0.0 parents ---");
+        ChildPaths.Run((name, ok, detail) => Check(name, ok, detail));
 
         Console.WriteLine($"\n=== {s_total - s_failures}/{s_total} {(s_failures == 0 ? "PASS" : "FAIL")} ===");
         return s_failures == 0 ? 0 : 1;

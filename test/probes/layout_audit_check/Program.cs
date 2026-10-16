@@ -124,31 +124,51 @@ internal static class Program
             }
         }
 
-        // v1.3.10: XUSB-companion gate audit. Walks every deployable profile
-        // and asserts profile.Inner.RequiresXusbCompanion is true ONLY when:
-        //   - VID == 0x045E (Microsoft)
-        //   - DriverMode is not xinputhid / xusb22
-        //   - "xbox" appears in Id / Name / ProductString (case-insensitive)
-        // Catches the SideWinder-class regression where a Microsoft-VID
-        // non-Xbox device (joystick / FF wheel / etc.) accidentally received
-        // an XUSB companion devnode and showed up as an XInput slot.
+        // v2.0.0: the XInput presentation is profile data. Every catalog
+        // profile with XInput states it, in its own xinput block or the
+        // driverMode alias, and none takes it from an identity default,
+        // so no catalog behavior stays keyed on a VID even as data. The
+        // companion and xinputhid sets are the ten Xbox 360 profiles and
+        // the twelve Xbox One and Series profiles.
         Console.WriteLine();
-        Console.WriteLine("--- XUSB companion gate (v1.3.10) ---");
-        int xusbExpectedTrue = 0, xusbExpectedFalse = 0;
+        Console.WriteLine("--- XInput presentation (v2.0.0) ---");
+        int companions = 0, xinputhids = 0;
         foreach (var p in ctx.AllProfiles)
         {
-            if (!p.IsDeployable) continue;
-
-            bool expected = ExpectedRequiresXusb(p);
-            bool actual = p.Inner.RequiresXusbCompanion;
-            if (expected) xusbExpectedTrue++; else xusbExpectedFalse++;
-
-            Check($"{p.Id}: RequiresXusbCompanion matches gate predicate",
-                  actual == expected,
-                  $"expected={expected} actual={actual} vid=0x{p.VendorId:X4}");
+            var r = XInputPresentation.Resolve(p.Inner);
+            Check($"{p.Id}: presentation is its own data, not an identity default",
+                  r.Source is "own" or "own:driverMode" or "none", $"source={r.Source}");
+            if (r.XusbCompanion)
+            {
+                companions++;
+                Check($"{p.Id}: an XUSB companion is stated in its xinput block", p.XInput?.Via == "xusbCompanion");
+            }
+            if (r.Xinputhid) xinputhids++;
+            Check($"{p.Id}: RequiresXusbCompanion reads the resolved block",
+                  p.Inner.RequiresXusbCompanion == r.XusbCompanion && p.Inner.UsesXinputhid == r.Xinputhid);
         }
-        Console.WriteLine($"  XUSB-companion expected true:  {xusbExpectedTrue}");
-        Console.WriteLine($"  XUSB-companion expected false: {xusbExpectedFalse}");
+        Check("10 catalog profiles present an XUSB companion", companions == 10, $"{companions}");
+        Check("12 catalog profiles present through xinputhid", xinputhids == 12, $"{xinputhids}");
+
+        // HMProfile.XInput is a copy: a caller that changes it changes no
+        // catalog profile, and a builder keeps its own copy.
+        var wheel = ctx.GetProfile("xbox-360-wheel-v1")!;
+        string Shape(XInputSpec x) => $"{x.Via}|{x.SubType}|{(x.Flags == null ? "-" : string.Join(",", x.Flags))}";
+        var copy = wheel.XInput!;
+        string before = Shape(copy);
+        copy.Via = "xinputhid";
+        copy.SubType = "guitar";
+        (copy.Flags ??= new()).Add("wireless");
+        var fresh = wheel.XInput!;
+        Check("HMProfile.XInput: changing the copy leaves the catalog profile",
+              Shape(fresh) == before && fresh.Via == "xusbCompanion" && wheel.Inner.RequiresXusbCompanion,
+              $"{before} -> {Shape(fresh)}");
+        var spec = new XInputSpec { Via = "xusbCompanion", Flags = new() { "voice" } };
+        var built = new HMProfileBuilder().FromProfile(wheel).Id("xinput-copy-check").XInput(spec).Build();
+        spec.Via = "xinputhid";
+        spec.Flags.Add("wireless");
+        Check("HMProfileBuilder.XInput: changing the block afterward leaves the built profile",
+              built.XInput!.Via == "xusbCompanion" && built.XInput.Flags!.SequenceEqual(new[] { "voice" }), "");
 
         // How every profile's devnodes present themselves (PresentationPlan),
         // against the record of master 3dd5e2a and the listed changes.
@@ -164,20 +184,5 @@ internal static class Program
         Console.WriteLine($"  Authored: {authoredProfiles}  Unspecified: {unspecifiedProfiles}  Unauthored: {unauthoredProfiles}");
         Console.WriteLine($"\n=== {(s_failures == 0 ? "PASS" : "FAIL")}: {s_total - s_failures}/{s_total} ===");
         return s_failures == 0 ? 0 : 1;
-    }
-
-    // Independent reimplementation of the XUSB-companion gate predicate.
-    // The SDK's RequiresXusbCompanion (Internal/ControllerProfile.cs) MUST
-    // agree with this for every deployable profile. If they disagree the
-    // SDK's predicate has drifted; check git blame on either side.
-    static bool ExpectedRequiresXusb(HMProfile p)
-    {
-        if (p.VendorId != 0x045E) return false;
-        if (string.Equals(p.DriverMode, "xinputhid", StringComparison.OrdinalIgnoreCase)) return false;
-        if (string.Equals(p.DriverMode, "xusb22", StringComparison.OrdinalIgnoreCase)) return false;
-        const StringComparison cmp = StringComparison.OrdinalIgnoreCase;
-        return (p.Id?.Contains("xbox", cmp) ?? false)
-            || (p.Name?.Contains("xbox", cmp) ?? false)
-            || (p.ProductString?.Contains("xbox", cmp) ?? false);
     }
 }

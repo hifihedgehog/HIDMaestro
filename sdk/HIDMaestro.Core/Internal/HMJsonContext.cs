@@ -65,6 +65,7 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
         typeof(SnakeCaseEnumConverter<HMRumbleKind>),
     })]
 [JsonSerializable(typeof(ControllerProfile))]
+[JsonSerializable(typeof(XInputSpec))]
 [JsonSerializable(typeof(List<FieldSpec>))]
 [JsonSerializable(typeof(DeviceModelFile))]
 [JsonSerializable(typeof(IdentityDefaultsFile))]

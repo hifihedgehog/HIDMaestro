@@ -46,6 +46,7 @@ public sealed class HMProfileBuilder
     private string _type = "gamepad";
     private string _connection = "usb";
     private string? _driverMode;
+    private XInputSpec? _xinput;
     private string? _triggerMode;
     private string? _descriptorHex;
     private int? _inputReportSize;
@@ -102,6 +103,32 @@ public sealed class HMProfileBuilder
 
     /// <summary>Set the driver mode: "xinputhid" for Xbox BT controllers, or null for standard HID.</summary>
     public HMProfileBuilder DriverMode(string? mode) { _driverMode = mode; return this; }
+
+    /// <summary>The XInput presentation: the JSON of the profile's
+    /// <c>xinput</c> block (the design note's mechanism 6), read as a
+    /// profile file's is. <c>{"via":"xusbCompanion"}</c> gives an XUSB
+    /// companion beside the HID device, <c>{"via":"xinputhid"}</c>
+    /// Microsoft's xinputhid, <c>{}</c> no XInput. Null takes the
+    /// presentation from <see cref="DriverMode"/>, the model the profile
+    /// names or its identity default (a Microsoft VID with "xbox" in the
+    /// id, name or product string gets the companion).</summary>
+    /// <exception cref="HMProfileException">The JSON does not read as an
+    /// <c>xinput</c> block, at its path under <c>$.xinput</c>.</exception>
+    public HMProfileBuilder XInput(string? json)
+    {
+        if (json == null) { _xinput = null; return this; }
+        try
+        {
+            _xinput = System.Text.Json.JsonSerializer.Deserialize(json, HMJsonContext.Default.XInputSpec)
+                ?? throw new HMProfileException(_id, null, "$.xinput", "is null. Pass null to take the presentation the profile's model gives.");
+        }
+        catch (System.Text.Json.JsonException e)
+        {
+            string inner = string.IsNullOrEmpty(e.Path) || e.Path == "$" ? "" : e.Path[1..];
+            throw new HMProfileException(_id, null, "$.xinput" + inner, ProfileDefects.Locate(e).Reason, e);
+        }
+        return this;
+    }
 
     /// <summary>Set the trigger mode: "combined", "separate", or null.</summary>
     public HMProfileBuilder TriggerMode(string? mode) { _triggerMode = mode; return this; }
@@ -347,6 +374,7 @@ public sealed class HMProfileBuilder
         _type = source.Type;
         _connection = source.Connection;
         _driverMode = source.DriverMode;
+        _xinput = source.Inner.XInput?.Clone();
         _triggerMode = source.TriggerMode;
         _descriptorHex = source.DescriptorHex;
         _inputReportSize = source.InputReportSize > 0 ? source.InputReportSize : null;
@@ -412,6 +440,7 @@ public sealed class HMProfileBuilder
         inner.Type = _type;
         inner.Connection = _connection;
         inner.DriverMode = _driverMode;
+        inner.XInput = _xinput?.Clone();
         inner.TriggerMode = _triggerMode;
         inner.Descriptor = _descriptorHex;
         inner.InputReportSize = _inputReportSize;

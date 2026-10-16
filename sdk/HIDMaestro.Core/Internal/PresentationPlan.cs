@@ -22,8 +22,6 @@ internal sealed class PresentationPlan
         /// <summary>An SWD devnode that xinputhid's INF binds above the HID
         /// child (<c>DeviceOrchestrator.CreateGamepadCompanion</c>).</summary>
         XinputhidGamepad,
-        /// <summary>No HID devnode, the XUSB companion alone.</summary>
-        CompanionOnly,
         /// <summary>A composite USB persona on the USB/IP backend, whose
         /// identity its USB descriptors give.</summary>
         Usbip,
@@ -72,23 +70,42 @@ internal sealed class PresentationPlan
 
     public BusTypeStamp BusType { get; private init; }
 
-    /// <summary>The plan for <paramref name="profile"/>.</summary>
+    /// <summary>The XInput presentation the plan was made from
+    /// (<see cref="XInputPresentation.Resolve"/>), and where it came
+    /// from.</summary>
+    public string PresentationSource { get; private init; } = "none";
+
+    /// <summary>The plan for <paramref name="profile"/>, from its resolved
+    /// <c>xinput</c> block. Throws <see cref="InvalidOperationException"/>
+    /// naming the JSON path of a block that does not validate.</summary>
     public static PresentationPlan Of(ControllerProfile profile)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
+        var xi = XInputPresentation.Resolve(profile);
+        if (profile.RequiresUsbipBackend)
+            return new PresentationPlan { Path = CreatePath.Usbip, HardwarePid = profile.ProductId, PresentationSource = xi.Source };
+
         string vid = $"{profile.VendorId:X4}";
         string pid = $"{profile.ProductId:X4}";
         ushort hwPid = profile.ResolvedDriverPid != null ? Convert.ToUInt16(profile.ResolvedDriverPid, 16) : profile.ProductId;
-        bool companion = profile.RequiresXusbCompanion;
+        bool companion = xi.XusbCompanion;
         bool bluetooth = string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase);
 
-        if (profile.RequiresUsbipBackend)
-            return new PresentationPlan { Path = CreatePath.Usbip, HardwarePid = profile.ProductId };
-
+        // The companion's hardware ID carries the IDs its GET_INFORMATION
+        // reports, which are the HID child's unless the block's information
+        // gives others, so each companion keeps the hidmaestro_xusb.inf
+        // model line it matches (root\VID_045E&PID_0719&XI_00 for the
+        // wireless pad behind its 02A1 HID child).
         string[] companionHw = Array.Empty<string>(), companionCompat = Array.Empty<string>();
         if (companion)
         {
-            companionHw = new[] { $"root\\VID_{vid}&PID_{pid}&XI_00", "root\\HIDMaestroXUSB" };
+            string infoVid = vid, infoPid = pid;
+            if (xi.Spec!.Information is { } info)
+            {
+                infoVid = $"{XInputPresentation.ParseId(info.Vid!, "information.vid"):X4}";
+                infoPid = $"{XInputPresentation.ParseId(info.Pid!, "information.pid"):X4}";
+            }
+            companionHw = new[] { $"root\\VID_{infoVid}&PID_{infoPid}&XI_00", "root\\HIDMaestroXUSB" };
             companionCompat = new[] { "USB\\MS_COMP_XUSB10", "USB\\Class_FF&SubClass_5D&Prot_01", "USB\\Class_FF&SubClass_5D", "USB\\Class_FF" };
         }
 
@@ -96,7 +113,7 @@ internal sealed class PresentationPlan
         // ID of the parent, with driverPid where its INF lists another PID,
         // and SDL3 and HIDAPI skip an &IG_00 path and read it through
         // XInput.
-        if (profile.UsesUpperFilter)
+        if (xi.Xinputhid)
         {
             var compat = new List<string>();
             if (profile.Connection == "bluetooth")
@@ -110,23 +127,26 @@ internal sealed class PresentationPlan
                 HardwarePid = hwPid,
                 HardwareIds = new[] { $"root\\VID_{vid}&PID_{hwPid:X4}&IG_00", "root\\HIDMaestroGamepad", "root\\HIDMaestro" },
                 CompatibleIds = compat,
-                XusbCompanion = companion,
-                CompanionHardwareIds = companionHw,
-                CompanionCompatibleIds = companionCompat,
-                FunctionMode = companion ? 1 : 0,
+                FunctionMode = 0,
                 WaitsForXInputSlot = true,
-                PacksGip = companion,
                 BusType = BusTypeStamp.EveryDevnodeUsb,
+                PresentationSource = xi.Source,
             };
         }
 
-        // WGI and GameInputSvc identify an Xbox controller by
-        // USB\MS_COMP_XUSB10. SDL3 and hidapi take the bus type from the
-        // substrings USB, BTHENUM and BTHLEDEVICE in the parent's compatible
-        // IDs (hid_internal_detect_bus_type).
+        // Only an XInput device carries IG_ in its enumerator. Microsoft's
+        // own test for one is the substring ("check each device ID to see
+        // if it contains "IG_"", Learn, Comparison of XInput and
+        // DirectInput features), and SDL skips an IG_ path in its HIDAPI
+        // and DirectInput backends (hid.c:1016-1018,
+        // SDL_dinputjoystick.c:251-255 at 3.4.18). WGI and GameInputSvc
+        // identify an Xbox controller by USB\MS_COMP_XUSB10. SDL3 and
+        // hidapi take the bus type from the substrings USB, BTHENUM and
+        // BTHLEDEVICE in the parent's compatible IDs
+        // (hid_internal_detect_bus_type, hid.c:741-808).
         string enumerator, hwId;
         string[] compatIds = Array.Empty<string>();
-        if (profile.VendorId == 0x045E)
+        if (companion)
         {
             enumerator = $"VID_{vid}&PID_{pid}&IG_00";
             hwId = $"root\\VID_{vid}&PID_{pid}&IG_00";
@@ -145,12 +165,12 @@ internal sealed class PresentationPlan
         }
         return new PresentationPlan
         {
-            Path = profile.CompanionOnly ? CreatePath.CompanionOnly : CreatePath.Root,
-            Enumerator = profile.CompanionOnly ? null : enumerator,
+            Path = CreatePath.Root,
+            Enumerator = enumerator,
             HardwarePid = profile.ProductId,
-            HardwareIds = profile.CompanionOnly ? Array.Empty<string>() : new[] { hwId, "root\\HIDMaestro" },
-            CompatibleIds = profile.CompanionOnly ? Array.Empty<string>() : compatIds,
-            UpperFilterTripwire = companion && !profile.CompanionOnly,
+            HardwareIds = new[] { hwId, "root\\HIDMaestro" },
+            CompatibleIds = compatIds,
+            UpperFilterTripwire = companion,
             XusbCompanion = companion,
             CompanionHardwareIds = companionHw,
             CompanionCompatibleIds = companionCompat,
@@ -158,6 +178,7 @@ internal sealed class PresentationPlan
             WaitsForXInputSlot = companion,
             PacksGip = companion,
             BusType = BusTypeStamp.EveryDevnodeUsb,
+            PresentationSource = xi.Source,
         };
     }
 
