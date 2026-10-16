@@ -82,7 +82,7 @@
         "integer",
         "null"
       ],
-      "description": "Size of the input report in bytes (excluding report ID). Null if unknown."
+      "description": "Length on the wire of the input report a data-only frame fills, in bytes, the report ID's byte included. The driver sends that report at this length. Null: the report's own length in the descriptor."
     },
     "dataReportId": {
       "type": [
