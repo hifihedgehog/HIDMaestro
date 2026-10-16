@@ -79,8 +79,9 @@ internal static partial class VrSharedMemory
     // needs the Interactive group instead of LocalService: vrserver runs
     // in the logged-on user's session and both maps the section for
     // haptic writes and waits on events. 0x1F0003 = EVENT_ALL_ACCESS. Owner
-    // Administrators (O:BA), as for every object the SDK creates, so the
-    // owner does not depend on the default-owner policy.
+    // Administrators (O:BA), as for every object the SDK creates outside its
+    // private namespace, so the owner does not depend on the default-owner
+    // policy.
     private const string SectionSddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)";
     private const string EventSddl = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1F0003;;;IU)";
 

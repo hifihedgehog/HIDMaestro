@@ -12,8 +12,12 @@ namespace HIDMaestro.Internal;
 /// LocalService as an owner: measured, SetSecurityInfo setting the owner of
 /// its own mutex to Administrators fails with ERROR_INVALID_OWNER.
 ///
-/// <para>This release sets O:BA on every object it creates, so its own
-/// objects are owned by Administrators on any machine. A program built on
+/// <para>This release sets O:BA on every object it creates under a name a
+/// program that is not elevated could create first, and on its private
+/// namespace, so those objects are owned by Administrators on any machine.
+/// The mutexes inside that namespace carry no descriptor: only a token with
+/// Administrators enabled can open the namespace (AdminNamespace), so no
+/// owner check reads them. A program built on
 /// HIDMaestro 1.12.0 or older set no owner, and its objects take the
 /// creating token's default owner. That is Administrators for an elevated
 /// token here (measured), but the user on some machines: "User Account
