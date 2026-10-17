@@ -2132,6 +2132,24 @@ function Scenario-Vendor-Blob-Golden {
                  -Message 'a vendor-blob report no longer encodes or decodes to its golden bytes, or the codec vocabulary no longer reproduces the code it replaces (see probe stdout)'
 }
 
+# S92: every report program three ways. program_equivalence_check runs each
+# catalog program, decoder and layout set through its generated kernel, the
+# interpreter and a naive evaluator written from the design note, on random
+# states and on DD-0's recorded inputs, then the review cases, the domain
+# edges, a corpus of 1,000 random programs drawn at the probe's build from
+# the seed pre-tag-validate passes and prints, the negative corpus, the
+# planted defects, every validation rule with its JSON path, the binder's
+# fallback and key order, a profile from outside the catalog, and the
+# inlining of each program into the code that sends it. Once under the JIT
+# and once in the NativeAOT build beside it, where every catalog program must
+# bind its generated kernel through the hash computed at run time. Offline.
+function Scenario-Program-Equivalence {
+    Invoke-Probe -Dir 'program_equivalence_check' -Exe 'ProgramEquivalenceCheck.exe' -Arguments 'check' -Tag 'jit' `
+                 -Message 'a report program gives different bytes on its generated, interpreted or naive path, or a validation rule names the wrong path (see probe stdout)'
+    Invoke-Probe -Dir 'program_equivalence_check' -Exe ('aot-' + (Get-SmokeArch) + '\ProgramEquivalenceCheck.exe') -Arguments 'check' -Tag 'aot' `
+                 -Message 'under NativeAOT, a report program gives different bytes or binds no generated kernel (see probe stdout)'
+}
+
 # S96: catalog data and driver text against the captures and sources they
 # come from. Every comment line of the two driver INFs is plain ASCII. The
 # Xbox 360 profiles carry a real pad's manufacturer string. The flight
@@ -2251,6 +2269,7 @@ $scenarios = @(
     @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} },
     @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} },
     @{ Name = 'S91_Vendor_Blob_Golden';          Body = ${function:Scenario-Vendor-Blob-Golden} },
+    @{ Name = 'S92_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} }
 )
 

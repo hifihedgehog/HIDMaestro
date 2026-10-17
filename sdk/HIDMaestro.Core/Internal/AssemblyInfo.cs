@@ -44,6 +44,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Ds4ReportCheck")]
 [assembly: InternalsVisibleTo("Ds3SixaxisCheck")]
 [assembly: InternalsVisibleTo("Switch2CompositeCheck")]
+[assembly: InternalsVisibleTo("ProgramEquivalenceCheck")]
 [assembly: InternalsVisibleTo("RegistryOwnershipCheck")]
 [assembly: InternalsVisibleTo("KbmOfflineCheck")]
 [assembly: InternalsVisibleTo("ReportLengthCheck")]

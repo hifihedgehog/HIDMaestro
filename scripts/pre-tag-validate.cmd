@@ -104,6 +104,17 @@ for /d %%p in (test\probes\*) do (
         )
     )
 )
+rem program_equivalence_check (S92) draws its 1,000 random programs at
+rem build time. Each run draws them from a new seed, printed here and by the
+rem probe, so a failing corpus can be built again with the same seed.
+set /a HM_CORPUS_SEED=%RANDOM% * 32768 + %RANDOM%
+echo        Program corpus seed %HM_CORPUS_SEED%
+dotnet build test\probes\program_equivalence_check -c Release --nologo -v:quiet -p:ProgramCorpusSeed=%HM_CORPUS_SEED% >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] program_equivalence_check build failed with corpus seed %HM_CORPUS_SEED%.
+    popd
+    exit /b 2
+)
 dotnet build test\probes\switch_pro_check\SwitchProCheck.csproj -c Release --nologo -v:minimal >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] SwitchProCheck build failed.

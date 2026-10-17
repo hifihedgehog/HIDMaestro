@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- program_equivalence_check (S92): every report program three ways, the
+       generated kernel, the interpreter and a naive evaluator written from
+       the design note. It references the SDK as a consumer does, and emits
+       kernels of its own for the seeded corpus, the review cases and the
+       planted defects with the build step the SDK uses (KernelGen.targets,
+       mode probe). The battery passes the corpus seed as
+       -p:ProgramCorpusSeed=N, and the probe prints it. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+    <AssemblyName>ProgramEquivalenceCheck</AssemblyName>
+    <KernelGenMode>probe</KernelGenMode>
+    <ProgramCorpusSeed Condition="'$(ProgramCorpusSeed)' == ''">20261017</ProgramCorpusSeed>
+    <KernelGenSeed>$(ProgramCorpusSeed)</KernelGenSeed>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
+    <Compile Remove="bin\**;obj\**" />
+    <None Update="user\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Import Project="..\..\..\sdk\HIDMaestro.KernelGen\KernelGen.targets" />
+
+  <!-- The same check under NativeAOT, published beside the JIT build for the
+       machine's architecture, as aot_smoke publishes its apps. Its own
+       intermediate directory is deleted first, so every build compiles it
+       again from this build's kernels. -->
+  <PropertyGroup>
+    <_PecArch Condition="'$(PROCESSOR_ARCHITECTURE)' == 'ARM64'">arm64</_PecArch>
+    <_PecArch Condition="'$(_PecArch)' == ''">x64</_PecArch>
+    <_PecPath>$([MSBuild]::Escape('$(MSBuildProgramFiles32)\Microsoft Visual Studio\Installer;$(PATH)'))</_PecPath>
+  </PropertyGroup>
+  <Target Name="PublishAotCheck" AfterTargets="Build" Condition="'$(PecAotPublish)' != 'true' and '$(PecSkipAot)' != 'true'">
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\obj\$(Configuration)\aot-$(_PecArch)" />
+    <Exec EnvironmentVariables="PATH=$(_PecPath)" Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r win-$(_PecArch) -p:PublishAot=true -p:PecAotPublish=true -p:ProgramCorpusSeed=$(ProgramCorpusSeed) -p:IntermediateOutputPath=obj\$(Configuration)\aot-$(_PecArch)\ -o &quot;$(OutDir)aot-$(_PecArch)&quot; --nologo -v:quiet" />
+  </Target>
+</Project>
