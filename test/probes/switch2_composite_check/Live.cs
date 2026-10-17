@@ -81,8 +81,10 @@ internal static partial class Program
         volatile bool _stop;
         Thread? _pump;
         /// <summary>Set while a check owns the state block, so the consumer's
-        /// submits do not replace it.</summary>
-        public volatile bool PauseSubmits;
+        /// submits do not replace it. Set and read under SubmitGate, which a
+        /// submit holds, so once a check has set it no submit is under way.</summary>
+        public bool PauseSubmits;
+        public readonly object SubmitGate = new();
 
         public readonly ConcurrentQueue<(byte Left, byte Right, byte[] Raw)> Decoded = new();
         public readonly ConcurrentQueue<(byte Source, byte ReportId, int Size)> Received = new();
@@ -121,7 +123,8 @@ internal static partial class Program
                 {
                     HMGamepadState s;
                     lock (a._stateLock) s = a._state;
-                    if (!a.PauseSubmits) try { a.Pad.SubmitState(s); } catch { }
+                    lock (a.SubmitGate)
+                        if (!a.PauseSubmits) try { a.Pad.SubmitState(s); } catch { }
                     Thread.Sleep(8);
                 }
             }) { IsBackground = true, Name = "ProbeSubmit" };
@@ -466,8 +469,7 @@ internal static partial class Program
         // The block reaches the device's engine byte for byte, read once the
         // device's input pump has taken it, with the consumer's submits held
         // off so none replaces it first.
-        a.PauseSubmits = true;
-        Thread.Sleep(50);
+        lock (a.SubmitGate) a.PauseSubmits = true;
         var known = new byte[24];
         for (int i = 0; i < known.Length; i++) known[i] = (byte)(0x31 + 7 * i);
         bool tookBlock = true;
@@ -478,7 +480,7 @@ internal static partial class Program
         Check("a raw submit of 24 bytes is the device's state block, byte for byte", tookBlock && view.StateBlock.AsSpan().SequenceEqual(known), X(view.StateBlock));
         // Back to a pad at rest for the reports that follow.
         a.Pad.SubmitState(new HMGamepadState());
-        a.PauseSubmits = false;
+        lock (a.SubmitGate) a.PauseSubmits = false;
 
         long tStart = Stopwatch.GetTimestamp();
         var started = bulk.Command(Cmd(0x03, 0x0D, H("0100ffffffffffff")));
