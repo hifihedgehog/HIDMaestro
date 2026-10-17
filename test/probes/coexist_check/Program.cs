@@ -191,16 +191,17 @@ internal static partial class Program
     static int Main(string[] args)
     {
         if (IsPlanted()) return Planted(args);
-        if (args.Length > 0 && args[0] == "offline") return Offline();
+        // Every process the probe starts has no window, and a loader failure
+        // in one returns an exit code, never a dialog. Set before any mode
+        // that starts one: offline starts peers and cmd.exe, phantomgate
+        // starts children.
+        Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
+        if (args.Length > 0 && args[0] == "offline") return Offline(args.Length > 1 ? args[1] : null);
         if (args.Length > 0 && args[0] == "--peer")
         {
             Peer.Extra = PeerZ.Run;
             return Peer.Run();
         }
-        // Every process the probe starts has no window, and a loader failure
-        // in one returns an exit code, never a dialog. Set before any mode
-        // that starts one: phantomgate starts children.
-        Native.SetErrorMode(Native.SEM_FAILCRITICALERRORS | Native.SEM_NOGPFAULTERRORBOX | Native.SEM_NOOPENFILEERRORBOX);
         if (args.Length > 0 && args[0] == "phantomclaims") return PhantomClaims();
         if (args.Length > 0 && args[0] == "phantomgate") return PhantomGate();
         if (args.Length > 2 && args[0] == "phantomgate-child") return PhantomGateChild(args[1], args[2]);

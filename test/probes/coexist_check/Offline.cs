@@ -77,6 +77,9 @@
 //        failure. HMContext.IsDriverInstalled's answer
 //        (HMContext.AnswerInstalled) is false, not a throw, for each way the
 //        driver store's read fails.
+//   OF12 ObjectHolders, which names the processes that hold an object a
+//        live check finds left behind (ObjectHolders.SelfCheck). "offline
+//        holders" runs it alone.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -84,9 +87,16 @@ using System.Reflection;
 
 internal static partial class Program
 {
-    static int Offline()
+    static int Offline(string? only)
     {
         Console.WriteLine("=== Coexistence checks that need no elevation ===");
+        if (only == "holders")
+        {
+            ObjectHolders.SelfCheck(Check);
+            Console.WriteLine();
+            Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
+            return s_failures == 0 ? 0 : 1;
+        }
         var allowed = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.ProtectedStaging")
             ?.GetMethod("InPlaceRepairAllowed", BindingFlags.NonPublic | BindingFlags.Static);
         Check("OF: ProtectedStaging.InPlaceRepairAllowed exists", allowed != null);
@@ -118,6 +128,7 @@ internal static partial class Program
         OfflineSweep();
         OfflineDiagFiles();
         OfflineListings();
+        ObjectHolders.SelfCheck(Check);
         Console.WriteLine();
         Console.WriteLine($"=== {s_total - s_failures}/{s_total} checks passed ===");
         return s_failures == 0 ? 0 : 1;
