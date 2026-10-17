@@ -73,6 +73,13 @@ public sealed class HMProfile
     /// note, "Profiles made outside the catalog").</summary>
     public bool HasDeviceModel => !Inner.Resolved.Model.IsEmpty;
 
+    /// <summary>The device builds each input report itself, from the state
+    /// a program submits, so <see cref="HMController.SubmitRawReport(byte[])"/>
+    /// and the other raw submits are refused for it and
+    /// <see cref="HMController.SubmitState"/> is the way in. A consumer that
+    /// mirrors the SDK's rule reads this rather than an identity.</summary>
+    public bool BuildsItsOwnReports => Inner.BuildsItsOwnReports;
+
     /// <summary>Where each group of the profile's device model came from,
     /// by group: <c>answers</c>, <c>protocol</c> and <c>presentation</c>.
     /// Each reads <c>own</c> (the profile's own keys),

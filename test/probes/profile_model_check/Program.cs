@@ -24,6 +24,9 @@
 //   deploy     the deploy floor at 2.0.0 through the create's gate on a
 //              machine the check gives, under alternatives A and B, and B's
 //              predicate against a golden list (Deploy.cs)
+//   builder    FromProfile's whole copy, a copy refused for a descriptor
+//              its model does not fit, ClearDeviceModel, DriverPid,
+//              FeatureAnswers and BuildsItsOwnReports (Builder.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -51,6 +54,7 @@ internal static class Program
             ("answers", Answers.Run),
             ("contract", Contract.Run),
             ("deploy", Deploy.Run),
+            ("builder", Builder.Run),
         };
         int fail = 0;
         if (mode == "check")

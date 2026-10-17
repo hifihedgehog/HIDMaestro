@@ -56,6 +56,14 @@ public sealed class HMProfileBuilder
     private int[]? _triggerButtons;
     private Dictionary<string, string>? _axisMap;
     private string? _deviceModelFrom;
+    private string? _deviceModel;
+    private string? _driverPid;
+    private FeatureStubSpec? _featureStubs;
+    private Dictionary<string, ValueSourceSpec>? _valueSources;
+    // FromProfile's copy of the whole source profile, read again from its
+    // JSON. Build starts from it, so every key no setter names comes with
+    // the copy: the extended reports, the layout, the USB configuration.
+    private ControllerProfile? _copy;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
     public HMProfileBuilder Id(string id) { _id = id; return this; }
@@ -156,10 +164,48 @@ public sealed class HMProfileBuilder
     /// takes the model the profile's identity gives it.</summary>
     public HMProfileBuilder DeviceModelFrom(string? name) { _deviceModelFrom = name; return this; }
 
-    /// <summary>Initialize all fields from an existing profile. Call individual
-    /// setters afterward to override specific properties.</summary>
+    /// <summary>The product ID the driver presents in the HID attributes,
+    /// where an XInput presentation through xinputhid binds only on a PID
+    /// xinputhid's INF lists (the presentation group of the device model).
+    /// Hex, as the profile's <c>driverPid</c>. Null takes none.</summary>
+    public HMProfileBuilder DriverPid(string? pid) { _driverPid = pid; return this; }
+
+    /// <summary>The answers the device gives to GET_REPORT(Feature), the
+    /// profile's <c>featureStubs</c> (the design note's mechanism 4). Null
+    /// takes the answers of the model the profile names or its identity
+    /// gives it.</summary>
+    public HMProfileBuilder FeatureAnswers(FeatureStubSpec? answers) { _featureStubs = answers; return this; }
+
+    /// <summary>Drops the device model keys tied to the descriptor's
+    /// reports, the answers and their value sources, and the model the
+    /// profile names, and keeps the presentation (<c>driverPid</c>), which
+    /// describes the device node rather than its reports. The model the
+    /// identity the builder sets gives then applies, as for any profile
+    /// made outside the catalog. Call it before replacing the descriptor of
+    /// a copy whose model the new descriptor does not fit.</summary>
+    public HMProfileBuilder ClearDeviceModel()
+    {
+        _featureStubs = null;
+        _valueSources = null;
+        _deviceModelFrom = null;
+        _deviceModel = null;
+        return this;
+    }
+
+    /// <summary>Initialize all fields from an existing profile: the whole
+    /// profile, its own device model keys and the model it names included,
+    /// and not what an identity default gave it, which the copy resolves
+    /// again under its own identity. Call individual setters afterward to
+    /// override specific properties. Before v2.0.0 the copy dropped the
+    /// feature answers, <c>driverPid</c> and the extended reports.</summary>
     public HMProfileBuilder FromProfile(HMProfile source)
     {
+        _copy = source.Inner.Clone();
+        _deviceModelFrom = source.Inner.DeviceModelFrom;
+        _deviceModel = source.Inner.DeviceModel;
+        _driverPid = source.Inner.DriverPid;
+        _featureStubs = _copy.FeatureStubs;
+        _valueSources = _copy.ValueSources;
         _id = source.Id;
         _name = source.Name;
         _vendor = source.Vendor;
@@ -193,30 +239,37 @@ public sealed class HMProfileBuilder
         if (_vid == 0) throw new HMProfileException(_id, null, "$.vid", "VID must be set (use .Vid(0x045E)).");
         if (_pid == 0) throw new HMProfileException(_id, null, "$.pid", "PID must be set (use .Pid(0x028E)).");
 
-        var inner = new ControllerProfile
-        {
-            Id = _id,
-            Name = _name,
-            Vendor = _vendor,
-            Vid = $"0x{_vid:X4}",
-            Pid = $"0x{_pid:X4}",
-            ProductString = _productString,
-            ManufacturerString = _manufacturerString,
-            Type = _type,
-            Connection = _connection,
-            DriverMode = _driverMode,
-            TriggerMode = _triggerMode,
-            Descriptor = _descriptorHex,
-            InputReportSize = _inputReportSize,
-            DataReportId = _dataReportId,
-            DeviceDescription = _deviceDescription,
-            Notes = _notes,
-            ButtonMap = _buttonMap,
-            TriggerButtons = _triggerButtons,
-            AxisMap = _axisMap,
-            DeviceModelFrom = _deviceModelFrom,
-            BuiltInCode = true,
-        };
+        // A copy keeps every key of its source but the ones set here.
+        var inner = _copy?.Clone() ?? new ControllerProfile();
+        inner.Id = _id;
+        inner.Name = _name;
+        inner.Vendor = _vendor;
+        inner.Vid = $"0x{_vid:X4}";
+        inner.Pid = $"0x{_pid:X4}";
+        inner.ProductString = _productString;
+        inner.ManufacturerString = _manufacturerString;
+        inner.Type = _type;
+        inner.Connection = _connection;
+        inner.DriverMode = _driverMode;
+        inner.TriggerMode = _triggerMode;
+        inner.Descriptor = _descriptorHex;
+        inner.InputReportSize = _inputReportSize;
+        inner.DataReportId = _dataReportId;
+        inner.DeviceDescription = _deviceDescription;
+        inner.Notes = _notes;
+        inner.ButtonMap = _buttonMap;
+        inner.TriggerButtons = _triggerButtons;
+        inner.AxisMap = _axisMap;
+        inner.DeviceModelFrom = _deviceModelFrom;
+        inner.DeviceModel = _deviceModel;
+        inner.DriverPid = _driverPid;
+        inner.FeatureStubs = _featureStubs;
+        inner.ValueSources = _valueSources;
+        // Read again from its JSON, so two profiles built from one builder,
+        // and a builder's caller, share no object with the profile.
+        inner = inner.Clone();
+        inner.SourceFile = null;
+        inner.BuiltInCode = true;
 
         try
         {
