@@ -64,6 +64,7 @@ internal static class Vocabulary
         Run("the Switch 2 Pro rumble", Switch2ProRumble);
         Run("the Triton timestamp", () => TritonTimestamp(db["steam-controller-2"]));
         Run("the int16 center", Int16Center);
+        Run("the Triton timestamp while its IMU is off", () => TritonImuHold(db["steam-controller-2"]));
         Console.WriteLine($"=== vocabulary: {(s_fail == 0 ? "PASS" : $"{s_fail} FAIL")} ===");
         return s_fail;
     }
@@ -175,6 +176,73 @@ internal static class Vocabulary
         Check("charging gives 0xEE, full gives 0xEF, and both give 0xEF, full first as ds3-battery put it",
             Encode(5, true, false) == 0xEE && Encode(5, false, true) == 0xEF && Encode(5, true, true) == 0xEF,
             $"{Encode(5, true, false):X2} {Encode(5, false, true):X2} {Encode(5, true, true):X2}");
+    }
+
+    /// <summary>steam-controller-2's IMU register and the hold it drives
+    /// (design note, mechanisms 1 and 3): SDL's SET_SETTINGS_VALUES on
+    /// feature report 1 (SDL_hidapi_steam_triton.c:652-668 at 804cf65), the
+    /// settings as 3-byte records (controller_structs.h:36-40), setting 48
+    /// imu_mode. The register is the device's, from its protocol, as a create
+    /// builds it, and the codec reads it as HMController hands it over. A real
+    /// Triton's stamp stays frozen while its IMU is off (sc2-research
+    /// HID_REPORT_FORMAT.md:83, :105 at b46d517).</summary>
+    static void TritonImuHold(ControllerProfile triton)
+    {
+        var compiled = HIDMaestro.Internal.Usbip.CompiledProtocol.Compile(triton, new HIDMaestro.Internal.Usbip.UsbDescriptorSet(triton, 0));
+        // Without a protocol the register checks fail, and the stamp checks
+        // below still run, on a codec that holds nothing.
+        var engine = compiled == null ? null : new HIDMaestro.Internal.Usbip.ProtocolEngine(compiled);
+        int imu = compiled?.Registers.IndexOf("imuMode") ?? -1;
+        void Set(string hex) { var b = new byte[64]; Convert.FromHexString(hex).CopyTo(b, 0); engine?.HandlePacket(b); }
+        uint Reg() => engine != null && imu >= 0 ? engine.GetRegister(imu) : 0xFFFFFFFF;
+        Check("the IMU is off until a host turns it on", Reg() == 0, imu < 0 ? "no imuMode register" : $"0x{Reg():X}");
+        Set("018703301800");
+        uint on = Reg();
+        Set("018703300000");
+        uint off = Reg();
+        Check("SDL's 01 87 03 30 18 00 sets imuMode to 0x18 and 01 87 03 30 00 00 clears it", on == 0x18 && off == 0, $"0x{on:X} then 0x{off:X}");
+        Set("018709" + "090000" + "301800" + "070100");
+        uint second = Reg();
+        Set("018703" + "090000");
+        uint other = Reg();
+        Check("a write of three settings with imu_mode second sets it, and one without imu_mode leaves it", second == 0x18 && other == 0x18, $"0x{second:X} then 0x{other:X}");
+        Set("018806301800");
+        Check("another message leaves it", Reg() == 0x18);
+
+        var spec = triton.ExtendedReport!;
+        var enc = new VendorBlobCodec.EncoderState();
+        long now = 1_000_000;
+        typeof(VendorBlobCodec.EncoderState).GetField("TimestampClock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(enc, (Func<long>)(() => now));
+        typeof(VendorBlobCodec.EncoderState).GetField("TimestampFrequency", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(enc, 3_000_000L);
+        var hold = VendorBlobProgram.Get(spec).HoldWhile;
+        if (hold != null && compiled != null && engine != null)
+        {
+            enc.Hold = HIDMaestro.Internal.ConditionParser.Parse(hold, compiled.Registers, "holdWhile");
+            enc.HoldRegisters = engine.RegisterWords;
+        }
+        var buf = new byte[spec.Size];
+        uint Frame(long advanceTicks)
+        {
+            now += advanceTicks;
+            var st = new HMGamepadState();
+            VendorBlobCodec.EncodeInput(spec, in st, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, enc);
+            return BitConverter.ToUInt32(buf, 30);
+        }
+        Set("018703300000");
+        var offRun = new[] { Frame(0), Frame(3000), Frame(3000) };
+        Check("while the IMU is off the timestamp holds", offRun.All(x => x == offRun[0]), string.Join(" ", offRun));
+        Set("018703301800");
+        var onRun = new[] { Frame(3000), Frame(3000) };
+        Check("the IMU on, it resumes from the held value and adds only the time since the last frame",
+            onRun[0] == offRun[0] + 1000 && onRun[1] == onRun[0] + 1000, $"{offRun[^1]} then {string.Join(" ", onRun)}");
+        Set("018703300000");
+        uint held = Frame(3000);
+        uint stillHeld = Frame(30_000);
+        Check("off again, it holds there", held == onRun[1] && stillHeld == held, $"{held} {stillHeld}");
+        engine?.Reset();
+        Check("an attach or port reset turns the IMU off", Reg() == 0);
     }
 
     /// <summary>steam-controller-2's report 0x42 bytes 30 to 33, the IMU

@@ -264,9 +264,14 @@ internal sealed class VendorBlobProgram
     /// that restarted or ran backward.</summary>
     public readonly uint NominalTicks;
 
+    /// <summary>The accumulating field's holdWhile condition, as written, or
+    /// null. The controller compiles it against the protocol's registers.</summary>
+    public readonly string? HoldWhile;
+
     private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount, uint[] counterInitials, bool resolvesDpad,
-                              bool accumulates, uint nominalTicks)
+                              bool accumulates, uint nominalTicks, string? holdWhile = null)
     {
+        HoldWhile = holdWhile;
         Fields = fields;
         DecodeFieldCount = decodeFieldCount;
         CounterInitials = counterInitials;
@@ -293,6 +298,7 @@ internal sealed class VendorBlobProgram
         var counterSlots = new Dictionary<(string Key, bool Wide), int>();
         var counterInitials = new List<uint>();
         bool resolvesDpad = false, accumulates = false;
+        string? holdWhile = null;
         for (int i = 0; i < spec.Fields.Count; i++)
         {
             var f = spec.Fields[i];
@@ -533,6 +539,7 @@ internal sealed class VendorBlobProgram
             resolvesDpad |= dpad;
             bool accumulate = f.Clock == "accumulate";
             accumulates |= accumulate;
+            if (accumulate && f.HoldWhile != null) holdWhile = f.HoldWhile;
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
                 f.Center ?? (op == FieldOp.U10BE ? 512 : op == FieldOp.I16 ? 0 : 128), f.NeutralValue ?? 8,
@@ -578,7 +585,7 @@ internal sealed class VendorBlobProgram
             if (producesEntry) decodeCount++;
         }
         return new VendorBlobProgram(fields, decodeCount, counterInitials.ToArray(), resolvesDpad,
-            accumulates, (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue));
+            accumulates, (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue), holdWhile);
     }
 
     /// <summary>The wire values at the SDK's 0 and 1 a type takes when its
@@ -665,6 +672,8 @@ internal sealed class VendorBlobProgram
                         $"{where}.fields[{i}] ('{src.Type}').bits \"{src.Bits}\" reaches bit {f.BitHi}. This type holds bits 0 to {maxBit}.");
             }
             CheckVocabulary(in f, i, size, where, output);
+            if (src.HoldWhile != null && src.Clock != "accumulate")
+                throw new InvalidOperationException($"{where}.fields[{i}].holdWhile goes with \"clock\": \"accumulate\", the stamp it holds.");
             if (src.Clock != null)
             {
                 if (src.Clock != "accumulate")

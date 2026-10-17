@@ -1145,6 +1145,14 @@ public sealed class FieldSpec
     /// is.</summary>
     [JsonPropertyName("clock")]
     public string? Clock { get; set; }
+
+    /// <summary>v2.0.0: for an accumulating sensorTimestamp, a condition on
+    /// the profile's protocol registers while which the accumulator adds
+    /// nothing and the field repeats its last value, as a Triton's stamp
+    /// stays frozen while its IMU is off. The registers' initial values hold
+    /// until a host's command sets them.</summary>
+    [JsonPropertyName("holdWhile")]
+    public string? HoldWhile { get; set; }
 }
 
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is

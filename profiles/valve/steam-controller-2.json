@@ -234,7 +234,8 @@
         "type": "uint32-le",
         "semantic": "sensorTimestamp",
         "divisor": 3,
-        "clock": "accumulate"
+        "clock": "accumulate",
+        "holdWhile": "imuMode==0"
       },
       {
         "byte": 34,
@@ -267,5 +268,26 @@
         "semantic": "gyroRoll"
       }
     ]
+  },
+  "protocol": {
+    "state": [
+      { "name": "imuMode", "bits": 16, "initial": "0" }
+    ],
+    "commands": {
+      "source": "setReport",
+      "rules": [
+        {
+          "match": "01 87",
+          "minLength": 3,
+          "storeRecord": {
+            "at": 3,
+            "size": 3,
+            "count": { "byte": 2, "divideBy": 3 },
+            "key": { "offset": 0, "value": "30" },
+            "store": { "imuMode": { "offset": 1, "bytes": 2, "order": "le" } }
+          }
+        }
+      ]
+    }
   }
 }

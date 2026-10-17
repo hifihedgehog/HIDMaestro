@@ -289,6 +289,14 @@ internal sealed class Case6ValveInputPath : IOracleCase
                 ?? throw new MissingMethodException("HMController.RepeatLastFrame is gone: update case 6.");
 
             _dev = NewDevice(p, _view, _ring, _event, host.Connection, out _inEndpoint, out _inLength);
+            // v2.0.0: a create's controller reads its device's protocol
+            // registers through its USB/IP handle, for a sensor timestamp
+            // that holds while one says so (the Triton's, while SDL has its
+            // IMU off). This controller has no handle, so the case hands the
+            // codec the registers as the constructor would.
+            if (_dev.Protocol != null
+                && typeof(HMController).GetField("_extEncoderState", Instance)!.GetValue(_c) is VendorBlobCodec.EncoderState enc)
+                enc.HoldRegisters = _dev.Protocol.RegisterWords;
             _hidInterface = _dev.Descriptors.HidInterfaceNumber;
             var t = typeof(UsbipEmulatedDevice);
             _hidLock = t.GetField("_hidLock", Instance)!.GetValue(_dev)!;

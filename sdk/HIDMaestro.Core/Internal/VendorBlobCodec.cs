@@ -85,6 +85,13 @@ internal static class VendorBlobCodec
         /// arrives, a Stopwatch-style timestamp, and its ticks per second.
         /// Null reads the Stopwatch. A test sets its own.</summary>
         internal Func<long>? TimestampClock;
+
+        /// <summary>The accumulating field's holdWhile, compiled against the
+        /// protocol's registers, and the registers it reads: the device's
+        /// own, or the declared initial values for a device whose protocol
+        /// no host has reached. Null for none.</summary>
+        internal Programs.Condition? Hold;
+        internal uint[]? HoldRegisters;
         internal long TimestampFrequency = System.Diagnostics.Stopwatch.Frequency;
 
         /// <summary>Advances the accumulator by one frame whose consumer
@@ -97,9 +104,12 @@ internal static class VendorBlobCodec
         /// adds <paramref name="nominalTicks"/> instead. A stamp of 0 after
         /// the switch is no stamp this frame: it adds the clock's time, and
         /// the last stamp moves on by that much. A repeat of the last state
-        /// carries the same stamp and adds nothing.</summary>
+        /// carries the same stamp and adds nothing.
+        /// <para>While <paramref name="hold"/>, the frame adds nothing, and
+        /// the stamps and the clock still move on, so the field resumes from
+        /// its held value.</para></summary>
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-        internal ulong AdvanceTimestamp(uint stamp, uint nominalTicks)
+        internal ulong AdvanceTimestamp(uint stamp, uint nominalTicks, bool hold = false)
         {
             long now = TimestampClock?.Invoke() ?? System.Diagnostics.Stopwatch.GetTimestamp();
             if (!_accStarted)
@@ -116,7 +126,7 @@ internal static class VendorBlobCodec
             _accPrevTicks = Math.Max(ticks, _accPrevTicks);
             if (!_accConsumer)
             {
-                _acc += clock;
+                if (!hold) _acc += clock;
                 if (stamp != 0)
                 {
                     _accConsumer = true;
@@ -125,13 +135,13 @@ internal static class VendorBlobCodec
             }
             else if (stamp == 0)
             {
-                _acc += clock;
+                if (!hold) _acc += clock;
                 _accPrevStamp = unchecked(_accPrevStamp + (uint)clock);
             }
             else
             {
                 uint d = unchecked(stamp - _accPrevStamp);
-                _acc += d >= 0x8000_0000u ? nominalTicks : d;
+                if (!hold) _acc += d >= 0x8000_0000u ? nominalTicks : d;
                 _accPrevStamp = stamp;
             }
             return _acc;
@@ -170,7 +180,10 @@ internal static class VendorBlobCodec
         var counters = prog.CounterInitials.Length > 0 ? encState.CountersFor(prog) : null;
         // One advance of the timestamp accumulator per frame, for a program
         // with a "clock": "accumulate" field.
-        ulong acc = prog.Accumulates ? encState.AdvanceTimestamp(state.SensorTimestamp, prog.NominalTicks) : 0;
+        ulong acc = prog.Accumulates
+            ? encState.AdvanceTimestamp(state.SensorTimestamp, prog.NominalTicks,
+                encState.Hold != null && encState.HoldRegisters != null && encState.Hold.Holds(encState.HoldRegisters))
+            : 0;
         // The d-pad from HatDegrees, HatHundredths, HatRaw or Hat, once per
         // frame for a program that reads it.
         bool dUp = false, dDown = false, dLeft = false, dRight = false;

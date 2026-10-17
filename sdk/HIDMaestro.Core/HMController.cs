@@ -617,6 +617,14 @@ public sealed partial class HMController : IDisposable
             _decodeInput = GC.AllocateArray<byte>(Math.Max(need, SharedMemoryIO.DATA_CAPACITY + 1) + Internal.Programs.ProgramForm.Slack + 1, pinned: true);
             _decodeOutput = GC.AllocateArray<byte>(Internal.Programs.ProgramForm.MaxReport, pinned: true);
         }
+        // A sensor timestamp that holds while a register's condition does, as
+        // a Triton's holds while its IMU is off.
+        if (_extEncoderState != null && profile.ExtendedReport != null
+            && VendorBlobProgram.Get(profile.ExtendedReport).HoldWhile is { } hold)
+        {
+            _extEncoderState.Hold = ConditionParser.Parse(hold, model.Registers, "$.extendedReport.fields[].holdWhile");
+            _extEncoderState.HoldRegisters = _protocolEngine?.RegisterWords ?? model.Registers.Initial;
+        }
 
         // v1.13.0: the profile's controller ports, whose report goes out
         // once now so the device starts from it, and its USB/IP protocol.
