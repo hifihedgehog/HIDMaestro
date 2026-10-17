@@ -413,8 +413,10 @@ public sealed class HMContext : IDisposable
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        // The catalog's registry loads the embedded catalog on first use,
-        // outside the context's lock, which creates and disposes wait on.
+        // The catalog's registry, taken outside the context's lock, which
+        // creates and disposes wait on. It loads no catalog profile until a
+        // name or an identity entry asks for one, and that load, inside the
+        // directory load below, takes no lock of this context.
         var catalog = Internal.ModelRegistry.Catalog;
         lock (_directoryLoadLock)
         {

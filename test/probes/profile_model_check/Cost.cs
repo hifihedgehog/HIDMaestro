@@ -11,8 +11,9 @@
 //              source, the path a device on a machine with Steam takes and
 //              the one the base had, and with a reader that finds no file,
 //              which serves the captured stamp
-//   alloc      bytes the thread allocated per such GET (0 expected: the
-//              answer is a slice of the table's buffer)
+//   alloc      bytes the thread allocated per such GET: 0 for an answer
+//              that is a slice of the table's buffer, and the registry and
+//              file reads' own for Triton's GET through Steam's config
 //   compile    FeatureStubTable.From for a controller at create, and the
 //              FeatureAnswers blob the create writes for UMDF2
 // Against the base SDK it measures what the base has: Triton's answer to

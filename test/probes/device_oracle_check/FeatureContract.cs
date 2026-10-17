@@ -30,8 +30,8 @@
 //   - a blob truncated, of format 3 or past a limit, and no
 //     CachedInputReportIds, fail the start with DriverConfigError naming it
 //   - a DualSense-style channel (SET 0x80, then three pages on 0x81) and the
-//     Deck's unnumbered channel with HID class's leading 0, its parameter at
-//     the offset the entry names
+//     Deck's unnumbered channel as HID class hands it over, with no leading
+//     0, its parameter at the offset the entry names
 //   - a GET no entry answers goes on to the PID block
 //   - an extended frame goes out only at its report's declared length
 //   - with a cached-ID list, the polled GET_INPUT_REPORT keeps listed frames

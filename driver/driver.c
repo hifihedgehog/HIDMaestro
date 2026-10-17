@@ -553,8 +553,9 @@ InputIdCached(_In_ PDEVICE_CONTEXT ctx, _In_ UCHAR id)
  * entries start again. For a descriptor that declares report IDs the
  * buffer starts with the ID. For one that declares none HID class hands
  * the minidriver the report without an ID byte, in both directions: the
- * caller's leading 0 is left out (Wine 2df1ee2 hidclass.sys device.c:485,
- * offset = report->ReportID ? 0 : 1, and vhidmini2 197ba21 vhidmini.c:765-767),
+ * caller's leading 0 is left out (Wine 2df1ee2 hidclass.sys device.c:485
+ * and 505, offset = report->ReportID ? 0 : 1, for a GET and a SET alike,
+ * and vhidmini2 197ba21 vhidmini.c:765-767 for a GET),
  * as ServeFeature answers from the buffer's first byte and as the USB/IP
  * device's data stage carries it (FeatureStubTable.OnSetFeature). */
 static VOID

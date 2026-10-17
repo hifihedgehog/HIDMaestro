@@ -630,9 +630,10 @@ internal sealed class ModelRegistry
     private static string ProfileLabel(ControllerProfile p) =>
         p.SourceFile != null ? $"profile '{p.Id}' ({p.SourceFile})" : $"profile '{p.Id}'";
 
-    /// <summary>The catalog's registry, built once with the embedded
-    /// catalog. Profiles built in code and profiles a program constructs
-    /// resolve against it.</summary>
+    /// <summary>The catalog's registry: the SDK's models and identity table,
+    /// read once, and the catalog's profiles by name, the catalog loaded
+    /// the first time a name asks for one. Profiles built in code and
+    /// profiles a program constructs resolve against it.</summary>
     internal static ModelRegistry Catalog => s_catalog.Value;
 
     /// <summary>The catalog's registry for profiles outside the catalog:

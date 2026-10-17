@@ -23,7 +23,8 @@
 //                string request for index 1, answered with the index at the
 //                caller's byte 3. This tests that HID class hands the
 //                driver an unnumbered report without the caller's 0 in both
-//                directions, as Wine's HID class and vhidmini2 say (R3-N9).
+//                directions, as Wine's HID class does for both and
+//                vhidmini2 says for a GET (R3-N9).
 //   extract      Each UMDF2 catalog profile with a model is created, read
 //                back with HMDeviceExtractor.Extract, and the extracted
 //                profile must name the model its identity gives it, with

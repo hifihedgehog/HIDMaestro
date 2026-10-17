@@ -342,12 +342,6 @@ public sealed class HMProfileBuilder
         return this;
     }
 
-    /// <summary>Build the <see cref="HMProfile"/>. The returned profile can be
-    /// passed directly to <see cref="HMContext.CreateController(HMProfile)"/>.
-    /// The profile meets the checks a profile file meets when it loads.</summary>
-    /// <exception cref="HMProfileException">VID or PID is not set, the
-    /// descriptor's hex does not parse, the layout names an axis or button
-    /// the descriptor lacks, or the device model does not compile.</exception>
     /// <summary>A USB/IP persona presents its IDs in its USB device
     /// descriptor as well, idVendor at byte 8 and idProduct at byte 10,
     /// little-endian (USB 2.0 section 9.6.1), and its load checks them
@@ -375,6 +369,12 @@ public sealed class HMProfileBuilder
         return System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value, info), info)!;
     }
 
+    /// <summary>Build the <see cref="HMProfile"/>. The returned profile can be
+    /// passed directly to <see cref="HMContext.CreateController(HMProfile)"/>.
+    /// The profile meets the checks a profile file meets when it loads.</summary>
+    /// <exception cref="HMProfileException">VID or PID is not set, the
+    /// descriptor's hex does not parse, the layout names an axis or button
+    /// the descriptor lacks, or the device model does not compile.</exception>
     public HMProfile Build()
     {
         // A copy carries its source's IDs, 0x0000 included, as moza-r16's PID
