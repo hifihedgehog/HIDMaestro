@@ -731,7 +731,13 @@ internal sealed class DescriptorPart
             }
             double lt = Trigger(_canonLt, lk), rt = Trigger(_canonRt, rk);
             double combined = Math.Clamp(0.5 + (rt - lt) * 0.5, 0.0, 1.0);
-            plan[_b.CombinedTrigger] = (HMAxis.Z, combined, combined, false, 0.5, true);
+            // Under rule nan to=rest a NaN trigger is at its rest, 0, before
+            // the combined axis is formed from the two, so the combined axis
+            // carries the other trigger.
+            double ltNow = r.Nan == "rest" && double.IsNaN(lt) ? 0.0 : lt;
+            double rtNow = r.Nan == "rest" && double.IsNaN(rt) ? 0.0 : rt;
+            double combinedNow = Math.Clamp(0.5 + (rtNow - ltNow) * 0.5, 0.0, 1.0);
+            plan[_b.CombinedTrigger] = (HMAxis.Z, combined, combinedNow, false, 0.5, true);
             plan[_b.LeftTrigger] = (lk, lt, lt, false, 0.0, true);
             plan[_b.RightTrigger] = (rk, rt, rt, false, 0.0, true);
         }
@@ -1116,8 +1122,34 @@ internal sealed class ControllerParts
         return _acc.Value;
     }
 
+    /// <summary>The six slots as the base resolved them. The base passed a
+    /// NaN axis through as a NaN slot, which the rules' base check and
+    /// <c>rule nan</c> read. A tree that gives a NaN its rest resolves it to
+    /// a number, so the slots are resolved twice more with every NaN set to
+    /// two different numbers: a slot that follows the substitute came from a
+    /// NaN, and is a NaN again.</summary>
     public void Slots(in HMGamepadState s, out float lx, out float ly, out float rx, out float ry, out float lt, out float rt)
-        => C.ResolveSlots(in s, out lx, out ly, out rx, out ry, out lt, out rt);
+    {
+        C.ResolveSlots(in s, out lx, out ly, out rx, out ry, out lt, out rt);
+        if (s.Axes is not { } axes || !axes.Values.Any(float.IsNaN)) return;
+        var a = Substitute(in s, 0.25f);
+        var b = Substitute(in s, 0.75f);
+        C.ResolveSlots(in a, out float alx, out float aly, out float arx, out float ary, out float alt, out float art);
+        C.ResolveSlots(in b, out float blx, out float bly, out float brx, out float bry, out float blt, out float brt);
+        if (alx != blx) lx = float.NaN;
+        if (aly != bly) ly = float.NaN;
+        if (arx != brx) rx = float.NaN;
+        if (ary != bry) ry = float.NaN;
+        if (alt != blt) lt = float.NaN;
+        if (art != brt) rt = float.NaN;
+    }
+
+    static HMGamepadState Substitute(in HMGamepadState s, float value)
+    {
+        var copy = s;
+        copy.Axes = s.Axes!.ToDictionary(kv => kv.Key, kv => float.IsNaN(kv.Value) ? value : kv.Value);
+        return copy;
+    }
 }
 
 /// <summary>An output that is a submit's frame (Case1Submit.Frame):
