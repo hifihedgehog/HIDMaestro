@@ -884,61 +884,7 @@ public sealed partial class HMController : IDisposable
         // bound, so the bytes are unused: skip the per-frame packing
         // entirely (~60-80 instructions saved). The downstream Marshal.Copy
         // is also skipped via the gipData=null path in WriteInputFrame.
-        if (_packsGipBuffer)
-        {
-            // The one arithmetic (WireArith) on XInput's own ranges. A thumb
-            // X is 0..65535 here, which companion.c reads as g - 32768.
-            // XInput's thumb Y grows upward, the other way from the SDK's Y,
-            // so it is an inverted field, sThumbY = Linear(v, -32768, 32767,
-            // invert), and the slice carries 32767 - sThumbY, which
-            // companion.c turns back. A trigger is the XInput byte t the
-            // rule gives, carried as the smallest 10-bit g whose
-            // g * 255 / 1023 (companion.c's integer decode) is t, so every
-            // companion reads back the byte the rule chose.
-            ushort gipLx = (ushort)WireArith.Linear(mlx, 0, 65535, invert: false, rest: 0.5);
-            ushort gipLy = (ushort)(32767 - WireArith.Linear(mly, -32768, 32767, invert: true, rest: 0.5));
-            ushort gipRx = (ushort)WireArith.Linear(mrx, 0, 65535, invert: false, rest: 0.5);
-            ushort gipRy = (ushort)(32767 - WireArith.Linear(mry, -32768, 32767, invert: true, rest: 0.5));
-            ushort gipLt = XusbTrigger(mlt);
-            ushort gipRt = XusbTrigger(mrt);
-            _gipBuf[0]  = (byte)(gipLx & 0xFF); _gipBuf[1]  = (byte)(gipLx >> 8);
-            _gipBuf[2]  = (byte)(gipLy & 0xFF); _gipBuf[3]  = (byte)(gipLy >> 8);
-            _gipBuf[4]  = (byte)(gipRx & 0xFF); _gipBuf[5]  = (byte)(gipRx >> 8);
-            _gipBuf[6]  = (byte)(gipRy & 0xFF); _gipBuf[7]  = (byte)(gipRy >> 8);
-            _gipBuf[8]  = (byte)(gipLt & 0xFF); _gipBuf[9]  = (byte)(gipLt >> 8);
-            _gipBuf[10] = (byte)(gipRt & 0xFF); _gipBuf[11] = (byte)(gipRt >> 8);
-            // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
-            uint b = (uint)state.Buttons;
-            byte btnLow = 0;
-            if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
-            if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
-            if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
-            if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
-            if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
-            if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
-            if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
-            if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
-            _gipBuf[12] = btnLow;
-            // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
-            // 4-bit hat: companion.c does (btnHigh >> 2) & 0x0F and switches
-            // the result into wButtons.DPAD_* (companion.c:421-426). Guide
-            // sits above the hat at bit 6 (0x40); HMXInput.dll's
-            // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
-            // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
-            // Pre-v1.3.3 the hat bits were never written, so XInput consumers
-            // hitting xusb22 directly (SDL3 XInput backend, sample-quality
-            // XInput apps) saw no d-pad on Xbox 360 wired (#19). HID-derived
-            // consumers (joy.cpl/DI, SDL3-HID, browsers via WGI) were
-            // unaffected because BuildReportInto correctly populates the
-            // descriptor's Hat Switch usage. Mask against 0x0F so a future
-            // HMHat extension can't smear into Back/Start bits below.
-            byte btnHigh = 0;
-            if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
-            if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
-            btnHigh |= (byte)(((byte)state.Hat & 0x0F) << 2);
-            if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
-            _gipBuf[13] = btnHigh;
-        }
+        if (_packsGipBuffer) PackXusbSlice(in state, mlx, mly, mrx, mry, mlt, mrt, _gipBuf);
 
         // v1.3.5: two write paths, mutually exclusive per frame:
         //
@@ -986,10 +932,81 @@ public sealed partial class HMController : IDisposable
         return ElapsedMicros(startTicks);
     }
 
-    /// <summary>The XUSB slice's 10-bit trigger for <paramref name="v"/>:
+    /// <summary>The 14-byte slice the XUSB companion reads on
+    /// IOCTL_XUSB_GET_STATE: thumbs, triggers and buttons. Its own method,
+    /// so the one arithmetic's six conversions inline here and not into
+    /// SubmitStateCore.</summary>
+    private static void PackXusbSlice(in HMGamepadState state, double mlx, double mly, double mrx, double mry,
+                                      double mlt, double mrt, byte[] gip)
+    {
+        // The one arithmetic (WireArith) on XInput's own ranges. A thumb
+        // X is 0..65535 here, which companion.c reads as g - 32768.
+        // XInput's thumb Y grows upward, the other way from the SDK's Y,
+        // so it is an inverted field, sThumbY = Linear(v, -32768, 32767,
+        // invert), and the slice carries 32767 - sThumbY, which
+        // companion.c turns back. A trigger is the XInput byte t the
+        // rule gives, carried as the smallest 10-bit g whose
+        // g * 255 / 1023 (companion.c's integer decode) is t, so every
+        // companion reads back the byte the rule chose.
+        //
+        // ResolveSimpleSlots gives all six in [0, 1], a NaN axis already at
+        // its rest (0.5 for a thumb, 0 for a trigger), so each takes
+        // WireArith.Unit, the same value as WireArith.Linear on such an
+        // input. A thumb at rest reads 0 on both axes.
+        ushort gipLx = (ushort)WireArith.Unit(mlx, 65535);
+        ushort gipLy = (ushort)(32767 - ThumbY(mly));
+        ushort gipRx = (ushort)WireArith.Unit(mrx, 65535);
+        ushort gipRy = (ushort)(32767 - ThumbY(mry));
+        ushort gipLt = XusbTrigger(mlt);
+        ushort gipRt = XusbTrigger(mrt);
+        gip[0]  = (byte)(gipLx & 0xFF); gip[1]  = (byte)(gipLx >> 8);
+        gip[2]  = (byte)(gipLy & 0xFF); gip[3]  = (byte)(gipLy >> 8);
+        gip[4]  = (byte)(gipRx & 0xFF); gip[5]  = (byte)(gipRx >> 8);
+        gip[6]  = (byte)(gipRy & 0xFF); gip[7]  = (byte)(gipRy >> 8);
+        gip[8]  = (byte)(gipLt & 0xFF); gip[9]  = (byte)(gipLt >> 8);
+        gip[10] = (byte)(gipRt & 0xFF); gip[11] = (byte)(gipRt >> 8);
+        // Button low byte: A,B,X,Y,LB,RB,LS,RS (XInput XUSB convention)
+        uint b = (uint)state.Buttons;
+        byte btnLow = 0;
+        if ((b & (uint)HMButton.A)           != 0) btnLow |= 0x01;
+        if ((b & (uint)HMButton.B)           != 0) btnLow |= 0x02;
+        if ((b & (uint)HMButton.X)           != 0) btnLow |= 0x04;
+        if ((b & (uint)HMButton.Y)           != 0) btnLow |= 0x08;
+        if ((b & (uint)HMButton.LeftBumper)  != 0) btnLow |= 0x10;
+        if ((b & (uint)HMButton.RightBumper) != 0) btnLow |= 0x20;
+        if ((b & (uint)HMButton.LeftStick)   != 0) btnLow |= 0x40;
+        if ((b & (uint)HMButton.RightStick)  != 0) btnLow |= 0x80;
+        gip[12] = btnLow;
+        // Button high byte. Bits 0..1 are Back/Start, bits 2..5 carry the
+        // 4-bit hat: companion.c does (btnHigh >> 2) & 0x0F and switches
+        // the result into wButtons.DPAD_* (companion.c:421-426). Guide
+        // sits above the hat at bit 6 (0x40). HMXInput.dll's
+        // IOCTL_XUSB_GET_STATE handler translates 0x40 to the undocumented
+        // XINPUT_GAMEPAD_GUIDE bit (0x0400) returned by XInputGetStateEx.
+        // Pre-v1.3.3 the hat bits were never written, so XInput consumers
+        // hitting xusb22 directly (SDL3 XInput backend, sample-quality
+        // XInput apps) saw no d-pad on Xbox 360 wired (#19). HID-derived
+        // consumers (joy.cpl/DI, SDL3-HID, browsers via WGI) were
+        // unaffected because BuildReportInto correctly populates the
+        // descriptor's Hat Switch usage. Mask against 0x0F so a future
+        // HMHat extension can't smear into Back/Start bits below.
+        byte btnHigh = 0;
+        if ((b & (uint)HMButton.Back)  != 0) btnHigh |= 0x01;
+        if ((b & (uint)HMButton.Start) != 0) btnHigh |= 0x02;
+        btnHigh |= (byte)(((byte)state.Hat & 0x0F) << 2);
+        if ((b & (uint)HMButton.Guide) != 0) btnHigh |= 0x40;
+        gip[13] = btnHigh;
+    }
+
+    /// <summary>The XUSB slice's 10-bit trigger for <paramref name="v"/>, in [0, 1]:
     /// the smallest g whose g * 255 / 1023 is the 8-bit XInput trigger the
     /// one arithmetic gives.</summary>
-    internal static ushort XusbTrigger(double v) => (ushort)((WireArith.Linear(v, 0, 255, invert: false, rest: 0) * 1023 + 254) / 255);
+    internal static ushort XusbTrigger(double v) => (ushort)((WireArith.Unit(v, 255) * 1023 + 254) / 255);
+
+    /// <summary>XInput's sThumbY for a thumb Y value in [0, 1]:
+    /// Linear(v, -32768, 32767, invert), from WireArith.Unit.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static int ThumbY(double v) => -32768 + WireArith.Unit(1.0 - v, 65535);
 
     private static long ElapsedMicros(long startTicks) => startTicks == 0 ? 0
         : (System.Diagnostics.Stopwatch.GetTimestamp() - startTicks) * 1_000_000L / System.Diagnostics.Stopwatch.Frequency;

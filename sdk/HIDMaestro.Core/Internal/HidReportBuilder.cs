@@ -58,8 +58,9 @@ public class HidReportBuilder
     // frame builds it: each declared analog field with the value it rests
     // at when the consumer leaves it out or writes NaN and, for a field its
     // profile centers, the center and the two slopes WireArith.Centered
-    // takes.
-    private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest,
+    // takes. Min and Span are the field's WireArith.Linear terms, so an
+    // input GetAxisValue has already clamped takes WireArith.Unit.
+    private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest, int Min, double Span,
                                              bool IsCentered, int Center, double SlopeLow, double SlopeStep);
     private AxisWrite[]? _axisWrites;
     private HashSet<HMAxis>? _stickAxes;
@@ -105,14 +106,16 @@ public class HidReportBuilder
         {
             bool stick = _stickAxes != null && _stickAxes.Contains(key);
             double rest = stick || field.LogicalMin < 0 ? 0.5 : 0.0;
+            int min = field.LogicalMin;
+            double span = (long)field.LogicalMax - min;
             if (_axisCenters != null && _axisCenters.TryGetValue(key, out int c))
             {
                 var (low, step) = WireArith.Slopes(field.LogicalMin, c, field.LogicalMax);
-                writes[i++] = new AxisWrite(key, field, rest, true, c, low, step);
+                writes[i++] = new AxisWrite(key, field, rest, min, span, true, c, low, step);
             }
             else
             {
-                writes[i++] = new AxisWrite(key, field, rest, false, 0, 0, 0);
+                writes[i++] = new AxisWrite(key, field, rest, min, span, false, 0, 0, 0);
             }
         }
         return writes;
@@ -800,12 +803,13 @@ public class HidReportBuilder
         for (int i = 0; i < axisWrites.Length; i++)
         {
             ref readonly var w = ref axisWrites[i];
+            // GetAxisValue gives a value in [0, 1], a NaN at the field's rest,
+            // so each field takes WireArith's form for such an input,
+            // Linear's or Centered's value on it.
             double v = GetAxisValue(w.Key, w.Rest);
-            if (w.IsCentered)
-                WriteBits(report, w.Field.BitOffset + idOffset, w.Field.BitSize,
-                          WireArith.Centered(v, w.Field.LogicalMin, w.Center, w.Field.LogicalMax, w.SlopeLow, w.SlopeStep, invert: false));
-            else
-                WriteField(w.Field, v);
+            int raw = w.IsCentered ? WireArith.CenteredUnit(v, w.Center, w.SlopeLow, w.SlopeStep)
+                : unchecked(w.Min + WireArith.Unit(v, w.Span));
+            WriteBits(report, w.Field.BitOffset + idOffset, w.Field.BitSize, raw);
         }
 
         // Combined-Z trigger synthesis (Xbox 360 wired with Vx/Vy hidden pair):

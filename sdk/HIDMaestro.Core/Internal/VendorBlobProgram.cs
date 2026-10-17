@@ -146,6 +146,20 @@ internal sealed class VendorBlobProgram
         }
     }
 
+    /// <summary>The parameters only a few fields set: a calibrated field's
+    /// scale and repeat, a level map's charging value, a packed-uint's
+    /// parts.</summary>
+    public sealed class FieldExtras
+    {
+        public double ScaleNumerator;
+        public double ScaleDenominator = 1;
+        public bool Negate;
+        public int RepeatCount = 1;
+        public int RepeatStride;
+        public int ChargingValue = -1;
+        public PackedPart[]? Parts;
+    }
+
     public readonly struct CompiledField
     {
         public readonly FieldSpec Src;      // original spec (decode strings, scope)
@@ -172,30 +186,39 @@ internal sealed class VendorBlobProgram
         public readonly bool Invert;        // wire axis opposite the SDK's
 
         // v2.0.0: the vocabulary's parameters, resolved to their defaults.
+        // The ones a frame reads on common fields are stored here. The rest,
+        // which only a few fields set, sit in Extras, so the field array an
+        // encode walks stays as short as it can.
         /// <summary>Wire value at the SDK's 0 and at 1, or the released and
         /// pressed values of a pad pressure.</summary>
         public int Min { get; init; }
         public int Max { get; init; }
-        /// <summary>A calibrated int16-le field's counts per unit, as a
-        /// ratio. Numerator 0 for any other field.</summary>
-        public double ScaleNumerator { get; init; }
-        public double ScaleDenominator { get; init; }
-        public bool Negate { get; init; }
-        /// <summary>Times the field is written, and bytes between.</summary>
-        public int RepeatCount { get; init; }
-        public int RepeatStride { get; init; }
         /// <summary>The d-pad from HatDegrees, HatHundredths, HatRaw or Hat,
         /// the first one set.</summary>
         public bool DpadResolved { get; init; }
-        public byte[]? Levels { get; init; }
-        public int ChargingValue { get; init; }
-        /// <summary>The rolling field's counter, an index into the encoder
-        /// state's counters, -1 for any other field.</summary>
-        public int CounterSlot { get; init; }
-        public PackedPart[]? Parts { get; init; }
         /// <summary>A sensor timestamp written from the encoder state's
         /// accumulator (<c>"clock": "accumulate"</c>).</summary>
         public bool Accumulate { get; init; }
+        /// <summary>The rolling field's counter, an index into the encoder
+        /// state's counters, -1 for any other field.</summary>
+        public int CounterSlot { get; init; }
+        /// <summary>The scale, repeat, level table and packed parts of the
+        /// few fields that set them, null for every other field.</summary>
+        public FieldExtras? Extras { get; init; }
+
+        /// <summary>A calibrated int16-le field's counts per unit, as a
+        /// ratio. Numerator 0 for any other field.</summary>
+        public double ScaleNumerator => Extras?.ScaleNumerator ?? 0;
+        public double ScaleDenominator => Extras?.ScaleDenominator ?? 1;
+        public bool Negate => Extras?.Negate ?? false;
+        /// <summary>Times the field is written, and bytes between.</summary>
+        public int RepeatCount => Extras?.RepeatCount ?? 1;
+        public int RepeatStride => Extras?.RepeatStride ?? 0;
+        /// <summary>A uint8-level-map's table, stored here, since the frame
+        /// reads it on every report.</summary>
+        public byte[]? Levels { get; init; }
+        public int ChargingValue => Extras?.ChargingValue ?? -1;
+        public PackedPart[]? Parts => Extras?.Parts;
 
         public CompiledField(FieldSpec src, FieldOp op, SrcOp source, int b,
                              int rangeLo, int rangeHi, int bitLo, int bitHi, bool hasBits,
@@ -210,9 +233,7 @@ internal sealed class VendorBlobProgram
             CrcDst = crcDst; RollKey = rollKey; ButtonBits = buttonBits; FlagKinds = flagKinds;
             Divisor = divisor; FullValue = fullValue;
             Resolution = resolution; SourceResolution = sourceResolution; Invert = invert;
-            Min = 0; Max = 0; ScaleNumerator = 0; ScaleDenominator = 1; Negate = false;
-            RepeatCount = 1; RepeatStride = 0; DpadResolved = false; Levels = null;
-            ChargingValue = -1; CounterSlot = -1; Parts = null; Accumulate = false;
+            Min = 0; Max = 0; DpadResolved = false; Accumulate = false; CounterSlot = -1; Extras = null;
         }
     }
 
@@ -519,17 +540,21 @@ internal sealed class VendorBlobProgram
             {
                 Min = f.Min ?? defMin,
                 Max = f.Max ?? defMax,
-                ScaleNumerator = f.Scale?.Numerator ?? 0,
-                ScaleDenominator = f.Scale?.Denominator ?? 1,
-                Negate = f.Negate == true,
-                RepeatCount = f.Repeat is { Count: 2 } r ? r[0] : 1,
-                RepeatStride = f.Repeat is { Count: 2 } s ? s[1] : 0,
                 DpadResolved = dpad,
-                Levels = f.Levels?.ConvertAll(x => (byte)x).ToArray(),
-                ChargingValue = f.ChargingValue ?? -1,
                 CounterSlot = counterSlot,
-                Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
                 Accumulate = accumulate,
+                Levels = f.Levels?.ConvertAll(x => (byte)x).ToArray(),
+                Extras = f.Scale == null && f.Negate == null && f.Repeat == null && f.Levels == null
+                         && f.ChargingValue == null && op != FieldOp.PackedUint ? null : new FieldExtras
+                {
+                    ScaleNumerator = f.Scale?.Numerator ?? 0,
+                    ScaleDenominator = f.Scale?.Denominator ?? 1,
+                    Negate = f.Negate == true,
+                    RepeatCount = f.Repeat is { Count: 2 } r ? r[0] : 1,
+                    RepeatStride = f.Repeat is { Count: 2 } s ? s[1] : 0,
+                    ChargingValue = f.ChargingValue ?? -1,
+                    Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
+                },
             };
 
             // Mirror of Decode's per-type "produces a dict entry" predicate,

@@ -36,10 +36,26 @@ internal static class WireArith
     public static int Linear(double v, int min, int max, bool invert, double rest)
     {
         if (double.IsNaN(v)) v = rest;
-        double c = Math.Clamp(v, 0.0, 1.0);
+        // Min and Max rather than Clamp: the same value for an input that
+        // is not NaN, in two instructions and no branch.
+        double c = Math.Max(0.0, Math.Min(v, 1.0));
         if (invert) c = 1.0 - c;
-        return (int)(min + (long)Math.Round(c * ((long)max - min)));
+        // The span is below 2^32, so the product is under 2^51 and the
+        // bias rounds it. The sum wraps back into the field's range.
+        return unchecked(min + (int)BitConverter.DoubleToInt64Bits(c * ((long)max - min) + RoundingBias));
     }
+
+    /// <summary><see cref="Linear"/> from 0 for an input the caller has
+    /// already clamped to [0, 1], never NaN: <c>RoundHalfEven(c x span)</c>.
+    /// The XUSB slice's six conversions take it on values ResolveSimpleSlots
+    /// gives, and the descriptor path on values GetAxisValue gives, each a
+    /// NaN already replaced by its rest (<see cref="Normalized"/>), so a
+    /// frame pays no second clamp and no NaN test. A span of 2^31 or more
+    /// returns the low 32 bits, which the descriptor path's min + Unit wraps
+    /// back into the field's range.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int Unit(double c, double span) =>
+        (int)BitConverter.DoubleToInt64Bits(c * span + RoundingBias);
 
     /// <summary>The wire value of <paramref name="v"/> on a field whose
     /// hosts read <paramref name="center"/> as the stick at rest, with the
@@ -51,11 +67,28 @@ internal static class WireArith
     public static int Centered(double v, int min, int center, int max, double slopeLow, double slopeStep, bool invert)
     {
         if (double.IsNaN(v)) return center;
-        double c = Math.Clamp(v, 0.0, 1.0);
+        double c = Math.Max(0.0, Math.Min(v, 1.0));
         if (invert) c = 1.0 - c;
         double t = c - 0.5;
         return center + (int)Math.Round(t * slopeLow + Math.Max(t, 0.0) * slopeStep);
     }
+
+    /// <summary><see cref="Centered"/> for an input the caller has already
+    /// clamped to [0, 1] and that is not NaN, uninverted.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int CenteredUnit(double c, int center, double slopeLow, double slopeStep)
+    {
+        double t = c - 0.5;
+        return center + (int)BitConverter.DoubleToInt64Bits(t * slopeLow + Math.Max(t, 0.0) * slopeStep + RoundingBias);
+    }
+
+    /// <summary>1.5 x 2^52. Added to a double y with |y| below 2^51, the
+    /// sum lies where doubles are one apart, so the addition itself rounds
+    /// y to the nearest integer, ties to even, by IEEE 754's default
+    /// rounding, and the low 32 bits of the sum are that integer in two's
+    /// complement. Math.Round and a conversion give the same integer, at
+    /// the cost of the saturating conversion.</summary>
+    private const double RoundingBias = 6755399441055744.0;
 
     /// <summary>The two slopes of a centered field, computed once when its
     /// profile compiles: sL = 2 (c - min) below the center c, and the step

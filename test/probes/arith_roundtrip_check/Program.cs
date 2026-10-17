@@ -8,8 +8,10 @@
 //               every path (Nan.cs)
 //   rest        what a descriptor-path stick and its neighbors carry when
 //               the consumer writes no value (Rest.cs)
-//   check       roundtrip (nan included) and rest, the battery's run (S90),
-//               the default
+//   rounding    WireArith's biased rounding against Math.Round on every
+//               tie of each span (Rounding.cs)
+//   check       roundtrip (nan included), rest and rounding, the battery's
+//               run (S90), the default
 //   diff        every float in [0, 1] through each catalog conversion's old
 //               and new arithmetic, against the design note's table of what
 //               changes, and the per-profile list (Diff.cs). S90 runs it too
@@ -34,11 +36,12 @@ internal static class Program
             case "roundtrip": fail += RoundTrip.Run(); fail += Nan.Run(); break;
             case "nan": fail += Nan.Run(); break;
             case "rest": fail += Rest.Run(); break;
-            case "check": fail += RoundTrip.Run(); fail += Nan.Run(); fail += Rest.Run(); break;
+            case "rounding": fail += Rounding.Run(); break;
+            case "check": fail += RoundTrip.Run(); fail += Nan.Run(); fail += Rest.Run(); fail += Rounding.Run(); break;
             case "diff": fail += Diff.Run(args.Length > 1 ? args[1] : null); break;
-            case "all": fail += RoundTrip.Run(); fail += Nan.Run(); fail += Rest.Run(); fail += Diff.Run(null); break;
+            case "all": fail += RoundTrip.Run(); fail += Nan.Run(); fail += Rest.Run(); fail += Rounding.Run(); fail += Diff.Run(null); break;
             default:
-                Console.WriteLine("usage: ArithRoundtripCheck check | roundtrip | nan | rest | diff [<conversion text>] | all");
+                Console.WriteLine("usage: ArithRoundtripCheck check | roundtrip | nan | rest | rounding | diff [<conversion text>] | all");
                 return 1;
         }
         Console.WriteLine($"arith_roundtrip_check {mode}: {(fail == 0 ? "PASS" : $"FAIL, {fail}")}");

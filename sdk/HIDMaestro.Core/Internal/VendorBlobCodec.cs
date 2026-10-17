@@ -98,6 +98,7 @@ internal static class VendorBlobCodec
         /// the switch is no stamp this frame: it adds the clock's time, and
         /// the last stamp moves on by that much. A repeat of the last state
         /// carries the same stamp and adds nothing.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         internal ulong AdvanceTimestamp(uint stamp, uint nominalTicks)
         {
             long now = TimestampClock?.Invoke() ?? System.Diagnostics.Stopwatch.GetTimestamp();
@@ -319,43 +320,21 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.I16:
                 {
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    short v;
-                    if (f.ScaleNumerator != 0)
+                    // A calibrated value or a repeated field: its own method,
+                    // so the few profiles that set them keep this loop short.
+                    if (f.Extras != null) { WriteCalibratedI16(in f, in state, buffer); break; }
+                    short v = f.Source switch
                     {
-                        // A calibrated value as counts, by the one arithmetic
-                        // (WireArith.Scaled).
-                        float g = f.Source switch
-                        {
-                            VendorBlobProgram.SrcOp.AccelGX  => state.AccelGX,
-                            VendorBlobProgram.SrcOp.AccelGY  => state.AccelGY,
-                            VendorBlobProgram.SrcOp.AccelGZ  => state.AccelGZ,
-                            VendorBlobProgram.SrcOp.GyroDpsX => state.GyroDpsX,
-                            VendorBlobProgram.SrcOp.GyroDpsY => state.GyroDpsY,
-                            VendorBlobProgram.SrcOp.GyroDpsZ => state.GyroDpsZ,
-                            _ => 0f,
-                        };
-                        v = WireArith.Scaled(f.Negate ? -g : g, f.ScaleNumerator, f.ScaleDenominator);
-                    }
-                    else
-                    {
-                        v = f.Source switch
-                        {
-                            VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
-                            VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
-                            VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
-                            VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
-                            VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
-                            VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
-                            _ => (short)0,
-                        };
-                    }
-                    // A report that carries several motion frames of one
-                    // sample writes it in each (repeat).
-                    for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
-                    {
-                        buffer[at]     = (byte)(v & 0xFF);
-                        buffer[at + 1] = (byte)((v >> 8) & 0xFF);
-                    }
+                        VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
+                        VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
+                        VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
+                        VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
+                        VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
+                        VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
+                        _ => (short)0,
+                    };
+                    buffer[f.B]     = (byte)(v & 0xFF);
+                    buffer[f.B + 1] = (byte)((v >> 8) & 0xFF);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.I16Axis:
@@ -603,8 +582,8 @@ internal static class VendorBlobCodec
                         bool r = f.DpadResolved;
                         bool on = bits switch
                         {
-                            VendorBlobProgram.ButtonLtDigital => TriggerByte(leftTrigger) > 0,
-                            VendorBlobProgram.ButtonRtDigital => TriggerByte(rightTrigger) > 0,
+                            VendorBlobProgram.ButtonLtDigital => TriggerOn(leftTrigger),
+                            VendorBlobProgram.ButtonRtDigital => TriggerOn(rightTrigger),
                             VendorBlobProgram.ButtonDpadUp    => r ? dUp : h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
                             VendorBlobProgram.ButtonDpadDown  => r ? dDown : h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
                             VendorBlobProgram.ButtonDpadLeft  => r ? dLeft : h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
@@ -953,9 +932,12 @@ internal static class VendorBlobCodec
         double.IsNaN(v) ? (byte)Math.Clamp(center, 0, 255)
             : (byte)Math.Clamp(center + sign * Math.Round(Math.Clamp(v, -2.0, 2.0) * 127), 0, 255);
 
-    /// <summary>The 8-bit value a <c>uint8-trigger</c> field writes for
-    /// <paramref name="v"/>, by the same arithmetic.</summary>
-    private static int TriggerByte(float v) => WireArith.Linear(v, 0, 255, invert: false, rest: 0);
+    /// <summary>Whether the 8-bit value a <c>uint8-trigger</c> field writes
+    /// for <paramref name="v"/>, by the one arithmetic, is above zero: the
+    /// LT and RT digital bits. RoundHalfEven(c x 255) is above zero exactly
+    /// when c x 255, an exact product, is above 0.5, and a NaN, at its rest
+    /// of 0, is not.</summary>
+    internal static bool TriggerOn(float v) => v * 255.0 > 0.5;
 
     /// <summary>A pressure-sensitive button's byte: the consumer's pressure
     /// when it sets one, otherwise 255 while the button is pressed and 0
@@ -980,10 +962,54 @@ internal static class VendorBlobCodec
         return p != 0 ? p : down ? (byte)255 : (byte)0;
     }
 
+    /// <summary>An int16-le field with a scale or a repeat: a calibrated
+    /// value as counts by the one arithmetic (WireArith.Scaled), or a raw
+    /// one, written in each motion frame the repeat gives.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void WriteCalibratedI16(in VendorBlobProgram.CompiledField f, in HMGamepadState state, byte[] buffer)
+    {
+        short v;
+        if (f.ScaleNumerator != 0)
+        {
+            float g = f.Source switch
+            {
+                VendorBlobProgram.SrcOp.AccelGX  => state.AccelGX,
+                VendorBlobProgram.SrcOp.AccelGY  => state.AccelGY,
+                VendorBlobProgram.SrcOp.AccelGZ  => state.AccelGZ,
+                VendorBlobProgram.SrcOp.GyroDpsX => state.GyroDpsX,
+                VendorBlobProgram.SrcOp.GyroDpsY => state.GyroDpsY,
+                VendorBlobProgram.SrcOp.GyroDpsZ => state.GyroDpsZ,
+                _ => 0f,
+            };
+            v = WireArith.Scaled(f.Negate ? -g : g, f.ScaleNumerator, f.ScaleDenominator);
+        }
+        else
+        {
+            v = f.Source switch
+            {
+                VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
+                VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
+                VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
+                VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
+                VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
+                VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
+                _ => (short)0,
+            };
+        }
+        // A report that carries several motion frames of one sample writes
+        // it in each (repeat).
+        for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
+        {
+            buffer[at]     = (byte)(v & 0xFF);
+            buffer[at + 1] = (byte)((v >> 8) & 0xFF);
+        }
+    }
+
     /// <summary>v2.0.0: the d-pad a <c>dpad: "resolved"</c> field reads: the
     /// first of HatDegrees, HatHundredths, HatRaw and Hat that is set, as an
     /// angle, and each direction on within 67.5 degrees of it, so a
     /// diagonal's 45 degrees light two.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static void ResolveDpad(in HMGamepadState state,
                                      out bool up, out bool down, out bool left, out bool right)
     {
