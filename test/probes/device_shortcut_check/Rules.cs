@@ -287,6 +287,8 @@ internal static class Rules
         new("ControllerProfile.SdlMapping", "a mapping string handed to programs (HMProfile.cs:202), read by no device code"),
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
+        new("FieldSpec.Levels", "the uint8-level-map codec op's table (VendorBlobProgram.cs). dualshock-3-full sets it, and the PS Move's battery byte is the second device: levels 0 to 5, 0xEE charging and 0xEF full (psmoveapi include/psmove.h:194-203 at 97d97e9)"),
+        new("FieldSpec.ChargingValue", "the uint8-level-map codec op's charging byte (VendorBlobProgram.cs), 0xEE on the DualShock 3 and on the PS Move (psmoveapi include/psmove.h:201 at 97d97e9)"),
         new("HM*Layout.*", "the layout vocabulary of a layout kind (HMLayout.cs), which every profile of that kind fills"),
         new("HMImu.Magnetometer", "the layout vocabulary's IMU description (HMLayout.cs)"),
         new("HMTriggerButton.*", "the layout vocabulary's trigger description (HMLayout.cs)"),

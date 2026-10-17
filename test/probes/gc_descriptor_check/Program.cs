@@ -203,7 +203,13 @@ internal static class Program
 
         // A field wider than its block or report.
         ("a uint16 on a port block's last byte",
-            j => PortField(j, 7)["type"] = "uint16-trigger",
+            j =>
+            {
+                // max as v1 implied it, so the field is refused for its
+                // width and not for the key v2.0.0 requires.
+                PortField(j, 7)["type"] = "uint16-trigger";
+                PortField(j, 7)["max"] = 32767;
+            },
             "extendedReport.ports.fields[7] ('uint16-trigger') at bytes 8-9 runs past the 9-byte port block"),
         ("a uint16 that ends past the block's data bytes",
             j =>
@@ -211,6 +217,7 @@ internal static class Program
                 Ports(j)["data"] = "1-7";
                 Ports(j)["fields"]!.AsArray().RemoveAt(7);
                 PortField(j, 6)["type"] = "uint16-trigger";
+                PortField(j, 6)["max"] = 32767;
             },
             "extendedReport.ports.fields[6] ('uint16-trigger') at bytes 7-8 is outside the block's data bytes 1-7"),
         ("an output port field read past its 1-byte block",

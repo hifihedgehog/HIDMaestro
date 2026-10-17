@@ -327,10 +327,16 @@ internal static class Inventory
         }
     }
 
+    /// <summary>True on a tree whose codec reads min and max, where Y
+    /// inverts only by the profile's invert.</summary>
+    static readonly bool MinMaxKnown = typeof(FieldSpec).GetProperty("Max") != null;
+
     static void Codec(string id, VendorBlobProgram.CompiledField f, string where)
     {
-        bool yStick = f.Source is VendorBlobProgram.SrcOp.LeftStickY or VendorBlobProgram.SrcOp.RightStickY;
-        bool yPad = f.Source is VendorBlobProgram.SrcOp.LeftPadY or VendorBlobProgram.SrcOp.RightPadY;
+        // Until v2.0.0 the codec negated a stick's Y by its semantic and a
+        // pad's always. From v2.0.0 the profile says so with invert.
+        bool yStick = f.Invert || (f.Source is VendorBlobProgram.SrcOp.LeftStickY or VendorBlobProgram.SrcOp.RightStickY && f.Src.Invert == null && !MinMaxKnown);
+        bool yPad = f.Invert || (f.Source is VendorBlobProgram.SrcOp.LeftPadY or VendorBlobProgram.SrcOp.RightPadY && f.Src.Invert == null && !MinMaxKnown);
         switch (f.Op)
         {
             case VendorBlobProgram.FieldOp.U8Axis: Add(id, "codec", Sites.U8Axis(f.Center, f.Invert), where); break;

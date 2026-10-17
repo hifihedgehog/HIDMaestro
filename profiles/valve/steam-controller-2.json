@@ -164,12 +164,14 @@
       {
         "byte": 6,
         "type": "uint16-trigger",
-        "semantic": "leftTrigger"
+        "semantic": "leftTrigger",
+        "max": 32767
       },
       {
         "byte": 8,
         "type": "uint16-trigger",
-        "semantic": "rightTrigger"
+        "semantic": "rightTrigger",
+        "max": 32767
       },
       {
         "byte": 10,
@@ -179,7 +181,8 @@
       {
         "byte": 12,
         "type": "int16-axis",
-        "semantic": "leftStickY"
+        "semantic": "leftStickY",
+        "invert": true
       },
       {
         "byte": 14,
@@ -189,7 +192,8 @@
       {
         "byte": 16,
         "type": "int16-axis",
-        "semantic": "rightStickY"
+        "semantic": "rightStickY",
+        "invert": true
       },
       {
         "byte": 18,
@@ -199,12 +203,14 @@
       {
         "byte": 20,
         "type": "int16-pad",
-        "semantic": "leftPadY"
+        "semantic": "leftPadY",
+        "invert": true
       },
       {
         "byte": 22,
         "type": "uint16-pressure",
-        "semantic": "leftPadPressure"
+        "semantic": "leftPadPressure",
+        "max": 32767
       },
       {
         "byte": 24,
@@ -214,12 +220,14 @@
       {
         "byte": 26,
         "type": "int16-pad",
-        "semantic": "rightPadY"
+        "semantic": "rightPadY",
+        "invert": true
       },
       {
         "byte": 28,
         "type": "uint16-pressure",
-        "semantic": "rightPadPressure"
+        "semantic": "rightPadPressure",
+        "max": 32767
       },
       {
         "byte": 30,

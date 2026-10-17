@@ -213,7 +213,8 @@
       {
         "byte": 18,
         "type": "int16-pad-or-stick",
-        "semantic": "leftPadY"
+        "semantic": "leftPadY",
+        "invert": true
       },
       {
         "byte": 20,
@@ -223,17 +224,20 @@
       {
         "byte": 22,
         "type": "int16-pad-or-stick",
-        "semantic": "rightPadY"
+        "semantic": "rightPadY",
+        "invert": true
       },
       {
         "byte": 24,
         "type": "uint16-trigger",
-        "semantic": "leftTrigger"
+        "semantic": "leftTrigger",
+        "max": 32767
       },
       {
         "byte": 26,
         "type": "uint16-trigger",
-        "semantic": "rightTrigger"
+        "semantic": "rightTrigger",
+        "max": 32767
       },
       {
         "byte": 28,

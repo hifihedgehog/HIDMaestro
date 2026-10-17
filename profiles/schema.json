@@ -212,14 +212,30 @@
         "object",
         "null"
       ],
-      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09, DualShock 3 Report 0x01): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report. With alwaysArmed set the report goes out from the first frame, for firmware that streams it from power-on."
+      "description": "Data-driven vendor-blob INPUT spec (Sony BT Report 0x31/0x11, Switch 2 Pro Report 0x09, DualShock 3 Report 0x01): { reportId, size, armOn, alwaysArmed, fields[] }. Drives VendorBlobCodec.EncodeInput. armOn lists the host reads or writes that switch the pad into this report. With alwaysArmed set the report goes out from the first frame, for firmware that streams it from power-on.",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extendedField"
+          }
+        }
+      }
     },
     "extendedOutputReport": {
       "type": [
         "object",
         "null"
       ],
-      "description": "Data-driven vendor-blob OUTPUT spec (rumble/lightbar/triggers): { reportId, size, fields[] }. Drives VendorBlobCodec.EncodeOutput/Decode."
+      "description": "Data-driven vendor-blob OUTPUT spec (rumble/lightbar/triggers): { reportId, size, fields[] }. Drives VendorBlobCodec.EncodeOutput/Decode.",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extendedField"
+          }
+        }
+      }
     },
     "companionOnly": {
       "type": [
@@ -243,6 +259,230 @@
     "featureStubs": {
       "type": "object",
       "description": "Issue #56: the answers a usbip persona gives to GET_REPORT(Feature), for a device whose claiming software interrogates it before it will use it. 'match' selects the keying rule: 'reportId' (default) keys on the request's own report id; 'lastMessage' keys on the message id of the SET_REPORT that preceded it, which is what Valve's command channel needs (SET 0x83 then GET 0x83 for attributes, SET 0xAE then GET 0xAE for a string). 'messageByte' says where that message id sits in the payload: 0 when the descriptor declares no report ids at all (the Steam Deck and the 2015 Steam Controller), 1 when a report id precedes it (the 2026 Steam Controller, whose command channel rides feature report 1). 'reports' lists { id (hex), param (the message parameter this answer is for, when one message carries several, as ID_GET_STRING_ATTRIBUTE does; absent answers the message whatever parameter it carried), size (the report's wire length, padded to), data (leading bytes, hex, verbatim from a real device's reply), comment }. A message with no entry stalls, as real hardware does for one it does not implement. Only valid with backend 'usbip'; see sdk/HIDMaestro.Core/Internal/Usbip/FeatureStubTable.cs and the three profiles/valve/*-composite and steam-controller-2 profiles for the authored examples."
+    }
+  },
+  "$defs": {
+    "extendedField": {
+      "type": "object",
+      "description": "One field of a vendor-blob report, the codec's vocabulary (sdk/HIDMaestro.Core/Internal/VendorBlobProgram.cs). Every normalized value is written as min + RoundHalfEven(v' x (max - min)) in double, v' the clamped input or 1 minus it with invert. A key a type ignores is refused when a create compiles the profile.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "uint8",
+            "uint8-axis",
+            "uint8-trigger",
+            "uint8-rolling",
+            "uint8-pressure",
+            "uint8-battery",
+            "uint8-level-map",
+            "int16-le",
+            "int16-axis",
+            "int16-pad",
+            "int16-pad-or-stick",
+            "uint16-le",
+            "uint16-trigger",
+            "uint16-pressure",
+            "uint10-be",
+            "uint32-le",
+            "uint32-rolling",
+            "touchpad-finger",
+            "bitfield",
+            "hat-octant",
+            "button-mask",
+            "rgb24",
+            "bytes-passthrough",
+            "bytes-zero",
+            "crc32-le",
+            "stick12-pair",
+            "packed-uint"
+          ],
+          "description": "The field's wire form. In an output report, OutputDecoded carries a decoded field boxed as its type says: uint8, uint8-rolling, hat-octant and packed-uint box byte, uint8-axis and uint8-trigger box float, button-mask boxes List<string> of the pressed names, rgb24 boxes byte[3] and bytes-passthrough byte[]. No other type is decoded. packed-uint is an output type only. ds3-battery is refused: write uint8-level-map with its table."
+        },
+        "byte": {
+          "type": "integer",
+          "description": "The byte the field is written at, the report ID's byte 0 included."
+        },
+        "bytes": {
+          "type": "string",
+          "description": "A byte range such as \"3-8\", for rgb24, bytes-passthrough, bytes-zero and crc32-le."
+        },
+        "bits": {
+          "type": "string",
+          "description": "A bit range such as \"0-3\" inside the byte, for bitfield, uint8-battery, hat-octant and button-mask."
+        },
+        "semantic": {
+          "type": "string",
+          "description": "The SDK value an input field reads, or the name an output field is reported under."
+        },
+        "buttons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "One name per bit: an HMButton name, \"#n\" for HMButton bit n, LT_DIGITAL, RT_DIGITAL, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, LEFTPAD_TOUCH, RIGHTPAD_TOUCH, or \"_\" for an unused bit. A bitfield names flags."
+        },
+        "center": {
+          "type": "integer",
+          "description": "uint8-axis: the wire value at rest, the range then running center - 127 to center + 127. uint10-be: the wire value at zero."
+        },
+        "min": {
+          "type": "integer",
+          "description": "The wire value at the SDK's 0 for uint8-axis, uint8-trigger, stick12-pair, int16-axis, int16-pad-or-stick's stick and uint16-trigger, and the no-contact value of uint16-pressure. Defaults to 0, or -32767 for the signed axes. Input reports only: an output field refuses it."
+        },
+        "max": {
+          "type": "integer",
+          "description": "The wire value at the SDK's 1, and the contact value of uint16-pressure. Defaults to 255, 4095 or 32767 by the type's width. Required on uint16-trigger and uint16-pressure, where v1 wrote 32767 without it: give 32767 for v1's bytes or 65535 for the full width. Input reports only: an output field refuses it."
+        },
+        "invert": {
+          "type": "boolean",
+          "description": "The wire axis grows the other way from the SDK's, which runs 0 at the left and the top: on every axis and trigger type, the Y half of stick12-pair, and uint10-be. Required on an int16-axis, int16-pad or int16-pad-or-stick field of a Y semantic, which v1 negated without it: give true for v1's bytes. An output field takes it on uint8-axis only."
+        },
+        "scale": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ],
+          "description": "int16-le of a calibrated source (accelGX to gyroDpsZ): counts per g or per degree per second, a number or an exact ratio [13371, 936]. In a packed-uint part, the value's factor."
+        },
+        "negate": {
+          "type": "boolean",
+          "description": "With scale: the calibrated value negated before it is scaled."
+        },
+        "repeat": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "With scale: [count, stride], the field written count times, stride bytes apart."
+        },
+        "dpad": {
+          "type": "string",
+          "enum": [
+            "resolved"
+          ],
+          "description": "button-mask with DPAD_* names, hat-octant: the d-pad from HatDegrees, then HatHundredths, then HatRaw, then Hat. Input reports only."
+        },
+        "levels": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 11,
+          "maxItems": 11,
+          "description": "uint8-level-map: the byte for each battery level from 0 to 10."
+        },
+        "chargingValue": {
+          "type": "integer",
+          "description": "uint8-level-map: the byte while charging."
+        },
+        "fullValue": {
+          "type": "integer",
+          "description": "uint8-battery: the level bits while full. uint8-level-map: the byte while full, ahead of chargingValue."
+        },
+        "parts": {
+          "type": "array",
+          "description": "packed-uint: the parts. Each part's value is assembled from its pieces, lowest first, in each frame, and the largest frame's value, plus offset, maps to 0 outside range and otherwise to itself times scale, rounded down or to nearest and clamped to 0..255. The field is the largest part's value, boxed as byte.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pieces": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "at": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "description": "Bit groups: a bit offset from the report's first byte, its ID included, and a width. At most 32 bits in all."
+              },
+              "frames": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "[count, stride]: the pieces read in count frames, stride bytes apart."
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "range": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "scale": {
+                "oneOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                ]
+              },
+              "round": {
+                "type": "string",
+                "enum": [
+                  "down",
+                  "nearest"
+                ]
+              }
+            }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "description": "crc32-le: the prefix bytes and the report bytes from and to the CRC covers."
+        },
+        "initial": {
+          "type": "integer"
+        },
+        "stride": {
+          "type": "integer"
+        },
+        "neutralValue": {
+          "type": "integer"
+        },
+        "divisor": {
+          "type": "integer"
+        },
+        "resolution": {
+          "type": "integer"
+        },
+        "sourceResolution": {
+          "type": "integer"
+        },
+        "comment": {
+          "type": "string"
+        }
+      }
     }
   }
 }

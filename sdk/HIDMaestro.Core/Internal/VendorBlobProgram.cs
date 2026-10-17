@@ -46,9 +46,13 @@ internal sealed class VendorBlobProgram
         // sensor timestamp, which counts in 16/3 µs and wraps at 16 bits.
         U16,
         // The DualShock 3 (PadForge discussion 476): a pressure-sensitive
-        // button's 0..255 byte, a 10-bit motion sensor in a big-endian
-        // 16-bit field, and its battery status byte.
-        U8Pressure, U10BE, Ds3Battery,
+        // button's 0..255 byte and a 10-bit motion sensor in a big-endian
+        // 16-bit field.
+        U8Pressure, U10BE,
+        // v2.0.0: a byte chosen from a table by the battery level, the
+        // charging flag and the full flag, and an output field decoded from
+        // bit groups.
+        U8LevelMap, PackedUint,
     }
 
     /// <summary>Input-direction value source, numeric. Replaces the
@@ -78,6 +82,10 @@ internal sealed class VendorBlobProgram
         PressureA, PressureB, PressureX, PressureY,
         PressureLeftBumper, PressureRightBumper,
         PressureDpadUp, PressureDpadRight, PressureDpadDown, PressureDpadLeft,
+        // v2.0.0: the calibrated motion channel, g and degrees per second
+        // in SDL's sensor frame (HMGamepadState.AccelGX to GyroDpsZ), which
+        // an int16-le field with a scale writes as counts.
+        AccelGX, AccelGY, AccelGZ, GyroDpsX, GyroDpsY, GyroDpsZ,
     }
 
     // Bitfield flag sources (input direction), numeric. Index-aligned with
@@ -105,6 +113,39 @@ internal sealed class VendorBlobProgram
     public const ulong ButtonPad0Touch = 1UL << 38;
     public const ulong ButtonPad1Touch = 1UL << 39;
 
+    /// <summary>One part of a packed-uint field, compiled: its bit groups,
+    /// its frames, and the map from its value to 0..255.</summary>
+    public readonly struct PackedPart
+    {
+        public readonly int[] PieceAt;      // bit offset of each group, lowest first
+        public readonly int[] PieceCount;   // width of each group
+        public readonly int Frames;         // frames read, >= 1
+        public readonly int StrideBits;     // between frames
+        public readonly long Offset;
+        public readonly long Lo, Hi;        // inclusive range, after the offset
+        public readonly double Numerator, Denominator;
+        public readonly bool Down;          // truncate, else nearest ties to even
+
+        public PackedPart(int[] pieceAt, int[] pieceCount, int frames, int strideBits, long offset,
+                          long lo, long hi, double numerator, double denominator, bool down)
+        {
+            PieceAt = pieceAt; PieceCount = pieceCount; Frames = frames; StrideBits = strideBits;
+            Offset = offset; Lo = lo; Hi = hi; Numerator = numerator; Denominator = denominator; Down = down;
+        }
+
+        /// <summary>The bits the part reads, from its first to its last, in
+        /// a report: the report must reach the last.</summary>
+        public int LastBit
+        {
+            get
+            {
+                int last = 0;
+                for (int i = 0; i < PieceAt.Length; i++) last = Math.Max(last, PieceAt[i] + PieceCount[i] - 1);
+                return last + (Frames - 1) * StrideBits;
+            }
+        }
+    }
+
     public readonly struct CompiledField
     {
         public readonly FieldSpec Src;      // original spec (decode strings, scope)
@@ -121,14 +162,37 @@ internal sealed class VendorBlobProgram
         public readonly byte Initial;
         public readonly int Stride;
         public readonly int CrcDst;         // resolved crc dest start, -1 = end-4
-        public readonly string RollKey;     // rolling-counter dict key, precomputed
+        public readonly string RollKey;     // rolling-counter key, for the output direction
         public readonly ulong[]? ButtonBits;// per position: HMButton mask | sentinel, 0 = skip
         public readonly byte[]? FlagKinds;  // bitfield: Flag* per position
         public readonly uint Divisor;       // uint16-le sensor timestamp, >= 1
-        public readonly int FullValue;      // uint8-battery while full, -1 when absent
+        public readonly int FullValue;      // uint8-battery and uint8-level-map while full, -1 when absent
         public readonly int Resolution;     // uint10-be wire counts per unit, >= 1
         public readonly int SourceResolution; // uint10-be source counts per unit, >= 1
-        public readonly bool Invert;        // uint10-be wire axis opposite the SDK's
+        public readonly bool Invert;        // wire axis opposite the SDK's
+
+        // v2.0.0: the vocabulary's parameters, resolved to their defaults.
+        /// <summary>Wire value at the SDK's 0 and at 1, or the released and
+        /// pressed values of a pad pressure.</summary>
+        public int Min { get; init; }
+        public int Max { get; init; }
+        /// <summary>A calibrated int16-le field's counts per unit, as a
+        /// ratio. Numerator 0 for any other field.</summary>
+        public double ScaleNumerator { get; init; }
+        public double ScaleDenominator { get; init; }
+        public bool Negate { get; init; }
+        /// <summary>Times the field is written, and bytes between.</summary>
+        public int RepeatCount { get; init; }
+        public int RepeatStride { get; init; }
+        /// <summary>The d-pad from HatDegrees, HatHundredths, HatRaw or Hat,
+        /// the first one set.</summary>
+        public bool DpadResolved { get; init; }
+        public byte[]? Levels { get; init; }
+        public int ChargingValue { get; init; }
+        /// <summary>The rolling field's counter, an index into the encoder
+        /// state's counters, -1 for any other field.</summary>
+        public int CounterSlot { get; init; }
+        public PackedPart[]? Parts { get; init; }
 
         public CompiledField(FieldSpec src, FieldOp op, SrcOp source, int b,
                              int rangeLo, int rangeHi, int bitLo, int bitHi, bool hasBits,
@@ -143,6 +207,9 @@ internal sealed class VendorBlobProgram
             CrcDst = crcDst; RollKey = rollKey; ButtonBits = buttonBits; FlagKinds = flagKinds;
             Divisor = divisor; FullValue = fullValue;
             Resolution = resolution; SourceResolution = sourceResolution; Invert = invert;
+            Min = 0; Max = 0; ScaleNumerator = 0; ScaleDenominator = 1; Negate = false;
+            RepeatCount = 1; RepeatStride = 0; DpadResolved = false; Levels = null;
+            ChargingValue = -1; CounterSlot = -1; Parts = null;
         }
     }
 
@@ -152,10 +219,21 @@ internal sealed class VendorBlobProgram
     /// <see cref="VendorBlobCodec.Decode"/> can pre-size its dictionary.</summary>
     public readonly int DecodeFieldCount;
 
-    private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount)
+    /// <summary>The rolling counters an encode advances: one per distinct
+    /// semantic and width, as the string-keyed counters were. Each starts
+    /// at the initial value of the first field that uses it.</summary>
+    public readonly uint[] CounterInitials;
+
+    /// <summary>True when a field reads the resolved d-pad, so an encode
+    /// resolves it once.</summary>
+    public readonly bool ResolvesDpad;
+
+    private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount, uint[] counterInitials, bool resolvesDpad)
     {
         Fields = fields;
         DecodeFieldCount = decodeFieldCount;
+        CounterInitials = counterInitials;
+        ResolvesDpad = resolvesDpad;
     }
 
     /// <summary>Get (or build) the compiled program for a spec. The spec is
@@ -173,9 +251,18 @@ internal sealed class VendorBlobProgram
     {
         var fields = new CompiledField[spec.Fields.Count];
         int decodeCount = 0;
+        var counterSlots = new Dictionary<(string Key, bool Wide), int>();
+        var counterInitials = new List<uint>();
+        bool resolvesDpad = false;
         for (int i = 0; i < spec.Fields.Count; i++)
         {
             var f = spec.Fields[i];
+            // v2.0.0 drops the one battery type written for one device. Its
+            // table is profile data now.
+            if (f.Type == "ds3-battery")
+                throw new InvalidOperationException(
+                    $"fields[{i}].type 'ds3-battery' is not a field type. Write it as type 'uint8-level-map' with " +
+                    "levels [1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 5], chargingValue 238 and fullValue 239.");
             var op = f.Type switch
             {
                 "uint8-axis"        => FieldOp.U8Axis,
@@ -191,7 +278,8 @@ internal sealed class VendorBlobProgram
                 "uint16-le"         => FieldOp.U16,
                 "uint8-pressure"    => FieldOp.U8Pressure,
                 "uint10-be"         => FieldOp.U10BE,
-                "ds3-battery"       => FieldOp.Ds3Battery,
+                "uint8-level-map"   => FieldOp.U8LevelMap,
+                "packed-uint"       => FieldOp.PackedUint,
                 "uint32-le"         => FieldOp.U32,
                 "uint32-rolling"    => FieldOp.U32Rolling,
                 "touchpad-finger"   => FieldOp.TouchpadFinger,
@@ -247,6 +335,12 @@ internal sealed class VendorBlobProgram
                 "pressureDpadRight"   => SrcOp.PressureDpadRight,
                 "pressureDpadDown"    => SrcOp.PressureDpadDown,
                 "pressureDpadLeft"    => SrcOp.PressureDpadLeft,
+                "accelGX"             => SrcOp.AccelGX,
+                "accelGY"             => SrcOp.AccelGY,
+                "accelGZ"             => SrcOp.AccelGZ,
+                "gyroDpsX"            => SrcOp.GyroDpsX,
+                "gyroDpsY"            => SrcOp.GyroDpsY,
+                "gyroDpsZ"            => SrcOp.GyroDpsZ,
                 _                 => SrcOp.None,
             };
             // touchpad-finger defaults to finger0 for ANY other semantic,
@@ -279,10 +373,24 @@ internal sealed class VendorBlobProgram
             int crcDst = hasBytes ? rangeLo : (f.Byte ?? -1);
 
             string rollKey = f.Semantic ?? "_b" + (b >= 0 ? b : 0);
-            // EncodeOutput's rolling key differs when semantic is null
-            // ("_o{b}") but no shipped spec has a semantic-less rolling
-            // output field; preserve the input-side key and let the output
-            // path derive its own when needed (see VendorBlobCodec).
+
+            // One counter per distinct key and width, as the encoder state's
+            // two string-keyed dictionaries kept them until v2.0.0: two
+            // rolling fields that share a semantic share a counter.
+            int counterSlot = -1;
+            if (op is FieldOp.U8Rolling or FieldOp.U32Rolling)
+            {
+                var key = (rollKey, op == FieldOp.U32Rolling);
+                if (!counterSlots.TryGetValue(key, out counterSlot))
+                {
+                    counterSlot = counterInitials.Count;
+                    counterSlots[key] = counterSlot;
+                    // Both widths start from the field's initial byte, as
+                    // the string-keyed counters started from the compiled
+                    // field's Initial.
+                    counterInitials.Add((byte)(f.Initial ?? 0));
+                }
+            }
 
             ulong[]? buttonBits = null;
             byte[]? flagKinds = null;
@@ -303,6 +411,19 @@ internal sealed class VendorBlobProgram
                         if (name == "DPAD_RIGHT") { buttonBits[j] = ButtonDpadRight; continue; }
                         if (name == "LEFTPAD_TOUCH")  { buttonBits[j] = ButtonPad0Touch; continue; }
                         if (name == "RIGHTPAD_TOUCH") { buttonBits[j] = ButtonPad1Touch; continue; }
+                        // v2.0.0: "#n" is HMButton bit n, for a profile whose
+                        // buttons are layout positions rather than names.
+                        if (name.Length > 1 && name[0] == '#')
+                        {
+                            if (int.TryParse(name.AsSpan(1), System.Globalization.NumberStyles.None,
+                                             System.Globalization.CultureInfo.InvariantCulture, out int bit) && bit < 32)
+                            {
+                                buttonBits[j] = 1UL << bit;
+                                continue;
+                            }
+                            throw new InvalidOperationException(
+                                $"Button '{name}' at index {j} of the button mask at byte {f.Byte} is not '#' and an HMButton bit from 0 to 31.");
+                        }
                         if (Enum.TryParse<HMButton>(name, true, out var btn))
                         {
                             buttonBits[j] = (uint)btn;
@@ -320,7 +441,7 @@ internal sealed class VendorBlobProgram
                             $"{f.Byte} resolves to no HMButton and is not one of the " +
                             "recognized special names (LT_DIGITAL, RT_DIGITAL, DPAD_UP, " +
                             "DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, LEFTPAD_TOUCH, " +
-                            "RIGHTPAD_TOUCH). Use \"_\" for a slot that is " +
+                            "RIGHTPAD_TOUCH) or '#' and a bit number. Use \"_\" for a slot that is " +
                             "deliberately unused.");
                     }
                 }
@@ -352,7 +473,7 @@ internal sealed class VendorBlobProgram
                 throw new InvalidOperationException(
                     $"extendedReport field {i} (type '{f.Type}') declares divisor {divisor}, below the minimum of 1");
             int fullValue = f.FullValue ?? -1;
-            if (f.FullValue is int fv && (fv < 0 || fv >= (1 << (bitHi - bitLo + 1))))
+            if (op == FieldOp.Battery && f.FullValue is int fv && (fv < 0 || fv >= (1 << (bitHi - bitLo + 1))))
                 throw new InvalidOperationException(
                     $"extendedReport field {i} (type '{f.Type}') declares fullValue {fv}, " +
                     $"which bits {bitLo}-{bitHi} cannot hold");
@@ -368,13 +489,30 @@ internal sealed class VendorBlobProgram
                 throw new InvalidOperationException(
                     $"extendedReport field {i} (type '{f.Type}') names no pressure-sensitive button ('{f.Semantic}')");
 
+            var (defMin, defMax) = DefaultRange(op);
+            bool dpad = f.Dpad == "resolved";
+            resolvesDpad |= dpad;
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
                 f.Center ?? (op == FieldOp.U10BE ? 512 : 128), f.NeutralValue ?? 8,
                 (byte)(f.Initial ?? 0), f.Stride ?? 1,
                 crcDst, rollKey, buttonBits, flagKinds,
                 (uint)divisor, fullValue,
-                resolution, sourceResolution, f.Invert == true);
+                resolution, sourceResolution, f.Invert == true)
+            {
+                Min = f.Min ?? defMin,
+                Max = f.Max ?? defMax,
+                ScaleNumerator = f.Scale?.Numerator ?? 0,
+                ScaleDenominator = f.Scale?.Denominator ?? 1,
+                Negate = f.Negate == true,
+                RepeatCount = f.Repeat is { Count: 2 } r ? r[0] : 1,
+                RepeatStride = f.Repeat is { Count: 2 } s ? s[1] : 0,
+                DpadResolved = dpad,
+                Levels = f.Levels?.ConvertAll(x => (byte)x).ToArray(),
+                ChargingValue = f.ChargingValue ?? -1,
+                CounterSlot = counterSlot,
+                Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
+            };
 
             // Mirror of Decode's per-type "produces a dict entry" predicate,
             // used only for dictionary pre-sizing (over-count is harmless).
@@ -384,11 +522,49 @@ internal sealed class VendorBlobProgram
                     or FieldOp.U8Trigger or FieldOp.HatOctant => f.Byte != null && f.Semantic != null,
                 FieldOp.ButtonMask => f.Byte != null && f.Buttons != null,
                 FieldOp.Rgb24 or FieldOp.BytesPassthrough => hasBytes && f.Semantic != null,
+                FieldOp.PackedUint => f.Semantic != null,
                 _ => false,
             };
             if (producesEntry) decodeCount++;
         }
-        return new VendorBlobProgram(fields, decodeCount);
+        return new VendorBlobProgram(fields, decodeCount, counterInitials.ToArray(), resolvesDpad);
+    }
+
+    /// <summary>The wire values at the SDK's 0 and 1 a type takes when its
+    /// field gives no <c>min</c> and <c>max</c>: the full range of its
+    /// width, symmetric for the signed axes.</summary>
+    private static (int Min, int Max) DefaultRange(FieldOp op) => op switch
+    {
+        FieldOp.U8Axis or FieldOp.U8Trigger => (0, 255),
+        FieldOp.Stick12Pair => (0, 4095),
+        FieldOp.I16Axis or FieldOp.I16PadOrStick => (-32767, 32767),
+        FieldOp.U16Trigger or FieldOp.U16Pressure => (0, 65535),
+        _ => (0, 0),
+    };
+
+    private static PackedPart[] CompileParts(FieldSpec f, int i)
+    {
+        var specs = f.Parts ?? throw new InvalidOperationException($"fields[{i}] ('packed-uint') needs parts.");
+        var parts = new PackedPart[specs.Count];
+        for (int p = 0; p < specs.Count; p++)
+        {
+            var s = specs[p] ?? throw new InvalidOperationException($"fields[{i}].parts[{p}] is null.");
+            var at = new int[s.Pieces?.Count ?? 0];
+            var count = new int[at.Length];
+            for (int k = 0; k < at.Length; k++)
+            {
+                var piece = s.Pieces![k] ?? throw new InvalidOperationException($"fields[{i}].parts[{p}].pieces[{k}] is null.");
+                at[k] = piece.At;
+                count[k] = piece.Count;
+            }
+            parts[p] = new PackedPart(at, count,
+                s.Frames is { Count: 2 } fr ? fr[0] : 1, s.Frames is { Count: 2 } fs ? fs[1] * 8 : 0,
+                s.Offset ?? 0,
+                s.Range is { Count: 2 } rl ? rl[0] : long.MinValue, s.Range is { Count: 2 } rh ? rh[1] : long.MaxValue,
+                s.Scale?.Numerator ?? 1, s.Scale?.Denominator ?? 1,
+                s.Round == "down");
+        }
+        return parts;
     }
 
     /// <summary>v1.13.0: refuse a field the codec would skip, cut short or
@@ -437,7 +613,9 @@ internal sealed class VendorBlobProgram
                     throw new InvalidOperationException(
                         $"{where}.fields[{i}] ('{src.Type}').bits \"{src.Bits}\" reaches bit {f.BitHi}. This type holds bits 0 to {maxBit}.");
             }
+            CheckVocabulary(in f, i, size, where, output);
 
+            if (f.Op == FieldOp.PackedUint) continue;
             var (lo, hi) = Extent(in f, size);
             if (lo < 0)
                 throw new InvalidOperationException(
@@ -488,21 +666,168 @@ internal sealed class VendorBlobProgram
             // encoder would turn into its fallback. A missing semantic, or one
             // that names another type's value, keeps the type's defined
             // fallback: the axis center, a zero, the left stick, finger 0.
-            if (!output && !string.IsNullOrEmpty(src.Semantic) && f.Source == SrcOp.None && Sources(f.Op) is string[] allowed)
+            if (!output && !string.IsNullOrEmpty(src.Semantic) && f.Source == SrcOp.None && Sources(f.Op, f.ScaleNumerator != 0) is string[] allowed)
                 throw new InvalidOperationException(
                     $"{where}.fields[{i}] ('{src.Type}').semantic '{src.Semantic}' names no value the SDK has. " +
                     $"This type reads {string.Join(", ", allowed)}.");
         }
     }
 
+    /// <summary>v2.0.0: the vocabulary's parameters, each refused on a type
+    /// that ignores it and outside the values it takes.</summary>
+    private static void CheckVocabulary(in CompiledField f, int i, int size, string where, bool output)
+    {
+        var src = f.Src;
+        string at = $"{where}.fields[{i}]";
+
+        // An output field decodes its byte over the type's full range, and
+        // only uint8-axis decodes inverted (VendorBlobCodec.Decode), so the
+        // parameters it would ignore are refused.
+        if (output)
+        {
+            if (src.Min != null || src.Max != null)
+                throw new InvalidOperationException($"{at} ('{src.Type}').min and .max: an output field decodes its type's full range and ignores them.");
+            if (src.Dpad != null)
+                throw new InvalidOperationException($"{at} ('{src.Type}').dpad: an output field reads no d-pad.");
+            if (src.Invert == true && f.Op != FieldOp.U8Axis)
+                throw new InvalidOperationException($"{at} ('{src.Type}').invert: of the output types only uint8-axis decodes inverted.");
+        }
+
+        // What v1 did without a key, a profile now states, so no profile
+        // written for v1 changes its bytes unseen: a uint16-trigger or
+        // uint16-pressure without max went to 32767, and every int16 Y,
+        // stick or pad, was negated.
+        if (!output && (f.Op is FieldOp.U16Trigger or FieldOp.U16Pressure) && src.Max == null)
+            throw new InvalidOperationException(
+                $"{at} ('{src.Type}').max is required. v1 wrote a full pull or press as 32767: add \"max\": 32767 for that, or \"max\": 65535 for the full width.");
+        bool ySource = f.Source is SrcOp.LeftStickY or SrcOp.RightStickY or SrcOp.LeftPadY or SrcOp.RightPadY;
+        if (!output && (f.Op is FieldOp.I16Axis or FieldOp.I16Pad or FieldOp.I16PadOrStick) && ySource && src.Invert == null)
+            throw new InvalidOperationException(
+                $"{at} ('{src.Type}', {src.Semantic}).invert is required. v1 negated every int16 Y: add \"invert\": true for that, or \"invert\": false for a wire that grows downward.");
+
+        bool linear = f.Op is FieldOp.U8Axis or FieldOp.U8Trigger or FieldOp.Stick12Pair or FieldOp.I16Axis
+            or FieldOp.I16PadOrStick or FieldOp.U16Trigger or FieldOp.U16Pressure;
+        if ((src.Min != null || src.Max != null) && !linear)
+            throw new InvalidOperationException($"{at} ('{src.Type}').min and .max: this type carries no normalized value and ignores them.");
+        if (linear)
+        {
+            if (f.Min == f.Max)
+                throw new InvalidOperationException($"{at}.min {f.Min} equals max. A field needs two ends.");
+            if (f.Op == FieldOp.U8Axis && f.Center != 128 && (src.Min != null || src.Max != null))
+                throw new InvalidOperationException($"{at}.center {f.Center} sets the range center - 127 to center + 127. Give center or min and max, not both.");
+            var (lo, hi) = f.Op switch
+            {
+                FieldOp.U8Axis or FieldOp.U8Trigger => (0, 255),
+                FieldOp.Stick12Pair => (0, 4095),
+                FieldOp.U16Trigger or FieldOp.U16Pressure => (0, 65535),
+                _ => (-32768, 32767),
+            };
+            if (f.Min < lo || f.Min > hi || f.Max < lo || f.Max > hi)
+                throw new InvalidOperationException($"{at}.min {f.Min} and .max {f.Max}: this type's wire holds {lo} to {hi}.");
+        }
+        bool inverts = f.Op is FieldOp.U8Axis or FieldOp.U8Trigger or FieldOp.Stick12Pair or FieldOp.I16Axis
+            or FieldOp.I16Pad or FieldOp.I16PadOrStick or FieldOp.U16Trigger or FieldOp.U10BE;
+        if (src.Invert == true && !inverts)
+            throw new InvalidOperationException($"{at} ('{src.Type}').invert: this type carries no axis and ignores it.");
+
+        bool calibrated = f.Source is >= SrcOp.AccelGX and <= SrcOp.GyroDpsZ;
+        if (src.Scale != null)
+        {
+            if (f.Op != FieldOp.I16 || !calibrated)
+                throw new InvalidOperationException($"{at}.scale: only an int16-le field of a calibrated source, accelGX to gyroDpsZ, takes a scale.");
+            if (!(f.ScaleNumerator != 0) || !double.IsFinite(f.ScaleNumerator) || !(f.ScaleDenominator > 0) || !double.IsFinite(f.ScaleDenominator))
+                throw new InvalidOperationException($"{at}.scale: the counts per unit are a finite nonzero number, over a positive denominator.");
+        }
+        else if (calibrated && !output)
+            throw new InvalidOperationException($"{at}.semantic '{src.Semantic}' is a calibrated value: give scale, its counts per unit.");
+        if ((src.Negate != null || src.Repeat != null) && src.Scale == null)
+            throw new InvalidOperationException($"{at}.negate and .repeat go with scale.");
+        if (src.Repeat != null)
+        {
+            if (src.Repeat.Count != 2 || f.RepeatCount < 1 || f.RepeatStride < 2)
+                throw new InvalidOperationException($"{at}.repeat is [count, stride]: one or more frames, at least 2 bytes apart.");
+            int last = f.B + (f.RepeatCount - 1) * f.RepeatStride + 1;
+            if (f.B >= 0 && last >= size)
+                throw new InvalidOperationException($"{at}.repeat's last frame ends at byte {last}, past the {size}-byte report.");
+        }
+
+        if (src.Dpad != null)
+        {
+            if (src.Dpad != "resolved")
+                throw new InvalidOperationException($"{at}.dpad \"{src.Dpad}\": the one value is \"resolved\".");
+            bool dpadBits = f.ButtonBits != null && Array.Exists(f.ButtonBits,
+                x => x is ButtonDpadUp or ButtonDpadDown or ButtonDpadLeft or ButtonDpadRight);
+            if (!(f.Op == FieldOp.HatOctant || (f.Op == FieldOp.ButtonMask && dpadBits)))
+                throw new InvalidOperationException($"{at}.dpad: only a hat-octant or a button-mask with DPAD_* names reads the d-pad.");
+        }
+
+        if (f.Op == FieldOp.U8LevelMap)
+        {
+            if (src.Levels == null || src.Levels.Count != 11)
+                throw new InvalidOperationException($"{at}.levels: eleven bytes, one for each battery level from 0 to 10.");
+            for (int k = 0; k < 11; k++)
+                if (src.Levels[k] is < 0 or > 255)
+                    throw new InvalidOperationException($"{at}.levels[{k}] {src.Levels[k]} is not a byte.");
+            if (src.ChargingValue is < 0 or > 255) throw new InvalidOperationException($"{at}.chargingValue {src.ChargingValue} is not a byte.");
+            if (src.FullValue is < 0 or > 255) throw new InvalidOperationException($"{at}.fullValue {src.FullValue} is not a byte.");
+        }
+        else
+        {
+            if (src.Levels != null || src.ChargingValue != null)
+                throw new InvalidOperationException($"{at} ('{src.Type}').levels and .chargingValue go with uint8-level-map.");
+            if (src.FullValue != null && f.Op != FieldOp.Battery)
+                throw new InvalidOperationException($"{at} ('{src.Type}').fullValue goes with uint8-battery and uint8-level-map.");
+        }
+
+        if (f.Op == FieldOp.PackedUint)
+        {
+            if (!output)
+                throw new InvalidOperationException($"{at}: packed-uint decodes an output report. An input report cannot carry one.");
+            if (string.IsNullOrEmpty(src.Semantic))
+                throw new InvalidOperationException($"{at} ('packed-uint') needs a semantic, the name its value is reported under.");
+            if (f.Parts!.Length == 0)
+                throw new InvalidOperationException($"{at}.parts: at least one part.");
+            for (int p = 0; p < f.Parts.Length; p++)
+            {
+                ref readonly var part = ref f.Parts[p];
+                var partSpec = src.Parts![p];
+                int bits = 0;
+                if (part.PieceAt.Length == 0)
+                    throw new InvalidOperationException($"{at}.parts[{p}].pieces: at least one bit group.");
+                for (int k = 0; k < part.PieceAt.Length; k++)
+                {
+                    if (part.PieceAt[k] < 0 || part.PieceCount[k] < 1)
+                        throw new InvalidOperationException($"{at}.parts[{p}].pieces[{k}]: a bit offset of 0 or more and a count of 1 or more.");
+                    bits += part.PieceCount[k];
+                }
+                if (bits > 32)
+                    throw new InvalidOperationException($"{at}.parts[{p}].pieces hold {bits} bits. A part reads at most 32.");
+                if (partSpec.Frames != null && (partSpec.Frames.Count != 2 || part.Frames < 1 || part.StrideBits < 8))
+                    throw new InvalidOperationException($"{at}.parts[{p}].frames is [count, stride]: one or more frames, a stride of 1 byte or more.");
+                if (partSpec.Range != null && (partSpec.Range.Count != 2 || part.Lo > part.Hi))
+                    throw new InvalidOperationException($"{at}.parts[{p}].range is [low, high], low at most high.");
+                if (!(part.Numerator != 0) || !double.IsFinite(part.Numerator) || !(part.Denominator > 0) || !double.IsFinite(part.Denominator))
+                    throw new InvalidOperationException($"{at}.parts[{p}].scale: a finite nonzero number, over a positive denominator.");
+                if (partSpec.Round is not (null or "down" or "nearest"))
+                    throw new InvalidOperationException($"{at}.parts[{p}].round \"{partSpec.Round}\": \"down\" or \"nearest\".");
+                if (part.LastBit >= size * 8)
+                    throw new InvalidOperationException($"{at}.parts[{p}] reads bit {part.LastBit}, past the {size}-byte report.");
+            }
+        }
+        else if (src.Parts != null)
+        {
+            throw new InvalidOperationException($"{at} ('{src.Type}').parts go with packed-uint.");
+        }
+    }
+
     // The type strings Compile reads, for the message that refuses another.
     private static readonly string[] s_typeNames =
     {
-        "uint8", "uint8-axis", "uint8-trigger", "uint8-rolling", "uint8-pressure", "uint8-battery",
+        "uint8", "uint8-axis", "uint8-trigger", "uint8-rolling", "uint8-pressure", "uint8-battery", "uint8-level-map",
         "int16-le", "int16-axis", "int16-pad", "int16-pad-or-stick", "uint16-le", "uint16-trigger",
-        "uint16-pressure", "uint10-be", "ds3-battery", "uint32-le", "uint32-rolling", "touchpad-finger",
+        "uint16-pressure", "uint10-be", "uint32-le", "uint32-rolling", "touchpad-finger",
         "bitfield", "hat-octant", "button-mask", "rgb24", "bytes-passthrough", "bytes-zero", "crc32-le",
-        "stick12-pair",
+        "stick12-pair", "packed-uint",
     };
 
     private static bool UsesRange(FieldOp op)
@@ -510,7 +835,8 @@ internal sealed class VendorBlobProgram
 
     /// <summary>The bytes a field writes in a report of
     /// <paramref name="size"/> bytes, as <see cref="VendorBlobCodec"/>
-    /// writes them, or (-1, -1) when the field declares no place.</summary>
+    /// writes them, or (-1, -1) when the field declares no place. A
+    /// packed-uint field writes none.</summary>
     internal static (int Lo, int Hi) Extent(in CompiledField f, int size)
     {
         switch (f.Op)
@@ -526,6 +852,8 @@ internal sealed class VendorBlobProgram
                 int dst = f.CrcDst >= 0 ? f.CrcDst : size - 4;
                 return dst < 0 ? (-1, -1) : (dst, dst + 3);
             }
+            case FieldOp.PackedUint:
+                return (-1, -1);
         }
         if (f.B < 0) return (-1, -1);
         int width = f.Op switch
@@ -537,6 +865,8 @@ internal sealed class VendorBlobProgram
             FieldOp.ButtonMask => f.BitHi / 8 + 1,
             _ => 1,
         };
+        // A repeated motion field's extent runs to its last frame.
+        if (f.RepeatCount > 1) width += (f.RepeatCount - 1) * f.RepeatStride;
         return (f.B, f.B + width - 1);
     }
 
@@ -545,11 +875,12 @@ internal sealed class VendorBlobProgram
     /// null for a type whose semantic is only a name. Touchpad-finger is not
     /// listed: Compile maps every semantic but touchpadFinger1 to finger
     /// 0.</summary>
-    private static string[]? Sources(FieldOp op) => op switch
+    private static string[]? Sources(FieldOp op, bool scaled) => op switch
     {
         FieldOp.U8Axis or FieldOp.I16Axis => s_stickAxes,
         FieldOp.U8Trigger or FieldOp.U16Trigger => s_triggers,
-        FieldOp.I16 or FieldOp.U10BE => s_motion,
+        FieldOp.I16 => scaled ? s_calibrated : s_motion,
+        FieldOp.U10BE => s_motion,
         FieldOp.U16 or FieldOp.U32 => s_timestamp,
         FieldOp.Stick12Pair => s_sticks,
         FieldOp.I16Pad or FieldOp.I16PadOrStick => s_pads,
@@ -560,6 +891,7 @@ internal sealed class VendorBlobProgram
     private static readonly string[] s_stickAxes = { "leftStickX", "leftStickY", "rightStickX", "rightStickY" };
     private static readonly string[] s_triggers = { "leftTrigger", "rightTrigger" };
     private static readonly string[] s_motion = { "gyroPitch", "gyroYaw", "gyroRoll", "accelX", "accelY", "accelZ" };
+    private static readonly string[] s_calibrated = { "accelGX", "accelGY", "accelGZ", "gyroDpsX", "gyroDpsY", "gyroDpsZ" };
     private static readonly string[] s_timestamp = { "sensorTimestamp" };
     private static readonly string[] s_sticks = { "leftStick", "rightStick" };
     private static readonly string[] s_pads = { "leftPadX", "leftPadY", "rightPadX", "rightPadY" };

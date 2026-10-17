@@ -204,10 +204,10 @@ internal static class RoundTrip
             if (k == "codec stick12-pair")
                 return Codec(new FieldSpec { Byte = 1, Type = "stick12-pair", Semantic = "leftStick" }, (b, _) => b[1] | ((b[2] & 0x0F) << 8), stick: true);
             if (k.StartsWith("codec int16-axis", StringComparison.Ordinal))
-                return Codec(new FieldSpec { Byte = 1, Type = "int16-axis", Semantic = k.Contains("Y") ? "leftStickY" : "leftStickX" },
+                return Codec(Spec("int16-axis", k.Contains("Y") ? "leftStickY" : "leftStickX", invert: k.Contains("Y")),
                     (b, _) => (short)(b[1] | (b[2] << 8)), stick: true, y: k.Contains("Y"));
             if (k == "codec uint16-trigger")
-                return Codec(new FieldSpec { Byte = 1, Type = "uint16-trigger", Semantic = "leftTrigger" }, (b, _) => b[1] | (b[2] << 8), stick: false);
+                return Codec(Spec("uint16-trigger", "leftTrigger", max: 32767), (b, _) => b[1] | (b[2] << 8), stick: false);
             if (k == "xusb slice stick X") return v => Companion.StickX(Gip(v, 0));
             if (k == "xusb slice stick Y") return v => Companion.StickY(Gip(v, 1));
             if (k == "xusb slice trigger") return v => Companion.Trigger(Gip(v, 2));
@@ -275,6 +275,18 @@ internal static class RoundTrip
                 else if (value >= short.MinValue && value <= short.MaxValue) { d.Add((byte)(tag | 2)); d.Add((byte)value); d.Add((byte)(value >> 8)); }
                 else { d.Add((byte)(tag | 3)); d.AddRange(BitConverter.GetBytes(value)); }
             }
+        }
+
+        /// <summary>A field at byte 1. The Y axis's negation and the 16-bit
+        /// trigger's 32767 are profile data from v2.0.0 (invert, max), set
+        /// by name so the probe also builds on a tree from before them,
+        /// where the codec held both as code.</summary>
+        static FieldSpec Spec(string type, string semantic, bool invert = false, int? max = null)
+        {
+            var f = new FieldSpec { Byte = 1, Type = type, Semantic = semantic };
+            if (invert) typeof(FieldSpec).GetProperty("Invert")!.SetValue(f, true);
+            if (max != null) typeof(FieldSpec).GetProperty("Max")?.SetValue(f, max);
+            return f;
         }
 
         /// <summary>The codec on a report with one field at byte 1.</summary>

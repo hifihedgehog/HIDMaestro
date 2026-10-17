@@ -10,7 +10,7 @@
 //     type: uint8-rolling stride, uint8-axis, uint8-trigger, hat-octant,
 //     button-mask, int16-le IMU, uint32-le and uint16-le timestamps,
 //     touchpad-finger x2, uint8-battery, bitfield, crc32-le, constants,
-//     and the DualShock 3 uint8-pressure, uint10-be and ds3-battery).
+//     and the DualShock 3 uint8-pressure, uint10-be and uint8-level-map).
 //   - EncodeOutput: 3 successive frames per extendedOutputReport profile
 //     with every semantic populated deterministically (uint8, rgb24,
 //     bytes-passthrough, uint8-rolling auto-advance, crc32-le).
@@ -212,6 +212,7 @@ internal static class Program
             Console.WriteLine($"  [FAIL] artifact count {lines.Count} != golden count {Goldens.Length}");
         }
         Console.WriteLine($"\n=== {lines.Count - failures}/{lines.Count} golden checks passed ===");
+        failures += Vocabulary.Run();
         return failures == 0 ? 0 : 1;
     }
 

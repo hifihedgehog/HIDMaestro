@@ -31,14 +31,27 @@ internal static class VendorBlobCodec
     /// emitted reports increment monotonically as a real device does.</summary>
     public sealed class EncoderState
     {
-        // Keyed by field semantic name so multiple rolling fields in one
-        // report (Sony: framingTag at byte 1, reportCounter at byte 8)
-        // each advance independently.
+        // EncodeOutput's rolling counters, keyed by field semantic name so
+        // multiple rolling fields in one report each advance independently.
         public Dictionary<string, byte> RollingCounters { get; } = new();
 
-        /// <summary>Wider counters, for a format whose packet number is 32
-        /// bits (Valve's state packets).</summary>
-        public Dictionary<string, uint> RollingCounters32 { get; } = new();
+        // EncodeInput's rolling counters, one slot per counter the program
+        // compiled (VendorBlobProgram.CounterInitials), so a frame looks up
+        // none by name. Bound to the first program this state encodes, and
+        // bound again, from each counter's initial value, if it is handed
+        // another.
+        private VendorBlobProgram? _counterProgram;
+        private uint[] _counters = Array.Empty<uint>();
+
+        internal uint[] CountersFor(VendorBlobProgram prog)
+        {
+            if (!ReferenceEquals(_counterProgram, prog))
+            {
+                _counters = (uint[])prog.CounterInitials.Clone();
+                _counterProgram = prog;
+            }
+            return _counters;
+        }
 
         private long _clockOrigin;
 
@@ -90,6 +103,11 @@ internal static class VendorBlobCodec
 
         var prog = VendorBlobProgram.Get(spec);
         var fields = prog.Fields;
+        var counters = prog.CounterInitials.Length > 0 ? encState.CountersFor(prog) : null;
+        // The d-pad from HatDegrees, HatHundredths, HatRaw or Hat, once per
+        // frame for a program that reads it.
+        bool dUp = false, dDown = false, dLeft = false, dRight = false;
+        if (prog.ResolvesDpad) ResolveDpad(in state, out dUp, out dDown, out dLeft, out dRight);
         for (int fi = 0; fi < fields.Length; fi++)
         {
             ref readonly var f = ref fields[fi];
@@ -113,7 +131,7 @@ internal static class VendorBlobCodec
                     // from the SDK's, which runs 0 at the left and the top,
                     // such as a stick Y that grows upward.
                     int raw = f.Center == 128
-                        ? WireArith.Linear(v, 0, 255, f.Invert, rest: 0.5)
+                        ? WireArith.Linear(v, f.Min, f.Max, f.Invert, rest: 0.5)
                         : WireArith.Linear(v, f.Center - 127, f.Center + 127, f.Invert, rest: 0.5);
                     buffer[f.B] = (byte)Math.Clamp(raw, 0, 255);
                     break;
@@ -127,7 +145,7 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightTrigger => rightTrigger,
                         _ => 0f,
                     };
-                    buffer[f.B] = (byte)WireArith.Linear(v, 0, 255, invert: false, rest: 0);
+                    buffer[f.B] = (byte)WireArith.Linear(v, f.Min, f.Max, f.Invert, rest: 0);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.Stick12Pair:
@@ -148,8 +166,10 @@ internal static class VendorBlobCodec
                     // 0..1 maps onto the full 12-bit range. VIIPER centers a
                     // resting stick at 0x0800 (StickCenter), which is what
                     // 0.5f produces here after rounding.
-                    int x = WireArith.Linear(vx, 0, 4095, invert: false, rest: 0.5);
-                    int y = WireArith.Linear(vy, 0, 4095, invert: false, rest: 0.5);
+                    // invert turns the Y half, the axis whose direction a
+                    // stick can read the other way from the SDK's.
+                    int x = WireArith.Linear(vx, f.Min, f.Max, invert: false, rest: 0.5);
+                    int y = WireArith.Linear(vy, f.Min, f.Max, f.Invert, rest: 0.5);
                     buffer[f.B]     = (byte)(x & 0xFF);
                     buffer[f.B + 1] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4));
                     buffer[f.B + 2] = (byte)((y >> 4) & 0xFF);
@@ -158,10 +178,9 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.U8Rolling:
                 {
                     if (f.B < 0) break;
-                    if (!encState.RollingCounters.TryGetValue(f.RollKey, out var counter))
-                        counter = f.Initial;
+                    byte counter = (byte)counters![f.CounterSlot];
                     buffer[f.B] = counter;
-                    encState.RollingCounters[f.RollKey] = unchecked((byte)(counter + f.Stride));
+                    counters[f.CounterSlot] = unchecked((byte)(counter + f.Stride));
                     break;
                 }
                 case VendorBlobProgram.FieldOp.U8Const:
@@ -218,33 +237,58 @@ internal static class VendorBlobCodec
                     buffer[f.B + 1] = (byte)(v10 & 0xFF);
                     break;
                 }
-                case VendorBlobProgram.FieldOp.Ds3Battery:
+                case VendorBlobProgram.FieldOp.U8LevelMap:
                 {
-                    // 0xEE charging and 0xEF charged on the cable, otherwise a
-                    // level 0..5 that hid-sony.c reads as 0, 1, 25, 50, 75 and
-                    // 100% (sixaxis_battery_capacity) and RPCS3 reads the same
-                    // way (ds3_pad_handler.cpp get_data).
+                    // A battery byte from the profile's table: fullValue while
+                    // full, ahead of chargingValue while charging, otherwise
+                    // the level's entry. The DualShock 3's table puts 0xEF
+                    // ahead of 0xEE (dualshock-3-full.json).
                     if (f.B < 0 || (uint)f.B >= (uint)buffer.Length) break;
-                    buffer[f.B] = state.BatteryFull ? (byte)0xEF
-                                : state.BatteryCharging ? (byte)0xEE
-                                : Ds3BatteryLevel[Math.Min((int)state.BatteryLevel, 10)];
+                    buffer[f.B] = state.BatteryFull && f.FullValue >= 0 ? (byte)f.FullValue
+                                : state.BatteryCharging && f.ChargingValue >= 0 ? (byte)f.ChargingValue
+                                : f.Levels![Math.Min((int)state.BatteryLevel, 10)];
                     break;
                 }
                 case VendorBlobProgram.FieldOp.I16:
                 {
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    short v = f.Source switch
+                    short v;
+                    if (f.ScaleNumerator != 0)
                     {
-                        VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
-                        VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
-                        VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
-                        VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
-                        VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
-                        VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
-                        _ => (short)0,
-                    };
-                    buffer[f.B]     = (byte)(v & 0xFF);
-                    buffer[f.B + 1] = (byte)((v >> 8) & 0xFF);
+                        // A calibrated value as counts, by the one arithmetic
+                        // (WireArith.Scaled).
+                        float g = f.Source switch
+                        {
+                            VendorBlobProgram.SrcOp.AccelGX  => state.AccelGX,
+                            VendorBlobProgram.SrcOp.AccelGY  => state.AccelGY,
+                            VendorBlobProgram.SrcOp.AccelGZ  => state.AccelGZ,
+                            VendorBlobProgram.SrcOp.GyroDpsX => state.GyroDpsX,
+                            VendorBlobProgram.SrcOp.GyroDpsY => state.GyroDpsY,
+                            VendorBlobProgram.SrcOp.GyroDpsZ => state.GyroDpsZ,
+                            _ => 0f,
+                        };
+                        v = WireArith.Scaled(f.Negate ? -g : g, f.ScaleNumerator, f.ScaleDenominator);
+                    }
+                    else
+                    {
+                        v = f.Source switch
+                        {
+                            VendorBlobProgram.SrcOp.GyroPitch => state.GyroPitch,
+                            VendorBlobProgram.SrcOp.GyroYaw   => state.GyroYaw,
+                            VendorBlobProgram.SrcOp.GyroRoll  => state.GyroRoll,
+                            VendorBlobProgram.SrcOp.AccelX    => state.AccelX,
+                            VendorBlobProgram.SrcOp.AccelY    => state.AccelY,
+                            VendorBlobProgram.SrcOp.AccelZ    => state.AccelZ,
+                            _ => (short)0,
+                        };
+                    }
+                    // A report that carries several motion frames of one
+                    // sample writes it in each (repeat).
+                    for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
+                    {
+                        buffer[at]     = (byte)(v & 0xFF);
+                        buffer[at + 1] = (byte)((v >> 8) & 0xFF);
+                    }
                     break;
                 }
                 case VendorBlobProgram.FieldOp.I16Axis:
@@ -261,13 +305,9 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightStickY => rightStickY,
                         _ => 0.5f,
                     };
-                    // Valve's packets are positive-up on Y, the opposite of
-                    // the byte-oriented pads: SDL applies a unary minus to
-                    // sLeftStickY and sRightStickY on the way in. Y is
-                    // therefore negated here so up reads as up.
-                    bool yAxis = f.Source is VendorBlobProgram.SrcOp.LeftStickY
-                                           or VendorBlobProgram.SrcOp.RightStickY;
-                    short sraw = (short)WireArith.Linear(sv, -32767, 32767, invert: yAxis, rest: 0.5);
+                    // A wire axis that grows upward, such as Valve's stick Y,
+                    // which SDL negates on the way in, sets invert.
+                    short sraw = (short)WireArith.Linear(sv, f.Min, f.Max, f.Invert, rest: 0.5);
                     buffer[f.B]     = (byte)(sraw & 0xFF);
                     buffer[f.B + 1] = (byte)((sraw >> 8) & 0xFF);
                     break;
@@ -280,7 +320,8 @@ internal static class VendorBlobCodec
                     // Valve's pads are full-scale signed with positive Y up:
                     // SDL_hidapi_steamdeck.c reads them back as
                     // sLeftPadX / 65536 + 0.5 and -sLeftPadY / 65536 + 0.5,
-                    // so X maps straight across and Y inverts.
+                    // so X maps straight across and Y, which sets invert,
+                    // turns.
                     //
                     // I16PadOrStick is the 2015 controller's shared pair. Its
                     // firmware packs EITHER the pad or the joystick into the
@@ -304,7 +345,7 @@ internal static class VendorBlobCodec
                             : (isY ? state.TouchpadFinger1Y : state.TouchpadFinger1X);
                         float span = isY ? 1079f : 1919f;
                         float unit = Math.Clamp(raw / span, 0f, 1f) - 0.5f;
-                        if (isY) unit = -unit;
+                        if (f.Invert) unit = -unit;
                         praw = (short)Math.Clamp(
                             (int)Math.Round(unit * 2f * 32767f), -32767, 32767);
                     }
@@ -312,7 +353,7 @@ internal static class VendorBlobCodec
                     {
                         float sv = isLeft ? (isY ? leftStickY : leftStickX)
                                           : (isY ? rightStickY : rightStickX);
-                        praw = (short)WireArith.Linear(sv, -32767, 32767, invert: isY, rest: 0.5);
+                        praw = (short)WireArith.Linear(sv, f.Min, f.Max, f.Invert, rest: 0.5);
                     }
                     else
                     {
@@ -324,25 +365,25 @@ internal static class VendorBlobCodec
                 }
                 case VendorBlobProgram.FieldOp.U16Pressure:
                 {
-                    // Pad pressure, 0..32768 full scale (SDL divides by
-                    // 32768.0f). HMGamepadState carries no analog pressure,
-                    // so a contact reports full scale and no contact zero,
+                    // Pad pressure. HMGamepadState carries no analog
+                    // pressure, so a contact reports max and no contact min,
                     // which is the same shape a capacitive pad without a
-                    // force sensor reports.
+                    // force sensor reports. Valve's profiles set max 32767,
+                    // full scale for SDL, which divides by 32768.0f.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
                     bool pdown = f.Source == VendorBlobProgram.SrcOp.RightPadPressure
                         ? state.TouchpadFinger1Active
                         : state.TouchpadFinger0Active;
-                    ushort pv = pdown ? (ushort)32767 : (ushort)0;
+                    ushort pv = (ushort)(pdown ? f.Max : f.Min);
                     buffer[f.B]     = (byte)(pv & 0xFF);
                     buffer[f.B + 1] = (byte)((pv >> 8) & 0xFF);
                     break;
                 }
                 case VendorBlobProgram.FieldOp.U16Trigger:
                 {
-                    // Unsigned 16-bit trigger, 0..32767. SDL widens it as
-                    // (raw * 2 - 32768) to reach its own full range, so a
-                    // full pull is 32767 rather than 65535.
+                    // Unsigned 16-bit trigger, min at release and max at a
+                    // full pull. Valve's profiles set max 32767: SDL widens
+                    // it as (raw * 2 - 32768) to reach its own full range.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
                     float tv = f.Source switch
                     {
@@ -350,7 +391,7 @@ internal static class VendorBlobCodec
                         VendorBlobProgram.SrcOp.RightTrigger => rightTrigger,
                         _ => 0f,
                     };
-                    int traw = WireArith.Linear(tv, 0, 32767, invert: false, rest: 0);
+                    int traw = WireArith.Linear(tv, f.Min, f.Max, f.Invert, rest: 0);
                     buffer[f.B]     = (byte)(traw & 0xFF);
                     buffer[f.B + 1] = (byte)((traw >> 8) & 0xFF);
                     break;
@@ -362,14 +403,12 @@ internal static class VendorBlobCodec
                     // advance on every encode or the stream reads as one
                     // frame repeated forever.
                     if (f.B < 0 || f.B + 3 >= buffer.Length) break;
-                    if (!encState.RollingCounters32.TryGetValue(f.RollKey, out var c32))
-                        c32 = f.Initial;
+                    uint c32 = counters![f.CounterSlot];
                     buffer[f.B]     = (byte)(c32         & 0xFF);
                     buffer[f.B + 1] = (byte)((c32 >>  8) & 0xFF);
                     buffer[f.B + 2] = (byte)((c32 >> 16) & 0xFF);
                     buffer[f.B + 3] = (byte)((c32 >> 24) & 0xFF);
-                    encState.RollingCounters32[f.RollKey] =
-                        unchecked(c32 + (uint)Math.Max(1, (int)f.Stride));
+                    counters[f.CounterSlot] = unchecked(c32 + (uint)Math.Max(1, (int)f.Stride));
                     break;
                 }
                 case VendorBlobProgram.FieldOp.U32:
@@ -447,8 +486,11 @@ internal static class VendorBlobCodec
                 {
                     // HMHat values 1..8 (N..NW) map to descriptor 0..7;
                     // HMHat.None maps to the neutral value (typically 8).
+                    // With dpad "resolved" the octant comes from the
+                    // resolved directions instead of Hat alone.
                     if (f.B < 0) break;
-                    int hatNibble = state.Hat == HMHat.None ? f.Neutral : ((int)state.Hat - 1) & 0x0F;
+                    var hat = f.DpadResolved ? Octant(dUp, dDown, dLeft, dRight) : state.Hat;
+                    int hatNibble = hat == HMHat.None ? f.Neutral : ((int)hat - 1) & 0x0F;
                     if (f.HasBits)
                     {
                         int width = f.BitHi - f.BitLo + 1;
@@ -488,14 +530,15 @@ internal static class VendorBlobCodec
                         // "above zero" test produced for any value under
                         // half of the first step.
                         var h = state.Hat;
+                        bool r = f.DpadResolved;
                         bool on = bits switch
                         {
                             VendorBlobProgram.ButtonLtDigital => TriggerByte(leftTrigger) > 0,
                             VendorBlobProgram.ButtonRtDigital => TriggerByte(rightTrigger) > 0,
-                            VendorBlobProgram.ButtonDpadUp    => h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
-                            VendorBlobProgram.ButtonDpadDown  => h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
-                            VendorBlobProgram.ButtonDpadLeft  => h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
-                            VendorBlobProgram.ButtonDpadRight => h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
+                            VendorBlobProgram.ButtonDpadUp    => r ? dUp : h is HMHat.North or HMHat.NorthEast or HMHat.NorthWest,
+                            VendorBlobProgram.ButtonDpadDown  => r ? dDown : h is HMHat.South or HMHat.SouthEast or HMHat.SouthWest,
+                            VendorBlobProgram.ButtonDpadLeft  => r ? dLeft : h is HMHat.West  or HMHat.NorthWest or HMHat.SouthWest,
+                            VendorBlobProgram.ButtonDpadRight => r ? dRight : h is HMHat.East  or HMHat.NorthEast or HMHat.SouthEast,
                             VendorBlobProgram.ButtonPad0Touch => state.TouchpadFinger0Active,
                             VendorBlobProgram.ButtonPad1Touch => state.TouchpadFinger1Active,
                             _ => (mask & (uint)bits) != 0,
@@ -798,6 +841,12 @@ internal static class VendorBlobCodec
                     result[field.Semantic] = slice;
                     break;
                 }
+                case VendorBlobProgram.FieldOp.PackedUint:
+                {
+                    if (field.Semantic == null) continue;
+                    result[field.Semantic] = DecodePacked(f.Parts!, buffer);
+                    break;
+                }
                 case VendorBlobProgram.FieldOp.Crc32:
                 {
                     if (field.Scope == null) continue;
@@ -861,10 +910,88 @@ internal static class VendorBlobCodec
         return p != 0 ? p : down ? (byte)255 : (byte)0;
     }
 
-    /// <summary>DualShock 3 battery level for each 0..10 level: the level
-    /// whose hid-sony.c capacity (0, 1, 25, 50, 75, 100%) is nearest the
-    /// level's midpoint, 10 x level + 5%.</summary>
-    private static readonly byte[] Ds3BatteryLevel = { 1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 5 };
+    /// <summary>v2.0.0: the d-pad a <c>dpad: "resolved"</c> field reads: the
+    /// first of HatDegrees, HatHundredths, HatRaw and Hat that is set, as an
+    /// angle, and each direction on within 67.5 degrees of it, so a
+    /// diagonal's 45 degrees light two.</summary>
+    internal static void ResolveDpad(in HMGamepadState state,
+                                     out bool up, out bool down, out bool left, out bool right)
+    {
+        double? deg = null;
+        if (state.HatDegrees.HasValue) deg = state.HatDegrees.Value;
+        else if (state.HatHundredths.HasValue) deg = state.HatHundredths.Value / 100.0;
+        else if (state.HatRaw.HasValue)
+        {
+            // 8-way raw: 0..7 = N..NW clockwise, >=8 = neutral.
+            if (state.HatRaw.Value < 8) deg = state.HatRaw.Value * 45.0;
+        }
+        else if (state.Hat != HMHat.None) deg = ((int)state.Hat - 1) * 45.0;
+
+        up = down = left = right = false;
+        if (!deg.HasValue) return;
+        double d = ((deg.Value % 360.0) + 360.0) % 360.0;
+        up = d > 292.5 || d < 67.5;
+        right = d > 22.5 && d < 157.5;
+        down = d > 112.5 && d < 247.5;
+        left = d > 202.5 && d < 337.5;
+    }
+
+    /// <summary>The octant of four resolved directions, or None. A NaN
+    /// angle lights none.</summary>
+    private static HMHat Octant(bool up, bool down, bool left, bool right) =>
+        (up, down, left, right) switch
+        {
+            (true, false, false, false) => HMHat.North,
+            (true, false, false, true)  => HMHat.NorthEast,
+            (false, false, false, true) => HMHat.East,
+            (false, true, false, true)  => HMHat.SouthEast,
+            (false, true, false, false) => HMHat.South,
+            (false, true, true, false)  => HMHat.SouthWest,
+            (false, false, true, false) => HMHat.West,
+            (true, false, true, false)  => HMHat.NorthWest,
+            _ => HMHat.None,
+        };
+
+    /// <summary>A packed-uint field's value: each part's value per frame,
+    /// the largest, plus the offset, 0 outside the range, else scaled,
+    /// rounded and clamped to 0..255, and the largest of the parts. Boxed
+    /// as a byte, as every decoded motor level is.</summary>
+    private static byte DecodePacked(VendorBlobProgram.PackedPart[] parts, ReadOnlySpan<byte> buffer)
+    {
+        int best = 0;
+        for (int p = 0; p < parts.Length; p++)
+        {
+            ref readonly var part = ref parts[p];
+            long v = -1;
+            for (int fr = 0; fr < part.Frames; fr++)
+            {
+                long x = 0;
+                int shift = 0;
+                bool inside = true;
+                for (int k = 0; k < part.PieceAt.Length; k++)
+                {
+                    int at = part.PieceAt[k] + fr * part.StrideBits;
+                    for (int bit = 0; bit < part.PieceCount[k]; bit++, shift++)
+                    {
+                        int pos = at + bit;
+                        if ((pos >> 3) >= buffer.Length) { inside = false; break; }
+                        x |= (long)((buffer[pos >> 3] >> (pos & 7)) & 1) << shift;
+                    }
+                    if (!inside) break;
+                }
+                // A frame past a short host write is not there to read.
+                if (inside && x > v) v = x;
+            }
+            if (v < 0) continue;
+            v += part.Offset;
+            if (v < part.Lo || v > part.Hi) continue;
+            double scaled = v * part.Numerator / part.Denominator;
+            double r = part.Down ? Math.Floor(scaled) : Math.Round(scaled);
+            int level = (int)Math.Clamp(r, 0, 255);
+            if (level > best) best = level;
+        }
+        return (byte)best;
+    }
 
     // CRC-32/ISO-HDLC, polynomial 0xEDB88320 (matches Sony BT, dualsense-tester,
     // ds4drv, hidapi, OpenRGB SonyDualSenseController, PadForge Ds5RawHidWriter).

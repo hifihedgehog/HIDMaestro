@@ -381,6 +381,9 @@ public sealed class ControllerProfile
         {
             if (prog.Fields[i].Op == VendorBlobProgram.FieldOp.Crc32 && prog.Fields[i].CrcDst < 0) continue;
             var (lo, hi) = VendorBlobProgram.Extent(in prog.Fields[i], spec.Size);
+            // A packed-uint field writes no bytes and reads its parts' bits.
+            if (prog.Fields[i].Parts is { } parts)
+                foreach (var part in parts) { lo = 0; hi = Math.Max(hi, part.LastBit / 8); }
             if (hi > OutputRingData)
                 throw new InvalidOperationException(
                     $"{where}.fields[{i}] ('{prog.Fields[i].Src.Type}') at bytes {lo}-{hi} ends past byte {OutputRingData}. " +
@@ -959,11 +962,170 @@ public sealed class FieldSpec
     public int? SourceResolution { get; set; }
 
     /// <summary>v1.10.0: for a <c>uint10-be</c> sensor field, true when the
-    /// wire axis points opposite to the SDK's. v1.13.0: the same for a
-    /// <c>uint8-axis</c> stick axis, which the SDK runs 0 at the left and at
-    /// the top, such as a stick Y that grows upward.</summary>
+    /// wire axis points opposite to the SDK's. v2.0.0: the same for every
+    /// axis and trigger type (<c>uint8-axis</c>, <c>uint8-trigger</c>,
+    /// <c>int16-axis</c>, <c>int16-pad</c>, <c>int16-pad-or-stick</c>,
+    /// <c>uint16-trigger</c>, and the Y half of <c>stick12-pair</c>), which
+    /// the SDK runs 0 at the left and at the top, such as a stick Y that
+    /// grows upward.</summary>
     [JsonPropertyName("invert")]
     public bool? Invert { get; set; }
+
+    /// <summary>v2.0.0: for a type that carries a normalized value
+    /// (<c>uint8-axis</c>, <c>uint8-trigger</c>, <c>stick12-pair</c>,
+    /// <c>int16-axis</c>, <c>int16-pad-or-stick</c>'s stick,
+    /// <c>uint16-trigger</c>), the wire value at the SDK's 0, and for
+    /// <c>uint16-pressure</c> the value with no contact. Defaults to the
+    /// type's full range: 0, or -32767 for the signed axes.</summary>
+    [JsonPropertyName("min")]
+    public int? Min { get; set; }
+
+    /// <summary>v2.0.0: the wire value at the SDK's 1, and for
+    /// <c>uint16-pressure</c> the value of a contact. Defaults to 255,
+    /// 4095, 32767 or 65535 by the type's width.</summary>
+    [JsonPropertyName("max")]
+    public int? Max { get; set; }
+
+    /// <summary>v2.0.0: for an <c>int16-le</c> field of a calibrated
+    /// source (<c>accelGX</c> to <c>accelGZ</c> in g, <c>gyroDpsX</c> to
+    /// <c>gyroDpsZ</c> in degrees per second), the counts per unit: a
+    /// number, or an exact ratio <c>[13371, 936]</c>.</summary>
+    [JsonPropertyName("scale")]
+    public ScaleSpec? Scale { get; set; }
+
+    /// <summary>v2.0.0: with <see cref="Scale"/>, the calibrated value
+    /// negated before it is scaled, for a wire axis that points the other
+    /// way from the SDK's sensor frame.</summary>
+    [JsonPropertyName("negate")]
+    public bool? Negate { get; set; }
+
+    /// <summary>v2.0.0: with <see cref="Scale"/>, <c>[count, stride]</c>:
+    /// the field written <c>count</c> times, <c>stride</c> bytes apart, for
+    /// a report that carries several motion frames of one sample.</summary>
+    [JsonPropertyName("repeat")]
+    public List<int>? Repeat { get; set; }
+
+    /// <summary>v2.0.0: <c>"resolved"</c> on a <c>button-mask</c> with
+    /// DPAD_* names or a <c>hat-octant</c>: the d-pad from
+    /// <see cref="HMGamepadState.HatDegrees"/>, then HatHundredths, then
+    /// HatRaw, then Hat, the first one set, where it is otherwise read from
+    /// Hat alone.</summary>
+    [JsonPropertyName("dpad")]
+    public string? Dpad { get; set; }
+
+    /// <summary>v2.0.0: for <c>uint8-level-map</c>, the byte for each
+    /// <see cref="HMGamepadState.BatteryLevel"/> from 0 to 10, eleven
+    /// entries.</summary>
+    [JsonPropertyName("levels")]
+    public List<int>? Levels { get; set; }
+
+    /// <summary>v2.0.0: for <c>uint8-level-map</c>, the byte while
+    /// <see cref="HMGamepadState.BatteryCharging"/> is set.
+    /// <see cref="FullValue"/>, while BatteryFull is set, goes before
+    /// it.</summary>
+    [JsonPropertyName("chargingValue")]
+    public int? ChargingValue { get; set; }
+
+    /// <summary>v2.0.0: for <c>packed-uint</c>, an output field decoded
+    /// from bit groups: each part's value, mapped, and the largest mapped
+    /// value of every part and frame is the field's.</summary>
+    [JsonPropertyName("parts")]
+    public List<PackedPartSpec>? Parts { get; set; }
+}
+
+/// <summary>v2.0.0: a <c>scale</c> as JSON writes it, a number or an exact
+/// ratio <c>[numerator, denominator]</c>.</summary>
+[JsonConverter(typeof(ScaleSpecJsonConverter))]
+public sealed class ScaleSpec
+{
+    public double Numerator { get; set; }
+    public double Denominator { get; set; } = 1;
+}
+
+/// <summary>Reads and writes <see cref="ScaleSpec"/> as a number or a
+/// two-number array.</summary>
+public sealed class ScaleSpecJsonConverter : JsonConverter<ScaleSpec>
+{
+    public override ScaleSpec Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Number)
+            return new ScaleSpec { Numerator = reader.GetDouble(), Denominator = 1 };
+        if (reader.TokenType != JsonTokenType.StartArray)
+            throw new JsonException("A scale is a number or an array [numerator, denominator].");
+        reader.Read();
+        if (reader.TokenType != JsonTokenType.Number) throw new JsonException("A scale's numerator is a number.");
+        double n = reader.GetDouble();
+        reader.Read();
+        if (reader.TokenType != JsonTokenType.Number) throw new JsonException("A scale's denominator is a number.");
+        double d = reader.GetDouble();
+        reader.Read();
+        if (reader.TokenType != JsonTokenType.EndArray) throw new JsonException("A scale's array holds two numbers.");
+        return new ScaleSpec { Numerator = n, Denominator = d };
+    }
+
+    public override void Write(Utf8JsonWriter writer, ScaleSpec value, JsonSerializerOptions options)
+    {
+        if (value.Denominator == 1)
+        {
+            writer.WriteNumberValue(value.Numerator);
+            return;
+        }
+        writer.WriteStartArray();
+        writer.WriteNumberValue(value.Numerator);
+        writer.WriteNumberValue(value.Denominator);
+        writer.WriteEndArray();
+    }
+}
+
+/// <summary>v2.0.0: one part of a <c>packed-uint</c> output field. Its
+/// value is assembled from <see cref="Pieces"/>, lowest first, in each of
+/// <see cref="Frames"/>. The largest frame's value, plus
+/// <see cref="Offset"/>, maps to 0 outside <see cref="Range"/>, and
+/// otherwise to itself times <see cref="Scale"/>, rounded by
+/// <see cref="Round"/> and clamped to 0..255.</summary>
+public sealed class PackedPartSpec
+{
+    /// <summary>The bit groups, lowest first: each <c>{ "at", "count" }</c>,
+    /// a bit offset from the report's first byte, its ID included, and a
+    /// width.</summary>
+    [JsonPropertyName("pieces")]
+    public List<PackedPieceSpec> Pieces { get; set; } = new();
+
+    /// <summary><c>[count, stride]</c>: the pieces read in each of
+    /// <c>count</c> frames, <c>stride</c> bytes apart. Absent is one
+    /// frame.</summary>
+    [JsonPropertyName("frames")]
+    public List<int>? Frames { get; set; }
+
+    /// <summary>Added to the value before the range test.</summary>
+    [JsonPropertyName("offset")]
+    public int? Offset { get; set; }
+
+    /// <summary><c>[low, high]</c>: a value outside maps to 0. Absent
+    /// accepts every value.</summary>
+    [JsonPropertyName("range")]
+    public List<int>? Range { get; set; }
+
+    /// <summary>The value's factor, a number or <c>[numerator,
+    /// denominator]</c>. Absent is 1.</summary>
+    [JsonPropertyName("scale")]
+    public ScaleSpec? Scale { get; set; }
+
+    /// <summary><c>"down"</c> truncates the scaled value, as integer
+    /// division does. <c>"nearest"</c>, the default, rounds it to nearest,
+    /// ties to even.</summary>
+    [JsonPropertyName("round")]
+    public string? Round { get; set; }
+}
+
+/// <summary>v2.0.0: one bit group of a <see cref="PackedPartSpec"/>.</summary>
+public sealed class PackedPieceSpec
+{
+    [JsonPropertyName("at")]
+    public int At { get; set; }
+
+    [JsonPropertyName("count")]
+    public int Count { get; set; }
 }
 
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is
