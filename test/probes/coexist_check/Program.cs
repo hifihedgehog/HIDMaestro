@@ -1240,6 +1240,42 @@ internal static partial class Program
         return i < 0 ? null : reply[(i + tag.Length)..].Trim();
     }
 
+    /// <summary>Whether a v1.12.0 program's staging directory holds the two
+    /// signed catalogs its deploy writes there.</summary>
+    static bool StagingCataloged(string? dir) =>
+        dir != null && File.Exists(Path.Combine(dir, "hidmaestro.cat")) && File.Exists(Path.Combine(dir, "hidmaestro_xusb.cat"));
+
+    /// <summary>Puts a v1.12.0 program's staging in the state section E's
+    /// install leaves it in, which sections U and Y need, so they test the
+    /// same thing on any machine. A v1.12.0 create that finds a package of
+    /// each INF in the driver store skips its own deploy
+    /// (DeviceOrchestrator step 2, PnputilHelper.IsHidMaestroDriverInstalled)
+    /// and hands UpdateDriverForPlugAndPlayDevicesW the hidmaestro.inf of
+    /// its staging, %TEMP%\HIDMaestro_&lt;hash&gt; (DriverBuilder.EnsureExtracted,
+    /// HMContext's infPath). That INF names hidmaestro.cat, which only its
+    /// deploy's GenerateCatalogs writes. Without it the call fails with
+    /// ERROR_NO_CATALOG_FOR_OEM_INF and the device gets no driver. The
+    /// staging is put right through the two public DriverBuilder steps that
+    /// write it, signing and cataloging, and never through v1.12.0's
+    /// InstallDriver, whose deploy removes every HIDMaestro package from the
+    /// store (RemoveOldDriverPackages). Later v1.12.0 peers share this
+    /// process's %TEMP% and so the staging.</summary>
+    static bool LegacyStagingCataloged(string section)
+    {
+        using var p = PeerProcess.Start($"{section}-v1.12.0-catalogs", "v1.12.0");
+        string? dir = StagingPath(p.Send("stagingdir"));
+        bool before = StagingCataloged(dir);
+        if (dir != null && !before)
+        {
+            p.Send("builderstep SignDrivers", 180_000);
+            p.Send("builderstep GenerateCatalogs", 180_000);
+        }
+        bool done = StagingCataloged(dir);
+        Check($"{section}: the v1.12.0 program's staging carries its signed catalogs, as section E's install leaves it", done,
+              dir == null ? "no staging" : $"{dir}, {(before ? "already there" : done ? "written now" : "not written")}");
+        return done;
+    }
+
     static void SectionI()
     {
         try

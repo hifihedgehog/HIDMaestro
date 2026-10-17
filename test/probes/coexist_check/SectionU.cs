@@ -251,6 +251,10 @@ internal static partial class Program
             return;
         }
         string config = $@"SOFTWARE\HIDMaestro\Controller{t}";
+        // The acknowledgement checks below need the v1.12.0 controller on a
+        // driver: only a driver writes that section. Without the staging's
+        // catalogs its create installs none (LegacyStagingCataloged).
+        LegacyStagingCataloged("U");
         Check("U: the next create is set to wait before its input mapping", Ok(a.Send("pausemapping")));
         a.Post("create pad F1B0 -");
         string paused = a.Receive("create pad F1B0 - (waiting)", 60_000);
@@ -271,20 +275,41 @@ internal static partial class Program
         bool configThere = Registry.LocalMachine.OpenSubKey(config) is { } ck && Close(ck);
         Check("U: its devices are present and its configuration written", oldDevices.Count >= 2 && configThere,
               $"{string.Join(",", oldDevices)}, {config} {configThere}");
+        Check("U: its controller runs on a driver", oldMain is not (null or "none") && Native.DriverVersionOf(oldMain) != null && Native.IsStarted(oldMain),
+              oldMain is null or "none" ? "no instance" : $"{Native.DriverVersionOf(oldMain) ?? "no driver"}, {(Native.IsStarted(oldMain) ? "started" : "not started")}");
 
         // The v1.12.0 controller's input frame and acknowledgement, at rest
         // after a burst of input. The refused create must write neither.
         string inputName = $@"Global\HIDMaestroInput{t}", ackName = $@"Global\HIDMaestroInputAck{t}";
-        old.Send("stream 0 0.7 60 0");
-        Thread.Sleep(500);
-        old.Send("stopstream");
-        Thread.Sleep(300);
-        byte[]? inBefore = Native.SectionBytes(inputName, InputSectionSize);
-        byte[]? ackBefore = Native.SectionBytes(ackName, AckSectionSize);
+        // The driver stores a frame's sequence number in the section's first
+        // word once HID class has taken it, at the read after the one that
+        // carried it (driver.c NoteFrameCompletedLocked), so a delivered
+        // frame needs a reader. Nothing else reads the device in a sandbox,
+        // so the probe reads its HID interface through the burst, as a
+        // program that uses the controller would.
+        string? oldHid = oldMain is null or "none" ? null
+            : Native.Subtree(oldMain).Skip(1).SelectMany(c => Native.InterfaceList(Native.HidGuid, c)).FirstOrDefault();
+        byte[]? inBefore, ackBefore;
+        using (var oldCap = oldHid == null ? null : HidCapture.Open(oldHid))
+        {
+            long mark = oldCap?.Mark() ?? 0;
+            old.Send("stream 0 0.7 60 0");
+            Thread.Sleep(500);
+            old.Send("stopstream");
+            Thread.Sleep(300);
+            int reports = oldCap?.Since(mark).Count ?? 0;
+            Check("U: the probe reads the v1.12.0 controller's HID interface through the burst", reports > 0,
+                  oldHid == null ? "no HID interface" : oldCap == null ? $"{oldHid} did not open" : $"{reports} reports");
+            inBefore = Native.SectionBytes(inputName, InputSectionSize);
+            ackBefore = Native.SectionBytes(ackName, AckSectionSize);
+        }
         Check("U: the v1.12.0 controller's input section carries its frame",
               inBefore != null && inBefore.Any(x => x != 0), inBefore == null ? "absent" : inBefore.Any(x => x != 0) ? "" : "all zero");
+        int delivered = ackBefore == null ? 0 : BitConverter.ToInt32(ackBefore, 0);
+        int caps = ackBefore == null ? 0 : BitConverter.ToInt32(ackBefore, 4);
         Check("U: and its acknowledgement section carries a delivered frame",
-              ackBefore != null && ackBefore.Any(x => x != 0), ackBefore == null ? "absent" : ackBefore.Any(x => x != 0) ? "" : "all zero");
+              ackBefore != null && delivered != 0,
+              ackBefore == null ? "absent" : $"DeliveredSeqNo {delivered}, Capabilities 0x{caps:X8}");
 
         string f7 = a.Send("go", 120_000);
         Check("U: the waiting create is refused as in use",

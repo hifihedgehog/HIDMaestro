@@ -104,6 +104,10 @@
 //        program's OutputReceived. Then it kills the program and times the
 //        sweep that removes the device. The user still cannot open the
 //        OutputEvent, and every output arrives within 20 ms.
+//
+//    Every part runs v1.12.0 programs whose staging carries the signed
+//    catalogs section E's install leaves there, so their creates install
+//    v1.12.0's own driver on any machine (LegacyStagingCataloged).
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -130,6 +134,7 @@ internal static partial class Program
         if (user == IntPtr.Zero) return;
         try
         {
+            LegacyStagingCataloged("Y");
             string? installed = SectionYBody(user);
             if (installed == null) return;
             // Programs before v1.13.0 take index 0 whatever runs, so these
