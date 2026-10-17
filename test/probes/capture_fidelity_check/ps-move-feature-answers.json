@@ -1,0 +1,31 @@
+{
+  "comment": "ps-move's feature answers in lane DD-2's answer-table form (FeatureStubSpec), prepared for that table to take once it merges. Each byte comes from a cited capture or layout. capture_fidelity_check (S96) checks these bytes against the moveonpc wiki and decodes the calibration as psmoveapi does. The 0x10 entry needs one thing DD-2's form does not have yet: pages on a plain entry, served to successive GETs in turn and wrapping to the first, as a real Move answers 0x10 (Calibration data: it has to be read three times, and the first block read may be any of the three).",
+  "featureStubs": {
+    "reports": [
+      {
+        "id": "0x04",
+        "size": 16,
+        "data": "040000004D4802082500000000000000",
+        "patch": [
+          {
+            "at": 1,
+            "length": 1,
+            "encoding": "uint8",
+            "source": "index"
+          }
+        ],
+        "comment": "Bluetooth addresses, 16 bytes with the ID (the descriptor's 0x0F data bytes). The controller's own address backwards from byte 1, 08 25 00 at 7 to 9, the host's address backwards from byte 10 (moveonpc HID reports, lines 9-11 at 033ab8e: 04 66 55 44 33 22 11 08 25 00 FF EE DD CC BB AA). psmoveapi reads the controller's address as a USB Move's serial (psmove.c:560-570, 935-962 at 97d97e9). The address is 02:48:4D:00:00:<index>, locally administered as the DualSense model's pairing MAC is, so it cannot collide with a real controller's. The host address is zeros: no source gives the address of a Move that was never paired."
+      },
+      {
+        "id": "0x10",
+        "size": 49,
+        "pages": [
+          "10004607737F9F7FE88F856ECA7FF47E557FF17F1A6E98900A805B7F677FC9904C7FB77FE66E067F8708A57F0680808176",
+          "100107A87F00808B81000000000000000100019208E001E594E67FA181E0014B7FD6915981E001A17F2C80A6958907360C",
+          "108250C35BC8FB42683DB542CD137D3F935B813F70EA763FFF804F3FC6EA9C3D0000000000000000000000000000000000"
+        ],
+        "comment": "Calibration, three 49-byte blocks with indices 00, 01 and 82, the sample at the top of moveonpc Calibration data (lines 10-25 at 033ab8e), which reassembled is the second of the page's eight dumps. psmoveapi reads 0x10 three times and places each block by its index (psmove.c:974-1022), RPCS3 reads two and places them by index the same way (ps_move_handler.cpp:290-325 at c82221f), so the rotation starts at block 00. ps-move's motion scale and zero come from these blocks, read as psmoveapi reads them, so a host that calibrates from them reads the profile's motion back in g and degrees per second."
+      }
+    ]
+  }
+}

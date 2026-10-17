@@ -17,4 +17,7 @@
       <_Parameter2>$(MSBuildProjectDirectory)</_Parameter2>
     </AssemblyAttribute>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="ps-move-feature-answers.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
