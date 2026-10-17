@@ -426,7 +426,6 @@ internal sealed class FeatureStubTable
     /// else the first feature report it declares.</summary>
     internal static List<Normal> Normalize(FeatureStubSpec spec, HidReportMap map, bool usbip)
     {
-        bool legacy = spec.Match != null;
         bool lastMessage = spec.Match == "lastMessage";
         byte channel = 0;
         if (lastMessage && map.UsesReportIds)
@@ -441,7 +440,10 @@ internal sealed class FeatureStubTable
         {
             var r = spec.Reports[i];
             string at = $"$.featureStubs.reports[{i}]";
-            var n = new Normal { Index = i, Echo = r.Echo, ReplyHead = r.ReplyHead != null, Notify = r.Notify ?? (legacy || usbip) };
+            // Without notify an answer publishes on usbip, as every answered
+            // GET did through v1.13.0, a table-level match included, and not
+            // on UMDF2, whose v1 driver had no tables.
+            var n = new Normal { Index = i, Echo = r.Echo, ReplyHead = r.ReplyHead != null, Notify = r.Notify ?? usbip };
             byte id = Hex(r.Id, at + ".id");
             if (lastMessage && r.Message == null)
             {

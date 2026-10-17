@@ -440,5 +440,19 @@ internal static class Answers
             var ut = FeatureStubTable.From(u.Inner, 0, null, _ => null)!;
             return (Get(ut, 0x05, 64, out bool notify) != null && !notify, "");
         });
+        // The same with v1.x's table-level match: the schema and the design
+        // note say an absent notify publishes nothing on UMDF2. At 41f4d725
+        // a table-level match published on every GET there.
+        c.Run("on UMDF2 a table with v1.x's table-level match and no notify publishes none", () =>
+        {
+            var umdf = FromRepo(@"heusinkveld\ultimate-pedals.json", "user-umdf-legacy");
+            umdf["descriptor"] = FromRepo(@"sony\dualsense.json", "x")["descriptor"]!.DeepClone();
+            umdf["featureStubs"] = JsonNode.Parse("{\"match\":\"reportId\",\"reports\":[{\"id\":\"0x05\",\"size\":41,\"data\":\"" + new string('0', 80) + "\"}]}");
+            umdf.Remove("layout");
+            var (u, why) = Load(umdf);
+            if (u == null) return (false, why?.ToString() ?? "not loaded");
+            var ut = FeatureStubTable.From(u.Inner, 0, null, _ => null)!;
+            return (Get(ut, 0x05, 64, out bool notify) != null && !notify, $"notify {notify}");
+        });
     }
 }
