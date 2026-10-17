@@ -29,6 +29,33 @@ internal static class Strict
     public static int Run()
     {
         var c = new Checks("strict");
+        // A catalog profile looked up by name while the catalog itself
+        // loads would load it again on that thread, or wait on the load's
+        // lock from one of its parallel workers. The lookup refuses with a
+        // message instead. At 4a42386d nothing refused it.
+        c.Run("a catalog lookup made during the catalog's own load is refused, not run", () =>
+        {
+            var flag = typeof(ProfileDatabase).GetField("s_loadingEmbedded", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new MissingFieldException("ProfileDatabase", "s_loadingEmbedded");
+            var cached = typeof(ProfileDatabase).GetField("s_cachedEmbedded", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+            var keep = cached.GetValue(null);
+            cached.SetValue(null, null);
+            flag.SetValue(null, true);
+            try
+            {
+                var lookup = typeof(ProfileDatabase).GetMethod("EmbeddedProfile", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+                try { lookup.Invoke(null, new object[] { "dualsense" }); return (false, "ran"); }
+                catch (System.Reflection.TargetInvocationException e) when (e.InnerException is InvalidOperationException io)
+                {
+                    return (io.Message.Contains("catalog", StringComparison.Ordinal), io.Message);
+                }
+            }
+            finally
+            {
+                flag.SetValue(null, false);
+                cached.SetValue(null, keep);
+            }
+        });
         Catalog(c);
         UserFiles(c);
         Paths(c);

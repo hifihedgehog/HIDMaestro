@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Text.Json.Serialization;
 
 namespace HIDMaestro.Internal;
@@ -1854,11 +1855,20 @@ public sealed class ProfileDatabase
     /// catalog's own load, which resolves over the profiles it read.</summary>
     internal static ControllerProfile? EmbeddedProfile(string id)
     {
+        // The catalog's own load resolves over the profiles it read. A
+        // lookup from inside it would load the catalog again on this thread,
+        // or wait on the load's lock from one of its parallel workers.
+        if (Volatile.Read(ref s_loadingEmbedded) && s_cachedEmbedded == null)
+            throw new InvalidOperationException(
+                $"Profile '{id}' was looked up in the catalog while the catalog loads. A check that runs at load reads the profile's own keys, not the catalog's registry.");
         var db = LoadEmbedded();
         return db._byId.TryGetValue(id, out var p) ? p : null;
     }
 
     private readonly Dictionary<string, ControllerProfile> _byId = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True while the embedded catalog loads.</summary>
+    private static bool s_loadingEmbedded;
 
     public static ProfileDatabase LoadEmbedded()
     {
@@ -1866,7 +1876,9 @@ public sealed class ProfileDatabase
         lock (s_cachedEmbeddedLock)
         {
             if (s_cachedEmbedded != null) return s_cachedEmbedded;
-            s_cachedEmbedded = LoadEmbeddedFresh();
+            Volatile.Write(ref s_loadingEmbedded, true);
+            try { s_cachedEmbedded = LoadEmbeddedFresh(); }
+            finally { Volatile.Write(ref s_loadingEmbedded, false); }
             return s_cachedEmbedded;
         }
     }
