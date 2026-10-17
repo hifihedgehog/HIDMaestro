@@ -150,6 +150,15 @@ internal static unsafe class ProgramCost
             }
         }));
 #endif
+        // Each variant past the tiered JIT's call-count threshold (30) and its
+        // background recompile, so every run reads Tier1 code. Ten calls left
+        // a variant's loop in on-stack-replacement code, whose speed varied
+        // from launch to launch: the generated decode ran at 6.7 ns in some
+        // launches and 15 to 20 ns in others, and at 6.7 ns in all of them
+        // with the tiered JIT off or with the warmup below.
+        foreach (var (_, batch) in variants) batch(Math.Min(calls, 20_000));
+        for (int w = 0; w < 60; w++) foreach (var (_, batch) in variants) batch(100);
+        Thread.Sleep(500);
         foreach (var (_, batch) in variants) batch(Math.Min(calls, 20_000));
         var times = variants.Select(_ => new List<double>()).ToList();
         var bytes = new long[variants.Count];
