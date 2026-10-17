@@ -973,22 +973,32 @@ public sealed class ExtendedReportSpec
     public byte ReportIdByte => ReportIds.Parse(ReportId);
 }
 
-/// <summary>Issue #56. A persona's feature-report answer table.</summary>
+/// <summary>Issue #56, v2.0.0: the answers a device gives on request, one
+/// table on both transports (design note, mechanism 4). Each entry says
+/// which GET it answers: a plain entry answers the report it names, and a
+/// message entry answers it only while the last SET_FEATURE on its
+/// <c>onReport</c> carried its message. Sony's report-ID answers and
+/// Valve's command channel are both entries of this table.</summary>
 public sealed class FeatureStubSpec
 {
-    /// <summary>How a request selects an entry: <c>"reportId"</c> (the
-    /// default) keys on the request's own report id, <c>"lastMessage"</c>
-    /// on the message id of the SET_REPORT that preceded it, for protocols
-    /// that declare no report ids.</summary>
+    /// <summary>The table-level matching of v1.7.0 to v1.13.0, read so a
+    /// copy of a profile from those releases keeps loading.
+    /// <c>"lastMessage"</c> makes every entry without a <c>message</c> a
+    /// message entry whose message is its <c>id</c>, at
+    /// <see cref="MessageByte"/> of the SET's data on the channel report
+    /// (report 0 for a descriptor without report IDs, else the first
+    /// feature report the descriptor declares), answered on that report
+    /// with the report ID in byte 0. <c>"reportId"</c> is the plain form.
+    /// An entry of either form publishes a feature-read notification, as
+    /// every answer did on USB/IP then. New profiles write the entries'
+    /// own keys.</summary>
     [JsonPropertyName("match")]
-    public string Match { get; set; } = "reportId";
+    public string? Match { get; set; }
 
-    /// <summary>Which byte of a SET_REPORT(Feature) payload carries the
-    /// message id, under <c>match: "lastMessage"</c>. Zero when the
-    /// descriptor declares no report ids and the payload is the message
-    /// outright (Valve's Steam Deck and 2015 Steam Controller); one when a
-    /// report id precedes it (the 2026 Steam Controller, whose command
-    /// channel rides feature report 1).</summary>
+    /// <summary>Under <see cref="Match"/> <c>"lastMessage"</c>, the byte of
+    /// the SET's data that carries the message, its parameter two bytes
+    /// on: 0 for a descriptor without report IDs, 1 when the report ID
+    /// precedes it.</summary>
     [JsonPropertyName("messageByte")]
     public int MessageByte { get; set; }
 
@@ -996,18 +1006,20 @@ public sealed class FeatureStubSpec
     public List<FeatureStubReport> Reports { get; set; } = new();
 }
 
-/// <summary>One feature-report answer.</summary>
+/// <summary>One answer of a <see cref="FeatureStubSpec"/> table.</summary>
 public sealed class FeatureStubReport
 {
-    /// <summary>Report id, or message id under <c>match: "lastMessage"</c>.
-    /// Hex.</summary>
+    /// <summary>The report ID the GET arrives on, hex, 0 for a descriptor
+    /// that declares none. Under the table-level <c>lastMessage</c> form of
+    /// earlier releases, the message ID.</summary>
     [JsonPropertyName("id")]
     public string Id { get; set; } = "";
 
     [JsonIgnore]
     public byte IdByte => ReportIds.Parse(Id);
 
-    /// <summary>The report's wire length. The device pads to it.</summary>
+    /// <summary>The report's wire length, report ID included. The device
+    /// pads to it.</summary>
     [JsonPropertyName("size")]
     public int Size { get; set; }
 
@@ -1017,14 +1029,30 @@ public sealed class FeatureStubReport
     [JsonPropertyName("data")]
     public string? Data { get; set; }
 
-    /// <summary>The message parameter this answer is for, when one message
-    /// carries several. Valve's ID_GET_STRING_ATTRIBUTE (0xAE) takes a
-    /// string index and answers a different string for each, so a persona
-    /// declares one entry per index. Absent means the entry answers the
-    /// message whatever parameter it carried, which is the right reading
-    /// for a message that takes none.</summary>
+    /// <summary>The SET this answer follows: the entry answers only while
+    /// the last SET_FEATURE on <see cref="AnswerMessageSpec.OnReport"/>
+    /// carried <see cref="AnswerMessageSpec.Value"/> at
+    /// <see cref="AnswerMessageSpec.At"/>. Absent for a plain entry, which
+    /// answers its report whatever was set.</summary>
+    [JsonPropertyName("message")]
+    public AnswerMessageSpec? Message { get; set; }
+
+    /// <summary>A further byte of the same SET, the message's parameter,
+    /// when one message has several answers: Valve's
+    /// ID_GET_STRING_ATTRIBUTE (0xAE) answers a different string for each
+    /// index. An entry with a parameter that matches comes before one
+    /// without. Earlier releases wrote a bare number, the byte two after
+    /// the message.</summary>
     [JsonPropertyName("param")]
-    public int? Param { get; set; }
+    [JsonConverter(typeof(AnswerParamConverter))]
+    public AnswerParamSpec? Param { get; set; }
+
+    /// <summary>Answers served in turn by successive GETs after the
+    /// matching SET, hex each, the last one repeating. A SET on the
+    /// message's report starts them again. A message entry only. When
+    /// given, <see cref="Data"/> is left out.</summary>
+    [JsonPropertyName("pages")]
+    public List<string>? Pages { get; set; }
 
     /// <summary>Answer by echoing the message that was written, padded to
     /// <see cref="Size"/>, rather than with a fixed <see cref="Data"/>.
@@ -1033,6 +1061,35 @@ public sealed class FeatureStubReport
     /// a real Steam Deck answering a real Steam client.</summary>
     [JsonPropertyName("echo")]
     public bool Echo { get; set; }
+
+    /// <summary><c>"requestReportId"</c>: byte 0 of the answer is the report
+    /// ID the GET was asked on.</summary>
+    [JsonPropertyName("replyHead")]
+    public string? ReplyHead { get; set; }
+
+    /// <summary>A request shorter than this fails: STATUS_BUFFER_TOO_SMALL
+    /// on UMDF2, a stall on USB/IP. Absent, a shorter request gets the
+    /// answer cut to its length.</summary>
+    [JsonPropertyName("minLength")]
+    public int? MinLength { get; set; }
+
+    /// <summary>The sizes the answer comes in, the largest the caller's
+    /// buffer holds served: report 0x02 of a DualShock 4 is 41 bytes to a
+    /// caller with room for them and 37 to one with 37 to 40. A request
+    /// smaller than the smallest fails.</summary>
+    [JsonPropertyName("sizes")]
+    public List<int>? Sizes { get; set; }
+
+    /// <summary>A CRC-32 the SDK computes over the answer from its report ID,
+    /// after a seed, and writes little-endian in its last four bytes, as a
+    /// Sony pad ends a feature report over Bluetooth.</summary>
+    [JsonPropertyName("crc32")]
+    public AnswerCrcSpec? Crc32 { get; set; }
+
+    /// <summary>Serving the answer publishes a feature-read notification,
+    /// which arms an extended report whose <c>armOn</c> names the read.</summary>
+    [JsonPropertyName("notify")]
+    public bool Notify { get; set; }
 
     /// <summary>v2.0.0: bytes of the answer that differ per controller,
     /// each from a value source (<see cref="AnswerPatchSpec"/>). Absent for
@@ -1051,6 +1108,100 @@ public sealed class FeatureStubReport
     /// <summary>Why this answer is what it is. Documentation only.</summary>
     [JsonPropertyName("comment")]
     public string? Comment { get; set; }
+}
+
+/// <summary>v2.0.0: the SET a message entry follows.</summary>
+public sealed class AnswerMessageSpec
+{
+    /// <summary>The feature report the SET arrives on, hex, 0 for a
+    /// descriptor that declares none.</summary>
+    [JsonPropertyName("onReport")]
+    public string OnReport { get; set; } = "";
+
+    [JsonIgnore]
+    public byte OnReportByte => ReportIds.Parse(OnReport);
+
+    /// <summary>The offset of the message in the SET's data, counted from
+    /// the report ID for a descriptor that declares report IDs and from the
+    /// first data byte for one that declares none.</summary>
+    [JsonPropertyName("at")]
+    public int At { get; set; }
+
+    /// <summary>The message's bytes, hex.</summary>
+    [JsonPropertyName("value")]
+    public string Value { get; set; } = "";
+}
+
+/// <summary>v2.0.0: a message's parameter, one byte of the SET.</summary>
+public sealed class AnswerParamSpec
+{
+    /// <summary>Its offset, counted as <see cref="AnswerMessageSpec.At"/>
+    /// is. Null in the bare-number form of earlier releases, which put it
+    /// two bytes after the message.</summary>
+    [JsonPropertyName("at")]
+    public int? At { get; set; }
+
+    /// <summary>The byte, a number or hex.</summary>
+    [JsonPropertyName("value")]
+    public int Value { get; set; }
+}
+
+/// <summary>Reads <see cref="AnswerParamSpec"/> from an object, or from the
+/// bare number earlier releases wrote.</summary>
+internal sealed class AnswerParamConverter : JsonConverter<AnswerParamSpec>
+{
+    public override AnswerParamSpec? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null) return null;
+        if (reader.TokenType == JsonTokenType.Number) return new AnswerParamSpec { Value = reader.GetInt32() };
+        if (reader.TokenType != JsonTokenType.StartObject) throw new JsonException("param is a number or { at, value }.");
+        var p = new AnswerParamSpec();
+        bool sawValue = false;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+        {
+            string name = reader.GetString()!;
+            if (!seen.Add(name)) throw new JsonException($"param.{name} is written twice.");
+            reader.Read();
+            switch (name.ToLowerInvariant())
+            {
+                case "at": p.At = reader.GetInt32(); break;
+                case "value":
+                    if (reader.TokenType == JsonTokenType.String)
+                    {
+                        string s = reader.GetString()!;
+                        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
+                        if (!byte.TryParse(s, System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out byte b))
+                            throw new JsonException($"param.value \"{reader.GetString()}\" is not a hex byte.");
+                        p.Value = b;
+                    }
+                    else p.Value = reader.GetInt32();
+                    sawValue = true;
+                    break;
+                default: throw new JsonException($"The JSON property 'param.{name}' could not be mapped. param takes at and value.");
+            }
+        }
+        if (!sawValue) throw new JsonException("param needs its value.");
+        return p;
+    }
+
+    public override void Write(Utf8JsonWriter writer, AnswerParamSpec value, JsonSerializerOptions options)
+    {
+        if (value.At == null) { writer.WriteNumberValue(value.Value); return; }
+        writer.WriteStartObject();
+        writer.WriteNumber("at", value.At.Value);
+        writer.WriteString("value", $"{value.Value:X2}");
+        writer.WriteEndObject();
+    }
+}
+
+/// <summary>v2.0.0: the CRC-32 of a feature answer.</summary>
+public sealed class AnswerCrcSpec
+{
+    /// <summary>Bytes the CRC runs over before the answer, hex: <c>A3</c> for
+    /// a Sony feature report over Bluetooth.</summary>
+    [JsonPropertyName("seed")]
+    public string Seed { get; set; } = "";
 }
 
 /// <summary>v2.0.0: bytes of a feature answer that differ per controller

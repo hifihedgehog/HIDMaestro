@@ -204,8 +204,15 @@ internal static class Values
     static void Patches(Checks c)
     {
         var baseTriton = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "steam-controller-2");
-        byte[]? Answer(ControllerProfile p, int index, string? serial, string? file, byte message = 0x83) =>
-            FeatureStubTable.From(p, index, serial, _ => file)?.Lookup(message, 64);
+        // The answer to Steam's message on feature report 1, as Steam asks.
+        byte[]? Answer(ControllerProfile p, int index, string? serial, string? file, byte message = 0x83)
+        {
+            var t = FeatureStubTable.From(p, index, serial, _ => file);
+            if (t == null) return null;
+            t.OnSetFeature(1, new byte[] { 0x01, message, 0x00 });
+            int n = t.Lookup(1, 64, out _);
+            return n < 0 ? null : t.Answer(n).ToArray();
+        }
         uint Stamp(byte[]? a) => a == null ? 0 : BinaryPrimitives.ReadUInt32LittleEndian(a.AsSpan(19));
 
         c.Run("steam-controller-2: with Steam's config, bytes 19 to 22 carry its TRITON_FW_TS", () =>

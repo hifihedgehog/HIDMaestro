@@ -654,8 +654,6 @@ internal sealed class Case4UsbipFeatures : IOracleCase
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", index);
             Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp));
-            Set("_lastFeatureParam", -1);
-            Set("_lastFeaturePayload", Array.Empty<byte>());
             var slots = new int[256];
             Array.Fill(slots, -1);
             Set("_inputSlot", slots);
@@ -914,7 +912,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                             o.AddRange(e);
                         }
                         g.Out($"state.{name}", o.ToArray());
-                        g.Out($"answer-83.{name}", FeatureStubTable.From(triton, 0, null)?.Lookup(0x83, 64) ?? Array.Empty<byte>());
+                        g.Out($"answer-83.{name}", Answer83(FeatureStubTable.From(triton, 0, null)));
                     }
 
                     // Steam writes SteamPath with forward slashes in lower case
@@ -950,6 +948,17 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         }
     }
 
+    /// <summary>Triton's 0x83 answer as Steam asks for it: the message on
+    /// feature report 1, then a GET on that report (empty when it stalls).
+    /// At 9bd6279 this was the table's Lookup(0x83, 64).</summary>
+    static byte[] Answer83(FeatureStubTable? t)
+    {
+        if (t == null) return Array.Empty<byte>();
+        t.OnSetFeature(1, new byte[] { 0x01, 0x83, 0x00 });
+        int n = t.Lookup(1, 64, out _);
+        return n < 0 ? Array.Empty<byte>() : t.Answer(n).ToArray();
+    }
+
     // ── Round 3: the table's refusal of a stamp it cannot place ──────────
 
     /// <summary>FeatureStubTable.From refuses a stamp on an echoed answer, a
@@ -981,12 +990,12 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         {
             var json = JsonSerializer.Serialize(triton, HMJsonContext.Default.ControllerProfile);
             var p = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile)!;
-            var entry = p.FeatureStubs!.Reports.First(r => r.IdByte == 0x83 && r.Patch != null);
+            var entry = p.FeatureStubs!.Reports.First(r => r.Message?.Value == "83" && r.Patch != null);
             edit(entry);
             try
             {
                 var table = FeatureStubTable.From(p, 0, null, _ => "TRITON_FW_TS:6A628345");
-                g.Out($"ok.{name}", table?.Lookup(0x83, 64) ?? Array.Empty<byte>());
+                g.Out($"ok.{name}", Answer83(table));
             }
             catch (Exception e)
             {

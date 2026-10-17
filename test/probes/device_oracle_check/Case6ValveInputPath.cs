@@ -323,8 +323,6 @@ internal sealed class Case6ValveInputPath : IOracleCase
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", 0);
             Set("_stubs", FeatureStubTable.From(p, 0, descriptors.SerialString, _ => null));
-            Set("_lastFeatureParam", -1);
-            Set("_lastFeaturePayload", Array.Empty<byte>());
             inEndpoint = 0;
             inLength = 64;
             foreach (var kv in descriptors.Endpoints)

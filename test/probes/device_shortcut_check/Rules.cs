@@ -335,6 +335,8 @@ internal static class Rules
         new("ValueRootSpec.*", "a keyedHexFile source's roots (ValueSources.Locate), any registry value or known folder"),
         new("FeatureStubReport.Patch", "per-controller bytes of a feature answer from a value source (ValueSources.Apply). The Sony answer models patch the index into their MACs, and Valve's puck patches PROTEUS_FW_TS"),
         new("AnswerPatchSpec.*", "per-controller bytes of a feature answer from a value source (ValueSources.Apply). The Sony answer models patch the index into their MACs, and Valve's puck patches PROTEUS_FW_TS"),
+        new("AnswerMessageSpec.*", "the message a feature answer follows (FeatureStubTable.Find, design note mechanism 4): any report a SET arrives on, any offset and value. steam-controller-2 frames its command channel on report 1, and dualsense-tester's test channel, a SET on DualSense report 0x80 answered on 0x81, is the second device (ds.util.ts:164-211 at ff340fe)"),
+        new("FeatureStubReport.ReplyHead", "an answer that starts with the request's report ID (FeatureStubTable.Answer, mechanism 4), for a command channel on any numbered report. steam-controller-2 sets it on report 1, and the DualSense test channel's answers on 0x81 start with 0x81 the same way (dualsense-tester ds.util.ts:165 at ff340fe)"),
         new("ExtendedReportSpec.Comment", "documentation on a report, read by no code, as on a feature answer"),
         new("HM*Layout.*", "the layout vocabulary of a layout kind (HMLayout.cs), which every profile of that kind fills"),
         new("HMImu.Magnetometer", "the layout vocabulary's IMU description (HMLayout.cs)"),

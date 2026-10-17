@@ -180,10 +180,10 @@ internal static class Program
         Check("profile declares a feature-stub table", stubs != null);
         if (stubs != null)
         {
-            Check("keys on the preceding message, the Deck protocol's rule",
-                  stubs.MatchesLastMessage);
+            Check("every answer follows a message at byte 0 of a SET on report 0, the Deck protocol's rule",
+                  stubs.Entries.All(e => e.IsMessage && e.Id == 0 && e.At == 0 && stubs.OnReports[e.OnSlot] == 0));
 
-            var attr = stubs.Lookup(0x83, 64);
+            var attr = Ask(stubs, 0, 0x83, -1, 64);
             Check("ID_GET_ATTRIBUTES_VALUES (0x83) answers a full 64-byte report",
                   attr != null && attr.Length == 64, $"{attr?.Length ?? 0} bytes");
             if (attr != null)
@@ -204,11 +204,11 @@ internal static class Program
                       AttrValue(attr, 0x04) != 0);
             }
 
-            var serial = stubs.Lookup(0xAE, 64);
+            var serial = Ask(stubs, 0, 0xAE, -1, 64);
             Check("ID_GET_STRING_ATTRIBUTE (0xAE) answers", serial != null && serial.Length == 64);
             Check("a message the device does not implement stalls",
-                  stubs.Lookup(0x99, 64) == null);
-            var shortRead = stubs.Lookup(0x83, 16);
+                  Ask(stubs, 0, 0x99, -1, 64) == null);
+            var shortRead = Ask(stubs, 0, 0x83, -1, 16);
             Check("a short read is truncated, never over-run",
                   shortRead != null && shortRead.Length == 16);
         }
@@ -375,11 +375,11 @@ internal static class Program
 
         var stubs = FeatureStubTable.From(inner, 0, null, _ => null);
         Check("answers ID_GET_ATTRIBUTES_VALUES, which SDL reads before it trusts the pad",
-              stubs != null && stubs.Lookup(0x83, 64) != null);
+              stubs != null && Ask(stubs, 0, 0x83, -1, 64) != null);
         if (stubs == null) return;
-        Check("keyed by the message id in payload byte 0, as this protocol has no report ids",
-              stubs.MessageByte == 0);
-        var a = stubs.Lookup(0x83, 64)!;
+        Check("keyed by the message id at byte 0 of a SET on report 0, as this protocol has no report ids",
+              stubs.Entries.All(e => e.IsMessage && e.Id == 0 && e.At == 0 && stubs.OnReports[e.OnSlot] == 0));
+        var a = Ask(stubs, 0, 0x83, -1, 64)!;
         Check("ATTRIB_PRODUCT_ID reads back 0x1102", AttrValue(a, 0x01) == 0x1102,
               $"0x{AttrValue(a, 0x01):X}");
         Check("ATTRIB_CONNECTION_INTERVAL_IN_US is SDL's 9000us default for this family",
@@ -392,9 +392,9 @@ internal static class Program
               a.Take(2 + a[1]).Where((b, i) => i >= 2 && (i - 2) % 5 == 0)
                .All(t => t != 0x04 && t != 0x0A && t != 0x09));
         Check("ID_GET_STRING_ATTRIBUTE answers rather than stalling, as the real pad does",
-              stubs.Lookup(0xAE, 64) is byte[] str && str[0] == 0xAE && str[1] == 0x14);
+              Ask(stubs, 0, 0xAE, -1, 64) is byte[] str && str[0] == 0xAE && str[1] == 0x14);
         Check("a message the device does not implement stalls rather than answering",
-              stubs.Lookup(0x7F, 64) == null);
+              Ask(stubs, 0, 0x7F, -1, 64) == null);
     }
 
     /// <summary>The 2026 Steam Controller, SDL's Triton: one HID interface
@@ -448,12 +448,12 @@ internal static class Program
         var stubs = FeatureStubTable.From(inner, 0, null, _ => null);
         Check("declares the command-channel answers", stubs != null);
         if (stubs == null) return;
-        Check("keyed by payload byte 1, the byte after Triton's feature report id",
-              stubs.MessageByte == 1);
+        Check("keyed by byte 1 of a SET on feature report 1, the byte after Triton's report id, and answered on report 1 with its id in byte 0",
+              stubs.Entries.All(e => e.IsMessage && e.Id == 1 && e.At == 1 && e.ReplyHead && stubs.OnReports[e.OnSlot] == 1));
 
         // ID_GET_ATTRIBUTES_VALUES. The reply is [report id][0x83][len][25
         // bytes of (tag, u32-LE) records], verbatim from a real 28DE:1302.
-        var a = stubs.Lookup(0x83, 64);
+        var a = Ask(stubs, 1, 0x83, -1, 64);
         Check("0x83 answers at the descriptor's 63-byte report plus its report id",
               a != null && a.Length == 64, a == null ? "stalled" : $"{a.Length} bytes");
         if (a != null)
@@ -474,14 +474,14 @@ internal static class Program
         // differs from the TRITON_FW_TS its config names, so with Steam
         // present the build follows that value and nothing else moves.
         const uint SteamBuild = 0x6A628345;
-        var spec = inner.FeatureStubs!.Reports.First(r => r.IdByte == 0x83).Patch?.FirstOrDefault();
+        var spec = inner.FeatureStubs!.Reports.First(r => r.Message?.Value == "83").Patch?.FirstOrDefault();
         Check("the tracked stamp is the tag-4 record's value, a patch keyed TRITON_FW_TS from Steam's updater config",
               spec != null && spec.Key == "TRITON_FW_TS" && spec.Encoding == "uint32-le" && spec.Length == 4
               && inner.ValueSources?.TryGetValue(spec.Source, out var src) == true && src.Kind == "keyedHexFile"
               && src.Path == @"bin\hardwareupdater\hardwareupdater.cfg" && a != null && a[spec.At - 1] == 0x04,
               spec == null ? "not declared" : $"at {spec.At}, key {spec.Key}, source {spec.Source}");
         var withSteam = FeatureStubTable.From(inner, 0, null, _ => "TRITON_FW_TS:6A628345");
-        var b = withSteam?.Lookup(0x83, 64);
+        var b = withSteam == null ? null : Ask(withSteam, 1, 0x83, -1, 64);
         Check("with Steam present, the firmware build is Steam's TRITON_FW_TS",
               b != null && Attr(b, 3, 25, 0x04) == SteamBuild,
               b == null ? "stalled" : $"0x{Attr(b, 3, 25, 0x04):X}");
@@ -489,9 +489,10 @@ internal static class Program
               a != null && b != null && a.Length == b.Length
               && Enumerable.Range(0, a.Length).All(i => (i >= 19 && i < 23) || a[i] == b[i]));
         Check("a short read carries Steam's build as well",
-              withSteam?.Lookup(0x83, 23) is byte[] shortB && shortB.Length == 23
+              withSteam != null && Ask(withSteam, 1, 0x83, -1, 23) is byte[] shortB && shortB.Length == 23
               && BitConverter.ToUInt32(shortB, 19) == SteamBuild);
-        var otherFamily = FeatureStubTable.From(inner, 0, null, _ => "PROTEUS_FW_TS:6A628359")?.Lookup(0x83, 64);
+        var otherTable = FeatureStubTable.From(inner, 0, null, _ => "PROTEUS_FW_TS:6A628359");
+        var otherFamily = otherTable == null ? null : Ask(otherTable, 1, 0x83, -1, 64);
         Check("a build Steam names only for another family leaves the capture",
               otherFamily != null && Attr(otherFamily, 3, 25, 0x04) == 0x6A18D057);
 
@@ -510,26 +511,26 @@ internal static class Program
 
         // ID_GET_STRING_ATTRIBUTE takes an index and answers a different
         // string for each, so the persona declares one entry per index.
-        var s3 = stubs.Lookup(0xAE, 3, 64);
+        var s3 = Ask(stubs, 1, 0xAE, 3, 64);
         Check("0xAE index 3 is the Valve constant Steam checks",
               s3 != null && s3[3] == 3 && Ascii(s3, 4) == "7054257d2da7",
               s3 == null ? "stalled" : $"idx={s3![3]} '{Ascii(s3, 4)}'");
-        var s1 = stubs.Lookup(0xAE, 1, 64);
+        var s1 = Ask(stubs, 1, 0xAE, 1, 64);
         Check("0xAE index 1 is a unit serial in Valve's own format",
               s1 != null && s1[3] == 1 && Ascii(s1, 4).StartsWith("FXA", StringComparison.Ordinal),
               s1 == null ? "stalled" : $"idx={s1![3]} '{Ascii(s1, 4)}'");
         Check("index 0 and index 1 are different strings, as board and unit serial are",
-              s1 != null && stubs.Lookup(0xAE, 0, 64) is byte[] s0
+              s1 != null && Ask(stubs, 1, 0xAE, 0, 64) is byte[] s0
               && s0[3] == 0 && Ascii(s0, 4) != Ascii(s1, 4));
-        var s9 = stubs.Lookup(0xAE, 9, 64);
+        var s9 = Ask(stubs, 1, 0xAE, 9, 64);
         Check("an index the device has no string for reads 0xFF, Steam's not-provisioned marker",
               s9 != null && s9[3] == 0xFF, s9 == null ? "stalled" : $"0x{s9![3]:X2}");
 
-        var w = stubs.Lookup(0xB4, 64);
+        var w = Ask(stubs, 1, 0xB4, -1, 64);
         Check("0xB4 reports the wired transport with no radio link",
               w != null && w[1] == 0xB4 && w[2] == 0x01 && w[3] == 0x01);
         Check("a message the device does not implement stalls rather than answering",
-              stubs.Lookup(0x7F, 64) == null);
+              Ask(stubs, 1, 0x7F, -1, 64) == null);
     }
 
     /// <summary>Read a (tag, u32-LE) attribute record out of a reply's
@@ -544,6 +545,23 @@ internal static class Program
     }
 
     /// <summary>The NUL-terminated ASCII run at an offset.</summary>
+    /// <summary>The answer to a message, asked as a host asks it: a SET of
+    /// the message on the channel report, framed as Valve frames its command
+    /// channel ([message][length][parameters...], after the report ID when
+    /// the channel has one), then a GET on that report. A parameter of -1
+    /// writes none. Null when the device stalls.</summary>
+    static byte[]? Ask(FeatureStubTable t, byte channel, byte message, int param, int wLength)
+    {
+        int at = channel == 0 ? 0 : 1;
+        var set = new byte[at + (param >= 0 ? 3 : 2)];
+        if (channel != 0) set[0] = channel;
+        set[at] = message;
+        if (param >= 0) set[at + 2] = (byte)param;
+        t.OnSetFeature(channel, set);
+        int n = t.Lookup(channel, wLength, out _);
+        return n < 0 ? null : t.Answer(n).ToArray();
+    }
+
     static string Ascii(byte[] b, int off)
     {
         int end = off;

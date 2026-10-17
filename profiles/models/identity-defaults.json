@@ -12,6 +12,42 @@
       "comment": "A DualShock 3 in the sixaxis form, gated on the sixaxisCompatible key (the Ds3Sixaxis value the driver read at 9bd6279).",
       "match": { "keys": { "sixaxisCompatible": true } },
       "model": "dualshock-3-full"
+    },
+    {
+      "name": "sony-dualshock4-bt",
+      "comment": "Sony's feature answers, the DualShock 4 branch: report 0x05's DualShock 4 order for 05C4, 09CC and 0BA0, with the Bluetooth CRC for a Bluetooth profile (driver.c's Sony table at 9bd6279, gated on VID 054C).",
+      "match": { "vid": "0x054C", "pid": [ "0x05C4", "0x09CC", "0x0BA0" ], "connection": "bluetooth" },
+      "model": "sony-dualshock4-bt"
+    },
+    {
+      "name": "sony-dualshock4",
+      "comment": "The same over USB, no CRC.",
+      "match": { "vid": "0x054C", "pid": [ "0x05C4", "0x09CC", "0x0BA0" ] },
+      "model": "sony-dualshock4"
+    },
+    {
+      "name": "sony-dualsense-edge-bt",
+      "comment": "Sony's feature answers, the Edge branch: report 0x20's firmware line for 0DF2, with the Bluetooth CRC.",
+      "match": { "vid": "0x054C", "pid": "0x0DF2", "connection": "bluetooth" },
+      "model": "sony-dualsense-edge-bt"
+    },
+    {
+      "name": "sony-dualsense-edge",
+      "comment": "The same over USB, no CRC.",
+      "match": { "vid": "0x054C", "pid": "0x0DF2" },
+      "model": "sony-dualsense-edge"
+    },
+    {
+      "name": "sony-dualsense-bt",
+      "comment": "Sony's feature answers for every other Sony PID, the DualSense default, with the Bluetooth CRC.",
+      "match": { "vid": "0x054C", "connection": "bluetooth" },
+      "model": "sony-dualsense-bt"
+    },
+    {
+      "name": "sony-dualsense",
+      "comment": "The same over USB, no CRC.",
+      "match": { "vid": "0x054C" },
+      "model": "sony-dualsense"
     }
   ]
 }

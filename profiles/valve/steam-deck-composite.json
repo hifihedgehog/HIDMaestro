@@ -13,38 +13,73 @@
   "inputReportSize": 64,
   "notes": "Issue #56, from PadForge discussion #337. The Steam Deck's controller at 28DE:1205 on the usbip backend, reproduced from a real unit's lsusb dump rather than assembled: bcdDevice 3.00, iProduct 'Steam Controller', a serial string at index 3, bmAttributes 0x80 bus-powered, iConfiguration 4, wTotalLength 150 and FIVE interfaces. Mouse on 0 (EP 0x81), keyboard on 1 (EP 0x82, boot protocol), the vendor-page controller on 2 (EP 0x83, 64-byte reports), then an Interface Association Descriptor and the CDC ACM pair on 3 and 4. An earlier revision of this profile carried three interfaces, bcdDevice 2.00 and the product string 'Steam Deck Controller', taken from a different unit's dump with the CDC pair dropped as 'carrying no controller data'. Steam claimed that device, read its attributes and named it, then decoded every input as zero, because the identity it inspects is the whole configuration and not just the controller interface. The 64-byte Neptune frame (ID_CONTROLLER_DECK_STATE, header 01 00 09 40) is packed by extendedReport from SteamDeckStatePacket_t and cross-checked against a real Deck capture; featureStubs answer the GET_REPORT interrogation Steam performs before it claims the device.",
   "featureStubs": {
-    "match": "lastMessage",
     "reports": [
       {
-        "id": "0x83",
+        "id": "0x00",
+        "message": {
+          "onReport": "0x00",
+          "at": 0,
+          "value": "83"
+        },
         "size": 64,
-        "comment": "ID_GET_ATTRIBUTES_VALUES. Nine (tag, u32-LE) records, verbatim from hhd's virtual Steam Deck (hhd_virtual_sd.py), which current Steam accepts on non-Deck handhelds. A real Deck capture from 2023 was used here first; it carries the same nine tags but an older firmware build time and board revision, and Steam reads both back (Controller Info: HWID, FWTimestamp in controller.txt). Matching the reference implementation's values removes firmware vintage as a variable.",
-        "data": "832d010512000002000000000a2b12a96204b7617c67092e0000000ba00f00000d000000000c000000000e00000000"
+        "data": "832d010512000002000000000a2b12a96204b7617c67092e0000000ba00f00000d000000000c000000000e00000000",
+        "notify": true,
+        "comment": "ID_GET_ATTRIBUTES_VALUES. Nine (tag, u32-LE) records, verbatim from hhd's virtual Steam Deck (hhd_virtual_sd.py), which current Steam accepts on non-Deck handhelds. A real Deck capture from 2023 was used here first; it carries the same nine tags but an older firmware build time and board revision, and Steam reads both back (Controller Info: HWID, FWTimestamp in controller.txt). Matching the reference implementation's values removes firmware vintage as a variable."
       },
       {
-        "id": "0xAE",
-        "param": 0,
+        "id": "0x00",
+        "message": {
+          "onReport": "0x00",
+          "at": 0,
+          "value": "AE"
+        },
+        "param": {
+          "at": 2,
+          "value": "00"
+        },
         "size": 64,
-        "comment": "ATTRIB_STR_BOARD_SERIAL. Steam asks for this index by name during the claim, so it needs its own answer: a real Deck returns [0xAE][0x14][index][12-char serial], zero-padded. The 4-char model prefix is the real one; the 8-char tail that identifies an individual unit is not, because a captured serial is device-unique and does not belong in a shipped profile.",
-        "data": "ae14004d4844413030303030303031"
+        "data": "ae14004d4844413030303030303031",
+        "notify": true,
+        "comment": "ATTRIB_STR_BOARD_SERIAL. Steam asks for this index by name during the claim, so it needs its own answer: a real Deck returns [0xAE][0x14][index][12-char serial], zero-padded. The 4-char model prefix is the real one; the 8-char tail that identifies an individual unit is not, because a captured serial is device-unique and does not belong in a shipped profile."
       },
       {
-        "id": "0xAE",
-        "param": 1,
+        "id": "0x00",
+        "message": {
+          "onReport": "0x00",
+          "at": 0,
+          "value": "AE"
+        },
+        "param": {
+          "at": 2,
+          "value": "01"
+        },
         "size": 64,
-        "comment": "ATTRIB_STR_UNIT_SERIAL, index 1. Steam reads index 1 and index 0 back to back, and the two must differ and each echo the index asked for. Answering both from one entry, as this profile did before, is what left Steam re-asking.",
-        "data": "ae1401465831413030303030303031"
+        "data": "ae1401465831413030303030303031",
+        "notify": true,
+        "comment": "ATTRIB_STR_UNIT_SERIAL, index 1. Steam reads index 1 and index 0 back to back, and the two must differ and each echo the index asked for. Answering both from one entry, as this profile did before, is what left Steam re-asking."
       },
       {
-        "id": "0xAE",
+        "id": "0x00",
+        "message": {
+          "onReport": "0x00",
+          "at": 0,
+          "value": "AE"
+        },
         "size": 64,
-        "comment": "SDL declares only ATTRIB_STR_BOARD_SERIAL (0) and ATTRIB_STR_UNIT_SERIAL (1). Any other index reads back 0xFF where the index would be, the not-provisioned marker.",
-        "data": "ae14ff"
+        "data": "ae14ff",
+        "notify": true,
+        "comment": "SDL declares only ATTRIB_STR_BOARD_SERIAL (0) and ATTRIB_STR_UNIT_SERIAL (1). Any other index reads back 0xFF where the index would be, the not-provisioned marker."
       },
       {
-        "id": "0x87",
+        "id": "0x00",
+        "message": {
+          "onReport": "0x00",
+          "at": 0,
+          "value": "87"
+        },
         "size": 64,
         "echo": true,
+        "notify": true,
         "comment": "ID_SET_SETTINGS_VALUES reads back as the settings block the host just wrote. Verified on a real Steam Deck answering a real Steam client: five SET/GET pairs in that capture, every reply byte-identical to its write. Steam performs this read during the claim, and a device that stalls it never finishes being claimed."
       }
     ]

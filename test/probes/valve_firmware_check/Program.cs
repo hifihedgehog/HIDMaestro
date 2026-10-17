@@ -85,7 +85,16 @@ internal static class Program
 
         // The serial the updater reports is the unit serial the persona
         // serves at string index 1.
-        var served = FeatureStubTable.From(profile.Inner, 0, null, _ => null)?.Lookup(0xAE, 1, 64);
+        // Asked as Steam asks it: ID_GET_STRING_ATTRIBUTE with index 1 on
+        // feature report 1, then a GET on that report.
+        var table = FeatureStubTable.From(profile.Inner, 0, null, _ => null);
+        byte[]? served = null;
+        if (table != null)
+        {
+            table.OnSetFeature(1, new byte[] { 0x01, 0xAE, 0x00, 0x01 });
+            int n = table.Lookup(1, 64, out _);
+            if (n > 0) served = table.Answer(n).ToArray();
+        }
         string serial = served == null ? "" : Ascii(served, 4);
         Check("the persona serves a unit serial", serial.Length > 0, serial);
         if (serial.Length == 0) return Finish();

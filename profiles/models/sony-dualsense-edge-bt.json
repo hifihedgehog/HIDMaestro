@@ -1,0 +1,91 @@
+{
+  "id": "sony-dualsense-edge-bt",
+  "comment": "The feature answers of the DualSense Edge, PID 0DF2, over Bluetooth, byte for byte the table the UMDF2 driver held in code through v1.13.0 (driver.c at 9bd6279) and the USB/IP copy of it. Every answer publishes a feature-read notification, which arms a Bluetooth pad's extended report. Over Bluetooth reports 0x05, 0x09 and 0x20 end in the CRC-32 hid-playstation.c and RPCS3 check, seed 0xA3 then the report from its ID (issue #64).",
+  "featureStubs": {
+    "reports": [
+      {
+        "id": "0x05",
+        "size": 41,
+        "minLength": 41,
+        "data": "05000000000000401FC0E0401FC0E0401FC0E0F401F401002000E0002000E0002000E0",
+        "notify": true,
+        "comment": "Motion calibration, 41 bytes: the identity calibration for the pad's nominal units, 8192 per g and 16 per degree per second, bias at 1 to 6, gyro plus and minus at 7 to 18, speed at 19 to 22, accel at 23 to 34 (hid-playstation.c). The DualSense orders the gyro pairs pitch+ pitch- yaw+ yaw- roll+ roll-.",
+        "crc32": {
+          "seed": "A3"
+        }
+      },
+      {
+        "id": "0x09",
+        "size": 20,
+        "minLength": 20,
+        "data": "0902484D000000",
+        "notify": true,
+        "patch": [
+          {
+            "at": 6,
+            "length": 1,
+            "encoding": "uint8",
+            "source": "index"
+          }
+        ],
+        "comment": "Pairing info, 20 bytes, which hid-playstation.c requires exactly. The MAC at 1 to 6 is 02:48:4D:00:00:<index>, locally administered so it cannot collide with a real pad's, and stable per controller.",
+        "crc32": {
+          "seed": "A3"
+        }
+      },
+      {
+        "id": "0x20",
+        "size": 64,
+        "minLength": 64,
+        "data": "204A756C202034203230323531303A31303A333203004400101300002A00100101C800000000000000000000170200003C0001000A0002000600000000000000",
+        "notify": true,
+        "comment": "Firmware info, 64 bytes, captured from a real wired DualSense during an F1 22 startup trace (issue #43): build date \"Jul  4 2025\" and time \"10:10:32\", fwType 3, hwInfo 0x1310 and the firmware versions. F1 22 validates this blob and abandons a pad that answers zeros. A DualSense Edge is another firmware line: Sony's updater data records it as type 0x0044 at version 0x0217 where the base pad is type 0x0004 at 0x0630 (Paliverse/DualSense-List-of-Firmwares), so bytes 22 and 44 carry those. The rest is the base pad's capture, since no dump of an Edge's report exists.",
+        "crc32": {
+          "seed": "A3"
+        }
+      },
+      {
+        "id": "0x12",
+        "size": 16,
+        "minLength": 16,
+        "data": "1202484D000000",
+        "notify": true,
+        "patch": [
+          {
+            "at": 6,
+            "length": 1,
+            "encoding": "uint8",
+            "source": "index"
+          }
+        ],
+        "comment": "DualShock 4 pairing info over USB, 16 bytes, the MAC as in report 0x09. hid-playstation.c fails the device without it, and SDL's ReadWiredSerial needs a nonzero MAC."
+      },
+      {
+        "id": "0x22",
+        "size": 64,
+        "minLength": 64,
+        "data": "22",
+        "notify": true,
+        "comment": "Bluetooth patch info, 64 bytes. Zero past the report ID is a pad that carries no patch, which dualsense-tester reads after report 0x20 opens its traceability branch."
+      },
+      {
+        "id": "0x02",
+        "sizes": [
+          41,
+          37
+        ],
+        "data": "02000000000000401FC0E0401FC0E0401FC0E0F401F401002000E0002000E0002000E0",
+        "notify": true,
+        "comment": "DualShock 4 calibration over USB, 37 bytes, or 41 for a caller whose buffer holds them, in the DualSense order. Only USB hosts parse it."
+      },
+      {
+        "id": "0xA3",
+        "size": 49,
+        "minLength": 49,
+        "data": "A34175672020332032303133000000000030373A30313A3132000000000000000000010031030000004900050000800300",
+        "notify": true,
+        "comment": "DualShock 4 firmware and hardware info, 49 bytes, verbatim from WinUHid's WinUHidPS4.cpp: build date \"Aug  3 2013\" and time \"07:01:12\", then the hardware and firmware words."
+      }
+    ]
+  }
+}

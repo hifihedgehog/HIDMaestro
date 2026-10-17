@@ -16,61 +16,134 @@
     "steamUpdater": {
       "kind": "keyedHexFile",
       "roots": [
-        { "registry": "HKCU\\Software\\Valve\\Steam", "value": "SteamPath" },
-        { "registry": "HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam", "value": "InstallPath" },
-        { "knownFolder": "ProgramFilesX86", "path": "Steam" }
+        {
+          "registry": "HKCU\\Software\\Valve\\Steam",
+          "value": "SteamPath"
+        },
+        {
+          "registry": "HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam",
+          "value": "InstallPath"
+        },
+        {
+          "knownFolder": "ProgramFilesX86",
+          "path": "Steam"
+        }
       ],
       "path": "bin\\hardwareupdater\\hardwareupdater.cfg"
     }
   },
   "featureStubs": {
-    "match": "lastMessage",
-    "messageByte": 1,
     "reports": [
       {
-        "id": "0x83",
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "83"
+        },
         "size": 64,
-        "comment": "ID_GET_ATTRIBUTES_VALUES. The 25-byte attribute blob verbatim from a real 28DE:1302 (OpenPuck ReversePuckFirmware/identity.cpp, read with 'scmd 1302 --up 1 83'). As (tag, u32-LE) records: 01 product 0x1302, 02 capabilities, 0A bootloader build 0x68D2F92E, 04 firmware build 0x6A18D057, 09 board revision 0x48. The firmware build at offset 19 follows TRITON_FW_TS in Steam's hardwareupdater.cfg (issue #62). Steam's updater lists a controller whose build differs from that value in either direction, and a real unit that has taken the update reports exactly that value. Without Steam the captured build stands. Every other byte is the capture's, and all of them are firmware and model values shared across units rather than per-device ones.",
         "data": "018319010213000002000000000a2ef9d2680457d0186a0948000000",
-        "patch": [ { "at": 19, "length": 4, "encoding": "uint32-le", "source": "steamUpdater", "key": "TRITON_FW_TS" } ]
+        "patch": [
+          {
+            "at": 19,
+            "length": 4,
+            "encoding": "uint32-le",
+            "source": "steamUpdater",
+            "key": "TRITON_FW_TS"
+          }
+        ],
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "ID_GET_ATTRIBUTES_VALUES. The 25-byte attribute blob verbatim from a real 28DE:1302 (OpenPuck ReversePuckFirmware/identity.cpp, read with 'scmd 1302 --up 1 83'). As (tag, u32-LE) records: 01 product 0x1302, 02 capabilities, 0A bootloader build 0x68D2F92E, 04 firmware build 0x6A18D057, 09 board revision 0x48. The firmware build at offset 19 follows TRITON_FW_TS in Steam's hardwareupdater.cfg (issue #62). Steam's updater lists a controller whose build differs from that value in either direction, and a real unit that has taken the update reports exactly that value. Without Steam the captured build stands. Every other byte is the capture's, and all of them are firmware and model values shared across units rather than per-device ones."
       },
       {
-        "id": "0xAE",
-        "param": 0,
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "AE"
+        },
+        "param": {
+          "at": 3,
+          "value": "00"
+        },
         "size": 64,
-        "comment": "ID_GET_STRING_ATTRIBUTE index 0, the board serial, in Valve's own format.",
-        "data": "01ae14004d584139393630323030303031"
+        "data": "01ae14004d584139393630323030303031",
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "ID_GET_STRING_ATTRIBUTE index 0, the board serial, in Valve's own format."
       },
       {
-        "id": "0xAE",
-        "param": 1,
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "AE"
+        },
+        "param": {
+          "at": 3,
+          "value": "01"
+        },
         "size": 64,
-        "comment": "Index 1, the unit serial. Constant, as every serial this catalog ships is.",
-        "data": "01ae140146584139393630323030303031"
+        "data": "01ae140146584139393630323030303031",
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "Index 1, the unit serial. Constant, as every serial this catalog ships is."
       },
       {
-        "id": "0xAE",
-        "param": 3,
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "AE"
+        },
+        "param": {
+          "at": 3,
+          "value": "03"
+        },
         "size": 64,
-        "comment": "Index 3 is the one Steam actually checks: the Valve constant 7054257d2da7, the same on every real unit.",
-        "data": "01ae1403373035343235376432646137"
+        "data": "01ae1403373035343235376432646137",
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "Index 3 is the one Steam actually checks: the Valve constant 7054257d2da7, the same on every real unit."
       },
       {
-        "id": "0xAE",
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "AE"
+        },
         "size": 64,
-        "comment": "Any other index reads back 0xFF where the index would be, which is how a real unit says the string is not provisioned: Steam's own hardwareupdater tests that byte for 0xFF (CouchTurtle/sc2-research tools/attr_query.py, read out of the shipped updater bundle).",
-        "data": "01ae14ff"
+        "data": "01ae14ff",
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "Any other index reads back 0xFF where the index would be, which is how a real unit says the string is not provisioned: Steam's own hardwareupdater tests that byte for 0xFF (CouchTurtle/sc2-research tools/attr_query.py, read out of the shipped updater bundle)."
       },
       {
-        "id": "0xB4",
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "B4"
+        },
         "size": 64,
-        "comment": "Wireless transport state. 0x01 = wired, no radio link up.",
-        "data": "01b40101"
+        "data": "01b40101",
+        "replyHead": "requestReportId",
+        "notify": true,
+        "comment": "Wireless transport state. 0x01 = wired, no radio link up."
       },
       {
-        "id": "0x87",
+        "id": "0x01",
+        "message": {
+          "onReport": "0x01",
+          "at": 1,
+          "value": "87"
+        },
         "size": 64,
         "echo": true,
+        "replyHead": "requestReportId",
+        "notify": true,
         "comment": "ID_SET_SETTINGS_VALUES reads back as the settings block the host just wrote. Verified on a real Steam Deck answering a real Steam client: five SET/GET pairs in that capture, every reply byte-identical to its write. Steam performs this read during the claim, and a device that stalls it never finishes being claimed. Triton's channel rides feature report 1, so the echo carries that report id back too."
       }
     ]

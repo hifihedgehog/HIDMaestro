@@ -24,12 +24,10 @@ namespace HIDMaestro.Internal.Usbip;
 /// (reserve Head atomically, fill the slot, fence, publish slot.SeqNo,
 /// doorbell last), so <c>HMController.OutputReceived</c> and
 /// <c>OutputDecoded</c> fire identically to the UMDF2 path.</item>
-/// <item>Feature reads: the Sony Get_Feature table is driver.c's, byte for
-/// byte (0x05/41 and 0x02/37-41 carrying the neutral calibration, 0x09/20
-/// and 0x12/16 with the synthetic MAC for DS5 and DS4 respectively,
-/// 0x20/64 and 0xA3/49 carrying real firmware info, 0x22/64 answering the
-/// Bluetooth-patch read, VID 0x054C gated), including the HID_FEATURE_READ
-/// ring notification that drives the extendedReport.armOn watcher.</item>
+/// <item>Feature reads: the profile's answer table
+/// (<see cref="FeatureStubTable"/>), the one table the UMDF2 driver serves
+/// as well, including the HID_FEATURE_READ ring notification that drives
+/// the extendedReport.armOn watcher for an entry that publishes one.</item>
 /// </list>
 ///
 /// <para>PID FFB feature serving is deliberately absent here: no usbip
@@ -97,8 +95,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// after that, so its connection's reader ends the connection.</summary>
     internal bool IsDisposed => _stop;
 
-    /// <summary>Controller index, kept so the synthetic pairing MAC in
-    /// BuildFeatureStub is stable and unique per controller (#43).</summary>
+    /// <summary>The controller's transport index.</summary>
     private readonly int _index;
     public uint Devid { get; }
 
@@ -185,18 +182,11 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
     /// a secondary HID interface and simply parks its reads.</summary>
     private readonly byte _primaryInEndpoint;
 
-    /// <summary>Profile-declared feature-report answers (issue #56), and the
-    /// state one needs. Sony's stubs are keyed by report id; the Steam
-    /// Deck's protocol has no report ids and instead answers GET_REPORT
-    /// according to the message id of the SET_REPORT that preceded it, which
-    /// is what <c>match: "lastMessage"</c> selects.</summary>
+    /// <summary>The answers the device gives on request (issue #56, design
+    /// note mechanism 4), compiled for this controller: plain entries by
+    /// report ID, message entries by the last SET on their report, which the
+    /// table keeps itself. Null for a profile with none.</summary>
     private readonly FeatureStubTable? _stubs;
-    private byte _lastFeatureMessage;
-    private int _lastFeatureParam = -1;
-    // The last such SET_REPORT's data, copied in place: the reader's buffer
-    // it arrived in is reused for the next transfer.
-    private byte[] _lastFeaturePayload = Array.Empty<byte>();
-    private int _lastFeatureLength;
 
     // Buffer lengths of parked bulk IN reads, by seqnum, for a protocol
     // whose replies go out on a bulk IN endpoint. The seqnums park in
@@ -1035,11 +1025,14 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 }
                 if (reportType == 0x03)
                 {
-                    var stub = BuildFeatureStub(reportId, wLength);
-                    if (stub == null) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
-                    PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
-                    int n = Math.Min(stub.Length, wLength);
-                    SendRetSubmit(cmd.Seqnum, 0, n, stub.AsSpan(0, n).ToArray());
+                    // An answer the table holds, cut to what the host asked
+                    // for. No entry, or a request shorter than the entry
+                    // serves, stalls, as a real device does.
+                    bool notify = false;
+                    int n = _stubs?.Lookup(reportId, wLength, out notify) ?? -1;
+                    if (n < 0) { SendError(cmd.Seqnum, -UsbipProtocol.EPipe); return; }
+                    if (notify) PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
+                    SendRetSubmitSpan(cmd.Seqnum, 0, n, _stubs!.Answer(n));
                     return;
                 }
                 break;
@@ -1069,27 +1062,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     : null;
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
                 var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
-                // A protocol whose feature reports carry no report id (the
-                // Steam Deck's) answers the NEXT GET_REPORT according to
-                // the message this write opened. MessageByte says where
-                // that message id sits: byte 0 when the descriptor declares
-                // no report ids at all, byte 1 when one precedes it.
-                if (reportType == 0x03 && _stubs != null && _stubs.MatchesLastMessage
-                    && payload.Length > _stubs.MessageByte)
-                {
-                    _lastFeatureMessage = payload[_stubs.MessageByte];
-                    // Valve frames a command-channel write as
-                    // [message][length][parameters...], so the message's
-                    // first parameter is two bytes on. It selects the
-                    // answer for a message carrying several, which
-                    // ID_GET_STRING_ATTRIBUTE does.
-                    int paramAt = _stubs.MessageByte + 2;
-                    _lastFeatureParam = payload.Length > paramAt ? payload[paramAt] : -1;
-                    if (_lastFeaturePayload.Length < payload.Length)
-                        _lastFeaturePayload = new byte[payload.Length];
-                    payload.CopyTo(_lastFeaturePayload);
-                    _lastFeatureLength = payload.Length;
-                }
+                // The data a message entry follows, as the SET carried it:
+                // from the report ID for a descriptor that declares report
+                // IDs, from the first data byte for one that declares none.
+                if (reportType == 0x03) _stubs?.OnSetFeature(reportId, payload);
                 // After the answer table has read the write, the command goes
                 // to the ring as every protocol's commands do: as the host
                 // sent it, as the report its rule emits, or not at all when
@@ -1112,198 +1088,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
         // a real one stalls these.
         SendError(cmd.Seqnum, -UsbipProtocol.EPipe);
     }
-
-    /// <summary>driver.c's Sony Get_Feature stub table
-    /// (IOCTL_UMDF_HID_GET_FEATURE handler), sized against wLength the way
-    /// the driver sizes against the IOCTL output buffer.</summary>
-    private byte[]? BuildFeatureStub(byte reportId, ushort wLength)
-    {
-        // Profile-declared stubs win (issue #56): a persona whose feature
-        // protocol is its own carries the answers as data rather than as a
-        // branch in here. The Sony table below stays code because it
-        // synthesizes per-controller values (the pairing MAC) rather than
-        // serving constants.
-        if (_stubs != null)
-        {
-            byte key = _stubs.MatchesLastMessage ? _lastFeatureMessage : reportId;
-            var declared = _stubs.Lookup(key, _lastFeatureParam, wLength,
-                _lastFeaturePayload.AsSpan(0, _lastFeatureLength));
-            if (declared != null)
-            {
-                // A protocol riding report ids answers with the id it was
-                // asked on in byte 0, the shape the Sony table below builds
-                // by hand. MessageByte is that prefix's width, and is zero
-                // for a protocol declaring no report ids at all.
-                if (_stubs.MessageByte > 0 && declared.Length > 0) declared[0] = reportId;
-                return declared;
-            }
-        }
-
-        if (Descriptors.VendorId != 0x054C) return null;
-        switch (reportId)
-        {
-            case 0x05:
-                if (wLength < 41) return null;
-                {
-                    // A DS4 orders this report's gyro pairs differently from
-                    // the DualSense, exactly as driver.c serves it. Every
-                    // composite persona is USB, so no Bluetooth CRC.
-                    ushort pid = Descriptors.ProductId;
-                    bool ds4 = pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0;
-                    var p = new byte[41];
-                    p[0] = reportId;
-                    (ds4 ? SonyCalibrationDs4Bt : SonyCalibration).CopyTo(p, 1);
-                    return p;
-                }
-            case 0x09:
-                if (wLength < 20) return null;
-                {
-                    var p = new byte[20];
-                    p[0] = reportId;
-                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
-                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
-                    return p;
-                }
-            case 0x20:
-                if (wLength < 64) return null;
-                {
-                    var p = (byte[])Ds5FirmwareInfo.Clone();
-                    // DualSense Edge is a different firmware line: Sony's
-                    // updater data records the base pad as type 0x0004 and
-                    // the Edge as type 0x0044. See driver.c for why those
-                    // two offsets are identified rather than guessed, and
-                    // for what in this blob is still the base pad's.
-                    if (Descriptors.ProductId == 0x0DF2)
-                    {
-                        p[22] = 0x44; p[23] = 0x00;   // swSeries      0x0044
-                        p[44] = 0x17; p[45] = 0x02;   // updateVersion 0x0217
-                    }
-                    return p;
-                }
-            case 0x12:
-                // DS4 pairing info over USB. The DS4's equivalent of 0x09,
-                // and the one Sony read whose absence is fatal rather than
-                // cosmetic: hid-playstation's caller aborts device creation
-                // when it fails. MAC at bytes 1..6, non-zero, locally
-                // administered, matching the 0x09 path exactly.
-                if (wLength < 16) return null;
-                {
-                    var p = new byte[16];
-                    p[0] = reportId;
-                    p[1] = 0x02; p[2] = 0x48; p[3] = 0x4D; // locally administered, 'H' 'M'
-                    p[4] = 0x00; p[5] = 0x00; p[6] = (byte)_index;
-                    return p;
-                }
-            case 0x22:
-                // Bluetooth patch info. Zero past the report ID is the real
-                // answer for a pad carrying no patch, and dualsense-tester
-                // skips the row on a falsy value. It only has to exist
-                // because the real 0x20 above opens the traceability branch
-                // that reads it; see driver.c for the full reasoning.
-                if (wLength < 64) return null;
-                { var p = new byte[64]; p[0] = reportId; return p; }
-            case 0x02:
-                if (wLength >= 41) { var p = new byte[41]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
-                if (wLength >= 37) { var p = new byte[37]; p[0] = reportId; SonyCalibration.CopyTo(p, 1); return p; }
-                return null;
-            case 0xA3:
-                if (wLength < 49) return null;
-                { var p = (byte[])Ds4FirmwareInfo.Clone(); return p; }
-            default:
-                return null;
-        }
-    }
-
-    /// <summary>Sony motion calibration, byte-for-byte the same payload
-    /// driver.c serves (g_SonyCalibration, issues #43 and #64). Written at
-    /// offset 1, after the report id. It is the identity calibration for
-    /// the pad's nominal units, 8192 per g and 16 per degree/second.
-    /// driver.c shows the arithmetic in each reader. The composite lane must
-    /// not diverge from the UMDF2 lane here: a consumer reading calibration
-    /// from a composite persona has to see exactly what it sees from the
-    /// plain profile, or the two backends disagree about the same
-    /// device.</summary>
-    private static readonly byte[] SonyCalibration =
-    {
-        0x00, 0x00,  // gyro_pitch_bias
-        0x00, 0x00,  // gyro_yaw_bias
-        0x00, 0x00,  // gyro_roll_bias
-        0x40, 0x1F,  // gyro_pitch_plus    +8000
-        0xC0, 0xE0,  // gyro_pitch_minus   -8000
-        0x40, 0x1F,  // gyro_yaw_plus      +8000
-        0xC0, 0xE0,  // gyro_yaw_minus     -8000
-        0x40, 0x1F,  // gyro_roll_plus     +8000
-        0xC0, 0xE0,  // gyro_roll_minus    -8000
-        0xF4, 0x01,  // gyro_speed_plus     +500
-        0xF4, 0x01,  // gyro_speed_minus    +500
-        0x00, 0x20,  // acc_x_plus         +8192
-        0x00, 0xE0,  // acc_x_minus        -8192
-        0x00, 0x20,  // acc_y_plus         +8192
-        0x00, 0xE0,  // acc_y_minus        -8192
-        0x00, 0x20,  // acc_z_plus         +8192
-        0x00, 0xE0,  // acc_z_minus        -8192
-    };
-
-    /// <summary>The same calibration in a DualShock 4's report 0x05 order,
-    /// pitch+ yaw+ roll+ then pitch- yaw- roll-, byte-for-byte driver.c's
-    /// g_SonyCalibrationDs4Bt (issue #64).</summary>
-    private static readonly byte[] SonyCalibrationDs4Bt =
-    {
-        0x00, 0x00,  // gyro_pitch_bias
-        0x00, 0x00,  // gyro_yaw_bias
-        0x00, 0x00,  // gyro_roll_bias
-        0x40, 0x1F,  // gyro_pitch_plus    +8000
-        0x40, 0x1F,  // gyro_yaw_plus      +8000
-        0x40, 0x1F,  // gyro_roll_plus     +8000
-        0xC0, 0xE0,  // gyro_pitch_minus   -8000
-        0xC0, 0xE0,  // gyro_yaw_minus     -8000
-        0xC0, 0xE0,  // gyro_roll_minus    -8000
-        0xF4, 0x01,  // gyro_speed_plus     +500
-        0xF4, 0x01,  // gyro_speed_minus    +500
-        0x00, 0x20,  // acc_x_plus         +8192
-        0x00, 0xE0,  // acc_x_minus        -8192
-        0x00, 0x20,  // acc_y_plus         +8192
-        0x00, 0xE0,  // acc_y_minus        -8192
-        0x00, 0x20,  // acc_z_plus         +8192
-        0x00, 0xE0,  // acc_z_minus        -8192
-    };
-
-    /// <summary>DS5 firmware info, byte-for-byte the same payload driver.c
-    /// serves (ds5FirmwareInfo, issue #43). Captured from a real wired
-    /// DualSense during an F1 22 startup trace. ASCII build date
-    /// "Jul  4 2025" and time "10:10:32", then fwType 3, hwInfo 0x1310 and
-    /// the firmware versions.
-    ///
-    /// <para>Served verbatim. F1 22 validates this blob and abandons the
-    /// device on the zeros it used to get, and which field it validates is
-    /// not known, so no byte here is synthesized. See driver.c for the
-    /// offset agreement between hid-playstation.c and dualsense-tester, and
-    /// for why WinUHid's own default is not used.</para></summary>
-    private static readonly byte[] Ds5FirmwareInfo =
-    {
-        0x20, 0x4A, 0x75, 0x6C, 0x20, 0x20, 0x34, 0x20,
-        0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3A, 0x31,
-        0x30, 0x3A, 0x33, 0x32, 0x03, 0x00, 0x04, 0x00,
-        0x10, 0x13, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x01,
-        0x01, 0xC8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x30, 0x06, 0x00, 0x00,
-        0x3C, 0x00, 0x01, 0x00, 0x0A, 0x00, 0x02, 0x00,
-        0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-
-    /// <summary>DS4 firmware / hardware info, verbatim from WinUHid's
-    /// WinUHidPS4.cpp. ASCII build date "Aug  3 2013" and time "07:01:12"
-    /// followed by the hardware and firmware words.</summary>
-    private static readonly byte[] Ds4FirmwareInfo =
-    {
-        0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
-        0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
-        0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
-        0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
-        0x00
-    };
 
     private void ResetDeviceState()
     {

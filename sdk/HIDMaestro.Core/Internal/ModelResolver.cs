@@ -458,6 +458,7 @@ internal sealed class ModelRegistry
             none = true;
         }
         var notes = new List<string>();
+        List<string> namedNotes = new(), identityNotes = new();
         var own = DeviceModel.OwnOf(p);
         // Own keys are the profile's own and validated strictly.
         AnswerModels.Validate(p, own, taken: false, notes);
@@ -478,13 +479,11 @@ internal sealed class ModelRegistry
                 problem = $"deviceModelFrom names '{name}', which carries no device model. The profile takes the model its identity gives it.";
             else
             {
-                var takenNotes = new List<string>();
                 try
                 {
-                    AnswerModels.Validate(p, found.Value.Model, taken: true, takenNotes);
+                    AnswerModels.Validate(p, found.Value.Model, taken: true, namedNotes);
                     named = found.Value.Model;
                     namedSource = $"named:{name}";
-                    notes.AddRange(takenNotes);
                 }
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
@@ -507,12 +506,10 @@ internal sealed class ModelRegistry
                 ? null : registry.Find(hit.Entry.Model!, resolving);
             if (found != null && !found.Value.Model.IsEmpty)
             {
-                var takenNotes = new List<string>();
                 try
                 {
-                    AnswerModels.Validate(p, found.Value.Model, taken: true, takenNotes);
+                    AnswerModels.Validate(p, found.Value.Model, taken: true, identityNotes);
                     identity = found.Value.Model;
-                    notes.AddRange(takenNotes);
                 }
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
@@ -533,6 +530,11 @@ internal sealed class ModelRegistry
             else if (identity != null && identity.Covers(g)) { model = model.With(g, identity); sources[key] = identityLabel!; }
             else sources[key] = "none";
         }
+        // The notes on a taken model's answers stand only when the profile
+        // takes its answers from that model.
+        string answersFrom = sources[DeviceModel.GroupName(ModelGroup.Answers)];
+        if (answersFrom == namedSource) notes.AddRange(namedNotes);
+        else if (answersFrom == identityLabel) notes.AddRange(identityNotes);
         if (named != null && !nameUsed)
             notes.Add($"deviceModelFrom names '{p.DeviceModelFrom}', whose model fills no group this profile leaves empty, so the name is unused.");
         return new ResolvedModel
@@ -555,14 +557,17 @@ internal sealed class ModelRegistry
 
 /// <summary>The checks a device model's keys meet, the profile's own when
 /// it loads and a model it takes when it resolves: the answers and their
-/// value sources (<see cref="Usbip.FeatureStubTable.Validate"/>) and the
-/// driver PID. Throws <see cref="ProfileDefectException"/> with the JSON
-/// path.</summary>
+/// value sources (<see cref="Usbip.FeatureStubTable.Validate"/>), the
+/// answers against the profile's descriptor
+/// (<see cref="Usbip.FeatureStubTable.ValidateAgainst"/>), and the driver
+/// PID. Throws <see cref="ProfileDefectException"/> with the JSON path.</summary>
 internal static class AnswerModels
 {
     internal static void Validate(ControllerProfile p, DeviceModel m, bool taken, List<string> notes)
     {
         Usbip.FeatureStubTable.Validate(m.FeatureStubs, m.ValueSources, p.RequiresUsbipBackend);
+        if (m.FeatureStubs != null && p.HasDescriptor)
+            Usbip.FeatureStubTable.ValidateAgainst(p, m.FeatureStubs, taken, notes);
         if (m.DriverPid != null) _ = ModelRegistry.ParseId(m.DriverPid, "$.driverPid");
     }
 }
