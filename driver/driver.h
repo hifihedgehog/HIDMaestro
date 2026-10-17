@@ -166,7 +166,7 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE  StopEvent;            /* Named: Global\HIDMaestroStopEvent<N>, or
                                   * unnamed when that name is unusable
                                   * (CreateHostEvent) */
-    volatile LONG TearingDown;   /* issue #38: set by EvtDeviceContextCleanup
+    volatile LONG TearingDown;   /* issue #38: set by ReleaseIndexObjects
                                   * BEFORE it signals StopEvent. StopEvent is
                                   * a named object shared with every other
                                   * context at this index and with foreign

@@ -18,6 +18,7 @@ DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD CompanionDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL CompanionIoControl;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP CompanionDeviceCleanup;
+EVT_WDF_DEVICE_SELF_MANAGED_IO_FLUSH CompanionSelfManagedIoFlush;
 EVT_WDF_TIMER CompanionPumpTimer;
 static DWORD WINAPI CompanionInputPumpProc(LPVOID param);
 struct _COMPANION_CTX;
@@ -244,9 +245,11 @@ static BOOLEAN ReadGipDataLocked(PCOMPANION_CTX ctx, UCHAR gipOut[14])
     return TRUE;
 }
 
-void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
+/* Let go of every object of the index. Runs from the self-managed I/O
+ * flush and again from the context cleanup, where it finds nothing left:
+ * each step clears what it closed. */
+static VOID CompanionRelease(PCOMPANION_CTX ctx)
 {
-    PCOMPANION_CTX ctx = GetCompanionCtx((WDFDEVICE)Object);
     if (ctx->PumpThread) {
         if (ctx->PumpStopEvent) SetEvent(ctx->PumpStopEvent);
         WaitForSingleObject(ctx->PumpThread, 2000);
@@ -264,6 +267,29 @@ void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->OutputSignalEvent) { CloseHandle(ctx->OutputSignalEvent); ctx->OutputSignalEvent = NULL; }
+}
+
+/* The device is gone: surprise removed, or removed. A host can process
+ * IRP_MN_SURPRISE_REMOVAL and never receive the IRP_MN_REMOVE_DEVICE that
+ * runs the context cleanup, since the PnP manager sends it only after
+ * every handle to the device is closed. Until then the pump thread and
+ * the timer ran on with no device, and in one test run the thread made
+ * index 0's output doorbell on its first idle wake after the device was
+ * gone and the host held it for 25 minutes. The framework runs this
+ * flush on both paths and never on a stop for a rebalance, which keeps
+ * the device and restarts it without a new CompanionDeviceAdd. Both
+ * queues are power managed (no WdfFdoInitSetFilter here), so the
+ * framework has purged them and finished their requests before it runs,
+ * and no I/O callback can open a section or the doorbell after it. */
+VOID CompanionSelfManagedIoFlush(_In_ WDFDEVICE Device)
+{
+    CompanionRelease(GetCompanionCtx(Device));
+}
+
+void CompanionDeviceCleanup(_In_ WDFOBJECT Object)
+{
+    /* A device that never started gets no flush. */
+    CompanionRelease(GetCompanionCtx((WDFDEVICE)Object));
 }
 
 /* The output doorbell's descriptor and its check on an existing object,
@@ -446,6 +472,13 @@ NTSTATUS CompanionDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT Devic
     WDF_IO_QUEUE_CONFIG queueConfig;
 
     UNREFERENCED_PARAMETER(Driver);
+
+    {
+        WDF_PNPPOWER_EVENT_CALLBACKS pnpPower;
+        WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPower);
+        pnpPower.EvtDeviceSelfManagedIoFlush = CompanionSelfManagedIoFlush;
+        WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPower);
+    }
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, COMPANION_CTX);
     attributes.EvtCleanupCallback = CompanionDeviceCleanup;

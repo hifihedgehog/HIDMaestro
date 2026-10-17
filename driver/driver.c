@@ -704,7 +704,7 @@ TryOpenInputAck(_In_ PDEVICE_CONTEXT ctx)
     WdfWaitLockRelease(ctx->InputLock);
 }
 
-/* Caller holds InputLock (or is the only thread left, at cleanup). */
+/* Caller holds InputLock (or is the only thread left, at release). */
 static VOID
 CloseInputAckLocked(_In_ PDEVICE_CONTEXT ctx)
 {
@@ -884,7 +884,7 @@ TryOpenOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
 }
 
 /* Cancel the pending read and wait for it to finish before the OVERLAPPED
- * and its event go away. Worker thread, or cleanup after the worker has
+ * and its event go away. Worker thread, or the release after the worker has
  * been joined. */
 static VOID
 CloseOwnerWatch(_In_ PDEVICE_CONTEXT ctx)
@@ -2094,7 +2094,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
  *     the timeout is a safety net, not a polling interval.
  *
  * StopEvent is signaled from:
- *   (a) EvtDeviceContextCleanup: normal PnP teardown. Sets
+ *   (a) ReleaseIndexObjects: normal PnP teardown. Sets
  *       ctx->TearingDown FIRST, so the worker returns 0.
  *   (b) External SDK RemoveAllVirtualControllers cleanup: opens the
  *       named stop event and signals it to unblock worker threads of
@@ -2108,7 +2108,7 @@ ProcessSharedInput(_In_ PDEVICE_CONTEXT ctx)
  * everything looks alive from user land. The worker now exits ONLY when
  * ctx->TearingDown is set; foreign signals are absorbed (ResetEvent on
  * the manual-reset object, then recycle to Phase 1). The 2-second
- * thread-join in EvtDeviceContextCleanup is the backstop if the worker
+ * thread-join in ReleaseIndexObjects is the backstop if the worker
  * is somehow stuck outside the wait (e.g., inside ProcessSharedInput's
  * WdfRequestComplete during a concurrent teardown), and also bounds the
  * benign race where a foreign absorb's ResetEvent eats our own
@@ -2288,7 +2288,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * 0 and killed the worker permanently; now we recycle like
              * every other non-signal path and let Phase 1 re-open fresh
              * handles. The 2-second thread-join timeout in
-             * EvtDeviceContextCleanup still bounds any teardown race. */
+             * ReleaseIndexObjects still bounds any teardown race. */
             recycle = TRUE;
             break;
         }
@@ -2308,7 +2308,7 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
              * The named section is a stable kernel object; the driver's
              * own handle keeps the view valid regardless of SDK restarts,
              * so keeping it mapped for the device lifetime is correct.
-             * The view is unmapped exclusively in EvtDeviceContextCleanup
+             * The view is unmapped exclusively in ReleaseIndexObjects
              * after both threads join, mirroring the VR transport's
              * publish-vs-unmap discipline. */
             if (!ctx->SwitchProtocol) {
@@ -2333,12 +2333,12 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
 }
 
 /* ================================================================== */
-/* Context cleanup: unmap shared memory section on device teardown */
-static EVT_WDF_OBJECT_CONTEXT_CLEANUP EvtDeviceContextCleanup;
-static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
+/* Release: let go of every object of the index, on device teardown.
+ * Runs from the self-managed I/O flush, after the I/O queues are purged,
+ * and again from the context cleanup, where it finds nothing left: each
+ * step clears what it closed. */
+static VOID ReleaseIndexObjects(_In_ PDEVICE_CONTEXT ctx)
 {
-    PDEVICE_CONTEXT ctx = GetDeviceContext((WDFDEVICE)Object);
-
     /* Stop the worker thread first so nothing is touching SharedMemPtr
      * while we unmap. TearingDown BEFORE SetEvent (issue #38): the named
      * stop event is shared with sibling contexts and foreign sweeps, and
@@ -2369,14 +2369,42 @@ static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
 
     if (ctx->SharedMemPtr) { UnmapViewOfFile(ctx->SharedMemPtr); ctx->SharedMemPtr = NULL; }
     if (ctx->SharedMemHandle) { CloseHandle(ctx->SharedMemHandle); ctx->SharedMemHandle = NULL; }
-    /* Workers are joined and the queues purged before context cleanup, so
-     * no read path can be touching the acknowledgement any more. */
+    /* Workers are joined and the queues purged before this runs, so no
+     * read path can be touching the acknowledgement any more. */
     CloseInputAckLocked(ctx);
     CloseOwnerWatch(ctx);
     if (ctx->OutputMemPtr) { UnmapViewOfFile(ctx->OutputMemPtr); ctx->OutputMemPtr = NULL; }
     if (ctx->OutputMemHandle) { CloseHandle(ctx->OutputMemHandle); ctx->OutputMemHandle = NULL; }
     if (ctx->PidStateMemPtr) { UnmapViewOfFile(ctx->PidStateMemPtr); ctx->PidStateMemPtr = NULL; }
     if (ctx->PidStateMemHandle) { CloseHandle(ctx->PidStateMemHandle); ctx->PidStateMemHandle = NULL; }
+}
+
+/* The device is gone: surprise removed, or removed. A host can process
+ * IRP_MN_SURPRISE_REMOVAL and never receive the IRP_MN_REMOVE_DEVICE that
+ * runs the context cleanup, since the PnP manager sends it only after
+ * every handle to the device is closed. Until then the host kept every
+ * object of the index with no device behind it, and a later create on
+ * the index met them. The framework runs this flush on both paths and
+ * never on a stop for a rebalance, which keeps the device and restarts it
+ * without a new EvtDeviceAdd. It purges the power-managed queues first,
+ * but in filter mode (WdfFdoInitSetFilter) neither queue is power
+ * managed, and those it purges only at the removal. Purged here, they
+ * finish every request in flight and refuse new ones, so no I/O callback
+ * reads a view the release unmaps, or opens one again. */
+static EVT_WDF_DEVICE_SELF_MANAGED_IO_FLUSH EvtDeviceSelfManagedIoFlush;
+static VOID EvtDeviceSelfManagedIoFlush(_In_ WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    WdfIoQueuePurgeSynchronously(ctx->DefaultQueue);
+    WdfIoQueuePurgeSynchronously(ctx->ManualQueue);
+    ReleaseIndexObjects(ctx);
+}
+
+static EVT_WDF_OBJECT_CONTEXT_CLEANUP EvtDeviceContextCleanup;
+static void EvtDeviceContextCleanup(_In_ WDFOBJECT Object)
+{
+    /* A device that never started gets no flush. */
+    ReleaseIndexObjects(GetDeviceContext((WDFDEVICE)Object));
 }
 
 /*  DriverEntry                                                        */
@@ -2523,6 +2551,13 @@ EvtDeviceAdd(
         }
         if (!functionMode)
             WdfFdoInitSetFilter(DeviceInit);
+    }
+
+    {
+        WDF_PNPPOWER_EVENT_CALLBACKS pnpPower;
+        WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPower);
+        pnpPower.EvtDeviceSelfManagedIoFlush = EvtDeviceSelfManagedIoFlush;
+        WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPower);
     }
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, DEVICE_CONTEXT);
@@ -2720,7 +2755,7 @@ EvtDeviceAdd(
          * the initialState argument and returns a handle to the existing object
          * in whatever signal state it's in. On live-swap (teardown old context
          * + create new context on the same ControllerIndex), the OLD context's
-         * EvtDeviceContextCleanup signaled this event (manual-reset → stays
+         * ReleaseIndexObjects signaled this event (manual-reset → stays
          * signaled) to wake its worker. If any process still holds a handle to
          * the event when the new context runs: the SDK's
          * RemoveAllVirtualControllers utility keeps a handle briefly, and the
