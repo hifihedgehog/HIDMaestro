@@ -1605,6 +1605,177 @@ internal static class Offline
               left1 == 0 && left2 == 0 && th2.Ids[ChildId].Registrations == 1,
               $"left {left1} and {left2}, the direct child registered {th2.Ids[ChildId].Registrations} time(s)");
 
+        // S77's timing of a child's own REMOVED reads each instance event's
+        // id from CM_NOTIFY_EVENT_DATA: FilterType and Reserved, then the id
+        // at offset 8, read no further than the event's size.
+        string eventId = @"HID\HIDCLASS\1&74102611&0&0000";
+        IntPtr eventData = System.Runtime.InteropServices.Marshal.AllocHGlobal(8 + (eventId.Length + 1) * 2);
+        try
+        {
+            System.Runtime.InteropServices.Marshal.WriteInt32(eventData, 0, 2);
+            System.Runtime.InteropServices.Marshal.WriteInt32(eventData, 4, 0);
+            for (int i = 0; i < eventId.Length; i++)
+                System.Runtime.InteropServices.Marshal.WriteInt16(eventData, 8 + i * 2, eventId[i]);
+            System.Runtime.InteropServices.Marshal.WriteInt16(eventData, 8 + eventId.Length * 2, 0);
+            string whole = DeviceManager.InstanceIdOf(eventData, (uint)(8 + (eventId.Length + 1) * 2));
+            string cut = DeviceManager.InstanceIdOf(eventData, (uint)(8 + 8));
+            string none = DeviceManager.InstanceIdOf(eventData, 8);
+            Check("an instance event's id is read at offset 8, up to its terminator and no further than its size",
+                  whole == eventId && cut == eventId.Substring(0, 4) && none == "", $"{whole} | {cut} | '{none}'");
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(eventData); }
+
+        // An event tap that throws costs the SDK's own handler nothing: the
+        // tap runs in a try of its own (DeviceManager.Dispatch).
+        {
+            int handled = 0;
+            DeviceManager.CM_NOTIFY_CALLBACK handler = (h, c, a, d, size) => { Interlocked.Increment(ref handled); return 0u; };
+            var keep = System.Runtime.InteropServices.GCHandle.Alloc(handler);
+            IntPtr data = System.Runtime.InteropServices.Marshal.AllocHGlobal(8 + (eventId.Length + 1) * 2);
+            try
+            {
+                System.Runtime.InteropServices.Marshal.WriteInt32(data, 0, 2);
+                System.Runtime.InteropServices.Marshal.WriteInt32(data, 4, 0);
+                for (int i = 0; i < eventId.Length; i++)
+                    System.Runtime.InteropServices.Marshal.WriteInt16(data, 8 + i * 2, eventId[i]);
+                System.Runtime.InteropServices.Marshal.WriteInt16(data, 8 + eventId.Length * 2, 0);
+                DeviceManager.InstanceEventTap = (r, a, id) => throw new InvalidOperationException("a tap that throws");
+                uint answer = DeviceManager.Dispatch((IntPtr)0x11, System.Runtime.InteropServices.GCHandle.ToIntPtr(keep), 9, data,
+                                                     (uint)(8 + (eventId.Length + 1) * 2));
+                Check("an instance event tap that throws -> the SDK's handler still runs, and nothing escapes",
+                      handled == 1 && answer == 0, $"handler ran {handled} time(s), answered {answer}");
+            }
+            finally
+            {
+                DeviceManager.InstanceEventTap = null;
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(data);
+                keep.Free();
+            }
+        }
+
+        // S77's live judgment of that timing, on made-up events. The window's
+        // registration made at -200 ms and closed at 9,800, the create at 0,
+        // the child enumerated at 10, a second one at 12 and another HID
+        // device at 40, the dispose from 90, the child's own REMOVED at 98
+        // and the parent's at 100 through the window's registration, the
+        // parent's at 100.2 through the SDK's own watch, the PnP lock let go
+        // at 140.
+        const string TimedParent = @"ROOT\HIDCLASS\PNP_NOTIFY_CHECK_TIMED", TimedChild = @"HID\HIDCLASS\1&7173&0&0000",
+                     TimedSibling = @"HID\HIDCLASS\1&7173&0&0001", Stranger = @"HID\VID_054C&PID_09CC\7&2B1C&0&0000";
+        IntPtr held = (IntPtr)0x11, sdkWatch = (IntPtr)0x22;
+        (bool Ok, string Detail) Timed(double? childRemoved = 98, double? earlierRemoved = null, bool childThroughWindow = true,
+                                       bool parentThroughWindow = true, bool childEnumerated = true, string[]? children = null,
+                                       double? siblingRemoved = null, bool registered = true, bool refused = false,
+                                       double openedAt = -200, double closedAt = 9800, double lockReleasedAt = 140,
+                                       double? parentAfterClose = null)
+        {
+            var e = new List<(double Ms, IntPtr Registration, uint Action, string Id)>();
+            if (childEnumerated) e.Add((10, held, 7, TimedChild));
+            e.Add((12, held, 7, TimedSibling));
+            e.Add((40, held, 7, Stranger));
+            if (earlierRemoved is double before) e.Add((before, held, 9, TimedChild));
+            if (childRemoved is double at) e.Add((at, childThroughWindow ? held : sdkWatch, 9, TimedChild));
+            if (siblingRemoved is double sib) e.Add((sib, held, 9, TimedSibling));
+            e.Add((100, parentThroughWindow ? held : sdkWatch, 9, TimedParent));
+            e.Add((100.2, sdkWatch, 9, TimedParent));
+            if (parentAfterClose is double later) e.Add((later, held, 9, TimedParent));
+            Program.HeldRegistration? window = registered ? new Program.HeldRegistration(refused ? IntPtr.Zero : held, openedAt, closedAt) : null;
+            return Program.ChildRemovedInTime(e.ToArray(), window, TimedParent, children ?? new[] { TimedChild },
+                                              createAt: 0, disposeAt: 90, lockReleasedAt: lockReleasedAt);
+        }
+        string Show(string name, (bool Ok, string Detail) r) => $"{name} {(r.Ok ? "passed" : "failed")}: {r.Detail}";
+
+        var inTime = Timed();
+        var twoInTime = Timed(children: new[] { TimedChild, TimedSibling }, siblingRemoved: 99);
+        Check("S77's child timing: passes on each child's own REMOVED through the held-open registration before the PnP lock was let go, another HID device enumerated in the window counting for nothing",
+              inTime.Ok && twoInTime.Ok
+              && inTime.Detail.Contains(@"HID\HIDCLASS\1&7173&0&0000: its own REMOVED 8.0 ms into the dispose, 42.0 ms before the PnP lock was let go, -2.0 ms from the parent's"),
+              Show("one child", inTime) + " || " + Show("two", twoInTime));
+
+        // Judged failures: the inference shown false.
+        var judged = new (string Name, (bool Ok, string Detail) R, string Says)[]
+        {
+            ("after the lock, before the dispose returned", Timed(childRemoved: 145), "55.0 ms into the dispose, 5.0 ms after the PnP lock was let go"),
+            ("never", Timed(childRemoved: null), "no REMOVED of its own through the held-open registration in the 9660.0 ms it stayed open after the PnP lock was let go"),
+            ("only before the dispose", Timed(childRemoved: null, earlierRemoved: 50), "after the PnP lock was let go, only one 40.0 ms before the dispose began"),
+            ("only through another registration", Timed(childThroughWindow: false), "no REMOVED of its own through the held-open registration"),
+            ("a second child late", Timed(children: new[] { TimedChild, TimedSibling }, siblingRemoved: 400), @"HID\HIDCLASS\1&7173&0&0001: its own REMOVED 310.0 ms into the dispose, 260.0 ms after the PnP lock was let go"),
+        };
+        var judgedWrong = judged.Where(j => j.R.Ok || !j.R.Detail.Contains(j.Says) || j.R.Detail.Contains("not judged")).ToList();
+        Check("S77's child timing: fails, judged, on a child's own REMOVED after the PnP lock was let go though before the dispose returned, on none, on one only from before the dispose, on one only through another registration, and on a second child's late one",
+              judgedWrong.Count == 0,
+              string.Join(" || ", (judgedWrong.Count > 0 ? judgedWrong : judged.Take(1).ToList()).Select(j => Show(j.Name, j.R))));
+
+        // Failures without the window's own controls: not judged, each cause
+        // named, and no word of a missing REMOVED it could not have seen.
+        var unjudged = new (string Name, (bool Ok, string Detail) R, string Cause)[]
+        {
+            ("refused", Timed(refused: true, childThroughWindow: false), "Windows refused the held-open registration"),
+            ("never made", Timed(registered: false), "the held-open wait made no registration"),
+            ("made late", Timed(openedAt: 20), "the held-open registration was made 20.0 ms after the create began"),
+            ("made late, the child's only ENUMERATED through its handle before it", Timed(openedAt: 20), @"no ENUMERATED for HID\HIDCLASS\1&7173&0&0000 through the held-open registration"),
+            ("the parent's REMOVED through its handle only after it closed", Timed(parentThroughWindow: false, parentAfterClose: 9900), "no REMOVED for the parent through the held-open registration"),
+            ("closed early", Timed(childRemoved: 130, closedAt: 120), "the held-open registration closed 20.0 ms before the PnP lock was let go"),
+            ("no parent REMOVED through it", Timed(childRemoved: null, parentThroughWindow: false), "no REMOVED for the parent through the held-open registration"),
+            ("no child ENUMERATED through it", Timed(childEnumerated: false), @"no ENUMERATED for HID\HIDCLASS\1&7173&0&0000 through the held-open registration"),
+            ("no lock line", Timed(lockReleasedAt: double.NaN), "no diag line that the parent's RemoveDevice returned"),
+            ("no child", Timed(children: Array.Empty<string>()), "the parent had no child before the dispose"),
+        };
+        var unjudgedWrong = unjudged.Where(u => u.R.Ok || !u.R.Detail.StartsWith("not judged: ") || !u.R.Detail.Contains(u.Cause)
+                                                || u.R.Detail.Contains("no REMOVED of its own")).ToList();
+        Check("S77's child timing: fails as not judged, naming the cause, when the held-open registration was refused, never made, made after the create began or closed before the lock was let go, or carried no REMOVED for the parent or ENUMERATED for the child, or the lock's release or the child is missing",
+              unjudgedWrong.Count == 0,
+              string.Join(" || ", (unjudgedWrong.Count > 0 ? unjudgedWrong : unjudged.Take(1).ToList()).Select(u => Show(u.Name, u.R))));
+
+        // S77's two lookups. The window's registration is the one made on
+        // the held-open wait's own thread while it runs: a registration made
+        // on another thread first, and a second one on the wait's thread,
+        // count for nothing.
+        using (var timing = new Program.ChildTiming())
+        {
+            using var go = new ManualResetEventSlim(false);
+            var hold = timing.Hold(() =>
+            {
+                go.Wait();
+                DeviceManager.AllInstancesRegistrationTap!((IntPtr)0x11);
+                DeviceManager.AllInstancesRegistrationTap!((IntPtr)0x33);
+                return false;
+            });
+            DeviceManager.AllInstancesRegistrationTap!((IntPtr)0x22);
+            go.Set();
+            hold.Wait();
+            var w = timing.Window;
+            Check("S77's window: the registration made on the held-open wait's own thread, first, not another thread's made before it",
+                  w is { } got && got.Handle == (IntPtr)0x11 && got.OpenedAt <= got.ClosedAt,
+                  w is { } shown ? $"handle 0x{shown.Handle.ToInt64():X}, made at {shown.OpenedAt:0.0} ms, closed at {shown.ClosedAt:0.0} ms" : "no registration");
+        }
+        // The lock's release is the line the orchestrator writes once the
+        // parent's RemoveDevice returned, in its own format, not a line
+        // naming the parent written under the lock, another parent's, or a
+        // child's.
+        using (var timing = new Program.ChildTiming())
+        {
+            const string LockParent = @"SWD\HIDMAESTRO_VID_045E_PID_0B13&IG_00\HM_7D367031F8E76B1E",
+                         LockChild = @"HID\HIDMAESTRO_VID_045E_PID_0B13&IG_00\1&7D367031&0&0000";
+            timing.DisposeStarting(LockParent, new[] { LockChild });
+            DeviceOrchestrator.DiagTap!($"      SwdDeviceFactory.Remove({LockParent}) hr=0x00000000 confirmed_offline=True after 104ms");
+            DeviceOrchestrator.DiagTap!($"        WaitForDeviceRemoval({LockParent}, 120000ms): Removed after 13ms");
+            DeviceOrchestrator.DiagTap!($"      {LockChild} was out of the tree at its removal call, its record decided: Removed");
+            DeviceOrchestrator.DiagTap!(@"    parent RemoveDevice(ROOT\HIDClass\HM_0000) returned True after 11ms");
+            double underLock = timing.Now;
+            Thread.Sleep(5);
+            double before = timing.Now;
+            DeviceOrchestrator.DiagTap!($"    parent RemoveDevice({LockParent}) returned False after 119ms");
+            double after = timing.Now;
+            Thread.Sleep(5);
+            DeviceOrchestrator.DiagTap!($"    child RemoveDevice({LockChild}) returned True after 0ms");
+            DeviceOrchestrator.DiagTap!($"    parent RemoveDevice({LockParent}) returned True after 3ms");
+            double at = timing.LockReleasedAt;
+            Check("S77's lock release: the line that the parent's RemoveDevice returned, the first one, not a line naming the parent written under the lock, another parent's or a child's",
+                  at >= before && at <= after,
+                  $"taken at {at:0.000} ms, the line written between {before:0.000} and {after:0.000} ms, the lines under the lock by {underLock:0.000} ms");
+        }
+
         // The replayed cost of the recorded shape, ten runs, from the call
         // of RemoveDevice to its return. A replay of made-up times, no
         // device: it shows the child's 2 s bound gone from this path.

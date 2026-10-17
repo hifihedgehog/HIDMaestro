@@ -56,7 +56,7 @@ public static partial class DeviceManager
     [LibraryImport("CfgMgr32.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial uint CM_Get_Device_IDW(uint dnDevInst, char[] Buffer, uint BufferLen, uint ulFlags);
 
-    delegate uint CM_NOTIFY_CALLBACK(IntPtr hNotify, IntPtr Context, uint Action, IntPtr EventData, uint EventDataSize);
+    internal delegate uint CM_NOTIFY_CALLBACK(IntPtr hNotify, IntPtr Context, uint Action, IntPtr EventData, uint EventDataSize);
 
     const uint CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE = 0;
     const uint CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE = 2;
@@ -114,17 +114,31 @@ public static partial class DeviceManager
         }
     }
 
-    /// <summary>The one callback cfgmgr32 calls. It hands the event to the
-    /// handler whose GCHandle is the registration's context. An exception
-    /// must not unwind into cfgmgr32, and one left unhandled in an
-    /// UnmanagedCallersOnly method ends the process, so none escapes.</summary>
+    /// <summary>The one callback cfgmgr32 calls (<see cref="Dispatch"/>).
+    /// An exception must not unwind into cfgmgr32, and one left unhandled
+    /// in an UnmanagedCallersOnly method ends the process, so none
+    /// escapes.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvStdcall) })]
-    static uint NotifyDispatch(IntPtr hNotify, IntPtr context, uint action, IntPtr eventData, uint eventDataSize)
+    static uint NotifyDispatch(IntPtr hNotify, IntPtr context, uint action, IntPtr eventData, uint eventDataSize) =>
+        Dispatch(hNotify, context, action, eventData, eventDataSize);
+
+    /// <summary>Counts the event, shows an instance event to
+    /// <see cref="InstanceEventTap"/>, and hands it to the handler whose
+    /// GCHandle is the registration's context. The tap runs in a try of
+    /// its own, so a tap that throws costs the handler nothing. Nothing
+    /// escapes. pnp_notify_check's offline part calls it directly.</summary>
+    internal static uint Dispatch(IntPtr hNotify, IntPtr context, uint action, IntPtr eventData, uint eventDataSize)
     {
         Interlocked.Increment(ref s_notificationsDelivered);
         // An interface filter delivers only the interface actions, arrival
         // and removal (0 and 1). Every instance action is 2 or higher.
         if (action <= CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL) Interlocked.Increment(ref s_interfaceNotificationsDelivered);
+        if (InstanceEventTap is { } tap && action >= CM_NOTIFY_ACTION_DEVICEINSTANCEENUMERATED
+            && action <= CM_NOTIFY_ACTION_DEVICEINSTANCEREMOVED)
+        {
+            try { tap(hNotify, action, InstanceIdOf(eventData, eventDataSize)); }
+            catch { }
+        }
         try
         {
             if (GCHandle.FromIntPtr(context).Target is CM_NOTIFY_CALLBACK handler)
@@ -135,6 +149,37 @@ public static partial class DeviceManager
     }
 
     private static long s_notificationsDelivered;
+
+    /// <summary>Sees every device instance event (enumerated, started,
+    /// removed) any registration of this process receives, with the
+    /// registration that received it and the instance id, as cfgmgr32
+    /// delivers it. Opens no registration of its own. pnp_notify_check sets
+    /// it to time a HID child's own REMOVED against its parent's through the
+    /// all-instances registration its held-open wait keeps, which
+    /// <see cref="AllInstancesRegistrationTap"/> names. Null outside
+    /// it.</summary>
+    internal static Action<IntPtr, uint, string>? InstanceEventTap;
+
+    /// <summary>Sees each registration <see cref="RegisterAllInstanceEvents"/>
+    /// makes, on the thread that asked for it: its handle, or zero when
+    /// Windows refused it. pnp_notify_check sets it to learn which
+    /// registration its held-open wait keeps, and takes its timing and the
+    /// timing's controls from that registration's events alone. Null
+    /// outside it.</summary>
+    internal static Action<IntPtr>? AllInstancesRegistrationTap;
+
+    /// <summary>The instance id of an instance event. CM_NOTIFY_EVENT_DATA
+    /// is FilterType and Reserved, then a union at offset 8, which an
+    /// instance event fills with the id. Reads no further than
+    /// <paramref name="size"/>.</summary>
+    internal static string InstanceIdOf(IntPtr data, uint size)
+    {
+        int chars = size > 8 ? (int)(size - 8) / 2 : 0;
+        if (data == IntPtr.Zero || chars == 0) return "";
+        string s = Marshal.PtrToStringUni(data + 8, chars);
+        int end = s.IndexOf('\0');
+        return end >= 0 ? s.Substring(0, end) : s;
+    }
 
     /// <summary>PnP notifications delivered to a wait since the process
     /// started. A wait whose registration Windows refuses still finishes on
@@ -258,7 +303,9 @@ public static partial class DeviceManager
             Flags = CM_NOTIFY_FILTER_FLAG_ALL_DEVICE_INSTANCES,
             FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINSTANCE,
         };
-        return CM_Register_Notification(ref filter, context, &NotifyDispatch, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+        IntPtr registration = CM_Register_Notification(ref filter, context, &NotifyDispatch, out IntPtr h) == CR_SUCCESS ? h : IntPtr.Zero;
+        AllInstancesRegistrationTap?.Invoke(registration);
+        return registration;
     }
 
     /// <summary>Runs <paramref name="wait"/> with <paramref name="callback"/>
