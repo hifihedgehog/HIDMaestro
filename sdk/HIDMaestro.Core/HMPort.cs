@@ -536,7 +536,8 @@ public sealed class HMDeviceProtocol
         _engine = engine;
     }
 
-    /// <summary>The device's named states, as the profile declares them.</summary>
+    /// <summary>The device's registers, as the profile declares them in
+    /// <c>protocol.state</c>.</summary>
     public IReadOnlyList<string> StateNames => _engine.Protocol.StateNames;
 
     /// <summary>Whether a named state is on now.</summary>
@@ -549,6 +550,35 @@ public sealed class HMDeviceProtocol
             throw new ArgumentException(
                 $"'{name}' is not a state of this device: {string.Join(", ", _engine.Protocol.StateNames)}.", nameof(name));
         return _engine.GetState(i);
+    }
+
+    /// <summary>A register's value now, as wide as the profile declares it.</summary>
+    /// <exception cref="ArgumentException">The device declares no register
+    /// of that name.</exception>
+    public uint GetRegister(string name)
+    {
+        int i = Array.IndexOf(_engine.Protocol.StateNames, name);
+        if (i < 0)
+            throw new ArgumentException(
+                $"'{name}' is not a register of this device: {string.Join(", ", _engine.Protocol.StateNames)}.", nameof(name));
+        return _engine.GetRegister(i);
+    }
+
+    /// <summary>The device's counters, as the profile declares them in
+    /// <c>protocol.counters</c>.</summary>
+    public IReadOnlyList<string> CounterNames => _engine.Protocol.Model.CounterNames;
+
+    /// <summary>A counter's value now: reports sent, frames, reads or clock
+    /// periods, by the event the profile counts it on.</summary>
+    /// <exception cref="ArgumentException">The device declares no counter of
+    /// that name.</exception>
+    public uint GetCounter(string name)
+    {
+        int i = Array.IndexOf(_engine.Protocol.Model.CounterNames, name);
+        if (i < 0)
+            throw new ArgumentException(
+                $"'{name}' is not a counter of this device: {string.Join(", ", _engine.Protocol.Model.CounterNames)}.", nameof(name));
+        return _engine.GetCounter(i);
     }
 
     /// <summary>The host poll period the device's input endpoint
