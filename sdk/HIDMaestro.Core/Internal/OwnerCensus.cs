@@ -103,16 +103,28 @@ internal sealed partial class OwnerCensus
         return set;
     }
 
+    /// <summary>The census's holder reads: each call reads the holders of
+    /// the ledger at <paramref name="root"/> of <paramref name="hive"/>
+    /// (<see cref="RegistryLedger.LiveHolders"/>), and all of them share one
+    /// read of the process list (<paramref name="readList"/>, through
+    /// <see cref="RegistryLedger.ReadOnce"/>), needed only for a holder's
+    /// process that refuses the open. <see cref="Take"/> hands it HKLM's
+    /// ledger and <see cref="RegistryLedger.ProcessCreateTimes()"/>, the
+    /// coexistence probe's OF13 a scratch ledger and a read it
+    /// counts.</summary>
+    internal static Func<IEnumerable<(int Pid, int Index)>> HolderReads(RegistryKey hive, string root, Func<Dictionary<int, long>?> readList)
+    {
+        var list = RegistryLedger.ReadOnce(readList);
+        return () => RegistryLedger.LiveHolders(hive, root, list);
+    }
+
     /// <summary>Read the records and the present devices. Costs a read of
     /// the Enum keys' names under ROOT and SWD, a presence check per
     /// HIDMaestro devnode, and a registry read per present one.</summary>
     public static OwnerCensus Take()
     {
-        // Both holder reads share one read of the process list, needed only
-        // for a holder's process that refuses the open.
-        var processList = RegistryLedger.ReadOnce(RegistryLedger.ProcessCreateTimes);
         var census = Build(PresentOwnedDevnodes(), s_openDeviceParameters, MachineClaims.ReadAll(), LegacyProgramOn,
-            () => RegistryLedger.LiveHolders(Registry.LocalMachine, RegistryLedger.Root, processList), MachineClaims.ReadAll);
+            HolderReads(Registry.LocalMachine, RegistryLedger.Root, RegistryLedger.ProcessCreateTimes), MachineClaims.ReadAll);
 
         var recordedPorts = new HashSet<int>();
         foreach (var r in census.Records)

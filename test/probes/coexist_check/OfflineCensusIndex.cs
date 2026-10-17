@@ -25,8 +25,10 @@
 //   index from use. With every index read, nothing is looked for. The
 //   holders are read, then the records, then the holders again, and only a
 //   holder both reads have counts.
-//   The holder test opens the holder's process, and reads the process list
-//   only for one that refuses the open, once for both holder reads.
+//   The holder test opens the holder's process, closes it again, and reads
+//   the process list only for one that refuses the open, once for both of
+//   the census's holder reads (OwnerCensus.HolderReads). A process's first
+//   read of the list makes one kernel query.
 //   The exit (OwnerSweep.ExitRecordMayGo) keeps the record while a hold of
 //   its own process stands, with controllers listed or none, and while a
 //   device is still in the device tree.
@@ -346,6 +348,13 @@ internal static partial class Program
         listReads = 0;
         AliveWith("4-1-3", list);
         Check("OF13: a holder of a process that refuses the open reads the process list once", listReads == 1, $"list read {listReads} times");
+        // Each holder test opens the holder's process and closes it again.
+        int Handles() { using var me = System.Diagnostics.Process.GetCurrentProcess(); return me.HandleCount; }
+        int handlesBefore = Handles();
+        for (int i = 0; i < 500; i++) { AliveWith($"{self}-{start:X}-3", list); AliveWith($"{self}-1-3", list); }
+        int handlesAfter = Handles();
+        Check("OF13: a thousand holder tests of a process that opens leave no handle behind",
+              handlesAfter - handlesBefore < 50, $"{handlesBefore} handles before, {handlesAfter} after");
         // A process's first read of the list fits its buffer on a machine
         // with this many processes, and so does the next.
         var sizeField = ledger!.GetField("s_processListSize", AnyStaticMember);
@@ -407,6 +416,17 @@ internal static partial class Program
                 Check("OF13: two holder reads through RegistryLedger.ReadOnce read the process list once", reads == 1, $"list read {reads} times");
             }
             else Check("OF13: RegistryLedger.ReadOnce exists", false);
+            // The census's own holder reads, as OwnerCensus.Take builds them.
+            if (sdk.GetType("HIDMaestro.Internal.OwnerCensus")?.GetMethod("HolderReads", AnyStaticMember) is { } holderReads)
+            {
+                reads = 0;
+                var census = (Func<IEnumerable<(int Pid, int Index)>>)holderReads.Invoke(null, new object[] { Registry.CurrentUser, root, counted })!;
+                var firstRead = census().OrderBy(h => h).ToList();
+                var secondRead = census().OrderBy(h => h).ToList();
+                Check("OF13: the census's two holder reads read the process list once between them",
+                      reads == 1 && firstRead.SequenceEqual(secondRead), $"list read {reads} times, {firstRead.Count} and {secondRead.Count} holders");
+            }
+            else Check("OF13: OwnerCensus.HolderReads exists", false);
             using (var k = Registry.CurrentUser.OpenSubKey($@"{root}\JoystickOem\VID_BEEF&PID_0001\Holders", writable: true)!)
                 k.DeleteValue("4-1-5");
             reads = 0;
