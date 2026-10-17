@@ -39,7 +39,7 @@
 // I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first, when
 // there is one, and at the end remove what they made and put it back, with
 // the OpenVR install record and the user's OpenVR path registry, which I11's
-// registration writes, as they were. Since staging moved under
+// registration writes, with its folder, as they were. Since staging moved under
 // %ProgramFiles%, a fresh machine has none.
 using System;
 using System.Collections.Generic;
@@ -210,6 +210,9 @@ internal static partial class Program
         string? vrPaths = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.OpenVrPathRegistry")
             ?.GetProperty("FilePath", AnyStaticMember)?.GetValue(null) as string;
         byte[]? vrPathsBefore = vrPaths != null && File.Exists(vrPaths) ? File.ReadAllBytes(vrPaths) : null;
+        // The registration makes the file's folder first where there is none.
+        string? vrPathsDir = vrPaths != null ? Path.GetDirectoryName(vrPaths) : null;
+        bool vrPathsDirExisted = vrPathsDir != null && Directory.Exists(vrPathsDir);
         bool existed = Directory.Exists(root);
         bool started = false;
         try
@@ -301,25 +304,10 @@ internal static partial class Program
         {
             if (started)
             {
-                // Everything under these was made in this section, by the
-                // impersonating thread, this probe or the SDK under test.
-                try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (Exception e) { Console.WriteLine($"    could not remove the section's root: {e.Message}"); }
-                foreach (string aside in Directory.GetDirectories(programData, "HIDMaestro.untrusted-*"))
-                    if (!asideBefore.Contains(aside))
-                        try { Directory.Delete(aside, true); } catch (Exception e) { Console.WriteLine($"    could not remove {aside}: {e.Message}"); }
-                if (existed)
-                {
-                    try { Directory.Move(saved, root); }
-                    catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
-                }
-                else Check("I10: the machine is left with no %ProgramData%\\HIDMaestro, as the section found it", !Directory.Exists(root), root);
-                using (var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro"))
-                {
-                    if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
-                    else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
-                }
-                // Where the section changed the path registry, its content
-                // goes back. A file the section made goes.
+                // Each step in a try of its own, so one that fails leaves the
+                // others to run, and each ends in a check. The path registry
+                // goes first: it is in the user's profile, outside the
+                // section's folders.
                 if (vrPaths != null)
                 {
                     try
@@ -331,13 +319,48 @@ internal static partial class Program
                             if (vrPathsBefore == null) File.Delete(vrPaths);
                             else File.WriteAllBytes(vrPaths, vrPathsBefore);
                         }
+                        // A folder the registration made goes, when nothing
+                        // else was put in it meanwhile.
+                        bool dirMade = vrPathsDir != null && !vrPathsDirExisted && Directory.Exists(vrPathsDir);
+                        if (dirMade && !Directory.EnumerateFileSystemEntries(vrPathsDir!).Any()) Directory.Delete(vrPathsDir!);
                         byte[]? after = File.Exists(vrPaths) ? File.ReadAllBytes(vrPaths) : null;
-                        Check("I10: the user's OpenVR path registry is as the section found it",
-                              after == null ? vrPathsBefore == null : vrPathsBefore != null && after.AsSpan().SequenceEqual(vrPathsBefore),
-                              same ? $"{vrPaths}, unchanged" : $"{vrPaths}, put back");
+                        bool dirAsFound = vrPathsDir == null || Directory.Exists(vrPathsDir) == vrPathsDirExisted;
+                        Check("I10: the user's OpenVR path registry and its folder are as the section found it",
+                              dirAsFound && (after == null ? vrPathsBefore == null : vrPathsBefore != null && after.AsSpan().SequenceEqual(vrPathsBefore)),
+                              $"{vrPaths}, {(same ? "unchanged" : "put back")}{(dirMade ? ", folder made by the section " + (dirAsFound ? "removed" : "not empty, left") : "")}");
                     }
-                    catch (Exception e) { Check("I10: the user's OpenVR path registry is as the section found it", false, $"{vrPaths}: {e.Message}"); }
+                    catch (Exception e) { Check("I10: the user's OpenVR path registry and its folder are as the section found it", false, $"{vrPaths}: {e.Message}"); }
                 }
+                // Everything under these was made in this section, by the
+                // impersonating thread, this probe or the SDK under test.
+                try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (Exception e) { Console.WriteLine($"    could not remove the section's root: {e.Message}"); }
+                try
+                {
+                    foreach (string aside in Directory.GetDirectories(programData, "HIDMaestro.untrusted-*"))
+                        if (!asideBefore.Contains(aside))
+                            try { Directory.Delete(aside, true); } catch (Exception e) { Console.WriteLine($"    could not remove {aside}: {e.Message}"); }
+                }
+                catch (Exception e) { Console.WriteLine($"    could not list the folders moved aside: {e.Message}"); }
+                string leftAside;
+                try { leftAside = string.Join(", ", Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").Where(a => !asideBefore.Contains(a))); }
+                catch (Exception e) { leftAside = $"not listed: {e.Message}"; }
+                Check("I10: no folder the section moved aside is left", leftAside.Length == 0, leftAside);
+                if (existed)
+                {
+                    try { Directory.Move(saved, root); }
+                    catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
+                }
+                else Check("I10: the machine is left with no %ProgramData%\\HIDMaestro, as the section found it", !Directory.Exists(root), root);
+                try
+                {
+                    using (var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro"))
+                    {
+                        if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
+                        else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
+                    }
+                    Check("I10: the OpenVR install record is as the section found it", OpenVrRecord() == vrRecord, OpenVrRecord() ?? "none");
+                }
+                catch (Exception e) { Check("I10: the OpenVR install record is as the section found it", false, e.Message); }
             }
         }
     }
