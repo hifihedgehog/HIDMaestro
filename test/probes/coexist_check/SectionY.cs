@@ -90,10 +90,13 @@
 //        program's pipe, the census reads its controller as a running
 //        program's, and a sweep leaves it.
 //    Y18. The same, with the dead program streaming input until it is
-//        killed, so the driver's idle window starts at the kill, and the
-//        v1.12.0 program streaming without a pause from the moment its
-//        create returns, inside that window. The driver never maps the input
-//        section again, and watches the new program's pipe all the same.
+//        killed, so the driver's idle window starts at the kill. The
+//        v1.12.0 program's adopting create returns only after its restart
+//        has waited out its 5 s bound for the device to stop, which the
+//        probe's handle refuses (v1.12.0 DeviceManager.RestartDevice), so
+//        it streams after that window has ended and the driver has dropped
+//        the dead program's section. Its input reaches the device once the
+//        driver maps the section again, and the driver watches its pipe.
 //    Y19. Y13's squatter, holding the acknowledgement section as well, and
 //        then the dead program's device is added again, so a new driver
 //        context starts with no values. The section still carries the
@@ -770,8 +773,8 @@ internal static partial class Program
 
     /// <summary>Y17 and Y18. A gamepad companion a v1.12.0 program adopts
     /// after its first program died, with the restart refused. With
-    /// <paramref name="stream"/> the program streams without a pause from
-    /// its create on.</summary>
+    /// <paramref name="stream"/> the dead program streams until the kill,
+    /// and the v1.12.0 program from its create on.</summary>
     static void SectionYAdopted(string installed, string y, bool stream)
     {
         Clean();
@@ -788,8 +791,7 @@ internal static partial class Program
         // creates and disposes one controller first. Then it has no device
         // and no owner pipe, so this SDK does not count it as a running
         // v1.12.0 program (ControllerLease.LegacyProgramRuns counts a present
-        // device of one), and its next create takes index 0 again and can
-        // follow the kill inside the driver's idle window.
+        // device of one), and its next create takes index 0 again.
         using var old = PeerProcess.Start("Y-v1.12.0-adopter", "v1.12.0");
         string first = old.Send("create pad F1FE coexist-y-adopter-first");
         if (!Ok(first)) { Check($"{y}: the v1.12.0 program creates", false, first); return; }
@@ -817,8 +819,9 @@ internal static partial class Program
             Check($"{y}: the probe holds the companion's HID child open", cap != null, string.Join(", ", path));
             // The driver's idle window counts from the last input, not from
             // the kill. With the dead program streaming until it dies, the
-            // kill starts a full window of eight 500 ms waits, so a program
-            // that attaches and streams inside it gets no recycle and no map.
+            // kill starts a full window of eight 500 ms waits, after which
+            // the driver drops the section and looks for the input event
+            // again every 200 ms.
             if (stream)
             {
                 long mark = cap?.Mark() ?? 0;
@@ -841,13 +844,19 @@ internal static partial class Program
             string second = old.Send("create xinputhid - coexist-y-adopter");
             if (stream)
             {
-                // At once, before the window the kill started ends. Each
-                // frame wakes the worker, so it never recycles and never
-                // maps the section again.
+                // The create asked for a restart, which the probe's handle
+                // refuses while the device stays started, and v1.12.0 waits
+                // up to 5 s for it to stop before it goes on. So the program
+                // streams after the window the kill started has ended.
+                long mark = cap?.Mark() ?? 0;
                 old.Send("stream 1 0.5 250 1");
-                Check($"{y}: the program attaches and streams inside the driver's idle window",
-                      killed.ElapsedMilliseconds < 3500, $"{killed.ElapsedMilliseconds} ms after the kill");
-                Check($"{y}: its input reaches the device", cap != null && Flows(cap));
+                long began = killed.ElapsedMilliseconds;
+                Check($"{y}: the v1.12.0 program streams only after the driver's idle window, its create having waited out the refused restart",
+                      began >= 4000, $"{began} ms after the kill, {second}");
+                var toFirst = Stopwatch.StartNew();
+                bool reached = cap != null && WaitFor(() => cap.Since(mark).Count > 0, 5000);
+                Check($"{y}: its input reaches the device once the driver maps the program's section again", reached,
+                      reached ? $"first report {toFirst.ElapsedMilliseconds} ms after the stream began" : "no report within 5000 ms of the stream");
             }
             Check($"{y}: the v1.12.0 program's create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
