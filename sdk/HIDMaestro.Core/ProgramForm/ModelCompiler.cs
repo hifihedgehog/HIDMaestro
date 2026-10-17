@@ -322,7 +322,6 @@ internal static class ModelCompiler
 
     // ── Programs ─────────────────────────────────────────────────────────
 
-    /// <summary>One program from its ops as a profile writes them.</summary>
     /// <summary>A layout's, decoder's or report's program lowered and
     /// validated. With <paramref name="reportId"/> 0 or more, byte 0 is that
     /// report ID: a top-level const puts it there, and no other op writes
