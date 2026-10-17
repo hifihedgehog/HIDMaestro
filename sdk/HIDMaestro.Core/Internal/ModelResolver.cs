@@ -118,6 +118,12 @@ internal sealed class ResolvedModel
     public string? ProblemFile { get; init; }
     public string ProblemPath { get; init; } = "$.deviceModelFrom";
 
+    /// <summary>The file each filled group's keys came from: the profile's
+    /// own file, a named model's, or, through a catalog profile, the file
+    /// that profile's group came from. A problem with a model taken through
+    /// a catalog profile is listed in the file that holds the key.</summary>
+    internal IReadOnlyDictionary<ModelGroup, string> GroupFiles { get; init; } = new Dictionary<ModelGroup, string>();
+
     /// <summary>What resolution noted without refusing: an answer for a
     /// report the profile's descriptor does not declare, kept because
     /// today's code keeps it, and a name that filled no group.</summary>
@@ -403,17 +409,34 @@ internal sealed class ModelRegistry
     }
 
     /// <summary>A model by name: a named model, else a catalog profile's
-    /// resolved model. Null when nothing holds the name. The source is the
-    /// file or profile it came from.</summary>
-    private (DeviceModel Model, string Source)? Find(string name, HashSet<string> resolving)
+    /// resolved model. Null when nothing holds the name. The files are the
+    /// file each group came from: the named model's for every group, or,
+    /// group by group, the catalog profile's own file or the file of the
+    /// model it took.</summary>
+    private (DeviceModel Model, IReadOnlyDictionary<ModelGroup, string> Files)? Find(string name, HashSet<string> resolving)
     {
-        if (_models.TryGetValue(name, out var m)) return (DeviceModel.Of(m.File), m.Source);
+        if (_models.TryGetValue(name, out var m))
+            return (DeviceModel.Of(m.File), DeviceModel.Groups.ToDictionary(g => g, _ => m.Source));
         var p = _profiles(name);
         if (p == null) return null;
         if (!resolving.Add(p.Id))
             throw new ProfileDefectException("$.deviceModelFrom", $"'{name}' names a profile whose model names this one back.");
-        try { return (Resolve(p, this, outsideCatalog: false, resolving).Model, p.SourceFile ?? p.Id); }
+        try
+        {
+            var r = Resolve(p, this, outsideCatalog: false, resolving);
+            return (r.Model, r.GroupFiles);
+        }
         finally { resolving.Remove(p.Id); }
+    }
+
+    /// <summary>The file that holds the key a taken model's check names:
+    /// <c>$.driverPid</c> is the presentation group's, every other key the
+    /// answers group's (AnswerModels.Validate). Null, the profile's own
+    /// file, when no file filled that group.</summary>
+    private static string? FileAt(IReadOnlyDictionary<ModelGroup, string> files, string path)
+    {
+        var g = path == "$.driverPid" ? ModelGroup.Presentation : ModelGroup.Answers;
+        return files.TryGetValue(g, out var f) ? f : null;
     }
 
     /// <summary>The first identity default whose match holds for the
@@ -492,6 +515,7 @@ internal sealed class ModelRegistry
         AnswerModels.Validate(p, own, taken: false, notes);
 
         DeviceModel? named = null;
+        IReadOnlyDictionary<ModelGroup, string>? namedFiles = null, identityFiles = null;
         string? namedSource = null;
         string? problem = null, problemFile = null;
         string problemPath = "$.deviceModelFrom";
@@ -512,13 +536,14 @@ internal sealed class ModelRegistry
                 {
                     AnswerModels.Validate(p, found.Value.Model, taken: true, namedNotes);
                     named = found.Value.Model;
+                    namedFiles = found.Value.Files;
                     namedSource = $"named:{name}";
                 }
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
                     var (path, reason) = ProfileDefects.Locate(e);
                     problem = $"{ProfileLabel(p)} names '{name}' in deviceModelFrom, and the model does not fit it at {path}: {reason} The profile takes the model its identity gives it.";
-                    problemFile = found.Value.Source;
+                    problemFile = FileAt(found.Value.Files, path);
                     problemPath = path;
                 }
             }
@@ -542,6 +567,7 @@ internal sealed class ModelRegistry
                 {
                     AnswerModels.Validate(p, found.Value.Model, taken: true, identityNotes);
                     identity = found.Value.Model;
+                    identityFiles = found.Value.Files;
                 }
                 catch (Exception e) when (ProfileDefects.IsDefect(e))
                 {
@@ -549,7 +575,7 @@ internal sealed class ModelRegistry
                     if (problem == null)
                     {
                         problem = $"the identity default {hit.Label} gives {ProfileLabel(p)} '{hit.Entry.Model}', and the model does not fit it at {path}: {reason}";
-                        problemFile = found.Value.Source;
+                        problemFile = FileAt(found.Value.Files, path);
                         problemPath = path;
                     }
                 }
@@ -558,13 +584,22 @@ internal sealed class ModelRegistry
 
         var model = DeviceModel.Empty;
         var sources = new Dictionary<string, string>(StringComparer.Ordinal);
+        var groupFiles = new Dictionary<ModelGroup, string>();
         bool nameUsed = false;
         foreach (var g in DeviceModel.Groups)
         {
             string key = DeviceModel.GroupName(g);
-            if (own.Covers(g)) { model = model.With(g, own); sources[key] = "own"; }
-            else if (named != null && named.Covers(g)) { model = model.With(g, named); sources[key] = namedSource!; nameUsed = true; }
-            else if (identity != null && identity.Covers(g)) { model = model.With(g, identity); sources[key] = identityLabel!; }
+            if (own.Covers(g)) { model = model.With(g, own); sources[key] = "own"; groupFiles[g] = p.SourceFile ?? p.Id; }
+            else if (named != null && named.Covers(g))
+            {
+                model = model.With(g, named); sources[key] = namedSource!; nameUsed = true;
+                if (namedFiles!.TryGetValue(g, out var f)) groupFiles[g] = f;
+            }
+            else if (identity != null && identity.Covers(g))
+            {
+                model = model.With(g, identity); sources[key] = identityLabel!;
+                if (identityFiles!.TryGetValue(g, out var f)) groupFiles[g] = f;
+            }
             else sources[key] = "none";
         }
         // The notes on a taken model's answers stand only when the profile
@@ -584,6 +619,7 @@ internal sealed class ModelRegistry
             Problem = problem,
             ProblemFile = problemFile,
             ProblemPath = problemPath,
+            GroupFiles = groupFiles,
             Notes = notes,
         };
     }

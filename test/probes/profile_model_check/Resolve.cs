@@ -29,7 +29,36 @@ internal static class Resolve
         Catalog(c);
         Directory(c);
         Concurrent(c);
+        ThroughCatalog(c);
         return c.Failures;
+    }
+
+    /// <summary>A model taken through a catalog profile, whose own model
+    /// came from a model file, is listed in that model file when it does
+    /// not fit. dualsense takes its answers from models/sony-dualsense.json
+    /// by identity, and a profile with a PID block on one of those answers'
+    /// report IDs names dualsense. At 6cae4b02 the problem was listed in
+    /// dualsense's profile file, which has no featureStubs key.</summary>
+    static void ThroughCatalog(Checks c)
+    {
+        c.Run("a model that does not fit, taken through a catalog profile, is listed in the model file that holds the key", () =>
+        {
+            foreach (var basis in ProfileDatabase.LoadEmbedded().All)
+            {
+                if (basis.RequiresUsbipBackend || string.IsNullOrEmpty(basis.Descriptor)) continue;
+                var o = JsonNode.Parse(JsonSerializer.Serialize(basis, HMJsonContext.Default.ControllerProfile))!.AsObject();
+                o["id"] = "user-through-catalog";
+                o["deviceModelFrom"] = "dualsense";
+                o.Remove("deviceModel");
+                var db = ProfileDatabase.LoadTexts(new[] { ("through.json", o.ToJsonString()) }, ModelRegistry.Catalog);
+                var hit = Api.Issues(db, "Issues").FirstOrDefault(i => i.Kind == "ModelProblem" && i.Reason.Contains("PID block", StringComparison.Ordinal));
+                if (hit == null) continue;
+                return (hit.File.Replace('\\', '/').EndsWith("models/sony-dualsense.json", StringComparison.OrdinalIgnoreCase)
+                        && hit.Path.StartsWith("$.featureStubs", StringComparison.Ordinal),
+                        $"{basis.Id}: {hit.File} {hit.Path}");
+            }
+            return (false, "no catalog profile with a PID block on a DualSense answer's report ID");
+        });
     }
 
     /// <summary>DeviceModelSource, or no groups at all on an SDK without
