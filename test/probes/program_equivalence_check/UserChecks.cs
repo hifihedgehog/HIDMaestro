@@ -88,8 +88,10 @@ internal static unsafe class UserChecks
                 var naive = authored.First(x => x.What == $"decoder {dec.Form.Name}").Naive;
                 var s = new byte[v.Spec.StateSize + Checks.StatePad];
                 var a = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
+                var b = new byte[ProgramForm.MaxReport];
+                var scratch = new byte[v.Spec.StateSize + Checks.StatePad];
                 var regs = new uint[Checks.Registers]; var ctr = new uint[Checks.Counters];
-                int diff = 0;
+                int diff = 0, outputDiff = 0;
                 for (int n = 0; n < 20000; n++)
                 {
                     data.NextBytes(s);
@@ -97,9 +99,25 @@ internal static unsafe class UserChecks
                     fixed (byte* ps = s, pa = a) dec.Run(ps, pa);
                     naive(s, c, regs, ctr);
                     if (!a.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size))) diff++;
+                    // As the controller decodes an output report: its data
+                    // after the ID, in place in a buffer with room past it,
+                    // and copied behind the ID from one without.
+                    int dataSize = dec.Form.MinLength - 1;
+                    var roomy = new byte[256];
+                    var tight = new byte[dataSize];
+                    s.AsSpan(1, dataSize).CopyTo(roomy);
+                    s.AsSpan(1, dataSize).CopyTo(tight);
+                    foreach (var report in new[] { roomy, tight })
+                    {
+                        Array.Fill(b, (byte)0x5A);
+                        fixed (byte* pb = b) dec.RunOutput(s[0], report, dataSize, scratch, pb);
+                        if (!b.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size))) outputDiff++;
+                    }
                 }
                 if (diff == 0) Console.WriteLine($"{p.Id} decoder {dec.Form.Name}: {(dec.Generated ? "generated" : "interpreted")}, 0 of 20000 differ from the naive evaluator");
                 else Fail($"{p.Id} decoder {dec.Form.Name}: {diff} of 20000 differ from the naive evaluator");
+                if (outputDiff == 0) Console.WriteLine($"{p.Id} decoder {dec.Form.Name}: on an output report's data, in place and copied, 0 of 40000 differ");
+                else Fail($"{p.Id} decoder {dec.Form.Name}: on an output report's data, {outputDiff} of 40000 differ from the naive evaluator");
             }
         }
         return Checks.Failures - before;

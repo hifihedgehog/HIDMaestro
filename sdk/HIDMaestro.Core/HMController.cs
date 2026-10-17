@@ -1997,14 +1997,8 @@ public sealed partial class HMController : IDisposable
         }
         if (index < 0) return;
         var decoder = decoders[index];
-        if (length < decoder.Form.MinLength) return;
-        var inBuf = _decodeInput!;
-        inBuf[0] = reportId;
-        int copy = Math.Min(dataSize, decoder.Form.MinLength - 1);
-        Buffer.BlockCopy(data, 0, inBuf, 1, copy);
-        fixed (byte* s = inBuf)
         fixed (byte* d = _decodeOutput!)
-            decoder.Run(s, d);
+            if (!decoder.RunOutput(reportId, data, dataSize, _decodeInput!, d)) return;
         var semantics = decoder.Form.Semantics;
         var fields = new Dictionary<string, object>(semantics.Length);
         for (int i = 0; i < semantics.Length; i++) fields[semantics[i]] = _decodeOutput![i];

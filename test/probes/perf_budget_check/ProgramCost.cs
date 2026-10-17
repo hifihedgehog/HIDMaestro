@@ -107,19 +107,15 @@ internal static unsafe class ProgramCost
                         fixed (byte* sp = padded[i & 63])
                             dec.Run(sp, dp);
             }));
-            // As HMController.RunDecoder: the report copied in after its
-            // length is checked, then decoded.
+            // As HMController.RunDecoder: the report's data as the output
+            // ring hands it, after the ID, in the thread's 256-byte buffer,
+            // through the decoder's RunOutput.
+            var ring = rumble.Select(r => { var b = new byte[256]; r.AsSpan(1).CopyTo(b); return b; }).ToArray();
             variants.Add(("s2-decode-path" + (interpret ? "-interpreted" : ""), n =>
             {
-                fixed (byte* sp = input)
                 fixed (byte* dp = output)
                     for (int i = 0; i < n; i++)
-                    {
-                        var r = rumble[i & 63];
-                        if (r.Length < dec.Form.MinLength) continue;
-                        r.CopyTo(input, 0);
-                        dec.Run(sp, dp);
-                    }
+                        dec.RunOutput(0x02, ring[i & 63], 32, input, dp);
             }));
         }
         var spec = p.StateBlockSpecForCodec();

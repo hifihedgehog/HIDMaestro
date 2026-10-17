@@ -61,11 +61,39 @@ internal sealed unsafe class DecoderRunner
     public DecoderForm Form { get; }
     public bool Generated => _kernel != null;
 
+    // True when no part reads byte 0, the report ID, so the decoder runs on
+    // an output report's data where it lies, one byte before it standing
+    // for the ID it never reads.
+    private readonly bool _inPlace;
+
     public DecoderRunner(DecoderForm form, delegate*<byte*, byte*, uint*, uint*, void> kernel, ReportProgram? interpreted)
     {
         Form = form;
         _kernel = kernel;
         _interpreted = interpreted;
+        _inPlace = !form.Program.Spec.Ops.OfType<MaxOfOp>().SelectMany(m => m.Terms).SelectMany(t => t.Parts).Any(p => p.BitOffset < 8);
+    }
+
+    /// <summary>Decodes an output report as the ring delivers it: its ID
+    /// apart, and <paramref name="dataSize"/> bytes of
+    /// <paramref name="data"/> after it. In place when no part reads the ID
+    /// and <paramref name="data"/> holds the slack past the decoder's last
+    /// byte, otherwise copied into <paramref name="scratch"/> behind the ID.
+    /// False for a report shorter than the decoder reads, which is not
+    /// decoded.</summary>
+    public bool RunOutput(byte reportId, byte[] data, int dataSize, byte[] scratch, byte* d)
+    {
+        int min = Form.MinLength;
+        if (dataSize + 1 < min) return false;
+        if (_inPlace && data.Length >= min + ProgramForm.Slack)
+        {
+            fixed (byte* p = data) Run(p - 1, d);
+            return true;
+        }
+        scratch[0] = reportId;
+        Buffer.BlockCopy(data, 0, scratch, 1, min - 1);
+        fixed (byte* s = scratch) Run(s, d);
+        return true;
     }
 
     /// <summary>Decodes <paramref name="s"/>, the report with the slack every
