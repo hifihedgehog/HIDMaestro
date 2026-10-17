@@ -153,7 +153,14 @@ internal sealed class Case5Driver : IOracleCase
         }
         File.WriteAllText(plan, text, new UTF8Encoding(false));
 
+        // --explain: the plan's text, of which the golden file keeps the
+        // digest, and the Switch Pro streams the driver serves from its
+        // bodies.
+        var planExplainer = new PlanExplainer();
+        golden.ExplainerFor = name => name == "plan" ? planExplainer
+            : name.StartsWith("switch/", StringComparison.Ordinal) ? planExplainer.Driver() : null;
         golden.Stream("plan");
+        golden.Note("text", Encoding.UTF8.GetBytes(text));
         golden.Out("sha256", System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)));
         // Both plans' instance configuration (review F7): the kept plan's,
         // and what the tree's SDK wrote for the kept plan's profiles with
@@ -624,36 +631,42 @@ internal sealed class Case5Driver : IOracleCase
     /// motion in both directions.</summary>
     static IEnumerable<(string, byte[])> SwitchBodies()
     {
-        byte[] Build(HMGamepadState s, double lx = 0.5, double ly = 0.5, double rx = 0.5, double ry = 0.5)
+        foreach (var x in SwitchBodyInputs())
         {
             var b = new byte[SwitchProPacker.BodySize];
-            SwitchProPacker.BuildBody(in s, lx, ly, rx, ry, b);
-            return b;
+            var s = x.State;
+            SwitchProPacker.BuildBody(in s, x.Lx, x.Ly, x.Rx, x.Ry, b);
+            yield return (x.Name, b);
         }
-        yield return ("neutral", Build(new HMGamepadState()));
+    }
+
+    /// <summary>The input of each body the plan carries, by name.</summary>
+    internal static IEnumerable<(string Name, HMGamepadState State, double Lx, double Ly, double Rx, double Ry)> SwitchBodyInputs()
+    {
+        yield return ("neutral", new HMGamepadState(), 0.5, 0.5, 0.5, 0.5);
         for (int i = 0; i < 14; i++)
-            yield return ($"button{i}", Build(new HMGamepadState { Buttons = (HMButton)(1u << i) }));
+            yield return ($"button{i}", new HMGamepadState { Buttons = (HMButton)(1u << i) }, 0.5, 0.5, 0.5, 0.5);
         for (int h = 1; h <= 8; h++)
-            yield return ($"hat{h}", Build(new HMGamepadState { Hat = (HMHat)h }));
+            yield return ($"hat{h}", new HMGamepadState { Hat = (HMHat)h }, 0.5, 0.5, 0.5, 0.5);
         double[] edges = { 0.0, 0.25, 0.75, 1.0 };
         foreach (double e in edges)
         {
-            yield return ($"left-x-{e:0.00}", Build(new HMGamepadState(), lx: e));
-            yield return ($"left-y-{e:0.00}", Build(new HMGamepadState(), ly: e));
-            yield return ($"right-x-{e:0.00}", Build(new HMGamepadState(), rx: e));
-            yield return ($"right-y-{e:0.00}", Build(new HMGamepadState(), ry: e));
+            yield return ($"left-x-{e:0.00}", new HMGamepadState(), e, 0.5, 0.5, 0.5);
+            yield return ($"left-y-{e:0.00}", new HMGamepadState(), 0.5, e, 0.5, 0.5);
+            yield return ($"right-x-{e:0.00}", new HMGamepadState(), 0.5, 0.5, e, 0.5);
+            yield return ($"right-y-{e:0.00}", new HMGamepadState(), 0.5, 0.5, 0.5, e);
         }
-        yield return ("motion-plus", Build(new HMGamepadState
+        yield return ("motion-plus", new HMGamepadState
         {
             AccelGX = 1, AccelGY = 2, AccelGZ = -1, GyroDpsX = 100, GyroDpsY = -250, GyroDpsZ = 2000,
-        }));
-        yield return ("motion-minus", Build(new HMGamepadState
+        }, 0.5, 0.5, 0.5, 0.5);
+        yield return ("motion-minus", new HMGamepadState
         {
             AccelGX = -8, AccelGY = -0.5f, AccelGZ = 8, GyroDpsX = -2000, GyroDpsY = 45.5f, GyroDpsZ = -1,
-        }));
-        yield return ("everything", Build(new HMGamepadState
+        }, 0.5, 0.5, 0.5, 0.5);
+        yield return ("everything", new HMGamepadState
         {
             Buttons = (HMButton)0x3FFF, Hat = HMHat.SouthWest, AccelGX = 0.25f, GyroDpsY = 10,
-        }, 0.1, 0.9, 0.3, 0.7));
+        }, 0.1, 0.9, 0.3, 0.7);
     }
 }

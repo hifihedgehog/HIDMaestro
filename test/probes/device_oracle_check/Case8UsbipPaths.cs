@@ -120,6 +120,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void Axes(GoldenCase g, CompositeRig r)
     {
         g.Stream($"usbip-path/{Switch2Id}/axes");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         var scratch = new Dictionary<HMAxis, float>();
         foreach (var s in States.Scripted(new[] { HMAxis.X, HMAxis.Y, HMAxis.Z, HMAxis.Rx, HMAxis.Ry, HMAxis.Rz }, scratch))
             r.Submit(s);
@@ -134,6 +135,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void OtherComposite(GoldenCase g, CompositeRig r, string id)
     {
         g.Stream($"usbip-path/{id}/handle");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         var ids = new List<byte> { 0x00, 0x02, 0xFF };
         foreach (var rep in r.Controller.Profile.Inner.GetOrBuildReportBuilder().InputReports) if (!ids.Contains(rep.Id)) ids.Add(rep.Id);
         void Gets()
@@ -159,6 +161,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void Report02Sources(GoldenCase g, CompositeRig r, Rng rng)
     {
         g.Stream($"usbip-path/{Switch2Id}/report-02-sources");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         var payloads = new List<byte[]>();
         foreach (int len in new[] { 0, 16, 31, 32, 33, 40, 63 })
         {
@@ -190,6 +193,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void AttachDetach(GoldenCase g, Host host, CompositeRig r)
     {
         g.Stream($"usbip-path/{Switch2Id}/attach-detach");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         var other = (UsbipServer.Connection)RuntimeHelpers.GetUninitializedObject(typeof(UsbipServer.Connection));
         r.Registers();
         r.Claim(host.Connection, "holder");
@@ -229,6 +233,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void SdlRun(GoldenCase g, CompositeRig r, Rng rng)
     {
         g.Stream($"usbip-path/{Switch2Id}/sdl-start");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         // The body plumbing first: each axis alone, each button alone, each
         // hat value, each motion field, so a body built from the wrong input
         // differs here.
@@ -283,6 +288,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void SteamRun(GoldenCase g, CompositeRig r)
     {
         g.Stream($"usbip-path/{Switch2Id}/steam-start");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         r.Submit(new HMGamepadState { AccelGY = 1f });
         foreach (var (_, hex) in Case3Switch2Device.SteamS65)
         {
@@ -302,6 +308,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void Transport(GoldenCase g, CompositeRig r)
     {
         g.Stream($"usbip-path/{Switch2Id}/transport");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         r.Submit(new HMGamepadState { Buttons = HMButton.A });
         r.BulkIn(64);                                                        // parks
         r.BulkOut(Convert.FromHexString("0391000D000800000100FFFFFFFFFFFF")); // the parked read takes the reply
@@ -341,6 +348,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     static void Rumble(GoldenCase g, CompositeRig r, Rng rng)
     {
         g.Stream($"usbip-path/{Switch2Id}/rumble");
+        g.Explainer = new UsbipReportExplainer(r.Controller, 8);
         var reports = new List<byte[]>();
         for (int len = 0; len <= 40; len++)
         {
@@ -406,6 +414,8 @@ internal sealed class Case8UsbipPaths : IOracleCase
         readonly byte _inEndpoint;
         bool _bodyStuck;
         readonly ConcurrentQueue<(string Tag, byte[] Data)> _events = new();
+        // The seqnums of the reads that return an input report.
+        readonly HashSet<uint> _reports = new();
         readonly SemaphoreSlim _sentinel = new(0);
         const byte SentinelSource = 0xEE, SentinelId = 0xEE;
 
@@ -553,6 +563,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
         /// queued frame as an interrupt IN read takes it.</summary>
         public void Submit(in HMGamepadState s)
         {
+            _g.SetInput(in s);
             uint before = Seq();
             try { _c.SubmitState(in s); }
             catch (Exception e) { Out("throw", Encoding.ASCII.GetBytes(e.GetType().FullName ?? "?")); return; }
@@ -646,6 +657,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
         public uint InterruptIn()
         {
             uint seq = _host.Submit(_dev, (byte)(_inEndpoint & 0x0F), isIn: true, 64, ReadOnlySpan<byte>.Empty);
+            _reports.Add(seq);
             Out("int-in", ReadOnlySpan<byte>.Empty);
             Drain();
             return seq;
@@ -684,8 +696,8 @@ internal sealed class Case8UsbipPaths : IOracleCase
 
         public void GetInput(byte id, ushort wLength)
         {
-            _host.Submit(_dev, 0x00, isIn: true, wLength, ReadOnlySpan<byte>.Empty,
-                setup: Setup(0xA1, 0x01, (ushort)(0x0100 | id), _dev.Descriptors.HidInterfaceNumber, wLength));
+            _reports.Add(_host.Submit(_dev, 0x00, isIn: true, wLength, ReadOnlySpan<byte>.Empty,
+                setup: Setup(0xA1, 0x01, (ushort)(0x0100 | id), _dev.Descriptors.HidInterfaceNumber, wLength)));
             Out($"get-input.{id:X2}.w{wLength}", ReadOnlySpan<byte>.Empty);
             Drain();
         }
@@ -822,6 +834,9 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 BinaryPrimitives.WriteInt32LittleEndian(o, status);
                 BinaryPrimitives.WriteInt32LittleEndian(o.AsSpan(4), actual);
                 data.CopyTo(o, 8);
+                // --explain: an interrupt IN read or a GET_REPORT(Input)
+                // returns an input report the device built from the frame.
+                _g.NextIsReport(kind == UsbipProtocol.RetSubmit && _reports.Remove(seq));
                 Out(kind == UsbipProtocol.RetUnlink ? "ret-unlink" : "ret-submit", o);
                 if (kind == UsbipProtocol.RetSubmit) got[seq] = data.Length;
             }
@@ -876,6 +891,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
             if (companion == IntPtr.Zero) throw new InvalidOperationException("CreateEventW failed.");
             CompanionEvents()[index] = companion;
             var c = Case1Submit.Create(p, index, view);
+            g.Explainer = new FrameExplainer(c, tail: 1);
             typeof(HMController).GetField("_idleThread", Instance)!.SetValue(c, new Thread(() => { }) { Name = "case 8 idle pump, never started" });
             var repeat = typeof(HMController).GetMethod("RepeatLastFrame", Instance)!;
             var section = new byte[SharedMemoryIO.SHARED_INPUT_SIZE];
@@ -904,6 +920,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 var s = RandomState(rng);
                 stamp += 12000;
                 s.SensorTimestamp = stamp;
+                g.SetInput(in s);
                 Do("state", () => c.SubmitState(in s));
             }
             int extSize = p.ExtendedReport?.Size ?? 0;

@@ -684,6 +684,7 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
         }
         try
         {
+            golden.Explainer = new FrameExplainer(c);
             object? flag = typeof(HMController).GetField("_switchProtocol", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(c);
             golden.Out("switch.protocol", new[] { flag is bool on ? (byte)(on ? 1 : 0) : (byte)0xFF });
             IReadOnlyList<HMAxis> axes;
@@ -700,6 +701,7 @@ internal sealed class Case9PhysicalCorpus : IOracleCase
                 var s = state;
                 stamp += 12000;
                 if (s.SensorTimestamp == 0) s.SensorTimestamp = stamp;
+                golden.SetInput(in s);
                 try { c.SubmitState(in s); }
                 catch (Exception ex)
                 {

@@ -80,7 +80,10 @@ internal sealed class GoldenStream
     public string Digest => _digest ??= Convert.ToHexString(_sha.GetHashAndReset());
 }
 
-internal sealed class GoldenCase
+// Partial: the probe's GoldenExplain.cs adds --explain, which reads the
+// SDK's internals. The test app links this file without it, and the
+// explain hooks below then compile to nothing.
+internal sealed partial class GoldenCase
 {
     public readonly string Name;
     public readonly ulong Seed;
@@ -95,13 +98,22 @@ internal sealed class GoldenCase
     public static string? DumpDir { get; set; }
     BinaryWriter? _dump;
 
+    // --explain's hooks (GoldenExplain.cs).
+    partial void ExplainStart();
+    partial void ExplainStream(string name);
+    partial void ExplainOut(string tag, ReadOnlySpan<byte> data);
+    partial void ExplainNote(string tag, ReadOnlySpan<byte> data);
+    partial void ExplainEnd();
+
     /// <summary>A case's recording. Only the run of a case passes
     /// <paramref name="dump"/>, so a recording a case keeps for its own
-    /// comparison, or one read back from its file, writes no dump.</summary>
+    /// comparison, or one read back from its file, writes no dump and
+    /// holds nothing against the base.</summary>
     public GoldenCase(string name, ulong seed, bool dump = false)
     {
         Name = name;
         Seed = seed;
+        if (dump) ExplainStart();
         if (dump && DumpDir != null)
         {
             Directory.CreateDirectory(DumpDir);
@@ -112,6 +124,7 @@ internal sealed class GoldenCase
     /// <summary>Ends the dump file with its end record.</summary>
     public void CloseDump()
     {
+        ExplainEnd();
         if (_dump == null) return;
         _dump.Write((byte)'E');
         _dump.Dispose();
@@ -124,6 +137,7 @@ internal sealed class GoldenCase
         if (!_names.Add(name)) throw new ArgumentException($"Case {Name} has stream {name} twice.");
         _current = new GoldenStream(name);
         Streams.Add(_current);
+        ExplainStream(name);
         if (_dump != null)
         {
             var n = Encoding.ASCII.GetBytes(name);
@@ -144,9 +158,28 @@ internal sealed class GoldenCase
         if (_current == null) throw new InvalidOperationException($"Case {Name}: an output before any stream.");
         if (Redact != null) data = Redact(data.ToArray());
         _current.Add(tag, data);
+        ExplainOut(tag, data);
         if (_dump != null)
         {
             _dump.Write((byte)'O');
+            _dump.Write((byte)tag.Length);
+            _dump.Write(Encoding.ASCII.GetBytes(tag));
+            _dump.Write((uint)data.Length);
+            _dump.Write(data);
+        }
+    }
+
+    /// <summary>Data that is not an output: written to the dump as an 'N'
+    /// record and held against the base dump's for the stream's explainer,
+    /// and never part of the golden file. Case 5 notes its plan's text, of
+    /// which the golden file keeps only the digest.</summary>
+    public void Note(string tag, ReadOnlySpan<byte> data)
+    {
+        if (_current == null) throw new InvalidOperationException($"Case {Name}: a note before any stream.");
+        ExplainNote(tag, data);
+        if (_dump != null)
+        {
+            _dump.Write((byte)'N');
             _dump.Write((byte)tag.Length);
             _dump.Write(Encoding.ASCII.GetBytes(tag));
             _dump.Write((uint)data.Length);
@@ -319,7 +352,9 @@ internal static class GoldenStore
 /// <summary>Reads what the native driver harness writes: little-endian
 /// records, 'S' then a 16-bit length and a stream name, 'O' then an 8-bit
 /// length and a tag, a 32-bit length and the output's bytes, and 'E' at the
-/// end. A file without its 'E' came from a harness that stopped early.</summary>
+/// end. A file without its 'E' came from a harness that stopped early. A
+/// dump (GoldenCase.DumpDir) may also hold 'N' notes, laid out as outputs,
+/// which are not outputs and are skipped.</summary>
 internal static class NativeStreamReader
 {
     public static void ReadInto(string path, GoldenCase target)
@@ -344,6 +379,12 @@ internal static class NativeStreamReader
                     byte[] data = br.ReadBytes(len);
                     if (data.Length != len) throw new EndOfStreamException($"{path}: an output is cut short.");
                     target.Out(tag, data);
+                    break;
+                }
+                case 'N':
+                {
+                    br.ReadBytes(br.ReadByte());
+                    br.ReadBytes(checked((int)br.ReadUInt32()));
                     break;
                 }
                 case 'E':

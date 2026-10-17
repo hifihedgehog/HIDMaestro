@@ -1,0 +1,6 @@
+# The Triton's left trigger one count short of full scale (lane DD-1's
+# review, item 3). With this patch, replay and replay --explain must both
+# fail on a tree whose steam-controller-2 sets its trigger's "max": the
+# change list pins each stream's digest, and --explain recomputes each
+# trigger value by decision (a) on the field's range at the base.
+steam-controller-2 | ("semantic": "leftTrigger",\s*"max": )32767 | ${1}32766

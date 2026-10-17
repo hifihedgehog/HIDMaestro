@@ -26,7 +26,11 @@
 // consumer's clock would give it), and for a profile that arms its extended
 // report on a host's feature read, the arming: HMController._extendedModeArmed
 // is set as the output reader sets it when the read arrives. A field a later
-// lane renames moves this file with it.
+// lane renames moves this file with it. On a tree whose codec reads its
+// clock through a field a test can set (VendorBlobCodec.EncoderState's
+// TimestampClock), each controller's encoder reads a scripted clock
+// (ScriptedClock, Explain.cs) instead, so the bytes it stamps from the
+// clock are an oracle too.
 //
 // A submit that throws records the exception's type in place of a frame.
 using System;
@@ -86,6 +90,7 @@ internal sealed class Case1Submit : IOracleCase
                     var c = Create(p, index, view);
                     if (armed) typeof(HMController).GetField("_extendedModeArmed", Instance)!.SetValue(c, true);
                     golden.Stream($"submit/{id}{suffix}");
+                    golden.Explainer = new FrameExplainer(c);
                     // The inputs this stream's states move, first, so a
                     // replay whose profile reads other axes differs at
                     // output 0 rather than somewhere in the frames.
@@ -107,6 +112,7 @@ internal sealed class Case1Submit : IOracleCase
                         stamp += 12000;
                         if (stamp == 0) stamp = 12000;
                         if (s.SensorTimestamp == 0) s.SensorTimestamp = stamp;
+                        golden.SetInput(in s);
                         for (int k = 0; k < States.Repeats; k++)
                         {
                             try { c.SubmitState(in s); }
@@ -316,6 +322,7 @@ internal sealed class Case1Submit : IOracleCase
         // Keyboard and mouse pacing waits a millisecond between frames, a
         // timing rule the frames' bytes do not depend on.
         typeof(HMController).GetField("_deliverEvery", Instance)!.SetValue(c, false);
+        ScriptedClock.Install(c);
         return c;
     }
 

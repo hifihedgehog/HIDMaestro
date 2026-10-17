@@ -50,6 +50,19 @@
 //                                   writes beyond the kept plan (Case5Driver.cs)
 //   either mode: [--dump <dir>]   also writes every output whole to
 //                                   <dir>\<case>.bin (GoldenCase.DumpDir)
+//   replay [--explain <dir> --lane <lane>]
+//                                 also holds every output against a base
+//                                   tree's dump in <dir>, and recomputes each
+//                                   by the lane's rules (Explain.cs)
+//          [--write-changes <file>] writes the change list this replay
+//                                   would pass with: every stream that
+//                                   differs from its golden file pinned to
+//                                   its count and digest, with --explain's
+//                                   categories. A new entry's lane, or its
+//                                   reason, is "?" until filled in
+//          [--profile-patch <file>] edits catalog profiles for this run
+//                                   (ProfilePatch.cs), for a mutation the
+//                                   list and --explain must catch
 //   compare <dirA> <dirB>
 //   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]
 //                         the live run against the native harness
@@ -137,6 +150,7 @@ internal static class Program
         string golden = Path.Combine(ProbeDir(), "golden");
         string native = Path.Combine(AppContext.BaseDirectory, "native");
         bool goldenGiven = false, skipCorpus = false;
+        string? lane = null, writeChanges = null, profilePatch = null;
         var changeFiles = new List<string>();
         var names = new List<string>();
         for (int i = 1; i < args.Length; i++)
@@ -153,9 +167,17 @@ internal static class Program
                 case "--corpus-root": Case9PhysicalCorpus.CorpusRoot = Path.GetFullPath(Value()); break;
                 case "--skip-corpus": skipCorpus = true; break;
                 case "--dump": GoldenCase.DumpDir = Path.GetFullPath(Value()); break;
+                case "--explain": GoldenCase.ExplainDir = Path.GetFullPath(Value()); break;
+                case "--lane": lane = Value(); break;
+                case "--write-changes": writeChanges = Path.GetFullPath(Value()); break;
+                case "--profile-patch": profilePatch = Path.GetFullPath(Value()); break;
                 default: return Usage();
             }
         }
+        if ((GoldenCase.ExplainDir != null) != (lane != null))
+            throw new ArgumentException("--explain and --lane go together: the base dump, and the lane whose rules and entries it holds the tree to.");
+        if (mode != "replay" && (GoldenCase.ExplainDir != null || writeChanges != null || profilePatch != null))
+            throw new ArgumentException("--explain, --write-changes and --profile-patch are replay's.");
         var selected = names.Count == 0 ? Cases.ToList()
             : names.Select(n => Cases.FirstOrDefault(c => c.Name == n) ?? throw new ArgumentException($"No case {n}.")).ToList();
         var options = new Options(seed, golden, native, mode == "replay");
@@ -168,12 +190,23 @@ internal static class Program
         Case5Driver.ConfigChanges = changes.Config.ToList();
         if (changes.Entries.Count > 0)
             Console.WriteLine($"  change list: {changes.Entries.Count} intended change(s) from {string.Join(", ", changeFiles.Select(Path.GetFileName))}");
-        // A differing stream passes when the last entry naming it pins what
-        // the replay gave.
+        if (lane != null)
+        {
+            ExplainSession.Changes = changes;
+            ExplainSession.Lane = lane;
+            ExplainRules.Active = ExplainRules.From(changes, lane);
+            Console.WriteLine($"  explain: lane {lane}, rules {ExplainRules.Active}");
+        }
+        // What the replay gave for each stream, and for each that differs
+        // from its golden file, for --write-changes.
+        var pins = new Dictionary<string, (long Count, string Digest)>(StringComparer.Ordinal);
+        var moved = new Dictionary<string, (long Count, string Digest)>(StringComparer.Ordinal);
+        var explainedStreams = new Dictionary<string, ExplainSession.StreamResult>(StringComparer.Ordinal);
         (bool Ok, string Why)? Pin(string caseName, string stream, GoldenStream? r)
         {
             long n = r?.Count ?? 0;
             string d = r?.Digest ?? "none";
+            moved[$"{caseName}/{stream}"] = pins[$"{caseName}/{stream}"] = (n, d);
             var e = changes.Stream(caseName, stream);
             if (e == null) return null;
             if (e.Count == n && e.Digest == d) return (true, $"{e.Lane}: {e.Reason}");
@@ -202,6 +235,7 @@ internal static class Program
         }
 
         Console.WriteLine($"=== device_oracle_check {mode}, seed {seed}, golden {golden} ===");
+        if (profilePatch != null) ProfilePatch.Apply(profilePatch);
         int failures = 0, skipped = 0;
         var recorded = new List<GoldenCase>();
         foreach (var c in selected)
@@ -225,8 +259,26 @@ internal static class Program
                     failures++;
                     continue;
                 }
+                if (g.Explained is { } ex)
+                {
+                    foreach (var line in ex.Lines) Console.WriteLine(line);
+                    foreach (var (name, result) in ex.Results) explainedStreams[$"{c.Name}/{name}"] = result;
+                    Console.WriteLine($"  [{(ex.Failures == 0 ? "PASS" : "FAIL")}] {c.Name}: every output against the base dump, by lane {lane}'s rules, {ex.Failures} failure(s)");
+                    if (ex.Failures != 0) failures++;
+                }
                 int bad = GoldenCase.Compare(want, g, Console.Out, (s, r) => Pin(c.Name, s, r));
                 var mine = g.Streams.ToDictionary(x => x.Name, StringComparer.Ordinal);
+                foreach (var s in g.Streams) pins[$"{c.Name}/{s.Name}"] = (s.Count, s.Digest);
+                // A stream the lane moved against its base back to its golden
+                // bytes: its entry pins those.
+                foreach (var e in changes.Entries.Where(e => e.Explained && !e.Used && e.Case == c.Name))
+                {
+                    e.Used = true;
+                    var (n, d) = pins.TryGetValue(e.Target, out var p) ? p : (0, "none");
+                    if (e.Count == n && e.Digest == d) continue;
+                    Console.WriteLine($"  [FAIL] {e.Source}: {e.Target} equals its golden file, count {n} digest {Short(d)}, and the entry pins count {e.Count} digest {Short(e.Digest)}");
+                    bad++;
+                }
                 int same = want.Streams.Count(w => mine.TryGetValue(w.Name, out var r) && r.Count == w.Count && r.Digest == w.Digest);
                 Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] {c.Name}: {same} of {want.Streams.Count} golden streams identical in the replay{(bad == 0 ? "" : $", {bad} difference(s)")}");
                 if (bad != 0) failures++;
@@ -250,12 +302,18 @@ internal static class Program
             }
         }
         // Every change listed for a case that ran must have matched: the list
-        // names the tree's changes and no others.
+        // names the tree's changes and no others. A rule is the lane's to
+        // state, and --explain's to hold the tree to.
         var ran = new HashSet<string>(selected.Select(c => c.Name), StringComparer.Ordinal);
-        foreach (var e in changes.Entries.Where(e => !e.Used && (e.Kind == "config" ? ran.Contains("case5-driver") : ran.Contains(e.Case))))
+        foreach (var e in changes.Entries.Where(e => !e.Used && e.Kind != "rule" && (e.Kind == "config" ? ran.Contains("case5-driver") : ran.Contains(e.Case))))
         {
             Console.WriteLine($"  [FAIL] {e.Source}: the listed change {e.Kind} {e.Target} ({e.Lane}) matched no difference");
             failures++;
+        }
+        if (writeChanges != null)
+        {
+            ChangeWriter.Write(writeChanges, changes, ran, moved, pins, explainedStreams, lane);
+            Console.WriteLine($"  wrote {writeChanges}: the change list this replay passes with, \"?\" where a lane or reason is to be filled in");
         }
         if (mode == "record" && failures == 0)
         {
@@ -360,6 +418,7 @@ internal static class Program
     static int Usage()
     {
         Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus] [--dump <dir>]");
+        Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane>] [--write-changes <file>] [--profile-patch <file>]");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));

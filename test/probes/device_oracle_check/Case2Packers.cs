@@ -45,14 +45,18 @@ internal sealed class Case2Packers : IOracleCase
             }
         }
         golden.Stream("switch-pro/body/states");
+        golden.Explainer = new BodyExplainer(switchPro: true);
         EachState((s, v) =>
         {
+            golden.SetInput(in s, v);
             SwitchProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], body);
             golden.Out("body", body);
         });
         golden.Stream("switch2-pro/body/states");
+        golden.Explainer = new BodyExplainer(switchPro: false);
         EachState((s, v) =>
         {
+            golden.SetInput(in s, v);
             Switch2ProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], v[4], v[5], body2);
             golden.Out("body", body2);
         });
@@ -68,18 +72,22 @@ internal sealed class Case2Packers : IOracleCase
         for (int k = 0; k <= 4095; k += 1) sweep.Add(k / 4095.0);
         var neutral = new HMGamepadState();
         golden.Stream("switch-pro/body/slots");
+        golden.Explainer = new BodyExplainer(switchPro: true);
         foreach (double v in sweep)
             for (int slot = 0; slot <= 4; slot++)
             {
                 var a = SlotsAt(slot, v, 4);
+                golden.SetInput(in neutral, a);
                 SwitchProPacker.BuildBody(in neutral, a[0], a[1], a[2], a[3], body);
                 golden.Out(slot == 4 ? "all" : $"slot{slot}", body);
             }
         golden.Stream("switch2-pro/body/slots");
+        golden.Explainer = new BodyExplainer(switchPro: false);
         foreach (double v in sweep)
             for (int slot = 0; slot <= 6; slot++)
             {
                 var a = SlotsAt(slot, v, 6);
+                golden.SetInput(in neutral, a);
                 Switch2ProPacker.BuildBody(in neutral, a[0], a[1], a[2], a[3], a[4], a[5], body2);
                 golden.Out(slot == 6 ? "all" : $"slot{slot}", body2);
             }

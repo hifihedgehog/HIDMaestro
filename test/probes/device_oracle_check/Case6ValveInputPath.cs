@@ -49,7 +49,10 @@
 // profiles declares such a field at 9bd6279, so the mask is empty and is
 // recorded as such: the Triton's byte 30 is a uint32-rolling counter
 // (steam-controller-2.json, VendorBlobCodec.cs:365-381), and no Valve field
-// reads the consumer's stamp or the clock.
+// reads the consumer's stamp or the clock. A tree whose encoder reads a
+// clock a test can set gets the scripted one case 1 gives it
+// (Case1Submit.Create, ScriptedClock), so the bytes stamped from it are
+// the same in every run.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -143,6 +146,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
     static void Scripted(GoldenCase g, string name, Rig r, bool stamped)
     {
         g.Stream(name);
+        g.Explainer = new UsbipReportExplainer(r.Controller, 4);
         r.MaskHeader(clock: !stamped);
         r.LizardOff();
         var scratch = new Dictionary<HMAxis, float>();
@@ -164,6 +168,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
     static void Idle(GoldenCase g, string name, Rig r, bool stamped)
     {
         g.Stream(name);
+        g.Explainer = new UsbipReportExplainer(r.Controller, 4);
         r.MaskHeader(clock: !stamped);
         r.LizardOff();
         r.Imu(true);
@@ -183,6 +188,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
     static void StampRestart(GoldenCase g, string name, Rig r)
     {
         g.Stream(name);
+        g.Explainer = new UsbipReportExplainer(r.Controller, 4);
         r.MaskHeader();
         r.Imu(true);
         for (uint k = 0; k < 20; k++) r.Submit(new HMGamepadState { GyroDpsY = k, SensorTimestamp = 0xF0000000u + k * StampStep }, stamped: true);
@@ -195,6 +201,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
     static void StampWrap(GoldenCase g, string name, Rig r)
     {
         g.Stream(name);
+        g.Explainer = new UsbipReportExplainer(r.Controller, 4);
         r.MaskHeader();
         r.Imu(true);
         uint t = 0xFFFFFFFFu - 10 * StampStep;
@@ -211,6 +218,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
     static void Random(GoldenCase g, string name, Rig r, Rng rng)
     {
         g.Stream(name);
+        g.Explainer = new UsbipReportExplainer(r.Controller, 4);
         r.MaskHeader();
         r.LizardOff();
         var scratch = new Dictionary<HMAxis, float>();
@@ -252,6 +260,9 @@ internal sealed class Case6ValveInputPath : IOracleCase
         uint _published;
         byte[]? _lastReport;
         bool _clock;
+
+        /// <summary>The controller, for --explain.</summary>
+        public HMController Controller => _c;
 
         public Rig(GoldenCase g, Host host, ControllerProfile p, int index, int[] mask, bool sdlSteamSensors)
         {
@@ -380,6 +391,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
                 if (_stamp == 0) _stamp = StampStep;
                 s.SensorTimestamp = _stamp;
             }
+            _g.SetInput(in s);
             uint before = Seq();
             try { _c.SubmitState(in s); }
             catch (Exception e)
