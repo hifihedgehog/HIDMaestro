@@ -4,10 +4,12 @@ using HIDMaestro.Internal.Programs;
 
 /// <summary>The third evaluator, written from the design note's text alone
 /// (mechanism 2: the op table, "One semantics" and its write order, the
-/// condition grammar and the hat8 sector rule). It takes the program as its
-/// author wrote it, not the validated form's stage lists, and shares no
-/// stage order, table, constant or arithmetic shortcut with the generated
-/// and interpreted paths. Values are read one state bit at a time, the
+/// condition grammar and the hat8 sector rule), for a program built in code,
+/// which has no authored JSON: the corpus, the review cases and the planted
+/// defects. A profile's programs go to <see cref="NaiveJson"/>, which reads
+/// the JSON. This takes the program's ops in list order, not the validated
+/// form's stage lists, and shares no stage order, table, constant or
+/// arithmetic shortcut with the generated and interpreted paths. Values are read one state bit at a time, the
 /// arithmetic is exact in 64 bits, a hat's sector is found from the note's
 /// stated boundary, and an OR op writes its bits over the byte rather than
 /// ORing into it, which the note says gives the same byte because validation
@@ -82,7 +84,7 @@ internal static class Naive
     /// 414,214 b (up 0 or down 4 for y, right 2 or left 6 for x), and on the
     /// diagonal of its quadrant otherwise (1 up-right, 3 down-right, 5
     /// down-left, 7 up-left).</summary>
-    static int HatSector(long x, long y, long deadzone)
+    internal static int HatSector(long x, long y, long deadzone)
     {
         if (x * x + y * y <= deadzone * deadzone) return 8;
         long ax = Math.Abs(x), ay = Math.Abs(y);

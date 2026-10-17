@@ -59,7 +59,7 @@ internal static unsafe class Checks
     /// they agree on every byte of the report. <paramref name="s"/> holds the
     /// state block and its pad.</summary>
     public static bool Agree(ValidProgram v, delegate*<byte*, byte*, uint*, uint*, void> kernel, ReportProgram interp,
-        byte[] s, byte[] a, byte[] b, byte[] c, uint[] regs, uint[] ctr, byte[] fills, ref string? first)
+        byte[] s, byte[] a, byte[] b, byte[] c, uint[] regs, uint[] ctr, byte[] fills, ref string? first, NaiveJson.Evaluate? naive = null)
     {
         int size = v.Spec.Size;
         Array.Fill(a, fills[0]); Array.Fill(b, fills[1]); Array.Fill(c, fills[2]);
@@ -69,7 +69,8 @@ internal static unsafe class Checks
             kernel(ps, pa, pr, pc);
             interp.Run(ps, pb, pr, pc);
         }
-        Naive.Run(v.Spec, s, c, regs, ctr);
+        if (naive != null) naive(s, c, regs, ctr);
+        else Naive.Run(v.Spec, s, c, regs, ctr);
         bool same = a.AsSpan(0, size).SequenceEqual(b.AsSpan(0, size)) && a.AsSpan(0, size).SequenceEqual(c.AsSpan(0, size));
         if (!same)
             first ??= $"state {Convert.ToHexString(s, 0, v.Spec.StateSize)}: generated {Convert.ToHexString(a, 0, size)} interpreted {Convert.ToHexString(b, 0, size)} naive {Convert.ToHexString(c, 0, size)}";
@@ -80,7 +81,7 @@ internal static unsafe class Checks
     /// inputs. Returns the inputs on which any two differ.</summary>
     public static int Compare(ValidProgram v, int inputs, Random data, out string? first,
         PathMutation gen = PathMutation.None, InterpMutation interpMutation = InterpMutation.None, byte[]? fills = null,
-        delegate*<byte*, byte*, uint*, uint*, void> kernel = null)
+        delegate*<byte*, byte*, uint*, uint*, void> kernel = null, NaiveJson.Evaluate? naive = null)
     {
         fills ??= PreFill;
         first = null;
@@ -95,7 +96,7 @@ internal static unsafe class Checks
         {
             data.NextBytes(s);
             DrawRegisters(data, regs, ctr, n);
-            if (!Agree(v, kernel, interp, s, a, b, c, regs, ctr, fills, ref first)) diff++;
+            if (!Agree(v, kernel, interp, s, a, b, c, regs, ctr, fills, ref first, naive)) diff++;
         }
         return diff;
     }

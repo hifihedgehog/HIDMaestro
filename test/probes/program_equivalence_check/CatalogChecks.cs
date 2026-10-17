@@ -37,12 +37,15 @@ internal static unsafe class CatalogChecks
             var programs = m.AllPrograms.ToList();
             if (programs.Count == 0) continue;
             models.Add((p, m));
-            foreach (var v in programs.GroupBy(x => x.Hash).Select(g => g.First()))
+            // The naive evaluator reads each program from the profile's JSON
+            // as its author wrote it.
+            var authored = new NaiveJson(Root(p.Id));
+            foreach (var (v, naive, _) in authored.Pair(m).GroupBy(x => x.Program.Hash).Select(g => g.First()))
             {
                 hashes.Add(v.Hash);
                 var k = ProgramBinder.Kernel(v.Hash);
                 if (k == null) { Fail($"{p.Id} {v.Spec.Name}: hash {v.Hash[..16]} binds no generated kernel"); continue; }
-                int d = Checks.Compare(v, 100000, data, out var first, kernel: k);
+                int d = Checks.Compare(v, 100000, data, out var first, kernel: k, naive: naive);
                 if (d == 0) Console.WriteLine($"{p.Id} {v.Spec.Name}: hash {v.Hash[..16]}, bound to its generated kernel, 0 of 100000 differ");
                 else Fail($"{p.Id} {v.Spec.Name}: {d} of 100000 differ, first {first}");
             }
@@ -50,7 +53,7 @@ internal static unsafe class CatalogChecks
             {
                 setKeys.Add(m.LayoutSet!.Key);
                 if (!runner.Generated) Fail($"{p.Id}: its layout set binds the interpreter, not its generated set");
-                else RunnerAgainstNaive(p.Id, m, runner, data, 20000);
+                else RunnerAgainstNaive(p.Id, m, authored, runner, data, 20000);
             }
             var decoders = ProgramBinder.BindDecoders(m);
             for (int i = 0; i < decoders.Length; i++)
@@ -72,8 +75,9 @@ internal static unsafe class CatalogChecks
     /// <summary>The device's layouts through the bound runner, the way the
     /// device clock and a GET_REPORT run them, against the naive evaluator,
     /// each layout on <paramref name="inputs"/> random states.</summary>
-    static void RunnerAgainstNaive(string id, CompiledModel m, LayoutRunner runner, Random data, int inputs)
+    static void RunnerAgainstNaive(string id, CompiledModel m, NaiveJson authored, LayoutRunner runner, Random data, int inputs)
     {
+        var naive = authored.Pair(m).Take(m.Layouts.Length).Select(x => x.Naive).ToArray();
         var s = new byte[m.StateSize + Checks.StatePad];
         var a = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
         var regs = new uint[Checks.Registers]; var ctr = new uint[Checks.Counters];
@@ -89,7 +93,7 @@ internal static unsafe class CatalogChecks
                 fixed (byte* ps = s, pa = a)
                 fixed (uint* pr = regs, pc = ctr)
                     runner.Run(layout, ps, pa, pr, pc);
-                Naive.Run(v.Spec, s, c, regs, ctr);
+                naive[layout](s, c, regs, ctr);
                 if (!a.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size)))
                 {
                     diff++;
@@ -173,10 +177,13 @@ internal static unsafe class CatalogChecks
         foreach (var (p, m) in models)
         {
             var sized = bodies.Where(x => x.Length == m.StateSize).ToList();
-            foreach (var layout in m.Layouts)
+            var authored = new NaiveJson(Root(p.Id)).Pair(m).ToList();
+            for (int li = 0; li < m.Layouts.Length; li++)
             {
+                var layout = m.Layouts[li];
                 if (sized.Count == 0) break;
                 var v = layout.Program;
+                var naive = authored[li].Naive;
                 var kernel = ProgramBinder.Kernel(v.Hash);
                 if (kernel == null) continue;
                 var interp = new ReportProgram(v);
@@ -190,7 +197,7 @@ internal static unsafe class CatalogChecks
                         if (r == 0) { Array.Clear(regs); m.Registers.Initial.CopyTo(regs, 0); Array.Clear(ctr); }
                         else Checks.DrawRegisters(data, regs, ctr, r);
                         runs++;
-                        if (!Checks.Agree(v, kernel, interp, s, a, b, c, regs, ctr, Checks.PreFill, ref first)) diff++;
+                        if (!Checks.Agree(v, kernel, interp, s, a, b, c, regs, ctr, Checks.PreFill, ref first, naive)) diff++;
                     }
                 if (diff == 0) Console.WriteLine($"{p.Id} layout {layout.Name}: {sized.Count} recorded state blocks under 4 register sets, 0 of {runs} differ");
                 else Fail($"{p.Id} layout {layout.Name}: {diff} of {runs} recorded inputs differ, first {first}");
@@ -198,6 +205,7 @@ internal static unsafe class CatalogChecks
             foreach (var dec in m.Decoders)
             {
                 var v = dec.Program;
+                var naive = authored.First(x => x.What == $"decoder {dec.Name}").Naive;
                 var kernel = ProgramBinder.Kernel(v.Hash);
                 if (kernel == null) continue;
                 var interp = new ReportProgram(v);
@@ -210,13 +218,27 @@ internal static unsafe class CatalogChecks
                         s[0] = id;
                         row.CopyTo(s, 1);
                         runs++;
-                        if (!Checks.Agree(v, kernel, interp, s, a, b, c, regs, ctr, Checks.PreFill, ref first)) diff++;
+                        if (!Checks.Agree(v, kernel, interp, s, a, b, c, regs, ctr, Checks.PreFill, ref first, naive)) diff++;
                     }
                 if (runs == 0) continue;
                 if (diff == 0) Console.WriteLine($"{p.Id} decoder {dec.Name}: {runs} recorded reports, 0 differ");
                 else Fail($"{p.Id} decoder {dec.Name}: {diff} of {runs} recorded reports differ, first {first}");
             }
         }
+    }
+
+    /// <summary>The embedded profile file of <paramref name="id"/> as JSON.</summary>
+    static JsonObject Root(string id)
+    {
+        var asm = typeof(HMContext).Assembly;
+        foreach (var name in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal) && n.EndsWith(".json", StringComparison.OrdinalIgnoreCase)))
+        {
+            using var st = asm.GetManifestResourceStream(name)!;
+            using var sr = new StreamReader(st, Encoding.UTF8);
+            if (JsonNode.Parse(sr.ReadToEnd(), documentOptions: new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true }) is JsonObject o
+                && (string?)o["id"] == id) return o;
+        }
+        throw new InvalidOperationException($"no embedded profile {id}");
     }
 
     /// <summary>Each embedded profile file whose model has layouts, as JSON:

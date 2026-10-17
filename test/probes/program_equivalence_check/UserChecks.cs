@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json.Nodes;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Programs;
 using HIDMaestro.Internal.Usbip;
@@ -26,6 +27,11 @@ internal static unsafe class UserChecks
         int files = Directory.EnumerateFiles(dir, "*.json", SearchOption.AllDirectories).Count();
         if (db.All.Count != files) Fail($"{files} files, {db.All.Count} profiles loaded");
         var data = new Random(ProbeCorpusSeed.Value ^ 0x05E2);
+        // Each file as its author wrote it, for the naive evaluator.
+        var roots = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var file in Directory.EnumerateFiles(dir, "*.json", SearchOption.AllDirectories))
+            if (JsonNode.Parse(File.ReadAllText(file), documentOptions: new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true }) is JsonObject o
+                && (string?)o["id"] is string id) roots[id] = o;
         foreach (var p in db.All)
         {
             CompiledModel m;
@@ -46,15 +52,17 @@ internal static unsafe class UserChecks
                     if (!kinds.Contains(kind)) Fail($"{p.Id}: uses no {kind}, so it does not test every op");
                 }
 
+            var authored = new NaiveJson(roots[p.Id]).Pair(m).ToList();
             if (ProgramBinder.BindLayouts(m) is { } runner)
             {
                 Console.WriteLine($"{p.Id}: its layout set binds {(runner.Generated ? "the generated set, since the build generated it from the same JSON" : "the interpreter")}");
-                Layouts(p, m, runner, data);
-                Engine(p, m, runner, data);
+                Layouts(p, m, authored, runner, data);
+                Engine(p, m, authored, runner, data);
             }
             foreach (var dec in ProgramBinder.BindDecoders(m))
             {
                 var v = dec.Form.Program;
+                var naive = authored.First(x => x.What == $"decoder {dec.Form.Name}").Naive;
                 var s = new byte[v.Spec.StateSize + Checks.StatePad];
                 var a = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
                 var regs = new uint[Checks.Registers]; var ctr = new uint[Checks.Counters];
@@ -64,7 +72,7 @@ internal static unsafe class UserChecks
                     data.NextBytes(s);
                     Array.Fill(a, (byte)0xA5); Array.Fill(c, (byte)0xC3);
                     fixed (byte* ps = s, pa = a) dec.Run(ps, pa);
-                    Naive.Run(v.Spec, s, c, regs, ctr);
+                    naive(s, c, regs, ctr);
                     if (!a.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size))) diff++;
                 }
                 if (diff == 0) Console.WriteLine($"{p.Id} decoder {dec.Form.Name}: {(dec.Generated ? "generated" : "interpreted")}, 0 of 20000 differ from the naive evaluator");
@@ -74,7 +82,7 @@ internal static unsafe class UserChecks
         return Checks.Failures - before;
     }
 
-    static void Layouts(ControllerProfile p, CompiledModel m, LayoutRunner runner, Random data)
+    static void Layouts(ControllerProfile p, CompiledModel m, List<(ValidProgram Program, NaiveJson.Evaluate Naive, string What)> authored, LayoutRunner runner, Random data)
     {
         var s = new byte[m.StateSize + Checks.StatePad];
         var a = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
@@ -91,7 +99,7 @@ internal static unsafe class UserChecks
                 fixed (byte* ps = s, pa = a)
                 fixed (uint* pr = regs, pc = ctr)
                     runner.Run(layout, ps, pa, pr, pc);
-                Naive.Run(v.Spec, s, c, regs, ctr);
+                authored[layout].Naive(s, c, regs, ctr);
                 if (!a.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size)))
                 {
                     diff++;
@@ -107,7 +115,7 @@ internal static unsafe class UserChecks
     /// it, its engine holding a random state block, and each layout read
     /// through the engine as a GET_REPORT reads it, against the naive
     /// evaluator under the engine's registers and counters.</summary>
-    static void Engine(ControllerProfile p, CompiledModel m, LayoutRunner runner, Random data)
+    static void Engine(ControllerProfile p, CompiledModel m, List<(ValidProgram Program, NaiveJson.Evaluate Naive, string What)> authored, LayoutRunner runner, Random data)
     {
         var compiled = CompiledProtocol.Compile(p, new UsbDescriptorSet(p, 0));
         if (compiled == null) { Console.WriteLine($"{p.Id}: no protocol, so no engine"); return; }
@@ -118,9 +126,10 @@ internal static unsafe class UserChecks
         var s = new byte[m.StateSize + Checks.StatePad];
         var regs = new uint[Checks.Registers]; var ctr = new uint[Checks.Counters];
         int runs = 0, diff = 0;
-        foreach (var layout in m.Layouts.Where(l => l.ReportId >= 0))
-            for (int n = 0; n < 2000; n++)
+        for (int li = 0; li < m.Layouts.Length; li++)
+            for (int n = 0; n < 2000 && m.Layouts[li].ReportId >= 0; n++)
             {
+                var layout = m.Layouts[li];
                 data.NextBytes(block);
                 engine.SetStateBlock(block);
                 Array.Fill(dst, (byte)0xA5);
@@ -129,7 +138,7 @@ internal static unsafe class UserChecks
                 Array.Clear(regs); engine.RegisterWords.CopyTo(regs, 0);
                 Array.Clear(ctr); for (int k = 0; k < m.CounterNames.Length; k++) ctr[k] = engine.GetCounter(k);
                 Array.Fill(c, (byte)0xC3);
-                Naive.Run(layout.Program.Spec, s, c, regs, ctr);
+                authored[li].Naive(s, c, regs, ctr);
                 runs++;
                 if (len != layout.Size || !dst.AsSpan(0, layout.Size).SequenceEqual(c.AsSpan(0, layout.Size))) diff++;
             }
