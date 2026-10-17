@@ -44,6 +44,10 @@ internal static partial class RuleChecks
         // create. The build tool does not run that check, so these are not
         // held to the tool.
         yield return E("a state block field at byte 2^31-1", "$.stateBlock.fields[3]", Set("$.stateBlock.fields[3]", $"{{\"byte\":{Max},\"type\":\"int16-le\"}}"));
+        yield return E("a state block CRC at byte 2^31-1", "$.stateBlock.fields[3]", Set("$.stateBlock.fields[3]", $"{{\"byte\":{Max},\"type\":\"crc32-le\",\"scope\":{{\"from\":0,\"to\":1}}}}"));
+        yield return E("an output packed part at bit 2^31-1", "$.extendedOutputReport.fields[0].parts[0]", Set("$.extendedOutputReport", "{\"reportId\":\"0x03\",\"size\":33,\"fields\":[{\"type\":\"packed-uint\",\"semantic\":\"leftMotor\",\"parts\":[{\"pieces\":[{\"at\":2147483647,\"count\":8}]}]}]}"));
+        yield return E("an output packed part whose frames run past 2^31 bits", "$.extendedOutputReport.fields[0].parts[0]", Set("$.extendedOutputReport", "{\"reportId\":\"0x03\",\"size\":33,\"fields\":[{\"type\":\"packed-uint\",\"semantic\":\"leftMotor\",\"parts\":[{\"pieces\":[{\"at\":0,\"count\":8}],\"frames\":[3,268435455]}]}]}"));
+        yield return E("an output packed part whose stride in bits passes int", "$.extendedOutputReport.fields[0].parts[0]", Set("$.extendedOutputReport", "{\"reportId\":\"0x03\",\"size\":33,\"fields\":[{\"type\":\"packed-uint\",\"semantic\":\"leftMotor\",\"parts\":[{\"pieces\":[{\"at\":0,\"count\":8}],\"frames\":[2,536870912]}]}]}"));
         yield return E("a state block field repeated over a stride of 2^31-1", "$.stateBlock.fields[3].repeat",
             Set("$.stateBlock.fields[3]", $"{{\"byte\":4,\"type\":\"int16-le\",\"semantic\":\"accelGX\",\"scale\":1,\"repeat\":[3,{Max}]}}"));
     }

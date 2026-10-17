@@ -135,13 +135,15 @@ internal sealed class VendorBlobProgram
 
         /// <summary>The bits the part reads, from its first to its last, in
         /// a report: the report must reach the last.</summary>
-        public int LastBit
+        /// <summary>The last bit the part reads, in long: offsets near
+        /// int.MaxValue must not wrap back inside the report.</summary>
+        public long LastBit
         {
             get
             {
-                int last = 0;
-                for (int i = 0; i < PieceAt.Length; i++) last = Math.Max(last, PieceAt[i] + PieceCount[i] - 1);
-                return last + (Frames - 1) * StrideBits;
+                long last = 0;
+                for (int i = 0; i < PieceAt.Length; i++) last = Math.Max(last, (long)PieceAt[i] + PieceCount[i] - 1);
+                return last + (long)(Frames - 1) * StrideBits;
             }
         }
     }
@@ -654,7 +656,7 @@ internal sealed class VendorBlobProgram
                 count[k] = piece.Count;
             }
             parts[p] = new PackedPart(at, count,
-                s.Frames is { Count: 2 } fr ? fr[0] : 1, s.Frames is { Count: 2 } fs ? fs[1] * 8 : 0,
+                s.Frames is { Count: 2 } fr ? fr[0] : 1, s.Frames is { Count: 2 } fs ? (int)Math.Clamp(fs[1] * 8L, int.MinValue, int.MaxValue) : 0,
                 s.Offset ?? 0,
                 s.Range is { Count: 2 } rl ? rl[0] : long.MinValue, s.Range is { Count: 2 } rh ? rh[1] : long.MaxValue,
                 s.Scale?.Numerator ?? 1, s.Scale?.Denominator ?? 1,
@@ -905,7 +907,7 @@ internal sealed class VendorBlobProgram
             {
                 ref readonly var part = ref f.Parts[p];
                 var partSpec = src.Parts![p];
-                int bits = 0;
+                long bits = 0;
                 if (part.PieceAt.Length == 0)
                     throw new InvalidOperationException($"{at}.parts[{p}].pieces: at least one bit group.");
                 for (int k = 0; k < part.PieceAt.Length; k++)
@@ -924,7 +926,7 @@ internal sealed class VendorBlobProgram
                     throw new InvalidOperationException($"{at}.parts[{p}].scale: a finite nonzero number, over a positive denominator.");
                 if (partSpec.Round is not (null or "down" or "nearest"))
                     throw new InvalidOperationException($"{at}.parts[{p}].round \"{partSpec.Round}\": \"down\" or \"nearest\".");
-                if (part.LastBit >= size * 8)
+                if (part.LastBit >= size * 8L)
                     throw new InvalidOperationException($"{at}.parts[{p}] reads bit {part.LastBit}, past the {size}-byte report.");
             }
         }
@@ -964,7 +966,7 @@ internal sealed class VendorBlobProgram
                 // Without a declared place the codec writes the last four
                 // bytes of the report.
                 int dst = f.CrcDst >= 0 ? f.CrcDst : size - 4;
-                return dst < 0 ? (-1, -1) : (dst, dst + 3);
+                return dst < 0 ? (-1, -1) : (dst, (int)Math.Min(int.MaxValue, dst + 3L));
             }
             case FieldOp.PackedUint:
                 return (-1, -1);

@@ -455,7 +455,7 @@ public sealed class ControllerProfile
             var (lo, hi) = VendorBlobProgram.Extent(in prog.Fields[i], spec.Size);
             // A packed-uint field writes no bytes and reads its parts' bits.
             if (prog.Fields[i].Parts is { } parts)
-                foreach (var part in parts) { lo = 0; hi = Math.Max(hi, part.LastBit / 8); }
+                foreach (var part in parts) { lo = 0; hi = (int)Math.Max(hi, Math.Min(int.MaxValue, part.LastBit / 8)); }
             if (hi > OutputRingData)
                 throw new InvalidOperationException(
                     $"{where}.fields[{i}] ('{prog.Fields[i].Src.Type}') at bytes {lo}-{hi} ends past byte {OutputRingData}. " +
