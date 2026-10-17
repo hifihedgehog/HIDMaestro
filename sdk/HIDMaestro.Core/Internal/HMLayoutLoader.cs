@@ -422,7 +422,7 @@ public static class HMLayoutValidator
                 if (sh.SequentialDownButton is int sdb) CheckButton(ctx, sdb, "sequentialDownButton");
                 if (sh.HPatternGears != null)
                     foreach (var (key, b) in PresentValues(sh.HPatternGears, "hPatternGears"))
-                        CheckButton(ctx, b.ButtonIndex, $"hPatternGears.{key}.buttonIndex");
+                        CheckButton(ctx, b.ButtonIndex, Member("hPatternGears", key) + ".buttonIndex");
                 break;
 
             case HMHandbrakeLayout hb:
@@ -442,7 +442,7 @@ public static class HMLayoutValidator
             case HMDancePadLayout d:
                 if (d.Pads != null)
                     foreach (var (key, b) in PresentValues(d.Pads, "pads"))
-                        CheckButton(ctx, b.ButtonIndex, $"pads.{key}.buttonIndex");
+                        CheckButton(ctx, b.ButtonIndex, Member("pads", key) + ".buttonIndex");
                 CheckBindings(ctx, d.SystemButtons, "systemButtons");
                 break;
 
@@ -495,9 +495,20 @@ public static class HMLayoutValidator
     {
         foreach (var (key, b) in map)
             if (b == null)
-                throw new HMLayoutValidationException($"layout/{path}.{key}: is null.");
+                throw new HMLayoutValidationException($"layout/{Member(path, key)}: is null.");
         return map;
     }
+
+    /// <summary>The path of a map's member as System.Text.Json writes it
+    /// (ReadStack.AppendPropertyName): <c>pads.up-left</c>, or
+    /// <c>pads['up left']</c> for a key holding one of the characters
+    /// JsonReaderHelper.SpecialCharacters lists, so a dot or a space in a
+    /// key is not read as the path's own punctuation.</summary>
+    internal static string Member(string path, string key) =>
+        key.AsSpan().IndexOfAny(PathSpecials) >= 0 ? $"{path}['{key}']" : $"{path}.{key}";
+
+    /// <summary>JsonReaderHelper.SpecialCharacters, System.Text.Json 10.0.</summary>
+    private const string PathSpecials = ". '/\"[]()\t\n\r\f\b\\\u0085\u2028\u2029";
 
     private static void CheckAxis(ValidationContext ctx, HMAxis axis, string path)
     {

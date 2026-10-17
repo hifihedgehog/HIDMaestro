@@ -352,6 +352,24 @@ internal static class Strict
             o["layout"]!["faceButtons"]![2]!["buttonIndex"] = 40;
             return o.ToJsonString();
         }, "$.layout.faceButtons[2].buttonIndex");
+        // A map's key keeps its path whatever it holds, written as
+        // System.Text.Json writes one. At d69bfd0a a dash ended the path at
+        // the map and the reason repeated it, and a dot split the key.
+        Add("a dance pad key with a dash, written null", "xbox-360-dance-pad", o =>
+        {
+            o["layout"]!["pads"]!.AsObject()["up-left"] = null;
+            return o.ToJsonString();
+        }, "$.layout.pads.up-left");
+        Add("a dance pad key with a space, on a button the descriptor lacks", "xbox-360-dance-pad", o =>
+        {
+            o["layout"]!["pads"]!.AsObject()["up left"] = JsonNode.Parse("{\"role\":\"dpad_up\",\"buttonIndex\":99}");
+            return o.ToJsonString();
+        }, "$.layout.pads['up left'].buttonIndex");
+        Add("a shifter gear key with a dot, written null", "thrustmaster-th8a-shifter", o =>
+        {
+            o["layout"]!["hPatternGears"]!.AsObject()["1.5"] = null;
+            return o.ToJsonString();
+        }, "$.layout.hPatternGears['1.5']");
         Add("a codec key v2.0.0 requires, under keys spelled in another case", BaseId, o =>
         {
             o["extendedReport"] = JsonNode.Parse(

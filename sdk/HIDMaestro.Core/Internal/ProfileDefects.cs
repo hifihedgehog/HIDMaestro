@@ -31,8 +31,11 @@ internal static partial class ProfileDefects
     [GeneratedRegex(@"^Profile '[^']*':\s+(?<path>[A-Za-z][A-Za-z0-9_]*(?:(?:\.[A-Za-z][A-Za-z0-9_]*)|(?:\[[0-9]*\]))*)")]
     private static partial Regex ProfilePrefixed();
 
-    // "layout/sticks[].x: ...", HMLayoutValidator's form.
-    [GeneratedRegex(@"^layout/(?<path>[A-Za-z0-9_.\[\]]+):")]
+    // "layout/sticks[1].x: ...", HMLayoutValidator's form. A map's key is
+    // written as System.Text.Json writes it (HMLayoutValidator.Member): a
+    // dash or a colon stays in a dotted segment, and a key with a dot or a
+    // space is a bracketed one.
+    [GeneratedRegex(@"^layout/(?<path>[^.\[\s']+(?:\.[^.\[\s']+|\[[0-9]+\]|\['.*?'\])*):(?=\s|$)")]
     private static partial Regex LayoutPrefixed();
 
     [GeneratedRegex(@"^Profile '[^']*':\s+")]
@@ -96,6 +99,24 @@ internal static partial class ProfileDefects
         {
             var sb = new System.Text.StringBuilder("$");
             JsonElement? at = doc.RootElement;
+            // The file's spelling of a key of the object at hand, and the
+            // value it holds, null when the file has no such key.
+            string Step(string key)
+            {
+                string spelled = key;
+                if (at is { ValueKind: JsonValueKind.Object } o)
+                {
+                    JsonElement? next = null;
+                    foreach (var p in o.EnumerateObject())
+                        if (p.Name == key) { spelled = p.Name; next = p.Value; break; }
+                    if (next == null)
+                        foreach (var p in o.EnumerateObject())
+                            if (string.Equals(p.Name, key, StringComparison.OrdinalIgnoreCase)) { spelled = p.Name; next = p.Value; break; }
+                    at = next;
+                }
+                else at = null;
+                return spelled;
+            }
             int i = 1;
             while (i < path.Length)
             {
@@ -103,21 +124,17 @@ internal static partial class ProfileDefects
                 {
                     int j = i + 1;
                     while (j < path.Length && path[j] != '.' && path[j] != '[') j++;
-                    string key = path[(i + 1)..j];
-                    string spelled = key;
-                    if (at is { ValueKind: JsonValueKind.Object } o)
-                    {
-                        JsonElement? next = null;
-                        foreach (var p in o.EnumerateObject())
-                            if (p.Name == key) { spelled = p.Name; next = p.Value; break; }
-                        if (next == null)
-                            foreach (var p in o.EnumerateObject())
-                                if (string.Equals(p.Name, key, StringComparison.OrdinalIgnoreCase)) { spelled = p.Name; next = p.Value; break; }
-                        at = next;
-                    }
-                    else at = null;
-                    sb.Append('.').Append(spelled);
+                    sb.Append('.').Append(Step(path[(i + 1)..j]));
                     i = j;
+                }
+                else if (path.AsSpan(i).StartsWith("['"))
+                {
+                    // A key System.Text.Json brackets for its special
+                    // characters (ReadStack.AppendPropertyName).
+                    int j = path.IndexOf("']", i + 2, StringComparison.Ordinal);
+                    if (j < 0) { sb.Append(path[i..]); break; }
+                    sb.Append("['").Append(Step(path[(i + 2)..j])).Append("']");
+                    i = j + 2;
                 }
                 else if (path[i] == '[')
                 {
