@@ -63,6 +63,7 @@
 //          [--profile-patch <file>] edits catalog profiles for this run
 //                                   (ProfilePatch.cs), for a mutation the
 //                                   list and --explain must catch
+//   selftest                      the change list's own rules (SelfTest.cs)
 //   compare <dirA> <dirB>
 //   compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]
 //                         the live run against the native harness
@@ -142,6 +143,8 @@ internal static class Program
         string mode = args[0];
         if (mode == "compare")
             return args.Length == 3 ? CompareDirs(args[1], args[2]) : Usage();
+        if (mode == "selftest")
+            return SelfTest.Run();
         if (mode == "compare-live")
             return CompareLive.Run(args[1..], Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"));
         if (mode != "record" && mode != "replay") return Usage();
@@ -269,14 +272,16 @@ internal static class Program
                 int bad = GoldenCase.Compare(want, g, Console.Out, (s, r) => Pin(c.Name, s, r));
                 var mine = g.Streams.ToDictionary(x => x.Name, StringComparer.Ordinal);
                 foreach (var s in g.Streams) pins[$"{c.Name}/{s.Name}"] = (s.Count, s.Digest);
-                // A stream the lane moved against its base back to its golden
-                // bytes: its entry pins those.
-                foreach (var e in changes.Entries.Where(e => e.Explained && !e.Used && e.Case == c.Name))
+                // A stream back at its golden bytes: its chain's last entry
+                // pins those.
+                foreach (var chain in changes.Entries.Where(e => e.Kind == "stream" && !e.Used && e.Case == c.Name)
+                                                     .GroupBy(e => e.Target, StringComparer.Ordinal))
                 {
-                    e.Used = true;
-                    var (n, d) = pins.TryGetValue(e.Target, out var p) ? p : (0, "none");
-                    if (e.Count == n && e.Digest == d) continue;
-                    Console.WriteLine($"  [FAIL] {e.Source}: {e.Target} equals its golden file, count {n} digest {Short(d)}, and the entry pins count {e.Count} digest {Short(e.Digest)}");
+                    var end = chain.Last();
+                    foreach (var e in chain) e.Used = true;
+                    var (n, d) = pins.TryGetValue(chain.Key, out var p) ? p : (0, "none");
+                    if (end.Count == n && end.Digest == d) continue;
+                    Console.WriteLine($"  [FAIL] {end.Source}: {chain.Key} equals its golden file, count {n} digest {Short(d)}, and its last entry pins count {end.Count} digest {Short(end.Digest)}");
                     bad++;
                 }
                 int same = want.Streams.Count(w => mine.TryGetValue(w.Name, out var r) && r.Count == w.Count && r.Digest == w.Digest);
@@ -419,6 +424,7 @@ internal static class Program
     {
         Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus] [--dump <dir>]");
         Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane>] [--write-changes <file>] [--profile-patch <file>]");
+        Console.WriteLine("       DeviceOracleCheck selftest");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
         Console.WriteLine("cases: " + string.Join(", ", Cases.Select(c => c.Name)));

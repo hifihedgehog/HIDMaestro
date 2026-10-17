@@ -13,7 +13,12 @@
 // differs from its golden file passes only when the last entry naming it
 // pins its count and digest, and is printed as [CHANGED] with that entry's
 // lane and reason. A later lane that moves the stream again adds its own
-// entry, and the earlier ones stay as its history.
+// entry after the earlier ones, which stay as the stream's chain: each
+// lane names a stream once, entries follow the order of the lanes, which
+// is the order of each lane's first stream entry in the list, and each
+// entry pins other bytes than the one before it. A stream back at its
+// golden bytes is pinned so by its last entry. Load refuses a chain that
+// breaks these.
 //
 // The categories are what replay --explain counted for the stream against
 // the lane's base (Explain.cs), as fields, one per category with a nonzero
@@ -40,10 +45,6 @@ internal sealed class ChangeList
     {
         public string Kind = "", Target = "", Lane = "", Reason = "", Source = "";
         public bool Used;
-
-        /// <summary>Set by --explain for an entry whose categories it held
-        /// the stream to (ExplainSession.Flush).</summary>
-        public bool Explained;
 
         /// <summary>A stream entry's pins: the output count and the
         /// digest, "none" for a stream the tree no longer records.</summary>
@@ -131,7 +132,44 @@ internal sealed class ChangeList
                 list.Entries.Add(e);
             }
         }
+        list.CheckChains();
         return list;
+    }
+
+    /// <summary>A lane's place in the history of every stream: where its
+    /// first stream entry stands in the list, or for a lane that moved no
+    /// stream, its first line of any kind. A lane not in the list comes
+    /// after every lane in it.</summary>
+    public int LaneOrder(string lane)
+    {
+        for (int i = 0; i < Entries.Count; i++)
+            if (Entries[i].Kind == "stream" && Entries[i].Lane == lane) return i;
+        for (int i = 0; i < Entries.Count; i++)
+            if (Entries[i].Lane == lane) return i;
+        return int.MaxValue;
+    }
+
+    /// <summary>A stream's entries in order.</summary>
+    public List<Entry> Chain(string target) =>
+        Entries.Where(e => e.Kind == "stream" && string.Equals(e.Target, target, StringComparison.Ordinal)).ToList();
+
+    void CheckChains()
+    {
+        foreach (var chain in Entries.Where(e => e.Kind == "stream").GroupBy(e => e.Target, StringComparer.Ordinal))
+        {
+            Entry? prev = null;
+            var lanes = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var e in chain)
+            {
+                if (!lanes.Add(e.Lane))
+                    throw new InvalidDataException($"{e.Source}: lane {e.Lane} names {e.Target} twice. A lane re-pins its own entry in place");
+                if (prev != null && LaneOrder(prev.Lane) > LaneOrder(e.Lane))
+                    throw new InvalidDataException($"{e.Source}: lane {e.Lane}'s entry for {e.Target} follows lane {prev.Lane}'s ({prev.Source}), which comes later in the list");
+                if (prev != null && prev.Count == e.Count && prev.Digest == e.Digest)
+                    throw new InvalidDataException($"{e.Source}: pins the bytes {prev.Source} already pins for {e.Target}");
+                prev = e;
+            }
+        }
     }
 
     static void AddFields(Entry e, string text, string where)
@@ -173,16 +211,20 @@ internal sealed class ChangeList
 }
 
 /// <summary>replay --write-changes: the loaded list as one file, with every
-/// stream that differs from its golden file, or under --explain from the
-/// base, pinned to what the replay gave. The last entry of a stream takes
-/// the new count and digest, and under --explain the categories counted
-/// against the base. A stream the lane moved against its base, whose last
-/// entry is another lane's, gets a new entry of the lane after it. A stream
-/// no entry names gets a new one. Each new entry's reason is "?", which the
-/// list refuses until it is filled in. An entry whose stream now equals both
-/// its golden file and its base is left out as a comment.</summary>
+/// stream of the cases that ran pinned to what the replay gave. Only the
+/// running lane's own entry (--lane) is re-pinned in place, and it keeps
+/// categories only from --explain's counts. Another lane's entry is never
+/// changed: a stream it pins that the replay gives otherwise gets a new
+/// entry, of the running lane, or of lane "?" without --lane, as does a
+/// stream no entry names. New entries go at the end of the list, so a
+/// lane's first stream entry follows every earlier lane's. A new entry's
+/// reason is "?", which the list refuses until it is filled in.</summary>
 internal static class ChangeWriter
 {
+    /// <param name="moved">The streams that differ from their golden
+    /// files.</param>
+    /// <param name="pins">What the replay gave for every stream of the
+    /// cases that ran, and count 0 digest none for one it lacks.</param>
     public static void Write(string path, ChangeList changes, ISet<string> ran,
                              IReadOnlyDictionary<string, (long Count, string Digest)> moved,
                              IReadOnlyDictionary<string, (long Count, string Digest)> pins,
@@ -195,38 +237,47 @@ internal static class ChangeWriter
             "# Written by device_oracle_check replay --write-changes (ChangeList.cs). Fill in each \"?\".",
         };
         var done = new HashSet<string>(StringComparer.Ordinal);
+        var added = new List<string>();
         foreach (var e in changes.Entries)
         {
-            if (e.Kind != "stream" || !ran.Contains(e.Case)) { lines.Add(e.Line()); continue; }
-            explained.TryGetValue(e.Target, out var x);
-            if (!moved.ContainsKey(e.Target) && x == null) { lines.Add("# the stream now equals its golden file and its base: " + e.Line()); continue; }
-            if (!ReferenceEquals(last[e.Target], e)) { lines.Add(e.Line()); continue; }
+            if (e.Kind != "stream" || !ran.Contains(e.Case) || !ReferenceEquals(last[e.Target], e)) { lines.Add(e.Line()); continue; }
             done.Add(e.Target);
-            var pin = pins[e.Target];
-            if (x != null && lane != null && e.Lane != lane)
+            explained.TryGetValue(e.Target, out var x);
+            if (!pins.TryGetValue(e.Target, out var pin)) pin = (0, "none");
+            if (lane != null && e.Lane == lane)
             {
-                lines.Add(e.Line());
-                lines.AddRange(New(e.Target, pin, x, lane));
+                // The running lane's own entry, left out where the stream is
+                // back at the bytes the entry before it pins, or at its
+                // golden file's with none before it.
+                var chain = changes.Chain(e.Target);
+                var before = chain.Count > 1 ? chain[^2] : null;
+                if (before != null ? before.Count == pin.Count && before.Digest == pin.Digest : !moved.ContainsKey(e.Target))
+                {
+                    lines.Add("# the stream is back at the bytes before this lane: " + e.Line());
+                    continue;
+                }
+                var copy = new ChangeList.Entry { Kind = "stream", Target = e.Target, Lane = e.Lane, Reason = e.Reason, Count = pin.Count, Digest = pin.Digest };
+                if (x != null) foreach (var kv in x.Categories) copy.Fields[kv.Key] = kv.Value.ToString();
+                lines.Add(copy.Line());
                 continue;
             }
-            var copy = new ChangeList.Entry { Kind = "stream", Target = e.Target, Lane = e.Lane, Reason = e.Reason, Count = pin.Count, Digest = pin.Digest };
-            if (x == null) foreach (var kv in e.Fields) copy.Fields[kv.Key] = kv.Value;
-            else foreach (var kv in x.Categories) copy.Fields[kv.Key] = kv.Value.ToString();
-            lines.Add(copy.Line());
+            lines.Add(e.Line());
+            if (e.Count == pin.Count && e.Digest == pin.Digest) continue;
+            added.AddRange(New(e.Target, pin, x, lane ?? "?"));
         }
         foreach (var target in moved.Keys.Concat(explained.Keys))
         {
             if (!done.Add(target)) continue;
             explained.TryGetValue(target, out var x);
-            lines.AddRange(New(target, pins[target], x, lane ?? "?"));
+            added.AddRange(New(target, pins[target], x, lane ?? "?"));
         }
-        File.WriteAllLines(path, lines);
+        File.WriteAllLines(path, lines.Concat(added));
     }
 
     static IEnumerable<string> New(string target, (long Count, string Digest) pin, ExplainSession.StreamResult? x, string lane)
     {
         var e = new ChangeList.Entry { Kind = "stream", Target = target, Lane = lane, Reason = "?", Count = pin.Count, Digest = pin.Digest };
-        if (x != null) foreach (var kv in x.Categories) e.Fields[kv.Key] = kv.Value.ToString();
+        if (x != null && lane != "?") foreach (var kv in x.Categories) e.Fields[kv.Key] = kv.Value.ToString();
         yield return e.Line();
     }
 }

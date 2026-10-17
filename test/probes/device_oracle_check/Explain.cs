@@ -283,11 +283,7 @@ internal sealed class ExplainSession
             else if (!counts.SequenceEqual(e.Categories))
                 problem = $"{e.Source} claims {(e.Fields.Count == 0 ? "no categories" : string.Join(" ", e.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";
             if (problem != null) { verdict = "FAIL"; Failures++; }
-            else
-            {
-                verdict = _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
-                e!.Explained = true;
-            }
+            else verdict = _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
             Lines.Add($"  [{verdict}] {where}: {tally}{(problem == null ? "" : $". {problem}")}");
             foreach (var u in _unexplained) Lines.Add("      " + u);
         }
