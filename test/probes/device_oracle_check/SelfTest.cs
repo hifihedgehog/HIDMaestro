@@ -11,6 +11,9 @@
 //            bytes.
 //   base     --explain refuses a base dump whose stream is not what the list
 //            pinned before the lane, or the golden file where nothing did.
+//   later    --explain of a lane re-runs after a later lane pinned the same
+//            stream: it rebuilds the lane's bytes from the base and holds
+//            them to the lane's own pin.
 // Exit 0 when every check passes, 1 otherwise.
 using System;
 using System.Collections.Generic;
@@ -40,6 +43,7 @@ internal static class SelfTest
             Writer(dir);
             Chain(dir);
             Base(dir);
+            Later(dir);
         }
         finally
         {
@@ -171,6 +175,16 @@ internal static class SelfTest
               "base: a dump equal to lane W3's pin before lane X passes");
         Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) > 0,
               "base: a dump from before lane W3's pin fails");
+    }
+
+    static void Later(string dir)
+    {
+        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", " other=1"), Entry(T2, "Y")) == 0,
+              "later: lane X's claim of outputs no rule gives is kept once lane Y pins the stream");
+        Check(Explain(dir, B0, T2, golden: B0, "X", "rule round | X | r", Entry(T2, "Y")) == 0,
+              "later: a stream lane X left alone and lane Y pinned since rebuilds to the golden bytes");
+        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X"), Entry(T2, "Y")) > 0,
+              "later: lane X's pin that its rules do not rebuild fails");
     }
 
     static void Chain(string dir)

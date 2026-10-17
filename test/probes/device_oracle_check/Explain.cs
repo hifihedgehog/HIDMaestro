@@ -54,6 +54,14 @@
 // A CRC field is recomputed over the bytes it covers, and counts crc. An
 // output the rules do not give counts other: a lane claims those outputs
 // by number, and only its entry's digest states their bytes.
+//
+// The base dump must be the lane's base: each base stream must equal the
+// last pin before the lane in the list, or the golden file's. A stream a
+// later lane pinned since is not read from the tree, whose bytes are the
+// later lane's: the lane's bytes are rebuilt from the base by its rules
+// and held to its own pin, so the lane's --explain re-runs at any later
+// tip. An entry that claims other outputs keeps them as its own tip's run
+// held them.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -165,7 +173,7 @@ internal sealed record StampRule(int Byte, int Width, uint Divisor);
 /// <summary>The base dump of one case read in step with the tree's outputs,
 /// each output recomputed by the lane's rules, and each stream held twice
 /// against the change list: the base's bytes against what the list pinned
-/// before the lane, and the lane's counts against its entry.</summary>
+/// before the lane, and the lane's counts against its own entry.</summary>
 internal sealed class ExplainSession
 {
     /// <summary>The change list and the lane whose entries --explain holds
@@ -196,6 +204,11 @@ internal sealed class ExplainSession
 
     // The base stream as read, hashed as the golden file hashes a stream.
     GoldenStream? _baseStream;
+    // A lane after this one pinned the stream: the tree's bytes are that
+    // lane's, and this lane's are rebuilt from the base by its rules.
+    bool _later;
+    GoldenStream? _rebuilt;
+    string? _rebuildBroken;
 
     public ExplainSession(string dir, string caseName)
     {
@@ -214,6 +227,11 @@ internal sealed class ExplainSession
         string baseName = Encoding.ASCII.GetString(_base.ReadBytes(_base.ReadUInt16()));
         if (baseName != name) { Fail($"stream {name}: the base has stream {baseName} here"); throw new InvalidDataException("The replay and the base dump fell out of step."); }
         _baseStream = new GoldenStream(name);
+        var chain = Changes?.Chain($"{_case}/{name}") ?? new List<ChangeList.Entry>();
+        int order = Changes?.LaneOrder(Lane) ?? int.MaxValue;
+        _later = chain.Any(e => e.Lane != Lane && Changes!.LaneOrder(e.Lane) > order);
+        _rebuilt = _later ? new GoldenStream(name) : null;
+        _rebuildBroken = null;
     }
 
     public void Out(string tag, ReadOnlySpan<byte> data, IExplainer? explainer, ExplainInput input)
@@ -224,6 +242,11 @@ internal sealed class ExplainSession
         byte[] before = _base.ReadBytes(checked((int)_base.ReadUInt32()));
         _baseStream!.Add(baseTag, before);
         bool rules = ExplainRules.Active.Any;
+        if (_later)
+        {
+            Rebuild(baseTag, before, rules ? explainer : null, input);
+            return;
+        }
         bool same = baseTag == tag && data.SequenceEqual(before);
         if (same && (!rules || explainer == null)) { _same++; return; }
         string why;
@@ -257,6 +280,34 @@ internal sealed class ExplainSession
         _unexplainedCount++;
     }
 
+    /// <summary>This lane's output rebuilt from the base by its rules, for a
+    /// stream a later lane pinned since. The tree's bytes are the later
+    /// lane's and are not read.</summary>
+    void Rebuild(string tag, byte[] before, IExplainer? explainer, ExplainInput input)
+    {
+        byte[] expected = before;
+        if (explainer != null)
+        {
+            expected = (byte[])before.Clone();
+            _tally.Reset();
+            explainer.Expect(tag, before, expected, input, _tally);
+            if (_tally.Raw) _raw++;
+            if (_tally.Why != null)
+            {
+                _rebuildBroken ??= $"{tag}: {_tally.Why}";
+                expected = before;
+            }
+            else if (!expected.AsSpan().SequenceEqual(before))
+            {
+                _changed++;
+                foreach (var c in _tally.Cats) _categories[c] = _categories.GetValueOrDefault(c) + 1;
+            }
+            else _same++;
+        }
+        else _same++;
+        _rebuilt!.Add(tag, expected);
+    }
+
     /// <summary>The base dump's next record must be the same note. It
     /// goes to the stream's explainer, and is never an output.</summary>
     public void Note(string tag, ReadOnlySpan<byte> data, IExplainer? explainer)
@@ -283,14 +334,18 @@ internal sealed class ExplainSession
     /// <summary>Holds the stream to the list. Its base must be what the list
     /// pinned before this lane, so a dump of another tree fails at its
     /// first moved stream. A stream that moved against the base, or that
-    /// the rules move and the tree does not, needs an entry of this lane,
-    /// the stream's last, whose categories equal the counts, "other"
-    /// counting the outputs the rules do not give.</summary>
+    /// the rules move and the tree does not, needs an entry of this lane
+    /// whose categories equal the counts, "other" counting the outputs the
+    /// rules do not give. Where a later lane pinned the stream since, this
+    /// lane's entry, or the pin before it, must be what its rules rebuild
+    /// from the base, unless the entry claims outputs no rule gives, whose
+    /// bytes its own tip's run held.</summary>
     void Flush()
     {
         if (_stream.Length == 0) return;
         string where = $"{_case}/{_stream}";
         var chain = Changes?.Chain(where) ?? new List<ChangeList.Entry>();
+        var own = chain.FirstOrDefault(e => e.Lane == Lane);
         var before = PinBefore(chain);
         if (_baseStream!.Count != before.Count || _baseStream.Digest != before.Digest)
         {
@@ -302,15 +357,33 @@ internal sealed class ExplainSession
         if (_unexplainedCount > 0) counts["other"] = _unexplainedCount;
         string tally = $"{_same} identical, {_changed} changed ({string.Join(", ", counts.Select(kv => $"{kv.Key} {kv.Value}"))})"
                      + (_raw == 0 ? "" : $", {_raw} carrying raw bytes");
-        if (_changed > 0 || _unexplainedCount > 0)
+        if (_later)
+        {
+            // The lane's bytes, rebuilt.
+            var pin = own != null ? (own.Count, own.Digest) : (before.Count, before.Digest);
+            var claimed = own?.Categories ?? new SortedDictionary<string, long>(StringComparer.Ordinal);
+            string? problem = null;
+            string verdict = "REBUILT";
+            if (claimed.ContainsKey("other")) verdict = "KEPT";
+            else if (_rebuildBroken != null)
+                problem = $"the rules cannot rebuild lane {Lane}'s output, {_rebuildBroken}";
+            else if (_rebuilt!.Count != pin.Item1 || _rebuilt.Digest != pin.Item2)
+                problem = $"the rules rebuild count {_rebuilt.Count} digest {Short(_rebuilt.Digest)}, and lane {Lane} pins count {pin.Item1} digest {Short(pin.Item2)}";
+            else if (!counts.SequenceEqual(claimed))
+                problem = $"{own?.Source ?? "no entry"} claims {(claimed.Count == 0 ? "no categories" : string.Join(" ", claimed.Select(kv => $"{kv.Key}={kv.Value}")))}";
+            if (problem != null) { verdict = "FAIL"; Failures++; }
+            if (problem != null || own != null)
+                Lines.Add($"  [{verdict}] {where}: pinned by a later lane, lane {Lane}'s output rebuilt from the base: {tally}" +
+                          (problem != null ? $". {problem}" : verdict == "KEPT" ? $". {own!.Source} claims outputs no rule gives, held at lane {Lane}'s own tip" : ""));
+        }
+        else if (_changed > 0 || _unexplainedCount > 0)
         {
             Results[_stream] = new StreamResult(_same, _changed, counts);
-            var e = chain.LastOrDefault();
             string? problem = null;
-            if (e == null || e.Lane != Lane)
-                problem = e == null ? "no entry names it" : $"its last entry, {e.Source}, is lane {e.Lane}'s";
-            else if (!counts.SequenceEqual(e.Categories))
-                problem = $"{e.Source} claims {(e.Fields.Count == 0 ? "no categories" : string.Join(" ", e.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";
+            if (own == null)
+                problem = chain.Count == 0 ? "no entry names it" : $"no entry of lane {Lane} names it";
+            else if (!counts.SequenceEqual(own.Categories))
+                problem = $"{own.Source} claims {(own.Fields.Count == 0 ? "no categories" : string.Join(" ", own.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";
             string verdict = problem != null ? "FAIL" : _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
             if (problem != null) Failures++;
             Lines.Add($"  [{verdict}] {where}: {tally}{(problem == null ? "" : $". {problem}")}");
