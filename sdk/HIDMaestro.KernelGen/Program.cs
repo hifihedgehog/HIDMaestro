@@ -9,8 +9,10 @@ using HIDMaestro.Internal.Programs;
 //   catalog <out.g.cs> <inputs>  the SDK's kernels, from the profile and model
 //                                files the inputs list names
 //   probe <out.g.cs> <inputs>    program_equivalence_check's kernels: the
-//                                catalog's, the seeded corpus, the review
-//                                cases and the planted defects
+//                                catalog's codec reports as state programs,
+//                                the seeded corpus, the review cases and the
+//                                planted defects. The catalog's own programs
+//                                are the SDK's kernels, which the probe binds
 //   check-file <file>            reads and validates one file and prints the
 //                                result, as the run-time loader would
 if (args.Length < 2)
