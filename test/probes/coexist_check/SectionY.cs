@@ -80,11 +80,15 @@
 //        the index's event to come back. The program is then killed. The driver records its owner pipe closed
 //        while it waits, as it does while input flows.
 //    Y17. A program's gamepad companion outlives it, the driver having
-//        recorded its watch ended. A v1.12.0 program then creates the same
-//        profile on that index and adopts the companion, and the restart the
-//        adoption asks for is refused while the probe holds the HID child
-//        open. The driver watches the new program's pipe, the census reads
-//        its controller as a running program's, and a sweep leaves it.
+//        recorded its watch ended. The program created it on transport index
+//        0 while no v1.12.0 controller existed, since beside one this SDK
+//        creates from index 64 up. A v1.12.0 program, which ran its
+//        once-per-session cleanup on a controller it disposed before, then
+//        creates the same profile on index 0 and adopts the companion, and
+//        the restart the adoption asks for is refused while the probe holds
+//        the HID child open. The driver watches the new
+//        program's pipe, the census reads its controller as a running
+//        program's, and a sweep leaves it.
 //    Y18. The same, with the dead program streaming input until it is
 //        killed, so the driver's idle window starts at the kill, and the
 //        v1.12.0 program streaming without a pause from the moment its
@@ -443,11 +447,28 @@ internal static partial class Program
     static void SectionYAdopted(string installed, string y, bool stream)
     {
         Clean();
+        // A v1.12.0 program adopts only a companion whose ControllerIndex is
+        // the index its own create takes, the lowest its own controllers
+        // leave free (v1.12.0 DeviceOrchestrator.FindExistingCompanion,
+        // HMContext.CreateController). While a v1.12.0 program has a
+        // controller, this SDK's create starts at transport index 64
+        // (ControllerLease.LegacyClearance), out of that program's reach.
+        // So the program on this SDK creates while no v1.12.0 controller
+        // exists. The v1.12.0 program's first create in a process removes
+        // every HIDMaestro device present (its once-per-session
+        // CleanupGhostDevices), which would take the companion, so it
+        // creates and disposes one controller first. Then it has no device
+        // and no owner pipe, so this SDK does not count it as a running
+        // v1.12.0 program (ControllerLease.LegacyProgramRuns counts a present
+        // device of one), and its next create takes index 0 again and can
+        // follow the kill inside the driver's idle window.
         using var old = PeerProcess.Start("Y-v1.12.0-adopter", "v1.12.0");
-        // Its first controller takes index 0, so this SDK's next create
-        // skips that index.
-        string first = old.Send("create pad F1FE coexist-y-adopter");
+        string first = old.Send("create pad F1FE coexist-y-adopter-first");
         if (!Ok(first)) { Check($"{y}: the v1.12.0 program creates", false, first); return; }
+        string firstInst = PeerProcess.Field(first, "instance")!;
+        old.Send("dispose");
+        Check($"{y}: the v1.12.0 program's first controller, made for its once-per-session cleanup, is disposed and its device gone",
+              WaitFor(() => !Native.IsPresent(firstInst), 15_000), Native.StatusOf(firstInst));
         string inst;
         int t;
         HidCapture? cap;
@@ -457,6 +478,9 @@ internal static partial class Program
             if (!Ok(cp)) { Check($"{y}: a program creates a gamepad companion", false, cp); return; }
             inst = PeerProcess.Field(cp, "instance")!;
             t = int.Parse(PeerProcess.Field(cp, "transport")!);
+            Check($"{y}: with no v1.12.0 controller on the machine, it takes transport index 0, the one a v1.12.0 program's first create takes",
+                  t == 0, cp);
+            if (t != 0) { p.Kill(); return; }
             Check($"{y}: the driver watches the program", WaitFor(() => Y.WatchValues(inst) is { Connected: 1 }, 10_000), Y.ShowWatch(inst));
             // A handle on the HID child makes Windows refuse the polite
             // disable a restart begins with, as an XInput handle does.
@@ -486,7 +510,7 @@ internal static partial class Program
         {
             Check($"{y}: the driver records the program gone",
                   WaitFor(() => Y.WatchValues(inst) is { Connected: 0 }, 5000), Y.ShowWatch(inst));
-            string second = old.Send("create xinputhid - coexist-y-adopter-2");
+            string second = old.Send("create xinputhid - coexist-y-adopter");
             if (stream)
             {
                 // At once, before the window the kill started ends. Each
@@ -497,7 +521,7 @@ internal static partial class Program
                       killed.ElapsedMilliseconds < 3500, $"{killed.ElapsedMilliseconds} ms after the kill");
                 Check($"{y}: its input reaches the device", cap != null && Flows(cap));
             }
-            Check($"{y}: the v1.12.0 program's next create adopts the companion on its index",
+            Check($"{y}: the v1.12.0 program's create adopts the companion on its index",
                   Ok(second) && string.Equals(PeerProcess.Field(second, "instance"), inst, StringComparison.OrdinalIgnoreCase)
                   && PeerProcess.Field(second, "transport") == t.ToString(), second);
             Check($"{y}: the restart was refused: the probe's handle still reads and the device keeps the installed driver",

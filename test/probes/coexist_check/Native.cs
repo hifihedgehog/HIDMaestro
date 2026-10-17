@@ -155,6 +155,13 @@ internal static class Native
     internal static bool IsGone(string instanceId) =>
         CM_Locate_DevNodeW(out _, instanceId, 0) != 0 && CM_Locate_DevNodeW(out _, instanceId, 1) != 0;
 
+    /// <summary>A devnode's status flags and problem code, for a check's
+    /// detail.</summary>
+    internal static string StatusOf(string instanceId) =>
+        CM_Locate_DevNodeW(out uint di, instanceId, 0) != 0 ? "not present"
+        : CM_Get_DevNode_Status(out uint st, out uint problem, di, 0) != 0 ? "no status"
+        : $"status 0x{st:X8} problem {problem}";
+
     internal static bool IsStarted(string instanceId) =>
         CM_Locate_DevNodeW(out uint di, instanceId, 0) == 0
         && CM_Get_DevNode_Status(out uint st, out _, di, 0) == 0 && (st & DN_STARTED) != 0;
