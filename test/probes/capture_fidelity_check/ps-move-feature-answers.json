@@ -1,5 +1,5 @@
 {
-  "comment": "ps-move's feature answers in lane DD-2's answer-table form (FeatureStubSpec), prepared for that table to take once it merges. Each byte comes from a cited capture or layout. capture_fidelity_check (S96) checks these bytes against the moveonpc wiki and decodes the calibration as psmoveapi does. The 0x10 entry needs one thing DD-2's form does not have yet: pages on a plain entry, served to successive GETs in turn and wrapping to the first, as a real Move answers 0x10 (Calibration data: it has to be read three times, and the first block read may be any of the three).",
+  "comment": "ps-move's feature answers in lane DD-2's answer-table form (FeatureStubSpec), prepared for that table to take once it merges. Each byte comes from a cited capture or layout. capture_fidelity_check (S96) checks these bytes against the moveonpc wiki and decodes the calibration as psmoveapi does. The 0x10 entry needs one thing DD-2's form does not have yet: pages on a plain entry, served to successive GETs in turn and wrapping to the first, the counter kept for the device's lifetime, as a real Move answers 0x10 (Calibration data: it has to be read three times, and the first block read may be any of the three). The ZCM2 Move answers its two blocks the same way (Calibration-data-CECH-ZCM2, lines 8 and 38).",
   "featureStubs": {
     "reports": [
       {
@@ -24,7 +24,7 @@
           "100107A87F00808B81000000000000000100019208E001E594E67FA181E0014B7FD6915981E001A17F2C80A6958907360C",
           "108250C35BC8FB42683DB542CD137D3F935B813F70EA763FFF804F3FC6EA9C3D0000000000000000000000000000000000"
         ],
-        "comment": "Calibration, three 49-byte blocks with indices 00, 01 and 82, the sample at the top of moveonpc Calibration data (lines 10-25 at 033ab8e), which reassembled is the second of the page's eight dumps. psmoveapi reads 0x10 three times and places each block by its index (psmove.c:974-1022), RPCS3 reads two and places them by index the same way (ps_move_handler.cpp:290-325 at c82221f), so the rotation starts at block 00. ps-move's motion scale and zero come from these blocks, read as psmoveapi reads them, so a host that calibrates from them reads the profile's motion back in g and degrees per second."
+        "comment": "Calibration, three 49-byte blocks with indices 00, 01 and 82, the sample at the top of moveonpc Calibration data (lines 10-25 at 033ab8e), which reassembled is the second of the page's eight dumps. psmoveapi reads 0x10 three times and places each block by its index (psmove.c:974-1022), RPCS3 reads two and places them by index (ps_move_handler.cpp:292-325 at c82221f): with the counter kept across hosts, a second RPCS3 connect gets 0x82 and 00, as it would from a real Move. ps-move's motion scale and zero come from these blocks, read as psmoveapi reads them, so a host that calibrates from them reads the profile's motion back in g and degrees per second."
       }
     ]
   }
