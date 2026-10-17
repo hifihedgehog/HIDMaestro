@@ -624,14 +624,22 @@ public sealed class ControllerProfile
         ValidatePorts();
         ValidateProgramModel();
         var cfg = UsbConfiguration;
-        if (Protocol == null && cfg?.WinUsb == null) return;
-        if (!RequiresUsbipBackend)
+        bool engine = Protocol != null || cfg?.WinUsb != null;
+        if (cfg != null && RequiresUsbipBackend)
+        {
+            // The descriptor set a create builds, built here, so a
+            // usbConfiguration it cannot hold is refused at load, with or
+            // without a protocol or a WinUSB package.
+            var descriptors = new Usbip.UsbDescriptorSet(this);
+            if (!engine) return;
+            Usbip.CompiledProtocol.Compile(this, descriptors);
+            WinUsbBinding.PackageFor(this, descriptors);
+            return;
+        }
+        if (engine)
             throw new InvalidOperationException(
                 $"Profile '{Id}': protocol and usbConfiguration.winUsb apply to the usbip backend in this release, " +
                 "where the SDK serves the device's endpoints.");
-        var descriptors = new Usbip.UsbDescriptorSet(this);
-        Usbip.CompiledProtocol.Compile(this, descriptors);
-        WinUsbBinding.PackageFor(this, descriptors);
     }
 
     /// <summary>v2.0.0: the model groups compile, the state block's fields fit

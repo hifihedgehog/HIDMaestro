@@ -401,6 +401,14 @@ internal static class Strict
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
             return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
         }, "$.ExtendedReport.Fields[0]");
+        // A usbConfiguration the descriptor set cannot hold is refused at
+        // load on a persona with no protocol or WinUSB package too. At
+        // 8debad63 it loaded and failed at create, after the lease.
+        Add("a USB/IP persona's interface with its alternate settings null", "steam-controller-2", o =>
+        {
+            o["usbConfiguration"]!["interfaces"]![0]!.AsObject()["altSettings"] = null;
+            return o.ToJsonString();
+        }, "$.usbConfiguration.interfaces[0].altSettings");
         // A patch with no source is refused at its source whatever else the
         // entry holds. At c19d24a1 an ascii patch was refused at its
         // encoding, and an entry with a CRC at its crc32, as if the null
