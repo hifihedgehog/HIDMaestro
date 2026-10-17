@@ -31,6 +31,10 @@ internal sealed class CompiledProtocol
     public const int MaxLog = 4096;
 
     public string ProfileId { get; }
+
+    /// <summary>Output report IDs another decode takes before the
+    /// protocol's decoders, and which decode that is.</summary>
+    private readonly (byte Id, string By)[] _decodedFirst;
     public CompiledModel Model { get; }
     public RegisterTable Registers => Model.Registers;
     /// <summary>The register names, which v1.13.0's one-bit states became.</summary>
@@ -192,6 +196,16 @@ internal sealed class CompiledProtocol
         const string root = "$.protocol";
         var regs = model.Registers;
 
+        // The output reports the decode chain gives to another decode before
+        // the protocol's decoders: a rule's decode never runs on them.
+        var decodedFirst = new List<(byte Id, string By)>();
+        if (profile.ExtendedOutputReport != null) decodedFirst.Add((profile.ExtendedOutputReport.ReportIdByte, "extendedOutputReport's codec"));
+        if (SwitchProPacker.IsSwitchPro(profile.VendorId, profile.ProductId))
+        {
+            decodedFirst.Add((0x01, "the SDK's Switch Pro rumble decode"));
+            decodedFirst.Add((0x10, "the SDK's Switch Pro rumble decode"));
+        }
+        _decodedFirst = decodedFirst.ToArray();
         Ports = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport", output: false);
         if (Ports != null && Ports.Count > MaxPorts)
             throw Fail($"extendedReport.ports.count {Ports.Count}: a device with a protocol has at most {MaxPorts} ports.");
@@ -676,6 +690,12 @@ internal sealed class CompiledProtocol
         {
             rule.Decode = Array.FindIndex(Model.Decoders, d => d.Name == r.Decode);
             if (rule.Decode < 0) throw Fail($"{at}.decode '{r.Decode}' is not one of protocol.decoders.");
+            // The decode reads the output report ID first (HMController's
+            // RunDecoder), so a rule whose match leaves byte 0 open, or
+            // allows such an ID there, would never decode that report.
+            foreach (var (id, by) in _decodedFirst)
+                if (rule.At > 0 || (id & rule.MatchMask[0]) == (rule.Match[0] & rule.MatchMask[0]))
+                    throw Fail($"{at}.decode '{r.Decode}': the rule matches output report 0x{id:X2}, which {by} decodes first. A report has one decode.");
             if (Model.Decoders[rule.Decode].MinLength > rule.MinLength && r.MinLength != null)
                 throw Fail($"{at}.decode '{r.Decode}' reads {Model.Decoders[rule.Decode].MinLength} bytes, past the rule's minLength {rule.MinLength}.");
         }

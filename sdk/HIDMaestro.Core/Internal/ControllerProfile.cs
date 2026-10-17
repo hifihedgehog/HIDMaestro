@@ -501,6 +501,12 @@ public sealed class ControllerProfile
                 if (Array.IndexOf(d.Reports, ExtendedOutputReport.ReportIdByte) is int at and >= 0)
                     throw new InvalidOperationException(
                         $"Profile '{Id}': protocol.decoders.{d.Name}.reports[{at}] 0x{d.Reports[at]:X2} is extendedOutputReport's report, which the codec decodes. A report has one decode.");
+        if (SwitchProPacker.IsSwitchPro(VendorId, ProductId))
+            foreach (var d in model.Decoders)
+                for (int at = 0; at < d.Reports.Length; at++)
+                    if (d.Reports[at] is 0x01 or 0x10)
+                        throw new InvalidOperationException(
+                            $"Profile '{Id}': protocol.decoders.{d.Name}.reports[{at}] 0x{d.Reports[at]:X2} is the Switch Pro's rumble report, which the SDK decodes. A report has one decode.");
         if (StateBlock != null)
         {
             if (StateBlockFields == null)
