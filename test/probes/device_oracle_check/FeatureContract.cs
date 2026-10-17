@@ -427,6 +427,13 @@ internal static class FeatureContract
         s.Append("stream cached\nversion tag-own\ndevice ds-cached31 0 driver\n")
          .Append($"frame 0102030405060708 -\ngetinput 01 78 01\nframe - {Ext(0x31, 78)}\ngetinput 01 78 01\nframe 0102030405060708 -\ngetinput 01 78 01\nremove\n");
         s.Append("stream xbox-after-ds\nversion tag-own\ndevice xbox-after-ds 0 driver\n").Append(Asks(0x05, 0x09, 0x20)).Append("remove\n");
+        // A program that starts again on the index while the device stays:
+        // the worker idles into a recycle, and the new program writes two
+        // frames before the worker's next turn, the second with the SeqNo
+        // the old program's last frame carried.
+        s.Append("stream recycle-same-seq\nversion tag-own\ndevice ds0 0 driver\n")
+         .Append("read 78\nframe 01A1000000000000 -\nread 78\nframe 01A2000000000000 -\nidle 8\nsdkrestart\n")
+         .Append("read 78\nframequeued 01B1000000000000 -\nframe 01B2000000000000 -\ngetinput 01 78 01\nremove\n");
 
         var t = RunScript(tree, plan, s.ToString(), work, "cases-tree");
         var o = RunScript(oracle, plan, s.ToString(), work, "cases-oracle");
@@ -521,6 +528,20 @@ internal static class FeatureContract
             bool ok = Status(g[0]) == 0 && Body(g[0])[0] == 0x83 && Body(g[0])[1] == 0x2D
                    && Status(g[1]) == 0 && Body(g[1])[2] == 0x01 && Status(g[2]) == 0 && Body(g[2])[2] == 0xFF;
             return (ok, string.Join(" ", g.Select(Show)));
+        });
+        // The recycle forgets the last SeqNo: the new program's second frame
+        // carries the SeqNo the old program's last did, and is new data.
+        // At efe5b20a the recycle reset SharedMemSeqNo while the gate read
+        // SeenSeqNo, so that frame was skipped and its read stayed pending.
+        Add("a recycle after a program starts again on the index forgets the last SeqNo: the frame that repeats it is read", () =>
+        {
+            var all = Of(r["recycle-same-seq"], "read");
+            string Show(byte[] x) => Status(x) == 0 ? Convert.ToHexString(Body(x)[..Math.Min(4, Body(x).Length)]) : Status(x).ToString("X8");
+            var g = Of(r["recycle-same-seq"], "getinput");
+            bool Holds(byte[] x, byte b) => Status(x) == 0 && Body(x).IndexOf(b) is >= 0 and < 4;
+            bool ok = all.Count == 3 && Holds(all[0], 0xA1) && Holds(all[1], 0xA2) && Holds(all[2], 0xB2)
+                      && g.Count == 1 && Holds(g[0], 0xB2);
+            return (ok, $"reads {string.Join(" ", all.Select(Show))}, polled {string.Join(" ", g.Select(Show))}");
         });
         Add("an extended frame goes out only at its report's declared length: 0x31 at 78 does, 0x31 at 77 and 0x32 at 78 do not", () =>
         {

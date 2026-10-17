@@ -2631,10 +2631,13 @@ SharedInputWorkerProc(_In_ LPVOID Parameter)
                  * TryOpenSharedMapping maps it again with the input
                  * section. */
             }
-            /* Also reset cached seqno so the fresh mapping's first read
+            /* Also reset the cached SeqNos so the fresh mapping's first read
              * (even if it happens to land on a SeqNo matching our previous
-             * cached value by chance) is treated as new data. */
+             * cached value by chance) is treated as new data. SeenSeqNo is
+             * the one ReadSharedInput's gate reads, and a program that
+             * starts again on the index counts its frames from the start. */
             ctx->SharedMemSeqNo = 0;
+            ctx->SeenSeqNo = 0;
         }
     }
 }
@@ -3051,6 +3054,7 @@ EvtDeviceAdd(
     ctx->SharedMemHandle = NULL;
     ctx->SharedMemPtr = NULL;
     ctx->SharedMemSeqNo = 0;
+    ctx->SeenSeqNo = 0;
 
     /* Event-driven shared-input worker. The SDK creates
      * Global\HIDMaestroInputEvent<N> alongside the section and SetEvents

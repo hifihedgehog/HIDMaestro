@@ -14,8 +14,17 @@
  *   frame <data> <extended>             SharedMemoryIO.WriteInputFrame of
  *                                       the data lane and the extended lane,
  *                                       then the worker's turn
+ *   framequeued <data> <extended>       the same write, before the worker's
+ *                                       turn: the next frame's turn reads
+ *                                       only the latest
  *   gip <14 bytes>                      a frame carrying the GIP slice
  *   tick                                one period of the Switch stream
+ *   idle <n>                            the worker's wait times out n times
+ *                                       with nothing signaled; eight recycle
+ *                                       its handles (driver.c's idle streak)
+ *   sdkrestart                          a program starts again on the index:
+ *                                       it opens the section the driver
+ *                                       keeps and counts frames from 0
  *   call <n>                            records "call" with n: the outputs
  *                                       up to the next call belong to it
  *   read <length>                       IOCTL_HID_READ_REPORT
@@ -130,6 +139,18 @@ int ScriptRun(const char *plan, const char *script, const char *output)
             Frame(&c, NULL, 0, a, NULL, 0);
         } else if (strcmp(cmd, "tick") == 0) {
             SwitchTick(&c);
+        } else if (strcmp(cmd, "framequeued") == 0) {
+            size_t na = ScriptHex(x1, a, sizeof(a), lineNo);
+            size_t nb = ScriptHex(x2, b, sizeof(b), lineNo);
+            SdkWriteFrame(&c.sdk, a, (uint32_t)na, NULL, nb ? b : NULL, (uint32_t)nb);
+        } else if (strcmp(cmd, "idle") == 0) {
+            uint32_t k = ScriptNumber(x1, lineNo);
+            for (uint32_t i = 0; i < k; i++) ThreadResume(CtlThread(&c, 0));
+        } else if (strcmp(cmd, "sdkrestart") == 0) {
+            /* A program that starts again on the index opens the section
+             * the driver keeps and counts its frames from the start
+             * (SharedMemoryIO's seqlock counter). */
+            c.sdk.seq = 0;
         } else if (strcmp(cmd, "read") == 0) {
             HidRead(&c, ScriptNumber(x1, lineNo));
         } else if (strcmp(cmd, "write") == 0) {
