@@ -1197,6 +1197,14 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
 {
     CloseOwnerWatch(ctx);
 
+    /* The next program on this index zeroes the input section and counts
+     * its frames from 1 (SharedMemoryIO.EnsureInputMapping), and it can
+     * start inside the idle window, before any recycle. Forget the last
+     * SeqNo as the recycle does, so its frame whose SeqNo equals this
+     * program's last is read. SeenSeqNo is the worker's alone, and
+     * SharedMemSeqNo is reset under InputLock below. */
+    ctx->SeenSeqNo = 0;
+
     /* The watch connects only beside the acknowledgement section, so it is
      * mapped here. Mark the watch ended in it (TryOpenOwnerWatch) before
      * the values say so: the census reads OwnerConnected 0 beside a clear
@@ -1234,6 +1242,7 @@ OwnerGone(_In_ PDEVICE_CONTEXT ctx)
     }
     ctx->ReleaseCount = count;
     ctx->ReleaseNext = 0;
+    ctx->SharedMemSeqNo = 0;
     /* Polled reads (IOCTL_UMDF_HID_GET_INPUT_REPORT) see the released
      * state too: the frame for the cached report's ID replaces it. */
     for (ULONG i = 0; i < count; i++) {

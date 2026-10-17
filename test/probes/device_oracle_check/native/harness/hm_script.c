@@ -146,6 +146,13 @@ int ScriptRun(const char *plan, const char *script, const char *output)
         } else if (strcmp(cmd, "idle") == 0) {
             uint32_t k = ScriptNumber(x1, lineNo);
             for (uint32_t i = 0; i < k; i++) ThreadResume(CtlThread(&c, 0));
+        } else if (strcmp(cmd, "sdkexit") == 0) {
+            /* The program's end of the owner pipe closes, as on Dispose or
+             * process exit, and the worker takes its turn. */
+            if (!c.sdk.pipe) HmFail("script line %d: the stream's SDK has no owner pipe", lineNo);
+            PipeServerClose(c.sdk.pipe);
+            c.sdk.pipe = NULL;
+            ThreadResume(CtlThread(&c, 0));
         } else if (strcmp(cmd, "sdkrestart") == 0) {
             /* A program that starts again on the index opens the section
              * the driver keeps and counts its frames from the start
