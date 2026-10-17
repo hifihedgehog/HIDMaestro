@@ -105,10 +105,19 @@ internal static class IdleLive
         return 0;
     }
 
+    /// <summary>A process's CPU cycles. A process this run cannot read
+    /// fails the run, rather than read as 0 and print a column of zeros.</summary>
     static ulong Cycles(Process p)
     {
-        try { return QueryProcessCycleTime(p.Handle, out ulong c) ? c : 0; }
-        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { return 0; }
+        try
+        {
+            if (QueryProcessCycleTime(p.Handle, out ulong c)) return c;
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            throw new InvalidOperationException($"idle-live cannot read the cycles of {p.ProcessName} ({p.Id}): {e.Message}", e);
+        }
     }
 
     static ulong Sum(Process[] ps) => ps.Aggregate(0UL, (s, p) => s + Cycles(p));
