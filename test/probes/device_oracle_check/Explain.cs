@@ -185,6 +185,11 @@ internal sealed class ExplainSession
     public static ChangeList? Changes { get; set; }
     public static string Lane { get; set; } = "";
 
+    /// <summary>--earlier: the lane is re-run at a later tip, so a stream a
+    /// later lane of the list pinned since is rebuilt rather than read.
+    /// Without it every stream is read from the tree.</summary>
+    public static bool Earlier { get; set; }
+
     /// <summary>The golden file's count and digest of each stream of the
     /// case, for a stream no entry before the lane pins.</summary>
     public static IReadOnlyDictionary<string, (long Count, string Digest)> Golden { get; set; } =
@@ -233,7 +238,7 @@ internal sealed class ExplainSession
         _baseStream = new GoldenStream(name);
         var chain = Changes?.Chain($"{_case}/{name}") ?? new List<ChangeList.Entry>();
         int order = Changes?.LaneOrder(Lane) ?? int.MaxValue;
-        _later = chain.Any(e => e.Lane != Lane && Changes!.LaneOrder(e.Lane) > order);
+        _later = Earlier && chain.Any(e => e.Lane != Lane && Changes!.LaneOrder(e.Lane) > order);
         _rebuilt = _later ? new GoldenStream(name) : null;
         _rebuildBroken = null;
     }
@@ -384,7 +389,10 @@ internal sealed class ExplainSession
         {
             Results[_stream] = new StreamResult(_same, _changed, counts);
             string? problem = null;
-            if (own == null)
+            var last = chain.LastOrDefault();
+            if (last != null && last != own && Changes!.LaneOrder(last.Lane) > Changes.LaneOrder(Lane))
+                problem = $"its last entry, {last.Source}, is lane {last.Lane}'s, which comes after lane {Lane}. --earlier re-runs lane {Lane} at a later tip";
+            else if (own == null)
                 problem = chain.Count == 0 ? "no entry names it" : $"no entry of lane {Lane} names it";
             else if (!counts.SequenceEqual(own.Categories))
                 problem = $"{own.Source} claims {(own.Fields.Count == 0 ? "no categories" : string.Join(" ", own.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";

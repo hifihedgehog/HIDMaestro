@@ -3,9 +3,15 @@
 // exists, and every file --changes names. One change a line, # starts a
 // comment:
 //
+//   lane <name> | <name> | <reason>
 //   stream <case>/<stream> count <n> digest <sha-256> [<category>=<n> ...] | <lane> | <reason>
 //   config <profile-id> <value name> absent|<registry type>:<hex> | <lane> | <reason>
 //   rule <name> [<key>=<value> ...] | <lane> | <reason>
+//
+// The lane lines are the list's lanes, in the order they changed the tree:
+// every other entry names one of them, and Load refuses one that names
+// another. A lane adds its own lane line after the others before it adds
+// an entry.
 //
 // A stream entry pins what the tree must now produce: the stream's output
 // count and the SHA-256 of its outputs (GoldenStream.Digest), or count 0
@@ -14,9 +20,8 @@
 // pins its count and digest, and is printed as [CHANGED] with that entry's
 // lane and reason. A later lane that moves the stream again adds its own
 // entry after the earlier ones, which stay as the stream's chain: each
-// lane names a stream once, entries follow the order of the lanes, which
-// is the order of each lane's first stream entry in the list, and each
-// entry pins other bytes than the one before it. A stream back at its
+// lane names a stream once, entries follow the order of the lane lines,
+// and each entry pins other bytes than the one before it. A stream back at its
 // golden bytes is pinned so by its last entry. Load refuses a chain that
 // breaks these.
 //
@@ -81,6 +86,7 @@ internal sealed class ChangeList
             string fields = string.Concat(Fields.Select(kv => $" {kv.Key}={kv.Value}"));
             string head = Kind switch
             {
+                "lane" => $"lane {Target}",
                 "stream" => $"stream {Target} count {Count} digest {Digest}{fields}",
                 "rule" => $"rule {Target}{fields}",
                 _ => $"{Kind} {Target}",
@@ -94,6 +100,7 @@ internal sealed class ChangeList
     static readonly Regex StreamHead = new(
         @"^stream (?<t>[^ *]+/[^ *]+) count (?<n>\d+) digest (?<d>[0-9A-F]{64}|none)(?<f>( [a-z][a-z-]*=\d+)*)$",
         RegexOptions.CultureInvariant);
+    static readonly Regex LaneHead = new(@"^lane (?<t>[A-Za-z0-9][A-Za-z0-9.-]*)$", RegexOptions.CultureInvariant);
     static readonly Regex RuleHead = new(
         @"^rule (?<t>[a-z][a-z-]*)(?<f>( [A-Za-z][A-Za-z0-9-]*=[^ =]+)*)$", RegexOptions.CultureInvariant);
     static readonly Regex Field = new(@" (?<k>[^ =]+)=(?<v>[^ ]+)", RegexOptions.CultureInvariant);
@@ -136,6 +143,12 @@ internal sealed class ChangeList
                     e.Target = m.Groups["t"].Value;
                     AddFields(e, m.Groups["f"].Value, where);
                 }
+                else if ((m = LaneHead.Match(head)).Success)
+                {
+                    e.Kind = "lane";
+                    e.Target = m.Groups["t"].Value;
+                    if (e.Lane != e.Target) throw new InvalidDataException($"{where}: lane {e.Target}'s line names lane {e.Lane}");
+                }
                 else if (head.StartsWith("config ", StringComparison.Ordinal))
                 {
                     e.Kind = "config";
@@ -143,25 +156,35 @@ internal sealed class ChangeList
                 }
                 else
                     throw new InvalidDataException(
-                        $"{where}: not \"stream <case>/<stream> count <n> digest <sha-256> [<category>=<n> ...]\", \"config ...\" or \"rule <name> [<key>=<value> ...]\"");
+                        $"{where}: not \"lane <name>\", \"stream <case>/<stream> count <n> digest <sha-256> [<category>=<n> ...]\", \"config ...\" or \"rule <name> [<key>=<value> ...]\"");
                 list.Entries.Add(e);
             }
         }
+        list.CheckLanes();
         list.CheckChains();
         return list;
     }
 
-    /// <summary>A lane's place in the history of every stream: where its
-    /// first stream entry stands in the list, or for a lane that moved no
-    /// stream, its first line of any kind. A lane not in the list comes
-    /// after every lane in it.</summary>
+    /// <summary>The list's lanes, in the order of their lane lines.</summary>
+    public List<string> Lanes => Entries.Where(e => e.Kind == "lane").Select(e => e.Target).ToList();
+
+    /// <summary>A lane's place in the history of every stream: the place of
+    /// its lane line. A lane the list does not name yet comes after every
+    /// lane it names.</summary>
     public int LaneOrder(string lane)
     {
-        for (int i = 0; i < Entries.Count; i++)
-            if (Entries[i].Kind == "stream" && Entries[i].Lane == lane) return i;
-        for (int i = 0; i < Entries.Count; i++)
-            if (Entries[i].Lane == lane) return i;
-        return int.MaxValue;
+        int i = Lanes.IndexOf(lane);
+        return i < 0 ? int.MaxValue : i;
+    }
+
+    void CheckLanes()
+    {
+        var lanes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var e in Entries.Where(e => e.Kind == "lane"))
+            if (!lanes.Add(e.Target)) throw new InvalidDataException($"{e.Source}: lane {e.Target} has a second lane line");
+        foreach (var e in Entries.Where(e => e.Kind != "lane"))
+            if (!lanes.Contains(e.Lane))
+                throw new InvalidDataException($"{e.Source}: no lane line names lane {e.Lane}. The list's lanes are {(lanes.Count == 0 ? "none" : string.Join(", ", Lanes))}");
     }
 
     /// <summary>A stream's entries in order.</summary>
@@ -308,6 +331,10 @@ internal static class ChangeWriter
         }
         foreach (var t in unlisted.Values)
             added.Add(new ChangeList.Entry { Kind = "config", Target = t, Lane = lane ?? "?", Reason = "?" }.Line());
+        // A lane the list does not name yet adds its lane line before its
+        // first entry.
+        if (lane != null && added.Count > 0 && !changes.Lanes.Contains(lane))
+            added.Insert(0, new ChangeList.Entry { Kind = "lane", Target = lane, Lane = lane, Reason = "?" }.Line());
         File.WriteAllLines(path, lines.Concat(added));
     }
 

@@ -9,11 +9,15 @@
 //   chain    Load refuses a lane that names a stream twice, an entry that
 //            follows a later lane's, and one that pins its predecessor's
 //            bytes.
+//   lanes    Load refuses an entry of a lane no lane line names, and a lane
+//            line twice. The writer adds a new lane's line before its
+//            first entry.
 //   base     --explain refuses a base dump whose stream is not what the list
 //            pinned before the lane, or the golden file where nothing did.
-//   later    --explain of a lane re-runs after a later lane pinned the same
-//            stream: it rebuilds the lane's bytes from the base and holds
-//            them to the lane's own pin.
+//   later    --explain --earlier re-runs a lane after a later lane pinned
+//            the same stream: it rebuilds the lane's bytes from the base and
+//            holds them to the lane's own pin. Without --earlier the stream
+//            is read from the tree, and fails.
 // Exit 0 when every check passes, 1 otherwise.
 using System;
 using System.Collections.Generic;
@@ -42,6 +46,7 @@ internal static class SelfTest
         {
             Writer(dir);
             Chain(dir);
+            Lanes(dir);
             Base(dir);
             Later(dir);
         }
@@ -53,12 +58,20 @@ internal static class SelfTest
         return s_failures == 0 ? 0 : 1;
     }
 
+    // The lanes of a list that names none.
+    static readonly string[] Roster = { "lane W3 | W3 | r", "lane X | X | r", "lane Y | Y | r", "lane DD-6 | DD-6 | r" };
+
     static ChangeList List(string dir, params string[] lines)
     {
         string path = Path.Combine(dir, "list.txt");
-        File.WriteAllLines(path, lines);
+        File.WriteAllLines(path, lines.Any(l => l.StartsWith("lane ", StringComparison.Ordinal)) ? lines : Roster.Concat(lines));
         return ChangeList.Load(new[] { path });
     }
+
+    /// <summary>A written list's entries, its lane lines and comments left
+    /// out.</summary>
+    static List<string> Entries(string path) =>
+        File.ReadAllLines(path).Where(l => !l.StartsWith('#') && !l.StartsWith("lane ", StringComparison.Ordinal)).ToList();
 
     static List<string> Write(string dir, ChangeList list, string? lane, (long, string) replay,
                               ExplainSession.StreamResult? explained = null)
@@ -69,7 +82,7 @@ internal static class SelfTest
         var x = new Dictionary<string, ExplainSession.StreamResult>(StringComparer.Ordinal);
         if (explained != null) x["c/s"] = explained;
         ChangeWriter.Write(path, list, new HashSet<string> { "c" }, moved, pins, x, lane);
-        return File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        return Entries(path);
     }
 
     static void Writer(string dir)
@@ -114,14 +127,14 @@ internal static class SelfTest
         ChangeWriter.Write(path, List(dir, w3, c3), new HashSet<string>(), new Dictionary<string, (long, string)>(),
                            new Dictionary<string, (long, string)>(), new Dictionary<string, ExplainSession.StreamResult>(),
                            "X", new[] { "p InputReportId 3:0103" });
-        lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        lines = Entries(path);
         Check(lines.Count == 3 && lines[1] == c3 && lines[2] == "config p InputReportId 3:0103 | X | ?",
               "writer keeps lane W3's config entry and adds lane X's for the value it now writes");
         string c6 = "config p InputReportId 3:0103 | X | the lane's own value";
         ChangeWriter.Write(path, List(dir, w3, c3, c6), new HashSet<string>(), new Dictionary<string, (long, string)>(),
                            new Dictionary<string, (long, string)>(), new Dictionary<string, ExplainSession.StreamResult>(),
                            "X", new[] { "p InputReportId 3:0104" });
-        lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        lines = Entries(path);
         Check(lines.Count == 3 && lines[1] == c3 && lines[2] == "config p InputReportId 3:0104 | X | the lane's own value",
               "writer rewrites lane X's own config entry in place");
 
@@ -165,6 +178,7 @@ internal static class SelfTest
         ExplainSession.Golden = new Dictionary<string, (long, string)> { ["s"] = Pin(golden) };
         ExplainRules.Active = ExplainRules.From(changes, lane);
         GoldenCase.ExplainDir = dumps;
+        ExplainSession.Earlier = s_earlier;
         try
         {
             var g = new GoldenCase("c", 1, dump: true);
@@ -178,6 +192,7 @@ internal static class SelfTest
         finally
         {
             GoldenCase.ExplainDir = null;
+            ExplainSession.Earlier = false;
             ExplainRules.Active = new ExplainRules();
         }
     }
@@ -193,7 +208,18 @@ internal static class SelfTest
               "base: a dump from before lane W3's pin fails");
     }
 
+    static bool s_earlier;
+
     static void Later(string dir)
+    {
+        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", " other=1"), Entry(T2, "Y")) > 0,
+              "later: without --earlier a stream lane Y pinned after lane X is read, and fails lane X");
+        s_earlier = true;
+        try { LaterEarlier(dir); }
+        finally { s_earlier = false; }
+    }
+
+    static void LaterEarlier(string dir)
     {
         Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X", " other=1"), Entry(T2, "Y")) == 0,
               "later: lane X's claim of outputs no rule gives is kept once lane Y pins the stream");
@@ -201,6 +227,28 @@ internal static class SelfTest
               "later: a stream lane X left alone and lane Y pinned since rebuilds to the golden bytes");
         Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "X"), Entry(T2, "Y")) > 0,
               "later: lane X's pin that its rules do not rebuild fails");
+    }
+
+    static void Lanes(string dir)
+    {
+        bool Refused(params string[] lines)
+        {
+            try { List(dir, lines); return false; }
+            catch (InvalidDataException) { return true; }
+        }
+        Check(Refused("lane DD-1 | DD-1 | r", $"stream c/s count 1 digest {A} | DD1 | r"),
+              "lanes: an entry of lane DD1, which no lane line names, is refused");
+        Check(Refused("lane W3 | W3 | r", "lane W3 | W3 | r", $"stream c/s count 1 digest {A} | W3 | r"),
+              "lanes: a second lane line for lane W3 is refused");
+        Check(Refused("lane W3 | X | r", $"stream c/s count 1 digest {A} | W3 | r"),
+              "lanes: a lane line filed under another lane is refused");
+        string path = Path.Combine(dir, "written.txt");
+        var replay = new Dictionary<string, (long, string)> { ["c/s"] = (2, B) };
+        ChangeWriter.Write(path, List(dir, "lane W3 | W3 | r", $"stream c/s count 1 digest {A} | W3 | r"), new HashSet<string> { "c" },
+                           replay, replay, new Dictionary<string, ExplainSession.StreamResult>(), "Z");
+        var lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        Check(lines.Count == 4 && lines[2] == "lane Z | Z | ?" && lines[3] == $"stream c/s count 2 digest {B} | Z | ?",
+              "lanes: the writer adds lane Z's line before its first entry");
     }
 
     static void Chain(string dir)
@@ -214,7 +262,7 @@ internal static class SelfTest
         string x = $"stream c/s count 2 digest {B} | X | r";
         Check(!Refused(w3, x), "chain: lane X's entry after lane W3's loads");
         Check(Refused(w3, x, $"stream c/s count 3 digest {C} | W3 | r"), "chain: lane W3 naming the stream twice is refused");
-        Check(Refused($"stream c/o count 1 digest {A} | X | r", w3, x),
+        Check(Refused(x, w3),
               "chain: lane X's entry after a later lane's entry is refused");
         Check(Refused(w3, x.Replace($"count 2 digest {B}", $"count 1 digest {A}")), "chain: an entry that pins its predecessor's bytes is refused");
 

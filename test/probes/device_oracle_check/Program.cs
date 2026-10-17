@@ -54,6 +54,8 @@
 //                                 also holds every output against a base
 //                                   tree's dump in <dir>, and recomputes each
 //                                   by the lane's rules (Explain.cs)
+//          [--earlier]              re-runs an earlier lane: a stream a later
+//                                   lane pinned since is rebuilt, not read
 //          [--write-changes <file>] writes the change list this replay
 //                                   would pass with: every stream that
 //                                   differs from its golden file pinned to
@@ -172,6 +174,7 @@ internal static class Program
                 case "--dump": GoldenCase.DumpDir = Path.GetFullPath(Value()); break;
                 case "--explain": GoldenCase.ExplainDir = Path.GetFullPath(Value()); break;
                 case "--lane": lane = Value(); break;
+                case "--earlier": ExplainSession.Earlier = true; break;
                 case "--write-changes": writeChanges = Path.GetFullPath(Value()); break;
                 case "--profile-patch": profilePatch = Path.GetFullPath(Value()); break;
                 default: return Usage();
@@ -179,6 +182,8 @@ internal static class Program
         }
         if ((GoldenCase.ExplainDir != null) != (lane != null))
             throw new ArgumentException("--explain and --lane go together: the base dump, and the lane whose rules and entries it holds the tree to.");
+        if (ExplainSession.Earlier && lane == null)
+            throw new ArgumentException("--earlier re-runs a lane's --explain at a later tip, and goes with --explain and --lane.");
         if (mode != "replay" && (GoldenCase.ExplainDir != null || writeChanges != null || profilePatch != null))
             throw new ArgumentException("--explain, --write-changes and --profile-patch are replay's.");
         var selected = names.Count == 0 ? Cases.ToList()
@@ -448,7 +453,7 @@ internal static class Program
     static int Usage()
     {
         Console.WriteLine("usage: DeviceOracleCheck record|replay [--case <name,...>] [--seed <n>] [--golden <dir>] [--native <dir>] [--corpus-root <dir>] [--plan-change <file>] [--changes <file>] [--skip-corpus] [--dump <dir>]");
-        Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane>] [--write-changes <file>] [--profile-patch <file>]");
+        Console.WriteLine("       DeviceOracleCheck replay ... [--explain <base dump dir> --lane <lane> [--earlier]] [--write-changes <file>] [--profile-patch <file>]");
         Console.WriteLine("       DeviceOracleCheck selftest");
         Console.WriteLine("       DeviceOracleCheck compare <dirA> <dirB>");
         Console.WriteLine("       DeviceOracleCheck compare-live <out dir> | --selftest <dir> [--golden <dir>] [--native <dir>]");
