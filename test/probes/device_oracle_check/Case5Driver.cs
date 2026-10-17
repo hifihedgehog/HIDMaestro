@@ -91,6 +91,10 @@ internal sealed class Case5Driver : IOracleCase
     /// replay accepts beside the --plan-change file's lines.</summary>
     public static List<ChangeList.Entry> ConfigChanges = new();
 
+    /// <summary>The values the tree's SDK writes that no config entry pins,
+    /// as config entry targets, for --write-changes.</summary>
+    public static readonly List<string> ConfigUnlisted = new();
+
     static int s_runs;
 
     [DllImport("kernel32.dll")]
@@ -129,10 +133,15 @@ internal sealed class Case5Driver : IOracleCase
             else
             {
                 if (PlanChangeFile != null) listed = ReadPlanChange(PlanChangeFile);
-                listed.AddRange(ConfigChanges.Select(e => e.Target));
-                foreach (var e in ConfigChanges) e.Used = diffs.Contains(e.Target);
+                // The last config entry of a profile's value pins it, and the
+                // earlier ones are its chain's history (ChangeList.cs).
+                var current = ChangeList.Current(ConfigChanges);
+                listed.AddRange(current.Select(e => e.Target));
+                foreach (var e in ConfigChanges) e.Used = !current.Contains(e) || diffs.Contains(e.Target);
                 var unlisted = diffs.Except(listed).ToList();
                 var missing = listed.Except(diffs).ToList();
+                ConfigUnlisted.Clear();
+                ConfigUnlisted.AddRange(unlisted);
                 if (unlisted.Count > 0 || missing.Count > 0)
                 {
                     var sb = new StringBuilder("the tree's SDK writes instance configuration the kept plan does not hold:");

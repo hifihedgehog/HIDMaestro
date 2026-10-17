@@ -244,6 +244,8 @@ internal static class Program
         // case after it records. None may: checked after the last case.
         var catalog = CatalogText();
         int failures = 0, skipped = 0;
+        // The cases that ran to their golden comparison.
+        var compared = new HashSet<string>(StringComparer.Ordinal);
         var recorded = new List<GoldenCase>();
         foreach (var c in selected)
         {
@@ -296,6 +298,7 @@ internal static class Program
                 int same = want.Streams.Count(w => mine.TryGetValue(w.Name, out var r) && r.Count == w.Count && r.Digest == w.Digest);
                 Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] {c.Name}: {same} of {want.Streams.Count} golden streams identical in the replay{(bad == 0 ? "" : $", {bad} difference(s)")}");
                 if (bad != 0) failures++;
+                compared.Add(c.Name);
             }
             catch (CaseSkippedException e) when (mode == "replay" && skipCorpus)
             {
@@ -323,8 +326,9 @@ internal static class Program
             }
         // Every change listed for a case that ran must have matched: the list
         // names the tree's changes and no others. A rule is the lane's to
-        // state, and --explain's to hold the tree to.
-        var ran = new HashSet<string>(selected.Select(c => c.Name), StringComparer.Ordinal);
+        // state, and --explain's to hold the tree to. A case that stopped
+        // short has failed already, and its entries are not held to it.
+        var ran = compared;
         foreach (var e in changes.Entries.Where(e => !e.Used && e.Kind != "rule" && (e.Kind == "config" ? ran.Contains("case5-driver") : ran.Contains(e.Case))))
         {
             Console.WriteLine($"  [FAIL] {e.Source}: the listed change {e.Kind} {e.Target} ({e.Lane}) matched no difference");
@@ -332,7 +336,7 @@ internal static class Program
         }
         if (writeChanges != null)
         {
-            ChangeWriter.Write(writeChanges, changes, ran, moved, pins, explainedStreams, lane);
+            ChangeWriter.Write(writeChanges, changes, ran, moved, pins, explainedStreams, lane, Case5Driver.ConfigUnlisted);
             Console.WriteLine($"  wrote {writeChanges}: the change list this replay passes with, \"?\" where a lane or reason is to be filled in");
         }
         if (mode == "record" && failures == 0)

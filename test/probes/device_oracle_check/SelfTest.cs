@@ -109,6 +109,22 @@ internal static class SelfTest
         Check(lines.Count == 3 && lines[1] == own && lines[2] == $"stream c/s count 2 digest {B} | Y | ?",
               "writer with --lane Y keeps lane X's entry and stacks one of lane Y on it");
 
+        string c3 = "config p InputReportId 3:0102 | W3 | r";
+        string path = Path.Combine(dir, "written.txt");
+        ChangeWriter.Write(path, List(dir, w3, c3), new HashSet<string>(), new Dictionary<string, (long, string)>(),
+                           new Dictionary<string, (long, string)>(), new Dictionary<string, ExplainSession.StreamResult>(),
+                           "X", new[] { "p InputReportId 3:0103" });
+        lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        Check(lines.Count == 3 && lines[1] == c3 && lines[2] == "config p InputReportId 3:0103 | X | ?",
+              "writer keeps lane W3's config entry and adds lane X's for the value it now writes");
+        string c6 = "config p InputReportId 3:0103 | X | the lane's own value";
+        ChangeWriter.Write(path, List(dir, w3, c3, c6), new HashSet<string>(), new Dictionary<string, (long, string)>(),
+                           new Dictionary<string, (long, string)>(), new Dictionary<string, ExplainSession.StreamResult>(),
+                           "X", new[] { "p InputReportId 3:0104" });
+        lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
+        Check(lines.Count == 3 && lines[1] == c3 && lines[2] == "config p InputReportId 3:0104 | X | the lane's own value",
+              "writer rewrites lane X's own config entry in place");
+
         string other = $"stream d/o count 1 digest {C} | W3 | r";
         lines = Write(dir, List(dir, w3, other), lane: "X", (2, B));
         Check(lines.Count == 3 && lines[0] == w3 && lines[1] == other && lines[2] == $"stream c/s count 2 digest {B} | X | ?",
@@ -201,5 +217,19 @@ internal static class SelfTest
         Check(Refused($"stream c/o count 1 digest {A} | X | r", w3, x),
               "chain: lane X's entry after a later lane's entry is refused");
         Check(Refused(w3, x.Replace($"count 2 digest {B}", $"count 1 digest {A}")), "chain: an entry that pins its predecessor's bytes is refused");
+
+        // A profile's configured value, which a later lane writes otherwise
+        // again: lane DD-6's InputReportId after lane W3's.
+        string c3 = "config xbox-360-flight-stick InputReportId 3:0102 | W3 | r";
+        string c6 = "config xbox-360-flight-stick InputReportId 3:0103 | DD-6 | r";
+        bool loads = !Refused(w3, x, c3, c6);
+        Check(loads, "chain: lane DD-6's config entry after lane W3's for the same value loads");
+        if (loads)
+        {
+            var current = ChangeList.Current(List(dir, w3, x, c3, c6).Config);
+            Check(current.Count == 1 && current[0].Lane == "DD-6", "chain: the last config entry of a value is its pin");
+        }
+        Check(Refused(w3, x, c3, c3.Replace("3:0102", "3:0103")), "chain: lane W3 naming a configured value twice is refused");
+        Check(Refused(w3, x, c3, c6.Replace("3:0103", "3:0102")), "chain: a config entry that pins its predecessor's value is refused");
     }
 }

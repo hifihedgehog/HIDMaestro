@@ -30,7 +30,10 @@
 // A rule entry states a rule-based change of its lane, which --explain
 // --lane <lane> recomputes output by output (Explain.cs names the rules and
 // their keys). A config entry is one --plan-change line for case 5: a value
-// the tree's SDK writes otherwise than the kept plan holds. An entry that
+// the tree's SDK writes otherwise than the kept plan holds. A profile's
+// value has a chain as a stream does: a later lane that writes it otherwise
+// again adds its own entry after the earlier ones, the last entry pins it,
+// and the chain follows the stream rules. An entry that
 // matches nothing in a case the replay ran fails the replay, so the list
 // names exactly the changes the tree makes and no more.
 using System;
@@ -55,6 +58,18 @@ internal sealed class ChangeList
         public readonly SortedDictionary<string, string> Fields = new(StringComparer.Ordinal);
 
         public string Case => Target.Split('/')[0];
+
+        /// <summary>What the entry's chain is of: a stream, or a config
+        /// entry's profile and value name.</summary>
+        public string Key
+        {
+            get
+            {
+                if (Kind != "config") return Target;
+                var parts = Target.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                return parts.Length >= 2 ? $"{parts[0]} {parts[1]}" : Target;
+            }
+        }
 
         /// <summary>The categories as counts.</summary>
         public SortedDictionary<string, long> Categories =>
@@ -155,18 +170,18 @@ internal sealed class ChangeList
 
     void CheckChains()
     {
-        foreach (var chain in Entries.Where(e => e.Kind == "stream").GroupBy(e => e.Target, StringComparer.Ordinal))
+        foreach (var chain in Entries.Where(e => e.Kind is "stream" or "config").GroupBy(e => (e.Kind, e.Key)))
         {
             Entry? prev = null;
             var lanes = new HashSet<string>(StringComparer.Ordinal);
             foreach (var e in chain)
             {
                 if (!lanes.Add(e.Lane))
-                    throw new InvalidDataException($"{e.Source}: lane {e.Lane} names {e.Target} twice. A lane re-pins its own entry in place");
+                    throw new InvalidDataException($"{e.Source}: lane {e.Lane} names {e.Key} twice. A lane re-pins its own entry in place");
                 if (prev != null && LaneOrder(prev.Lane) > LaneOrder(e.Lane))
-                    throw new InvalidDataException($"{e.Source}: lane {e.Lane}'s entry for {e.Target} follows lane {prev.Lane}'s ({prev.Source}), which comes later in the list");
-                if (prev != null && prev.Count == e.Count && prev.Digest == e.Digest)
-                    throw new InvalidDataException($"{e.Source}: pins the bytes {prev.Source} already pins for {e.Target}");
+                    throw new InvalidDataException($"{e.Source}: lane {e.Lane}'s entry for {e.Key} follows lane {prev.Lane}'s ({prev.Source}), which comes later in the list");
+                if (prev != null && (e.Kind == "config" ? prev.Target == e.Target : prev.Count == e.Count && prev.Digest == e.Digest))
+                    throw new InvalidDataException($"{e.Source}: pins what {prev.Source} already pins for {e.Key}");
                 prev = e;
             }
         }
@@ -206,6 +221,11 @@ internal sealed class ChangeList
     /// <summary>The config entries as --plan-change lines.</summary>
     public IEnumerable<Entry> Config => Entries.Where(e => e.Kind == "config");
 
+    /// <summary>The last config entry of each profile's value: the value
+    /// the tree must write. The earlier ones are its history.</summary>
+    public static List<Entry> Current(IEnumerable<Entry> config) =>
+        config.GroupBy(e => e.Key, StringComparer.Ordinal).Select(g => g.Last()).ToList();
+
     /// <summary>The rule entries of one lane.</summary>
     public IEnumerable<Entry> Rules(string lane) => Entries.Where(e => e.Kind == "rule" && e.Lane == lane);
 }
@@ -218,7 +238,11 @@ internal sealed class ChangeList
 /// entry, of the running lane, or of lane "?" without --lane, as does a
 /// stream no entry names. New entries go at the end of the list, so a
 /// lane's first stream entry follows every earlier lane's. A new entry's
-/// reason is "?", which the list refuses until it is filled in.</summary>
+/// reason is "?", which the list refuses until it is filled in. A configured value case 5 found no
+/// entry for is written the same way: the running lane's own current entry
+/// for it is rewritten in place, and otherwise a new entry goes at the end.
+/// Case 5 stops at such a value, so its streams are written by the next
+/// run, with the new config entries filled in.</summary>
 internal static class ChangeWriter
 {
     /// <param name="moved">The streams that differ from their golden
@@ -228,10 +252,16 @@ internal static class ChangeWriter
     public static void Write(string path, ChangeList changes, ISet<string> ran,
                              IReadOnlyDictionary<string, (long Count, string Digest)> moved,
                              IReadOnlyDictionary<string, (long Count, string Digest)> pins,
-                             IReadOnlyDictionary<string, ExplainSession.StreamResult> explained, string? lane)
+                             IReadOnlyDictionary<string, ExplainSession.StreamResult> explained, string? lane,
+                             IReadOnlyList<string>? configUnlisted = null)
     {
         var last = new Dictionary<string, ChangeList.Entry>(StringComparer.Ordinal);
         foreach (var e in changes.Entries) if (e.Kind == "stream") last[e.Target] = e;
+        // The values case 5 found unpinned, by profile and value name.
+        var unlisted = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var t in configUnlisted ?? Array.Empty<string>())
+            unlisted[new ChangeList.Entry { Kind = "config", Target = t }.Key] = t;
+        var currentConfig = ChangeList.Current(changes.Config);
         var lines = new List<string>
         {
             "# Written by device_oracle_check replay --write-changes (ChangeList.cs). Fill in each \"?\".",
@@ -240,6 +270,11 @@ internal static class ChangeWriter
         var added = new List<string>();
         foreach (var e in changes.Entries)
         {
+            if (e.Kind == "config" && lane != null && e.Lane == lane && currentConfig.Contains(e) && unlisted.Remove(e.Key, out var value))
+            {
+                lines.Add(new ChangeList.Entry { Kind = "config", Target = value, Lane = e.Lane, Reason = e.Reason }.Line());
+                continue;
+            }
             if (e.Kind != "stream" || !ran.Contains(e.Case) || !ReferenceEquals(last[e.Target], e)) { lines.Add(e.Line()); continue; }
             done.Add(e.Target);
             explained.TryGetValue(e.Target, out var x);
@@ -271,6 +306,8 @@ internal static class ChangeWriter
             explained.TryGetValue(target, out var x);
             added.AddRange(New(target, pins[target], x, lane ?? "?"));
         }
+        foreach (var t in unlisted.Values)
+            added.Add(new ChangeList.Entry { Kind = "config", Target = t, Lane = lane ?? "?", Reason = "?" }.Line());
         File.WriteAllLines(path, lines.Concat(added));
     }
 
