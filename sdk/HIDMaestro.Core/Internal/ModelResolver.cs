@@ -324,9 +324,10 @@ internal sealed class ModelRegistry
             foreach (string file in Directory.EnumerateFiles(modelsDir, "*.json", SearchOption.AllDirectories)
                          .OrderBy(f => f, StringComparer.Ordinal))
             {
+                string? text = null;
                 try
                 {
-                    string text = File.ReadAllText(file);
+                    text = File.ReadAllText(file);
                     if (Path.GetFileName(file).Equals(IdentityDefaultsName, StringComparison.OrdinalIgnoreCase))
                     {
                         var table = ReadTable(text, file);
@@ -338,7 +339,7 @@ internal sealed class ModelRegistry
                         for (int i = 0; table.Entries != null && i < table.Entries.Count; i++)
                         {
                             if (!taken.Contains(table.Entries[i].Name)) { kept.Add(table.Entries[i]); continue; }
-                            issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, $"$.entries[{i}].name",
+                            issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, ProfileDefects.Spell(text, $"$.entries[{i}].name"),
                                 $"the entry name '{table.Entries[i].Name}' is already loaded. Give the entry a name of its own.",
                                 HIDMaestro.HMProfileLoadIssueKind.Refused));
                         }
@@ -348,13 +349,14 @@ internal sealed class ModelRegistry
                     }
                     var m = ReadModel(text, file);
                     if (!models.TryAdd(m.Id, (m, file)))
-                        issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, "$.id",
+                        issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, ProfileDefects.Spell(text, "$.id"),
                             $"the model id '{m.Id}' is already loaded from {models[m.Id].Source}. Give the model an id of its own.",
                             HIDMaestro.HMProfileLoadIssueKind.Refused));
                 }
                 catch (Exception e) when (e is JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
                 {
                     var (path, reason) = ProfileDefects.Locate(e);
+                    if (text != null) path = ProfileDefects.Spell(text, path);
                     issues.Add(new HIDMaestro.HMProfileLoadIssue(file, null, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
                 }
             }

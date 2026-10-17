@@ -30,7 +30,34 @@ internal static class Resolve
         Directory(c);
         Concurrent(c);
         ThroughCatalog(c);
+        RepeatedEntry(c);
         return c.Failures;
+    }
+
+    /// <summary>An identity default whose name another loaded table holds
+    /// is refused at the key its file writes. At 7d62b08f it read
+    /// $.entries[0].name whatever the file spelled.</summary>
+    static void RepeatedEntry(Checks c)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), $"hm-profile-entry-{Environment.ProcessId}");
+        System.IO.Directory.CreateDirectory(Path.Combine(dir, "models"));
+        try
+        {
+            string table = Path.Combine(dir, "models", "identity-defaults.json");
+            File.WriteAllText(table,
+                "{ \"Entries\": [ { \"Name\": \"nintendo-switch-pro\", \"match\": { \"vid\": \"0x1234\" }, \"model\": \"switch-pro\" } ] }");
+            using var ctx = new HMContext();
+            ctx.LoadDefaultProfiles();
+            ctx.LoadProfilesFromDirectory(dir);
+            var mine = Api.Issues(ctx, "ProfileLoadIssues").Where(i => string.Equals(i.File, table, StringComparison.OrdinalIgnoreCase)).ToList();
+            c.Check("a repeated identity default name is refused at the key the file writes",
+                    mine.Count == 1 && mine[0].Kind == "Refused" && mine[0].Path == "$.Entries[0].Name",
+                    string.Join("; ", mine.Select(i => $"{i.Kind} {i.Path} {i.Reason}")));
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
     }
 
     /// <summary>A model taken through a catalog profile, whose own model
@@ -126,6 +153,8 @@ internal static class Resolve
                 "{ \"id\": \"user-pid-model\", \"comment\": \"xinputhid's 02FF\", \"driverPid\": \"0x02FF\" }");
             File.WriteAllText(Path.Combine(dir, "models", "b-pid-again.json"),
                 "{ \"id\": \"user-pid-model\", \"driverPid\": \"0x0B00\" }");
+            File.WriteAllText(Path.Combine(dir, "models", "b-pid-again-spelled.json"),
+                "{ \"ID\": \"user-pid-model\", \"driverPid\": \"0x0B01\" }");
             var triton = FromRepo(@"valve\steam-controller-2.json", "unused");
             var fileModel = new JsonObject
             {
@@ -237,6 +266,12 @@ internal static class Resolve
             c.Run("a repeated model id is refused naming the first", () =>
                 (issues.Any(i => i.File.EndsWith("b-pid-again.json", StringComparison.Ordinal) && i.Kind == "Refused"
                                  && i.Reason.Contains("a-pid.json", StringComparison.Ordinal)), ""));
+            // At 7d62b08f a repeated model id was listed at $.id however the
+            // file spelled the key.
+            c.Run("a repeated model id is refused at the key the file writes", () =>
+                (issues.FirstOrDefault(i => i.File.EndsWith("b-pid-again-spelled.json", StringComparison.Ordinal)) is { } i
+                 && i.Kind == "Refused" && i.Path == "$.ID",
+                 issues.FirstOrDefault(i => i.File.EndsWith("b-pid-again-spelled.json", StringComparison.Ordinal))?.ToString() ?? "none"));
             c.Run("no catalog profile's resolution changes after the directory load", () =>
             {
                 var changed = ctx.AllProfiles.Where(p => before.ContainsKey(p.Id)

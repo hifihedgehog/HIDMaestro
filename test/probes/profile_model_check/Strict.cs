@@ -176,6 +176,14 @@ internal static class Strict
         return o.ToJsonString();
     }
 
+    /// <summary>The same profile with its id's key spelled ID: the first
+    /// "id" key in the text, which is the profile's own.</summary>
+    static string SpelledID(string json)
+    {
+        int at = json.IndexOf("\"id\":", StringComparison.Ordinal);
+        return json[..at] + "\"ID\":" + json[(at + 5)..];
+    }
+
     static List<Case> Cases()
     {
         string extended = "\"extendedReport\":{\"reportId\":\"0x01\",\"size\":8,\"fields\":[]}";
@@ -201,6 +209,10 @@ internal static class Strict
                 "Refused", "$.id", "e-dup-1.json"),
             new("f-catalog-copy.json", WithId(BaseId), BaseId,
                 "Refused", "$.id", "catalog:"),
+            // A repeated id is refused at the key the file writes. At
+            // 7d62b08f it read $.id.
+            new("e-dup-3.json", SpelledID(WithId("user-dup")), "user-dup",
+                "Refused", "$.ID", "e-dup-1.json"),
             new("g-no-id.json", "{ \"name\": \"no id here\" }", null,
                 "NotAProfile", "$.id", "no id"),
             new("h-bad-value.json", WithId("user-bad-value", o => o["dataReportId"] = "0x7E"), "user-bad-value",
@@ -279,6 +291,19 @@ internal static class Strict
             c.Check("nothing in the models folder is read as a profile", !loaded.Contains("user-in-models")
                     && !issues.Any(i => i.File.Contains("k-in-models", StringComparison.Ordinal)));
             c.Check("LoadProfilesFromDirectory counts the two profiles it added", added == 2, $"{added}");
+            // Across loads too: a later directory's copy of a catalog id that
+            // spells its key ID. At 7d62b08f it was listed at $.id.
+            c.Run("a later load's repeat of a catalog id is refused at the key the file writes", () =>
+            {
+                string later = Path.Combine(dir, "later");
+                Directory.CreateDirectory(later);
+                string file = Path.Combine(later, "catalog-copy-spelled.json");
+                File.WriteAllText(file, SpelledID(WithId(BaseId)));
+                ctx.LoadProfilesFromDirectory(later);
+                var mine = Api.Issues(ctx, "ProfileLoadIssues").Where(i => string.Equals(i.File, file, StringComparison.OrdinalIgnoreCase)).ToList();
+                return (mine.Count == 1 && mine[0].Path == "$.ID" && mine[0].Reason.Contains("catalog:", StringComparison.Ordinal),
+                        string.Join("; ", mine.Select(i => $"{i.Kind} {i.Path} {i.Reason}")));
+            });
             c.Run("loading the catalog again adds nothing and lists nothing", () =>
             {
                 int before = Api.Issues(ctx, "ProfileLoadIssues").Count;

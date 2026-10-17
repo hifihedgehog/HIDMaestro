@@ -1825,7 +1825,7 @@ public sealed class ProfileDatabase
             var p = r.Profile!;
             if (first.TryGetValue(p.Id, out var earlier))
             {
-                db._issues.Add(new HIDMaestro.HMProfileLoadIssue(r.File, p.Id, "$.id",
+                db._issues.Add(new HIDMaestro.HMProfileLoadIssue(r.File, p.Id, r.Text != null ? ProfileDefects.Spell(r.Text, "$.id") : "$.id",
                     $"the id '{p.Id}' is already loaded from {earlier}. Give the profile an id of its own.",
                     HIDMaestro.HMProfileLoadIssueKind.Refused));
                 continue;

@@ -437,6 +437,17 @@ public sealed class HMContext : IDisposable
         return Add(ProfileDatabase.LoadEmbedded());
     }
 
+    /// <summary>The path of a profile file's id as the file spells it, read
+    /// again from the file, since the load keeps no text past itself.
+    /// <c>$.id</c> for a catalog profile, or a file gone or locked since its
+    /// load.</summary>
+    private static string IdPath(string? file)
+    {
+        if (file == null || !File.Exists(file)) return "$.id";
+        try { return ProfileDefects.Spell(File.ReadAllText(file), "$.id"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return "$.id"; }
+    }
+
     /// <summary>Adds a database's profiles and issues. A profile whose id is
     /// loaded from another file is refused, and one loaded from the same
     /// file, as when the catalog loads twice, is the same profile and adds
@@ -455,7 +466,7 @@ public sealed class HMContext : IDisposable
                 if (_profileSources.TryGetValue(inner.Id, out var earlier))
                 {
                     if (string.Equals(earlier, source, StringComparison.OrdinalIgnoreCase)) continue;
-                    _loadIssues.Add(new HMProfileLoadIssue(source, inner.Id, "$.id",
+                    _loadIssues.Add(new HMProfileLoadIssue(source, inner.Id, IdPath(inner.SourceFile),
                         $"the id '{inner.Id}' is already loaded from {earlier}. Give the profile an id of its own.",
                         HMProfileLoadIssueKind.Refused));
                     continue;
