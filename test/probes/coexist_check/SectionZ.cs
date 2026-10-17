@@ -28,10 +28,14 @@
 //      6. A usbip-win2 installer another program left running, played by a
 //         copy of this probe named USBip-zprobe.exe that runs 6 s. An install
 //         waits for it to end, and gives up at its own timeout.
-//      7. A sweep that restores a WinUSB entry while another thread's WinUSB
-//         work holds the binding's locks for 3 s. The ledger's lock stays
-//         free meanwhile, the entry stays until its restore is done, and
-//         then it is gone.
+//      7. A sweep that finds a WinUSB entry of another program while another
+//         thread's WinUSB work holds the binding's locks for 3 s. The sweep
+//         takes that lock only when no one holds it, so it does not wait.
+//         The ledger's lock stays free and the entry stays while the locks
+//         are held. Once they are free, and with no devnode to wait for, the
+//         follow-up the sweep started restores the entry, or the next sweep
+//         does (docs/design/v1.13.0.md, "Zero setup for Dolphin and
+//         Slippi").
 //      8. A WinUSB bind waits for the deploy lock to add its package, and two
 //         programs bind at the same moment and both bind.
 //      9. A GameCube adapter bound to WinUSB loses its connection, another
@@ -415,10 +419,15 @@ internal static partial class Program
         using var p = PeerProcess.Start("Z7");
         string r = p.Send("zwinusbsweep 3000", 60_000);
         long ledger = LongField(r, "ledgerms");
-        Check("Z7: the sweep's WinUSB restore waits for the binding's locks", PeerProcess.Field(r, "order") == "after", r);
-        Check("Z7: the ledger's lock is free while it waits", ledger >= 0 && ledger < 1000, r);
-        Check("Z7: the entry stays until its restore is done", PeerProcess.Field(r, "during") == "True", r);
-        Check("Z7: then the entry is gone", PeerProcess.Field(r, "after") == "False", r);
+        long sweep = LongField(r, "sweepms");
+        Check("Z7: with the binding's locks held, the sweep does not wait for them",
+              PeerProcess.Field(r, "order") == "before" && sweep >= 0 && sweep < 1500, r);
+        Check("Z7: the ledger's lock stays free while they are held", ledger >= 0 && ledger < 1000, r);
+        Check("Z7: the entry stays while they are held",
+              PeerProcess.Field(r, "during") == "True" && PeerProcess.Field(r, "aftersweep") == "True", r);
+        Check("Z7: once they are free, the follow-up restores the entry, or the next sweep does",
+              PeerProcess.Field(r, "gone") == "True" && PeerProcess.Field(r, "restored") == "after"
+              && PeerProcess.Field(r, "via") is "followup" or "sweep2", r);
     }
 
     // ── Z8 ─────────────────────────────────────────────────────────────
@@ -976,8 +985,11 @@ internal static partial class Program
 ///   zinstallers &lt;ms&gt;      UsbipDriverInstaller.WaitForRunningInstallers
 ///   zwinusbsweep &lt;ms&gt;     a WinUSB ledger entry for a devnode that does
 ///                         not exist, swept while another thread holds the
-///                         binding's locks &lt;ms&gt;. order=after when the
-///                         sweep ended after the hold let go
+///                         binding's locks &lt;ms&gt;, with follow-ups on.
+///                         order=before when the sweep ended before the hold
+///                         let go, via= who restored the entry (sweep,
+///                         followup, sweep2 or none), restored=after when
+///                         that was after the hold let go
 ///   zfollow queue|claim|check|end  the follow-up's decision: queue holds
 ///                         the WinUSB lock on a thread, claims the entry,
 ///                         and runs the full cleanup, which leaves the entry
@@ -1262,6 +1274,11 @@ internal static class PeerZ
             string devnodes = AdminName("WinUsb");
             using var held = new ManualResetEventSlim();
             long releasedAt = 0, sweptAt = 0;
+            // This program starts follow-ups, as every program but the
+            // probe's zreleasecost peer does.
+            (Sdk.GetType(Ledger)?.GetField("NoFollowUpForProbe", Any)
+                ?? throw new MissingFieldException(Ledger, "NoFollowUpForProbe")).SetValue(null, false);
+            bool Present() { using var k = Registry.LocalMachine.OpenSubKey(path); return k != null; }
             var holder = new Thread(() =>
             {
                 using var m = new Mutex(false, devnodes);
@@ -1288,20 +1305,39 @@ internal static class PeerZ
                 sweepMs = sweepSw.ElapsedMilliseconds;
             });
             sweeper.Start();
+            // 300 ms into the 3 s hold: the sweep that does not wait has
+            // ended, one that waits is still waiting.
             Thread.Sleep(300);
-            bool during;
-            using (var k = Registry.LocalMachine.OpenSubKey(path)) during = k != null;
+            bool during = Present();
             var sw = Stopwatch.StartNew();
             object l = AcquireLedger();
             long ledgerMs = sw.ElapsedMilliseconds;
             ReleaseLedger(l);
             sweeper.Join();
+            bool afterSweep = Present();
             holder.Join();
-            bool after;
-            using (var k = Registry.LocalMachine.OpenSubKey(path)) after = k != null;
+            // Once the locks are free the entry's follow-up, which waits for
+            // the devnode lock, restores it. This devnode does not exist, so
+            // there is nothing else to wait for.
+            string via = afterSweep ? "none" : "sweep";
+            long goneAt = afterSweep ? 0 : sweptAt;
+            if (afterSweep)
+            {
+                var wait = Stopwatch.StartNew();
+                while (Present() && wait.ElapsedMilliseconds < 10_000) Thread.Sleep(20);
+                if (!Present()) { via = "followup"; goneAt = Stopwatch.GetTimestamp(); }
+                else
+                {
+                    M(Ledger, "PruneDead").Invoke(null, null);
+                    if (!Present()) { via = "sweep2"; goneAt = Stopwatch.GetTimestamp(); }
+                }
+            }
+            bool gone = !Present();
             // Both threads are joined, so both stamps are written.
             string order = sweptAt > releasedAt ? "after" : "before";
-            return $"OK zwinusbsweep ledgerms={ledgerMs} during={during} after={after} sweepms={sweepMs} order={order}";
+            string restored = !gone ? "never" : goneAt > releasedAt ? "after" : "before";
+            long goneMs = gone ? (long)Stopwatch.GetElapsedTime(releasedAt, goneAt).TotalMilliseconds : -1;
+            return $"OK zwinusbsweep ledgerms={ledgerMs} during={during} aftersweep={afterSweep} sweepms={sweepMs} order={order} gone={gone} via={via} restored={restored} gonems={goneMs}";
         }
         finally
         {
