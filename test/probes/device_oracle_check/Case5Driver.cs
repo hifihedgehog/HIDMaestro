@@ -527,7 +527,11 @@ internal sealed class Case5Driver : IOracleCase
         Registry.LocalMachine.DeleteSubKeyTree("SOFTWARE", throwOnMissingSubKey: false);
         string type = p.Type;
         if (asKeyboard) p.Type = "keyboard";
-        try { s_writeInstanceConfig.Invoke(null, new object[] { 0, p }); }
+        // v2.0.0 passes the controller's identity, whose entry the call
+        // writes beside the configuration.
+        object[] args = s_writeInstanceConfig.GetParameters().Length == 3
+            ? new object[] { 0, p, DeviceIdentity.ForIndex(0) } : new object[] { 0, p };
+        try { s_writeInstanceConfig.Invoke(null, args); }
         catch (TargetInvocationException e) when (!asKeyboard && e.InnerException is UnauthorizedAccessException) { }
         finally { p.Type = type; }
         using var key = Registry.LocalMachine.OpenSubKey(InstanceKey)

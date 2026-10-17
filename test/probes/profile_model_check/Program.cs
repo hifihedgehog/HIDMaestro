@@ -18,6 +18,9 @@
 //   answers    answer tables: per-entry matching, pages, a parameter at
 //              its own offset, the Sony models, each refusal at load, the
 //              blob the driver reads, identity defaults (Answers.cs)
+//   contract   the SDK's half of the version contract: the identity tag,
+//              protocol 4, and the configuration and identity entry each
+//              create writes anew, in a hive the check owns (Contract.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -43,6 +46,7 @@ internal static class Program
             ("values", Values.Run),
             ("resolve", Resolve.Run),
             ("answers", Answers.Run),
+            ("contract", Contract.Run),
         };
         int fail = 0;
         if (mode == "check")

@@ -107,6 +107,28 @@ internal sealed class DeviceIdentity
         SerialVariant = isDefault ? index : (int)(hash % 999_999UL) + 1;
     }
 
+    /// <summary>v2.0.0: the identity tag the SDK writes into the version
+    /// section and a driver compares with its own devnode's (the design
+    /// note's decision (c)).</summary>
+    public ulong Tag => TagOf(Token);
+
+    /// <summary>The 64-bit FNV-1a hash of a token's UTF-16LE code units,
+    /// no terminator: HM_0000 gives 0x1FD048916B8D461F and
+    /// HM_0123456789ABCDEF 0x3B86F3634086D831, as driver.h's
+    /// HmIdentityTag does.</summary>
+    public static ulong TagOf(string token)
+    {
+        ulong h = 0xCBF29CE484222325UL;
+        foreach (char c in token)
+        {
+            h ^= (byte)c;
+            h *= 0x100000001B3UL;
+            h ^= (byte)(c >> 8);
+            h *= 0x100000001B3UL;
+        }
+        return h;
+    }
+
     /// <summary>The key a caller gets when it passes none.</summary>
     public static string DefaultKey(int index) => $"index:{index}";
 

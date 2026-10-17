@@ -175,10 +175,20 @@ internal static partial class SharedMemoryIO
     public const int VERSION_OFFSET_DRIVER_PROTOCOL = 20;
     public const int VERSION_OFFSET_DRIVER_VERSION = 24;
     public const int VERSION_OFFSET_DRIVER_CAPS = 32;
+    // v2.0.0: the reserved bytes from 36 (the design note's decision (c)).
+    public const int VERSION_OFFSET_DRIVER_PROTOCOL_MIN = 36;
+    public const int VERSION_OFFSET_COMPANION_PROTOCOL = 40;
+    public const int VERSION_OFFSET_COMPANION_PROTOCOL_MIN = 44;
+    public const int VERSION_OFFSET_IDENTITY_TAG = 48;
+    public const int VERSION_OFFSET_DRIVER_CONFIG_ERROR = 56;
+    public const int VERSION_OFFSET_COMPANION_CONFIG_ERROR = 60;
     public const int VERSION_LAYOUT = 1;
     /// <summary>Protocol 2 is the v1.12.0 layout set, InputAck and the
-    /// owner pipe included. Protocol 3 adds the version handshake.</summary>
-    public const int SDK_PROTOCOL_MIN = 2, SDK_PROTOCOL = 3;
+    /// owner pipe included. Protocol 3 adds the version handshake, and
+    /// protocol 4 the version contract: the identity tag and the
+    /// identity entry, under which a driver reads a controller's v2.0.0
+    /// values. This SDK runs on protocol 4 alone.</summary>
+    public const int SDK_PROTOCOL_MIN = 4, SDK_PROTOCOL = 4;
 
     /// <summary>The driver's version and protocol from the handshake, or
     /// null until a driver of protocol 3 or later has written them. A
@@ -196,6 +206,20 @@ internal static partial class SharedMemoryIO
                 (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 2),
                 (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 4));
             return (version, protocol);
+        }
+    }
+
+    /// <summary>v2.0.0: writes the controller's identity tag into its
+    /// version section, which <see cref="EnsureInputMapping"/> made. A
+    /// driver reads the controller's v2.0.0 values only when the tag is
+    /// its own devnode's, so this runs before any PnP work.</summary>
+    public static void WriteIdentityTag(int controllerIndex, ulong tag)
+    {
+        lock (s_inputViews)
+        {
+            if (!s_versionViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero)
+                throw new InvalidOperationException($"Controller {controllerIndex} has no version section to write its identity tag into.");
+            Marshal.WriteInt64(v, VERSION_OFFSET_IDENTITY_TAG, unchecked((long)tag));
         }
     }
 

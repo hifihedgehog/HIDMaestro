@@ -685,7 +685,12 @@ internal static partial class DeviceOrchestrator
     //  WriteInstanceConfig
     // ════════════════════════════════════════════════════════════════════
 
-    private static void WriteInstanceConfig(int controllerIndex, ControllerProfile profile)
+    /// <summary>The controller's configuration, written anew on every
+    /// create: the key is deleted first, so no value another profile wrote
+    /// on this index survives. Then the identity entry, which names the
+    /// index for the controller's token. Both come before the deploy gate
+    /// and any PnP work.</summary>
+    private static void WriteInstanceConfig(int controllerIndex, ControllerProfile profile, DeviceIdentity identity)
     {
         byte[] descriptor = profile.GetDescriptorBytes()!;
         var (_, inputReportLen, _) = DriverInputReport(profile);
@@ -697,6 +702,7 @@ internal static partial class DeviceOrchestrator
         bool funcMode = profile.RequiresXusbCompanion;
 
         string instancePath = RegPathForIndex(controllerIndex);
+        Registry.LocalMachine.DeleteSubKeyTree(instancePath, throwOnMissingSubKey: false);
         using var key = Registry.LocalMachine.CreateSubKey(instancePath);
         // The identity first: another program's sweep reads VendorId and
         // ProductId from a configuration a create may still be writing
@@ -720,6 +726,17 @@ internal static partial class DeviceOrchestrator
         key.SetValue("Bluetooth",
                      string.Equals(profile.Connection, "bluetooth", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
                      RegistryValueKind.DWord);
+        // v2.0.0: the answers to GET_FEATURE, compiled for this controller
+        // (mechanism 4): the index and the serial the driver serves
+        // patched in, CRCs final. A profile without answers writes the
+        // header alone. The driver reads it only under the version
+        // contract.
+        key.SetValue("FeatureAnswers", FeatureAnswersBlob(profile, controllerIndex), RegistryValueKind.Binary);
+        // v2.0.0: the input report IDs a polled GET_INPUT_REPORT answers
+        // from a cache of their own. No profile names any yet, so the
+        // value is empty, and the driver answers IDs 0 and 1 from the last
+        // frame as before.
+        key.SetValue("CachedInputReportIds", Array.Empty<byte>(), RegistryValueKind.Binary);
         // PadForge discussion 476: a DualShock 3 in the form sixaxis.sys and
         // DsHidMini's SXS mode present. The driver derives that form's
         // input, feature and output handling from the native report.
@@ -750,7 +767,20 @@ internal static partial class DeviceOrchestrator
         // no joy.cpl entry (issue #67).
         if (!profile.IsKeyboardOrMouse)
             RegistryLedger.ClaimJoystickOem(profile.VendorId, profile.ProductId, displayName, controllerIndex);
+
+        WriteIdentityEntry(identity.Token, controllerIndex);
     }
+
+    /// <summary>The serial the UMDF2 driver serves for an index
+    /// (driver.c InitInstancePaths): HM-CTL- and the index, at least four
+    /// digits.</summary>
+    internal static string DriverSerial(int controllerIndex) => $"HM-CTL-{controllerIndex:D4}";
+
+    /// <summary>The FeatureAnswers value of a controller: the blob of the
+    /// table its resolved model compiles to, or the empty blob.</summary>
+    internal static byte[] FeatureAnswersBlob(ControllerProfile profile, int controllerIndex) =>
+        Usbip.FeatureStubTable.From(profile, controllerIndex, DriverSerial(controllerIndex))?.ToBlob()
+        ?? Usbip.FeatureStubTable.EmptyBlob();
 
     // ════════════════════════════════════════════════════════════════════
     //  CreateGamepadCompanion (xinputhid path)
@@ -1375,6 +1405,7 @@ internal static partial class DeviceOrchestrator
         {
             BeforeInputMapping?.Invoke(controllerIndex);
             SharedMemoryIO.EnsureInputMapping(controllerIndex);
+            SharedMemoryIO.WriteIdentityTag(controllerIndex, identity.Tag);
             try
             {
                 SharedMemoryIO.EnsureOutputMapping(controllerIndex);
@@ -1405,7 +1436,7 @@ internal static partial class DeviceOrchestrator
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "1.instance_config"))
         {
             configWritten = true;
-            WriteInstanceConfig(controllerIndex, profile);
+            WriteInstanceConfig(controllerIndex, profile, identity);
         }
 
         // ── Step 2: ensure driver is in the store ────────────────────────
@@ -1702,7 +1733,7 @@ internal static partial class DeviceOrchestrator
             try { SharedMemoryIO.DestroyController(controllerIndex); } catch { }
             try { RegistryLedger.Release(controllerIndex); } catch { }
             if (configWritten)
-                try { Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false); } catch { }
+                DeleteInstanceConfig(controllerIndex);
             throw;
         }
         finally {
@@ -1989,12 +2020,8 @@ internal static partial class DeviceOrchestrator
             catch { }
         }
 
-        // Clear the per-instance registry config
-        try
-        {
-            Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false);
-        }
-        catch { }
+        // Clear the per-instance registry config and the identity entry
+        DeleteInstanceConfig(controllerIndex);
 
         // Sweep any HID children orphaned by the parent removals above.
         // DeviceManager.RemoveDevice on a ROOT\ parent should cascade to its
@@ -2174,11 +2201,51 @@ internal static partial class DeviceOrchestrator
     /// workers exit before their devices are removed.</summary>
     internal static void SignalStopEvents(HashSet<int> indices) => SignalStopEventsAndDrain(indices);
 
-    /// <summary>Delete one index's per-instance configuration key.</summary>
+    /// <summary>Delete one index's per-instance configuration key and every
+    /// identity entry that names the index.</summary>
     internal static void DeleteInstanceConfig(int controllerIndex)
     {
         try { Registry.LocalMachine.DeleteSubKeyTree(RegPathForIndex(controllerIndex), throwOnMissingSubKey: false); }
         catch { }
+        DeleteIdentityEntries(controllerIndex);
+    }
+
+    /// <summary>v2.0.0: <c>SOFTWARE\HIDMaestro\Identity</c>. Each subkey is
+    /// an identity token, with the value <see cref="IdentityIndexValue"/>
+    /// naming the controller index the token's devnodes read their
+    /// configuration from. A driver reads it before WdfDeviceCreate, from
+    /// its own instance ID's last segment, since an SWD devnode starts
+    /// before its hardware key holds the index (the design note's decision
+    /// (c), "The index before the first start").</summary>
+    internal const string IdentityRoot = REG_BASE + @"\Identity";
+    internal const string IdentityIndexValue = "ControllerIndex";
+
+    /// <summary>Writes the identity entry of a controller at an index,
+    /// after deleting every other entry that names the index, which only a
+    /// program that ended without its teardown leaves.</summary>
+    internal static void WriteIdentityEntry(string token, int controllerIndex)
+    {
+        DeleteIdentityEntries(controllerIndex);
+        using var key = Registry.LocalMachine.CreateSubKey($@"{IdentityRoot}\{token}");
+        key.SetValue(IdentityIndexValue, controllerIndex, RegistryValueKind.DWord);
+    }
+
+    /// <summary>Deletes every identity entry that names the index.</summary>
+    internal static void DeleteIdentityEntries(int controllerIndex)
+    {
+        try
+        {
+            using var root = Registry.LocalMachine.OpenSubKey(IdentityRoot, writable: true);
+            if (root == null) return;
+            foreach (string token in root.GetSubKeyNames())
+            {
+                object? value;
+                using (var entry = root.OpenSubKey(token)) value = entry?.GetValue(IdentityIndexValue);
+                if (value is int i && i == controllerIndex)
+                    root.DeleteSubKeyTree(token, throwOnMissingSubKey: false);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
     }
 
     /// <summary>The uninstall-grade sweep, <see cref="HMCleanupScope.Everything"/>:

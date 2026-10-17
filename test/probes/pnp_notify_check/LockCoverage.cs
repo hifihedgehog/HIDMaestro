@@ -144,8 +144,6 @@ internal static class LockCoverage
         (".SetValue(\"LastSwdGamepadHResult\"", "CreateGamepadCompanion", null),
         ("CreateSubKey(RegPathForIndex(", "CreateXusbCompanion", null),
         (".SetValue(\"LastSwdCompanionHResult\"", "CreateXusbCompanion", null),
-        ("DeleteSubKeyTree(RegPathForIndex(", "SetupControllerCore", null),
-        ("DeleteSubKeyTree(RegPathForIndex(", "TeardownController", null),
         ("DeleteSubKeyTree(@\"SOFTWARE\\HIDMaestro\"", "RemoveEverythingGated", null),
     };
 
