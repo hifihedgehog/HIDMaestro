@@ -8,10 +8,11 @@
 //    once more after its input pump started. Each time the create leaves
 //    no claim pipe, no device, no record entry and no section, the program
 //    keeps running, and the same identity creates again at once, in the
-//    same program and in another. Last, a v1.12.0 program starts an Xbox
-//    360 controller on the index while a create waits before its mapping:
-//    the create is refused, and the v1.12.0 program's devices,
-//    configuration and sections stay as they were.
+//    same program and in another. Before each lock every object of the
+//    index is gone, the name the lock takes included. Last, a v1.12.0
+//    program starts an Xbox 360 controller on the index while a create
+//    waits before its mapping: the create is refused, and the v1.12.0
+//    program's devices, configuration and sections stay as they were.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -146,11 +147,10 @@ internal static partial class Program
         // create's open of it is refused after every other object of the
         // mapping exists. Only index t carries the event, so the denial in
         // the reply shows the create reached index t and failed there.
-        bool clear5 = WaitFor(() => InputObjectsPresent(t, output: false).Count == 0, 10_000);
-        Check($"U: before the next create no object of index {t}'s input mapping exists", clear5,
-              string.Join(",", InputObjectsPresent(t, output: false)));
+        bool clear5 = WaitInputObjectsGone(t, output: false, out string trace5);
+        Check($"U: before the next create no object of index {t}'s input mapping exists", clear5, trace5);
         string f5;
-        using (LockedEvent($@"Global\HIDMaestroInputEvent{t}"))
+        using (LockedEvent($@"Global\HIDMaestroInputEvent{t}", t))
             f5 = a.Send("create pad F1B0 -");
         bool denied5 = !Ok(f5) && PeerProcess.Field(f5, "win32") == ErrorAccessDenied;
         Check($"U: a create on index {t} is refused at its input event", denied5, f5);
@@ -175,11 +175,10 @@ internal static partial class Program
         string tc = PeerProcess.Field(c4, "transport")!;
         a.Send("dispose");
         WaitFor(() => Native.HidPaths(0x054C, 0x0CE6).Except(before, StringComparer.OrdinalIgnoreCase).Count() == 0, 15_000);
-        bool clear4 = WaitFor(() => InputObjectsPresent(tc, output: true).Count == 0, 10_000);
-        Check($"U: before the next composite no section or event of index {tc} exists", clear4,
-              string.Join(",", InputObjectsPresent(tc, output: true)));
+        bool clear4 = WaitInputObjectsGone(tc, output: true, out string trace4);
+        Check($"U: before the next composite no section or event of index {tc} exists", clear4, trace4);
         string f4;
-        using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}"))
+        using (LockedEvent($@"Global\HIDMaestroOutputEvent{tc}", tc))
             f4 = a.Send("create composite - -");
         bool denied4 = !Ok(f4) && PeerProcess.Field(f4, "win32") == ErrorAccessDenied;
         Check($"U: a composite on index {tc} is refused at its output doorbell", denied4, f4);
@@ -263,7 +262,7 @@ internal static partial class Program
         string co = old.Send("create xbox - -");
         Check($"U: the v1.12.0 program creates on transport index {t} meanwhile",
               Ok(co) && PeerProcess.Field(co, "index") == t, co);
-        var oldDevices = IndexDevices(int.Parse(t));
+        var oldDevices = IndexDevices(int.Parse(t)).Where(IndexWideTeardownRemoves).ToList();
         string? oldMain = PeerProcess.Field(co, "instance");
         if (oldMain != null && oldMain != "none") oldDevices.Add(oldMain);
         bool configThere = Registry.LocalMachine.OpenSubKey(config) is { } ck && Close(ck);
@@ -309,31 +308,63 @@ internal static partial class Program
         Check("U: the v1.12.0 program's controller still takes its dispose", Ok(old.Send("dispose")));
     }
 
-    /// <summary>The present devices an index-wide teardown removes by
-    /// ControllerIndex: SWD\HIDMAESTRO and ROOT\HIDMAESTRO instances.</summary>
-    static List<string> IndexDevices(int index)
+    /// <summary>The present HIDMaestro devices whose Device Parameters carry
+    /// ControllerIndex <paramref name="index"/>: under ROOT and SWD, every
+    /// instance of the HIDMAESTRO enumerator and every instance named HM_
+    /// (DeviceIdentity's token) of any other, such as ROOT\HIDClass. A key
+    /// that cannot be read is named in <paramref name="unreadable"/>.</summary>
+    static List<string> IndexDevices(int index, List<string>? unreadable = null)
     {
         var list = new List<string>();
         foreach (var root in new[] { "SWD", "ROOT" })
         {
-            using var e = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}\HIDMAESTRO");
-            if (e == null) continue;
-            foreach (var inst in e.GetSubKeyNames())
+            try
             {
-                using var dp = e.OpenSubKey($@"{inst}\Device Parameters");
-                string id = $@"{root}\HIDMAESTRO\{inst}";
-                if (dp?.GetValue("ControllerIndex") is int ci && ci == index && Native.IsPresent(id))
-                    list.Add(id);
+                using var e = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{root}");
+                if (e == null) continue;
+                foreach (var enumerator in e.GetSubKeyNames())
+                {
+                    bool ours = enumerator.Equals("HIDMAESTRO", StringComparison.OrdinalIgnoreCase);
+                    try
+                    {
+                        using var ek = e.OpenSubKey(enumerator);
+                        if (ek == null) continue;
+                        foreach (var inst in ek.GetSubKeyNames())
+                        {
+                            if (!ours && !inst.StartsWith("HM_", StringComparison.OrdinalIgnoreCase)) continue;
+                            using var dp = ek.OpenSubKey($@"{inst}\Device Parameters");
+                            string id = $@"{root}\{enumerator}\{inst}";
+                            if (dp?.GetValue("ControllerIndex") is int ci && ci == index && Native.IsPresent(id))
+                                list.Add(id);
+                        }
+                    }
+                    catch (Exception x) when (x is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+                    {
+                        unreadable?.Add($@"{root}\{enumerator}");
+                    }
+                }
+            }
+            catch (Exception x) when (x is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+            {
+                unreadable?.Add(root);
             }
         }
         return list;
     }
 
+    /// <summary>The devices an index-wide teardown removes by
+    /// ControllerIndex: the SWD\HIDMAESTRO and ROOT\HIDMAESTRO ones.</summary>
+    static bool IndexWideTeardownRemoves(string instanceId) =>
+        instanceId.StartsWith(@"SWD\HIDMAESTRO\", StringComparison.OrdinalIgnoreCase)
+        || instanceId.StartsWith(@"ROOT\HIDMAESTRO\", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>An event owned by Administrators that grants everyone
     /// READ_CONTROL and nothing else. The transport allocator reads its
     /// owner and keeps the index. A create, which opens it to signal and
-    /// wait, is refused access. Closed on dispose.</summary>
-    static IDisposable LockedEvent(string name)
+    /// wait, is refused access. Closed on dispose. When the name exists
+    /// already, the exception names its owner, its holders and the present
+    /// devices on <paramref name="index"/>.</summary>
+    static IDisposable LockedEvent(string name, string index)
     {
         IntPtr sa = Native.Sa("O:BAD:P(A;;0x00020000;;;WD)");
         IntPtr h;
@@ -351,15 +382,19 @@ internal static partial class Program
         if (error == 183)
         {
             Native.CloseHandle(h);
-            throw new InvalidOperationException($"{name} already exists, so the probe cannot lock it");
+            throw new InvalidOperationException($"{name} already exists, so the probe cannot lock it. "
+                + ObjectHolders.Describe(name, section: false).Text + ". " + DevicesText(index));
         }
         return new Handle(h);
     }
 
     /// <summary>The objects of an index's input mapping that exist, and
-    /// with <paramref name="output"/> its output section: what a failed
-    /// create must close (SharedMemoryIO.ReleaseInputExtrasLocked and
-    /// DestroyController). The owner pipe is in <see cref="ClaimPipes"/>.</summary>
+    /// with <paramref name="output"/> its output section and doorbell: what
+    /// a failed create must close (SharedMemoryIO.ReleaseInputExtrasLocked
+    /// and DestroyController). The input event and the doorbell are the
+    /// names <see cref="LockedEvent"/> takes, so a check that waits on this
+    /// list before a lock waits on the name it locks. The owner pipe is in
+    /// <see cref="ClaimPipes"/>.</summary>
     static List<string> InputObjectsPresent(string index, bool output)
     {
         var present = new List<string>();
@@ -367,9 +402,76 @@ internal static partial class Program
         if (output) sections.Add("Output");
         foreach (var k in sections)
             if (Native.SectionExists($@"Global\HIDMaestro{k}{index}")) present.Add($"HIDMaestro{k}{index}");
-        foreach (var k in new[] { "CompanionInputEvent", "InputAckEvent" })
+        var events = new List<string> { "InputEvent", "CompanionInputEvent", "InputAckEvent" };
+        if (output) events.Add("OutputEvent");
+        foreach (var k in events)
             if (Native.OwnerOf($@"Global\HIDMaestro{k}{index}", section: false) != "absent") present.Add($"HIDMaestro{k}{index}");
         return present;
+    }
+
+    /// <summary>Wait up to 10 s for every object
+    /// <see cref="InputObjectsPresent"/> lists to go. The first look is the
+    /// list alone. One scan then reads the owner and holders of everything
+    /// it found (ObjectHolders.DescribeAll) and closes its handles before
+    /// the poll starts, so no handle of the probe keeps a name alive while
+    /// the poll times it. The poll reads the list alone. <paramref name="trace"/>
+    /// says what was there at the first look, its owners and holders and
+    /// how long their scan took, when each object went, came back or first
+    /// appeared, who holds any still there after 10 s, and the present
+    /// devices on the index, so a check that finds one left says what kept
+    /// it.</summary>
+    static bool WaitInputObjectsGone(string index, bool output, out string trace)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var first = InputObjectsPresent(index, output);
+        var reports = ObjectHolders.DescribeAll(first.Select(o => ($@"Global\{o}", IsSection(o))).ToList());
+        long scanned = clock.ElapsedMilliseconds;
+        string devices = first.Count == 0 ? "" : DevicesText(index);
+        var changes = new List<string>();
+        var previous = new HashSet<string>(first);
+        bool clear = WaitFor(() =>
+        {
+            var now = new HashSet<string>(InputObjectsPresent(index, output));
+            foreach (var o in previous.Except(now)) changes.Add($"{o} gone at {clock.ElapsedMilliseconds} ms");
+            foreach (var o in now.Except(previous))
+                changes.Add($"{o} {(first.Contains(o) ? "back" : "appeared")} at {clock.ElapsedMilliseconds} ms");
+            previous = now;
+            return now.Count == 0;
+        }, 10_000);
+        var parts = new List<string>
+        {
+            first.Count == 0
+                ? "nothing at the first look"
+                : $"at the first look: {string.Join(" | ", reports.Select(r => r.Text))} (read in {scanned} ms)",
+        };
+        if (devices.Length > 0) parts.Add(devices);
+        if (changes.Count > 0) parts.Add(string.Join(" | ", changes.Take(12)));
+        if (!clear)
+        {
+            long at = clock.ElapsedMilliseconds;
+            var left = ObjectHolders.DescribeAll(InputObjectsPresent(index, output).Select(o => ($@"Global\{o}", IsSection(o))).ToList());
+            parts.Add($"after {at} ms: " + string.Join(" | ", left.Select(r => r.Text)));
+            parts.Add(DevicesText(index));
+        }
+        trace = string.Join(". ", parts);
+        return clear;
+    }
+
+    static bool IsSection(string objectName) => !objectName.Contains("Event", StringComparison.Ordinal);
+
+    /// <summary>The present devices on an index with each one's status and
+    /// problem code, and any key IndexDevices could not read.</summary>
+    static string DevicesText(string index)
+    {
+        var unreadable = new List<string>();
+        var devices = IndexDevices(int.Parse(index), unreadable).Select(id =>
+        {
+            if (Native.CM_Locate_DevNodeW(out uint devInst, id, 0) != 0) return $"{id} gone";
+            Native.CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0);
+            return $"{id} status 0x{status:X} problem {problem}";
+        }).ToList();
+        return $"devices on index {index}: " + (devices.Count == 0 ? "none" : string.Join(", ", devices))
+            + (unreadable.Count == 0 ? "" : ", unreadable: " + string.Join(", ", unreadable));
     }
 
     // ERROR_ACCESS_DENIED, as the peer's reply carries it.
