@@ -1298,15 +1298,7 @@ public static partial class DeviceManager
     /// type pass of every create (DeviceOrchestrator.SetBusTypeGuidUsb),
     /// which writes a property on every present HIDMaestro devnode on the
     /// machine and on its first child, by the ghost XUSB interface sweep
-    /// from its presence check through its disable of a phantom, and by the
-    /// restart of ROOT\XNACOMPOSITE\0000 that a create of a profile without
-    /// the upper filter makes when that devnode is HIDMaestro's
-    /// (DeviceNodeCreator.CreateDeviceNode): since issue #60 that devnode
-    /// belongs to a program built before v1.8.0 or is residue, never to
-    /// the create. That take comes after the create's devnode is registered
-    /// and its driver installed, and when it throws (ten minutes of another
-    /// program's hold, or the exit's bound) it fails the create, whose
-    /// cleanup removes what it made.</para>
+    /// from its presence check through its disable of a phantom.</para>
     ///
     /// <para>Not held by these, so not ordered against them. pnp_notify_check's
     /// source check lists each of their calls and fails on one made anywhere

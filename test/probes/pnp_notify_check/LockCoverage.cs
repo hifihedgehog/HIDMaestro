@@ -12,7 +12,8 @@
 // RestartDevice, which disables and enables a devnode and takes no lock
 // itself, must sit inside a hold: a `using var` take whose block is open, or
 // a `using (...)` take whose statement it is. Its calls on a controller's own
-// devnodes are listed exclusions.
+// devnodes are listed exclusions. No call of it names its devnode by a
+// literal: a restart is of a devnode the caller made.
 //
 // Direct registry writes to devnode keys are watched too: in a method that
 // names an Enum or DeviceClasses key, every write (a key created or opened
@@ -305,6 +306,12 @@ internal static class LockCoverage
                 if (m.Success && UnderLockOnly.Contains(member) && code.Contains(member + "(") && memberLine == i) continue; // a helper's own declaration
                 if (m.Success && memberLine == i && HeldCalls.Any(c => code.Contains(" " + c))) continue; // its own declaration
                 sites++;
+                // A restart takes the instance ID of a devnode the caller
+                // made. One named by a literal is a devnode no create makes,
+                // another program's or residue, which this program has no
+                // business disabling.
+                if (code.Contains("RestartDevice(@\"") || code.Contains("RestartDevice(\""))
+                    found.Add($"{Path.GetFileName(file)}:{i + 1} {member}: restarts a devnode named by a literal, which no create makes: {line.Trim()}");
                 if (UnderLockOnly.Contains(member)) continue;
                 if (LockingHelpers.Any(h => code.Contains(h))) continue;
                 bool held = HeldCalls.Any(c => code.Contains(c))
