@@ -278,29 +278,42 @@ internal static partial class DriverDeploy
                 .ToList();
             bool held = holders.Count > 0 || pending.Count > 0;
 
+            // The lowest of the INFs' newest packages, null when neither has
+            // one. A half-failed install, or a program of another release,
+            // can leave one below the floor beside another that meets it.
+            var lowestPresent = DriverBuilder.PackageInfs
+                .Select(inf => Machine.Stamps(inf) is { Count: > 0 } s ? s.Max() : (DriverStamp?)null)
+                .Where(s => s != null).Select(s => s!.Value)
+                .DefaultIfEmpty().Min();
+            // An INF with no package at all: adding this build's touches
+            // nothing installed, held or not.
+            var absent = DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf).Count == 0).ToList();
+
             if (installed == null)
             {
                 // No main package. With nothing on the driver, a full deploy.
                 // With devices on a lone XUSB package, only what this build
                 // lacks is added: a full deploy would remove that package and
-                // its hosts under them.
-                if (held && DriverBuilder.PackageInfs.Any(inf => Machine.Stamps(inf).Count > 0))
-                    Machine.AddPackages(MissingOfBuild());
+                // its hosts under them. A held lone package below the floor
+                // is refused under alternative A, as beside a main package,
+                // and under B keeps the held package alone.
+                if (held && absent.Count < DriverBuilder.PackageInfs.Length)
+                {
+                    if (lowestPresent.Release < MinimumDriverVersion)
+                    {
+                        if (!allowHeldOlder) throw Refuse(lowestPresent.Release, holders, pending);
+                        Machine.AddPackages(absent);
+                    }
+                    else
+                        Machine.AddPackages(MissingOfBuild());
+                }
                 else
                     Machine.Deploy();
                 return HMDriverInstallOutcome.Installed;
             }
 
-            // The other INF's newest package. A half-failed install, or a
-            // program of another release, can leave it below the floor beside
-            // a main package that meets it.
-            var lowest = DriverBuilder.PackageInfs
-                .Select(inf => Machine.Stamps(inf) is { Count: > 0 } s ? s.Max() : (DriverStamp?)null)
-                .Where(s => s != null).Select(s => s!.Value).Min();
+            var lowest = lowestPresent;
             bool otherBelow = lowest.Release < MinimumDriverVersion && installed.Value.Release >= MinimumDriverVersion;
-            // An INF with no package at all: adding this build's touches
-            // nothing installed, held or not.
-            var absent = DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf).Count == 0).ToList();
 
             int cmp = installed.Value.CompareTo(embedded);
             if (cmp > 0)
@@ -320,11 +333,22 @@ internal static partial class DriverDeploy
             }
             if (cmp == 0)
             {
-                // The same build. A deploy cut off between its two adds, or
-                // a package of it removed since, leaves the set incomplete,
-                // and the fast path needs both. Adding what is missing touches
-                // nothing installed. Otherwise only the record of the install
-                // is missing, as after SOFTWARE\HIDMaestro was deleted: it is
+                // The same build. A held package of the other INF below the
+                // floor is refused under alternative A, as beside a newer or
+                // an older main package, and under B stays alone, with only
+                // an INF that has no package given this build's.
+                if (otherBelow && held)
+                {
+                    if (!allowHeldOlder) throw Refuse(lowest.Release, holders, pending);
+                    if (absent.Count == 0) return HMDriverInstallOutcome.KeptInUse;
+                    Machine.AddPackages(absent);
+                    return HMDriverInstallOutcome.Installed;
+                }
+                // A deploy cut off between its two adds, or a package of it
+                // removed since, leaves the set incomplete, and the fast path
+                // needs both. Adding what is missing touches nothing
+                // installed. Otherwise only the record of the install is
+                // missing, as after SOFTWARE\HIDMaestro was deleted: it is
                 // restored rather than reinstalled under running devices.
                 var missing = MissingOfBuild();
                 if (missing.Count > 0)
