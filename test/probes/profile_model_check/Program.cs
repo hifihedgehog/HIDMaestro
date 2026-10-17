@@ -27,10 +27,12 @@
 //   builder    FromProfile's whole copy, a copy refused for a descriptor
 //              its model does not fit, ClearDeviceModel, DriverPid,
 //              FeatureAnswers and BuildsItsOwnReports (Builder.cs)
+//   mutate     one null in a user's file refuses that file at the null's
+//              path and loads the rest of its directory, at each of the 18
+//              places a null reached a check, and every node of every
+//              catalog profile set to each of seven values leaves no
+//              exception out of a load (Mutate.cs)
 //   check      every mode above, the battery's run (S92), the default
-//   cost       one launch's cost of a GET through the answer tables and of
-//              their compile at create, for a script's p50 and p95 over
-//              30 launches or more (Cost.cs), outside check
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
 // 1 FAIL.
@@ -60,6 +62,7 @@ internal static class Program
             ("contract", Contract.Run),
             ("deploy", Deploy.Run),
             ("builder", Builder.Run),
+            ("mutate", Mutate.Run),
         };
         int fail = 0;
         if (mode == "check")

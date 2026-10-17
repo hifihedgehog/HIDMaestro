@@ -1595,6 +1595,18 @@ public sealed class ProfileDatabase
         return db;
     }
 
+    /// <summary>Files already read, each a label and its text, loaded as
+    /// <see cref="Load(string, ModelRegistry)"/> loads a directory's: read
+    /// strictly, checked, and resolved under <paramref name="registry"/>.</summary>
+    internal static ProfileDatabase LoadTexts(IReadOnlyList<(string File, string Text)> files, ModelRegistry registry)
+    {
+        var read = new Parsed[files.Count];
+        for (int i = 0; i < files.Count; i++) read[i] = Parse(files[i].File, files[i].Text);
+        var db = Assemble(read);
+        db.ResolveAll(registry, outsideCatalog: true);
+        return db;
+    }
+
     /// <summary>Resolves every profile's device model under a registry,
     /// and lists each model a profile named or took by identity that could
     /// not be taken. A profile whose own keys the resolution refuses was
@@ -1609,9 +1621,10 @@ public sealed class ProfileDatabase
             {
                 p.ResolvedCache = ModelRegistry.Resolve(p, registry, outsideCatalog);
             }
-            catch (Exception e) when (ProfileDefects.IsDefect(e))
+            catch (Exception e)
             {
-                var (path, reason) = ProfileDefects.Locate(e);
+                // Whatever a check throws refuses this profile alone.
+                var (path, reason) = ProfileDefects.LocateAny(e);
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path, reason,
                     HIDMaestro.HMProfileLoadIssueKind.Refused));
                 refused.Add(p);
@@ -1636,15 +1649,16 @@ public sealed class ProfileDatabase
         {
             profile = JsonSerializer.Deserialize(text, HMJsonContext.Default.ControllerProfile);
         }
-        catch (JsonException e)
+        catch (Exception e)
         {
             // A JSON file with no id is not a profile, whatever else it
             // carries: the catalog's folder keeps descriptor collections
-            // beside the profiles.
+            // beside the profiles. Anything a converter throws refuses this
+            // file alone.
             var (id, isObject) = PeekId(text);
             if (isObject && id == null)
                 return new Parsed(file, null, NotAProfile(file));
-            var (path, reason) = ProfileDefects.Locate(e);
+            var (path, reason) = ProfileDefects.LocateAny(e);
             return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
                 file, id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
         }
@@ -1655,9 +1669,11 @@ public sealed class ProfileDatabase
         {
             profile.ValidateAtLoad();
         }
-        catch (Exception e) when (ProfileDefects.IsDefect(e))
+        catch (Exception e)
         {
-            var (path, reason) = ProfileDefects.Locate(e);
+            // A check that fails on this file's content, in whatever way,
+            // refuses this file and never the load.
+            var (path, reason) = ProfileDefects.LocateAny(e);
             return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
                 file, profile.Id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
         }

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -317,72 +318,84 @@ public static class HMLayoutValidator
             case HMUnspecifiedLayout: return;
 
             case HMGamepadLayout g:
-                foreach (var s in g.Sticks)         CheckAxis(ctx, s.XAxis, "sticks[].x"); CheckAxis(ctx, GetY(g.Sticks), "sticks[].y");
-                foreach (var t in g.Triggers)       CheckAxis(ctx, t.Axis, "triggers[].axis");
-                foreach (var s in g.Sticks) if (s.ClickButton is int cb) CheckButton(ctx, cb, "sticks[].click_button");
+                Present(g.Sticks, "sticks"); Present(g.Triggers, "triggers");
+                // Every stick's x, and the first stick's y, as through v1.13.0.
+                for (int i = 0; i < g.Sticks.Count; i++) CheckAxis(ctx, g.Sticks[i].XAxis, $"sticks[{i}].xAxis");
+                if (g.Sticks.Count > 0) CheckAxis(ctx, g.Sticks[0].YAxis, "sticks[0].yAxis");
+                for (int i = 0; i < g.Triggers.Count; i++) CheckAxis(ctx, g.Triggers[i].Axis, $"triggers[{i}].axis");
+                for (int i = 0; i < g.Sticks.Count; i++)
+                    if (g.Sticks[i].ClickButton is int cb) CheckButton(ctx, cb, $"sticks[{i}].clickButton");
                 CheckDpad(ctx, g.Dpad, "dpad");
-                CheckBindings(ctx, g.FaceButtons,     "face_buttons");
-                CheckBindings(ctx, g.ShoulderButtons, "shoulder_buttons");
-                CheckBindings(ctx, g.SystemButtons,   "system_buttons");
-                CheckBindings(ctx, g.ExtraButtons,    "extra_buttons");
+                CheckBindings(ctx, g.FaceButtons,     "faceButtons");
+                CheckBindings(ctx, g.ShoulderButtons, "shoulderButtons");
+                CheckBindings(ctx, g.SystemButtons,   "systemButtons");
+                CheckBindings(ctx, g.ExtraButtons,    "extraButtons");
                 break;
 
             case HMJoystickLayout j:
-                CheckAxis(ctx, j.Stick.XAxis, "stick.x");
-                CheckAxis(ctx, j.Stick.YAxis, "stick.y");
-                if (j.Stick.ClickButton is int jcb) CheckButton(ctx, jcb, "stick.click_button");
+                Present(j.Stick, "stick"); Present(j.Hats, "hats");
+                CheckAxis(ctx, j.Stick.XAxis, "stick.xAxis");
+                CheckAxis(ctx, j.Stick.YAxis, "stick.yAxis");
+                if (j.Stick.ClickButton is int jcb) CheckButton(ctx, jcb, "stick.clickButton");
                 if (j.Rudder is { } jr)   CheckAxis(ctx, jr.Axis, "rudder.axis");
                 if (j.Throttle is { } jt) CheckAxis(ctx, jt.Axis, "throttle.axis");
                 CheckHats(ctx, j.Hats, "hats");
                 CheckTriggerButton(ctx, j.Trigger, "trigger");
-                CheckBindings(ctx, j.StickButtons, "stick_buttons");
-                CheckBindings(ctx, j.BaseButtons,  "base_buttons");
+                CheckBindings(ctx, j.StickButtons, "stickButtons");
+                CheckBindings(ctx, j.BaseButtons,  "baseButtons");
                 break;
 
             case HMFlightStickLayout f:
-                CheckAxis(ctx, f.Stick.XAxis, "stick.x");
-                CheckAxis(ctx, f.Stick.YAxis, "stick.y");
+                Present(f.Stick, "stick"); Present(f.Hats, "hats");
+                CheckAxis(ctx, f.Stick.XAxis, "stick.xAxis");
+                CheckAxis(ctx, f.Stick.YAxis, "stick.yAxis");
                 if (f.Rudder is { } fr)   CheckAxis(ctx, fr.Axis, "rudder.axis");
                 if (f.Throttle is { } ft) CheckAxis(ctx, ft.Axis, "throttle.axis");
                 CheckHats(ctx, f.Hats, "hats");
                 CheckTriggerButton(ctx, f.Trigger, "trigger");
-                CheckBindings(ctx, f.StickButtons, "stick_buttons");
-                CheckBindings(ctx, f.BaseButtons,  "base_buttons");
+                CheckBindings(ctx, f.StickButtons, "stickButtons");
+                CheckBindings(ctx, f.BaseButtons,  "baseButtons");
                 break;
 
             case HMHotasLayout h:
-                CheckAxis(ctx, h.Stick.XAxis, "stick.x");
-                CheckAxis(ctx, h.Stick.YAxis, "stick.y");
-                if (h.StickRudder is { } sr) CheckAxis(ctx, sr.Axis, "stick_rudder.axis");
-                CheckHats(ctx, h.StickHats, "stick_hats");
-                CheckTriggerButton(ctx, h.StickTrigger, "stick_trigger");
-                CheckBindings(ctx, h.StickButtons, "stick_buttons");
-                if (h.ThrottlePrimary is { } tp) CheckAxis(ctx, tp.Axis, "throttle_primary.axis");
-                foreach (var enc in h.ThrottleSecondary) CheckAxis(ctx, enc.Axis, "throttle_secondary[].axis");
-                CheckHats(ctx, h.ThrottleHats, "throttle_hats");
-                CheckBindings(ctx, h.ThrottleButtons, "throttle_buttons");
-                if (h.RudderModule is { } rm) CheckAxis(ctx, rm.Axis, "rudder_module.axis");
+                Present(h.Stick, "stick"); Present(h.StickHats, "stickHats");
+                Present(h.ThrottleSecondary, "throttleSecondary"); Present(h.ThrottleHats, "throttleHats");
+                CheckAxis(ctx, h.Stick.XAxis, "stick.xAxis");
+                CheckAxis(ctx, h.Stick.YAxis, "stick.yAxis");
+                if (h.StickRudder is { } sr) CheckAxis(ctx, sr.Axis, "stickRudder.axis");
+                CheckHats(ctx, h.StickHats, "stickHats");
+                CheckTriggerButton(ctx, h.StickTrigger, "stickTrigger");
+                CheckBindings(ctx, h.StickButtons, "stickButtons");
+                if (h.ThrottlePrimary is { } tp) CheckAxis(ctx, tp.Axis, "throttlePrimary.axis");
+                for (int i = 0; i < h.ThrottleSecondary.Count; i++) CheckAxis(ctx, h.ThrottleSecondary[i].Axis, $"throttleSecondary[{i}].axis");
+                CheckHats(ctx, h.ThrottleHats, "throttleHats");
+                CheckBindings(ctx, h.ThrottleButtons, "throttleButtons");
+                if (h.RudderModule is { } rm) CheckAxis(ctx, rm.Axis, "rudderModule.axis");
                 break;
 
             case HMWheelLayout w:
+                Present(w.Wheel, "wheel"); Present(w.Pedals, "pedals");
+                Present(w.Shifters, "shifters"); Present(w.RotaryEncoders, "rotaryEncoders");
                 CheckAxis(ctx, w.Wheel.Axis, "wheel.axis");
-                foreach (var p in w.Pedals)            CheckAxis(ctx, p.Axis, "pedals[].axis");
-                foreach (var s in w.Shifters) if (s.ButtonIndex is int sb) CheckButton(ctx, sb, "shifters[].button_index");
-                foreach (var enc in w.RotaryEncoders)  CheckAxis(ctx, enc.Axis, "rotary_encoders[].axis");
-                CheckBindings(ctx, w.WheelButtons, "wheel_buttons");
+                for (int i = 0; i < w.Pedals.Count; i++) CheckAxis(ctx, w.Pedals[i].Axis, $"pedals[{i}].axis");
+                for (int i = 0; i < w.Shifters.Count; i++)
+                    if (w.Shifters[i].ButtonIndex is int sb) CheckButton(ctx, sb, $"shifters[{i}].buttonIndex");
+                for (int i = 0; i < w.RotaryEncoders.Count; i++) CheckAxis(ctx, w.RotaryEncoders[i].Axis, $"rotaryEncoders[{i}].axis");
+                CheckBindings(ctx, w.WheelButtons, "wheelButtons");
                 CheckDpad(ctx, w.Dpad, "dpad");
                 break;
 
             case HMPedalsLayout pl:
-                foreach (var p in pl.Pedals) CheckAxis(ctx, p.Axis, "pedals[].axis");
+                Present(pl.Pedals, "pedals");
+                for (int i = 0; i < pl.Pedals.Count; i++) CheckAxis(ctx, pl.Pedals[i].Axis, $"pedals[{i}].axis");
                 break;
 
             case HMShifterLayout sh:
-                if (sh.SequentialUpButton   is int sub) CheckButton(ctx, sub, "sequential_up_button");
-                if (sh.SequentialDownButton is int sdb) CheckButton(ctx, sdb, "sequential_down_button");
+                if (sh.SequentialUpButton   is int sub) CheckButton(ctx, sub, "sequentialUpButton");
+                if (sh.SequentialDownButton is int sdb) CheckButton(ctx, sdb, "sequentialDownButton");
                 if (sh.HPatternGears != null)
-                    foreach (var (key, b) in sh.HPatternGears)
-                        CheckButton(ctx, b.ButtonIndex, $"h_pattern_gears[{key}].button_index");
+                    foreach (var (key, b) in PresentValues(sh.HPatternGears, "hPatternGears"))
+                        CheckButton(ctx, b.ButtonIndex, $"hPatternGears.{key}.buttonIndex");
                 break;
 
             case HMHandbrakeLayout hb:
@@ -395,30 +408,30 @@ public static class HMLayoutValidator
 
             case HMArcadeStickLayout a:
                 CheckDpad(ctx, a.Joystick, "joystick");
-                CheckBindings(ctx, a.FaceButtons,   "face_buttons");
-                CheckBindings(ctx, a.SystemButtons, "system_buttons");
+                CheckBindings(ctx, a.FaceButtons,   "faceButtons");
+                CheckBindings(ctx, a.SystemButtons, "systemButtons");
                 break;
 
             case HMDancePadLayout d:
                 if (d.Pads != null)
-                    foreach (var (key, b) in d.Pads)
-                        CheckButton(ctx, b.ButtonIndex, $"pads[{key}].button_index");
-                CheckBindings(ctx, d.SystemButtons, "system_buttons");
+                    foreach (var (key, b) in PresentValues(d.Pads, "pads"))
+                        CheckButton(ctx, b.ButtonIndex, $"pads.{key}.buttonIndex");
+                CheckBindings(ctx, d.SystemButtons, "systemButtons");
                 break;
 
             case HMGuitarLayout gt:
                 CheckBindings(ctx, gt.Frets,         "frets");
-                CheckBindings(ctx, gt.SoloFrets,     "solo_frets");
-                CheckBindings(ctx, gt.SystemButtons, "system_buttons");
+                CheckBindings(ctx, gt.SoloFrets,     "soloFrets");
+                CheckBindings(ctx, gt.SystemButtons, "systemButtons");
                 CheckDpad(ctx, gt.Strum, "strum");
                 if (gt.WhammyAxis is HMAxis whammy && whammy != HMAxis.None)
-                    CheckAxis(ctx, whammy, "whammy_axis");
-                if (gt.TiltButton is int tb) CheckButton(ctx, tb, "tilt_button");
+                    CheckAxis(ctx, whammy, "whammyAxis");
+                if (gt.TiltButton is int tb) CheckButton(ctx, tb, "tiltButton");
                 break;
 
             case HMMotionWandLayout mw:
                 if (mw.TriggerAxis is HMAxis ta && ta != HMAxis.None)
-                    CheckAxis(ctx, ta, "trigger_axis");
+                    CheckAxis(ctx, ta, "triggerAxis");
                 CheckTriggerButton(ctx, mw.Trigger, "trigger");
                 CheckBindings(ctx, mw.Buttons, "buttons");
                 break;
@@ -434,8 +447,30 @@ public static class HMLayoutValidator
         }
     }
 
-    private static HMAxis GetY(IEnumerable<HMStick> sticks)
-        => sticks.FirstOrDefault()?.YAxis ?? HMAxis.None;
+    /// <summary>A list or object the layout reads, or the refusal at its
+    /// key when the file wrote null for it or for one of its items.</summary>
+    private static void Present<T>([NotNull] IReadOnlyList<T>? list, string path) where T : class
+    {
+        if (list == null)
+            throw new HMLayoutValidationException($"layout/{path}: is null. Write [] for none, or leave the key out.");
+        for (int i = 0; i < list.Count; i++)
+            if (list[i] == null)
+                throw new HMLayoutValidationException($"layout/{path}[{i}]: is null.");
+    }
+
+    private static void Present([NotNull] object? value, string path)
+    {
+        if (value == null)
+            throw new HMLayoutValidationException($"layout/{path}: is null. Leave the key out for the default.");
+    }
+
+    private static IReadOnlyDictionary<string, HMButtonBinding> PresentValues(IReadOnlyDictionary<string, HMButtonBinding> map, string path)
+    {
+        foreach (var (key, b) in map)
+            if (b == null)
+                throw new HMLayoutValidationException($"layout/{path}.{key}: is null.");
+        return map;
+    }
 
     private static void CheckAxis(ValidationContext ctx, HMAxis axis, string path)
     {
@@ -453,17 +488,19 @@ public static class HMLayoutValidator
                 $"layout/{path}: button index {index} is out of range [0, {ctx.ButtonCount}).");
     }
 
-    private static void CheckBindings(ValidationContext ctx, IEnumerable<HMButtonBinding> bindings, string path)
+    private static void CheckBindings(ValidationContext ctx, IReadOnlyList<HMButtonBinding>? bindings, string path)
     {
+        Present(bindings, path);
         int i = 0;
         foreach (var b in bindings)
         {
-            CheckButton(ctx, b.ButtonIndex, $"{path}[{i++}].button_index");
+            CheckButton(ctx, b.ButtonIndex, $"{path}[{i++}].buttonIndex");
         }
     }
 
-    private static void CheckHats(ValidationContext ctx, IEnumerable<HMHatBinding> hats, string path)
+    private static void CheckHats(ValidationContext ctx, IReadOnlyList<HMHatBinding>? hats, string path)
     {
+        Present(hats, path);
         int i = 0;
         foreach (var h in hats)
         {
@@ -474,7 +511,7 @@ public static class HMLayoutValidator
     private static void CheckTriggerButton(ValidationContext ctx, HMTriggerButton? tb, string path)
     {
         if (tb is null) return;
-        CheckButton(ctx, tb.ButtonIndex, $"{path}.button_index");
+        CheckButton(ctx, tb.ButtonIndex, $"{path}.buttonIndex");
     }
 
     private static void CheckDpad(ValidationContext ctx, HMDpad? dpad, string path)
@@ -483,14 +520,14 @@ public static class HMLayoutValidator
         if (dpad.Encoding == HMDpadEncoding.Hat)
         {
             if (dpad.HatAxis is HMAxis ax && ax != HMAxis.None)
-                CheckAxis(ctx, ax, $"{path}.hat_axis");
+                CheckAxis(ctx, ax, $"{path}.hatAxis");
         }
         else
         {
-            if (dpad.UpButton    is int u) CheckButton(ctx, u, $"{path}.up_button");
-            if (dpad.DownButton  is int d) CheckButton(ctx, d, $"{path}.down_button");
-            if (dpad.LeftButton  is int l) CheckButton(ctx, l, $"{path}.left_button");
-            if (dpad.RightButton is int rr) CheckButton(ctx, rr, $"{path}.right_button");
+            if (dpad.UpButton    is int u) CheckButton(ctx, u, $"{path}.upButton");
+            if (dpad.DownButton  is int d) CheckButton(ctx, d, $"{path}.downButton");
+            if (dpad.LeftButton  is int l) CheckButton(ctx, l, $"{path}.leftButton");
+            if (dpad.RightButton is int rr) CheckButton(ctx, rr, $"{path}.rightButton");
         }
     }
 }

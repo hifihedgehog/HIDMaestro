@@ -149,7 +149,8 @@ internal sealed class UsbDescriptorSet
     {
         identity ??= DeviceIdentity.ForIndex(index);
         var cfg = profile.UsbConfiguration
-            ?? throw new InvalidOperationException($"Profile '{profile.Id}' has no usbConfiguration.");
+            ?? throw new ProfileDefectException("$.usbConfiguration", "is required for the usbip backend.");
+        CheckStructure(cfg);
         DeviceDescriptor = FromHex(cfg.DeviceDescriptorHex, "deviceDescriptor");
         ConfigurationDescriptor = FromHex(cfg.ConfigurationDescriptorHex, "configurationDescriptor");
         OtherSpeedConfiguration = cfg.OtherSpeedConfigurationDescriptorHex != null
@@ -158,7 +159,7 @@ internal sealed class UsbDescriptorSet
             ?? throw new InvalidOperationException($"Profile '{profile.Id}' has no HID report descriptor.");
 
         if (DeviceDescriptor.Length != 18 || DeviceDescriptor[0] != 18 || DeviceDescriptor[1] != 0x01)
-            throw new InvalidOperationException("deviceDescriptor is not an 18-byte USB device descriptor.");
+            throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor", "is not an 18-byte USB device descriptor.");
 
         VendorId = (ushort)(DeviceDescriptor[8] | (DeviceDescriptor[9] << 8));
         ProductId = (ushort)(DeviceDescriptor[10] | (DeviceDescriptor[11] << 8));
@@ -204,9 +205,8 @@ internal sealed class UsbDescriptorSet
 
         ushort profileVid = profile.VendorId, profilePid = profile.ProductId;
         if (VendorId != profileVid || ProductId != profilePid)
-            throw new InvalidOperationException(
-                $"Profile '{profile.Id}': deviceDescriptor VID/PID {VendorId:X4}:{ProductId:X4} " +
-                $"does not match the profile's {profileVid:X4}:{profilePid:X4}.");
+            throw new ProfileDefectException("$.usbConfiguration.deviceDescriptor",
+                $"its VID/PID {VendorId:X4}:{ProductId:X4} does not match the profile's {profileVid:X4}:{profilePid:X4}.");
 
         // Device qualifier, synthesized from the device descriptor per USB
         // 2.0 ch. 9.6.2. Matches the real pad's dump byte-for-byte
@@ -225,11 +225,10 @@ internal sealed class UsbDescriptorSet
         // HID class descriptor.
         var blob = ConfigurationDescriptor;
         if (blob.Length < 9 || blob[1] != 0x02)
-            throw new InvalidOperationException("configurationDescriptor does not start with a configuration header.");
+            throw new ProfileDefectException(ConfigurationPath, "does not start with a configuration header.");
         int total = blob[2] | (blob[3] << 8);
         if (total != blob.Length)
-            throw new InvalidOperationException(
-                $"configurationDescriptor wTotalLength {total} != blob length {blob.Length}.");
+            throw new ProfileDefectException(ConfigurationPath, $"its wTotalLength {total} is not its length {blob.Length}.");
         NumInterfaces = blob[4];
         ConfigurationValue = blob[5];
 
@@ -244,10 +243,11 @@ internal sealed class UsbDescriptorSet
         // Report descriptors the spec declares per interface, for the
         // secondary HID interfaces (issue #56).
         var declaredReports = new Dictionary<byte, byte[]>();
-        foreach (var iface in cfg.Interfaces)
-            foreach (var alt in iface.AltSettings)
-                if (!string.IsNullOrEmpty(alt.ReportDescriptor))
-                    declaredReports[iface.InterfaceNumber] = Convert.FromHexString(alt.ReportDescriptor);
+        for (int i = 0; i < cfg.Interfaces.Count; i++)
+            for (int j = 0; j < cfg.Interfaces[i].AltSettings.Count; j++)
+                if (cfg.Interfaces[i].AltSettings[j].ReportDescriptor is { Length: > 0 } rdHex)
+                    declaredReports[cfg.Interfaces[i].InterfaceNumber] =
+                        HexAt(rdHex, $"$.usbConfiguration.interfaces[{i}].altSettings[{j}].reportDescriptor");
 
         byte curIface = 0xFF, curAlt = 0;
         byte hidIface = 0xFF;
@@ -260,7 +260,7 @@ internal sealed class UsbDescriptorSet
         {
             int len = blob[off];
             if (len < 2 || off + len > blob.Length)
-                throw new InvalidOperationException($"configurationDescriptor is malformed at offset {off}.");
+                throw new ProfileDefectException(ConfigurationPath, $"is malformed at offset {off}.");
             byte type = blob[off + 1];
             if (type == 0x04) // interface
             {
@@ -290,7 +290,7 @@ internal sealed class UsbDescriptorSet
             off += len;
         }
         if (classByIface.Count == 0 || hidIface == 0xFF)
-            throw new InvalidOperationException("configurationDescriptor has no HID interface.");
+            throw new ProfileDefectException(ConfigurationPath, "has no HID interface.");
 
         // A spec-declared "hid" function wins; otherwise the first HID
         // interface in the blob, which is the pre-#56 rule verbatim.
@@ -304,21 +304,22 @@ internal sealed class UsbDescriptorSet
         // does not enumerate, so a mismatch is refused at create time.
         int declaredPrimaryLen = hidClass[7] | (hidClass[8] << 8);
         if (declaredPrimaryLen != ReportDescriptor.Length)
-            throw new InvalidOperationException(
-                $"HID class descriptor declares a {declaredPrimaryLen}-byte report descriptor " +
-                $"but the profile's is {ReportDescriptor.Length} bytes.");
+            throw new ProfileDefectException(ConfigurationPath,
+                $"its HID class descriptor declares a {declaredPrimaryLen}-byte report descriptor, " +
+                $"and the profile's descriptor is {ReportDescriptor.Length} bytes.");
         foreach (var kv in classByIface)
         {
             if (kv.Key == hidIface) continue;
+            int specAt = cfg.Interfaces.FindIndex(x => x.InterfaceNumber == kv.Key);
+            string ifacePath = specAt >= 0 ? $"$.usbConfiguration.interfaces[{specAt}]" : "$.usbConfiguration.interfaces";
             if (!declaredReports.TryGetValue(kv.Key, out var rd))
-                throw new InvalidOperationException(
-                    $"Interface {kv.Key} is a HID interface but the profile declares no " +
-                    $"usbConfiguration reportDescriptor for it.");
+                throw new ProfileDefectException(ifacePath,
+                    $"interface {kv.Key} is a HID interface in the configuration descriptor, and no alternate setting gives its reportDescriptor.");
             int declared = kv.Value[7] | (kv.Value[8] << 8);
             if (declared != rd.Length)
-                throw new InvalidOperationException(
-                    $"Interface {kv.Key}'s HID class descriptor declares a {declared}-byte report " +
-                    $"descriptor but the profile's is {rd.Length} bytes.");
+                throw new ProfileDefectException(ifacePath,
+                    $"interface {kv.Key}'s HID class descriptor declares a {declared}-byte report " +
+                    $"descriptor, and its reportDescriptor is {rd.Length} bytes.");
             _secondaryHid[kv.Key] = (kv.Value, rd);
         }
         _hidClassDescriptor = hidClass;
@@ -327,17 +328,21 @@ internal sealed class UsbDescriptorSet
         // Cross-check the structured spec against the blob's endpoint
         // descriptors, each against the one in its own interface and
         // alternate setting.
-        foreach (var iface in cfg.Interfaces)
+        for (int i = 0; i < cfg.Interfaces.Count; i++)
         {
-            foreach (var alt in iface.AltSettings)
+            var iface = cfg.Interfaces[i];
+            for (int j = 0; j < iface.AltSettings.Count; j++)
             {
-                foreach (var ep in alt.Endpoints)
+                var alt = iface.AltSettings[j];
+                for (int k = 0; k < alt.Endpoints.Count; k++)
                 {
+                    var ep = alt.Endpoints[k];
+                    string epPath = $"$.usbConfiguration.interfaces[{i}].altSettings[{j}].endpoints[{k}]";
                     int at = everyEndpoint.FindIndex(e => e.Address == ep.Address
                         && e.InterfaceNumber == iface.InterfaceNumber && e.AltSetting == alt.AltSetting);
                     if (at < 0)
-                        throw new InvalidOperationException(
-                            $"Structured spec endpoint 0x{ep.Address:X2} is absent from the configuration blob " +
+                        throw new ProfileDefectException(epPath,
+                            $"endpoint 0x{ep.Address:X2} is absent from the configuration descriptor " +
                             $"(interface {iface.InterfaceNumber}, alternate setting {alt.AltSetting}).");
                     var found = everyEndpoint[at];
                     bool typeOk = ep.TransferType switch
@@ -348,10 +353,10 @@ internal sealed class UsbDescriptorSet
                         _ => false,
                     };
                     if (!typeOk || found.MaxPacketSize != ep.MaxPacketSize || found.Interval != ep.Interval)
-                        throw new InvalidOperationException(
-                            $"Structured spec endpoint 0x{ep.Address:X2} " +
+                        throw new ProfileDefectException(epPath,
+                            $"endpoint 0x{ep.Address:X2} " +
                             $"({ep.TransferType}, {ep.MaxPacketSize}B, interval {ep.Interval}) " +
-                            $"disagrees with the blob " +
+                            $"disagrees with the configuration descriptor " +
                             $"(attributes 0x{found.Attributes:X2}, {found.MaxPacketSize}B, interval {found.Interval}).");
                 }
             }
@@ -533,10 +538,40 @@ internal sealed class UsbDescriptorSet
         return d;
     }
 
+    private const string ConfigurationPath = "$.usbConfiguration.configurationDescriptor";
+
     private static byte[] FromHex(string? hex, string field)
     {
         if (string.IsNullOrEmpty(hex))
-            throw new InvalidOperationException($"usbConfiguration.{field} is required for the usbip backend.");
-        return Convert.FromHexString(hex);
+            throw new ProfileDefectException($"$.usbConfiguration.{field}", "is required for the usbip backend.");
+        return HexAt(hex, $"$.usbConfiguration.{field}");
+    }
+
+    private static byte[] HexAt(string hex, string path)
+    {
+        try { return Convert.FromHexString(hex); }
+        catch (FormatException e) { throw new ProfileDefectException(path, $"is not whole hex bytes: {e.Message}"); }
+    }
+
+    /// <summary>The interfaces, alternate settings and endpoints the
+    /// constructor walks, each present: a file can write null for any of
+    /// them.</summary>
+    private static void CheckStructure(UsbConfigurationSpec cfg)
+    {
+        const string root = "$.usbConfiguration.interfaces";
+        if (cfg.Interfaces == null) throw new ProfileDefectException(root, "is null. Write [] for none.");
+        for (int i = 0; i < cfg.Interfaces.Count; i++)
+        {
+            var iface = cfg.Interfaces[i] ?? throw new ProfileDefectException($"{root}[{i}]", "is null.");
+            if (iface.AltSettings == null) throw new ProfileDefectException($"{root}[{i}].altSettings", "is null. Write [] for none.");
+            for (int j = 0; j < iface.AltSettings.Count; j++)
+            {
+                var alt = iface.AltSettings[j] ?? throw new ProfileDefectException($"{root}[{i}].altSettings[{j}]", "is null.");
+                if (alt.Endpoints == null) throw new ProfileDefectException($"{root}[{i}].altSettings[{j}].endpoints", "is null. Write [] for none.");
+                for (int k = 0; k < alt.Endpoints.Count; k++)
+                    if (alt.Endpoints[k] == null)
+                        throw new ProfileDefectException($"{root}[{i}].altSettings[{j}].endpoints[{k}]", "is null.");
+            }
+        }
     }
 }

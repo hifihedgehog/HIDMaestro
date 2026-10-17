@@ -60,6 +60,12 @@ internal static partial class ProfileDefects
         return ("$", ProfileHead().Replace(e.Message, ""));
     }
 
+    /// <summary>The JSON path and reason of anything a load check threw.
+    /// An exception that is no defect type still refuses only its file, at
+    /// <c>$</c>, with its type named, since no check placed it.</summary>
+    public static (string Path, string Reason) LocateAny(Exception e) =>
+        IsDefect(e) ? Locate(e) : ("$", $"a load check failed with {e.GetType().Name}: {e.Message}");
+
     /// <summary>System.Text.Json ends its messages with the path and
     /// position the exception carries apart.</summary>
     private static string TrimJsonMessage(string message)

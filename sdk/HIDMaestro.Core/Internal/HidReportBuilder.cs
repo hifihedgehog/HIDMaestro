@@ -363,6 +363,17 @@ public class HidReportBuilder
     /// there are no duplicates.</summary>
     void ApplyAxisMap(Dictionary<string, string> map)
     {
+        // A profile's axisMap: each key a hex usage, each value a name.
+        foreach (var kvp in map)
+        {
+            if (kvp.Value == null)
+                throw new ProfileDefectException($"$.axisMap.{kvp.Key}", "is null. Name the semantic the usage takes, or leave the key out.");
+            try { _ = Convert.ToUInt16(kvp.Key, 16); }
+            catch (Exception e) when (e is FormatException or OverflowException or ArgumentException)
+            {
+                throw new ProfileDefectException($"$.axisMap.{kvp.Key}", $"the key is not a 16-bit hex usage such as \"0x32\": {e.Message}");
+            }
+        }
         // Build a lookup from usage code → InputField
         var fieldByUsage = new Dictionary<ushort, InputField>();
         foreach (var f in InputFields)
