@@ -32,6 +32,11 @@
 //                  offline: the process's CPU time per second with one
 //                  dualsense-bt's idle repeat at the period and nothing else
 //                  submitting, and the frames it wrote per second
+//   idle-live [runs] [seconds]
+//                  live, elevated: one dualsense-bt at rest with one reader
+//                  in a child process, the CPU cycles per second of the SDK's
+//                  process, the reader and the WUDFHost processes, and the
+//                  reports read per second (IdleLive.cs)
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -114,6 +119,7 @@ internal static class Program
         string mode = args.Length > 0 ? args[0] : "gate";
         int runs = args.Length > 1 && int.TryParse(args[1], out int r) ? r : 30;
         if (mode == "start-child") return StartChild();
+        if (mode == "idle-reader") return IdleLive.Reader(args[1]);
 #if !HM_BASE
         // The usbip mode plays the host controller from this process.
         UsbipServer.AdmitImportsFromThisProcess = true;
@@ -142,6 +148,11 @@ internal static class Program
             return 0;
         }
         if (OtherSdkRunning()) return 2;
+        if (mode == "idle-live")
+        {
+            IdleLive.Run(runs, args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 10);
+            return 0;
+        }
 
         Console.WriteLine($"=== budgets, {Build}, mode {mode} ===");
         switch (mode)
