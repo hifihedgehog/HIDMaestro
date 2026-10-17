@@ -6,6 +6,14 @@
 //              Windows-1252, three stray characters in place of each dash.
 //              Needs the source tree beside the exe, and is skipped with
 //              a [SKIP] line when it is not there.
+//   strings    The ten Xbox 360 profiles carry the manufacturer string a real
+//              wired pad serves, string 1 of ControllersInfo's
+//              "DescriptorDump_Controller (Xbox 360 Wired Model
+//              X854237-001).txt":188 at bfc11b8, "\u00A9Microsoft
+//              Corporation". Nine carried it read as Windows-1252 once or
+//              twice. No catalog string carries that damage: a U+00C2 or
+//              U+00C3 followed by a character from U+0080 to U+00BF, which
+//              is a UTF-8 lead and continuation byte read one by one.
 //
 // Exit 0 PASS, 1 FAIL.
 using System;
@@ -14,6 +22,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using HIDMaestro.Internal;
 
 internal static partial class Program
 {
@@ -30,6 +39,7 @@ internal static partial class Program
     {
         Console.WriteLine("=== capture_fidelity_check: catalog data and driver text against their sources ===");
         InfText();
+        CatalogStrings();
         Console.WriteLine();
         Console.WriteLine($"capture_fidelity_check: {(s_failures == 0 ? "PASS" : "FAIL")}, {s_total - s_failures} of {s_total} checks pass");
         return s_failures == 0 ? 0 : 1;
@@ -76,5 +86,51 @@ internal static partial class Program
             Check($"{name}: {comments} comment lines, none outside printable ASCII", bad.Count == 0,
                   bad.Count == 0 ? "" : "lines " + string.Join(", ", bad));
         }
+    }
+
+    // ── strings ──────────────────────────────────────────────────────────
+
+    static readonly string[] Xbox360Ids =
+    {
+        "xbox-360-arcade-stick", "xbox-360-dance-pad", "xbox-360-flight-stick", "xbox-360-guitar-v1",
+        "xbox-360-guitar-v2", "xbox-360-type2", "xbox-360-wheel-v1", "xbox-360-wheel-v2",
+        "xbox-360-wired", "xbox-360-wireless",
+    };
+
+    static void CatalogStrings()
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- strings: catalog strings as the devices serve them ---");
+        var db = ProfileDatabase.LoadEmbedded();
+        const string Real = "\u00A9Microsoft Corporation";
+        foreach (string id in Xbox360Ids)
+        {
+            var p = db.All.FirstOrDefault(x => x.Id == id);
+            string? m = p?.ManufacturerString;
+            Check($"{id}: manufacturer string is the real pad's", m == Real,
+                  m == null ? "profile or string missing" : $"has {Escaped(m)}");
+        }
+        var damaged = new List<string>();
+        foreach (var p in db.All)
+            foreach (var (key, value) in new[] { ("name", p.Name), ("productString", p.ProductString),
+                                                 ("manufacturerString", p.ManufacturerString) })
+                if (value != null && ReadAsLatin1(value)) damaged.Add($"{p.Id} {key} {Escaped(value)}");
+        Check($"no string of the {db.All.Count} catalog profiles is UTF-8 read as single bytes", damaged.Count == 0,
+              string.Join("; ", damaged));
+    }
+
+    static bool ReadAsLatin1(string s)
+    {
+        for (int i = 0; i + 1 < s.Length; i++)
+            if ((s[i] == '\u00C2' || s[i] == '\u00C3') && s[i + 1] >= '\u0080' && s[i + 1] <= '\u00BF')
+                return true;
+        return false;
+    }
+
+    static string Escaped(string s)
+    {
+        var sb = new StringBuilder("\"");
+        foreach (char c in s) sb.Append(c is >= ' ' and <= '~' ? c.ToString() : $"\\u{(int)c:X4}");
+        return sb.Append('"').ToString();
     }
 }
