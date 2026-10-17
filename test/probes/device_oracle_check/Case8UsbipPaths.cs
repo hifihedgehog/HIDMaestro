@@ -110,19 +110,89 @@ internal sealed class Case8UsbipPaths : IOracleCase
         // A check beside the recording, which adds nothing to the streams.
         using (var host = new Host(sock)) LayoutEndpoint(host);
         using (var host = new Host(sock)) EmitAndLiveFeature(host);
+        using (var host = new Host(sock)) SetReportCommands(host);
     }
 
     /// <summary>The composite's JSON, from the SDK's embedded catalog.</summary>
-    static JsonObject CompositeJson()
+    static JsonObject CompositeJson() => CatalogJson(Switch2Id);
+
+    /// <summary>A catalog profile's JSON, from the SDK's embedded catalog.</summary>
+    static JsonObject CatalogJson(string id)
     {
         var asm = typeof(HMContext).Assembly;
         foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
         {
             using var st = asm.GetManifestResourceStream(res)!;
             using var sr = new StreamReader(st, Encoding.UTF8);
-            if (JsonNode.Parse(sr.ReadToEnd()) is JsonObject o && (string?)o["id"] == Switch2Id) return o;
+            if (JsonNode.Parse(sr.ReadToEnd()) is JsonObject o && (string?)o["id"] == id) return o;
         }
-        throw new InvalidOperationException($"No catalog profile {Switch2Id}.");
+        throw new InvalidOperationException($"No catalog profile {id}.");
+    }
+
+    /// <summary>Commands from SET_REPORT, a check beside the recording that
+    /// adds nothing to the streams. On a copy of steam-controller-2, whose
+    /// protocol reads its commands from SET_REPORT, a feature write no rule
+    /// consumes or emits for reaches the output ring as the host sent it, as
+    /// a feature report. A write whose rule consumes it does not reach the
+    /// ring. A write whose rule emits a report puts that report on the ring
+    /// in its place, as a feature report too. Throws on any other result.</summary>
+    static void SetReportCommands(Host host)
+    {
+        var json = CatalogJson("steam-controller-2");
+        json["id"] = "setreport-commands-check";
+        var rules = json["protocol"]!["commands"]!["rules"]!.AsArray();
+        rules.Insert(0, JsonNode.Parse("{\"match\":\"01 F0\",\"consume\":true}"));
+        rules.Insert(0, JsonNode.Parse(
+            "{\"match\":\"01 F1\",\"minLength\":4,\"emitOutput\":{\"reportId\":\"0x31\",\"size\":3,\"program\":[{\"const\":{\"0\":\"31\"}},{\"copy\":\"1-2\",\"to\":1}]}}"));
+        var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json.ToJsonString()))!;
+        p.ValidateDeviceModel();
+
+        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        try
+        {
+            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
+            ushort iface = dev.Descriptors.HidInterfaceNumber;
+            uint Head() => (uint)Marshal.ReadInt32(ring);
+            (byte Source, byte Id, string Data) Last()
+            {
+                uint head = Head();
+                if (head == 0) return (0, 0, "");
+                int slot = SharedMemoryIO.OUTPUT_HEADER_SIZE + (int)((head - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS) * SharedMemoryIO.OUTPUT_SLOT_SIZE;
+                int size = Marshal.ReadInt16(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE);
+                var data = new byte[size];
+                Marshal.Copy(ring + slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA, data, 0, size);
+                return (Marshal.ReadByte(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE), Marshal.ReadByte(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID), Convert.ToHexString(data));
+            }
+            void Write(string hex)
+            {
+                var b = Convert.FromHexString(hex);
+                host.Submit(dev, 0x00, isIn: false, b.Length, b, setup: Setup(0x21, 0x09, (ushort)((3 << 8) | b[0]), iface, (ushort)b.Length));
+                host.DrainReplies();
+            }
+            const byte Feature = UsbipEmulatedDevice.SourceHidFeature;
+
+            Write("01870330180000");
+            var plain = Last();
+            if (plain != (Feature, 0x01, "870330180000"))
+                throw new InvalidOperationException($"SET_REPORT check: a write no rule consumes or emits for reaches the ring as source {plain.Source}, report 0x{plain.Id:X2}, {plain.Data}, not as the feature report the host sent.");
+            uint before = Head();
+            Write("01F0AABB");
+            if (Head() != before)
+                throw new InvalidOperationException($"SET_REPORT check: a write its rule consumes reached the ring as {Last()}.");
+            Write("01F1CCDD");
+            var emitted = Last();
+            if (emitted != (Feature, 0x31, "F1CC"))
+                throw new InvalidOperationException($"SET_REPORT check: a write whose rule emits a report reaches the ring as source {emitted.Source}, report 0x{emitted.Id:X2}, {emitted.Data}, where it must be feature report 0x31 with F1CC.");
+            dev.Dispose();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(view);
+            Marshal.FreeHGlobal(ring);
+        }
     }
 
     /// <summary>A rule's emitOutput and a live feature report on USB/IP, a

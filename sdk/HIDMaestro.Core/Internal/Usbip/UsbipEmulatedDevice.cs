@@ -1090,10 +1090,13 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     payload.CopyTo(_lastFeaturePayload);
                     _lastFeatureLength = payload.Length;
                 }
-                // A rule that emits a report puts it on the ring in place of
-                // the command, after the answer table has read the write.
-                if (command is { Emit: >= 0 } emitting) PublishCommand(emitting, payload);
-                else PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
+                // After the answer table has read the write, the command goes
+                // to the ring as every protocol's commands do: as the host
+                // sent it, as the report its rule emits, or not at all when
+                // the rule or the protocol consumes it. It keeps its kind.
+                byte source = reportType == 0x03 ? SourceHidFeature : SourceHidOutput;
+                if (command is { } c && payload.Length > 0) PublishCommand(c, payload, source);
+                else PublishOutput(source, rid, data);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
             }

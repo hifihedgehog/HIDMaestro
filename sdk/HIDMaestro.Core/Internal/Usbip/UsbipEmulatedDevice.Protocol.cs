@@ -173,19 +173,20 @@ internal sealed partial class UsbipEmulatedDevice
 
     /// <summary>A command to the output ring: as the host sent it, as the
     /// report its rule emits in its place, or not at all when the protocol
-    /// or its rule consumes it.</summary>
-    private void PublishCommand(ProtocolEngine.CommandResult result, ReadOnlySpan<byte> command)
+    /// or its rule consumes it. <paramref name="source"/> is the kind of
+    /// report the host wrote, which an emitted report keeps.</summary>
+    private void PublishCommand(ProtocolEngine.CommandResult result, ReadOnlySpan<byte> command, byte source = SourceHidOutput)
     {
         var engine = _engine!;
         if (engine.Protocol.ConsumesCommands || result.Consume || command.Length == 0) return;
         if (result.Emit < 0)
         {
-            PublishOutput(SourceHidOutput, command[0], command[1..]);
+            PublishOutput(source, command[0], command[1..]);
             return;
         }
         Span<byte> emitted = stackalloc byte[Programs.ProgramForm.MaxReport];
         int n = engine.BuildEmit(result.Emit, command, emitted);
-        PublishOutput(SourceHidOutput, emitted[0], emitted[1..n]);
+        PublishOutput(source, emitted[0], emitted[1..n]);
     }
 
     /// <summary>What a command did: a halt fails every parked read, and any
