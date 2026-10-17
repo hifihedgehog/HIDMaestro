@@ -75,6 +75,32 @@ internal static class XusbContract
             }
             Check($"{profiles.Count} catalog profiles present an XUSB companion", profiles.Count == 10);
 
+            // The SDK's blob limits are the companion's (companion.c's
+            // HM_XUSB_ANSWERS_* defines, read from the tree's source).
+            string companionSource = Path.GetFullPath(Path.Combine(probeDir, "..", "..", "..", "driver", "companion.c"));
+            if (File.Exists(companionSource))
+            {
+                string text = File.ReadAllText(companionSource);
+                int Define(string name)
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(text, @"#define\s+" + name + @"\s+(\d+)");
+                    return m.Success ? int.Parse(m.Groups[1].Value) : -1;
+                }
+                foreach (var (name, sdk) in new[]
+                {
+                    ("HM_XUSB_ANSWERS_FORMAT", (int)XusbAnswers.Format), ("HM_XUSB_ANSWERS_MAX_ENTRIES", XusbAnswers.MaxEntries),
+                    ("HM_XUSB_ANSWERS_MAX_DATA", XusbAnswers.MaxData), ("HM_XUSB_ANSWERS_MAX_BLOB", XusbAnswers.MaxBlob),
+                    ("HM_XUSB_ANSWERS_HEADER", XusbAnswers.HeaderSize), ("HM_XUSB_ANSWERS_ENTRY", XusbAnswers.EntrySize),
+                    ("HM_XUSB_ANSWER_EXACT", XusbAnswers.ModeExact), ("HM_XUSB_ANSWER_UP_TO", XusbAnswers.ModeUpTo),
+                })
+                    Check($"companion.c's {name} is the SDK's {sdk}", Define(name) == sdk, $"{Define(name)}");
+            }
+            else
+            {
+                Check($"companion.c is beside the probe at {companionSource}", false);
+            }
+            IdentityEntryName(Check, Path.GetFullPath(Path.Combine(probeDir, "..", "..", "..")), probeDir);
+
             // Part 1: the answers, oracle against tree.
             var plan = new StringBuilder("hm-driver-plan 1\n");
             var oracleScript = new StringBuilder("hm-driver-script 1\n");
@@ -284,6 +310,51 @@ internal static class XusbContract
         string path = Path.Combine(dir, "script.txt");
         File.WriteAllText(path, script.ToString());
         return CompareLive.RunHarness(exe, plan, path, dir);
+    }
+
+    /// <summary>The identity entry's key and value name are one contract
+    /// (the design note, "The index before the first start"): the names the
+    /// note gives, the ones hm_contract.h defines and reads them by
+    /// (HmReadIdentityIndex), the one reader both drivers call with no
+    /// reader of their own, the SDK's writer (DeviceOrchestrator.IdentityRoot
+    /// and IdentityIndexValue), and the harness's writer for the tree's
+    /// drivers.</summary>
+    static void IdentityEntryName(Action<string, bool, string> check, string root, string probeDir)
+    {
+        const string Key = @"SOFTWARE\HIDMaestro\Identity\";
+        const string Value = "ControllerIndex";
+        string Read(string rel) => File.Exists(Path.Combine(root, rel)) ? File.ReadAllText(Path.Combine(root, rel)) : "";
+        string C(string s) => s.Replace(@"\", @"\\");
+
+        string note = Read(Path.Combine("docs", "design", "data-driven-devices.md"));
+        check($"the design note names the entry {Key}<token> and its DWORD value {Value}",
+              note.Contains($"`{Key}<token>`") && note.Contains($"as the DWORD value `{Value}`"), "");
+
+        string contract = Read(Path.Combine("driver", "hm_contract.h"));
+        var reader = System.Text.RegularExpressions.Regex.Match(contract,
+            @"HmReadIdentityIndex\(_In_.*?\r?\n\}\r?\n", System.Text.RegularExpressions.RegexOptions.Singleline);
+        check($"hm_contract.h names {Key} and {Value}, and HmReadIdentityIndex reads the value by them as a DWORD",
+              contract.Contains($"#define HIDMAESTRO_IDENTITY_ROOT    L\"{C(Key)}\"")
+              && contract.Contains($"#define HIDMAESTRO_IDENTITY_VALUE   L\"{Value}\"")
+              && reader.Success && reader.Value.Contains("HIDMAESTRO_IDENTITY_ROOT")
+              && reader.Value.Contains("RegQueryValueExW(hKey, HIDMAESTRO_IDENTITY_VALUE") && reader.Value.Contains("REG_DWORD"), "");
+
+        foreach (string file in new[] { "driver.c", "companion.c" })
+        {
+            string src = Read(Path.Combine("driver", file));
+            bool calls = src.Contains("HmReadIdentityIndex(token, &identityIndex)");
+            bool own = src.Contains(C(@"HIDMaestro\Identity")) || System.Text.RegularExpressions.Regex.IsMatch(src, @"\bReadIdentityIndex\s*\(");
+            check($"{file} reads the identity entry through hm_contract.h's HmReadIdentityIndex and has no reader of its own",
+                  calls && !own, $"calls={calls} own={own}");
+        }
+
+        check($"the SDK writes {Value} under {Key}<token> (DeviceOrchestrator.IdentityRoot, IdentityIndexValue)",
+              DeviceOrchestrator.IdentityRoot + @"\" == Key && DeviceOrchestrator.IdentityIndexValue == Value,
+              $"{DeviceOrchestrator.IdentityRoot} {DeviceOrchestrator.IdentityIndexValue}");
+
+        string harness = Read(Path.Combine("test", "probes", "device_oracle_check", "native", "harness", "hm_record.c"));
+        check($"the harness writes {Value} under {Key}<token> as a DWORD",
+              harness.Contains($"L\"{C(Key)}%s\"") && harness.Contains($"ValueSet(KeyMake(idPath), L\"{Value}\", REG_DWORD"), "");
     }
 
     /// <summary>xusb-answer-changes.txt: "&lt;profile&gt; 0x&lt;ioctl&gt; &lt;offset&gt;=&lt;byte&gt; | &lt;lane&gt; | &lt;reason&gt;",
