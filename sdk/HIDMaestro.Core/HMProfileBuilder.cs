@@ -77,10 +77,14 @@ public sealed class HMProfileBuilder
     /// <summary>Set the vendor name (for display only).</summary>
     public HMProfileBuilder Vendor(string vendor) { _vendor = vendor; return this; }
 
-    /// <summary>Set the USB Vendor ID.</summary>
+    /// <summary>Set the USB Vendor ID. On a copy of a USB/IP persona,
+    /// <see cref="Build"/> writes it into the persona's USB device
+    /// descriptor too.</summary>
     public HMProfileBuilder Vid(ushort vid) { _vid = vid; return this; }
 
-    /// <summary>Set the USB Product ID.</summary>
+    /// <summary>Set the USB Product ID. On a copy of a USB/IP persona,
+    /// <see cref="Build"/> writes it into the persona's USB device
+    /// descriptor too.</summary>
     public HMProfileBuilder Pid(ushort pid) { _pid = pid; return this; }
 
     /// <summary>Set the product string reported to the OS.</summary>
@@ -342,6 +346,25 @@ public sealed class HMProfileBuilder
     /// <exception cref="HMProfileException">VID or PID is not set, the
     /// descriptor's hex does not parse, the layout names an axis or button
     /// the descriptor lacks, or the device model does not compile.</exception>
+    /// <summary>A USB/IP persona presents its IDs in its USB device
+    /// descriptor as well, idVendor at byte 8 and idProduct at byte 10,
+    /// little-endian (USB 2.0 section 9.6.1), and its load checks them
+    /// against $.vid and $.pid. A copy given other IDs carries them there
+    /// too. A descriptor that is not whole hex or is too short is left for
+    /// that check to refuse.</summary>
+    private static void StampDeviceDescriptor(ControllerProfile p, ushort vid, ushort pid)
+    {
+        if (p.UsbConfiguration?.DeviceDescriptorHex is not { } hex) return;
+        byte[] d;
+        try { d = Convert.FromHexString(hex); }
+        catch (FormatException) { return; }
+        if (d.Length < 12) return;
+        if (d[8] == (byte)vid && d[9] == (byte)(vid >> 8) && d[10] == (byte)pid && d[11] == (byte)(pid >> 8)) return;
+        d[8] = (byte)vid; d[9] = (byte)(vid >> 8);
+        d[10] = (byte)pid; d[11] = (byte)(pid >> 8);
+        p.UsbConfiguration.DeviceDescriptorHex = Convert.ToHexString(d).ToLowerInvariant();
+    }
+
     /// <summary>A value read again from its JSON, so the profile and the
     /// builder share no object.</summary>
     private static T CopyOf<T>(T value) where T : class
@@ -390,6 +413,7 @@ public sealed class HMProfileBuilder
         inner.ValueSources = _valueSources == null ? null : CopyOf(_valueSources);
         inner.SourceFile = null;
         inner.MarkBuiltInCode(true);
+        StampDeviceDescriptor(inner, _vid.Value, _pid.Value);
 
         try
         {

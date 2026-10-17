@@ -246,5 +246,23 @@ internal static class Builder
                 bool got = (bool)Api.Prop(P(id), "BuildsItsOwnReports")!;
                 return (got == want, got.ToString());
             });
+        // A copy of a USB/IP persona given another PID builds, with the PID
+        // in its USB device descriptor, and the source keeps its own. At
+        // 31efc70f the copy's descriptor kept the source's PID and its
+        // check refused the copy.
+        foreach (var p in ctx.AllProfiles.Where(x => x.Inner.RequiresUsbipBackend && x.Inner.UsbConfiguration != null))
+            c.Run($"a FromProfile copy of {p.Id} given PID 0x1234 builds, with 0x1234 in its USB device descriptor", () =>
+            {
+                string before = p.Inner.UsbConfiguration!.DeviceDescriptorHex!;
+                try
+                {
+                    var copy = new HMProfileBuilder().FromProfile(p).Id(p.Id + "-pid").Pid(0x1234).Build();
+                    var d = Convert.FromHexString(copy.Inner.UsbConfiguration!.DeviceDescriptorHex!);
+                    bool ok = d[10] == 0x34 && d[11] == 0x12 && copy.ProductId == 0x1234
+                              && p.Inner.UsbConfiguration!.DeviceDescriptorHex == before;
+                    return (ok, Convert.ToHexString(d));
+                }
+                catch (HMProfileException e) { return (false, $"{e.JsonPath}: {e.Reason}"); }
+            });
     }
 }
