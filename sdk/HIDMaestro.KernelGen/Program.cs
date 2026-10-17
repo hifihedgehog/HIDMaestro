@@ -50,10 +50,30 @@ switch (args[0])
             files++;
             try
             {
-                var model = ModelCompiler.Compile(ProfilePrograms.Read(File.ReadAllBytes(path)));
-                programs.AddRange(model.AllPrograms);
-                if (model.StateProgram is { } state) states.Add(state);
-                if (model.LayoutSet is { } set) sets.Add(set);
+                var bytes = File.ReadAllBytes(path);
+                var model = ModelCompiler.Compile(ProfilePrograms.Read(bytes));
+                if (args[0] == "catalog")
+                {
+                    programs.AddRange(model.AllPrograms);
+                    if (model.StateProgram is { } state) states.Add(state);
+                    if (model.LayoutSet is { } set) sets.Add(set);
+                }
+                else
+                {
+                    // The probe's own kernels: the catalog's codec reports
+                    // lowered into state programs, for program_equivalence_check
+                    // to hold to the codec and to time. The SDK runs only state
+                    // blocks as state programs, from the catalog's kernels.
+                    using var doc = System.Text.Json.JsonDocument.Parse(ProfilePrograms.WithoutBom(bytes), ProfilePrograms.DocumentOptions);
+                    foreach (var (_, fields, size, id) in StateLowering.CodecReports(doc.RootElement))
+                        if (StateLowering.Lower(fields, size, id, allowFeeds: true, out _, out _) is { } spec)
+                        {
+                            // A report the form refuses stays with the codec,
+                            // as a state block the form refuses does.
+                            try { states.Add(ProgramForm.Validate(spec)); }
+                            catch (FormException) { continue; }
+                        }
+                }
             }
             catch (FormException e)
             {

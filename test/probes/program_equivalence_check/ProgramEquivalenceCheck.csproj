@@ -22,6 +22,9 @@
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
     <Compile Remove="bin\**;obj\**" />
     <None Update="user\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The catalog's files, whose codec reports the build tool lowers into
+         state programs of the probe's own (mode probe). -->
+    <KernelGenJson Include="..\..\..\profiles\**\*.json" Exclude="..\..\..\profiles\schema.json" />
   </ItemGroup>
   <Import Project="..\..\..\sdk\HIDMaestro.KernelGen\KernelGen.targets" />
 

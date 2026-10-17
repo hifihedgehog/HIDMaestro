@@ -315,12 +315,99 @@ internal static class Emitter
         var orTerms = new List<string>?[size];
         var whole = new bool[size];
         var body = new List<string>();
+        var tail = new List<string>();
+        var tables = new List<string>();
         bool buttons = false, hat = false;
         void AddOr(int dst, string term) => (orTerms[dst] ??= new List<string>()).Add(term);
+        void Whole(int at, int n) { for (int i = 0; i < n; i++) whole[at + i] = true; }
         foreach (var op in v.Unconditional)
         {
             switch (op)
             {
+                case GpRawOp g:
+                    Whole(g.Dst, g.Bytes);
+                    body.Add(F($"        {{ uint v = (uint){RawSource(g.Src)};"));
+                    for (int i = 0; i < g.Bytes; i++) body.Add(F($"          d[{g.Dst + i}] = (byte)(v >> {8 * i});"));
+                    body.Add("        }");
+                    break;
+                case GpPressureOp g:
+                {
+                    Whole(g.Dst, 1);
+                    var (field, down) = Pressure(g.Button);
+                    if (g.Button >= GpPressure.DpadUp) hat = true; else buttons = true;
+                    body.Add(F($"        {{ byte p = st.{field}; d[{g.Dst}] = p != 0 ? p : ({down} ? (byte)255 : (byte)0); }}"));
+                    break;
+                }
+                case GpTableOp g:
+                {
+                    string t = F($"T{name}_{tables.Count}");
+                    tables.Add(F($"    static ReadOnlySpan<byte> {t} => new byte[] {{ {string.Join(", ", g.Table.Select(x => F($"0x{x:X2}")))} }};"));
+                    string v2 = F($"{t}[(byte)st.{g.Src}]");
+                    if (g.Charging >= 0) v2 = F($"(st.BatteryCharging ? 0x{g.Charging:X2} : {v2})");
+                    if (g.Full >= 0) v2 = F($"(st.BatteryFull ? 0x{g.Full:X2} : {v2})");
+                    if (g.Whole) { Whole(g.Dst, 1); body.Add(F($"        d[{g.Dst}] = (byte){v2};")); }
+                    else
+                    {
+                        int mask = ((1 << (g.BitHi - g.BitLo + 1)) - 1) << g.BitLo;
+                        AddOr(g.Dst, F($"(((uint){v2} << {g.BitLo}) & 0x{mask:X2}u)"));
+                    }
+                    break;
+                }
+                case GpFingerOp g:
+                {
+                    Whole(g.Dst, 4);
+                    int n = g.Finger;
+                    body.Add(F($"        {{ uint x = st.TouchpadFinger{n}X, y = st.TouchpadFinger{n}Y;"));
+                    body.Add(F($"          d[{g.Dst}] = (byte)((st.TouchpadFinger{n}Id & 0x7F) | (st.TouchpadFinger{n}Active ? 0x00 : 0x80));"));
+                    body.Add(F($"          d[{g.Dst + 1}] = (byte)x; d[{g.Dst + 2}] = (byte)(((x >> 8) & 0x0F) | ((y & 0x0F) << 4)); d[{g.Dst + 3}] = (byte)(y >> 4); }}"));
+                    break;
+                }
+                case GpPadOp g:
+                {
+                    Whole(g.Dst, 2);
+                    int n = g.Pad;
+                    string axis = g.IsY ? "Y" : "X";
+                    string span = g.IsY ? "1079f" : "1919f";
+                    int slot = (g.Pad == 0 ? 0 : 2) + (g.IsY ? 1 : 0);
+                    // VendorBlobCodec's int16-pad, its float arithmetic as it is.
+                    body.Add("        {");
+                    body.Add("          short v;");
+                    body.Add(F($"          if (st.TouchpadFinger{n}Active)"));
+                    body.Add("          {");
+                    body.Add(F($"            float unit = Math.Clamp(st.TouchpadFinger{n}{axis} / {span}, 0f, 1f) - 0.5f;"));
+                    if (g.Invert) body.Add("            unit = -unit;");
+                    body.Add("            v = (short)Math.Clamp((int)Math.Round(unit * 2f * 32767f), -32767, 32767);");
+                    body.Add("          }");
+                    body.Add(g.OrStick
+                        ? F($"          else v = (short)global::HIDMaestro.Internal.WireArith.Linear(sl[{slot}], {g.Min}, {g.Max}, {(g.Invert ? "true" : "false")}, 0.5);")
+                        : "          else v = 0;");
+                    body.Add(F($"          d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8);"));
+                    body.Add("        }");
+                    break;
+                }
+                case GpSelectOp g:
+                    Whole(g.Dst, 2);
+                    hat |= g.Flag is GpFlag.DpadUp or GpFlag.DpadDown or GpFlag.DpadLeft or GpFlag.DpadRight;
+                    body.Add(F($"        {{ int v = {Flag(g.Flag)} ? {g.WhenSet} : {g.WhenClear}; d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"));
+                    break;
+                case GpTenBitOp g:
+                    Whole(g.Dst, 2);
+                    body.Add(F($"        {{ int delta = (int)Math.Round((double){RawSource(g.Src)} * {g.Resolution} / {g.SourceResolution}, MidpointRounding.AwayFromZero);"));
+                    body.Add(F($"          int v = Math.Clamp({g.Center} {(g.Invert ? "-" : "+")} delta, 0, 1023); d[{g.Dst}] = (byte)(v >> 8); d[{g.Dst + 1}] = (byte)v; }}"));
+                    break;
+                case CounterOp k:
+                    Whole(k.Dst, k.Width);
+                    body.AddRange(Counter(k, "        "));
+                    break;
+                case GpCrc32Op g:
+                {
+                    Whole(g.Dst, 4);
+                    // The register after the prefix, folded at build time.
+                    uint start = Crc32.Update(0xFFFFFFFFu, g.Prefix);
+                    tail.Add(F($"        {{ uint crc = global::HIDMaestro.Internal.Programs.Crc32.Update(0x{start:X8}u, d + {g.From}, {Math.Max(0, g.To - g.From + 1)}) ^ 0xFFFFFFFFu;"));
+                    tail.Add(F($"          d[{g.Dst}] = (byte)crc; d[{g.Dst + 1}] = (byte)(crc >> 8); d[{g.Dst + 2}] = (byte)(crc >> 16); d[{g.Dst + 3}] = (byte)(crc >> 24); }}"));
+                    break;
+                }
                 case GpButtonsOp g:
                 {
                     buttons = true;
@@ -397,9 +484,34 @@ internal static class Emitter
         if (hat) sb.AppendLine("        uint h = (byte)st.Hat;");
         sb.Append(string.Join("\n", Head(v.Template, size, whole, orTerms, PathMutation.None))).Append('\n');
         sb.Append(string.Join("\n", body)).Append('\n');
+        if (tail.Count > 0) sb.Append(string.Join("\n", tail)).Append('\n');
         sb.AppendLine("    }");
+        foreach (var t in tables) sb.AppendLine(t);
         return sb.ToString();
     }
+
+    static string RawSource(GpRaw r) => r switch
+    {
+        GpRaw.SensorTimestamp => "st.SensorTimestamp",
+        GpRaw.TouchpadPacketCounter => "st.TouchpadPacketCounter",
+        _ => F($"st.{r}"),
+    };
+
+    /// <summary>A pressure-sensitive button's pressure field and its
+    /// pressed test over b and h.</summary>
+    static (string Field, string Down) Pressure(GpPressure p) => p switch
+    {
+        GpPressure.A => ("PressureA", "((b & 0x1u) != 0)"),
+        GpPressure.B => ("PressureB", "((b & 0x2u) != 0)"),
+        GpPressure.X => ("PressureX", "((b & 0x4u) != 0)"),
+        GpPressure.Y => ("PressureY", "((b & 0x8u) != 0)"),
+        GpPressure.LeftBumper => ("PressureLeftBumper", "((b & 0x10u) != 0)"),
+        GpPressure.RightBumper => ("PressureRightBumper", "((b & 0x20u) != 0)"),
+        GpPressure.DpadUp => ("PressureDpadUp", Flag(GpFlag.DpadUp)),
+        GpPressure.DpadRight => ("PressureDpadRight", Flag(GpFlag.DpadRight)),
+        GpPressure.DpadDown => ("PressureDpadDown", Flag(GpFlag.DpadDown)),
+        _ => ("PressureDpadLeft", Flag(GpFlag.DpadLeft)),
+    };
 
     /// <summary>A flag as a bool expression over st, sl and the hat h. A
     /// direction holds for its hat values, N 1 to NW 8, and for none past 8.</summary>
