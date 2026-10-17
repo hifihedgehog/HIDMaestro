@@ -291,9 +291,33 @@ internal static partial class DriverDeploy
                 return HMDriverInstallOutcome.Installed;
             }
 
+            // The other INF's newest package. A half-failed install, or a
+            // program of another release, can leave it below the floor beside
+            // a main package that meets it.
+            var lowest = DriverBuilder.PackageInfs
+                .Select(inf => Machine.Stamps(inf) is { Count: > 0 } s ? s.Max() : (DriverStamp?)null)
+                .Where(s => s != null).Select(s => s!.Value).Min();
+            bool otherBelow = lowest.Release < MinimumDriverVersion && installed.Value.Release >= MinimumDriverVersion;
+            // An INF with no package at all: adding this build's touches
+            // nothing installed, held or not.
+            var absent = DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf).Count == 0).ToList();
+
             int cmp = installed.Value.CompareTo(embedded);
             if (cmp > 0)
-                return HMDriverInstallOutcome.KeptNewer;
+            {
+                // The main package is newer and stays: a newer driver is
+                // never replaced. This build's package of an INF below the
+                // floor is added beside it unless a program holds the old
+                // one, and of an INF with none, always.
+                if (otherBelow && held && !allowHeldOlder)
+                    throw Refuse(lowest.Release, holders, pending);
+                var add = new List<string>(absent);
+                if (otherBelow && !held)
+                    add.AddRange(DriverBuilder.PackageInfs.Where(inf => Machine.Stamps(inf) is { Count: > 0 } s && s.Max().Release < MinimumDriverVersion));
+                if (add.Count == 0) return HMDriverInstallOutcome.KeptNewer;
+                Machine.AddPackages(add);
+                return HMDriverInstallOutcome.Installed;
+            }
             if (cmp == 0)
             {
                 // The same build. A deploy cut off between its two adds, or
@@ -319,12 +343,14 @@ internal static partial class DriverDeploy
                 Machine.Deploy();
                 return HMDriverInstallOutcome.Upgraded;
             }
-            if (installed.Value.Release >= MinimumDriverVersion || allowHeldOlder)
-                return HMDriverInstallOutcome.KeptInUse;
-            var blockers = Describe(holders);
-            foreach (var (r, c) in pending)
-                blockers.Add($"identity {c.Token} on transport index {c.TransportIndex}, being created ({(r.Self ? "this program" : MachineClaims.Describe(r))})");
-            throw new HMDriverVersionException(installed.Value.Release, MinimumDriverVersion, blockers);
+            // Held: kept in use when both INFs meet the floor.
+            if (lowest.Release >= MinimumDriverVersion || allowHeldOlder)
+            {
+                if (absent.Count == 0) return HMDriverInstallOutcome.KeptInUse;
+                Machine.AddPackages(absent);
+                return HMDriverInstallOutcome.Installed;
+            }
+            throw Refuse(lowest.Release, holders, pending);
         }
         finally
         {
@@ -333,6 +359,17 @@ internal static partial class DriverDeploy
             // program's version is kept because its owner record names it.
             try { Machine.PruneStaging(); } catch { }
         }
+    }
+
+    /// <summary>The refusal of a held driver below the floor, naming the
+    /// older INF's version and every holder.</summary>
+    private static HMDriverVersionException Refuse(Version installed, List<OwnerCensus.DeviceGroup> holders,
+        List<(MachineClaims.OwnerRecord Record, MachineClaims.ControllerEntry Controller)> pending)
+    {
+        var blockers = Describe(holders);
+        foreach (var (r, c) in pending)
+            blockers.Add($"identity {c.Token} on transport index {c.TransportIndex}, being created ({(r.Self ? "this program" : MachineClaims.Describe(r))})");
+        return new HMDriverVersionException(installed, MinimumDriverVersion, blockers);
     }
 
     // The installed-payload record this process last saw with both

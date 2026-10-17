@@ -168,6 +168,51 @@ internal static class Deploy
             string r = On(m, A, () => Refusal(() => DriverDeploy.EnsureForCreate(Token, runsOnOlderDriver: false)));
             return (m.Calls.Contains("add hidmaestro_xusb.inf"), $"{r}, {string.Join(", ", m.Calls)}");
         });
+        // Both INFs meet the floor, whatever build the main package is. At
+        // 801a4dbf the policy read hidmaestro.inf alone: beside a 1.12.0
+        // hidmaestro_xusb.inf, a main package of another 2.0.x build was
+        // kept in use or kept as newer, the companion stayed on 1.12.0, and
+        // every later create took the census again.
+        FakeMachine Split(DriverDeploy.DriverStamp main)
+        {
+            var m = new FakeMachine();
+            m.Store["hidmaestro.inf"].Add(main);
+            m.Store["hidmaestro_xusb.inf"].Add(Stamp(1, 12, 0));
+            m.Manifest = "another-build";
+            return m;
+        }
+        bool XusbAtFloor(FakeMachine m) => m.Store["hidmaestro_xusb.inf"].Max().Release >= DriverDeploy.MinimumDriverVersion;
+        foreach (var (name, main) in new[] { ("an older 2.0.0 build", Stamp(2, 0, 0, 3)), ("a newer 2.0.1", Stamp(2, 0, 1, 1)) })
+        {
+            c.Run($"{name} hidmaestro.inf beside a 1.12.0 hidmaestro_xusb.inf, nothing held: this build's XUSB package is added and the main one kept", () =>
+            {
+                var m = Split(main);
+                var (r, below) = On(m, A, () => (Refusal(() => DriverDeploy.EnsureForCreate(Token, runsOnOlderDriver: false)), DriverDeploy.StoreBelowFloor()));
+                return (XusbAtFloor(m) && m.Store["hidmaestro.inf"].Max().CompareTo(main) >= 0 && !below,
+                        $"{r}, {string.Join(", ", m.Calls)}");
+            });
+            c.Run($"{name} hidmaestro.inf beside a held 1.12.0 hidmaestro_xusb.inf: under alternative A the create is refused, naming 1.12.0", () =>
+            {
+                var m = Split(main).HeldByV1();
+                string r = On(m, A, () => Refusal(() => DriverDeploy.EnsureForCreate(Token, runsOnOlderDriver: false)));
+                return (r.StartsWith("refused, 1.12.0 below 2.0.0", StringComparison.Ordinal), r);
+            });
+            c.Run($"{name} hidmaestro.inf beside a held 1.12.0 hidmaestro_xusb.inf: under alternative B a profile that runs on an older driver passes", () =>
+            {
+                var m = Split(main).HeldByV1();
+                string r = On(m, B, () => Refusal(() => DriverDeploy.EnsureForCreate(Token, runsOnOlderDriver: true)));
+                return (r == "passed", r);
+            });
+        }
+        foreach (var (name, main) in new[] { ("an older 2.0.0 build", Stamp(2, 0, 0, 3)), ("a newer 2.0.1", Stamp(2, 0, 1, 1)) })
+            c.Run($"{name} hidmaestro.inf held, with no hidmaestro_xusb.inf package: this build's XUSB package is added", () =>
+            {
+                var m = new FakeMachine().HeldByV1();
+                m.Store["hidmaestro.inf"].Add(main);
+                m.Manifest = "another-build";
+                string r = On(m, A, () => Refusal(() => DriverDeploy.EnsureForCreate(Token, runsOnOlderDriver: false)));
+                return (m.Calls.Contains("add hidmaestro_xusb.inf") && !m.Calls.Contains("deploy"), $"{r}, {string.Join(", ", m.Calls)}");
+            });
         c.Run("once both packages meet the floor the gate's record is confirmed, and the next create takes the fast return", () =>
         {
             var m = new FakeMachine().Holding(Stamp(1, 12, 0));
