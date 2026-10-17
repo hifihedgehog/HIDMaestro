@@ -851,10 +851,13 @@ partial class Program
     static readonly bool s_quietMode =
         Environment.GetEnvironmentVariable("HIDMAESTRO_QUIET") == "1";
 
-    /// <summary>Subscribe to OutputReceived for the given controller and print
-    /// each packet (decoded if recognized, hex-dumped otherwise). The handler
-    /// runs on the SDK's polling thread, not the test app's UI thread, so
-    /// keep it cheap and Console-only.</summary>
+    /// <summary>Subscribe to the given controller's output: OutputReceived,
+    /// printed as it arrives (XInput rumble by its source, every other
+    /// report raw), and OutputDecoded, printed field by field
+    /// (<see cref="DecodedLine"/>). The handlers run on the SDK's polling
+    /// thread, not the test app's UI thread, so keep them cheap and
+    /// Console-only. device_oracle_check's case 7 runs this hook on its
+    /// controllers and records the decoded lines.</summary>
     static void HookOutputReceived(HMController ctrl, int idx)
     {
         if (s_quietMode) return;  // suppress per-packet prints under regression
@@ -891,7 +894,10 @@ partial class Program
     /// <summary>One-line view of an output packet as it arrives: an XInput
     /// rumble packet by its source, anything else as a hex dump. The values
     /// a profile's decode gives come through OutputDecoded
-    /// (<see cref="DecodedLine"/>).</summary>
+    /// (<see cref="DecodedLine"/>). The profile is unused: it stays because
+    /// device_oracle_check's case 7 calls this method by name with a
+    /// profile and a packet, the shape 9bd6279's test client has, whose
+    /// decode read the profile's vendor ID.</summary>
     static string DecodeOutputPacket(HMProfile profile, in HMOutputPacket pkt)
     {
         var data = pkt.Data.Span;

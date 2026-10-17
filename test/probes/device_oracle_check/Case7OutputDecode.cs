@@ -19,8 +19,10 @@
 // Beside the SDK's events, each packet's line from the test client's own
 // decode, HIDMaestroTest's DecodeOutputPacket (test/Program.cs:871-910),
 // which keys its rumble labels on vendor IDs and report IDs, and, where the
-// test client prints OutputDecoded (its DecodedLine, lane DD-6 on), its line
-// for each OutputDecoded event. It is loaded
+// test client prints OutputDecoded (its DecodedLine, lane DD-6 on), the
+// line its own HookOutputReceived prints for each OutputDecoded event,
+// caught from the console, so a client that stops subscribing changes the
+// recording. It is loaded
 // from the test client's build (test\bin\Release\<tfm>\win-x64), so that project is
 // built before this case runs. Each gets its output report at every length from empty to two
 // bytes past its size, zeroed, all 0xFF, each byte alone at 0x80 and 0xFF,
@@ -59,12 +61,18 @@ internal sealed class Case7OutputDecode : IOracleCase
     {
         var all = ProfileDatabase.LoadEmbedded().All;
         var testDecode = TestClientDecode();
-        var testDecoded = TestClientDecodedLine();
+        var testHook = TestClientHook();
+        // The client prints nothing under HIDMAESTRO_QUIET=1, which the
+        // battery sets for the test app it runs, not for this probe.
+        if (testHook != null) Environment.SetEnvironmentVariable("HIDMAESTRO_QUIET", null);
+        var console = Console.Out;
+        var hookLines = new HookWriter(console);
         var profiles = all.Where(p => p.ExtendedOutputReport != null
                                       || p.Id is "switch-pro" or "xbox-360-wired" or "xbox-360-wireless")
                           .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        if (testHook != null) Console.SetOut(hookLines);
         try
         {
             int n = 0;
@@ -86,13 +94,14 @@ internal sealed class Case7OutputDecode : IOracleCase
                     events.Enqueue(("rx", o));
                     events.Enqueue(("testapp", Encoding.UTF8.GetBytes(testDecode(hp, pkt))));
                 };
-                c.OutputDecoded += (_, e) =>
+                c.OutputDecoded += (_, e) => events.Enqueue(("decoded", Decoded(e)));
+                // The test client's own subscriptions, after the case's, so
+                // its line for an event follows the event's record.
+                if (testHook != null)
                 {
-                    events.Enqueue(("decoded", Decoded(e)));
-                    // The test client's line for the same event, where its
-                    // build prints OutputDecoded (lane DD-6 on).
-                    if (testDecoded != null) events.Enqueue(("testapp-decoded", Encoding.UTF8.GetBytes(testDecoded(e))));
-                };
+                    hookLines.Events = events;
+                    testHook(c, index);
+                }
                 foreach (var port in c.Ports)
                 {
                     var pt = port;
@@ -193,6 +202,7 @@ internal sealed class Case7OutputDecode : IOracleCase
         }
         finally
         {
+            Console.SetOut(console);
             Marshal.FreeHGlobal(view);
             Marshal.FreeHGlobal(ring);
         }
@@ -235,16 +245,45 @@ internal sealed class Case7OutputDecode : IOracleCase
         return (profile, pkt) => (string)m.Invoke(null, new object[] { profile, pkt })!;
     }
 
-    /// <summary>HIDMaestroTest's DecodedLine, its line for an OutputDecoded
-    /// event, or null for a test client that prints none (9bd6279's).</summary>
-    static Func<HMOutputDecodedEventArgs, string>? TestClientDecodedLine()
+    /// <summary>HIDMaestroTest's HookOutputReceived, the subscriptions the
+    /// test app makes on each controller it runs, or null for a test client
+    /// that prints no OutputDecoded event (9bd6279's, which has no
+    /// DecodedLine of an event).</summary>
+    static Action<HMController, int>? TestClientHook()
     {
         string root = Path.GetFullPath(Path.Combine(ProbeDir(), "..", "..", ".."));
         string dll = Path.Combine(root, "test", "bin", "Release", "net10.0-windows10.0.26100.0", "win-x64", "HIDMaestroTest.dll");
         var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(dll);
-        var m = asm.GetType("HIDMaestroTest.Program")?.GetMethod("DecodedLine", BindingFlags.Static | BindingFlags.NonPublic,
-                                                                  new[] { typeof(HMOutputDecodedEventArgs) });
-        return m == null ? null : e => (string)m.Invoke(null, new object[] { e })!;
+        var type = asm.GetType("HIDMaestroTest.Program");
+        if (type?.GetMethod("DecodedLine", BindingFlags.Static | BindingFlags.NonPublic, new[] { typeof(HMOutputDecodedEventArgs) }) == null)
+            return null;
+        var hook = type.GetMethod("HookOutputReceived", BindingFlags.Static | BindingFlags.NonPublic, new[] { typeof(HMController), typeof(int) })
+            ?? throw new MissingMethodException("HIDMaestroTest's Program.HookOutputReceived changed: update case 7.");
+        return (c, i) => hook.Invoke(null, new object[] { c, i });
+    }
+
+    /// <summary>The console while the test client's hook is on: a line the
+    /// client prints for an OutputDecoded event goes to the case as
+    /// testapp-decoded, its per-packet line goes nowhere (the case records
+    /// that packet's decode as testapp), and every other line goes on to
+    /// the console.</summary>
+    sealed class HookWriter : TextWriter
+    {
+        readonly TextWriter _console;
+        public ConcurrentQueue<(string Tag, byte[] Data)>? Events;
+        public HookWriter(TextWriter console) { _console = console; }
+        public override Encoding Encoding => _console.Encoding;
+        public override void Write(char value) => _console.Write(value);
+        public override void WriteLine(string? value)
+        {
+            if (value != null && value.StartsWith("  [out", StringComparison.Ordinal))
+            {
+                if (value.Contains("] decoded id=", StringComparison.Ordinal))
+                    Events?.Enqueue(("testapp-decoded", Encoding.UTF8.GetBytes(value)));
+                return;
+            }
+            _console.WriteLine(value);
+        }
     }
 
     static string ProbeDir() =>
