@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>PerfBudgetCheck</AssemblyName>
     <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
          measurements, leaving out what b4d29d9 lacks. -->

@@ -19,6 +19,15 @@
 //                  median ns per call (ReportCost.cs). A script takes p50 and
 //                  p95 over 30 launches or more, this tree's and the tree's
 //                  before
+//   program [runs] [calls]
+//                  offline: the Switch 2 Pro composite's reports, rumble
+//                  decode and state block, each variant's median ns per call
+//                  (ProgramCost.cs). Built with -p:DefineConstants=DD4_BASE
+//                  against the tree before, the code they replace
+//   idle <periodMs> [seconds]
+//                  offline: the process's CPU time per second with one
+//                  dualsense-bt's idle repeat at the period and nothing else
+//                  submitting, and the frames it wrote per second
 //   start [runs]   process start to the first controller, each run in a
 //                  fresh process, with the session cleanup step's time
 //   claim [runs]   the owner claim, the census and the lease (this release)
@@ -109,6 +118,18 @@ internal static class Program
         if (mode == "report")
         {
             ReportCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
+        if (mode == "program")
+        {
+            ProgramCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
+        if (mode == "idle")
+        {
+            double period = args.Length > 1 ? double.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : 4;
+            double seconds = args.Length > 2 ? double.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 3;
+            ProgramCost.Idle(period, seconds);
             return 0;
         }
         if (OtherSdkRunning()) return 2;
