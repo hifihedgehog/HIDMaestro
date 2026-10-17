@@ -12,6 +12,8 @@
 //   lanes    Load refuses an entry of a lane no lane line names, and a lane
 //            line twice. The writer adds a new lane's line before its
 //            first entry.
+//   history  replay refuses a list in which the newest lane changed, added or
+//            dropped a line of another lane since its base list in git.
 //   base     --explain refuses a base dump whose stream is not what the list
 //            pinned before the lane, or the golden file where nothing did.
 //   later    --explain --earlier re-runs a lane after a later lane pinned
@@ -47,11 +49,14 @@ internal static class SelfTest
             Writer(dir);
             Chain(dir);
             Lanes(dir);
+            History(dir);
             Base(dir);
             Later(dir);
         }
         finally
         {
+            // git writes its objects read-only.
+            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)) File.SetAttributes(f, FileAttributes.Normal);
             Directory.Delete(dir, recursive: true);
         }
         Console.WriteLine($"device_oracle_check selftest: {(s_failures == 0 ? "PASS" : $"FAIL, {s_failures} check(s)")}");
@@ -249,6 +254,50 @@ internal static class SelfTest
         var lines = File.ReadAllLines(path).Where(l => !l.StartsWith('#')).ToList();
         Check(lines.Count == 4 && lines[2] == "lane Z | Z | ?" && lines[3] == $"stream c/s count 2 digest {B} | Z | ?",
               "lanes: the writer adds lane Z's line before its first entry");
+    }
+
+    static void History(string dir)
+    {
+        string repo = Path.Combine(dir, "repo");
+        Directory.CreateDirectory(repo);
+        string list = Path.Combine(repo, "changes.txt");
+        bool Git(params string[] args)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("git") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var a in new[] { "-C", repo, "-c", "user.name=selftest", "-c", "user.email=selftest@invalid", "-c", "commit.gpgsign=false" }.Concat(args))
+                psi.ArgumentList.Add(a);
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            proc.StandardOutput.ReadToEnd();
+            proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            return proc.ExitCode == 0;
+        }
+        void Commit(params string[] lines)
+        {
+            File.WriteAllLines(list, lines);
+            Git("add", "changes.txt");
+            Git("commit", "-q", "-m", "list");
+        }
+        int Problems(params string[] lines)
+        {
+            File.WriteAllLines(list, lines);
+            return ChangeHistory.Check(list, out _).Count;
+        }
+        if (!Git("init", "-q"))
+        {
+            Check(false, "history: git init");
+            return;
+        }
+        string w3l = "lane W3 | W3 | r", w3 = $"stream c/s count 1 digest {A} | W3 | r", c3 = "config p InputReportId 3:0102 | W3 | r";
+        string xl = "lane X | X | r", x = $"stream c/s count 2 digest {B} | X | r";
+        Commit(w3l, w3, c3);
+        Commit(w3l, w3, c3, xl, x);
+        Check(Problems(w3l, w3, c3, xl, x) == 0, "history: the list as committed passes");
+        Check(Problems(w3l, w3, c3, xl, x.Replace(B, C)) == 0, "history: the newest lane may re-pin its own entry");
+        Check(Problems(w3l, w3.Replace(A, C), c3, xl, x) > 0, "history: the newest lane editing lane W3's entry fails");
+        Check(Problems(w3l, w3, c3.Replace("0102", "0103"), xl, x) > 0, "history: the newest lane editing lane W3's config entry fails");
+        Check(Problems(w3l, w3, xl, x) > 0, "history: the newest lane dropping lane W3's entry fails");
+        Check(Problems(w3l, w3, c3, $"stream c/o count 1 digest {A} | W3 | r", xl, x) > 0, "history: the newest lane adding an entry under lane W3 fails");
     }
 
     static void Chain(string dir)

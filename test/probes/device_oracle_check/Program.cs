@@ -249,6 +249,14 @@ internal static class Program
         // case after it records. None may: checked after the last case.
         var catalog = CatalogText();
         int failures = 0, skipped = 0;
+        // No lane changes another lane's line (ChangeHistory.cs).
+        if (mode == "replay" && File.Exists(defaultChanges))
+        {
+            var problems = ChangeHistory.Check(defaultChanges, out string basis);
+            foreach (var problem in problems) Console.WriteLine($"  [FAIL] changes.txt: {problem}");
+            if (problems.Count == 0) Console.WriteLine($"  [PASS] changes.txt keeps every other lane's lines as {basis} held them");
+            else failures++;
+        }
         // The cases that ran to their golden comparison.
         var compared = new HashSet<string>(StringComparer.Ordinal);
         var recorded = new List<GoldenCase>();
