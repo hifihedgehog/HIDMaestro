@@ -408,7 +408,7 @@ internal static partial class Program
 
     static void LiveProtocol(Attached a)
     {
-        var s2 = a.Pad.UsbipHandle!.Device.Switch2!;
+        var s2 = Switch2View.Of(a.Pad.UsbipHandle!.Device);
         using var hid = new HidReader(a.HidPath!);
         using var bulk = new Bulk(a.WinUsbPath!);
 
@@ -453,11 +453,18 @@ internal static partial class Program
         // device's own handling of a parked and unlinked read is part A.
 
         Console.WriteLine("\n-- B3 start --");
+        // v2.0.0: the device builds its own reports, so a raw submit is its
+        // 24-byte state block, and any other length is refused with the size.
         bool threw = false;
-        try { a.Pad.SubmitRawReport(new byte[63]); } catch (NotSupportedException) { threw = true; }
+        try { a.Pad.SubmitRawReport(new byte[63]); } catch (ArgumentException e) { threw = e.Message.Contains("24-byte", StringComparison.Ordinal); }
         bool threwExtended = false;
-        try { a.Pad.SubmitRawExtendedReport(new byte[64]); } catch (NotSupportedException) { threwExtended = true; }
-        Check("the raw submit methods refuse: the device builds its own reports", threw && threwExtended);
+        try { a.Pad.SubmitRawExtendedReport(new byte[64]); } catch (ArgumentException e) { threwExtended = e.Message.Contains("24-byte", StringComparison.Ordinal); }
+        Check("a raw submit of another length than the state block is refused, naming its 24 bytes", threw && threwExtended);
+        bool tookBlock = true;
+        try { a.Pad.SubmitRawReport(new byte[24]); } catch (Exception) { tookBlock = false; }
+        Check("a raw submit of 24 bytes is taken as the state block", tookBlock);
+        // Back to a pad at rest for the reports that follow.
+        a.Pad.SubmitState(new HMGamepadState());
 
         long tStart = Stopwatch.GetTimestamp();
         var started = bulk.Command(Cmd(0x03, 0x0D, H("0100ffffffffffff")));
@@ -593,7 +600,7 @@ internal static partial class Program
                 b1.Command(Cmd(0x03, 0x0D, H("0100ffffffffffff")));
                 Check("starting the first leaves the second silent",
                       h1.Take(20, 1000).Count == 20 && h2.Pending == 0
-                      && one.Pad.UsbipHandle!.Device.Switch2!.ReportsOn && !two.Pad.UsbipHandle!.Device.Switch2!.ReportsOn);
+                      && Switch2View.Of(one.Pad.UsbipHandle!.Device).ReportsOn && !Switch2View.Of(two.Pad.UsbipHandle!.Device).ReportsOn);
                 b2.Command(Cmd(0x03, 0x0A, 0x05, 0, 0, 0));
                 b2.Command(Cmd(0x03, 0x0D, H("0100ffffffffffff")));
                 h1.Flush(30);

@@ -215,7 +215,7 @@ internal static partial class Program
         IntPtr gp = IntPtr.Zero;
         try
         {
-            var s2 = a.Pad.UsbipHandle!.Device.Switch2!;
+            var s2 = Switch2View.Of(a.Pad.UsbipHandle!.Device);
             var seen = WaitForSwitch2(1, 20000);
             foreach (var j in seen) Console.WriteLine($"  [joy] id={j.Id} gamepad={j.IsGamepad} '{j.Name}' path={Str(SDL_GetJoystickPathForID(j.Id))}");
             Check("SDL lists exactly one 057E:2069 device, as a gamepad", seen.Count == 1 && seen[0].IsGamepad, $"{seen.Count} listed");

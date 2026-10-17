@@ -40,10 +40,18 @@ internal static class Profiles
     static IEnumerable<PropertyInfo> JsonProperties(Type t) =>
         t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
          .Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null
-                     && p.GetCustomAttribute<JsonIgnoreAttribute>() == null
+                     && (p.GetCustomAttribute<JsonIgnoreAttribute>() == null || ReadBySharedParse(t, p))
                      && p.GetCustomAttribute<JsonExtensionDataAttribute>() == null
                      && (p.SetMethod?.IsPublic == true || p.GetCustomAttribute<JsonIncludeAttribute>() != null))
          .OrderBy(p => p.Name, StringComparer.Ordinal);
+
+    /// <summary>v2.0.0: the model groups (protocol, stateBlock, inputReports,
+    /// liveFeatureReports) are filled by the shared parse the build tool runs
+    /// (ProfilePrograms), not by the profile's own JSON context, which
+    /// ignores them. They are profile keys all the same.</summary>
+    static bool ReadBySharedParse(Type t, PropertyInfo p) =>
+        t == typeof(ControllerProfile) && p.GetCustomAttribute<JsonPropertyNameAttribute>() is { } name
+        && Array.IndexOf(ProfilePrograms.GroupKeys, name.Name) >= 0;
 
     static object? DefaultOf(Type t, Dictionary<Type, object?> cache)
     {

@@ -306,11 +306,29 @@
          composite create. A build made with HMSkipUsbip carries the
          profiles but refuses to create them. Consumers check
          HMProfile.RequiresUsbipBackend against HMBuildInfo.UsbipArchitectures. -->
-    <EmbeddedResource Include="..\..\profiles\**\*.json"
-                      Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json">
+    <HMProfileJson Include="..\..\profiles\**\*.json"
+                   Exclude="..\..\profiles\schema.json;..\..\profiles\scraped_descriptors.json;..\..\profiles\linux-kernel-fixed-descriptors.json;..\..\profiles\models\**" />
+    <!-- Named models: never read as profiles, and embedded under a logical
+         name of their own. -->
+    <HMModelJson Include="..\..\profiles\models\**\*.json" />
+    <EmbeddedResource Include="@(HMProfileJson)">
       <LogicalName>HIDMaestro.Profiles.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
       <Link>Profiles\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </EmbeddedResource>
+    <EmbeddedResource Include="@(HMModelJson)">
+      <LogicalName>HIDMaestro.Models.%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+      <Link>Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </EmbeddedResource>
+    <!-- The build step reads the same two item groups and generates a
+         kernel for every report program and decoder they declare (design
+         note, mechanism 2). A program it refuses fails this build, named by
+         file and JSON path. -->
+    <KernelGenJson Include="@(HMProfileJson);@(HMModelJson)" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <KernelGenMode>catalog</KernelGenMode>
+  </PropertyGroup>
+  <Import Project="..\HIDMaestro.KernelGen\KernelGen.targets" />
 
 </Project>

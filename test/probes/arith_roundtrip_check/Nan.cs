@@ -140,15 +140,17 @@ internal static class Nan
             {
                 double[] a = { 0.5, 0.5, 0.5, 0.5, 0, 0 };
                 a[k] = double.NaN;
-                var x = new byte[Switch2ProPacker.BodySize];
-                var y = new byte[Switch2ProPacker.BodySize];
+                // v2.0.0: the composite's state block through the codec,
+                // which replaced Switch2ProPacker.
+                var x = new byte[Switch2Body.Size];
+                var y = new byte[Switch2Body.Size];
                 var s = new HMGamepadState();
-                Switch2ProPacker.BuildBody(in s, a[0], a[1], a[2], a[3], a[4], a[5], x);
-                Switch2ProPacker.BuildBody(in s, 0.5, 0.5, 0.5, 0.5, 0, 0, y);
+                Switch2Body.Build(in s, a[0], a[1], a[2], a[3], a[4], a[5], x);
+                Switch2Body.Build(in s, 0.5, 0.5, 0.5, 0.5, 0, 0, y);
                 if (!x.AsSpan().SequenceEqual(y)) bad++;
             }
             if (bad != 0) fail++;
-            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] switch2 packer: {6 - bad} of 6 NaN slots write their rest");
+            Console.WriteLine($"  [{(bad == 0 ? "PASS" : "FAIL")}] switch2 state block: {6 - bad} of 6 NaN slots write their rest");
         }
         return fail;
     }

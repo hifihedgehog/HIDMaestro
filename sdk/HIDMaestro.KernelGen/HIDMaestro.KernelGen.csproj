@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The build step that emits the catalog's report programs as generated
+       kernels (design note, mechanism 2). It compiles the same ProgramForm
+       sources the SDK compiles, so a program parses, validates and hashes
+       one way at build time and at run time. A build-machine tool, never
+       shipped: framework-dependent, no runtime identifier, whatever the
+       program it serves publishes for. KernelGen.targets builds and runs it. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>HIDMaestro.KernelGen</AssemblyName>
+    <RootNamespace>HIDMaestro.KernelGen</RootNamespace>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>false</UseAppHost>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\HIDMaestro.Core\ProgramForm\**\*.cs" LinkBase="ProgramForm" />
+    <!-- The equivalence check's programs: the seeded corpus, the review
+         cases and the planted defects, emitted in mode probe. -->
+    <Compile Include="..\..\test\probes\program_equivalence_check\Corpus\**\*.cs" LinkBase="Corpus" />
+  </ItemGroup>
+</Project>

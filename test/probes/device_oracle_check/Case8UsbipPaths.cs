@@ -343,7 +343,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
 
     /// <summary>Output report 0x02 from the host on the interrupt OUT
     /// endpoint, at each length from empty to past the 32 bytes the decode
-    /// reads (Switch2ProPacker.cs:160), patterned and random, and other
+    /// reads (9bd6279's Switch2ProPacker.cs:160), patterned and random, and other
     /// report IDs, each batch read back from the controller's events.</summary>
     static void Rumble(GoldenCase g, CompositeRig r, Rng rng)
     {
@@ -405,8 +405,11 @@ internal sealed class Case8UsbipPaths : IOracleCase
         readonly IntPtr _view, _ring, _event;
         readonly HMController _c;
         readonly UsbipEmulatedDevice _dev;
-        readonly Switch2ProDevice? _s2;
-        readonly Action<long>? _send;
+        // A device that builds its reports (v2.0.0: the Switch 2 composite's
+        // protocol engine, where 9bd6279 had Switch2ProDevice), and its clock,
+        // which the case ticks itself.
+        readonly ProtocolEngine? _s2;
+        readonly IDeviceClock? _clock;
         readonly Thread _pump;
         readonly object _hidLock;
         readonly System.Collections.ICollection _frameQueue;
@@ -440,10 +443,9 @@ internal sealed class Case8UsbipPaths : IOracleCase
             InputEvents()[index] = _event;
 
             _dev = NewDevice(p, _view, _ring, _event, claimed ? host.Connection : null, out _inEndpoint);
-            _s2 = _dev.Switch2;
             var t = typeof(UsbipEmulatedDevice);
-            if (_s2 != null)
-                _send = (Action<long>)Delegate.CreateDelegate(typeof(Action<long>), _dev, t.GetMethod("SendSwitch2Report", Instance)!);
+            _s2 = _dev.Protocol is { Protocol.BuildsReports: true } engine ? engine : null;
+            _clock = (IDeviceClock?)t.GetField("_layoutClock", Instance)!.GetValue(_dev);
             _hidLock = t.GetField("_hidLock", Instance)!.GetValue(_dev)!;
             _frameQueue = (System.Collections.ICollection)t.GetField("_frameQueue", Instance)!.GetValue(_dev)!;
             _lastSeq = t.GetField("_lastSharedSeqNo", Instance)!;
@@ -482,9 +484,24 @@ internal sealed class Case8UsbipPaths : IOracleCase
             void Set(string field, object? value) =>
                 (t.GetField(field, Instance) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             var descriptors = new UsbDescriptorSet(p, 0);
-            if (CompiledProtocol.Compile(p, descriptors) != null)
-                throw new InvalidOperationException($"{p.Id} declares a device protocol, which this case does not build.");
             string busId = UsbipEmulatedDevice.BusIdFor(0);
+            // v2.0.0: a protocol compiles into an engine, its layouts bound as
+            // the constructor binds them (UsbipEmulatedDevice.cs, the
+            // constructor), to the generated kernels or, with
+            // HM_ORACLE_INTERPRET, the interpreter. A device that builds its
+            // reports gets its clock made and never started: the case ticks
+            // it.
+            var compiled = CompiledProtocol.Compile(p, descriptors);
+            LayoutRunner? runner = null;
+            if (compiled != null)
+            {
+                if (!compiled.BuildsReports && compiled.InputEndpoint != 0)
+                    throw new InvalidOperationException($"{p.Id} sends its report on a host poll clock, which this case does not build.");
+                runner = ProgramBinder.BindLayouts(compiled.Model, Environment.GetEnvironmentVariable("HM_ORACLE_INTERPRET") == "1");
+                var engine = new ProtocolEngine(compiled, descriptors.SerialString, 0, runner);
+                if (compiled.BuildsReports) engine.SetStateBlock(p.StateBlockAtRest());
+                Set("_engine", engine);
+            }
             Set("<Descriptors>k__BackingField", descriptors);
             Set("<BusId>k__BackingField", busId);
             Set("<Audio>k__BackingField", new UsbAudioEngine(p, (_, _, _) => { }));
@@ -501,13 +518,6 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 if (bulkIn == 0 && e.TransferType == 2 && e.IsIn) bulkIn = kv.Key;
             }
             Set("_primaryInEndpoint", inEndpoint);
-            bool switch2 = descriptors.VendorId == 0x057E && descriptors.ProductId == 0x2069;
-            if (switch2)
-            {
-                Set("_bulkInEndpoint", bulkIn);
-                Set("_switch2", new Switch2ProDevice(descriptors.SerialString, busId));
-                Set("_switch2Report", new byte[Switch2ProDevice.ReportSize]);
-            }
             var builder = p.GetOrBuildReportBuilder();
             Set("_builder", builder);
             int expectedSize = builder.InputReportByteSize > 0 ? builder.InputReportByteSize : 17;
@@ -547,6 +557,11 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("_readsPerEp", new Dictionary<byte, long>());
             Set("_completionsPerEp", new Dictionary<byte, long>());
             Set("_connection", connection);
+            // The protocol part's field initializers (UsbipEmulatedDevice.Protocol.cs).
+            Set("_protocolReads", Activator.CreateInstance(t.GetField("_protocolReads", Instance)!.FieldType));
+            Set("_spareReads", Activator.CreateInstance(t.GetField("_spareReads", Instance)!.FieldType));
+            if (runner != null)
+                t.GetMethod("CreateLayoutClock", Instance)!.Invoke(dev, new object[] { runner });
             return dev;
         }
 
@@ -599,15 +614,9 @@ internal sealed class Case8UsbipPaths : IOracleCase
             InterruptIn();
         }
 
-        /// <summary>Whether the responder's body is these bytes, read under
-        /// its own lock (Switch2ProDevice.cs:46, 66, 125-129).</summary>
-        bool BodyIs(byte[] body)
-        {
-            var t = typeof(Switch2ProDevice);
-            var sync = t.GetField("_sync", Instance)!.GetValue(_s2)!;
-            var have = (byte[])t.GetField("_body", Instance)!.GetValue(_s2)!;
-            lock (sync) return have.AsSpan().SequenceEqual(body);
-        }
+        /// <summary>Whether the device's state block is these bytes, read
+        /// under the engine's lock.</summary>
+        bool BodyIs(byte[] body) => _s2!.CopyStateBlock().AsSpan().SequenceEqual(body);
 
         static void Wait(Func<bool> done, string what)
         {
@@ -622,17 +631,16 @@ internal sealed class Case8UsbipPaths : IOracleCase
 
         uint Seq() => (uint)Marshal.ReadInt32(_view);
 
-        /// <summary>One tick of the report clock, while reports are on, as
-        /// Switch2Stream makes it.</summary>
+        /// <summary>One tick of the device clock, while reports are on, as
+        /// the clock's thread makes it.</summary>
         public void Tick()
         {
-            if (_s2 == null || _send == null) throw new InvalidOperationException("Only the Switch 2 composite has a report clock.");
-            if (!_s2.ReportsOnSince(out long since))
+            if (_s2 == null || _clock == null) throw new InvalidOperationException("Only the Switch 2 composite has a report clock.");
+            if (!_clock.TickNow())
             {
                 Out("tick-off", ReadOnlySpan<byte>.Empty);
                 return;
             }
-            _send(since);
             Out("tick", ReadOnlySpan<byte>.Empty);
             Drain();
         }
@@ -811,12 +819,13 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 return;
             }
             var r = new byte[10];
-            r[0] = (byte)(_s2.ReportsOn ? 1 : 0);
-            r[1] = _s2.SelectedReport;
-            r[2] = _s2.FeatureMask;
-            r[3] = _s2.FeatureEnabled;
-            r[4] = _s2.PlayerLeds;
-            BinaryPrimitives.WriteUInt32LittleEndian(r.AsSpan(5), _s2.ReportsSent);
+            var names = _s2.Protocol.Registers;
+            r[0] = (byte)(_s2.GetState(names.IndexOf("reportsOn")) ? 1 : 0);
+            r[1] = (byte)_s2.GetRegister(names.IndexOf("selectedReport"));
+            r[2] = (byte)_s2.GetRegister(names.IndexOf("featureMask"));
+            r[3] = (byte)_s2.GetRegister(names.IndexOf("featureEnabled"));
+            r[4] = (byte)_s2.GetRegister(names.IndexOf("playerLeds"));
+            BinaryPrimitives.WriteUInt32LittleEndian(r.AsSpan(5), _s2.GetCounter(0));
             r[9] = (byte)_dev.BulkReadsCanceled;
             Out("regs", r);
         }

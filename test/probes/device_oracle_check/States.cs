@@ -109,7 +109,7 @@ internal static class States
     /// at 9bd6279: the Switch Pro's 4096 per g and 13371/936 per
     /// degree/second (SwitchProPacker.cs:93-99), the Switch 2 Pro's 32767/8
     /// per g and pi/180 x 32767/34.8 per degree/second
-    /// (Switch2ProPacker.cs:45, 50). Written out here, so the inputs stay
+    /// (9bd6279's Switch2ProPacker.cs:45, 50). Written out here, so the inputs stay
     /// the same when those classes change or go.</summary>
     static float[] ImuScales() => new[]
     {

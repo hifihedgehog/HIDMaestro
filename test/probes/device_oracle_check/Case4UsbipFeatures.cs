@@ -642,8 +642,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
             var t = typeof(UsbipEmulatedDevice);
             var dev = (UsbipEmulatedDevice)RuntimeHelpers.GetUninitializedObject(t);
             var descriptors = new UsbDescriptorSet(profile, index);
-            if (CompiledProtocol.Compile(profile, descriptors) != null)
-                throw new InvalidOperationException($"{profile.Id} declares a device protocol, which this case does not build.");
+            OracleProtocol.Set(dev, profile, descriptors, index);
             void Set(string field, object? value) =>
                 (t.GetField(field, Instance) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             Set("<Descriptors>k__BackingField", descriptors);

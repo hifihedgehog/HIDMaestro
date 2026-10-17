@@ -36,3 +36,5 @@ __pycache__/
 *.pyc
 # Release ZIPs the coexistence probe builds its older peers from
 test/probes/coexist_check/legacy_cache/
+sdk/HIDMaestro.KernelGen/bin/
+sdk/HIDMaestro.KernelGen/obj/

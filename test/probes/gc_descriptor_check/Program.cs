@@ -306,7 +306,7 @@ internal static class Program
             "extendedOutputReport.fields[0] ('uint8') at bytes 2-2 overlaps the port blocks at bytes 1-4"),
         ("an output field past the OUT endpoint's packet",
             j => { Out(j)["size"] = 6; Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}"""); },
-            "extendedOutputReport.fields[0] ('uint8') ends at byte 6, past the 5-byte packets usbConfiguration.protocol.commands.endpoint 0x02 delivers"),
+            "$.extendedOutputReport.fields[0] ('uint8') ends at byte 6, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
 
         ("a port count that wraps an int",
             j =>
@@ -331,7 +331,7 @@ internal static class Program
             "extendedOutputReport.ports end at byte 281. An output report reaches the SDK with at most 256 bytes after its report ID"),
         ("an output report whose ports pass the OUT endpoint's packet",
             j => { Out(j)["size"] = 9; OutPorts(j)["stride"] = 2; },
-            "extendedOutputReport.ports end at byte 9, past the 5-byte packets usbConfiguration.protocol.commands.endpoint 0x02 delivers"),
+            "$.extendedOutputReport.ports end at byte 9, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
         ("more ports than the protocol tracks",
             j =>
             {
@@ -344,7 +344,7 @@ internal static class Program
                 ports["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftStickX"}""");
                 Rule(j, 2)["reply"]![1]!["bytes"] = "1-1";
             },
-            "extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
+            "$.extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
         ("a low-speed copy with a 37-byte interrupt endpoint",
             j => j["usbConfiguration"]!["busSpeed"] = "low",
             "usbConfiguration.busSpeed \"low\": interface 0 alternate setting 0 endpoint 0x81 has wMaxPacketSize 0x0025, over the 8 bytes a low-speed interrupt endpoint carries"),
@@ -407,53 +407,53 @@ internal static class Program
         // A command rule longer than the OUT endpoint's packets.
         ("a rule match longer than a packet",
             j => Rule(j, 0)["match"] = "110000000000",
-            "usbConfiguration.protocol.commands.rules[0].match is 6 bytes, longer than the 5-byte packets endpoint 0x02 delivers"),
+            "$.protocol.commands.rules[0].match ends at byte 6, past the 5-byte packets endpoint 0x02 delivers"),
         ("a rule minLength longer than a packet",
             j => Rule(j, 0)["minLength"] = 6,
-            "usbConfiguration.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
+            "$.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
         ("a report ID strip with no SET_REPORT commands",
             j => Protocol(j)["commands"]!["setReport"] = false,
-            "usbConfiguration.protocol.commands.setReportStripsId applies only with setReport true"),
+            "$.protocol.commands.setReportStripsId applies only to commands from SET_REPORT"),
 
         // Protocol values outside their range.
         ("no replies allowed to wait",
-            j => Protocol(j)["commands"]!["pendingReplies"] = 0,
-            "usbConfiguration.protocol.commands.pendingReplies 0 must be 1 or more"),
+            j => Protocol(j)["replies"]!["pending"] = 0,
+            "$.protocol.replies.pending 0 is outside 1 to 1024"),
         ("a GET_REPORT answer that is not defined",
             j => Protocol(j)["getReport"] = "stal",
-            "usbConfiguration.protocol.getReport \"stal\" is not one of input, reportId"),
+            "$.protocol.getReport \"stal\" is not one of input, reportId, deviceReport"),
 
         // A null where a value belongs.
         ("a null match",
             j => Rule(j, 3)["match"] = null,
-            "usbConfiguration.protocol.commands.rules[3].match is missing"),
+            "$.protocol.commands.rules[3].match is empty"),
         ("a null in a while list",
             j => Protocol(j)["input"]!["while"] = Arr("\"polling\"", "null"),
-            "usbConfiguration.protocol.input.while holds null where a state name belongs"),
+            Load + "$.protocol.input.while: A condition's list holds strings"),
         ("a null halt.while",
             j => Protocol(j)["halt"]!["while"] = null,
-            "usbConfiguration.protocol.halt.while names no state"),
+            "$.protocol.halt.while names no register"),
         ("a null reply part",
             j => Rule(j, 2)["reply"] = Arr("""{"hex":"22"}""", "null"),
-            "usbConfiguration.protocol.commands.rules[2].reply[1] is null"),
+            "$.protocol.commands.rules[2].reply[1] is null"),
         ("a null rule",
             j => Protocol(j)["commands"]!["rules"] = Arr("null"),
-            "usbConfiguration.protocol.commands.rules[0] is null"),
+            "$.protocol.commands.rules[0] is null"),
         ("null rules",
             j => Protocol(j)["commands"]!["rules"] = null,
-            "usbConfiguration.protocol.commands.rules is null"),
+            "$.protocol.commands.rules is null"),
         ("a null state",
             j => Protocol(j)["state"]![0] = null,
-            "usbConfiguration.protocol.state[0] is null"),
+            "$.protocol.state[0]: the entry is null"),
         ("null state",
             j => Protocol(j)["state"] = null,
-            "usbConfiguration.protocol.state is null"),
+            "$.protocol.input.while: 'polling' is not a register protocol.state declares"),
         ("a null input endpoint",
             j => Protocol(j)["input"]!["endpoint"] = null,
-            "usbConfiguration.protocol.input.endpoint is missing"),
+            "$.protocol.input.endpoint is missing"),
         ("a null portsConnected",
             j => Protocol(j)["input"]!["clock"]!["sourcePollRules"]![0]!["portsConnected"] = null,
-            "usbConfiguration.protocol.input.clock.sourcePollRules[0].portsConnected is null"),
+            "$.protocol.input.clock.sourcePollRules[0].portsConnected is null"),
         ("a null connection value",
             j => Ports(j)["status"]!["connections"]![1]!["value"] = null,
             "extendedReport.ports.status.connections[1].value is missing"),
@@ -526,7 +526,7 @@ internal static class Program
         ("an output field past the port blocks, on a device with no protocol",
             j =>
             {
-                j["usbConfiguration"]!.AsObject().Remove("protocol");
+                j.Remove("protocol");
                 Out(j)["size"] = 6;
                 Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}""");
             }),
@@ -582,7 +582,7 @@ internal static class Program
     {
         In(j).Remove("ports");
         Out(j).Remove("ports");
-        j["usbConfiguration"]!.AsObject().Remove("protocol");
+        j.Remove("protocol");
     }
 
     const string WideMask = """{"byte":1,"bits":"0-15","type":"button-mask","semantic":"held","buttons":["A","B","X","Y","LeftBumper","RightBumper","Back","Start","LeftStick","RightStick","Guide","_","_","_","_","_"]}""";
@@ -646,7 +646,7 @@ internal static class Program
         try
         {
             Probe.Check("CreateController refuses a malformed profile, naming it",
-                outcome.StartsWith($"InvalidOperationException: Profile '{id}': usbConfiguration.protocol.commands.rules[0].match", StringComparison.Ordinal),
+                outcome.StartsWith($"InvalidOperationException: Profile '{id}': $.protocol.commands.rules[0].match", StringComparison.Ordinal),
                 outcome);
             // Read before any dispose. A device a create made arrives
             // asynchronously, so give it the time the device part gives a
@@ -700,13 +700,18 @@ internal static class Program
         return seen;
     }
 
+    /// <summary>An expectation that starts with this is a refusal at load:
+    /// the shared parse of the model groups (ProfilePrograms) refuses the
+    /// file with the JSON path, before any create.</summary>
+    const string Load = "load: ";
+
     static JsonObject In(JsonObject j) => j["extendedReport"]!.AsObject();
     static JsonObject Out(JsonObject j) => j["extendedOutputReport"]!.AsObject();
     static JsonObject Ports(JsonObject j) => In(j)["ports"]!.AsObject();
     static JsonObject OutPorts(JsonObject j) => Out(j)["ports"]!.AsObject();
     static JsonObject PortField(JsonObject j, int i) => Ports(j)["fields"]![i]!.AsObject();
     static JsonObject OutPortField(JsonObject j, int i) => OutPorts(j)["fields"]![i]!.AsObject();
-    static JsonObject Protocol(JsonObject j) => j["usbConfiguration"]!["protocol"]!.AsObject();
+    static JsonObject Protocol(JsonObject j) => j["protocol"]!.AsObject();
     static JsonObject Rule(JsonObject j, int i) => Protocol(j)["commands"]!["rules"]![i]!.AsObject();
     static JsonArray Arr(params string[] items) => JsonNode.Parse("[" + string.Join(",", items) + "]")!.AsArray();
 
@@ -778,6 +783,17 @@ internal static class Program
             {
                 var (title, _, expect) = s_malformed[i];
                 string id = $"s79-malformed-{i}";
+                if (expect.StartsWith(Load, StringComparison.Ordinal))
+                {
+                    // The loader's parse of the file, as the load ran it.
+                    var parse = inner.PropertyType.GetMethod("Parse", BindingFlags.Static | Any)!;
+                    string message = "parsed";
+                    try { parse.Invoke(null, new object[] { (ReadOnlyMemory<byte>)File.ReadAllBytes(Path.Combine(dir, $"{id}.json")) }); }
+                    catch (TargetInvocationException ex) { message = ex.InnerException?.Message ?? "?"; }
+                    Probe.Check($"refused at load: {title}",
+                        ctx.GetProfile(id) == null && message.StartsWith(expect[Load.Length..], StringComparison.Ordinal), message);
+                    continue;
+                }
                 var p = ctx.GetProfile(id);
                 if (p == null)
                 {

@@ -287,12 +287,25 @@ public sealed partial class HMController : IDisposable
     private bool _switchProtocol;
     private byte[]? _switchBodyBuffer;
 
-    // Switch 2 Pro protocol (issue #66): the composite persona, 057E:2069
-    // on the USB/IP backend. SubmitState packs a state body and the
-    // backend's Switch2ProDevice builds every report from it on its own
-    // 4 ms clock. See Switch2ProPacker.
-    private readonly bool _switch2Protocol;
-    private readonly byte[]? _switch2BodyBuffer;
+    // v2.0.0: a device that builds its own reports (design note, mechanism
+    // 2). SubmitState encodes the profile's state block, and the device
+    // builds each report from it on its own clock, in the layout its
+    // protocol selects.
+    private readonly ExtendedReportSpec? _stateBlockSpec;
+    private readonly byte[]? _stateBlockBuffer;
+    private readonly VendorBlobCodec.EncoderState? _stateBlockEncoder;
+
+    // v2.0.0: the protocol's decoders, bound to their generated kernels or
+    // the interpreter, and the buffer one decodes from, the report with the
+    // slack a read's 32-bit load needs past it. The output reader alone
+    // touches the buffer.
+    private readonly DecoderRunner[]? _decoders;
+    private readonly byte[]? _decodeInput;
+    private readonly byte[]? _decodeOutput;
+
+    // The protocol a USB/IP device runs, whose registers a stream's
+    // condition and a codec field's holdWhile read.
+    private readonly Internal.Usbip.ProtocolEngine? _protocolEngine;
 
     /// <summary>v1.13.0: the controller ports of a device that carries
     /// several controllers in one report, as the profile's
@@ -301,8 +314,8 @@ public sealed partial class HMController : IDisposable
     /// submits to port 1.</summary>
     public HMPortSet Ports { get; }
 
-    /// <summary>v1.13.0: the protocol of a USB/IP device whose profile
-    /// declares <c>usbConfiguration.protocol</c>, else null.</summary>
+    /// <summary>The protocol of a USB/IP device whose profile declares a
+    /// <c>protocol</c>, else null.</summary>
     public HMDeviceProtocol? DeviceProtocol { get; }
 
     // Cached layout projections (audit 1n): Profile.Sticks / Profile.Triggers
@@ -586,14 +599,24 @@ public sealed partial class HMController : IDisposable
         if (_switchProtocol)
             _switchBodyBuffer = new byte[SwitchProPacker.BodySize];
 
-        // Switch 2 Pro protocol (issue #66): the same hardcoding, for the
-        // persona on the USB/IP backend alone. The UMDF2
-        // switch2-pro-controller profile shares the VID/PID and keeps its
-        // codec-built report 0x09.
-        _switch2Protocol = usbipHandle != null
-            && Switch2ProPacker.IsSwitch2Pro(profile.VendorId, profile.ProductId);
-        if (_switch2Protocol)
-            _switch2BodyBuffer = new byte[Switch2ProPacker.BodySize];
+        // v2.0.0: the device model. The profile compiled at load and at
+        // create's validation, so this reuses that work.
+        var model = profile.Inner.GetOrCompileModel();
+        _protocolEngine = usbipHandle?.Device.Protocol;
+        if (profile.Inner.StateBlock != null)
+        {
+            _stateBlockSpec = profile.Inner.StateBlockSpecForCodec();
+            _stateBlockBuffer = new byte[_stateBlockSpec.Size];
+            _stateBlockEncoder = new VendorBlobCodec.EncoderState();
+        }
+        if (model.Decoders.Length > 0)
+        {
+            _decoders = ProgramBinder.BindDecoders(model);
+            int need = 1;
+            foreach (var d in model.Decoders) need = Math.Max(need, d.MinLength);
+            _decodeInput = GC.AllocateArray<byte>(Math.Max(need, SharedMemoryIO.DATA_CAPACITY + 1) + Internal.Programs.ProgramForm.Slack + 1, pinned: true);
+            _decodeOutput = GC.AllocateArray<byte>(Internal.Programs.ProgramForm.MaxReport, pinned: true);
+        }
 
         // v1.13.0: the profile's controller ports, whose report goes out
         // once now so the device starts from it, and its USB/IP protocol.
@@ -777,20 +800,21 @@ public sealed partial class HMController : IDisposable
             return ElapsedMicros(startTicks);
         }
 
-        // Switch 2 Pro protocol path (issue #66): pack the state body. The
-        // device side picks report 0x09 or 0x05, stamps the counters and
-        // sends one report every 4 ms whatever rate this is called at, so a
-        // submit only replaces what the next report is built from. The body
-        // travels in the section's extended lane, which the backend reads
-        // back byte for byte.
-        if (_switch2Protocol)
+        // A device that builds its own reports (mechanism 2): encode its
+        // state block. The device picks the layout, stamps its counters and
+        // sends on its own clock whatever rate this is called at, so a submit
+        // only replaces what the next report is built from. The block travels
+        // in the section's extended lane, which the device reads back byte
+        // for byte.
+        if (_stateBlockSpec != null)
         {
-            Switch2ProPacker.BuildBody(in state, mlx, mly, mrx, mry, mlt, mrt, _switch2BodyBuffer!);
+            VendorBlobCodec.EncodeInput(_stateBlockSpec, in state, (float)mlx, (float)mly, (float)mrx, (float)mry,
+                (float)mlt, (float)mrt, _stateBlockBuffer!, _stateBlockEncoder!);
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0, null,
                 dataOffset: 0,
-                extendedData: _switch2BodyBuffer!, extendedLen: Switch2ProPacker.BodySize);
+                extendedData: _stateBlockBuffer!, extendedLen: _stateBlockSpec.Size);
 
             return ElapsedMicros(startTicks);
         }
@@ -1157,15 +1181,17 @@ public sealed partial class HMController : IDisposable
     /// data layout. The test app's <c>info</c> command shows every field's
     /// bit offset.</para>
     ///
-    /// <para>The Switch 2 Pro Controller composite persona takes no raw
-    /// reports and throws <see cref="NotSupportedException"/>. Which report
-    /// it sends, and when, belongs to the device, as it does on the real
-    /// pad, so its input comes from <see cref="SubmitState"/> alone.</para>
+    /// <para>A device that builds its own reports
+    /// (<see cref="HMProfile.BuildsItsOwnReports"/>) takes a raw report as its
+    /// state block, verbatim and of the state block's size, and throws
+    /// <see cref="ArgumentException"/> naming the size for any other length.
+    /// Which report it sends, and when, belongs to the device, as it does on
+    /// the real one.</para>
     /// </summary>
     public void SubmitRawReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        ThrowIfDeviceBuildsReports();
+        if (SubmitRawStateBlock(report)) return;
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         if (report.Length > SharedMemoryIO.DATA_CAPACITY)
             throw new ArgumentException(
@@ -1270,15 +1296,14 @@ public sealed partial class HMController : IDisposable
     /// caller owns the whole frame including its report id and wants that
     /// guaranteed regardless of profile (issue #58).</para>
     ///
-    /// <para>Throws <see cref="NotSupportedException"/> on the Switch 2 Pro
-    /// Controller composite persona, as <see cref="SubmitRawReport"/>
-    /// does.</para>
+    /// <para>A device that builds its own reports takes it as its state
+    /// block, as <see cref="SubmitRawReport"/> does.</para>
     /// </summary>
     /// <param name="report">The complete frame, report id included.</param>
     public void SubmitRawExtendedReport(ReadOnlySpan<byte> report)
     {
         ThrowIfDisposed();
-        ThrowIfDeviceBuildsReports();
+        if (SubmitRawStateBlock(report)) return;
         if (report.Length == 0) throw new ArgumentException("Report cannot be empty.", nameof(report));
         // The extended lane carries the whole frame in an 80-byte field. The
         // writer used to cut a longer one there without a word.
@@ -1865,35 +1890,13 @@ public sealed partial class HMController : IDisposable
                         }
                     }
 
-                    // Switch 2 Pro rumble decode (issue #66): output report
-                    // 0x02 carries one 16-byte block per actuator. The
-                    // levels surface as leftMotor and rightMotor on the lane
-                    // the first Pro uses. A report of another ID, or one
-                    // too short to hold both blocks, is skipped: a console
-                    // also sends empty packets on this endpoint.
-                    else if (_switch2Protocol
-                        && source == (byte)HMOutputSource.HidOutput && reportId == 0x02
-                        && dataSize >= Switch2ProPacker.RumbleDataSize && OutputDecoded != null)
+                    // v2.0.0: the protocol's decoders (mechanism 3), for an
+                    // output report a decoder names or a command whose rule
+                    // decodes it. A report shorter than its decoder reads is
+                    // not decoded: a console also sends empty packets.
+                    if (_decoders != null && source == (byte)HMOutputSource.HidOutput && OutputDecoded != null)
                     {
-                        try
-                        {
-                            Switch2ProPacker.DecodeRumble(new ReadOnlySpan<byte>(buf, 0, dataSize),
-                                out byte leftMotor, out byte rightMotor);
-                            var full = new byte[dataSize + 1];
-                            full[0] = reportId;
-                            Buffer.BlockCopy(buf, 0, full, 1, dataSize);
-                            EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
-                            {
-                                ReportId = reportId,
-                                Fields = new Dictionary<string, object>
-                                {
-                                    ["leftMotor"] = leftMotor,
-                                    ["rightMotor"] = rightMotor,
-                                },
-                                RawBytes = full,
-                                CrcValid = true,
-                            }, nameof(OutputDecoded));
-                        }
+                        try { RunDecoder(reportId, buf, dataSize); }
                         catch
                         {
                             // Same containment contract as the codec path.
@@ -2004,20 +2007,84 @@ public sealed partial class HMController : IDisposable
         }
     }
 
+    /// <summary>Decodes one output report, its ID and
+    /// <paramref name="dataSize"/> bytes of <paramref name="data"/>, with the
+    /// decoder its ID or its command's rule names, and raises OutputDecoded
+    /// with each field boxed as a byte.</summary>
+    private unsafe void RunDecoder(byte reportId, byte[] data, int dataSize)
+    {
+        var decoders = _decoders!;
+        int index = -1;
+        int length = dataSize + 1;
+        for (int i = 0; i < decoders.Length && index < 0; i++)
+            if (Array.IndexOf(decoders[i].Form.Reports, reportId) >= 0) index = i;
+        if (index < 0 && _protocolEngine != null)
+        {
+            var input = _decodeInput!;
+            input[0] = reportId;
+            Buffer.BlockCopy(data, 0, input, 1, Math.Min(dataSize, input.Length - 1));
+            int rule = _protocolEngine.Match(input.AsSpan(0, Math.Min(length, input.Length)));
+            if (rule >= 0) index = _protocolEngine.Protocol.Rules[rule].Decode;
+        }
+        if (index < 0) return;
+        var decoder = decoders[index];
+        if (length < decoder.Form.MinLength) return;
+        var inBuf = _decodeInput!;
+        inBuf[0] = reportId;
+        int copy = Math.Min(dataSize, decoder.Form.MinLength - 1);
+        Buffer.BlockCopy(data, 0, inBuf, 1, copy);
+        fixed (byte* s = inBuf)
+        fixed (byte* d = _decodeOutput!)
+            decoder.Run(s, d);
+        var semantics = decoder.Form.Semantics;
+        var fields = new Dictionary<string, object>(semantics.Length);
+        for (int i = 0; i < semantics.Length; i++) fields[semantics[i]] = _decodeOutput![i];
+        var full = new byte[length];
+        full[0] = reportId;
+        Buffer.BlockCopy(data, 0, full, 1, dataSize);
+        EventRaise.Each(OutputDecoded, this, new HMOutputDecodedEventArgs
+        {
+            ReportId = reportId,
+            Fields = fields,
+            RawBytes = full,
+            CrcValid = true,
+        }, nameof(OutputDecoded));
+    }
+
     private bool _disposed;
     private void ThrowIfDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(HMController));
     }
 
-    /// <summary>The Switch 2 Pro composite persona builds each report on the
-    /// device side, from the report its host selected and its own counters,
-    /// so a caller's finished report has nowhere to go (issue #66).</summary>
+    /// <summary>A device that builds each report from its state block has no
+    /// keyboard, mouse or consumer report for a caller's to land in.</summary>
     private void ThrowIfDeviceBuildsReports()
     {
-        if (_switch2Protocol)
+        if (_stateBlockSpec != null)
             throw new NotSupportedException(
-                $"Profile '{Profile.Id}' builds its own input reports. Use SubmitState.");
+                $"Profile '{Profile.Id}' builds its own input reports from its state block. Use SubmitState or SubmitRawReport.");
+    }
+
+    /// <summary>A raw submit on a device that builds its own reports: the
+    /// state block, verbatim. Returns false on any other device.</summary>
+    private bool SubmitRawStateBlock(ReadOnlySpan<byte> block)
+    {
+        if (_stateBlockSpec == null) return false;
+        if (block.Length != _stateBlockSpec.Size)
+            throw new ArgumentException(
+                $"Profile '{Profile.Id}' builds its reports from a {_stateBlockSpec.Size}-byte state block, " +
+                $"and a raw submit is that block: {block.Length} bytes is not.", nameof(block));
+        lock (_submitLock)
+        {
+            ThrowIfDisposed();
+            AwaitPreviousDelivery();
+            SubmitRawExtendedReportCore(block);
+            NoteFrameWritten();
+            if (_idleThread != null)
+                RememberRawFrame(block, extended: true);
+        }
+        return true;
     }
 
     /// <summary>True on a thread that raises this controller's events: its

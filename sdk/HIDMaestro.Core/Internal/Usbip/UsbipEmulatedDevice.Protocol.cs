@@ -6,11 +6,11 @@ using System.Threading;
 
 namespace HIDMaestro.Internal.Usbip;
 
-// A device whose profile declares usbConfiguration.protocol: its IN endpoint
-// served packet by packet on a modeled host poll clock, its command endpoint,
-// its control answers and its halt. ProtocolEngine holds the state, and
-// CompiledProtocol the profile's rules. docs/design/v1.13.0.md describes the
-// model.
+// A device whose profile declares a protocol and sends the SDK's report: its
+// IN endpoint served packet by packet on a modeled host poll clock, its
+// command endpoint, its control answers and its halt. ProtocolEngine holds the
+// state, and CompiledProtocol the profile's rules. docs/design/v1.13.0.md
+// describes the model. The poll clock is a DeviceClock with the nextPoll rule.
 internal sealed partial class UsbipEmulatedDevice
 {
     /// <summary>An output-ring entry the device writes when its protocol
@@ -40,26 +40,41 @@ internal sealed partial class UsbipEmulatedDevice
     private readonly LinkedList<ProtocolRead> _protocolReads = new();
     private readonly Stack<LinkedListNode<ProtocolRead>> _spareReads = new();
 
-    private AutoResetEvent? _protocolWake;
-    private IntPtr _protocolTimer;
-    private Thread? _protocolThread;
+    private DeviceClock<HostPollTick>? _protocolClock;
     // The host's poll grid starts at attach. A host controller polls an
     // interrupt endpoint on a fixed schedule whatever the transfers do.
     private long _protocolClockOrigin = Stopwatch.GetTimestamp();
 
+    /// <summary>The host's poll clock for the input endpoint. A host
+    /// controller polls an interrupt endpoint every period while a transfer
+    /// is queued, on a grid that starts at attach, and a read that arrives
+    /// between polls waits for the next one. The period is the endpoint
+    /// descriptor's unless the program models a faster host. While no read
+    /// could complete, because nothing is parked or the device has nothing to
+    /// send, the clock sleeps until something changes.</summary>
+    private struct HostPollTick : IClockTick
+    {
+        private readonly UsbipEmulatedDevice _dev;
+        public HostPollTick(UsbipEmulatedDevice dev) { _dev = dev; }
+
+        public bool Running(out long origin)
+        {
+            origin = Volatile.Read(ref _dev._protocolClockOrigin);
+            bool parked;
+            lock (_dev._hidLock) parked = _dev._protocolReads.Count > 0;
+            return parked && _dev._engine!.CanSend;
+        }
+
+        public long Period => Math.Max(1, Stopwatch.Frequency * _dev._engine!.HostPollMicros / 1_000_000);
+        public long NotBefore => 0;
+        public void Tick(long due) => _dev.ProtocolPoll(due);
+        public void RunEnded() { }
+    }
+
     private void StartProtocolClock()
     {
-        _protocolWake = new AutoResetEvent(false);
-        _protocolTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        var clock = new Thread(ProtocolClockLoop)
-        {
-            IsBackground = true,
-            Name = $"HMUsbipProtocolClock_{_index}",
-            Priority = ThreadPriority.AboveNormal,
-        };
-        clock.Start();
-        _protocolThread = clock;
+        _protocolClock = new DeviceClock<HostPollTick>(new HostPollTick(this), MissedTick.NextPoll, $"HMUsbipProtocolClock_{_index}");
+        _protocolClock.Start();
     }
 
     /// <summary>Initial state: at attach, at detach and on a port reset. The
@@ -79,8 +94,10 @@ internal sealed partial class UsbipEmulatedDevice
             }
         }
         Volatile.Write(ref _protocolClockOrigin, Stopwatch.GetTimestamp());
-        PublishOutput(SourceDeviceReset, 0, ReadOnlySpan<byte>.Empty);
+        // The ports' outputs go back to zero with the device's state.
+        if (engine.Protocol.Ports != null) PublishOutput(SourceDeviceReset, 0, ReadOnlySpan<byte>.Empty);
         WakeProtocolClock();
+        WakeLayoutClock();
     }
 
     /// <summary>Caller holds _hidLock.</summary>
@@ -121,11 +138,14 @@ internal sealed partial class UsbipEmulatedDevice
         var engine = _engine!;
         int size = engine.Protocol.CommandPacketSize;
         var effect = ProtocolEngine.Effect.None;
+        long now = Stopwatch.GetTimestamp();
         for (int off = 0; off < payload.Length; off += size)
         {
             var packet = payload.Slice(off, Math.Min(size, payload.Length - off));
-            effect |= engine.HandlePacket(packet);
-            PublishOutput(SourceHidOutput, packet[0], packet[1..]);
+            var result = engine.HandleCommand(packet, now);
+            effect |= result.Effect;
+            if (!engine.Protocol.ConsumesCommands && !result.Consume)
+                PublishOutput(SourceHidOutput, packet[0], packet[1..]);
             if ((effect & ProtocolEngine.Effect.Halted) != 0) break;
         }
         ProtocolApply(effect);
@@ -145,9 +165,10 @@ internal sealed partial class UsbipEmulatedDevice
         if (_engine!.Protocol.SetReportStripsId && reportId != 0 && report.Length > 1 && report[0] == reportId)
             report = report[1..];
         if (report.Length == 0) return;
-        var effect = _engine!.HandlePacket(report);
-        PublishOutput(SourceHidOutput, report[0], report[1..]);
-        ProtocolApply(effect);
+        var result = _engine!.HandleCommand(report, Stopwatch.GetTimestamp());
+        if (!_engine.Protocol.ConsumesCommands && !result.Consume)
+            PublishOutput(SourceHidOutput, report[0], report[1..]);
+        ProtocolApply(result.Effect);
     }
 
     /// <summary>What a command did: a halt fails every parked read, and any
@@ -157,7 +178,10 @@ internal sealed partial class UsbipEmulatedDevice
         if ((effect & ProtocolEngine.Effect.Halted) != 0)
             FailProtocolReads(_engine!.Protocol.HaltStatus);
         if (effect != ProtocolEngine.Effect.None)
+        {
             WakeProtocolClock();
+            WakeLayoutClock();
+        }
     }
 
     private void ProtocolSubmitOut(uint seqnum, ReadOnlySpan<byte> payload)
@@ -302,7 +326,10 @@ internal sealed partial class UsbipEmulatedDevice
             SendRetSubmitSpan(cmd.Seqnum, 0, 1, id);
             return true;
         }
-        if (reportType != 0x01) return false;
+        // A device that builds its reports answers from its layouts, in the
+        // device's general handling.
+        if (reportType != 0x01 || engine.Protocol.GetReport == GetReportMode.DeviceReport
+            || engine.Protocol.BuildsReports || engine.Protocol.InputEndpoint == 0) return false;
         // The input report as it stands, for its own ID. Any other ID goes
         // to the device's general handling: another report the descriptor
         // declares answers its ID and zeros, since the engine sends only its
@@ -316,111 +343,9 @@ internal sealed partial class UsbipEmulatedDevice
         return true;
     }
 
-    /// <summary>The host's poll clock for the input endpoint. A host
-    /// controller polls an interrupt endpoint every period while a transfer
-    /// is queued, on a grid that starts at attach, and a read that arrives
-    /// between polls waits for the next one. The period is the endpoint
-    /// descriptor's unless the program models a faster host. A clock held up
-    /// skips the polls it missed instead of sending a burst. While no read
-    /// could complete, because nothing is parked or the device has nothing
-    /// to send, the clock sleeps until something changes.</summary>
-    private void ProtocolClockLoop()
-    {
-        try
-        {
-            ProtocolClock();
-        }
-        finally
-        {
-            CloseProtocolClock();
-        }
-    }
+    /// <summary>Wake the poll clock, unless it has ended.</summary>
+    private void WakeProtocolClock() => _protocolClock?.Wake();
 
-    /// <summary>Wake the poll clock, unless it has ended and closed its
-    /// event.</summary>
-    private void WakeProtocolClock()
-    {
-        lock (_lifetimeLock)
-            if (!_protocolWakeClosed) _protocolWake?.Set();
-    }
-
-    /// <summary>The poll clock's event and timer, closed by the clock as it
-    /// ends, or by DisposeProtocol when the clock never started.</summary>
-    private void CloseProtocolClock()
-    {
-        lock (_lifetimeLock) _protocolWakeClosed = true;
-        if (_protocolTimer != IntPtr.Zero) CloseHandle(_protocolTimer);
-        _protocolWake?.Dispose();
-    }
-
-    private void ProtocolClock()
-    {
-        var engine = _engine!;
-        var waits = new[] { _protocolTimer, _protocolWake!.SafeWaitHandle.DangerousGetHandle() };
-        long freq = Stopwatch.Frequency;
-        long due = 0;
-        int dueMicros = 0;
-        while (!_stop)
-        {
-            try
-            {
-                bool parked;
-                lock (_hidLock) parked = _protocolReads.Count > 0;
-                if (!parked || !engine.CanSend)
-                {
-                    _protocolWake.WaitOne(500);
-                    due = 0;
-                    continue;
-                }
-
-                int micros = engine.HostPollMicros;
-                long interval = Math.Max(1, freq * micros / 1_000_000);
-                long now = Stopwatch.GetTimestamp();
-                if (due == 0 || micros != dueMicros)
-                {
-                    // The next poll on the grid.
-                    long origin = Volatile.Read(ref _protocolClockOrigin);
-                    long k = (now - origin) / interval + 1;
-                    due = origin + k * interval;
-                    dueMicros = micros;
-                }
-                if (now >= due)
-                {
-                    ProtocolPoll(due);
-                    due += interval;
-                    if (due <= now) due += ((now - due) / interval + 1) * interval;
-                    continue;
-                }
-
-                long wait = due - now;
-                if (_protocolTimer != IntPtr.Zero)
-                {
-                    long rel = -Math.Max(1, wait * 10_000_000L / freq); // relative, 100 ns units
-                    if (SetWaitableTimer(_protocolTimer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false)
-                        && WaitForMultipleObjects(2, waits, false, 100) != WAIT_FAILED)
-                        continue;
-                }
-                // No high-resolution timer (Windows 10 before 1803) or a
-                // failed wait: the plain wait, coarser but still running.
-                _protocolWake.WaitOne((int)Math.Max(1, wait * 1000 / freq));
-            }
-            catch
-            {
-                // The input pump's containment contract: a transient failure
-                // must not end the clock.
-            }
-        }
-    }
-
-    /// <summary>A started clock closes its own handles as it ends. A
-    /// constructor that failed inside StartProtocolClock leaves some of
-    /// these unset, and the clock unstarted.</summary>
-    private void DisposeProtocol(int joinMs)
-    {
-        WakeProtocolClock();
-        if (_protocolThread is { } clock)
-            try { clock.Join(joinMs); } catch { }
-        else
-            CloseProtocolClock();
-    }
+    /// <summary>A started clock closes its own handles as it ends.</summary>
+    private void DisposeProtocol(int joinMs) => _protocolClock?.Stop(joinMs);
 }

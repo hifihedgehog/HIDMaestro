@@ -240,6 +240,71 @@ public sealed class ControllerProfile
     [JsonPropertyName("usbConfiguration")]
     public UsbConfigurationSpec? UsbConfiguration { get; set; }
 
+    /// <summary>v2.0.0: how the device behaves beyond its descriptors: its
+    /// registers, the commands it takes and the replies they draw, when it
+    /// reports and how often, its output decoders, and when it stops
+    /// answering (design note, mechanism 3). Null for a device that reports
+    /// whatever is submitted as it is submitted. The model groups are read by
+    /// the shared parse (<see cref="ProfilePrograms"/>), the one the build
+    /// tool runs, not by this object's own JSON context.</summary>
+    [JsonIgnore]
+    [JsonPropertyName("protocol")]
+    public ProtocolSpec? Protocol { get; set; }
+
+    /// <summary>v2.0.0: the bytes SubmitState fills for a device that builds
+    /// its own reports (mechanism 2).</summary>
+    [JsonIgnore]
+    [JsonPropertyName("stateBlock")]
+    public StateBlockSpec? StateBlock { get; set; }
+
+    /// <summary>v2.0.0: <see cref="StateBlock"/>'s field list in the codec
+    /// vocabulary, read from its <c>fields</c>.</summary>
+    [JsonIgnore]
+    public List<FieldSpec>? StateBlockFields { get; set; }
+
+    /// <summary>v2.0.0: the reports a device builds from its state block.</summary>
+    [JsonIgnore]
+    [JsonPropertyName("inputReports")]
+    public List<InputReportSpec>? InputReports { get; set; }
+
+    /// <summary>v2.0.0: feature reports whose answer is the current state.</summary>
+    [JsonIgnore]
+    [JsonPropertyName("liveFeatureReports")]
+    public List<LiveFeatureReportSpec>? LiveFeatureReports { get; set; }
+
+    private CompiledModel? _model;
+
+    /// <summary>The model groups compiled into the validated form, once per
+    /// profile instance. Throws <see cref="Programs.FormException"/> with the
+    /// JSON path of a value it refuses.</summary>
+    internal CompiledModel GetOrCompileModel() =>
+        _model ??= ModelCompiler.Compile(new DeviceModelGroups
+        {
+            Protocol = Protocol, StateBlock = StateBlock, InputReports = InputReports, LiveFeatureReports = LiveFeatureReports,
+        });
+
+    /// <summary>True when the device builds its reports from a state block
+    /// it takes at SubmitState, so a raw submit is a state block too.</summary>
+    [JsonIgnore]
+    public bool BuildsItsOwnReports => InputReports is { Count: > 0 };
+
+    /// <summary>Reads a profile file: the profile through the SDK's context,
+    /// and its model groups through the shared parse the build tool runs.</summary>
+    internal static ControllerProfile? Parse(ReadOnlyMemory<byte> utf8)
+    {
+        utf8 = ProfilePrograms.WithoutBom(utf8);
+        var profile = JsonSerializer.Deserialize(utf8.Span, HMJsonContext.Default.ControllerProfile);
+        if (profile == null) return null;
+        var groups = ProfilePrograms.Read(utf8);
+        profile.Protocol = groups.Protocol;
+        profile.StateBlock = groups.StateBlock;
+        profile.InputReports = groups.InputReports;
+        profile.LiveFeatureReports = groups.LiveFeatureReports;
+        if (groups.StateBlock?.Fields is { } fields)
+            profile.StateBlockFields = fields.Deserialize(HMJsonContext.Default.ListFieldSpec);
+        return profile;
+    }
+
     /// <summary>Issue #56. Feature-report answers this persona serves, for
     /// a device whose claiming software interrogates it over
     /// GET_REPORT(Feature). Only meaningful on the <c>usbip</c> backend;
@@ -404,15 +469,53 @@ public sealed class ControllerProfile
         ValidateDataReport();
         ValidateExtendedReports();
         ValidatePorts();
+        ValidateProgramModel();
         var cfg = UsbConfiguration;
-        if (cfg?.Protocol == null && cfg?.WinUsb == null) return;
+        if (Protocol == null && cfg?.WinUsb == null) return;
         if (!RequiresUsbipBackend)
             throw new InvalidOperationException(
-                $"Profile '{Id}': usbConfiguration.protocol and usbConfiguration.winUsb apply to the usbip backend only.");
+                $"Profile '{Id}': protocol and usbConfiguration.winUsb apply to the usbip backend in this release, " +
+                "where the SDK serves the device's endpoints.");
         var descriptors = new Usbip.UsbDescriptorSet(this);
         Usbip.CompiledProtocol.Compile(this, descriptors);
         WinUsbBinding.PackageFor(this, descriptors);
     }
+
+    /// <summary>v2.0.0: the model groups compile, and the state block's
+    /// fields fit it.</summary>
+    private void ValidateProgramModel()
+    {
+        CompiledModel model;
+        try { model = GetOrCompileModel(); }
+        catch (Programs.FormException e) { throw new InvalidOperationException($"Profile '{Id}': {e.Path}: {e.Reason}", e); }
+        if (StateBlock != null)
+        {
+            if (StateBlockFields == null)
+                throw new InvalidOperationException($"Profile '{Id}': $.stateBlock.fields is missing: the state block's fields say what SubmitState writes.");
+            VendorBlobProgram.Check(StateBlockSpecForCodec(), StateBlock.Size, $"Profile '{Id}': $.stateBlock", output: false, portBlock: false);
+        }
+        if (BuildsItsOwnReports && Protocol == null)
+            throw new InvalidOperationException($"Profile '{Id}': $.inputReports: a device that builds its reports needs a protocol that says when it sends them.");
+    }
+
+    /// <summary>The state block of a device at rest, before any SubmitState:
+    /// a default state with the sticks centered and the triggers released,
+    /// encoded as SubmitState encodes one.</summary>
+    internal byte[] StateBlockAtRest()
+    {
+        var spec = StateBlockSpecForCodec();
+        var block = new byte[spec.Size];
+        var rest = new HMGamepadState();
+        VendorBlobCodec.EncodeInput(spec, in rest, 0.5f, 0.5f, 0.5f, 0.5f, 0f, 0f, block, new VendorBlobCodec.EncoderState());
+        return block;
+    }
+
+    private ExtendedReportSpec? _stateBlockSpec;
+
+    /// <summary>The state block as a codec spec: its size and fields, no
+    /// report ID, so the codec encodes it as it encodes any report.</summary>
+    internal ExtendedReportSpec StateBlockSpecForCodec() =>
+        _stateBlockSpec ??= new ExtendedReportSpec { Size = StateBlock!.Size, Fields = StateBlockFields ?? new List<FieldSpec>() };
 
     /// <summary>
     /// Whether triggers are combined into a single Z axis (true for Xbox on Windows).
@@ -1044,101 +1147,6 @@ public sealed class FieldSpec
     public string? Clock { get; set; }
 }
 
-/// <summary>v2.0.0: a <c>scale</c> as JSON writes it, a number or an exact
-/// ratio <c>[numerator, denominator]</c>.</summary>
-[JsonConverter(typeof(ScaleSpecJsonConverter))]
-public sealed class ScaleSpec
-{
-    public double Numerator { get; set; }
-    public double Denominator { get; set; } = 1;
-}
-
-/// <summary>Reads and writes <see cref="ScaleSpec"/> as a number or a
-/// two-number array.</summary>
-public sealed class ScaleSpecJsonConverter : JsonConverter<ScaleSpec>
-{
-    public override ScaleSpec Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        if (reader.TokenType == JsonTokenType.Number)
-            return new ScaleSpec { Numerator = reader.GetDouble(), Denominator = 1 };
-        if (reader.TokenType != JsonTokenType.StartArray)
-            throw new JsonException("A scale is a number or an array [numerator, denominator].");
-        reader.Read();
-        if (reader.TokenType != JsonTokenType.Number) throw new JsonException("A scale's numerator is a number.");
-        double n = reader.GetDouble();
-        reader.Read();
-        if (reader.TokenType != JsonTokenType.Number) throw new JsonException("A scale's denominator is a number.");
-        double d = reader.GetDouble();
-        reader.Read();
-        if (reader.TokenType != JsonTokenType.EndArray) throw new JsonException("A scale's array holds two numbers.");
-        return new ScaleSpec { Numerator = n, Denominator = d };
-    }
-
-    public override void Write(Utf8JsonWriter writer, ScaleSpec value, JsonSerializerOptions options)
-    {
-        if (value.Denominator == 1)
-        {
-            writer.WriteNumberValue(value.Numerator);
-            return;
-        }
-        writer.WriteStartArray();
-        writer.WriteNumberValue(value.Numerator);
-        writer.WriteNumberValue(value.Denominator);
-        writer.WriteEndArray();
-    }
-}
-
-/// <summary>v2.0.0: one part of a <c>packed-uint</c> output field. Its
-/// value is assembled from <see cref="Pieces"/>, lowest first, in each of
-/// <see cref="Frames"/>. The largest frame's value, plus
-/// <see cref="Offset"/>, maps to 0 outside <see cref="Range"/>, and
-/// otherwise to itself times <see cref="Scale"/>, rounded by
-/// <see cref="Round"/> and clamped to 0..255.</summary>
-public sealed class PackedPartSpec
-{
-    /// <summary>The bit groups, lowest first: each <c>{ "at", "count" }</c>,
-    /// a bit offset from the report's first byte, its ID included, and a
-    /// width.</summary>
-    [JsonPropertyName("pieces")]
-    public List<PackedPieceSpec> Pieces { get; set; } = new();
-
-    /// <summary><c>[count, stride]</c>: the pieces read in each of
-    /// <c>count</c> frames, <c>stride</c> bytes apart. Absent is one
-    /// frame.</summary>
-    [JsonPropertyName("frames")]
-    public List<int>? Frames { get; set; }
-
-    /// <summary>Added to the value before the range test.</summary>
-    [JsonPropertyName("offset")]
-    public int? Offset { get; set; }
-
-    /// <summary><c>[low, high]</c>: a value outside maps to 0. Absent
-    /// accepts every value.</summary>
-    [JsonPropertyName("range")]
-    public List<int>? Range { get; set; }
-
-    /// <summary>The value's factor, a number or <c>[numerator,
-    /// denominator]</c>. Absent is 1.</summary>
-    [JsonPropertyName("scale")]
-    public ScaleSpec? Scale { get; set; }
-
-    /// <summary><c>"down"</c> truncates the scaled value, as integer
-    /// division does. <c>"nearest"</c>, the default, rounds it to nearest,
-    /// ties to even.</summary>
-    [JsonPropertyName("round")]
-    public string? Round { get; set; }
-}
-
-/// <summary>v2.0.0: one bit group of a <see cref="PackedPartSpec"/>.</summary>
-public sealed class PackedPieceSpec
-{
-    [JsonPropertyName("at")]
-    public int At { get; set; }
-
-    [JsonPropertyName("count")]
-    public int Count { get; set; }
-}
-
 /// <summary>v1.3.5: CRC32 scope spec for a crc32-le field. The CRC is
 /// computed over <see cref="Prefix"/> bytes followed by the report bytes
 /// from offset <see cref="From"/> through <see cref="To"/> inclusive.</summary>
@@ -1187,8 +1195,7 @@ public sealed class ProfileDatabase
         {
             try
             {
-                var json = File.ReadAllText(file);
-                var profile = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile);
+                var profile = ControllerProfile.Parse(File.ReadAllBytes(file));
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
                     parsed.Add(profile);
             }
@@ -1249,9 +1256,9 @@ public sealed class ProfileDatabase
             {
                 using var s = asm.GetManifestResourceStream(name);
                 if (s == null) return;
-                using var reader = new StreamReader(s);
-                string json = reader.ReadToEnd();
-                var profile = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile);
+                using var ms = new MemoryStream();
+                s.CopyTo(ms);
+                var profile = ControllerProfile.Parse(ms.GetBuffer().AsMemory(0, (int)ms.Length));
                 if (profile != null && !string.IsNullOrEmpty(profile.Id))
                     parsed.Add(profile);
             }

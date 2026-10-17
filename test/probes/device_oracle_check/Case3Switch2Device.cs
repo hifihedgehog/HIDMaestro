@@ -21,14 +21,17 @@
 // The 4 ms report clock of UsbipEmulatedDevice.cs:933-991 is not part of
 // this case: the case calls BuildNextReport where that clock would.
 //
-// Only Subject below touches Switch2ProDevice, so a lane that replaces the
-// device replays this case by changing that one class.
+// Only Subject below touches the device. At 9bd6279 that was
+// Switch2ProDevice. From v2.0.0 it is the protocol engine compiled from the
+// composite profile's JSON, so the replay holds the profile's data to the
+// class it replaced.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
+using HIDMaestro.Internal.Programs;
 
 internal sealed class Case3Switch2Device : IOracleCase
 {
@@ -47,7 +50,7 @@ internal sealed class Case3Switch2Device : IOracleCase
     static readonly byte[] PeekIds = { 0x00, 0x05, 0x09, 0x07 };
 
     // Every command row Switch2ProDevice.HandleBulkOut names
-    // (Switch2ProDevice.cs:175-240), as (command << 8) | subcommand.
+    // (9bd6279's Switch2ProDevice.cs:175-240), as (command << 8) | subcommand.
     static readonly ushort[] Rows =
     {
         0x0201, 0x0204, 0x0303, 0x030A, 0x030D, 0x0701, 0x0907, 0x0C01, 0x0C02,
@@ -71,7 +74,7 @@ internal sealed class Case3Switch2Device : IOracleCase
 
     // Flash addresses for 02/01 and 02/04: SDL's reads
     // (SDL_hidapi_switch2.c:433-491), the image's segment edges
-    // (Switch2ProDevice.cs:405-419), and the 0x200000 wrap (353).
+    // (9bd6279's Switch2ProDevice.cs:405-419), and the 0x200000 wrap (353).
     static readonly uint[] Addresses =
     {
         0x13000, 0x13040, 0x13080, 0x130C0, 0x13100, 0x13140, 0x1FC040, 0x1FC080,
@@ -237,7 +240,7 @@ internal sealed class Case3Switch2Device : IOracleCase
         var s = new Subject(g, serial);
         // The probe staged gravity on the pad (Steam.cs:130, Stage(AccelGY = 1)):
         // buttons 0, sticks at 0x800, about 4096 counts on the third motion
-        // word, which Switch2ProPacker.cs:110-112 fills from AccelGY.
+        // word, which 9bd6279's Switch2ProPacker.cs:110-112 fills from AccelGY.
         s.SetBody(Hex("00000000" + "0008000800080008" + "000000000010" + "000000000000"));
         long on = -1;
         long reportsBuilt = 0;
@@ -345,7 +348,7 @@ internal sealed class Case3Switch2Device : IOracleCase
     }
 
     /// <summary>Payloads shorter than the 8-byte header: logged and
-    /// otherwise ignored (Switch2ProDevice.cs:166). Random bytes, and each
+    /// otherwise ignored (9bd6279's Switch2ProDevice.cs:166). Random bytes, and each
     /// prefix of 03/0D.</summary>
     static void ShortPayloads(GoldenCase g, string serial, Rng rng)
     {
@@ -369,7 +372,7 @@ internal sealed class Case3Switch2Device : IOracleCase
 
     /// <summary>Reports 0x09 and 0x05 with the IMU and rumble features off
     /// and on, from random bodies, every peek, and bodies of the wrong size,
-    /// which the device ignores (Switch2ProDevice.cs:127).</summary>
+    /// which the device ignores (9bd6279's Switch2ProDevice.cs:127).</summary>
     static void Reports(GoldenCase g, string serial, Rng rng)
     {
         g.Stream($"switch2/{ProfileId}/reports");
@@ -453,7 +456,7 @@ internal sealed class Case3Switch2Device : IOracleCase
         }
     }
 
-    /// <summary>More than 64 replies waiting (Switch2ProDevice.cs:61, 262-268):
+    /// <summary>More than 64 replies waiting (9bd6279's Switch2ProDevice.cs:61, 262-268):
     /// with the head unread the oldest goes, with the head half read the
     /// newest is dropped, and Reset clears a half-read head.</summary>
     static void Overflow(GoldenCase g, string serial)
@@ -485,7 +488,7 @@ internal sealed class Case3Switch2Device : IOracleCase
     /// <summary>Reset after every kind of state: it clears reports, the
     /// selection, the mask, the features, the LEDs, the count and the
     /// replies, and keeps the body and the bulk log
-    /// (Switch2ProDevice.cs:105-121).</summary>
+    /// (9bd6279's Switch2ProDevice.cs:105-121).</summary>
     static void ResetState(GoldenCase g, string serial, Rng rng)
     {
         g.Stream($"switch2/{ProfileId}/reset");
@@ -612,12 +615,40 @@ internal sealed class Case3Switch2Device : IOracleCase
 
     /// <summary>The device under test and the outputs it gives. The one
     /// class here that names Switch2ProDevice.</summary>
+    /// <summary>The device as v2.0.0 runs it: the protocol engine compiled
+    /// from the composite profile's own JSON (its protocol, stateBlock and
+    /// inputReports), with its layouts bound as the USB/IP device binds them,
+    /// to the kernels the build step generated, or to the interpreter when
+    /// HM_ORACLE_INTERPRET is set. Each member maps one call the recording
+    /// made on Switch2ProDevice at 9bd6279 to the engine member that took
+    /// its place.</summary>
     sealed class Subject
     {
         readonly GoldenCase _g;
-        readonly Switch2ProDevice _d;
+        readonly ProtocolEngine _e;
+        readonly LayoutRunner _runner;
         readonly bool _quiet;
         readonly byte[] _report = new byte[ReportSize];
+        readonly byte[] _chunk = new byte[4096];
+        readonly int _reportsOn, _selected, _mask, _enabled, _leds;
+
+        /// <summary>The profile the case reads, mutated by a run of
+        /// HM_ORACLE_MUTATE so the replay can be shown to fail.</summary>
+        static ControllerProfile Profile()
+        {
+            var p = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == ProfileId);
+            if (Environment.GetEnvironmentVariable("HM_ORACLE_MUTATE") == "pack12")
+            {
+                // One op of report 0x05's program changed, the right stick's
+                // pack12 moved one byte, before anything compiles the
+                // profile: the replay must fail on it.
+                var op = p.InputReports![1].Program.First(o => o.Pack12 is { } k && k[0] == 8);
+                op.To += 1;
+            }
+            return p;
+        }
+
+        static readonly ControllerProfile s_profile = Profile();
 
         /// <summary><paramref name="quiet"/> leaves out the registers and log
         /// entry after each command, for the long streams. A quiet stream
@@ -626,13 +657,24 @@ internal sealed class Case3Switch2Device : IOracleCase
         {
             _g = g;
             _quiet = quiet;
-            // The log tag only names the device in diagnostic lines.
-            _d = new Switch2ProDevice(serial, "oracle");
+            var compiled = CompiledProtocol.Compile(s_profile, new UsbDescriptorSet(s_profile, 0))!;
+            bool interpret = Environment.GetEnvironmentVariable("HM_ORACLE_INTERPRET") == "1";
+            _runner = ProgramBinder.BindLayouts(compiled.Model, interpret)!;
+            _e = new ProtocolEngine(compiled, serial, 0, _runner);
+            // As the device's constructor does: a pad at rest.
+            _e.SetStateBlock(s_profile.StateBlockAtRest());
+            var regs = compiled.Registers;
+            _reportsOn = regs.IndexOf("reportsOn");
+            _selected = regs.IndexOf("selectedReport");
+            _mask = regs.IndexOf("featureMask");
+            _enabled = regs.IndexOf("featureEnabled");
+            _leds = regs.IndexOf("playerLeds");
         }
 
         public bool Command(ReadOnlySpan<byte> payload, long ticks)
         {
-            bool started = _d.HandleBulkOut(payload, ticks);
+            var result = _e.HandleCommand(payload, ticks);
+            bool started = (result.Effect & ProtocolEngine.Effect.InputOpened) != 0;
             _g.Out(started ? "cmd.started" : "cmd", payload);
             if (!_quiet)
             {
@@ -641,25 +683,25 @@ internal sealed class Case3Switch2Device : IOracleCase
             }
             else
             {
-                _g.Out("has-reply", new[] { (byte)(_d.HasReply ? 1 : 0) });
+                _g.Out("has-reply", new[] { (byte)(_e.HasReply ? 1 : 0) });
             }
             return started;
         }
 
-        public bool HasReply() => _d.HasReply;
+        public bool HasReply() => _e.HasReply;
 
         /// <summary>One bulk IN read: the chunk it gets, or none.</summary>
         public int Take(int capacity)
         {
-            var chunk = _d.TakeReply(capacity);
+            int n = _e.TakeReply(capacity, _chunk);
             string cap = capacity == Unbounded ? "max" : capacity.ToString();
-            if (chunk == null)
+            if (n < 0)
             {
                 _g.Out("reply-none.c" + cap, ReadOnlySpan<byte>.Empty);
                 return 0;
             }
-            _g.Out("reply.c" + cap, chunk);
-            return chunk.Length;
+            _g.Out("reply.c" + cap, _chunk.AsSpan(0, n));
+            return n;
         }
 
         /// <summary>Read until nothing waits. Capacity 0 never empties a
@@ -667,27 +709,41 @@ internal sealed class Case3Switch2Device : IOracleCase
         public void Drain(int capacity)
         {
             if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
-            while (_d.HasReply) Take(capacity);
+            while (_e.HasReply) Take(capacity);
         }
 
+        sealed class Next : ILayoutVisitor<int>
+        {
+            readonly ProtocolEngine _e; readonly byte[] _dst;
+            public Next(ProtocolEngine e, byte[] dst) { _e = e; _dst = dst; }
+            public int Visit<TSet>(ref TSet set) where TSet : struct, HIDMaestro.Internal.Programs.IReportSet => _e.BuildNext(ref set, _dst);
+        }
+
+        /// <summary>A tick of the device clock: the next report, built through
+        /// the bound set as the clock builds it, and counted.</summary>
         public void Report()
         {
             _report.AsSpan().Fill(0xA5);   // a byte the device does not write shows
-            int n = _d.BuildNextReport(_report);
+            int n = _runner.Visit(new Next(_e, _report));
             _g.Out("report", _report.AsSpan(0, n));
         }
 
-        public void Peek(byte id) => _g.Out($"peek.{id:X2}", _d.PeekReport(id));
+        public void Peek(byte id)
+        {
+            var r = new byte[ReportSize];
+            int n = _e.Peek(id, r);
+            _g.Out($"peek.{id:X2}", r.AsSpan(0, n));
+        }
 
         public void SetBody(ReadOnlySpan<byte> body)
         {
-            _d.SetBody(body);
+            _e.SetStateBlock(body);
             _g.Out("body", body);
         }
 
         public void Reset()
         {
-            _d.Reset();
+            _e.Reset();
             _g.Out("reset", ReadOnlySpan<byte>.Empty);
             if (!_quiet) Registers();
         }
@@ -695,7 +751,7 @@ internal sealed class Case3Switch2Device : IOracleCase
         public void ReadFlash(uint address, int length)
         {
             var dst = new byte[length];
-            _d.ReadFlash(address, dst);
+            _e.ReadMemory(0, address, dst);
             var o = new byte[4 + length];
             BinaryPrimitives.WriteUInt32LittleEndian(o, address);
             dst.CopyTo(o, 4);
@@ -710,23 +766,23 @@ internal sealed class Case3Switch2Device : IOracleCase
         public void Registers()
         {
             var r = new byte[19];
-            bool on = _d.ReportsOnSince(out long since);
+            bool on = _e.InputOpenSince(out long since);
             r[0] = (byte)(on ? 1 : 0);
-            r[1] = (byte)(_d.ReportsOn ? 1 : 0);
+            r[1] = (byte)(_e.GetState(_reportsOn) ? 1 : 0);
             BinaryPrimitives.WriteInt64LittleEndian(r.AsSpan(2), since);
-            r[10] = _d.SelectedReport;
-            r[11] = _d.FeatureMask;
-            r[12] = _d.FeatureEnabled;
-            r[13] = _d.PlayerLeds;
-            BinaryPrimitives.WriteUInt32LittleEndian(r.AsSpan(14), _d.ReportsSent);
-            r[18] = (byte)(_d.HasReply ? 1 : 0);
+            r[10] = (byte)_e.GetRegister(_selected);
+            r[11] = (byte)_e.GetRegister(_mask);
+            r[12] = (byte)_e.GetRegister(_enabled);
+            r[13] = (byte)_e.GetRegister(_leds);
+            BinaryPrimitives.WriteUInt32LittleEndian(r.AsSpan(14), _e.GetCounter(0));
+            r[18] = (byte)(_e.HasReply ? 1 : 0);
             _g.Out("regs", r);
         }
 
         /// <summary>The log's length and its newest entry, time and payload.</summary>
         void LogNewest()
         {
-            var log = _d.SnapshotBulkLogTimed();
+            var log = _e.SnapshotLog();
             var (ticks, payload) = log[^1];
             var o = new byte[2 + 8 + payload.Length];
             BinaryPrimitives.WriteUInt16LittleEndian(o, (ushort)log.Count);
@@ -735,15 +791,14 @@ internal sealed class Case3Switch2Device : IOracleCase
             _g.Out("log", o);
         }
 
-        /// <summary>The whole bulk log, oldest first, with the untimed
-        /// snapshot's length beside it.</summary>
+        /// <summary>The whole log, oldest first, with its length twice, where
+        /// 9bd6279 had a timed and an untimed copy of one log.</summary>
         public void LogAll()
         {
-            var timed = _d.SnapshotBulkLogTimed();
-            int plain = _d.SnapshotBulkLog().Count;
+            var timed = _e.SnapshotLog();
             var head = new byte[4];
             BinaryPrimitives.WriteUInt16LittleEndian(head, (ushort)timed.Count);
-            BinaryPrimitives.WriteUInt16LittleEndian(head.AsSpan(2), (ushort)plain);
+            BinaryPrimitives.WriteUInt16LittleEndian(head.AsSpan(2), (ushort)timed.Count);
             _g.Out("log-all", head);
             foreach (var (ticks, payload) in timed)
             {

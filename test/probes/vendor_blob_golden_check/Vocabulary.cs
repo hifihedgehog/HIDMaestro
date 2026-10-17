@@ -13,9 +13,10 @@
 //   - dualshock-3-full's uint8-level-map gives the bytes ds3-battery gave,
 //     full ahead of charging
 //   - field lists in the vocabulary reproduce SwitchProPacker.BuildBody's
-//     48 bytes and Switch2ProPacker.BuildBody's 24 bytes on random states:
-//     "#n" buttons, the resolved d-pad, min and max, invert, and scaled,
-//     negated and repeated motion
+//     48 bytes on random states, and the Switch 2 Pro composite's stateBlock
+//     is the field list that reproduced Switch2ProPacker.BuildBody's 24
+//     bytes until v2.0.0 deleted the packer: "#n" buttons, the resolved
+//     d-pad, min and max, invert, and scaled, negated and repeated motion
 //   - an int16-le field's center offsets its value on the wire, 32768
 //     giving offset binary (the PS Move's motion words, psmove.c
 //     psmove_decode_16bit at 97d97e9), on a raw field and on a scaled,
@@ -23,9 +24,9 @@
 //     clamped as uint10-be clamps, without a center the bytes stay two's
 //     complement, and a center outside 0 to 65535, or on an output field,
 //     is refused
-//   - packed-uint output fields reproduce SwitchProPacker's and
-//     Switch2ProPacker's rumble decodes on every input the first reads and
-//     a million random reports for the second, boxed as byte
+//   - packed-uint output fields reproduce SwitchProPacker's rumble decode
+//     on every input it reads, and the Switch 2 Pro composite's
+//     protocol.decoders.rumble on a million random reports, boxed as byte
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -366,7 +367,7 @@ internal static class Vocabulary
     static void Switch2ProBody()
     {
         string gyro = (Math.PI / 180.0 * 32767.0 / 34.8).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
-        var spec = Spec(Switch2ProPacker.BodySize,
+        var spec = Spec(24,
             """{"byte":0,"type":"button-mask","buttons":["B","A","Y","X","RightBumper","RT_DIGITAL","Start","RightStick"]}""",
             """{"byte":1,"type":"button-mask","buttons":["DPAD_DOWN","DPAD_RIGHT","DPAD_LEFT","DPAD_UP","LeftBumper","LT_DIGITAL","Back","LeftStick"]}""",
             """{"byte":2,"type":"button-mask","buttons":["Guide","Share","RightPaddle","LeftPaddle","Misc1"]}""",
@@ -381,8 +382,13 @@ internal static class Vocabulary
             "{\"byte\":20,\"type\":\"int16-le\",\"semantic\":\"gyroDpsZ\",\"scale\":" + gyro + ",\"negate\":true}",
             "{\"byte\":22,\"type\":\"int16-le\",\"semantic\":\"gyroDpsY\",\"scale\":" + gyro + "}");
         VendorBlobProgram.Check(spec, spec.Size, "switch2 body", output: false, portBlock: false);
+        // The profile's own stateBlock, against the list this check held
+        // Switch2ProPacker to until v2.0.0 moved the body into the profile.
+        var profile = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch2-pro-controller-composite");
+        var own = profile.StateBlockSpecForCodec();
         var rng = new Random(20261017);
-        var packed = new byte[Switch2ProPacker.BodySize];
+        var packed = new byte[24];
+        var enc2 = new VendorBlobCodec.EncoderState();
         var coded = new byte[spec.Size];
         var enc = new VendorBlobCodec.EncoderState();
         int differ = 0;
@@ -391,14 +397,14 @@ internal static class Vocabulary
         for (int i = 0; i < N; i++)
         {
             var (s, v) = RandomState(rng);
-            Switch2ProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], v[4], v[5], packed);
+            VendorBlobCodec.EncodeInput(own, in s, v[0], v[1], v[2], v[3], v[4], v[5], packed, enc2);
             VendorBlobCodec.EncodeInput(spec, in s, v[0], v[1], v[2], v[3], v[4], v[5], coded, enc);
             if (!packed.AsSpan().SequenceEqual(coded))
             {
                 if (differ++ == 0) first = $"{Convert.ToHexString(packed)} against {Convert.ToHexString(coded)}";
             }
         }
-        Check($"field lists give Switch2ProPacker.BuildBody's 24 bytes on {N:N0} random states", differ == 0, differ == 0 ? "" : $"{differ} differ, first {first}");
+        Check($"the Switch 2 composite's stateBlock gives the field list's 24 bytes on {N:N0} random states", differ == 0, differ == 0 ? "" : $"{differ} differ, first {first}");
     }
 
     /// <summary>Output report 0x01 or 0x10 with its ID at byte 0: the left
@@ -463,7 +469,7 @@ internal static class Vocabulary
         void One()
         {
             var (fields, _) = VendorBlobCodec.Decode(spec, report);
-            Switch2ProPacker.DecodeRumble(report.AsSpan(1), out byte l, out byte r);
+            Switch2Decode(report, out byte l, out byte r);
             n++;
             boxed &= fields["leftMotor"] is byte && fields["rightMotor"] is byte;
             if ((byte)fields["leftMotor"] != l || (byte)fields["rightMotor"] != r)
@@ -487,7 +493,24 @@ internal static class Vocabulary
             rng.NextBytes(report.AsSpan(1));
             One();
         }
-        Check($"packed-uint gives Switch2ProPacker.DecodeRumble on {n:N0} reports, boxed as byte",
+        Check($"packed-uint gives the Switch 2 composite's rumble decoder on {n:N0} reports, boxed as byte",
             differ == 0 && boxed, differ == 0 ? (boxed ? "" : "not byte") : $"{differ} differ, first {first}");
+    }
+
+    static readonly HIDMaestro.Internal.DecoderRunner s_switch2Rumble = HIDMaestro.Internal.ProgramBinder.BindDecoders(
+        ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch2-pro-controller-composite").GetOrCompileModel())[0];
+
+    /// <summary>The composite's protocol.decoders.rumble on report 0x02, ID
+    /// first, through its generated kernel.</summary>
+    static unsafe void Switch2Decode(byte[] report, out byte left, out byte right)
+    {
+        var input = new byte[report.Length + 4];
+        report.CopyTo(input, 0);
+        var output = new byte[2];
+        fixed (byte* sp = input)
+        fixed (byte* dp = output)
+            s_switch2Rumble.Run(sp, dp);
+        left = output[0];
+        right = output[1];
     }
 }

@@ -129,7 +129,7 @@ internal static partial class Program
             if (a == null) { Console.WriteLine($"  [SKIP] {skip}"); return; }
             a.Stage(new HMGamepadState { AccelGY = 1.0f });
             var device = a.Pad.UsbipHandle!.Device;
-            var s2 = device.Switch2!;
+            var s2 = Switch2View.Of(device);
 
             // Steam opens the pad, starts it, counts 100 reports to choose
             // its sensor constants and then sends one more enable. That last
@@ -238,7 +238,7 @@ internal static partial class Program
         {
             a.Stage(new HMGamepadState { AccelGY = 1.0f });
             var device = a.Pad.UsbipHandle!.Device;
-            var s2 = device.Switch2!;
+            var s2 = Switch2View.Of(device);
             long t0 = Stopwatch.GetTimestamp();
             for (int i = 0; i < seconds; i++)
             {

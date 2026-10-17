@@ -1563,7 +1563,8 @@ internal static partial class Program
         var gc = ctx.GetProfile("gamecube-adapter")!.Inner;
         var hidLockField = typeof(UsbipEmulatedDevice).GetField("_hidLock", Private)!;
         var connectionField = typeof(UsbipEmulatedDevice).GetField("_connection", Private)!;
-        var clockField = typeof(UsbipEmulatedDevice).GetField("_protocolThread", Private)!;
+        // v2.0.0: the host poll clock is a DeviceClock, which owns its thread.
+        var clockField = typeof(UsbipEmulatedDevice).GetField("_protocolClock", Private)!;
         var connections = (System.Collections.ICollection)typeof(UsbipServer).GetField("_connections", Private)!.GetValue(server)!;
         bool NoConnections() => WaitUntil(() => { lock (connections) return connections.Count == 0; }, 5000);
 
@@ -1656,7 +1657,7 @@ internal static partial class Program
         // nothing Dispose released.
         {
             var (device, cl) = Attach(server, gc);
-            var clock = (Thread)clockField.GetValue(device)!;
+            var clock = ((IDeviceClock)clockField.GetValue(device)!).Thread;
             object hidLock = hidLockField.GetValue(device)!;
             var met = new System.Collections.Concurrent.ConcurrentQueue<string>();
             EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> watch = (_, e) =>
@@ -1693,8 +1694,11 @@ internal static partial class Program
         {
             var s2 = ctx.GetProfile("switch2-pro-controller-composite")!.Inner;
             var (device, cl) = Attach(server, s2);
-            var clock = (Thread)typeof(UsbipEmulatedDevice).GetField("_streamThread", Private)!.GetValue(device)!;
-            object sync = typeof(Switch2ProDevice).GetField("_sync", Private)!.GetValue(device.Switch2)!;
+            // v2.0.0: the device clock of a device that builds its reports, and
+            // the protocol engine's lock, which the clock takes to learn
+            // whether reports flow.
+            var clock = ((IDeviceClock)typeof(UsbipEmulatedDevice).GetField("_layoutClock", Private)!.GetValue(device)!).Thread;
+            object sync = typeof(ProtocolEngine).GetField("_sync", Private)!.GetValue(device.Protocol)!;
             var met = new System.Collections.Concurrent.ConcurrentQueue<string>();
             EventHandler<System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs> watch = (_, e) =>
             {

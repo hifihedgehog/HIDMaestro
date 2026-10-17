@@ -99,13 +99,6 @@ public sealed class UsbConfigurationSpec
     [JsonPropertyName("sharedSerial")]
     public bool SharedSerial { get; set; }
 
-    /// <summary>v1.13.0: how the device behaves beyond its descriptors: the
-    /// commands it takes, its replies, when and how often it reports, and
-    /// when it stops answering. Null for a device that reports whatever is
-    /// submitted as it is submitted. See <see cref="DeviceProtocolSpec"/>.</summary>
-    [JsonPropertyName("protocol")]
-    public DeviceProtocolSpec? Protocol { get; set; }
-
     /// <summary>v1.13.0: the device takes a WinUSB binding on request
     /// (HMController.BindWinUsb), for libusb hosts. See
     /// <see cref="WinUsbSpec"/>.</summary>

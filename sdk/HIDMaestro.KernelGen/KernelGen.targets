@@ -1,0 +1,66 @@
+<Project>
+  <!--
+    The build step that emits generated kernels (design note, mechanism 2),
+    shared by the SDK (mode catalog) and program_equivalence_check (mode
+    probe). A project sets KernelGenMode, fills @(KernelGenJson) with the
+    profile and model files the tool reads, and imports this file. The probe
+    also sets KernelGenSeed, the seed its random programs are drawn from.
+
+    The tool is built and located with the MSBuild task, never referenced: a
+    ProjectReference would hand it the consumer's publish properties and copy
+    its apphost, deps.json and runtimeconfig.json into every consumer's build
+    and publish output. With every property that makes a build platform- or
+    publish-specific removed, it builds once, for the build machine, into its
+    own folder, and later builds find it up to date.
+  -->
+  <PropertyGroup>
+    <KernelGenProject>$(MSBuildThisFileDirectory)HIDMaestro.KernelGen.csproj</KernelGenProject>
+    <_KernelGenRemoved>TargetFramework;RuntimeIdentifier;RuntimeIdentifiers;SelfContained;PublishAot;PublishTrimmed;PublishSingleFile;PublishReadyToRun;IntermediateOutputPath;BaseIntermediateOutputPath;OutputPath;OutDir;Platform;PlatformTarget;HMTargetArchitecture</_KernelGenRemoved>
+  </PropertyGroup>
+
+  <!-- The tool is outside the consumer's restore graph, so it is restored
+       here first, under a global property of its own: the build that follows
+       then evaluates the project again and sees what the restore wrote. A
+       restore with nothing to do returns at once. -->
+  <Target Name="KernelGenBuildTool">
+    <MSBuild Projects="$(KernelGenProject)" Targets="Restore" Properties="Configuration=Release;KernelGenRestore=true" RemoveProperties="$(_KernelGenRemoved)" />
+    <MSBuild Projects="$(KernelGenProject)" Targets="Build" Properties="Configuration=Release" RemoveProperties="$(_KernelGenRemoved)">
+      <Output TaskParameter="TargetOutputs" ItemName="_KernelGenTool" />
+    </MSBuild>
+  </Target>
+
+  <!-- The input list, by content: one line per JSON file with its SHA-256.
+       WriteOnlyWhenDifferent leaves the file's timestamp alone unless a file
+       was added, removed or changed, whatever the files' own timestamps, as
+       CoreCompile's inputs cache does for its references. -->
+  <Target Name="KernelGenInputs" DependsOnTargets="KernelGenBuildTool">
+    <PropertyGroup>
+      <_KernelGenOut>$(IntermediateOutputPath)Kernels.g.cs</_KernelGenOut>
+      <_KernelGenCache>$(IntermediateOutputPath)kernelgen.inputs</_KernelGenCache>
+      <_KernelGenDotnet>$(DOTNET_HOST_PATH)</_KernelGenDotnet>
+      <_KernelGenDotnet Condition="'$(_KernelGenDotnet)' == ''">dotnet</_KernelGenDotnet>
+      <_KernelGenHead>$(KernelGenMode)</_KernelGenHead>
+      <_KernelGenHead Condition="'$(KernelGenSeed)' != ''">$(KernelGenMode) $(KernelGenSeed)</_KernelGenHead>
+    </PropertyGroup>
+    <GetFileHash Files="@(KernelGenJson)" Algorithm="SHA256" Condition="'@(KernelGenJson)' != ''">
+      <Output TaskParameter="Items" ItemName="_KernelGenHashed" />
+    </GetFileHash>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile File="$(_KernelGenCache)" Lines="$(_KernelGenHead);@(_KernelGenHashed->'%(FullPath)|%(FileHash)')" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <FileWrites Include="$(_KernelGenCache)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="KernelGenEmit" DependsOnTargets="KernelGenInputs" BeforeTargets="CoreCompile"
+          Inputs="@(_KernelGenTool);$(_KernelGenCache)" Outputs="$(_KernelGenOut)">
+    <Exec Command="&quot;$(_KernelGenDotnet)&quot; &quot;@(_KernelGenTool)&quot; $(KernelGenMode) &quot;$(_KernelGenOut)&quot; &quot;$(_KernelGenCache)&quot;" />
+  </Target>
+
+  <Target Name="KernelGenAdd" AfterTargets="KernelGenEmit" BeforeTargets="CoreCompile" DependsOnTargets="KernelGenEmit">
+    <ItemGroup>
+      <Compile Include="$(_KernelGenOut)" />
+      <FileWrites Include="$(_KernelGenOut)" />
+    </ItemGroup>
+  </Target>
+</Project>

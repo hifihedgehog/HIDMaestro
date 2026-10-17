@@ -1088,11 +1088,7 @@ internal static class VendorBlobCodec
                 if (inside && x > v) v = x;
             }
             if (v < 0) continue;
-            v += part.Offset;
-            if (v < part.Lo || v > part.Hi) continue;
-            double scaled = v * part.Numerator / part.Denominator;
-            double r = part.Down ? Math.Floor(scaled) : Math.Round(scaled);
-            int level = (int)Math.Clamp(r, 0, 255);
+            int level = PackedMap.Level(v, part.Offset, part.Lo, part.Hi, part.Numerator, part.Denominator, part.Down);
             if (level > best) best = level;
         }
         return (byte)best;

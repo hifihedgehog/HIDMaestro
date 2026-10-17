@@ -523,10 +523,10 @@ public sealed class HMPortOutputEventArgs : EventArgs
     public int Value { get; }
 }
 
-/// <summary>The protocol of a USB/IP device whose profile declares
-/// <c>usbConfiguration.protocol</c>: the state the host's commands set, and
-/// the host poll the device is served at. Get it from
-/// <see cref="HMController.DeviceProtocol"/>.</summary>
+/// <summary>The protocol of a USB/IP device whose profile declares a
+/// <c>protocol</c>: the registers and counters the host's commands and the
+/// device's reports set, and the host poll the device is served at. Get it
+/// from <see cref="HMController.DeviceProtocol"/>.</summary>
 public sealed class HMDeviceProtocol
 {
     private readonly ProtocolEngine _engine;

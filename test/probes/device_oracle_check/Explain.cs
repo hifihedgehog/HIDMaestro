@@ -1217,8 +1217,8 @@ internal static class Switch2Body
     public static void Expect(byte[] before, byte[] expected, int at, in HMGamepadState s,
                               double lx, double ly, double rx, double ry, double lt, double rt, Tally t)
     {
-        Digital(before, expected, at, Switch2ProPacker.BitZR, rt, t);
-        Digital(before, expected, at, Switch2ProPacker.BitZL, lt, t);
+        Digital(before, expected, at, S2Old.BitZR, rt, t);
+        Digital(before, expected, at, S2Old.BitZL, lt, t);
         Stick(before, expected, at + 4, lx, false, t);
         Stick(before, expected, at + 6, ly, true, t);
         Stick(before, expected, at + 8, rx, false, t);
@@ -1326,7 +1326,9 @@ internal sealed class ControllerParts
         C = c;
         P = c.Profile.Inner;
         SwitchPro = typeof(HMController).GetField("_switchProtocol", Instance)?.GetValue(c) is true;
-        Switch2 = typeof(HMController).GetField("_switch2Protocol", Instance)?.GetValue(c) is true;
+        // A device that builds its reports from a state block, the Switch 2
+        // composite's (v2.0.0), where 9bd6279 had _switch2Protocol.
+        Switch2 = typeof(HMController).GetField("_stateBlockSpec", Instance)?.GetValue(c) != null;
         Gip = typeof(HMController).GetField("_packsGipBuffer", Instance)?.GetValue(c) is true;
         if (P.HasDescriptor && typeof(HMController).GetField("_reportBuilder", Instance)?.GetValue(c) is HidReportBuilder b)
             Desc = new DescriptorPart(P, b);
@@ -1533,7 +1535,7 @@ internal sealed class UsbipReportExplainer : IExplainer
         int n = before.Length - _prefix;
         if (_c.Switch2)
         {
-            if (before[_prefix] is Switch2ProDevice.ReportPro or Switch2ProDevice.ReportCommon) Switch2Report(before, expected, _prefix, t);
+            if (before[_prefix] is S2Old.ReportPro or S2Old.ReportCommon) Switch2Report(before, expected, _prefix, t);
             return;
         }
         // A codec report by its report ID, or by its length when it has
@@ -1569,9 +1571,9 @@ internal sealed class UsbipReportExplainer : IExplainer
     void Switch2Report(byte[] before, byte[] expected, int at, Tally t)
     {
         if (_bodyBefore == null || _bodyNow == null) return;
-        bool pro = before[at] == Switch2ProDevice.ReportPro;
+        bool pro = before[at] == S2Old.ReportPro;
         int n = before.Length - at;
-        int s = Switch2ProPacker.SticksOffset;
+        int s = S2Old.SticksOffset;
         int[] sticks = pro ? new[] { 6, 9 } : new[] { 0x0B, 0x0E };
         for (int k = 0; k < 2; k++)
         {
@@ -1592,7 +1594,7 @@ internal sealed class UsbipReportExplainer : IExplainer
         }
         else
         {
-            foreach (var (mask, bit) in new[] { (Switch2ProPacker.BitZR, 0x05 * 8 + 7), (Switch2ProPacker.BitZL, 0x07 * 8 + 7) })
+            foreach (var (mask, bit) in new[] { (S2Old.BitZR, 0x05 * 8 + 7), (S2Old.BitZL, 0x07 * 8 + 7) })
                 if (((b0 ^ b1) & mask) != 0)
                     Bits.Field(before, expected, at * 8 + bit, 1, (b0 & mask) != 0 ? 1 : 0, (b1 & mask) != 0 ? 1 : 0, null, t, "switch2 report trigger bit", bit);
             // The IMU timestamp at 0x2B is 1 + n * 4000, never 0, while the
@@ -1600,7 +1602,7 @@ internal sealed class UsbipReportExplainer : IExplainer
             if (n >= 0x2F && BitConverter.ToUInt32(before, at + 0x2B) != 0)
                 for (int i = 0; i < 12; i += 2)
                 {
-                    int m = Switch2ProPacker.MotionOffset + i;
+                    int m = S2Old.MotionOffset + i;
                     long om = _bodyBefore[m] | (_bodyBefore[m + 1] << 8), nm = _bodyNow[m] | (_bodyNow[m + 1] << 8);
                     Bits.Field(before, expected, (at + 0x31 + i) * 8, 16, om, nm, null, t, "switch2 report motion", om);
                 }
@@ -1765,4 +1767,14 @@ internal sealed class PlanExplainer : IExplainer, INoteReader
             if (!before.AsSpan().SequenceEqual(expected)) foreach (var c in first.Cats) t.Cats.Add(c);
         }
     }
+}
+
+/// <summary>Switch2ProPacker's and Switch2ProDevice's constants at 9bd6279,
+/// which v2.0.0 deleted when the composite became profile data: the body's
+/// offsets, report 0x09's ZR and ZL bits, and the two report IDs.</summary>
+internal static class S2Old
+{
+    public const int SticksOffset = 4, MotionOffset = 12;
+    public const uint BitZR = 1u << 5, BitZL = 1u << 13;
+    public const byte ReportCommon = 0x05, ReportPro = 0x09;
 }

@@ -879,7 +879,8 @@ internal static class Program
         UsbipPath(server, ctx.GetProfile(Composite)!.Inner, "input pump, " + Composite, runs, gate ? 2_000 : 1_000,
             inEp: 4, readLength: 64, frame: ds, extended: false, queueEveryOther: true, start: null, gate);
 
-        var body = new byte[Switch2ProPacker.BodySize];
+        // The state block the Switch 2 composite builds its reports from.
+        var body = new byte[24];
         UsbipPath(server, ctx.GetProfile("switch2-pro-controller-composite")!.Inner,
             "report clock, switch2-pro-controller-composite", runs, gate ? 250 : 50,
             inEp: 1, readLength: 64, frame: body, extended: true, queueEveryOther: false,

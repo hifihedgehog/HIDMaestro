@@ -311,8 +311,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
             void Set(string field, object? value) =>
                 (t.GetField(field, Instance | BindingFlags.Public) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             var descriptors = new UsbDescriptorSet(p, 0);
-            if (CompiledProtocol.Compile(p, descriptors) != null)
-                throw new InvalidOperationException($"{p.Id} declares a device protocol, which this case does not build.");
+            OracleProtocol.Set(dev, p, descriptors, 0);
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", 0);
             Set("_stubs", FeatureStubTable.From(p, _ => null));

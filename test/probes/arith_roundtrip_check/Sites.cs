@@ -275,7 +275,10 @@ internal static class Inventory
                 Add(p.Id, "packer", Sites.SwitchStick(true), "0x30 bytes 6-8 and 9-11 (Y)");
                 continue;
             }
-            if (p.RequiresUsbipBackend && Switch2ProPacker.IsSwitch2Pro(p.VendorId, p.ProductId))
+            // A device that builds its reports from a state block: the
+            // composite, whose stateBlock's int16-axis sticks scale as
+            // Switch2ProPacker's did (v2.0.0 moved the body into the profile).
+            if (p.RequiresUsbipBackend && p.BuildsItsOwnReports)
             {
                 Add(p.Id, "packer", Sites.Switch2Stick(false), "0x09 bytes 6-11, 0x05 bytes 0x0B-0x10 (X)");
                 Add(p.Id, "packer", Sites.Switch2Stick(true), "0x09 bytes 6-11, 0x05 bytes 0x0B-0x10 (Y)");

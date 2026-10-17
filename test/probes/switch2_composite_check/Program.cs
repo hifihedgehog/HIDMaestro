@@ -207,8 +207,8 @@ internal static partial class Program
         server.Register(device);
         try
         {
-            Check("the device carries the Switch 2 responder", device.Switch2 != null);
-            if (device.Switch2 != null) RunWire(server, device, identity);
+            Check("the device builds its reports from its profile's protocol", Switch2View.Builds(device));
+            if (Switch2View.Builds(device)) RunWire(server, device, identity);
         }
         finally
         {
@@ -252,23 +252,23 @@ internal static partial class Program
         var half = SdlRumbleReport(0x8000, 0x4000);
         Check("SDL_RumbleGamepad(0x8000, 0x4000) writes 87 c5 21 91 38",
               half.AsSpan(2, 5).SequenceEqual(H("87c5219138")), X(half.AsSpan(2, 5)));
-        Switch2ProPacker.DecodeRumble(half.AsSpan(1), out byte l, out byte r);
+        Switch2View.DecodeRumble(half, out byte l, out byte r);
         Check("it decodes to leftMotor 127, rightMotor 64", l == 127 && r == 64, $"{l}/{r}");
 
-        Switch2ProPacker.DecodeRumble(SdlRumbleReport(0xFFFF, 0xFFFF).AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(SdlRumbleReport(0xFFFF, 0xFFFF), out l, out r);
         Check("full scale on both decodes to 255 and 255", l == 255 && r == 255, $"{l}/{r}");
-        Switch2ProPacker.DecodeRumble(SdlRumbleReport(0, 0).AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(SdlRumbleReport(0, 0), out l, out r);
         Check("a stop decodes to 0 and 0", l == 0 && r == 0, $"{l}/{r}");
-        Switch2ProPacker.DecodeRumble(SdlRumbleReport(0xFFFF, 0).AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(SdlRumbleReport(0xFFFF, 0), out l, out r);
         Check("the low-frequency motor alone is the left motor", l == 255 && r == 0, $"{l}/{r}");
-        Switch2ProPacker.DecodeRumble(SdlRumbleReport(0, 0xFFFF).AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(SdlRumbleReport(0, 0xFFFF), out l, out r);
         Check("the high-frequency motor alone is the right motor", l == 0 && r == 255, $"{l}/{r}");
 
         // The largest amplitude over all six frames, not the first frame's.
         var later = new byte[64];
         later[0] = 0x02; later[1] = 0x50; later[0x11] = 0x50;
         SdlEncodeHdRumble(0x187, 29000, 0x112, 0).CopyTo(later, 0x11 + 1 + 10);   // right block, third frame
-        Switch2ProPacker.DecodeRumble(later.AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(later, out l, out r);
         Check("an amplitude in the right block's third frame is read", l == 0 && r == 255, $"{l}/{r}");
 
         // Frame 257220 of the capture, a console's own packet: 96 51 30 1f 06
@@ -276,11 +276,11 @@ internal static partial class Program
         var console = new byte[64];
         console[0] = 0x02; console[1] = 0x53; console[0x11] = 0x53;
         H("9651301f06").CopyTo(console, 2); H("9651301f06").CopyTo(console, 0x12);
-        Switch2ProPacker.DecodeRumble(console.AsSpan(1), out l, out r);
+        Switch2View.DecodeRumble(console, out l, out r);
         Check("a console's frame 96 51 30 1f 06 decodes to left 14, right 11", l == 14 && r == 11, $"{l}/{r}");
 
-        Switch2ProPacker.DecodeRumble(SdlRumbleReport(0xFFFF, 0xFFFF).AsSpan(1, 31), out l, out r);
-        Check("a report shorter than 33 bytes decodes to nothing", l == 0 && r == 0, $"{l}/{r}");
+        bool decoded = Switch2View.DecodeRumble(SdlRumbleReport(0xFFFF, 0xFFFF).AsSpan(0, 32), out l, out r);
+        Check("a report shorter than 33 bytes is not decoded", !decoded, $"{l}/{r}");
     }
 
     static void OtherPersonasStillStall(HMContext ctx, UsbipServer server)
@@ -301,7 +301,7 @@ internal static partial class Program
                 var c5 = w.ControlIn(0xC1, 0x01, 0, 5, 142);
                 Check($"{id}: vendor requests for wIndex 4 and 5 stall", c4.Status == -32 && c5.Status == -32,
                       $"{c4.Status}/{c5.Status}");
-                Check($"{id}: carries no Switch 2 responder", dev.Switch2 == null);
+                Check($"{id}: builds no reports of its own", !Switch2View.Builds(dev));
                 var bulkIn = dev.Descriptors.Endpoints.Values.FirstOrDefault(e => e.TransferType == 2 && e.IsIn);
                 if (bulkIn.Address != 0)
                 {
@@ -368,7 +368,7 @@ internal static partial class Program
 
     static void RunWire(UsbipServer server, UsbipEmulatedDevice device, DeviceIdentity identity)
     {
-        var s2 = device.Switch2!;
+        var s2 = Switch2View.Of(device);
         var sent = new List<byte[]>();   // every bulk OUT payload, for the log check
 
         Console.WriteLine("\n-- A2 enumeration --");
@@ -637,12 +637,12 @@ internal static partial class Program
         IntPtr view = SharedMemoryIO.EnsureInputMapping(IndexA);
         IntPtr evt = SharedMemoryIO.GetInputEvent(IndexA);
         uint seqNo = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(view, 0);
-        var bodyBuf = new byte[Switch2ProPacker.BodySize];
+        var bodyBuf = new byte[Switch2View.BodySize];
         void Submit(HMGamepadState st, double lx = 0.5, double ly = 0.5, double rx = 0.5, double ry = 0.5, double lt = 0, double rt = 0)
         {
-            Switch2ProPacker.BuildBody(in st, lx, ly, rx, ry, lt, rt, bodyBuf);
+            Switch2View.BuildBody(in st, lx, ly, rx, ry, lt, rt, bodyBuf);
             SharedMemoryIO.WriteInputFrame(view, evt, ref seqNo, Array.Empty<byte>(), 0, null,
-                dataOffset: 0, extendedData: bodyBuf, extendedLen: Switch2ProPacker.BodySize);
+                dataOffset: 0, extendedData: bodyBuf, extendedLen: Switch2View.BodySize);
         }
 
         Check("the read parked at attach is still parked", !w.Arrived(parked));

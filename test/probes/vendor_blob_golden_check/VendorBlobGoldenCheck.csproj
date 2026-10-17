@@ -5,6 +5,7 @@
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <PlatformTarget>x64</PlatformTarget>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />

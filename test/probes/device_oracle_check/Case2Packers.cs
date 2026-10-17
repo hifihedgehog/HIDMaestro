@@ -9,10 +9,15 @@
 //
 // The conversion replaces both with a state block and codec fields (design
 // note, mechanisms 1 and 2), which must reproduce these bodies and decodes
-// byte for byte except the listed arithmetic changes.
+// byte for byte except the listed arithmetic changes. From v2.0.0 the Switch
+// 2 Pro's body is the composite profile's stateBlock through the codec, as
+// HMController encodes it, and its rumble decode the profile's
+// protocol.decoders.rumble through the kernel the build step generated, or
+// the interpreter when HM_ORACLE_INTERPRET is set (Switch2 below).
 using System;
 using System.Collections.Generic;
 using HIDMaestro;
+using System.Linq;
 using HIDMaestro.Internal;
 
 internal sealed class Case2Packers : IOracleCase
@@ -28,7 +33,7 @@ internal sealed class Case2Packers : IOracleCase
     {
         var scratch = new Dictionary<HMAxis, float>();
         var body = new byte[SwitchProPacker.BodySize];
-        var body2 = new byte[Switch2ProPacker.BodySize];
+        var body2 = new byte[Switch2.BodySize];
 
         // The bodies on case 1's scripted and random states, each body built
         // as its state comes. The six slot values come from the axes as
@@ -57,7 +62,7 @@ internal sealed class Case2Packers : IOracleCase
         EachState((s, v) =>
         {
             golden.SetInput(in s, v);
-            Switch2ProPacker.BuildBody(in s, v[0], v[1], v[2], v[3], v[4], v[5], body2);
+            Switch2.BuildBody(in s, v[0], v[1], v[2], v[3], v[4], v[5], body2);
             golden.Out("body", body2);
         });
 
@@ -88,7 +93,7 @@ internal sealed class Case2Packers : IOracleCase
             {
                 var a = SlotsAt(slot, v, 6);
                 golden.SetInput(in neutral, a);
-                Switch2ProPacker.BuildBody(in neutral, a[0], a[1], a[2], a[3], a[4], a[5], body2);
+                Switch2.BuildBody(in neutral, a[0], a[1], a[2], a[3], a[4], a[5], body2);
                 golden.Out(slot == 6 ? "all" : $"slot{slot}", body2);
             }
 
@@ -124,14 +129,14 @@ internal sealed class Case2Packers : IOracleCase
         // three frames, two fields) alone at 0, 1, 512 and 1023, then a
         // million random reports, then the short reports it refuses.
         golden.Stream("switch2-pro/rumble/fields");
-        var data = new byte[Switch2ProPacker.RumbleDataSize];
-        var outR = new byte[Switch2ProPacker.RumbleDataSize + 2];
+        var data = new byte[Switch2.RumbleDataSize];
+        var outR = new byte[Switch2.RumbleDataSize + 2];
         void Decode(ReadOnlySpan<byte> d, string tag)
         {
-            Switch2ProPacker.DecodeRumble(d, out byte left, out byte right);
-            d.Slice(0, Math.Min(d.Length, Switch2ProPacker.RumbleDataSize)).CopyTo(outR);
-            outR[Switch2ProPacker.RumbleDataSize] = left;
-            outR[Switch2ProPacker.RumbleDataSize + 1] = right;
+            Switch2.DecodeRumble(d, out byte left, out byte right);
+            d.Slice(0, Math.Min(d.Length, Switch2.RumbleDataSize)).CopyTo(outR);
+            outR[Switch2.RumbleDataSize] = left;
+            outR[Switch2.RumbleDataSize + 1] = right;
             golden.Out(tag, outR);
         }
         for (int act = 0; act < 2; act++)
@@ -152,11 +157,11 @@ internal sealed class Case2Packers : IOracleCase
             Decode(data, "rumble");
         }
         golden.Stream("switch2-pro/rumble/short");
-        var full = new byte[Switch2ProPacker.RumbleDataSize];
+        var full = new byte[Switch2.RumbleDataSize];
         Array.Fill(full, (byte)0xFF);
-        for (int len = 0; len < Switch2ProPacker.RumbleDataSize; len++)
+        for (int len = 0; len < Switch2.RumbleDataSize; len++)
         {
-            Switch2ProPacker.DecodeRumble(full.AsSpan(0, len), out byte left, out byte right);
+            Switch2.DecodeRumble(full.AsSpan(0, len), out byte left, out byte right);
             golden.Out($"len{len}", new[] { left, right });
         }
     }
@@ -179,5 +184,42 @@ internal sealed class Case2Packers : IOracleCase
         if (slot == count) for (int k = 0; k < count; k++) a[k] = v;
         else a[slot] = v;
         return a;
+    }
+
+    /// <summary>What replaced Switch2ProPacker: the composite profile's
+    /// stateBlock, encoded by the codec from the same six slot values
+    /// HMController passes it (as floats), and its rumble decoder. A report
+    /// shorter than the decoder reads is not decoded, which the recording's
+    /// packer reported as two zero levels, and so does this.</summary>
+    static unsafe class Switch2
+    {
+        public const int BodySize = 24;
+        public const int RumbleDataSize = 32;
+        static readonly ControllerProfile s_profile =
+            ProfileDatabase.LoadEmbedded().All.First(p => p.Id == "switch2-pro-controller-composite");
+        static readonly ExtendedReportSpec s_spec = s_profile.StateBlockSpecForCodec();
+        static readonly VendorBlobCodec.EncoderState s_enc = new();
+        static readonly DecoderRunner s_decoder = ProgramBinder.BindDecoders(s_profile.GetOrCompileModel(),
+            Environment.GetEnvironmentVariable("HM_ORACLE_INTERPRET") == "1")[0];
+        static readonly byte[] s_in = GC.AllocateArray<byte>(64 + 4, pinned: true);
+        static readonly byte[] s_out = GC.AllocateArray<byte>(8, pinned: true);
+
+        public static void BuildBody(in HMGamepadState state, double lx, double ly, double rx, double ry,
+                                     double lt, double rt, byte[] dst) =>
+            VendorBlobCodec.EncodeInput(s_spec, in state, (float)lx, (float)ly, (float)rx, (float)ry, (float)lt, (float)rt, dst, s_enc);
+
+        /// <summary><paramref name="data"/> is report 0x02 after its ID.</summary>
+        public static void DecodeRumble(ReadOnlySpan<byte> data, out byte left, out byte right)
+        {
+            left = right = 0;
+            if (data.Length + 1 < s_decoder.Form.MinLength) return;
+            s_in[0] = 0x02;
+            data[..RumbleDataSize].CopyTo(s_in.AsSpan(1));
+            fixed (byte* sp = s_in)
+            fixed (byte* dp = s_out)
+                s_decoder.Run(sp, dp);
+            left = s_out[0];
+            right = s_out[1];
+        }
     }
 }

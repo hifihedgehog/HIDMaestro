@@ -270,12 +270,42 @@ internal static class Rules
     // with no new code. Property is Type.Property, * matching any run.
     public static readonly GeneralProperty[] GeneralProperties =
     {
-        new("DeviceProtocolSpec.*", "the generic device protocol (DeviceModelSpec.cs, Usbip/DeviceProtocol.cs) the GameCube adapter persona is the model of"),
-        new("Protocol*Spec.*", "the generic device protocol (DeviceModelSpec.cs, Usbip/DeviceProtocol.cs) the GameCube adapter persona is the model of"),
+        new("Protocol*Spec.*", "the generic device protocol (ProgramForm/ModelSpec.cs, Usbip/DeviceProtocol.cs, Usbip/ProtocolEngine.cs) the GameCube adapter persona is the model of"),
+        // v2.0.0, lane DD-4: the protocol engine and report programs
+        // (design note, mechanisms 2 and 3). The Switch 2 Pro composite is
+        // their first catalog user. The second device of each is the Switch
+        // Pro, whose protocol the design note writes in the same keys
+        // (mechanism 3's sketch: registers, memory with a value segment,
+        // echo and memory reply parts, a reply prefix, decoders, layouts with
+        // counters, copies, bit moves, a lookup and fields), which lane DD-5
+        // converts.
+        new("ControllerProfile.Protocol", "the device protocol at the profile's top level (mechanism 3), read by the shared parse (ProfilePrograms)"),
+        new("ControllerProfile.StateBlock", "the state block of a device that builds its reports (mechanism 2). The Switch Pro's 48-byte body is the second (SwitchProPacker.cs at 9bd6279)"),
+        new("ControllerProfile.InputReports", "the layouts of a device that builds its reports (mechanism 2). The Switch Pro's 0x30 and 0x3F are the second"),
+        new("ControllerProfile.LiveFeatureReports", "a feature report built from the state block (mechanism 2), the DualShock 3's report 0"),
+        new("RegisterSpec.*", "the protocol's registers (mechanism 3): the GameCube adapter's states, the Switch 2 Pro's, the Triton's imuMode"),
+        new("CounterSpec.*", "the protocol's counters (mechanism 2): the Switch 2 Pro's report counter, the Switch Pro's timer byte"),
+        new("MemorySpec.*", "a memory image a reply reads (mechanism 3): the Switch 2 Pro's flash, the Switch Pro's SPI image (driver.c:1393-1441 at 9bd6279)"),
+        new("MemorySegmentSpec.*", "a memory image's segments, constant or a value source (mechanism 3 and 5): the Switch 2 Pro's serial, the Switch Pro's MAC"),
+        new("StoreSpec.*", "a command byte stored into a register (mechanism 3): the Switch 2 Pro's report select, the Switch Pro's input mode (driver.c:1639-1703 at 9bd6279)"),
+        new("MaskedStoreSpec.*", "a command byte masked by a register (mechanism 3): the Switch 2 Pro's feature enable and disable"),
+        new("MemoryWriteSpec.*", "command bytes written into a memory image (mechanism 3): the Switch Pro's SPI write"),
+        new("EmitOutputSpec.*", "a translated output report raised in place of the command (mechanism 3): the DualShock 3's folded report 0x01 (driver.c:1293-1324 at 9bd6279)"),
+        new("ReplyPartSpec.*", "the parts of a protocol reply (mechanism 3): the GameCube adapter's, the Switch 2 Pro's, the Switch Pro's 0x21"),
+        new("ByteSourceSpec.*", "an address or length a reply part reads from the command (mechanism 3): the Switch 2 Pro's flash reads, the Switch Pro's SPI reads (address le32 at 11, length at 15, at most 29)"),
+        new("Bitmap*Spec.*", "reply bytes chosen by the bits of a command byte (mechanism 3): the Switch 2 Pro's feature info. The Switch 2 Joy-Cons answer the same command (switch2_controller_research commands.md, Get Feature Info)"),
+        new("DecoderSpec.*", "a protocol's output decoders (mechanism 3): the Switch 2 Pro's rumble, the Switch Pro's HD rumble"),
+        new("DecodeFieldSpec.*", "a decoded output field (mechanism 3)"),
+        new("Packed*Spec.*", "the packed-uint bit groups a decoder reads (mechanism 1): the Switch 2 Pro's and the Switch Pro's rumble amplitudes"),
+        new("ScaleSpec.*", "the codec's scale and a decoder part's ratio (mechanism 1): the Switch 2 Pro's motion, the Switch Pro's IMU (13371 / 936)"),
+        new("InputReportSpec.*", "a layout of a device that builds its reports (mechanism 2)"),
+        new("LiveFeatureReportSpec.*", "a feature report built from the state block (mechanism 2)"),
+        new("StateBlockSpec.*", "the state block of a device that builds its reports (mechanism 2)"),
+        new("ProgramOpSpec.*", "an op of a report program (mechanism 2), the vocabulary every layout, decoder and emitted report is written in"),
+        new("ReadSpec.*", "a value a report program reads from the state block (mechanism 2)"),
         new("Port*Spec.*", "the generic per-port model (PortLayout.cs, HMPort.cs) the GameCube adapter persona is the model of"),
         new("ExtendedReportSpec.Ports", "the generic per-port model (PortLayout.cs, HMPort.cs) the GameCube adapter persona is the model of"),
         new("HMControllerAdapterLayout.*", "the layout of the controller adapter kind (HMLayout.cs), which any adapter profile fills"),
-        new("UsbConfigurationSpec.Protocol", "the generic device protocol on a USB/IP configuration"),
         new("UsbConfigurationSpec.WinUsb", "the generic WinUSB binding (WinUsbBinding.cs)"),
         new("WinUsbSpec.*", "the generic WinUSB binding (WinUsbBinding.cs)"),
         new("UsbConfigurationSpec.SharedSerial", "a USB/IP identity choice any persona may make (UsbDescriptorSet.cs:179)"),

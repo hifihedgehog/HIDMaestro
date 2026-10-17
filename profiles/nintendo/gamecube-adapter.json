@@ -12,7 +12,7 @@
   "backend": "usbip",
   "descriptor": "05050900a101851119002aff00150026ff00750895059100c0a101852119002aff00150026ff00750895258100c0a101851219002aff00150026ff00750895019100c0a101852219002aff00150026ff00750895198100c0a101851319002aff00150026ff00750895019100c0a101852319002aff00150026ff00750895028100c0a101851419002aff00150026ff00750895019100c0a101852419002aff00150026ff00750895028100c0a101851519002aff00150026ff00750895019100c0a101852519002aff00150026ff00750895028100c0",
   "inputReportSize": 37,
-  "notes": "The Wii U GameCube adapter, WUP-028, as Dolphin, Slippi and SDL read it through libusb: one USB device with four controller ports. The descriptors are a real adapter's byte for byte: USB 2.00, full speed, bMaxPacketSize0 8, bcdDevice 1.00, strings Nintendo, WUP-028 and 15/07/2014, one HID interface with interrupt IN 0x81 of 37 bytes and interrupt OUT 0x02 of 5 bytes at 8 ms, and the 214-byte report descriptor of gamecube-adapter-hid. Every unit carries the serial 15/07/2014, so a second adapter gets a Windows instance named after its port. The adapter sends nothing until a host writes 0x13. From then on each host poll gets report 0x21: the report ID and nine bytes per port, a status byte (0x04 rumble power, 0x10 wired, 0x22 a WaveBird communicating, 0x20 a WaveBird that is not: Dolphin, SDL and ToadKing's driver read 0x20 as a connected WaveBird, and Nintendont alone as an empty port), two button bytes, the sticks, and the analog L and R. 0x11 sets each port's motor, 0x12 reads the origins, 0x14 stops the reports and 0x15 stops the adapter until a port reset. A reply that finds another still waiting is dropped. A SET_REPORT(Output) is one command, its whole data stage, less a leading report ID that matches wValue's, as tinyusb drops it before loopj's firmware reads the command. GET_REPORT answers the requested report ID alone, as loopj's firmware does. SET_PROTOCOL succeeds. extendedReport.ports and usbConfiguration.protocol describe all of it as data. Windows' HID parser rejects the report descriptor, so a real adapter has no HID collection on Windows, and HMController.BindWinUsb binds WinUSB to this device alone. HMController.Ports takes input per port, and SubmitState goes to port 1. docs/design/v1.13.0.md has the sources.",
+  "notes": "The Wii U GameCube adapter, WUP-028, as Dolphin, Slippi and SDL read it through libusb: one USB device with four controller ports. The descriptors are a real adapter's byte for byte: USB 2.00, full speed, bMaxPacketSize0 8, bcdDevice 1.00, strings Nintendo, WUP-028 and 15/07/2014, one HID interface with interrupt IN 0x81 of 37 bytes and interrupt OUT 0x02 of 5 bytes at 8 ms, and the 214-byte report descriptor of gamecube-adapter-hid. Every unit carries the serial 15/07/2014, so a second adapter gets a Windows instance named after its port. The adapter sends nothing until a host writes 0x13. From then on each host poll gets report 0x21: the report ID and nine bytes per port, a status byte (0x04 rumble power, 0x10 wired, 0x22 a WaveBird communicating, 0x20 a WaveBird that is not: Dolphin, SDL and ToadKing's driver read 0x20 as a connected WaveBird, and Nintendont alone as an empty port), two button bytes, the sticks, and the analog L and R. 0x11 sets each port's motor, 0x12 reads the origins, 0x14 stops the reports and 0x15 stops the adapter until a port reset. A reply that finds another still waiting is dropped. A SET_REPORT(Output) is one command, its whole data stage, less a leading report ID that matches wValue's, as tinyusb drops it before loopj's firmware reads the command. GET_REPORT answers the requested report ID alone, as loopj's firmware does. SET_PROTOCOL succeeds. extendedReport.ports and protocol describe all of it as data. Windows' HID parser rejects the report descriptor, so a real adapter has no HID collection on Windows, and HMController.BindWinUsb binds WinUSB to this device alone. HMController.Ports takes input per port, and SubmitState goes to port 1. docs/design/v1.13.0.md has the sources.",
   "extendedReport": {
     "reportId": "0x21",
     "size": 37,
@@ -95,45 +95,45 @@
         ]
       }
     ],
-    "protocol": {
-      "state": [
-        { "name": "polling", "initial": false },
-        { "name": "stalled", "initial": false },
-        { "name": "halted", "initial": false }
-      ],
-      "input": {
-        "endpoint": "0x81",
-        "while": ["polling", "!stalled"],
-        "clock": {
-          "sourcePollMs": 1.19971,
-          "sourcePollRules": [
-            { "portsConnected": [1, 2], "periodMs": 0.9995 }
-          ]
-        }
-      },
-      "commands": {
-        "endpoint": "0x02",
-        "setReport": true,
-        "setReportStripsId": true,
-        "pendingReplies": 1,
-        "rules": [
-          { "match": "11", "minLength": 5 },
-          { "match": "11", "set": { "stalled": true } },
-          { "match": "12", "reply": [ { "hex": "22" }, { "snapshot": "origin", "bytes": "3-8", "while": ["polling"] } ] },
-          { "match": "13", "set": { "polling": true, "stalled": false } },
-          { "match": "14", "reply": [ { "hex": "24" }, { "state": "polling" } ], "set": { "polling": false } },
-          { "match": "15", "set": { "halted": true, "polling": false } },
-          { "match": "16", "set": { "stalled": true } },
-          { "match": "17", "set": { "stalled": true } }
-        ]
-      },
-      "halt": { "while": ["halted"], "status": "EPROTO" },
-      "setProtocol": "ack",
-      "getStatus": "descriptor",
-      "getReport": "reportId"
-    },
     "winUsb": {
       "interfaceGuid": "{7F216CFC-A59A-41F6-947D-E7BF407BCAD0}"
     }
+  },
+  "protocol": {
+    "state": [
+      { "name": "polling", "initial": false },
+      { "name": "stalled", "initial": false },
+      { "name": "halted", "initial": false }
+    ],
+    "input": {
+      "endpoint": "0x81",
+      "while": ["polling", "!stalled"],
+      "clock": {
+        "sourcePollMs": 1.19971,
+        "sourcePollRules": [
+          { "portsConnected": [1, 2], "periodMs": 0.9995 }
+        ]
+      }
+    },
+    "commands": {
+      "endpoint": "0x02",
+      "setReport": true,
+      "setReportStripsId": true,
+      "rules": [
+        { "match": "11", "minLength": 5 },
+        { "match": "11", "set": { "stalled": true } },
+        { "match": "12", "reply": [ { "hex": "22" }, { "snapshot": "origin", "bytes": "3-8", "while": ["polling"] } ] },
+        { "match": "13", "set": { "polling": true, "stalled": false } },
+        { "match": "14", "reply": [ { "hex": "24" }, { "state": "polling" } ], "set": { "polling": false } },
+        { "match": "15", "set": { "halted": true, "polling": false } },
+        { "match": "16", "set": { "stalled": true } },
+        { "match": "17", "set": { "stalled": true } }
+      ]
+    },
+    "replies": { "pending": 1, "overflow": "dropNewest" },
+    "halt": { "while": ["halted"], "status": "EPROTO" },
+    "setProtocol": "ack",
+    "getStatus": "descriptor",
+    "getReport": "reportId"
   }
 }

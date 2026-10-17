@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -57,6 +58,7 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
         typeof(SnakeCaseEnumConverter<HMRumbleKind>),
     })]
 [JsonSerializable(typeof(ControllerProfile))]
+[JsonSerializable(typeof(List<FieldSpec>))]
 [JsonSerializable(typeof(HMLayout))]
 [JsonSerializable(typeof(HMUnspecifiedLayout))]
 [JsonSerializable(typeof(HMGamepadLayout))]
