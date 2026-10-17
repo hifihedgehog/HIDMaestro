@@ -583,5 +583,29 @@ internal static class Clock
         var plain = ControllerProfile.Parse(Encoding.UTF8.GetBytes(o.ToJsonString()))!;
         var ps = StreamClock.Compile(plain, plain.GetOrCompileModel().Registers)!;
         Check("a stream without timestamps holds them, as the idle repeat before v2.0.0 did", !ps.AdvanceTimestamps);
+
+        // The catalog's idle repeats: cadence.json's recommended interval for
+        // each profile whose real device streams at rest. dualshock-4-v2-bt
+        // starts in report 0x01 mode, and no source settles whether that mode
+        // repeats, so it has none.
+        var expected = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            ["dualsense"] = 4, ["dualsense-composite"] = 4, ["dualsense-bt"] = 1.25, ["dualsense-bt-full"] = 1.25, ["dualsense-edge-bt"] = 1.25,
+            ["dualsense-edge"] = 1, ["dualsense-edge-composite"] = 1,
+            ["dualshock-4-v1"] = 4, ["dualshock-4-v1-full"] = 4, ["dualshock-4-v2"] = 4, ["dualshock-4-v2-composite"] = 4, ["steam-deck"] = 4,
+            ["thrustmaster-t-gt"] = 250, ["thrustmaster-t150"] = 250, ["thrustmaster-t248"] = 250, ["thrustmaster-t300rs-ps3"] = 250,
+            ["thrustmaster-t300rs-ps3-adv"] = 250, ["openffboard"] = 101,
+            // The Valve personas' extendedReport.idleFrameIntervalMs, as
+            // v1.12.0 repeated them.
+            ["steam-controller-2"] = 4, ["steam-controller-composite"] = 8, ["steam-deck-composite"] = 4,
+        };
+        var actual = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var cp in ProfileDatabase.LoadEmbedded().All)
+            if (StreamClock.Compile(cp, cp.GetOrCompileModel().Registers) is { } sc)
+                actual[cp.Id] = Math.Round(sc.PeriodTicks * 1000.0 / f, 3);
+        var wrong = expected.Where(kv => !actual.TryGetValue(kv.Key, out var ms) || ms != kv.Value).Select(kv => $"{kv.Key} {(actual.TryGetValue(kv.Key, out var ms) ? ms + " ms" : "none")}, not {kv.Value} ms")
+            .Concat(actual.Keys.Except(expected.Keys).Select(id => $"{id} repeats every {actual[id]} ms, which the table does not list")).ToList();
+        Check($"the catalog's {expected.Count} idle repeats run at cadence.json's intervals, and no other profile repeats", wrong.Count == 0, string.Join("; ", wrong));
+        Check("dualshock-4-v2-bt does not repeat: no source settles its 0x01 mode", !actual.ContainsKey("dualshock-4-v2-bt"));
     }
 }
