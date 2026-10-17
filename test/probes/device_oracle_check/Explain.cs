@@ -43,12 +43,14 @@
 //                   descriptor axes: c + RoundHalfEven(t x sL + max(t, 0) x
 //                   (sH - sL)), t = v' - 0.5, sL = 2 (c - min), sH = 2 (max -
 //                   c). Counts centered
-//   rule stamp profile=<id> byte=<n> width=16|32 divisor=<n>
+//   rule stamp profile=<id> byte=<n> width=16|32 divisor=<n> interval-ms=<n>
 //                   the sensor timestamp at that byte of the profile's codec
 //                   report: (acc / divisor) mod 2^width, acc the design
 //                   note's accumulator (mechanism 1) over the states' stamps
 //                   and the readings of the clock each controller's encoder
-//                   reads (ScriptedClock). A stamp of 0 after the switch to
+//                   reads (ScriptedClock). A stamp that runs backward adds
+//                   one nominal interval, the profile's idleFrameIntervalMs,
+//                   which the rule states. A stamp of 0 after the switch to
 //                   the consumer's stamps adds the clock's time and moves
 //                   the last stamp on by as much. Counts stamp
 // A CRC field is recomputed over the bytes it covers, and counts crc. An
@@ -111,7 +113,7 @@ internal sealed class ExplainRules
         if (Rest) names.Add("rest");
         if (Nan != null) names.Add($"nan to={Nan}");
         foreach (var (p, c) in Centers) names.Add($"centered {p} {string.Join(' ', c.Select(kv => $"{kv.Key}={kv.Value}"))}");
-        foreach (var (p, s) in Stamps) names.Add($"stamp {p} byte={s.Byte} width={s.Width} divisor={s.Divisor}");
+        foreach (var (p, s) in Stamps) names.Add($"stamp {p} byte={s.Byte} width={s.Width} divisor={s.Divisor} interval-ms={s.IntervalMs}");
         return names.Count == 0 ? "none" : string.Join(", ", names);
     }
 
@@ -150,12 +152,14 @@ internal sealed class ExplainRules
                 }
                 case "stamp":
                 {
-                    Only("profile", "byte", "width", "divisor");
+                    Only("profile", "byte", "width", "divisor", "interval-ms");
                     int width = ParseInt(Need("width"));
                     if (width is not (16 or 32)) throw new InvalidDataException($"{e.Source}: rule stamp width= takes 16 or 32");
                     uint divisor = (uint)ParseInt(Need("divisor"));
                     if (divisor == 0) throw new InvalidDataException($"{e.Source}: rule stamp divisor= is at least 1");
-                    r.Stamps[Need("profile")] = new StampRule(ParseInt(Need("byte")), width, divisor);
+                    int interval = ParseInt(Need("interval-ms"));
+                    if (interval < 1) throw new InvalidDataException($"{e.Source}: rule stamp interval-ms= is at least 1");
+                    r.Stamps[Need("profile")] = new StampRule(ParseInt(Need("byte")), width, divisor, interval);
                     break;
                 }
                 default: throw new InvalidDataException($"{e.Source}: no rule {e.Target} (Explain.cs names the rules)");
@@ -168,7 +172,7 @@ internal sealed class ExplainRules
         ? Convert.ToInt32(v[2..], 16) : int.Parse(v);
 }
 
-internal sealed record StampRule(int Byte, int Width, uint Divisor);
+internal sealed record StampRule(int Byte, int Width, uint Divisor, int IntervalMs);
 
 /// <summary>The base dump of one case read in step with the tree's outputs,
 /// each output recomputed by the lane's rules, and each stream held twice
@@ -1210,9 +1214,11 @@ internal sealed class ControllerParts
             Ports = PortLayout.Of(spec, "ports", output: false);
             if (Ports != null) PortBlock = new CodecPart(Ports.FieldSpec, P.Id, stamped: false);
             else Codec = new CodecPart(spec, P.Id, stamped: true);
-            _nominal = (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue);
         }
         _clock = ScriptedClock.Of(typeof(HMController).GetField("_extEncoderState", Instance)?.GetValue(c));
+        // The nominal interval is the stamp rule's, not the tree's profile.
+        if (ExplainRules.Active.Stamps.TryGetValue(P.Id, out var stamp))
+            _nominal = (uint)Math.Clamp((long)stamp.IntervalMs * 3000, 0, uint.MaxValue);
     }
 
     public bool Armed => s_armed?.GetValue(C) is true;

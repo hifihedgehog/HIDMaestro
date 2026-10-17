@@ -67,7 +67,6 @@ internal sealed class Case7OutputDecode : IOracleCase
             int n = 0;
             foreach (var p in profiles)
             {
-                if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
                 Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
                 Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
                 int index = FirstIndex + n++;

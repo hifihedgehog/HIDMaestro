@@ -101,8 +101,8 @@ internal sealed class Case6ValveInputPath : IOracleCase
         {
             var p = db.All.FirstOrDefault(x => x.Id == id)
                 ?? throw new InvalidOperationException($"No profile {id} in the catalog.");
-            // No idle pump: the case repeats frames itself. Case 1 does the same.
-            if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
+            // No idle pump: the case repeats frames itself, on a controller
+            // Case1Submit.Create builds without one.
             var mask = ClockBytes(p);
             string at = $"valve-input/{id}";
 

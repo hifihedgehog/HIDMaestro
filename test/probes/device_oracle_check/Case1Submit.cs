@@ -18,8 +18,8 @@
 // size and bytes, and the 14-byte GIP slice.
 //
 // Four things decide timing, not bytes, and are fixed so a run repeats:
-// the idle-frame pump of a Valve profile (extendedReport.idleFrameIntervalMs,
-// set to 0 on the case's copy of the catalog before the controller exists),
+// the idle-frame pump of a Valve profile, which Create keeps from starting
+// without changing the catalog's profile (WithoutIdlePump),
 // the keyboard and mouse delivery pacing (HMController._deliverEvery, which
 // waits 1 ms between frames), the codec's own clock, which stamps a report
 // whose state carries no sensor timestamp (each such state gets the stamp a
@@ -81,8 +81,6 @@ internal sealed class Case1Submit : IOracleCase
             foreach (var (id, p) in subjects)
             {
                 int index = FirstIndex + n++;
-                // No idle pump: the case submits every frame itself.
-                if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
                 var axes = AxesOf(p);
                 foreach (var (suffix, armed) in PathsOf(p))
                 {
@@ -318,12 +316,33 @@ internal sealed class Case1Submit : IOracleCase
             typeof(HMContext), typeof(int), typeof(HMProfile), typeof(string), typeof(UsbipBackendHandle), typeof(string),
         }) ?? throw new MissingMethodException("HMController's private constructor changed: update case 1.");
         var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
-        var c = (HMController)ctor.Invoke(new object?[] { context, index, new HMProfile(p), null, usbip, null });
+        var c = (HMController)ctor.Invoke(new object?[] { context, index, new HMProfile(WithoutIdlePump(p)), null, usbip, null });
         // Keyboard and mouse pacing waits a millisecond between frames, a
         // timing rule the frames' bytes do not depend on.
         typeof(HMController).GetField("_deliverEvery", Instance)!.SetValue(c, false);
         ScriptedClock.Install(c);
         return c;
+    }
+
+    static readonly MethodInfo s_clone = typeof(object).GetMethod("MemberwiseClone", Instance)!;
+
+    /// <summary>The profile the controller is built from: the catalog's,
+    /// or for a profile with an idle-frame interval a copy of it whose
+    /// extended report has none, so the constructor starts no idle pump and
+    /// the case calls the repeat itself. The catalog's profile is never
+    /// changed. Its report is compiled first, from the catalog's own values,
+    /// and the copy shares that compiled program, so the encoder carries
+    /// the real interval wherever it reads one (an accumulating timestamp's
+    /// nominal step) however late a tree compiles.</summary>
+    internal static ControllerProfile WithoutIdlePump(ControllerProfile p)
+    {
+        if (p.ExtendedReport is not { IdleFrameIntervalMs: > 0 } spec) return p;
+        VendorBlobProgram.Get(spec);
+        var report = (ExtendedReportSpec)s_clone.Invoke(spec, null)!;
+        report.IdleFrameIntervalMs = 0;
+        var copy = (ControllerProfile)s_clone.Invoke(p, null)!;
+        copy.ExtendedReport = report;
+        return copy;
     }
 
     internal static void Forget(int index)

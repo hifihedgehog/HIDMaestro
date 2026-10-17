@@ -429,7 +429,6 @@ internal sealed class Case8UsbipPaths : IOracleCase
             _g = g;
             _host = host;
             _index = index;
-            if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
             _view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
             Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, _view, SharedMemoryIO.SHARED_INPUT_SIZE);
             _ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
@@ -880,7 +879,6 @@ internal sealed class Case8UsbipPaths : IOracleCase
     /// companion's (SharedMemoryIO.cs:486-490, 908-917).</summary>
     static void Raw(GoldenCase g, ControllerProfile p, int index, Rng rng)
     {
-        if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
         g.Stream($"raw/{p.Id}/submits");
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         IntPtr companion = IntPtr.Zero;

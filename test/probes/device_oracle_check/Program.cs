@@ -239,6 +239,10 @@ internal static class Program
 
         Console.WriteLine($"=== device_oracle_check {mode}, seed {seed}, golden {golden} ===");
         if (profilePatch != null) ProfilePatch.Apply(profilePatch);
+        // Every case reads the catalog through LoadEmbedded's process-wide
+        // cache, so a case that changed a profile would change what every
+        // case after it records. None may: checked after the last case.
+        var catalog = CatalogText();
         int failures = 0, skipped = 0;
         var recorded = new List<GoldenCase>();
         foreach (var c in selected)
@@ -311,6 +315,12 @@ internal static class Program
                 failures++;
             }
         }
+        foreach (var (id, text) in CatalogText())
+            if (!catalog.TryGetValue(id, out var was) || was != text)
+            {
+                Console.WriteLine($"  [FAIL] the run changed catalog profile {id}: the cases must build what they change from a copy");
+                failures++;
+            }
         // Every change listed for a case that ran must have matched: the list
         // names the tree's changes and no others. A rule is the lane's to
         // state, and --explain's to hold the tree to.
@@ -424,6 +434,12 @@ internal static class Program
             .First(a => a.Key == "ProbeDir").Value!;
 
     static string Short(string digest) => digest.Length > 16 ? digest[..16] : digest;
+
+    /// <summary>Each catalog profile as JSON, as the run's cases see it.</summary>
+    static Dictionary<string, string> CatalogText() =>
+        HIDMaestro.Internal.ProfileDatabase.LoadEmbedded().All.ToDictionary(
+            p => p.Id, p => System.Text.Json.JsonSerializer.Serialize(p, HIDMaestro.Internal.HMJsonContext.Default.ControllerProfile),
+            StringComparer.Ordinal);
 
     static int Usage()
     {
