@@ -37,6 +37,7 @@ internal static class Deploy
         Section(c, "the gate", Gate);
         Section(c, "the predicate", Predicate);
         Section(c, "the start", Start);
+        Section(c, "the deploy lock", LockHandle);
         return c.Failures;
     }
 
@@ -296,5 +297,23 @@ internal static class Deploy
                 return (ok ? e == null : e is HMDriverVersionException v && v.Blockers.SequenceEqual(new[] { Node }),
                         e == null ? "passed" : $"{e.GetType().Name}: {e.Message}");
             });
+    }
+
+    /// <summary>Releasing the deploy lock closes the mutex handle too. Each
+    /// create's gate and each InstallDriver open a new Mutex (Acquire), and
+    /// at 517255dd the hold released it and left the handle to the
+    /// finalizer. b22324e disposed it (using var mutex = Acquire()).</summary>
+    static void LockHandle(Checks c)
+    {
+        c.Run("disposing the deploy lock's hold releases the mutex and closes its handle", () =>
+        {
+            var held = typeof(DriverDeploy.DeployMachine).GetNestedType("Held", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                ?? throw new MissingMemberException("DeployMachine", "Held");
+            var m = new System.Threading.Mutex(false);
+            m.WaitOne();
+            var hold = (IDisposable)Activator.CreateInstance(held, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public, null, new object[] { m }, null)!;
+            hold.Dispose();
+            return (m.SafeWaitHandle.IsClosed, m.SafeWaitHandle.IsClosed ? "" : "the handle is still open");
+        });
     }
 }

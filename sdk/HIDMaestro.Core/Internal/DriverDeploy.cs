@@ -96,9 +96,15 @@ internal static partial class DriverDeploy
         internal virtual void RecordPayload() => DriverBuilder.RecordInstalledPayload();
         internal virtual void PruneStaging() => ProtectedStaging.PruneOldVersions();
 
+        /// <summary>The deploy lock held: releasing it releases the mutex
+        /// and closes the handle Acquire opened for this hold.</summary>
         private sealed class Held(Mutex mutex) : IDisposable
         {
-            public void Dispose() => mutex.ReleaseMutex();
+            public void Dispose()
+            {
+                try { mutex.ReleaseMutex(); }
+                finally { mutex.Dispose(); }
+            }
         }
     }
 
