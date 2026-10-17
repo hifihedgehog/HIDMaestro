@@ -108,10 +108,32 @@
 //        program's OutputReceived. Then it kills the program and times the
 //        sweep that removes the device. The user still cannot open the
 //        OutputEvent, and every output arrives within 20 ms.
+//    Y21. A v1.12.0 program on a machine where only this release deployed:
+//        its package is not in the driver store and its staging has no
+//        catalog. Its create installs no driver, and its device runs on
+//        none. While the program runs, the census holds the device as a
+//        running v1.12.0 program's, or, when it cannot read the device's
+//        index, as a program's of unknown state and says why. Either way a
+//        create of this SDK beside it starts at transport index 64, and
+//        sweeps leave it. Once the program is killed, nothing holds its
+//        acknowledgement section, the census reads the device as a
+//        program's older than v1.12.0, and sweeps leave it. It sets no
+//        floor then: a keyless create takes the slot index, or skips only
+//        the device's own index where the census reads one, and the same
+//        program's second keyless create, beside its first, stays below
+//        64. Only the
+//        uninstall-grade cleanup removes it, and the next create is back on
+//        the slot index.
+//    Y22. The same kind of v1.12.0 program on the index a running program
+//        of this release holds, 0: every named object on that index then
+//        carries this release's names. The v1.12.0 program's registry
+//        ledger holder, a running process no live record names, shows it,
+//        and the program of this release takes its next controller at
+//        transport index 64 or above.
 //
-//    Every part runs v1.12.0 programs whose staging carries the signed
-//    catalogs section E's install leaves there, so their creates install
-//    v1.12.0's own driver on any machine (LegacyStagingCataloged).
+//    Every part but Y21 and Y22 runs v1.12.0 programs whose staging carries the
+//    signed catalogs section E's install leaves there, so their creates
+//    install v1.12.0's own driver on any machine (LegacyStagingCataloged).
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -138,6 +160,21 @@ internal static partial class Program
         if (user == IntPtr.Zero) return;
         try
         {
+            // Y21 first: it takes v1.12.0's package out of the store, which
+            // the other parts put back through their creates. A failure in it
+            // is its own, and the other parts still run.
+            try { SectionYUncataloged(); }
+            catch (Exception ex)
+            {
+                Check("Y21 ran to the end", false, $"{ex.GetType().Name}: {ex.Message}");
+                Clean();
+            }
+            try { SectionYSharedIndex(); }
+            catch (Exception ex)
+            {
+                Check("Y22 ran to the end", false, $"{ex.GetType().Name}: {ex.Message}");
+                Clean();
+            }
             LegacyStagingCataloged("Y");
             string? installed = SectionYBody(user);
             if (installed == null) return;
@@ -158,6 +195,297 @@ internal static partial class Program
             SectionYReAdded(user, "Y20", holdAck: false);
         }
         finally { Y.CloseHandle(user); }
+    }
+
+    /// <summary>Y21. A v1.12.0 program on a machine where its own package is
+    /// not in the driver store and its staging has no catalog, the state of
+    /// a machine where only this release ever deployed. Its create skips its
+    /// deploy, since a package of each INF is in the store
+    /// (PnputilHelper.IsHidMaestroDriverInstalled), writes the devnode's
+    /// ControllerIndex, and hands UpdateDriverForPlugAndPlayDevicesW its
+    /// staging's hidmaestro.inf, whose catalog is not there: the call fails
+    /// with ERROR_NO_CATALOG_FOR_OEM_INF, the create goes on and waits out
+    /// its HID-child waits (DeviceNodeCreator.CreateDeviceNode,
+    /// DeviceOrchestrator step 4), and the device has no driver. Each check
+    /// states what this release does with that device.</summary>
+    static void SectionYUncataloged()
+    {
+        Uninstall();
+        Clean();
+        Check("Y21: the driver store holds this release's package of each INF and no v1.12.0 package",
+              StoreHoldsThisReleaseOnly(out string store), store);
+        // A staging directory of the probe's own, so this v1.12.0 program
+        // finds no catalog whatever ran before.
+        string temp = Path.Combine(Path.GetTempPath(), "hm-y21-" + Environment.ProcessId);
+        if (Directory.Exists(temp)) Directory.Delete(temp, true);
+        Directory.CreateDirectory(temp);
+        string? inst = null;
+        try
+        {
+            string tok, inputName, ackName;
+            using (var old = PeerProcess.Start("Y21-v1.12.0", "v1.12.0", tempDir: temp))
+            {
+                string? staging = StagingPath(old.Send("stagingdir"));
+                Check("Y21: the v1.12.0 program's staging has no catalog",
+                      staging != null && staging.StartsWith(temp, StringComparison.OrdinalIgnoreCase) && !StagingCataloged(staging), staging ?? "no staging");
+                string co = old.Send("create pad F1E2 coexist-y-uncataloged");
+                Check("Y21: its create returns all the same", Ok(co), co);
+                if (!Ok(co)) return;
+                inst = PeerProcess.Field(co, "instance")!;
+                int t = int.Parse(PeerProcess.Field(co, "transport")!);
+                tok = inst.Substring(inst.LastIndexOf('\\') + 1);
+                inputName = $@"Global\HIDMaestroInput{t}";
+                ackName = $@"Global\HIDMaestroInputAck{t}";
+                string index = ControllerIndexState(inst);
+                Check("Y21: its device runs on no driver: no driver version, not started, no HID child",
+                      Native.DriverVersionOf(inst) == null && !Native.IsStarted(inst) && Native.Subtree(inst).Count == 1
+                      && Native.HidPaths(0xBEEF, 0xF1E2).Count == 0,
+                      $"{Native.DriverVersionOf(inst) ?? "no driver"}, {Native.StatusOf(inst)}, {Native.Subtree(inst).Count} node(s)");
+                Check($"Y21: the create wrote ControllerIndex {t} in the devnode's Device Parameters", index == $"ControllerIndex {t}", index);
+
+                // The program streams. Its frames reach its input section,
+                // the control, and no driver reads them: nothing ever writes
+                // the acknowledgement section, whose capability word any
+                // driver that maps it sets.
+                old.Send("stream 6 0.6 125 0");
+                Thread.Sleep(500);
+                byte[]? input = Native.SectionBytes(inputName, InputSectionSize);
+                byte[]? ack = Native.SectionBytes(ackName, AckSectionSize);
+                Check($"Y21: its input reaches no device: the program writes {inputName}, and no driver ever wrote {ackName}",
+                      input != null && input.Any(x => x != 0) && ack != null && ack.All(x => x == 0),
+                      $"input {(input == null ? "absent" : input.Any(x => x != 0) ? "carries a frame" : "all zero")}, " +
+                      $"acknowledgement {(ack == null ? "absent" : ack.All(x => x == 0) ? "all zero" : "written")}");
+
+                // Its owner pipe is held, no driver reports on it, and both
+                // sections exist with no ended marker: OwnerCensus.LegacyPipeLive.
+                // With its index read, the census holds it as a running
+                // v1.12.0 program's. With the index unread it cannot test the
+                // index's owner pipe, holds it as a program's of unknown
+                // state, and names why (OwnerCensus.IndexRead).
+                using var nu = PeerProcess.Start("Y21-census");
+                string? entry = Y.CensusEntry(nu.Send("census"), tok);
+                string[] fields = entry?.Split('|') ?? Array.Empty<string>();
+                bool indexRead = fields.Length > 2 && int.TryParse(fields[1], out int read) && read >= 0;
+                Check("Y21: the census reads the device's index, or names why it cannot",
+                      fields.Length > 2 && (indexRead || fields[1].StartsWith("-1/", StringComparison.Ordinal)),
+                      $"{entry ?? "no entry"}, {ControllerIndexState(inst)}");
+                // With the index read, the owner the census gives is the
+                // test. With it unread the owner can only be Unknown, so the
+                // test is the reason: the census's must be what the probe
+                // reads in the same key.
+                string probeRead = ControllerIndexState(inst);
+                if (indexRead)
+                    Check("Y21: the census holds the device as a running v1.12.0 program's",
+                          fields[2] == "LiveLegacy", entry ?? "no entry");
+                else
+                    Check("Y21: with its index unread, the census's reason is the probe's own read of the key",
+                          fields.Length > 2 && CensusReasonMatches(fields[1], probeRead), $"{entry ?? "no entry"}, probe: {probeRead}");
+                // Either way a create of this SDK beside it stays out of the
+                // v1.12.0 program's reach (ControllerLease.LegacyProgramRuns).
+                string beside = nu.Send("create pad F1E3 coexist-y21-beside");
+                Check("Y21: a create beside it takes transport index 64 or above, out of the v1.12.0 program's reach",
+                      Ok(beside) && int.TryParse(PeerProcess.Field(beside, "transport"), out int tb) && tb >= 64, beside);
+                nu.Send("dispose");
+                nu.Send("sweep");
+                Thread.Sleep(2000);
+                Check("Y21: a sweep leaves it", Native.IsPresent(inst), Native.StatusOf(inst));
+                old.Kill();
+            }
+
+            // No driver held either section, so both go with the program.
+            bool sectionsGone = WaitFor(() => !Native.SectionExists(inputName) && !Native.SectionExists(ackName), 5000);
+            Check($"Y21: once the program is killed, {inputName} and {ackName} are gone with it", sectionsGone,
+                  $"input {(Native.SectionExists(inputName) ? "exists" : "gone")}, acknowledgement {(Native.SectionExists(ackName) ? "exists" : "gone")}");
+            // No record, no owner pipe, no acknowledgement section: the
+            // design's row for a program older than v1.12.0, whose state
+            // cannot be known (OwnerCensus.WithoutLiveRecord).
+            using var sweeper = PeerProcess.Start("Y21-sweeper");
+            string? after = Y.CensusEntry(sweeper.Send("census"), tok);
+            Check("Y21: the census then reads the device as Unknown, as a program's older than v1.12.0",
+                  after?.Split('|')[2] == "Unknown", $"{after ?? "no entry"}, {ControllerIndexState(inst)}");
+            sweeper.Send("sweep");
+            Thread.Sleep(2000);
+            Check("Y21: and a sweep leaves it, as it leaves such a program's", Native.IsPresent(inst), Native.StatusOf(inst));
+
+            // The state that lasts: the program is gone and its device
+            // stays. A device of a closed program sets no floor. Its index,
+            // where the census reads one, is skipped, and no other.
+            string[] afterFields = after?.Split('|') ?? Array.Empty<string>();
+            int leftIndex = afterFields.Length > 2 && int.TryParse(afterFields[1], out int li) ? li : -1;
+            string later = sweeper.Send("create pad F1E4 -");
+            int tl = Ok(later) && int.TryParse(PeerProcess.Field(later, "transport"), out int tv) ? tv : -1;
+            Check(leftIndex >= 0
+                      ? $"Y21: while the closed program's device stays, a keyless create skips only its index {leftIndex}, below 64"
+                      : "Y21: while the closed program's device stays, a keyless create takes the slot index, 0: the device moves no create",
+                  leftIndex >= 0 ? tl >= 0 && tl < 64 && tl != leftIndex : tl == 0, later);
+            // The same program's second keyless create, its first controller
+            // alive. Its own record lists that index, whose pipe and sections
+            // look like a v1.12.0 program's to the census, and are its own:
+            // the create stays below 64. Where the census reads the dead
+            // program's index, no index-less device is present and the
+            // census looks for no program, so this tells something only on
+            // the branch where the index cannot be read.
+            string later2 = sweeper.Send("create pad F1E5 -");
+            int tl2 = Ok(later2) && int.TryParse(PeerProcess.Field(later2, "transport"), out int tv2) ? tv2 : -1;
+            Check("Y21: the same program's second keyless create, its first controller alive, takes another index below 64",
+                  tl >= 0 && tl2 >= 0 && tl2 < 64 && tl2 != tl && tl2 != leftIndex, later2);
+            sweeper.Send("dispose");
+        }
+        finally
+        {
+            // RemoveAllVirtualControllers(HMCleanupScope.Everything), the
+            // uninstall-grade cleanup, removes it.
+            Clean();
+            if (inst != null)
+            {
+                Check("Y21: the cleanup that removes every device on the machine removes it", Native.IsGone(inst), Native.StatusOf(inst));
+                using var back = PeerProcess.Start("Y21-after-cleanup");
+                string c = back.Send("create pad F1E4 -");
+                Check("Y21: after the cleanup a keyless create takes the slot index, 0",
+                      Ok(c) && PeerProcess.Field(c, "transport") == "0", c);
+                back.Send("dispose");
+            }
+            // The v1.12.0 program's diagnostic log (HIDMAESTRO_DIAG), which
+            // it writes under its %TEMP%, goes with this directory. A copy
+            // stays in the probe's own %TEMP%.
+            string diag = Path.Combine(temp, "HIDMaestro");
+            if (Directory.Exists(diag))
+            {
+                string keep = Path.Combine(Path.GetTempPath(), $"HIDMaestro-Y21-v1.12.0-{Environment.ProcessId}");
+                try
+                {
+                    Directory.CreateDirectory(keep);
+                    foreach (string f in Directory.GetFiles(diag, "*.log"))
+                        File.Copy(f, Path.Combine(keep, Path.GetFileName(f)), overwrite: true);
+                    Console.WriteLine($"    Y21: the v1.12.0 program's diagnostics are kept in {keep}");
+                }
+                catch (Exception ex) { Console.WriteLine($"    Y21: {diag} not copied: {ex.Message}"); }
+            }
+            try { Directory.Delete(temp, true); }
+            catch (Exception ex) { Console.WriteLine($"    Y21: {temp} not removed: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Y22. A v1.12.0 program whose device has no driver, on the
+    /// index a running program of this release holds. Its first create
+    /// there opens this release's sections, and its owner pipe fails against
+    /// this release's two instances. What it writes of its own is its
+    /// registry ledger holder (v1.12.0 WriteInstanceConfig, before its
+    /// devnode), which the census reads for a running v1.12.0 program its
+    /// devices do not show (OwnerCensus.Build).</summary>
+    static void SectionYSharedIndex()
+    {
+        Clean();
+        Check("Y22: the driver store holds this release's package of each INF and no v1.12.0 package",
+              StoreHoldsThisReleaseOnly(out string store), store);
+        string temp = Path.Combine(Path.GetTempPath(), "hm-y22-" + Environment.ProcessId);
+        if (Directory.Exists(temp)) Directory.Delete(temp, true);
+        Directory.CreateDirectory(temp);
+        try
+        {
+            using var old = PeerProcess.Start("Y22-v1.12.0", "v1.12.0", tempDir: temp);
+            string? staging = StagingPath(old.Send("stagingdir"));
+            Check("Y22: the v1.12.0 program's staging has no catalog",
+                  staging != null && staging.StartsWith(temp, StringComparison.OrdinalIgnoreCase) && !StagingCataloged(staging), staging ?? "no staging");
+            // Its first create in a process removes every HIDMaestro device
+            // present (CleanupGhostDevices), so it creates and disposes one
+            // before the program of this release creates.
+            string first = old.Send("create pad F1E6 coexist-y22-first");
+            if (!Ok(first)) { Check("Y22: the v1.12.0 program creates", false, first); return; }
+            string firstInst = PeerProcess.Field(first, "instance")!;
+            old.Send("dispose");
+            Check("Y22: the v1.12.0 program's first controller, made for its once-per-session cleanup, is disposed and its device gone",
+                  WaitFor(() => !Native.IsPresent(firstInst), 15_000), Native.StatusOf(firstInst));
+            using var q = PeerProcess.Start("Y22-this");
+            string q1 = q.Send("create pad F1E7 -");
+            Check("Y22: a program of this release takes transport index 0", Ok(q1) && PeerProcess.Field(q1, "transport") == "0", q1);
+            string p = old.Send("create pad F1E8 coexist-y22-shared");
+            Check("Y22: the v1.12.0 program's next create lands on index 0 too", Ok(p) && PeerProcess.Field(p, "index") == "0", p);
+            if (!Ok(p)) return;
+            string pInst = PeerProcess.Field(p, "instance")!;
+            string pTok = pInst.Substring(pInst.LastIndexOf('\\') + 1);
+            Check("Y22: its device runs on no driver",
+                  Native.DriverVersionOf(pInst) == null && !Native.IsStarted(pInst),
+                  $"{Native.DriverVersionOf(pInst) ?? "no driver"}, {Native.StatusOf(pInst)}");
+            // Which sign the census has. With the device's index read, its
+            // group on index 0 tests the held pipe there, as for any v1.12.0
+            // device. With it unread, only the ledger holder shows the
+            // program: index 0 is this release's live record's, and the
+            // pipe and sections there are its own too.
+            string? entry = Y.CensusEntry(q.Send("census"), pTok);
+            string[] fields = entry?.Split('|') ?? Array.Empty<string>();
+            bool indexRead = fields.Length > 2 && int.TryParse(fields[1], out int read) && read >= 0;
+            string q2 = q.Send("create pad F1E9 -");
+            Check(entry == null
+                      ? "Y22: with no census entry for the v1.12.0 device, the program of this release takes its next controller at transport index 64 or above"
+                      : indexRead
+                      ? "Y22: with the v1.12.0 device's index read, the program of this release takes its next controller at transport index 64 or above"
+                      : "Y22: with the v1.12.0 device's index unread, its ledger holder makes the program of this release take its next controller at transport index 64 or above",
+                  Ok(q2) && int.TryParse(PeerProcess.Field(q2, "transport"), out int t2) && t2 >= 64,
+                  $"{q2}, census {entry ?? "no entry"}, {ControllerIndexState(pInst)}");
+            q.Send("dispose");
+            old.Kill();
+        }
+        finally
+        {
+            Clean();
+            try { Directory.Delete(temp, true); }
+            catch (Exception ex) { Console.WriteLine($"    Y22: {temp} not removed: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Whether the driver store holds a package of each INF and
+    /// none of v1.12.0: the state in which a v1.12.0 create skips its
+    /// deploy (its IsHidMaestroDriverInstalled needs both).</summary>
+    static bool StoreHoldsThisReleaseOnly(out string detail)
+    {
+        string repo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
+        int main = Directory.GetDirectories(repo, "hidmaestro.inf_*").Length;
+        int xusb = Directory.GetDirectories(repo, "hidmaestro_xusb.inf_*").Length;
+        var versions = StorePackageVersions();
+        detail = $"{main} hidmaestro.inf, {xusb} hidmaestro_xusb.inf: {string.Join(", ", versions)}";
+        return main > 0 && xusb > 0 && !versions.Any(v => v.StartsWith("1.12.", StringComparison.Ordinal));
+    }
+
+    /// <summary>The DriverVer versions of the HIDMaestro packages in the
+    /// driver store, both INFs.</summary>
+    static List<string> StorePackageVersions()
+    {
+        string repo = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "DriverStore", "FileRepository");
+        var list = new List<string>();
+        foreach (string inf in new[] { "hidmaestro.inf", "hidmaestro_xusb.inf" })
+            foreach (string dir in Directory.GetDirectories(repo, inf + "_*"))
+            {
+                string path = Path.Combine(dir, inf);
+                var m = File.Exists(path) ? Regex.Match(File.ReadAllText(path), @"(?m)^DriverVer\s*=\s*[^,]*,\s*([\d.]+)") : Match.Empty;
+                list.Add(m.Success ? m.Groups[1].Value : "unreadable");
+            }
+        return list;
+    }
+
+    /// <summary>Whether the census's index field, -1/&lt;reason&gt;, names
+    /// what <see cref="ControllerIndexState"/> found in the same key.</summary>
+    static bool CensusReasonMatches(string censusIndex, string probeRead) => censusIndex switch
+    {
+        "-1/NoValue" => probeRead.StartsWith("no ControllerIndex value", StringComparison.Ordinal)
+                        || probeRead.StartsWith("ControllerIndex of type", StringComparison.Ordinal),
+        "-1/NoKey" => probeRead == "no Device Parameters key",
+        "-1/Unreadable" => probeRead.StartsWith("Device Parameters unreadable", StringComparison.Ordinal),
+        _ => false,
+    };
+
+    /// <summary>What a devnode's Device Parameters say of its
+    /// ControllerIndex, which the census reads as the device's index.</summary>
+    static string ControllerIndexState(string instanceId)
+    {
+        try
+        {
+            using var dp = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{instanceId}\Device Parameters");
+            if (dp == null) return "no Device Parameters key";
+            object? v = dp.GetValue("ControllerIndex");
+            return v is int ci ? $"ControllerIndex {ci}" : v == null ? "no ControllerIndex value" : $"ControllerIndex of type {dp.GetValueKind("ControllerIndex")}";
+        }
+        catch (Exception ex) { return $"Device Parameters unreadable: {ex.GetType().Name}: {ex.Message}"; }
     }
 
     /// <summary>Y9. The v1.12.0 owner pipe's name, taken by the user before
