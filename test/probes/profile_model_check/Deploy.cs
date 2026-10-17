@@ -373,6 +373,20 @@ internal static class Deploy
             return (error.Message.Contains("FeatureAnswers", StringComparison.Ordinal) && error.Message.Contains("problem code 43", StringComparison.Ordinal),
                     error.Message);
         });
+        // A HID child that fails while its parent started is the device the
+        // error names, with the child's code. At 65451b0c the error read
+        // the parent alone and said "problem code 0".
+        c.Run("a failed HID child under a started parent: the error names the child and its problem code", () =>
+        {
+            const string Child = @"HID\HIDCLASS\HM_0003&COL01\1";
+            var withChild = typeof(DeviceOrchestrator).GetMethod("StartError", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
+                new[] { typeof(string), typeof(int), typeof(string) });
+            if (withChild == null) return (false, "StartError takes no child");
+            var error = With(id => id == Child ? (true, HasProblem, 43u) : (true, Started, 0u), _ => Child, _ => (0, 0, null, 0),
+                () => (Exception)withChild.Invoke(null, new object?[] { Node, 3, Child })!);
+            return (error.Message.Contains(Child, StringComparison.Ordinal) && error.Message.Contains("problem code 43", StringComparison.Ordinal),
+                    error.Message);
+        });
         // The public wait keeps the form v1.13.0 had, so a caller built
         // against it still binds. At de87fa90 a third optional parameter
         // replaced it.

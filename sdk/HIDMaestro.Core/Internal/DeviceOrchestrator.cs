@@ -1521,7 +1521,7 @@ internal static partial class DeviceOrchestrator
                 if (hidChildId != null)
                 {
                     if (WaitForDeviceStarted(hidChildId, parentId, controllerIndex, timeoutMs: 5000) == StartWait.Failed)
-                        throw StartError(parentId, controllerIndex);
+                        throw StartError(parentId, controllerIndex, hidChildId);
 
                     // Write ControllerIndex directly to the HID child's HW key
                     // so any future HID-child filter can read it without having
@@ -1631,7 +1631,7 @@ internal static partial class DeviceOrchestrator
                         string? hidChildId2 = DeviceManager.GetHidChildId(mainInstanceId);
                         if (hidChildId2 != null
                             && WaitForDeviceStarted(hidChildId2, mainInstanceId, controllerIndex, timeoutMs: 5000) == StartWait.Failed)
-                            throw StartError(mainInstanceId, controllerIndex);
+                            throw StartError(mainInstanceId, controllerIndex, hidChildId2);
                     }
                 }
                 LogDiag($"    restart_main_for_wgi restarted={restarted} childBack={childBack} in {rsSw.ElapsedMilliseconds}ms");
@@ -1825,13 +1825,21 @@ internal static partial class DeviceOrchestrator
 
     /// <summary>What a failed start throws: an
     /// <see cref="HMDriverVersionException"/> naming the value when the
-    /// driver set its error word, else the devnode's problem.</summary>
-    internal static Exception StartError(string instanceId, int controllerIndex)
+    /// driver set its error word, else the devnode's problem. With the HID
+    /// child's instance ID, a child that failed while its parent started is
+    /// the device named.</summary>
+    internal static Exception StartError(string instanceId, int controllerIndex, string? childId = null)
     {
         var half = DriverHalf(controllerIndex);
-        // The device's problem code goes in either message, the record of
-        // which failure Windows saw (cfg.h).
+        // The failed device's problem code goes in either message, the
+        // record of which failure Windows saw (cfg.h): the parent's when it
+        // has one, else the child's.
         var (_, _, problem) = DevnodeStatus(instanceId);
+        if (problem == 0 && childId != null && DevnodeStatus(childId) is (_, _, not 0) failedChild)
+        {
+            instanceId = childId;
+            problem = failedChild.Problem;
+        }
         if (half.ConfigError != 0)
             return new HMDriverVersionException(HMDriverVersionProblem.ValueNotRead,
                 $"The HIDMaestro driver {half.Version?.ToString() ?? "(no version written)"} could not read the value " +
