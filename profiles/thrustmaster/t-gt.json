@@ -10,5 +10,6 @@
   "connection": "usb",
   "descriptor": null,
   "inputReportSize": null,
-  "notes": "T-GT II shares the same PID. Ferrari F1 Wheel Advanced T-GT mode uses PID 0xB685."
+  "notes": "T-GT II shares the same PID. Ferrari F1 Wheel Advanced T-GT mode uses PID 0xB685.",
+  "stream": {"periodMs": 250}
 }

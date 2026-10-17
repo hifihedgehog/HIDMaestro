@@ -272,6 +272,11 @@ public sealed class ControllerProfile
     [JsonPropertyName("liveFeatureReports")]
     public List<LiveFeatureReportSpec>? LiveFeatureReports { get; set; }
 
+    /// <summary>v2.0.0: the device keeps reporting while the consumer is
+    /// quiet, as the real device streams. See <see cref="StreamSpec"/>.</summary>
+    [JsonPropertyName("stream")]
+    public StreamSpec? Stream { get; set; }
+
     private CompiledModel? _model;
 
     /// <summary>The model groups compiled into the validated form, once per
@@ -481,8 +486,8 @@ public sealed class ControllerProfile
         WinUsbBinding.PackageFor(this, descriptors);
     }
 
-    /// <summary>v2.0.0: the model groups compile, and the state block's
-    /// fields fit it.</summary>
+    /// <summary>v2.0.0: the model groups compile, the state block's fields fit
+    /// it, and the stream's keys name what the profile declares.</summary>
     private void ValidateProgramModel()
     {
         CompiledModel model;
@@ -496,6 +501,7 @@ public sealed class ControllerProfile
         }
         if (BuildsItsOwnReports && Protocol == null)
             throw new InvalidOperationException($"Profile '{Id}': $.inputReports: a device that builds its reports needs a protocol that says when it sends them.");
+        if (Stream != null) StreamClock.Compile(this, model.Registers);
     }
 
     /// <summary>The state block of a device at rest, before any SubmitState:

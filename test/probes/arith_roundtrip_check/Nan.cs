@@ -160,6 +160,7 @@ internal static class Nan
     static byte[] Frame(ControllerProfile p, bool armed, Dictionary<HMAxis, float> axes)
     {
         if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
+        p.Stream = null;
         int index = s_index++;
         IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
         try

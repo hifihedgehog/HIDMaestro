@@ -10,5 +10,6 @@
   "connection": "usb",
   "descriptor": null,
   "inputReportSize": null,
-  "notes": "Open-source force feedback wheel controller. PID-compliant. From universal-pidff hid-ids.h."
+  "notes": "Open-source force feedback wheel controller. PID-compliant. From universal-pidff hid-ids.h.",
+  "stream": {"periodMs": 101}
 }

@@ -285,6 +285,52 @@
     "liveFeatureReports": {
       "type": "array",
       "description": "Feature reports a device builds from its state block when the host reads them (mechanism 2): reportId, size and a program."
+    },
+    "stream": {
+      "type": "object",
+      "description": "The idle repeat: the consumer's last frame sent again one period after the last frame went out, as the real device reports at rest. Replaces extendedReport.idleFrameIntervalMs, which still loads as a stream of that whole-millisecond period. A profile sets one of the two.",
+      "required": [
+        "periodMs"
+      ],
+      "properties": {
+        "periodMs": {
+          "type": "number",
+          "minimum": 0.125,
+          "maximum": 60000,
+          "description": "The period in milliseconds, fractions allowed (1.25 for a DualSense over Bluetooth)."
+        },
+        "periodRegister": {
+          "type": "object",
+          "description": "A protocol register the host sets the period through, times unitMs. While it holds 0 the period is periodMs.",
+          "required": [
+            "name",
+            "unitMs"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "unitMs": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "while": {
+          "description": "A condition on the protocol's registers the repeat runs under, in the condition grammar: a string, or a list of terms that must all hold.",
+          "type": [
+            "string",
+            "array"
+          ]
+        },
+        "timestamps": {
+          "enum": [
+            "hold",
+            "advance"
+          ],
+          "description": "hold, the default, repeats the frame's sensor timestamp. advance moves it on by the time since the frame, as the real device's clock does."
+        }
+      }
     }
   },
   "$defs": {

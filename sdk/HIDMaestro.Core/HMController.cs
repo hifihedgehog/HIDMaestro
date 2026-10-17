@@ -279,8 +279,11 @@ public sealed partial class HMController : IDisposable
     private bool _lastRawWasExtended;
     private byte[]? _lastRawFrame;
     private int _lastRawLength;
+    // The idle repeat's thread, the device clock's, set while one runs. A
+    // submit remembers its frame for the repeat only while it is set.
     private Thread? _idleThread;
-    private readonly CancellationTokenSource _idleCts = new();
+    private IDeviceClock? _idleClock;
+    private StreamClock? _stream;
 
     // Switch Pro protocol (issue #33): wire-format packer state. See
     // SwitchProPacker + the driver-side responder in driver.c.
@@ -636,8 +639,8 @@ public sealed partial class HMController : IDisposable
         // Output passthrough is best-effort. If the section can't be created
         // (rare: only LocalService permission issues) we just don't raise
         // OutputReceived events.
-        int idleMs = profile.ExtendedReport?.IdleFrameIntervalMs ?? 0;
-        if (idleMs > 0)
+        _stream = StreamClock.Compile(profile.Inner, model.Registers);
+        if (_stream != null)
         {
             // Publish one frame immediately so the device is already
             // streaming when a driver opens it, then keep the cadence up
@@ -648,15 +651,12 @@ public sealed partial class HMController : IDisposable
                 lock (_submitLock) Ports.RememberReportLocked();
             else
                 _lastSubmitted = new HMGamepadState();
-            _idleThread = new Thread(() => IdleFrameLoop(idleMs))
-            {
-                IsBackground = true,
-                Name = $"HMIdleFrames_{index}",
-                // The same priority as the USB/IP input pump that carries
-                // these frames to the wire.
-                Priority = ThreadPriority.AboveNormal,
-            };
-            _idleThread.Start();
+            var tick = new StreamTick(_stream, _protocolEngine?.RegisterWords, RepeatLastFrameFromClock,
+                () => Volatile.Read(ref _lastSubmitTimestamp));
+            var clock = new DeviceClock<StreamTick>(tick, MissedTick.Drop, $"HMIdleFrames_{index}");
+            _idleClock = clock;
+            _idleThread = clock.Thread;
+            clock.Start();
         }
 
         try
@@ -1613,76 +1613,24 @@ public sealed partial class HMController : IDisposable
         }
     }
 
-    /// <summary>Re-publish the consumer's last frame at the profile's
-    /// declared interval whenever the consumer has gone quiet for longer
-    /// than that. A <see cref="SubmitState"/> frame is encoded again for
-    /// each repeat rather than copied, so rolling counters advance the way
-    /// a real device's do: SDL_hidapi_steam.c treats a repeated unPacketNum
-    /// as no new data at all. A raw frame is the consumer's own bytes and is
-    /// repeated as they are.
-    ///
-    /// <para>The cadence is a deadline in Stopwatch ticks, waited out on a
-    /// high-resolution waitable timer, the way UsbAudioEngine paces audio.
-    /// A plain wait rounds up to the 15.6 ms system tick, which held a 4 ms
-    /// Steam Deck to about 62 frames a second. SDL's Deck driver reads once
-    /// with a 16 ms timeout before it accepts the device, and at that rate
-    /// the read could come back empty.</para></summary>
-    private void IdleFrameLoop(int intervalMs)
+    /// <summary>The idle repeat, on the device clock (<see cref="StreamClock"/>):
+    /// the consumer's last frame again one period after the last frame went
+    /// out, while the stream's condition holds. A <see cref="SubmitState"/>
+    /// frame is encoded again for each repeat rather than copied, so rolling
+    /// counters advance the way a real device's do: SDL_hidapi_steam.c treats
+    /// a repeated unPacketNum as no new data at all. With the stream's
+    /// timestamps rule "advance", the repeat's sensor timestamp moves on by
+    /// the time since the consumer's frame, as a real device stamps every
+    /// report. A raw frame is the consumer's own bytes and is repeated as
+    /// they are.</summary>
+    private void RepeatLastFrameFromClock()
     {
-        var token = _idleCts.Token;
-        long interval = Math.Max(1, intervalMs * System.Diagnostics.Stopwatch.Frequency / 1000);
-        IntPtr timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero,
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        var waits = new[] { timer, token.WaitHandle.SafeWaitHandle.DangerousGetHandle() };
-        long due = System.Diagnostics.Stopwatch.GetTimestamp();
-        try
+        try { RepeatLastFrame(); }
+        catch
         {
-            while (!token.IsCancellationRequested)
-            {
-                // A consumer's own frame puts the next repeat one interval
-                // after it, so a live consumer's cadence always wins.
-                long afterConsumer = Volatile.Read(ref _lastSubmitTimestamp) + interval;
-                if (afterConsumer > due) due = afterConsumer;
-
-                long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (now >= due)
-                {
-                    try { RepeatLastFrame(); }
-                    catch
-                    {
-                        // Same containment contract as OutputPollLoop: a
-                        // transient failure must not kill the pump, and
-                        // disposal races here are ordinary rather than
-                        // exceptional.
-                    }
-                    // Fixed rate, the way a device clock runs. A pump that
-                    // fell a whole interval behind starts again from now
-                    // rather than sending a burst.
-                    due += interval;
-                    if (due <= now) due = now + interval;
-                    continue;
-                }
-
-                long wait = due - now;
-                if (timer != IntPtr.Zero)
-                {
-                    long rel = -Math.Max(1, wait * 10_000_000L / System.Diagnostics.Stopwatch.Frequency); // relative, 100 ns units
-                    if (SetWaitableTimer(timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false))
-                    {
-                        uint woke = WaitForMultipleObjects(2, waits, false, (uint)(intervalMs * 4 + 16));
-                        if (woke == 1) break;
-                        if (woke != WAIT_FAILED) continue;
-                    }
-                }
-                // No high-resolution timer (Windows 10 before 1803) or a
-                // failed wait: the plain wait, coarser but still running.
-                int ms = (int)Math.Max(1, wait * 1000 / System.Diagnostics.Stopwatch.Frequency);
-                if (token.WaitHandle.WaitOne(ms)) break;
-            }
-        }
-        finally
-        {
-            if (timer != IntPtr.Zero) CloseHandle(timer);
+            // Same containment contract as OutputPollLoop: a transient
+            // failure must not kill the pump, and disposal races here are
+            // ordinary rather than exceptional.
         }
     }
 
@@ -1702,6 +1650,9 @@ public sealed partial class HMController : IDisposable
             else
             {
                 var st = _lastSubmitted;
+                if (_stream is { AdvanceTimestamps: true })
+                    st.SensorTimestamp = StreamClock.Advance(st.SensorTimestamp,
+                        System.Diagnostics.Stopwatch.GetTimestamp() - Volatile.Read(ref _lastSubmitTimestamp));
                 SubmitStateCore(in st);
             }
         }
@@ -2123,8 +2074,7 @@ public sealed partial class HMController : IDisposable
         lock (_submitLock) _disposed = true;
         // Idle frames stop before the output pump, so no repeat can
         // land on a section this Dispose is about to unmap.
-        try { _idleCts.Cancel(); } catch { }
-        try { _idleThread?.Join(Internal.TimeoutScale.Apply(500)); } catch { }
+        try { _idleClock?.Stop(Internal.TimeoutScale.Apply(500)); } catch { }
         lock (_outputCtsLock)
             if (!_outputCtsClosed) _outputCts.Cancel();
         // The reader disposes the cancellation source as it ends. A reader
@@ -2147,20 +2097,6 @@ public sealed partial class HMController : IDisposable
         try { Internal.SharedMemoryIO.UnregisterOutputPump(Index); } catch { }
         _context.OnControllerDisposing(this);
     }
-
-    private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
-    private const uint TIMER_ALL_ACCESS = 0x1F0003;
-    private const uint WAIT_FAILED = 0xFFFFFFFF;
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period, IntPtr completionRoutine, IntPtr arg, [MarshalAs(UnmanagedType.Bool)] bool resume);
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial uint WaitForMultipleObjects(uint count, IntPtr[] handles, [MarshalAs(UnmanagedType.Bool)] bool waitAll, uint ms);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

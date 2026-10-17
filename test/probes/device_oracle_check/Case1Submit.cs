@@ -327,7 +327,13 @@ internal sealed class Case1Submit : IOracleCase
         if (idleThread.GetValue(c) is Thread pump)
         {
             lock (IdlePumps) IdlePumps.Add($"{p.Id} ({pump.Name})");
-            (typeof(HMController).GetField("_idleCts", Instance)?.GetValue(c) as CancellationTokenSource)?.Cancel();
+            // The idle repeat runs on a device clock, _idleClock, which
+            // Stop ends and joins.
+            if (typeof(HMController).GetField("_idleClock", Instance)?.GetValue(c) is IDeviceClock clock)
+            {
+                clock.Stop(1000);
+                typeof(HMController).GetField("_idleClock", Instance)!.SetValue(c, null);
+            }
             pump.Join(1000);
             idleThread.SetValue(c, null);
         }
@@ -345,8 +351,8 @@ internal sealed class Case1Submit : IOracleCase
     internal static readonly List<string> IdlePumps = new();
 
     /// <summary>The profile the controller is built from: the catalog's,
-    /// or for a profile with an idle-frame interval a copy of it whose
-    /// extended report has none, so the constructor starts no idle pump and
+    /// or for a profile with an idle-frame interval or a stream a copy of
+    /// it with neither, so the constructor starts no idle pump and
     /// the case calls the repeat itself. Every key that starts a pump is
     /// stopped here and only here: a tree that adds one adds it to this
     /// helper, or Create counts the pump and the case fails. The catalog's profile is never
@@ -356,12 +362,23 @@ internal sealed class Case1Submit : IOracleCase
     /// nominal step) however late a tree compiles.</summary>
     internal static ControllerProfile NoIdlePump(ControllerProfile p)
     {
-        if (p.ExtendedReport is not { IdleFrameIntervalMs: > 0 } spec) return p;
-        VendorBlobProgram.Get(spec);
-        var report = (ExtendedReportSpec)s_clone.Invoke(spec, null)!;
-        report.IdleFrameIntervalMs = 0;
+        bool interval = p.ExtendedReport is { IdleFrameIntervalMs: > 0 };
+        if (!interval && p.Stream == null) return p;
+        // What the tree derives from the catalog's own values first: the
+        // report's program, the model groups and the stream's clock, which
+        // validates the stream's keys against the registers.
+        if (p.ExtendedReport is { } spec) VendorBlobProgram.Get(spec);
+        var model = p.GetOrCompileModel();
+        if (p.Stream != null) StreamClock.Compile(p, model.Registers);
         var copy = (ControllerProfile)s_clone.Invoke(p, null)!;
-        copy.ExtendedReport = report;
+        if (interval)
+        {
+            var report = (ExtendedReportSpec)s_clone.Invoke(p.ExtendedReport!, null)!;
+            report.IdleFrameIntervalMs = 0;
+            copy.ExtendedReport = report;
+        }
+        // The top-level stream starts the idle repeat on the device clock.
+        copy.Stream = null;
         return copy;
     }
 
