@@ -36,7 +36,8 @@
 //                   a NaN input writes the field's rest value (0.5 on a
 //                   stick or a combined trigger, 0 on a trigger, 0 counts of
 //                   motion), or the wire value nearest zero in the field's
-//                   range. Counts nan
+//                   range. Counts nan, also for the combined axis of a split
+//                   trigger pair that a NaN trigger feeds
 //   rule centered profile=<id> <axis>=<wire center> ...
 //                   decision (a)'s centered form on the profile's
 //                   descriptor axes: c + RoundHalfEven(t x sL + max(t, 0) x
@@ -773,6 +774,10 @@ internal sealed class DescriptorPart
                 cat = "round";
                 now = r.Round ? Arith.Linear(w.Now, f.LogicalMin, f.LogicalMax, false) : Old.Descriptor(w.Now, f);
             }
+            // A field whose input was NaN counts as nan whatever the rule
+            // made of it: the combined axis of a NaN trigger under rule nan
+            // to=rest carries the other trigger, a number.
+            if (double.IsNaN(w.Base)) cat = "nan";
             if (w.Rested) cat = "rest";
             Bits.Field(before, expected, at, f.BitSize, old, now, cat, t, $"descriptor axis {w.Key}", w.Base);
         }
