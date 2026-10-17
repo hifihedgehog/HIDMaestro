@@ -29,6 +29,8 @@
 //                profile must name the model its identity gives it, with
 //                the answers the device gave.
 //   check        the three, the default.
+//   selftest     the version-section watch on a section this check makes,
+//                no device and no elevation.
 // Each create that throws is a named failure with the exception, the
 // driver's half of its index's version section and the problem code
 // Windows gave the device, and the checks after it go on. A create whose
@@ -113,18 +115,118 @@ internal static class Program
 
     static string Key() => "contract-live-" + Guid.NewGuid().ToString("N");
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenFileMappingW(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileMappingW(IntPtr file, IntPtr sec, uint protect, uint sizeHigh, uint sizeLow, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr MapViewOfFile(IntPtr mapping, uint access, uint offHigh, uint offLow, UIntPtr bytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool UnmapViewOfFile(IntPtr view);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    /// <summary>The version section of one index, held open by this check
+    /// from the moment the SDK makes it. A failed create tears its section
+    /// down (HMContext's cleanup), and the section lives while any handle
+    /// does, so the driver's half is still readable after the failure.</summary>
+    sealed class VersionWatch : IDisposable
+    {
+        const uint FILE_MAP_READ = 4;
+        readonly string _name;
+        readonly Thread _thread;
+        volatile bool _stop;
+        volatile bool _holding;
+        IntPtr _handle, _view;
+
+        /// <summary>The watch holds the section.</summary>
+        public bool Holding => _holding;
+
+        public VersionWatch(string name)
+        {
+            _name = name;
+            _thread = new Thread(Run) { IsBackground = true, Name = "version-watch" };
+            _thread.Start();
+        }
+
+        void Run()
+        {
+            while (!_stop)
+            {
+                IntPtr h = OpenFileMappingW(FILE_MAP_READ, false, _name);
+                if (h != IntPtr.Zero)
+                {
+                    IntPtr v = MapViewOfFile(h, FILE_MAP_READ, 0, 0, (UIntPtr)SharedMemoryIO.VERSION_INFO_SIZE);
+                    if (v != IntPtr.Zero) { _handle = h; _view = v; _holding = true; return; }
+                    CloseHandle(h);
+                }
+                Thread.Sleep(2);
+            }
+        }
+
+        /// <summary>The driver's half as SharedMemoryIO.DriverHalf reads
+        /// it, or why there is none.</summary>
+        public string Read()
+        {
+            _stop = true;
+            _thread.Join();
+            if (_view == IntPtr.Zero) return "no version section seen";
+            int error = Marshal.ReadInt32(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_CONFIG_ERROR);
+            int protocol = Marshal.ReadInt32(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL);
+            int min = Marshal.ReadInt32(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL_MIN);
+            var version = $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION)}." +
+                          $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION + 2)}." +
+                          $"{(ushort)Marshal.ReadInt16(_view, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION + 4)}";
+            return protocol == 0 && error == 0 ? "the driver wrote nothing"
+                : $"protocols {min} to {protocol}, version {version}, error word {error}";
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join();
+            if (_view != IntPtr.Zero) { UnmapViewOfFile(_view); _view = IntPtr.Zero; }
+            if (_handle != IntPtr.Zero) { CloseHandle(_handle); _handle = IntPtr.Zero; }
+        }
+    }
+
     /// <summary>A create, or a named failure: the exception, the driver's
     /// half of the index's version section, and what the index's device
-    /// reported.</summary>
+    /// reported. The section is watched from before the create, since the
+    /// failed create's cleanup releases the SDK's own view of it.</summary>
     static HMController? Create(HMContext ctx, int index, HMProfile profile, string what)
     {
+        using var watch = new VersionWatch($@"Global\HIDMaestroVersion{index}");
         try { return ctx.CreateControllerAt(index, profile, Key()); }
         catch (Exception e)
         {
-            Check($"{what}: the create", false,
-                  $"{e.GetType().Name}: {e.Message} | driver's half {SharedMemoryIO.DriverHalf(index)}");
+            Check($"{what}: the create", false, $"{e.GetType().Name}: {e.Message} | driver's half: {watch.Read()}");
             return null;
         }
+    }
+
+    /// <summary>The watch reads a section that outlived its maker: a
+    /// section this check makes and fills as a driver would, closed before
+    /// the read. Needs no device and no elevation.</summary>
+    static void Selftest()
+    {
+        string name = $@"Local\HMContractLiveSelftest{Environment.ProcessId}";
+        using var watch = new VersionWatch(name);
+        IntPtr h = CreateFileMappingW(new IntPtr(-1), IntPtr.Zero, 4 /* PAGE_READWRITE */, 0, (uint)SharedMemoryIO.VERSION_INFO_SIZE, name);
+        IntPtr v = MapViewOfFile(h, 2 /* FILE_MAP_WRITE */, 0, 0, (UIntPtr)SharedMemoryIO.VERSION_INFO_SIZE);
+        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL, 4);
+        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_PROTOCOL_MIN, 4);
+        Marshal.WriteInt16(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_VERSION, 2);
+        Marshal.WriteInt32(v, SharedMemoryIO.VERSION_OFFSET_DRIVER_CONFIG_ERROR, 1);
+        for (int i = 0; i < 500 && !watch.Holding; i++) Thread.Sleep(2);
+        UnmapViewOfFile(v);
+        CloseHandle(h);
+        string read = watch.Read();
+        Check("selftest: the watch reads a version section its maker closed", read == "protocols 4 to 4, version 2.0.0, error word 1", read);
     }
 
     /// <summary>The device a controller made, as Windows reports it.</summary>
@@ -145,6 +247,12 @@ internal static class Program
 
     static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "selftest")
+        {
+            Selftest();
+            Console.WriteLine($"contract_live_check selftest: {(s_failures == 0 ? "PASS" : $"FAIL, {s_failures}")}");
+            return s_failures == 0 ? 0 : 1;
+        }
         if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
         {
             Console.WriteLine("contract_live_check: needs elevation, nothing created");
