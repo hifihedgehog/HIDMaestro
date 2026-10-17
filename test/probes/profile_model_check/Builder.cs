@@ -137,7 +137,12 @@ internal static class Builder
             var same = new HMProfileBuilder().FromProfile(src).DescriptorHex(src.DescriptorHex!).Build();
             // The same bytes in another hex case are the same descriptor.
             var upper = new HMProfileBuilder().FromProfile(src).DescriptorHex(src.DescriptorHex!.ToUpperInvariant()).Build();
+            // And in the spaced form a profile's descriptor may take, which
+            // GetDescriptorBytes reads as the same bytes.
+            string spacedHex = string.Join(" ", Enumerable.Range(0, src.DescriptorHex!.Length / 2).Select(i => src.DescriptorHex!.Substring(i * 2, 2)));
+            var spaced = new HMProfileBuilder().FromProfile(src).DescriptorHex(spacedHex).Build();
             return (Json(same.Inner) == Json(src.Inner) && upper.Inner.Layout != null && upper.Inner.ExtendedReport != null
+                    && spaced.Inner.Layout != null && spaced.Inner.ExtendedReport != null
                     && (upper.Inner.FeatureStubs != null) == (src.Inner.FeatureStubs != null), "");
         });
         c.Run("a builder's first descriptor drops nothing set before it", () =>

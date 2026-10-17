@@ -150,10 +150,14 @@ public sealed class HMProfileBuilder
         _descriptorHex = hex;
     }
 
+    /// <summary>Two hex strings that give the same bytes, read as
+    /// ControllerProfile.GetDescriptorBytes reads them: spaces and dashes
+    /// between digits ignored, either case.</summary>
     private static bool SameBytes(string a, string b)
     {
-        try { return Convert.FromHexString(a).AsSpan().SequenceEqual(Convert.FromHexString(b)); }
-        catch (FormatException) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+        static string Bare(string h) => h.Replace(" ", "").Replace("-", "");
+        try { return Convert.FromHexString(Bare(a)).AsSpan().SequenceEqual(Convert.FromHexString(Bare(b))); }
+        catch (FormatException) { return string.Equals(Bare(a), Bare(b), StringComparison.OrdinalIgnoreCase); }
     }
 
     /// <summary>The keys <see cref="Descriptor(byte[])"/> lists, dropped
