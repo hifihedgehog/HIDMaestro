@@ -1061,10 +1061,15 @@ internal static partial class DeviceOrchestrator
                 // fast hw; some XUSB coinstallers can take 1–4 s to register
                 // the interface even after the SwDeviceCreate callback fires.
                 // Scaling is layered on top of the 5 s base by DeviceManager.
+                // A companion whose start failed ends the wait within one
+                // poll and fails the create, as the HID device's start does:
+                // a restart does not mend a failed add or start.
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    if (DeviceManager.WaitForDeviceInterface(xusbInstId, XusbInterfaceGuid, timeoutMs: 5000))
+                    if (CompanionInterfaceWait(xusbInstId, controllerIndex))
                         break;
+                    if (StartFailed(xusbInstId, controllerIndex))
+                        throw StartError(xusbInstId, controllerIndex);
                     DeviceManager.RestartDevice(xusbInstId);
                 }
             }
@@ -1813,6 +1818,13 @@ internal static partial class DeviceOrchestrator
     /// when the child appeared. A field, so a check gives it a machine.</summary>
     internal static Func<string, int, bool> RootChildWait = (instanceId, controllerIndex) =>
         DeviceManager.WaitForHidChild(instanceId, 5000, () => StartFailed(instanceId, controllerIndex));
+
+    /// <summary>The XUSB companion's wait for its XUSB interface, in
+    /// <see cref="CreateXusbCompanion"/>: ends as the interface arrives, or
+    /// within one 25 ms re-check of a failed start. True when the
+    /// interface is there. A field, so a check gives it a machine.</summary>
+    internal static Func<string, int, bool> CompanionInterfaceWait = (instanceId, controllerIndex) =>
+        DeviceManager.WaitForDeviceInterface(instanceId, XusbInterfaceGuid, 5000, () => StartFailed(instanceId, controllerIndex));
 
     /// <summary>The value a driver's error word names (driver.h
     /// HIDMAESTRO_CONFIG_ERROR_*).</summary>

@@ -333,7 +333,13 @@ public static partial class DeviceManager
     /// Waits for a specific device interface GUID to appear on the given device.
     /// Uses CM_Register_Notification: no polling, no sleeping.
     /// </summary>
-    public static bool WaitForDeviceInterface(string instanceId, Guid interfaceGuid, int timeoutMs = 10000)
+    public static bool WaitForDeviceInterface(string instanceId, Guid interfaceGuid, int timeoutMs = 10000) =>
+        WaitForDeviceInterface(instanceId, interfaceGuid, timeoutMs, null);
+
+    /// <summary>The same wait, which also ends when <paramref name="failed"/>,
+    /// re-checked every 25 ms, says the device's start failed. False then,
+    /// as on a timeout.</summary>
+    public static bool WaitForDeviceInterface(string instanceId, Guid interfaceGuid, int timeoutMs, Func<bool>? failed)
     {
         // Check if already present
         // (CM_Locate + check interfaces via registry)
@@ -353,8 +359,13 @@ public static partial class DeviceManager
             }
             return 0u;
         };
-        return WithNotification(cb => RegisterInterfaceEvents(interfaceGuid, cb), callback,
-            () => WaitUntil(() => Volatile.Read(ref arrived) || HasInterface(instanceId, interfaceGuid), signal, timeoutMs));
+        // A failed start publishes no interface, so with a failure test the
+        // wait re-checks every 25 ms, the orchestrator's poll, and ends there.
+        bool present = false;
+        WithNotification(cb => RegisterInterfaceEvents(interfaceGuid, cb), callback,
+            () => WaitUntil(() => (present = Volatile.Read(ref arrived) || HasInterface(instanceId, interfaceGuid)) || failed?.Invoke() == true,
+                            signal, timeoutMs, failed != null ? 25 : RecheckMs));
+        return present;
     }
 
     static bool HasInterface(string instanceId, Guid interfaceGuid)

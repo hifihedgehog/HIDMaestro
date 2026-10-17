@@ -411,6 +411,19 @@ internal static class Deploy
             long ms = sw.ElapsedMilliseconds;
             return (!child && ms < 1000, $"{child} in {ms} ms");
         });
+        // The XUSB companion's wait for its interface ends on a failed start
+        // too. At e0c4d951 it waited 5 s three times, restarting the
+        // companion between, and the create went on without the interface.
+        c.Run("the XUSB companion's wait for its interface ends within one poll on a failed start", () =>
+        {
+            var wait = typeof(DeviceOrchestrator).GetField("CompanionInterfaceWait", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                ?? throw new MissingMemberException("DeviceOrchestrator", "CompanionInterfaceWait");
+            var f = (Func<string, int, bool>)wait.GetValue(null)!;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool present = With(_ => (true, HasProblem, 43u), _ => null, _ => (0, 0, null, 0), () => f(@"SWD\HIDMAESTRO\HM_XUSB_7777", 3));
+            long ms = sw.ElapsedMilliseconds;
+            return (!present && ms < 1000, $"{present} in {ms} ms");
+        });
         // The protocol check runs when the HID child is slow too. At
         // 6cf274b6 a create whose child did not appear within its 10 s wait
         // finished with no check, as b22324e did. With no child the driver
