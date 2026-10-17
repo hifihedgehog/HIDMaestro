@@ -1,9 +1,14 @@
-// capture_fidelity_check: the PS Move's prepared feature answers.
+// capture_fidelity_check: the PS Move's prepared feature answers, and both
+// new descriptors against the dumps they come from.
 //
 //   answers    ps-move-feature-answers.json, the table prepared for lane
 //              DD-2's answer tables: 0x10's three pages are the moveonpc
 //              wiki's sample blocks and reassemble to one of its eight
 //              dumps, and 0x04 has the address layout the wiki gives.
+//   dumps      each descriptor equals the dump its notes cite: the LKML
+//              message's hidraw printout for ps-move, as printed, and
+//              ControllersInfo's .bin for the flight stick, read from the
+//              clone beside the repository ([SKIP] without it).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -115,4 +120,75 @@ d6 91 59 81 e0 01 a1 7f 2c 80 a6 95 89 07 36 0c
               Convert.ToHexString(d));
     }
 
+    // ── dumps ────────────────────────────────────────────────────────────
+
+    /// <summary>The LKML message's printout of a real Move's descriptor, as
+    /// hid-example printed it (Pavel Machek, 2015-03-14, "Re: Fun with sony
+    /// motion controllers: motion controller",
+    /// lkml.rescloud.iu.edu/1503.1/05461.html).</summary>
+    const string LkmlMoveDescriptor = @"5 1 9 5 a1 1 85 1 5 9 19 1 29 18 15 0 25 1 35 0 45 1 75 1 95 18 81 2 6
+0 ff 9 24 75 8 95 3 81 2 5 1 9 30 9 31 9 32 9 35 15 0 26 ff 0 95 4 81
+2 6 0 ff 9 20 95 26 81 2 85 2 9 21 95 30 91 2 85 6 9 27 95 8 91 2 85 3
+9 23 95 8 b1 2 85 10 9 22 95 30 b1 2 85 e0 9 25 95 30 b1 2 85 11 9 26
+95 30 b1 2 c0 6 2 ff 9 20 a1 1 9 21 85 4 15 0 26 ff 0 75 8 95 f b1 2 9
+22 85 5 95 16 b1 2 c0 6 3 ff 9 20 a1 1 9 21 85 a0 15 0 26 ff 0 75 8 95
+22 b1 2 9 22 85 a1 95 16 b1 2 c0";
+
+    /// <summary>The folder that holds the reference clones: beside the
+    /// repository, or beside the main checkout of a worktree, as
+    /// device_oracle_check's case 9 finds them, or HIDMAESTRO_CORPUS_ROOT.</summary>
+    static string? ReferenceRoot(string clone)
+    {
+        var candidates = new List<string>();
+        string? env = Environment.GetEnvironmentVariable("HIDMAESTRO_CORPUS_ROOT");
+        if (!string.IsNullOrEmpty(env)) candidates.Add(env);
+        if (RepoRoot() is string root)
+        {
+            if (Path.GetDirectoryName(root) is string up) candidates.Add(up);
+            // A worktree's .git file names its main checkout's git directory.
+            string dotGit = Path.Combine(root, ".git");
+            if (File.Exists(dotGit))
+            {
+                string line = File.ReadAllText(dotGit).Trim();
+                const string lead = "gitdir:";
+                if (line.StartsWith(lead, StringComparison.Ordinal))
+                {
+                    string gitDir = Path.GetFullPath(Path.Combine(root, line[lead.Length..].Trim()));
+                    // <main>\.git\worktrees\<name>
+                    var main = Directory.GetParent(gitDir)?.Parent?.Parent;
+                    if (main?.Parent is { } mainUp) candidates.Add(mainUp.FullName);
+                }
+            }
+        }
+        return candidates.FirstOrDefault(c => Directory.Exists(Path.Combine(c, clone)));
+    }
+
+    static void DescriptorDumps()
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- dumps: the descriptors against the dumps their notes cite ---");
+        var db = ProfileDatabase.LoadEmbedded();
+        var move = db.All.FirstOrDefault(x => x.Id == "ps-move");
+        byte[] lkml = Printed(LkmlMoveDescriptor);
+        Check($"ps-move's descriptor is the LKML message's printout byte for byte, {lkml.Length} bytes",
+              move?.GetDescriptorBytes() is { } md && md.AsSpan().SequenceEqual(lkml));
+        Check("ps-move's manufacturer and product strings are the capture's HID name, \"Sony Computer Entertainment Motion Controller\"",
+              move?.ManufacturerString == "Sony Computer Entertainment" && move.ProductString == "Motion Controller",
+              $"{move?.ManufacturerString} / {move?.ProductString}");
+        Check("ps-move's layout claims no magnetometer, which its report leaves zero",
+              move?.Layout is HMMotionWandLayout { Imu: { Magnetometer: false } },
+              move?.Layout?.GetType().Name ?? "no layout");
+
+        string? refs = ReferenceRoot("ControllersInfo");
+        string bin = refs == null ? "" : Path.Combine(refs, "ControllersInfo", "xbox360", "xusb_flightstick_hid_report_descriptor.bin");
+        if (refs == null || !File.Exists(bin))
+        {
+            Console.WriteLine("  [SKIP] the ControllersInfo clone is not beside the repository, so the flight stick's dump is not read.");
+            return;
+        }
+        var fs = db.All.FirstOrDefault(x => x.Id == "xbox-360-flight-stick");
+        byte[] dump = File.ReadAllBytes(bin);
+        Check($"xbox-360-flight-stick's descriptor is {Path.GetFileName(bin)} byte for byte, {dump.Length} bytes",
+              fs?.GetDescriptorBytes() is { } fd && fd.AsSpan().SequenceEqual(dump), bin);
+    }
 }

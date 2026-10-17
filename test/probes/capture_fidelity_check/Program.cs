@@ -23,6 +23,7 @@
 //              a real Move ZCM1's: the T trigger at bytes 5 and 6 with the T
 //              bit, the buttons in bytes 1 to 4, 0x7F in bytes 7 to 10, the
 //              battery in byte 12 and offset-binary motion in 13 to 36.
+//   answers, dumps  in PsMoveSources.cs.
 //   answers    in PsMoveSources.cs.
 //
 // Exit 0 PASS, 1 FAIL.
@@ -53,6 +54,8 @@ internal static partial class Program
         CatalogStrings();
         CapturedDescriptors();
         PsMoveReport();
+        PsMoveAnswers();
+        DescriptorDumps();
         PsMoveAnswers();
         Console.WriteLine();
         Console.WriteLine($"capture_fidelity_check: {(s_failures == 0 ? "PASS" : "FAIL")}, {s_total - s_failures} of {s_total} checks pass");
