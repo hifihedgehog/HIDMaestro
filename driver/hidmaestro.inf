@@ -1,5 +1,5 @@
 ﻿;
-; HIDMaestro â€” UMDF2 Virtual HID Minidriver INF
+; HIDMaestro: UMDF2 Virtual HID Minidriver INF
 ;
 ; Installs HIDMaestro.dll as a UMDF2 lower filter under MsHidUmdf.sys.
 ;
@@ -40,7 +40,7 @@ HIDMaestro.dll = 1
 %DeviceDesc% = HIDMaestro_Install, root\HIDMaestro
 
 ; ----------------------------------------------------------------
-;  Install sections (Windows 10 compatible â€” explicit AddService)
+;  Install sections (Windows 10 compatible, explicit AddService)
 ; ----------------------------------------------------------------
 
 [HIDMaestro_Install.NT]
@@ -55,7 +55,7 @@ AddReg = HIDMaestro_HW_AddReg
 [HIDMaestro_HW_AddReg]
 ; Lower filters: WUDFRd (UMDF reflector) loads our UMDF2 driver
 HKR,,"LowerFilters",0x00010008,"WUDFRd"
-; NOTE: no "xinputhid" UpperFilter here at the INF level â€” this INF is shared
+; NOTE: no "xinputhid" UpperFilter here at the INF level. This INF is shared
 ; by every profile. The tripwire is only desired for profiles that have an
 ; HIDMAESTRO XUSB companion (Xbox 360 wired family). For non-companion
 ; profiles (DualSense, Xbox Series BT, Switch Pro, etc.) the HID path IS the
