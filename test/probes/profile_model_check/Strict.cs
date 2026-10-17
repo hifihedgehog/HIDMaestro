@@ -376,6 +376,25 @@ internal static class Strict
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
             return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
         }, "$.ExtendedReport.Fields[0]");
+        // A patch with no source is refused at its source whatever else the
+        // entry holds. At c19d24a1 an ascii patch was refused at its
+        // encoding, and an entry with a CRC at its crc32, as if the null
+        // were a file.
+        Add("an ascii patch with no source", "steam-controller-2", o =>
+        {
+            var p = o["featureStubs"]!["reports"]![0]!["patch"]![0]!.AsObject();
+            p["source"] = null;
+            p["encoding"] = "ascii";
+            p.Remove("key");
+            return o.ToJsonString();
+        }, "$.featureStubs.reports[0].patch[0].source");
+        Add("a patch with no source on an entry with a CRC", "steam-controller-2", o =>
+        {
+            var r = o["featureStubs"]!["reports"]![0]!.AsObject();
+            r["crc32"] = JsonNode.Parse("{\"seed\":\"A3\"}");
+            r["patch"]![0]!["source"] = null;
+            return o.ToJsonString();
+        }, "$.featureStubs.reports[0].patch[0].source");
         // A VID or PID that is no 16-bit hex number is refused at load at its
         // key. At 08fd21f3 the identity match met the bad VID first and
         // refused the file at $, and a bad PID loaded and failed at create.

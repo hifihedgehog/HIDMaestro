@@ -82,6 +82,10 @@ internal static class ValueSources
                 var p = r.Patch[k] ?? throw new ProfileDefectException(at, "is null.");
                 if (r.Echo)
                     throw new ProfileDefectException(at, "an echoed answer is the bytes the host wrote, so it has none to patch.");
+                // A patch with no source is refused there, before any check
+                // that reads the source.
+                if (p.Source == null)
+                    throw new ProfileDefectException(at + ".source", "is null. Name index, serial or a valueSources entry.");
                 bool text = p.Encoding is "ascii";
                 int width = p.Encoding switch { "uint8" => 1, "uint16-le" => 2, "uint32-le" => 4, "ascii" or "ascii-decimal" => 0, _ => -1 };
                 if (width < 0)
@@ -106,8 +110,6 @@ internal static class ValueSources
                     if (p.Key != null) throw new ProfileDefectException(at + ".key", "only a keyedHexFile source takes a key.");
                     continue;
                 }
-                if (p.Source == null)
-                    throw new ProfileDefectException(at + ".source", "is null. Name index, serial or a valueSources entry.");
                 if (sources == null || !sources.ContainsKey(p.Source))
                     throw new ProfileDefectException(at + ".source", $"\"{p.Source}\" is not index, serial or a valueSources name.");
                 if (string.IsNullOrWhiteSpace(p.Key))
@@ -120,7 +122,7 @@ internal static class ValueSources
 
     /// <summary>True for a patch whose value comes from a file, read when
     /// the answer is asked for.</summary>
-    internal static bool ReadsFile(AnswerPatchSpec p) => p.Source is not (Index or Serial);
+    internal static bool ReadsFile(AnswerPatchSpec p) => p.Source is not (null or Index or Serial);
 
     /// <summary>Writes a patch's value over its bytes. A keyedHexFile value
     /// that is absent leaves the captured bytes, as Steam's absence left the
