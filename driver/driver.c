@@ -347,8 +347,9 @@ UnmapVersionSection(_In_opt_ PHIDMAESTRO_VERSION_INFO view, _In_opt_ HANDLE hand
  * tag. Otherwise the devnode is a v1 program's: it keeps the index of its
  * hardware key, and fails its start when that index's section carries
  * another token's tag, since it is then not that controller (a v1
- * program's restart after its index write recovers it). The companion
- * decides the same way (companion.c CompanionDeviceAdd). */
+ * program's restart after its index write recovers it). The design note's
+ * decision (c) gives the XUSB companion the same rule, which companion.c
+ * on this branch does not apply. */
 static NTSTATUS
 ChooseControllerIndex(_In_ const WCHAR *token, _In_ BOOLEAN haveIdentityIndex, _In_ ULONG identityIndex,
                       _In_ ULONG hardwareIndex, _Out_ ULONG *index, _Out_ BOOLEAN *contract)
