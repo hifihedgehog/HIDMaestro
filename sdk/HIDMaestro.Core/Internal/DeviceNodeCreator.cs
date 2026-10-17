@@ -92,8 +92,8 @@ internal static partial class DeviceNodeCreator
         // driverPid: alternate PID in the hardware ID used for driver matching only
         // (e.g. xinputhid's INF matches PID 0x02FF). Apps still see the real PID via
         // HID attributes: the driver returns it from IOCTL_HID_GET_DEVICE_ATTRIBUTES.
-        string hwPid = profile.DriverPid != null
-            ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : pid;
+        string hwPid = profile.ResolvedDriverPid != null
+            ? $"{Convert.ToUInt16(profile.ResolvedDriverPid, 16):X4}" : pid;
 
         string desc = profile.ProductString;
         string enumerator, hwId;
@@ -399,7 +399,7 @@ internal static partial class DeviceNodeCreator
             // under (xinputhid uses the &IG_00 form, plain HID uses HIDClass).
             string devEnumer;
             if (profile.UsesUpperFilter)
-                devEnumer = $"VID_{profile.VendorId:X4}&PID_{(profile.DriverPid != null ? Convert.ToUInt16(profile.DriverPid, 16) : profile.ProductId):X4}&IG_00";
+                devEnumer = $"VID_{profile.VendorId:X4}&PID_{(profile.ResolvedDriverPid != null ? Convert.ToUInt16(profile.ResolvedDriverPid, 16) : profile.ProductId):X4}&IG_00";
             else if (profile.VendorId == 0x045E)
                 devEnumer = $"VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00";
             else

@@ -65,15 +65,18 @@ internal sealed class FeatureStubTable
     /// and absent on any machine.</summary>
     internal static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, ValueSources.FileReader files)
     {
-        var spec = profile.FeatureStubs;
+        // The model the profile resolved to: its own answers, a model it
+        // names, or its identity default's.
+        var model = profile.Resolved.Model;
+        var spec = model.FeatureStubs;
         if (spec?.Reports == null || spec.Reports.Count == 0) return null;
-        try { Validate(profile); }
+        try { Validate(spec, model.ValueSources, profile.RequiresUsbipBackend); }
         catch (ProfileDefectException e)
         {
             throw new InvalidOperationException($"Profile '{profile.Id}': {e.JsonPath}: {e.Reason}", e);
         }
 
-        var values = new ValueSources.Values(index, serial, profile.ValueSources, files);
+        var values = new ValueSources.Values(index, serial, model.ValueSources, files);
         var table = new FeatureStubTable(
             string.Equals(spec.Match, "lastMessage", StringComparison.OrdinalIgnoreCase),
             spec.MessageByte, values);
@@ -103,9 +106,8 @@ internal sealed class FeatureStubTable
     /// answer's data is hex no longer than its size, and its value sources
     /// and patches fit (<see cref="ValueSources.Validate"/>). Throws
     /// <see cref="ProfileDefectException"/> with the JSON path.</summary>
-    internal static void Validate(ControllerProfile profile)
+    internal static void Validate(FeatureStubSpec? spec, Dictionary<string, ValueSourceSpec>? sources, bool usbip)
     {
-        var spec = profile.FeatureStubs;
         if (spec?.Reports != null)
             for (int i = 0; i < spec.Reports.Count; i++)
             {
@@ -123,7 +125,7 @@ internal sealed class FeatureStubTable
                 if (bytes.Length > size)
                     throw new ProfileDefectException(at + ".data", $"{bytes.Length} bytes of data exceed the declared {size}-byte report size.");
             }
-        ValueSources.Validate(profile.ValueSources, spec, profile.RequiresUsbipBackend);
+        ValueSources.Validate(sources, spec, usbip);
     }
 
     /// <summary>The answer for a key, padded to the declared report size and

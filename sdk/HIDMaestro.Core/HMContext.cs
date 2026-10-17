@@ -50,6 +50,9 @@ public sealed class HMContext : IDisposable
     // its id is refused by name, and every file a load refused.
     private readonly Dictionary<string, string> _profileSources = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<HMProfileLoadIssue> _loadIssues = new();
+    // The named models and identity defaults this context's profiles take:
+    // the catalog's, and each loaded directory's models folder.
+    private Internal.ModelRegistry? _registry;
     private bool _disposed;
 
     /// <summary>Create a new SDK context. Loading profiles and creating
@@ -391,7 +394,14 @@ public sealed class HMContext : IDisposable
     /// refused and names where the id came from, so a user's edited copy of
     /// a catalog profile needs an id of its own. Every refused file is
     /// listed in <see cref="ProfileLoadIssues"/>. Returns the number of
-    /// profiles added.</summary>
+    /// profiles added.
+    ///
+    /// <para>The <c>models</c> folder holds what a JSON author would otherwise
+    /// need a rebuild for, in the catalog's formats: named device models a
+    /// profile takes with <c>deviceModelFrom</c>, and an
+    /// <c>identity-defaults.json</c> that gives profiles outside the
+    /// catalog a model by their identity, tried before the catalog's. They
+    /// resolve for this directory's profiles and for later loads.</para></summary>
     public int LoadProfilesFromDirectory(string profilesDir)
     {
         if (profilesDir == null) throw new ArgumentNullException(nameof(profilesDir));
@@ -399,7 +409,11 @@ public sealed class HMContext : IDisposable
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        return Add(ProfileDatabase.Load(profilesDir));
+        Internal.ModelRegistry registry;
+        lock (_lock) registry = _registry ??= Internal.ModelRegistry.Catalog;
+        var db = ProfileDatabase.Load(profilesDir, registry);
+        lock (_lock) _registry = db.Registry;
+        return Add(db);
     }
 
     /// <summary>Load the default profile catalog embedded in the SDK

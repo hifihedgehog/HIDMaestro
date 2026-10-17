@@ -65,6 +65,29 @@ public sealed class HMProfile
     /// "separate" (independent LT/RT), or null (non-gamepad).</summary>
     public string? TriggerMode => Inner.TriggerMode;
 
+    // ── Device model ─────────────────────────────────────────────────────
+
+    /// <summary>True when the profile runs with a device model: feature
+    /// answers, a protocol or an XInput presentation of its own, from a
+    /// model it names, or from the model its identity gives it (design
+    /// note, "Profiles made outside the catalog").</summary>
+    public bool HasDeviceModel => !Inner.Resolved.Model.IsEmpty;
+
+    /// <summary>Where each group of the profile's device model came from,
+    /// by group: <c>answers</c>, <c>protocol</c> and <c>presentation</c>.
+    /// Each reads <c>own</c> (the profile's own keys),
+    /// <c>named:&lt;id&gt;</c> (its <c>deviceModelFrom</c>),
+    /// <c>identity:&lt;entry&gt;</c> or, for a loaded directory's table,
+    /// <c>identity:&lt;file&gt;#&lt;entry&gt;</c> (an identity default), or
+    /// <c>none</c>.</summary>
+    public IReadOnlyDictionary<string, string> DeviceModelSource => Inner.Resolved.Sources;
+
+    /// <summary>Why a model the profile names, or its identity gives it,
+    /// was not taken: a name nothing loaded holds, a model that is empty or
+    /// does not fit the profile's descriptor. The profile then runs with
+    /// the model its identity gives it. Null when nothing went wrong.</summary>
+    public string? DeviceModelProblem => Inner.Resolved.Problem;
+
     /// <summary>Which instantiation path this profile needs: "umdf2" for
     /// the single-HID-device path most profiles use, or "usbip" for a
     /// composite USB persona whose audio interfaces need the bundled USB

@@ -55,6 +55,7 @@ public sealed class HMProfileBuilder
     private int[]? _buttonMap;
     private int[]? _triggerButtons;
     private Dictionary<string, string>? _axisMap;
+    private string? _deviceModelFrom;
 
     /// <summary>Set the profile ID slug (must be unique if registered with a context).</summary>
     public HMProfileBuilder Id(string id) { _id = id; return this; }
@@ -149,6 +150,12 @@ public sealed class HMProfileBuilder
     /// Sony: { "0x32": "rightStickX", "0x35": "rightStickY", "0x33": "leftTrigger", "0x34": "rightTrigger" }</summary>
     public HMProfileBuilder AxisMap(Dictionary<string, string>? map) { _axisMap = map; return this; }
 
+    /// <summary>Name the device model the profile takes for the groups its
+    /// own keys leave empty: a named model a loaded models folder holds, or
+    /// a catalog profile (<see cref="HMProfile.DeviceModelSource"/>). Null
+    /// takes the model the profile's identity gives it.</summary>
+    public HMProfileBuilder DeviceModelFrom(string? name) { _deviceModelFrom = name; return this; }
+
     /// <summary>Initialize all fields from an existing profile. Call individual
     /// setters afterward to override specific properties.</summary>
     public HMProfileBuilder FromProfile(HMProfile source)
@@ -207,10 +214,15 @@ public sealed class HMProfileBuilder
             ButtonMap = _buttonMap,
             TriggerButtons = _triggerButtons,
             AxisMap = _axisMap,
+            DeviceModelFrom = _deviceModelFrom,
             BuiltInCode = true,
         };
 
-        try { inner.ValidateAtLoad(); }
+        try
+        {
+            inner.ValidateAtLoad();
+            inner.ResolvedCache = ModelRegistry.Resolve(inner, ModelRegistry.Catalog, outsideCatalog: true);
+        }
         catch (Exception e) when (ProfileDefects.IsDefect(e))
         {
             throw ProfileDefects.ToProfileException(inner, e);

@@ -66,6 +66,8 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
     })]
 [JsonSerializable(typeof(ControllerProfile))]
 [JsonSerializable(typeof(List<FieldSpec>))]
+[JsonSerializable(typeof(DeviceModelFile))]
+[JsonSerializable(typeof(IdentityDefaultsFile))]
 [JsonSerializable(typeof(HMLayout))]
 [JsonSerializable(typeof(HMUnspecifiedLayout))]
 [JsonSerializable(typeof(HMGamepadLayout))]

@@ -1,0 +1,17 @@
+{
+  "comment": "Identity defaults: what a profile with no keys of its own in a model group, and no deviceModelFrom, takes from its identity. Each entry is written from the gate it replaces in the code of 9bd6279, and its match names no more than that gate tested. The first entry that matches wins. No catalog profile takes a group from here: each carries its own keys, names its model or has nothing in the group, and switch-pro and dualshock-3-full are their own identities' models. A profile made outside the catalog, by HMProfileBuilder, by HMDeviceExtractor or in a user's JSON, keeps through these entries the behavior its identity got from that code.",
+  "entries": [
+    {
+      "name": "nintendo-switch-pro",
+      "comment": "The Switch Pro Controller, 057E:2009: the protocol responder, packer and rumble decode gated on that pair (SwitchProPacker.IsSwitchPro and driver.c's ReadConfigFromRegistry at 9bd6279).",
+      "match": { "vid": "0x057E", "pid": "0x2009" },
+      "model": "switch-pro"
+    },
+    {
+      "name": "sony-sixaxis",
+      "comment": "A DualShock 3 in the sixaxis form, gated on the sixaxisCompatible key (the Ds3Sixaxis value the driver read at 9bd6279).",
+      "match": { "keys": { "sixaxisCompatible": true } },
+      "model": "dualshock-3-full"
+    }
+  ]
+}

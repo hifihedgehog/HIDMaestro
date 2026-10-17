@@ -776,8 +776,8 @@ internal static partial class DeviceOrchestrator
     {
         string gpVid = $"{profile.VendorId:X4}";
         string gpPid = $"{profile.ProductId:X4}";
-        string hwPid = profile.DriverPid != null
-            ? $"{Convert.ToUInt16(profile.DriverPid, 16):X4}" : gpPid;
+        string hwPid = profile.ResolvedDriverPid != null
+            ? $"{Convert.ToUInt16(profile.ResolvedDriverPid, 16):X4}" : gpPid;
         string gpEnumeratorLegacy = $"VID_{gpVid}&PID_{hwPid}&IG_00";                 // ROOT\… path
         // SWD enumerator: `HIDMAESTRO_VID_<vid>_PID_<pid>&IG_00`. The only
         // load-bearing detail vs the pre-experiment `HIDMAESTRO_VID_xxx&PID_yyy&IG_00`

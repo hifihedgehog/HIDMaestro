@@ -64,7 +64,12 @@ internal static class Strict
         {
             var disk = ProfileDatabase.Load(profilesDir);
             bool same = disk.All.Select(p => p.Id).SequenceEqual(db.All.Select(p => p.Id));
-            var issues = Api.Issues(disk, "Issues");
+            // The folder's models are the catalog's, which the embedded
+            // catalog already holds, so a load of the folder refuses them as
+            // repeats. Every other file is a profile or not one.
+            string modelsDir = Path.Combine(profilesDir, "models");
+            var issues = Api.Issues(disk, "Issues")
+                .Where(i => !i.File.StartsWith(modelsDir, StringComparison.OrdinalIgnoreCase)).ToList();
             return (issues.All(i => i.Kind == "NotAProfile") && same,
                     $"{disk.All.Count} loaded, {issues.Count} issue(s): {string.Join("; ", issues.Take(8))}");
         });
@@ -164,9 +169,11 @@ internal static class Strict
         {
             var cases = Cases();
             foreach (var k in cases) File.WriteAllText(Path.Combine(dir, k.File), k.Text);
-            // A models folder holds models, never profiles.
+            // A models folder holds models, never profiles: a named model
+            // there loads as one, and nothing in it becomes a profile.
             Directory.CreateDirectory(Path.Combine(dir, "models"));
-            File.WriteAllText(Path.Combine(dir, "models", "k-in-models.json"), WithId("user-in-models"));
+            File.WriteAllText(Path.Combine(dir, "models", "k-in-models.json"),
+                "{ \"id\": \"user-in-models\", \"driverPid\": \"0x02FF\" }");
 
             using var ctx = new HMContext();
             ctx.LoadDefaultProfiles();

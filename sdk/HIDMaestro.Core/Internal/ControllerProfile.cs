@@ -475,6 +475,46 @@ public sealed class ControllerProfile
         }
     }
 
+    /// <summary>v2.0.0: the device model a profile takes, by name, for the
+    /// groups its own keys leave empty: a named model a loaded models folder
+    /// holds, or a catalog profile (design note, "Profiles made outside the
+    /// catalog"). A name nothing holds, or whose model does not fit the
+    /// profile, leaves the identity default and is listed as the profile's
+    /// <see cref="HIDMaestro.HMProfile.DeviceModelProblem"/>.</summary>
+    [JsonPropertyName("deviceModelFrom")]
+    public string? DeviceModelFrom { get; set; }
+
+    /// <summary>v2.0.0: <c>"none"</c> takes no model by name or by identity,
+    /// by the author's choice. The profile's own keys still apply.</summary>
+    [JsonPropertyName("deviceModel")]
+    public string? DeviceModel { get; set; }
+
+    /// <summary>What the profile resolved to, set by the loader with the
+    /// registry it loaded under. A profile no loader resolved, one built
+    /// in code or constructed by a program, resolves against the catalog's
+    /// on first use.</summary>
+    [JsonIgnore]
+    internal ResolvedModel? ResolvedCache { get; set; }
+
+    /// <summary>The device model the profile runs with: its own keys, the
+    /// model it names, or its identity default's, group by group.</summary>
+    [JsonIgnore]
+    internal ResolvedModel Resolved => ResolvedCache ??= ModelRegistry.Resolve(this, ModelRegistry.Catalog,
+        outsideCatalog: SourceFile?.StartsWith(ProfileDatabase.CatalogLabel, StringComparison.Ordinal) != true);
+
+    /// <summary>The driver PID the resolved model gives: the profile's
+    /// own, or its model's.</summary>
+    [JsonIgnore]
+    internal string? ResolvedDriverPid => Resolved.Model.DriverPid;
+
+    /// <summary>True when the profile carries keys of its own in a model
+    /// group, names a model, or says it takes none: a profile
+    /// <see cref="HIDMaestro.HMDeviceExtractor.ResolveDeviceModel"/> leaves
+    /// as it is.</summary>
+    [JsonIgnore]
+    internal bool StatesItsModel =>
+        DeviceModelFrom != null || DeviceModel != null || !global::HIDMaestro.Internal.DeviceModel.OwnOf(this).IsEmpty;
+
     /// <summary>The file the profile was loaded from, for its load issues
     /// and <see cref="HIDMaestro.HMProfileException"/>: a path, or
     /// <c>catalog:&lt;path&gt;</c> for the embedded catalog. Null for a
@@ -491,7 +531,9 @@ public sealed class ControllerProfile
     /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).</summary>
     internal void ValidateAtLoad()
     {
-        Usbip.FeatureStubTable.Validate(this);
+        AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
+        if (DeviceModel != null && DeviceModel != "none")
+            throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
         if (!HasDescriptor) return;
         ValidateDeviceModel();
         _ = GetOrBuildReportBuilder();
@@ -650,7 +692,19 @@ public sealed class ControllerProfile
     /// built in code can get the GameInput table
     /// (<see cref="GameInputMapping.Applies"/>).</summary>
     [JsonIgnore]
-    public bool BuiltInCode { get; init; }
+    public bool BuiltInCode { get; internal set; }
+
+    /// <summary>A copy of the profile's JSON keys, read again, with where it
+    /// came from and whether it was built in code. Nothing a create or a
+    /// resolution cached comes with it.</summary>
+    internal ControllerProfile Clone()
+    {
+        var copy = JsonSerializer.Deserialize(JsonSerializer.Serialize(this, HMJsonContext.Default.ControllerProfile),
+            HMJsonContext.Default.ControllerProfile)!;
+        copy.SourceFile = SourceFile;
+        copy.BuiltInCode = BuiltInCode;
+        return copy;
+    }
 
     /// <summary>A keyboard or mouse profile (issue #67): <c>type</c> is
     /// <c>keyboard</c> or <c>mouse</c>. These deliver every report in order,
@@ -1331,18 +1385,30 @@ public sealed class ProfileDatabase
     /// <summary>The prefix of the catalog's files in their labels.</summary>
     internal const string CatalogLabel = "catalog:";
 
+    /// <summary>The models and identity defaults this load resolved its
+    /// profiles under: for the catalog, its own.</summary>
+    internal ModelRegistry? Registry { get; private set; }
+
     /// <summary>
     /// Loads every .json profile file under the given directory, recursively,
     /// but schema.json and the <c>models</c> folder at its top, whose files
-    /// are models and not profiles.
+    /// are models and not profiles. The folder's named models and identity
+    /// defaults join the catalog's for this load's profiles.
     /// </summary>
-    public static ProfileDatabase Load(string profilesDir)
+    public static ProfileDatabase Load(string profilesDir) => Load(profilesDir, ModelRegistry.Catalog);
+
+    /// <summary>The same, with the models and identity defaults of earlier
+    /// loads in <paramref name="registry"/>. <see cref="Registry"/> is that
+    /// registry with this directory's models folder added.</summary>
+    internal static ProfileDatabase Load(string profilesDir, ModelRegistry registry)
     {
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
         string root = Path.GetFullPath(profilesDir);
         string models = Path.Combine(root, "models") + Path.DirectorySeparatorChar;
+        var modelIssues = new List<HIDMaestro.HMProfileLoadIssue>();
+        registry = registry.WithDirectory(models, modelIssues);
         var files = Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories)
             .Where(f => !Path.GetFileName(f).Equals("schema.json", StringComparison.OrdinalIgnoreCase)
                         && !f.StartsWith(models, StringComparison.OrdinalIgnoreCase))
@@ -1363,7 +1429,38 @@ public sealed class ProfileDatabase
             }
             read[i] = Parse(files[i], text);
         });
-        return Assemble(read);
+        var db = Assemble(read, modelIssues);
+        db.ResolveAll(registry, outsideCatalog: true);
+        return db;
+    }
+
+    /// <summary>Resolves every profile's device model under a registry,
+    /// and lists each model a profile named or took by identity that could
+    /// not be taken. A profile whose own keys the resolution refuses was
+    /// refused already by its load checks.</summary>
+    private void ResolveAll(ModelRegistry registry, bool outsideCatalog)
+    {
+        Registry = registry;
+        var refused = new List<ControllerProfile>();
+        foreach (var p in _profiles)
+        {
+            try
+            {
+                p.ResolvedCache = ModelRegistry.Resolve(p, registry, outsideCatalog);
+            }
+            catch (Exception e) when (ProfileDefects.IsDefect(e))
+            {
+                var (path, reason) = ProfileDefects.Locate(e);
+                _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path, reason,
+                    HIDMaestro.HMProfileLoadIssueKind.Refused));
+                refused.Add(p);
+                continue;
+            }
+            if (p.ResolvedCache.Problem != null)
+                _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, "$.deviceModelFrom",
+                    p.ResolvedCache.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
+        }
+        foreach (var p in refused) _profiles.Remove(p);
     }
 
     /// <summary>One file's result: the profile, or the issue that refused
@@ -1430,9 +1527,10 @@ public sealed class ProfileDatabase
 
     /// <summary>The profiles and issues of files read in path order. A
     /// second file with an id the first already took is refused.</summary>
-    private static ProfileDatabase Assemble(Parsed[] read)
+    private static ProfileDatabase Assemble(Parsed[] read, List<HIDMaestro.HMProfileLoadIssue>? priorIssues = null)
     {
         var db = new ProfileDatabase();
+        if (priorIssues != null) db._issues.AddRange(priorIssues);
         var first = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in read)
         {
@@ -1505,6 +1603,10 @@ public sealed class ProfileDatabase
             using var reader = new StreamReader(s);
             read[i] = Parse(label, reader.ReadToEnd());
         });
-        return Assemble(read);
+        var db = Assemble(read);
+        // The catalog's own registry, over the profiles just read: a catalog
+        // profile names a model the SDK carries or another catalog profile.
+        db.ResolveAll(ModelRegistry.ForCatalog(db._profiles), outsideCatalog: false);
+        return db;
     }
 }

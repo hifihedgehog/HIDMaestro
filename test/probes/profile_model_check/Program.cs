@@ -11,6 +11,10 @@
 //   values     value sources and patches: the keyedHexFile parser against
 //              9bd6279's ParseStamp, every encoding and source, the file
 //              cache, and each refusal at load (Values.cs)
+//   resolve    device model resolution: named models and identity
+//              defaults from the catalog and a loaded directory, the
+//              problems a name can meet, and no catalog profile resolved
+//              through an identity default (Resolve.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -34,6 +38,7 @@ internal static class Program
         {
             ("strict", Strict.Run),
             ("values", Values.Run),
+            ("resolve", Resolve.Run),
         };
         int fail = 0;
         if (mode == "check")

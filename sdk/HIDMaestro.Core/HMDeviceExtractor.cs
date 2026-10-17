@@ -137,7 +137,7 @@ public static class HMDeviceExtractor
         // issue #7.
         string resolvedProductString = raw.ProductString ?? name;
 
-        return new HMProfileBuilder()
+        var profile = new HMProfileBuilder()
             .Id(id)
             .Name(name)
             .Vendor(vendor)
@@ -151,6 +151,34 @@ public static class HMDeviceExtractor
             .Descriptor(raw.ReconstructedDescriptor)
             .Notes(notes)
             .Build();
+        // v2.0.0: the profile names the model its identity gives it, so the
+        // JSON it saves to states the device's behavior.
+        return ResolveDeviceModel(profile);
+    }
+
+    /// <summary>v2.0.0: a profile that states the device model its identity
+    /// gives it. For a profile with no device-model keys of its own, no
+    /// <c>deviceModelFrom</c> and no <c>deviceModel: "none"</c>, whose
+    /// identity default gives it a model, this returns a new profile that
+    /// names that model in <c>deviceModelFrom</c>, with its notes naming
+    /// the entry. Any other profile comes back as the same instance: this
+    /// never overwrites a model a profile carries or names. A stored profile
+    /// needs neither call to keep its behavior, since its identity default
+    /// applies at every load.</summary>
+    public static HMProfile ResolveDeviceModel(HMProfile profile)
+    {
+        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        var inner = profile.Inner;
+        if (inner.StatesItsModel) return profile;
+        var r = inner.Resolved;
+        if (r.IdentityModel == null || !r.Sources.Values.Any(s => s.StartsWith("identity:", StringComparison.Ordinal)))
+            return profile;
+        var copy = inner.Clone();
+        copy.DeviceModelFrom = r.IdentityModel;
+        string note = $"Device model: {r.IdentityModel}, from the identity default {r.IdentityEntry!.Substring("identity:".Length)}.";
+        copy.Notes = string.IsNullOrEmpty(copy.Notes) ? note : copy.Notes + " " + note;
+        copy.ResolvedCache = ModelRegistry.Resolve(copy, ModelRegistry.Catalog, outsideCatalog: true);
+        return new HMProfile(copy);
     }
 
     /// <summary>Convenience wrapper: find a connected device by VID:PID
@@ -188,6 +216,10 @@ public static class HMDeviceExtractor
         AppendField(sb, "connection", profile.Connection);
         AppendField(sb, "descriptor", profile.Inner.Descriptor);
         AppendRawField(sb, "inputReportSize", profile.InputReportSize > 0 ? profile.InputReportSize.ToString() : "null");
+        if (profile.Inner.DeviceModelFrom != null)
+            AppendField(sb, "deviceModelFrom", profile.Inner.DeviceModelFrom);
+        if (profile.Inner.DeviceModel != null)
+            AppendField(sb, "deviceModel", profile.Inner.DeviceModel);
         AppendField(sb, "notes", profile.Inner.Notes, trailingComma: false);
         sb.Append('}').Append('\n');
         return sb.ToString();

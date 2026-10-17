@@ -66,9 +66,12 @@ internal sealed class Catalog
             int sep = rest.IndexOfAny(new[] { '\\', '/' });
             if (sep > 0) folders.Add(rest[..sep]);
         }
+        // profiles\models holds the identity defaults and named models, no
+        // vendor's profiles: the SDK embeds it under HIDMaestro.Models.
         if (root != null && Directory.Exists(Path.Combine(root, "profiles")))
             foreach (string d in Directory.EnumerateDirectories(Path.Combine(root, "profiles")))
-                folders.Add(Path.GetFileName(d));
+                if (!string.Equals(Path.GetFileName(d), "models", StringComparison.OrdinalIgnoreCase))
+                    folders.Add(Path.GetFileName(d));
         foreach (string f in folders) texts.Add((f, "vendor folder " + f));
         foreach (var p in c.All)
         {
