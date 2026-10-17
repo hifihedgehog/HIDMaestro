@@ -1064,15 +1064,9 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // the data stage as one command too, report ID first, and the
                 // device answers and publishes it as before: the answer table
                 // keeps a feature report, and the ring gets both kinds.
-                // A rule that emits a report puts it on the ring in place of
-                // the command.
-                if (_engine is { Protocol.Source: CommandSource.SetReport }
-                    && _engine.HandleCommand(payload, System.Diagnostics.Stopwatch.GetTimestamp()) is { Emit: >= 0 } emitting)
-                {
-                    PublishCommand(emitting, payload);
-                    SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
-                    return;
-                }
+                ProtocolEngine.CommandResult? command = _engine is { Protocol.Source: CommandSource.SetReport }
+                    ? _engine.HandleCommand(payload, System.Diagnostics.Stopwatch.GetTimestamp())
+                    : null;
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
                 var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
                 // A protocol whose feature reports carry no report id (the
@@ -1096,7 +1090,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     payload.CopyTo(_lastFeaturePayload);
                     _lastFeatureLength = payload.Length;
                 }
-                PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
+                // A rule that emits a report puts it on the ring in place of
+                // the command, after the answer table has read the write.
+                if (command is { Emit: >= 0 } emitting) PublishCommand(emitting, payload);
+                else PublishOutput(reportType == 0x03 ? SourceHidFeature : SourceHidOutput, rid, data);
                 SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
                 return;
             }
