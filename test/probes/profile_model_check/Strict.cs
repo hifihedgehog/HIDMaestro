@@ -31,6 +31,7 @@ internal static class Strict
         var c = new Checks("strict");
         Catalog(c);
         UserFiles(c);
+        Paths(c);
         Exceptions(c);
         try { EarlierTags(c); }
         catch (Exception e) { c.Check("earlier tags' profile files go through the loader", false, $"threw {e.GetType().Name}: {e.Message}"); }
@@ -223,6 +224,85 @@ internal static class Strict
         finally
         {
             try { Directory.Delete(dir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    // ── The path is the one the author wrote ─────────────────────────────
+
+    /// <summary>A refusal inside a layout names the file's own path: the
+    /// layout's prefix, each array index, and each key as the file spells
+    /// it, since the reader matches keys without regard to case. The reason
+    /// does not repeat the path. At 08fd21f3 a key the layout's reader did
+    /// not map was named from inside the layout (<c>$.pedalz</c>), and a
+    /// layout check named <c>$.layout.sticks[].click_button</c>, no index
+    /// and not the key the file holds.</summary>
+    static void Paths(Checks c)
+    {
+        JsonObject From(string id)
+        {
+            var p = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == id);
+            return JsonNode.Parse(JsonSerializer.Serialize(p, HMJsonContext.Default.ControllerProfile))!.AsObject();
+        }
+        var cases = new List<(string Name, string Text, string Path)>();
+        void Add(string name, string id, Func<JsonObject, string> edit, string path)
+        {
+            var o = From(id);
+            o["id"] = "user-path";
+            cases.Add((name, edit(o), path));
+        }
+        Add("a key the layout's reader does not map", BaseId, o =>
+        {
+            o["layout"]!.AsObject()["pedalz"] = new JsonArray();
+            return o.ToJsonString();
+        }, "$.layout.pedalz");
+        Add("a misspelled key in the first pedal", BaseId, o =>
+        {
+            o["layout"]!["pedals"]![0]!.AsObject()["axs"] = "X";
+            return o.ToJsonString();
+        }, "$.layout.pedals[0].axs");
+        Add("a pedal on an axis the descriptor lacks", BaseId, o =>
+        {
+            o["layout"]!["pedals"]![1]!["axis"] = "Slider";
+            return o.ToJsonString();
+        }, "$.layout.pedals[1].axis");
+        Add("the second stick's click on a button the descriptor lacks", "xbox-360-wired", o =>
+        {
+            o["layout"]!["sticks"]![1]!["clickButton"] = 99;
+            return o.ToJsonString();
+        }, "$.layout.sticks[1].clickButton");
+        Add("the same, with the keys spelled in another case", "xbox-360-wired", o =>
+        {
+            o["layout"]!["sticks"]![1]!["clickButton"] = 99;
+            return o.ToJsonString().Replace("\"sticks\"", "\"Sticks\"").Replace("\"clickButton\"", "\"ClickButton\"")
+                                   .Replace("\"layout\"", "\"Layout\"");
+        }, "$.Layout.Sticks[1].ClickButton");
+        Add("a dpad hat on an axis the descriptor lacks", "xbox-360-wired", o =>
+        {
+            o["layout"]!["dpad"]!["hatAxis"] = "Slider";
+            return o.ToJsonString();
+        }, "$.layout.dpad.hatAxis");
+        Add("a face button past the descriptor's buttons", "xbox-360-wired", o =>
+        {
+            o["layout"]!["faceButtons"]![2]!["buttonIndex"] = 40;
+            return o.ToJsonString();
+        }, "$.layout.faceButtons[2].buttonIndex");
+        Add("a codec key v2.0.0 requires, under keys spelled in another case", BaseId, o =>
+        {
+            o["extendedReport"] = JsonNode.Parse(
+                "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
+            return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
+        }, "$.ExtendedReport.Fields[0]");
+        foreach (var (name, text, path) in cases)
+        {
+            c.Run($"{name}: refused at {path}, and the reason does not repeat the path", () =>
+            {
+                var db = ProfileDatabase.LoadTexts(new[] { ("user-path.json", text) }, ModelRegistry.Catalog);
+                var issues = Api.Issues(db, "Issues");
+                bool ok = issues.Count == 1 && issues[0].Path == path
+                          && !issues[0].Reason.Contains("layout/", StringComparison.Ordinal)
+                          && !issues[0].Reason.StartsWith(path, StringComparison.Ordinal);
+                return (ok, string.Join("; ", issues.Select(i => $"{i.Path}: {i.Reason}")));
+            });
         }
     }
 

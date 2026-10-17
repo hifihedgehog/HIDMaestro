@@ -1625,6 +1625,7 @@ public sealed class ProfileDatabase
             {
                 // Whatever a check throws refuses this profile alone.
                 var (path, reason) = ProfileDefects.LocateAny(e);
+                if (_texts.TryGetValue(p, out var text)) path = ProfileDefects.Spell(text, path);
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path, reason,
                     HIDMaestro.HMProfileLoadIssueKind.Refused));
                 refused.Add(p);
@@ -1635,11 +1636,17 @@ public sealed class ProfileDatabase
                     p.ResolvedCache.Problem, HIDMaestro.HMProfileLoadIssueKind.ModelProblem));
         }
         foreach (var p in refused) _profiles.Remove(p);
+        _texts.Clear();
     }
 
     /// <summary>One file's result: the profile, or the issue that refused
     /// it.</summary>
-    internal readonly record struct Parsed(string File, ControllerProfile? Profile, HIDMaestro.HMProfileLoadIssue? Issue);
+    internal readonly record struct Parsed(string File, ControllerProfile? Profile, HIDMaestro.HMProfileLoadIssue? Issue, string? Text = null);
+
+    /// <summary>Each loaded profile's file text, until this load has
+    /// resolved them, so a refusal at resolve names the path as the file
+    /// spells it.</summary>
+    private readonly Dictionary<ControllerProfile, string> _texts = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>Reads one profile file strictly and runs the load checks.</summary>
     internal static Parsed Parse(string file, string text)
@@ -1660,7 +1667,7 @@ public sealed class ProfileDatabase
                 return new Parsed(file, null, NotAProfile(file));
             var (path, reason) = ProfileDefects.LocateAny(e);
             return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
-                file, id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+                file, id, ProfileDefects.Spell(text, path), reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
         }
         if (profile == null || string.IsNullOrEmpty(profile.Id))
             return new Parsed(file, null, NotAProfile(file));
@@ -1675,9 +1682,9 @@ public sealed class ProfileDatabase
             // refuses this file and never the load.
             var (path, reason) = ProfileDefects.LocateAny(e);
             return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
-                file, profile.Id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+                file, profile.Id, ProfileDefects.Spell(text, path), reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
         }
-        return new Parsed(file, profile, null);
+        return new Parsed(file, profile, null, text);
     }
 
     private static HIDMaestro.HMProfileLoadIssue NotAProfile(string file) =>
@@ -1722,6 +1729,7 @@ public sealed class ProfileDatabase
             }
             first[p.Id] = r.File;
             db._profiles.Add(p);
+            if (r.Text != null) db._texts[p] = r.Text;
         }
         db._profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
         return db;

@@ -23,12 +23,12 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
 
         if (!root.TryGetProperty("kind", out var kindElem))
             throw new JsonException("HMLayout: missing required 'kind' property");
-        var kindStr = kindElem.GetString();
+        var kindStr = kindElem.ValueKind == JsonValueKind.String ? kindElem.GetString() : null;
         if (string.IsNullOrEmpty(kindStr))
-            throw new JsonException("HMLayout: 'kind' is empty");
+            throw Inside(".kind", new JsonException("HMLayout: 'kind' is empty or not a string"));
 
         var kind = SnakeCaseToEnum<HMLayoutKind>(kindStr)
-                   ?? throw new JsonException($"HMLayout: unknown kind '{kindStr}'");
+                   ?? throw Inside(".kind", new JsonException($"HMLayout: unknown kind '{kindStr}'"));
 
         // Each concrete layout is read with the metadata the options carry:
         // the source-generated HMJsonContext for the SDK's own options, so
@@ -67,10 +67,37 @@ internal sealed class HMLayoutJsonConverter : JsonConverter<HMLayout>
         // constructed record, which keeps them here too.
         var info = options.GetTypeInfo(concrete);
         var plan = PlanFor(concrete, options);
-        if (plan == null) return (HMLayout?)root.Deserialize(info);
-        var buffer = new System.Buffers.ArrayBufferWriter<byte>(4096);
-        using (var w = new Utf8JsonWriter(buffer)) WriteFilled(w, root, plan);
-        return (HMLayout?)JsonSerializer.Deserialize(buffer.WrittenSpan, info);
+        try
+        {
+            if (plan == null) return (HMLayout?)root.Deserialize(info);
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>(4096);
+            using (var w = new Utf8JsonWriter(buffer)) WriteFilled(w, root, plan);
+            return (HMLayout?)JsonSerializer.Deserialize(buffer.WrittenSpan, info);
+        }
+        catch (JsonException e) when (e.Path is { Length: > 1 } inner && inner[0] == '$')
+        {
+            // The nested reader's path starts at the layout. The outer reader
+            // sets the path of the layout itself on an exception that carries
+            // none, and the path inside goes with it.
+            throw Inside(inner[1..], new JsonException(StripPath(e.Message), e));
+        }
+    }
+
+    /// <summary>An exception for a value inside the layout, at
+    /// <paramref name="inner"/> below it (ProfileDefects.Locate joins the
+    /// two).</summary>
+    private static JsonException Inside(string inner, JsonException e)
+    {
+        e.Data[ProfileDefects.InnerPathKey] = inner;
+        return e;
+    }
+
+    /// <summary>System.Text.Json's message without the path and position it
+    /// appends, which name the nested reader's buffer.</summary>
+    private static string StripPath(string message)
+    {
+        int at = message.IndexOf(" Path: ", StringComparison.Ordinal);
+        return at > 0 ? message[..at] : message;
     }
 
     /// <summary>For one record type under one options instance: each

@@ -47,17 +47,92 @@ internal static partial class ProfileDefects
             case ProfileDefectException d:
                 return (d.JsonPath, d.Reason);
             case JsonException j:
-                return (string.IsNullOrEmpty(j.Path) ? "$" : j.Path!, TrimJsonMessage(j.Message));
+            {
+                // A converter that reads a value through a nested reader, as
+                // the layout's does, carries the path inside that value
+                // apart: the outer reader sets Path to the value itself.
+                string path = string.IsNullOrEmpty(j.Path) ? "$" : j.Path!;
+                if (j.Data[InnerPathKey] is string inner) path += inner;
+                return (path, TrimJsonMessage(j.Message));
+            }
             case HMLayoutValidationException l:
             {
                 var m = LayoutPrefixed().Match(l.Message);
-                return (m.Success ? "$.layout." + m.Groups["path"].Value : "$.layout", l.Message);
+                return m.Success
+                    ? ("$.layout." + m.Groups["path"].Value, l.Message[m.Length..].TrimStart())
+                    : ("$.layout", l.Message);
             }
         }
         var p = ProfilePrefixed().Match(e.Message);
         if (p.Success)
             return ("$." + p.Groups["path"].Value, ProfileHead().Replace(e.Message, ""));
         return ("$", ProfileHead().Replace(e.Message, ""));
+    }
+
+    /// <summary>The key of <see cref="Exception.Data"/> under which a
+    /// converter that reads a value through a nested reader leaves the path
+    /// inside that value, such as <c>.pedals[0].axs</c>.</summary>
+    internal const string InnerPathKey = "HIDMaestro.InnerJsonPath";
+
+    /// <summary>A path of the form <c>$.a.b[2].c</c> as the file spells it.
+    /// The reader matches keys without regard to case, so a check's path,
+    /// written with the schema's spelling, is respelled here from the file's
+    /// own keys. A segment the file does not hold, and every one after it,
+    /// keeps the check's spelling.</summary>
+    public static string Spell(string text, string path)
+    {
+        if (!path.StartsWith('$') || path.Length == 1) return path;
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(text, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+        }
+        catch (JsonException) { return path; }
+        using (doc)
+        {
+            var sb = new System.Text.StringBuilder("$");
+            JsonElement? at = doc.RootElement;
+            int i = 1;
+            while (i < path.Length)
+            {
+                if (path[i] == '.')
+                {
+                    int j = i + 1;
+                    while (j < path.Length && path[j] != '.' && path[j] != '[') j++;
+                    string key = path[(i + 1)..j];
+                    string spelled = key;
+                    if (at is { ValueKind: JsonValueKind.Object } o)
+                    {
+                        JsonElement? next = null;
+                        foreach (var p in o.EnumerateObject())
+                            if (p.Name == key) { spelled = p.Name; next = p.Value; break; }
+                        if (next == null)
+                            foreach (var p in o.EnumerateObject())
+                                if (string.Equals(p.Name, key, StringComparison.OrdinalIgnoreCase)) { spelled = p.Name; next = p.Value; break; }
+                        at = next;
+                    }
+                    else at = null;
+                    sb.Append('.').Append(spelled);
+                    i = j;
+                }
+                else if (path[i] == '[')
+                {
+                    int j = path.IndexOf(']', i);
+                    if (j < 0) { sb.Append(path[i..]); break; }
+                    string index = path[(i + 1)..j];
+                    at = at is { ValueKind: JsonValueKind.Array } a && int.TryParse(index, out int n) && n >= 0 && n < a.GetArrayLength()
+                        ? a[n] : null;
+                    sb.Append('[').Append(index).Append(']');
+                    i = j + 1;
+                }
+                else { sb.Append(path[i..]); break; }
+            }
+            return sb.ToString();
+        }
     }
 
     /// <summary>The JSON path and reason of anything a load check threw.
