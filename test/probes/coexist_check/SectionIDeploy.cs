@@ -38,7 +38,8 @@
 //
 // I10 and I11 set the machine's %ProgramData%\HIDMaestro aside first, when
 // there is one, and at the end remove what they made and put it back, with
-// the OpenVR install record as it was. Since staging moved under
+// the OpenVR install record and the user's OpenVR path registry, which I11's
+// registration writes, as they were. Since staging moved under
 // %ProgramFiles%, a fresh machine has none.
 using System;
 using System.Collections.Generic;
@@ -203,6 +204,12 @@ internal static partial class Program
         string saved = root + ".coexist-saved-" + Guid.NewGuid().ToString("N");
         var asideBefore = Directory.GetDirectories(programData, "HIDMaestro.untrusted-*").ToHashSet(StringComparer.OrdinalIgnoreCase);
         string? vrRecord = OpenVrRecord();
+        // The user's OpenVR path registry (openvrpaths.vrpath), as SteamVR
+        // and the SDK find it. I11's registration adds the driver under the
+        // section's root to it.
+        string? vrPaths = typeof(HIDMaestro.HMContext).Assembly.GetType("HIDMaestro.Internal.OpenVrPathRegistry")
+            ?.GetProperty("FilePath", AnyStaticMember)?.GetValue(null) as string;
+        byte[]? vrPathsBefore = vrPaths != null && File.Exists(vrPaths) ? File.ReadAllBytes(vrPaths) : null;
         bool existed = Directory.Exists(root);
         bool started = false;
         try
@@ -306,9 +313,31 @@ internal static partial class Program
                     catch (Exception e) { Check("I10: the machine's %ProgramData%\\HIDMaestro is put back", false, $"{saved}: {e.Message}"); }
                 }
                 else Check("I10: the machine is left with no %ProgramData%\\HIDMaestro, as the section found it", !Directory.Exists(root), root);
-                using var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro");
-                if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
-                else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
+                using (var k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\HIDMaestro"))
+                {
+                    if (vrRecord == null) k.DeleteValue("InstalledVrManifestSha256", throwOnMissingValue: false);
+                    else k.SetValue("InstalledVrManifestSha256", vrRecord, RegistryValueKind.String);
+                }
+                // Where the section changed the path registry, its content
+                // goes back. A file the section made goes.
+                if (vrPaths != null)
+                {
+                    try
+                    {
+                        byte[]? now = File.Exists(vrPaths) ? File.ReadAllBytes(vrPaths) : null;
+                        bool same = now == null ? vrPathsBefore == null : vrPathsBefore != null && now.AsSpan().SequenceEqual(vrPathsBefore);
+                        if (!same)
+                        {
+                            if (vrPathsBefore == null) File.Delete(vrPaths);
+                            else File.WriteAllBytes(vrPaths, vrPathsBefore);
+                        }
+                        byte[]? after = File.Exists(vrPaths) ? File.ReadAllBytes(vrPaths) : null;
+                        Check("I10: the user's OpenVR path registry is as the section found it",
+                              after == null ? vrPathsBefore == null : vrPathsBefore != null && after.AsSpan().SequenceEqual(vrPathsBefore),
+                              same ? $"{vrPaths}, unchanged" : $"{vrPaths}, put back");
+                    }
+                    catch (Exception e) { Check("I10: the user's OpenVR path registry is as the section found it", false, $"{vrPaths}: {e.Message}"); }
+                }
             }
         }
     }
