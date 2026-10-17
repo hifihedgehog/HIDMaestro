@@ -95,8 +95,10 @@
 //        has waited out its 5 s bound for the device to stop, which the
 //        probe's handle refuses (v1.12.0 DeviceManager.RestartDevice), so
 //        it streams after that window has ended and the driver has dropped
-//        the dead program's section. Its input reaches the device once the
-//        driver maps the section again, and the driver watches its pipe.
+//        the dead program's section. Before the program sends a frame, the
+//        driver maps its section again and watches its pipe: the map is the
+//        only place the driver opens a watch without input. Its input then
+//        reaches the device.
 //    Y19. Y13's squatter, holding the acknowledgement section as well, and
 //        then the dead program's device is added again, so a new driver
 //        context starts with no values. The section still carries the
@@ -846,16 +848,27 @@ internal static partial class Program
             {
                 // The create asked for a restart, which the probe's handle
                 // refuses while the device stays started, and v1.12.0 waits
-                // up to 5 s for it to stop before it goes on. So the program
-                // streams after the window the kill started has ended.
+                // up to 5 s for it to stop before it goes on. The window the
+                // kill started is eight 500 ms waits from the last frame,
+                // each of which can end late, so 4.5 s after the kill it has
+                // ended.
+                long returned = killed.ElapsedMilliseconds;
+                Check($"{y}: the v1.12.0 program's create returns after the driver's idle window, having waited out the refused restart",
+                      returned >= 4500, $"{returned} ms after the kill, {second}");
+                // The v1.12.0 create makes its input section, event and owner
+                // pipe before it asks for the restart. The worker opens a
+                // watch without input only when it maps a section
+                // (TryOpenSharedMapping), and after the window it looks for
+                // the event every 200 ms. So a watch on this program's pipe
+                // before it has sent a frame is the map.
+                bool mapped = WaitFor(() => Y.WatchValues(inst) is { Connected: 1 } w && w.Pid == old.Pid, 2000);
+                Check($"{y}: before the program sends a frame, the driver maps its section again and watches its pipe",
+                      mapped, Y.ShowWatch(inst) + $", program {old.Pid}, {killed.ElapsedMilliseconds} ms after the kill");
                 long mark = cap?.Mark() ?? 0;
                 old.Send("stream 1 0.5 250 1");
-                long began = killed.ElapsedMilliseconds;
-                Check($"{y}: the v1.12.0 program streams only after the driver's idle window, its create having waited out the refused restart",
-                      began >= 4000, $"{began} ms after the kill, {second}");
                 var toFirst = Stopwatch.StartNew();
                 bool reached = cap != null && WaitFor(() => cap.Since(mark).Count > 0, 5000);
-                Check($"{y}: its input reaches the device once the driver maps the program's section again", reached,
+                Check($"{y}: its input reaches the device through that map", reached,
                       reached ? $"first report {toFirst.ElapsedMilliseconds} ms after the stream began" : "no report within 5000 ms of the stream");
             }
             Check($"{y}: the v1.12.0 program's create adopts the companion on its index",
