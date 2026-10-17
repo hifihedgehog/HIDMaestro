@@ -8,6 +8,9 @@
 //              is not loaded, earlier tags' catalog files load but for the
 //              removed spellings, and a create or a build meets one
 //              exception type for a bad profile (Strict.cs)
+//   values     value sources and patches: the keyedHexFile parser against
+//              9bd6279's ParseStamp, every encoding and source, the file
+//              cache, and each refusal at load (Values.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -30,6 +33,7 @@ internal static class Program
         var modes = new (string Name, Func<int> Run)[]
         {
             ("strict", Strict.Run),
+            ("values", Values.Run),
         };
         int fail = 0;
         if (mode == "check")

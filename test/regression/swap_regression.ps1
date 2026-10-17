@@ -2191,7 +2191,9 @@ function Scenario-Arith-Roundtrip {
 # and a user's directory strictly: every defect a file can carry is refused
 # at its JSON path and listed in HMContext.ProfileLoadIssues, a create and a
 # build meet one exception type for a bad profile, and the catalog files of
-# every earlier v1.x tag load but for the removed spellings. Offline.
+# every earlier v1.x tag load but for the removed spellings. A feature
+# answer's per-controller bytes come from its value sources and patches.
+# Offline.
 function Scenario-Profile-Model {
     Invoke-Probe -Dir 'profile_model_check' -Exe 'ProfileModelCheck.exe' -Arguments 'check' `
                  -Message 'a profile loads, resolves or answers otherwise than the data-driven design states (see probe stdout for the check)'

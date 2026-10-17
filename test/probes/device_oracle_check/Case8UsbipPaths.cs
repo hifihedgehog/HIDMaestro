@@ -721,7 +721,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
             Set("<BusId>k__BackingField", busId);
             Set("<Audio>k__BackingField", new UsbAudioEngine(p, (_, _, _) => { }));
             Set("_index", 0);
-            Set("_stubs", FeatureStubTable.From(p, _ => null));
+            Set("_stubs", FeatureStubTable.From(p, 0, descriptors.SerialString, _ => null));
             Set("_lastFeatureParam", -1);
             Set("_lastFeaturePayload", Array.Empty<byte>());
             inEndpoint = 0;

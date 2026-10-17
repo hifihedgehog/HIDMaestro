@@ -84,6 +84,12 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         ["steam-controller-2"] = new byte[] { 0x01, 0xAE, 0xC1, 0xDC, 0xE2, 0xF2, 0x81, 0x83, 0x87 },
     };
 
+    // Where Steam keeps its updater's config under its install, which
+    // steam-controller-2's keyedHexFile source names
+    // (profiles/valve/steam-controller-2.json, valueSources.steamUpdater).
+    const string UpdaterRelativeDirectory = @"bin\hardwareupdater";
+    const string UpdaterConfigName = "hardwareupdater.cfg";
+
     static readonly (string Name, string? Cfg)[] StampStates =
     {
         ("absent", null),
@@ -103,7 +109,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         if (profiles.Count == 0) throw new InvalidOperationException("No Valve or Sony USB/IP composite in the catalog.");
 
         string root = Path.Combine(Path.GetTempPath(), $"hm-device-oracle-{Environment.ProcessId}");
-        string cfg = Path.Combine(root, SteamHardwareUpdater.RelativeDirectory, SteamHardwareUpdater.ConfigName);
+        string cfg = Path.Combine(root, UpdaterRelativeDirectory, UpdaterConfigName);
         using var host = new Host(Path.Combine(Path.GetTempPath(), $"hmoracle{Environment.ProcessId}.sock"));
         try
         {
@@ -330,7 +336,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         foreach (string text in texts)
             foreach (string key in new[] { "TRITON_FW_TS", "PROTEUS_FW_TS", "NEREID_FW_TS", "triton_fw_ts" })
             {
-                uint? v = SteamHardwareUpdater.ParseStamp(text, key);
+                uint? v = ValueSources.ParseKeyedHex(text, key);
                 var o = new byte[5];
                 o[0] = (byte)(v.HasValue ? 1 : 0);
                 BinaryPrimitives.WriteUInt32LittleEndian(o.AsSpan(1), v ?? 0);
@@ -341,8 +347,8 @@ internal sealed class Case4UsbipFeatures : IOracleCase
     /// <summary>Steam's firmware builds as the table asks for them: the
     /// config file read on every call, as SteamHardwareUpdater.CurrentStamp
     /// reads Steam's (SteamHardwareUpdater.cs:42-52), and null without one.</summary>
-    static Func<string, uint?> StampSource(string cfg) =>
-        key => File.Exists(cfg) ? SteamHardwareUpdater.ParseStamp(File.ReadAllText(cfg), key) : null;
+    static ValueSources.FileReader StampSource(string cfg) =>
+        _ => File.Exists(cfg) ? File.ReadAllText(cfg) : null;
 
     // ── Sequences ────────────────────────────────────────────────────────
 
@@ -620,7 +626,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
 
         public readonly byte[] SecondaryInterfaces;
 
-        public Device(GoldenCase g, Host host, ControllerProfile profile, int index, Func<string, uint?> stamp)
+        public Device(GoldenCase g, Host host, ControllerProfile profile, int index, ValueSources.FileReader stamp)
         {
             _g = g;
             _host = host;
@@ -636,7 +642,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         /// constructor sets them (UsbipEmulatedDevice.cs:272-337),
         /// with the stamp source and the ring in place of Steam's and the
         /// section's. No thread, section or event.</summary>
-        static UsbipEmulatedDevice NewDevice(ControllerProfile profile, int index, Func<string, uint?> stamp,
+        static UsbipEmulatedDevice NewDevice(ControllerProfile profile, int index, ValueSources.FileReader stamp,
                                              UsbipServer.Connection connection, IntPtr ring)
         {
             var t = typeof(UsbipEmulatedDevice);
@@ -647,7 +653,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                 (t.GetField(field, Instance) ?? throw new MissingFieldException(t.Name, field)).SetValue(dev, value);
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", index);
-            Set("_stubs", FeatureStubTable.From(profile, stamp));
+            Set("_stubs", FeatureStubTable.From(profile, index, descriptors.SerialString, stamp));
             Set("_lastFeatureParam", -1);
             Set("_lastFeaturePayload", Array.Empty<byte>());
             var slots = new int[256];
@@ -836,7 +842,10 @@ internal sealed class Case4UsbipFeatures : IOracleCase
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         Directory.CreateDirectory(root);
         string a = Path.Combine(root, "SteamA"), b = Path.Combine(root, "SteamB"), bare = Path.Combine(root, "SteamBare");
-        string Cfg(string steam) => Path.Combine(steam, SteamHardwareUpdater.RelativeDirectory, SteamHardwareUpdater.ConfigName);
+        string Cfg(string steam) => Path.Combine(steam, UpdaterRelativeDirectory, UpdaterConfigName);
+        // The profile's own source: its roots and path are the lookup
+        // SteamHardwareUpdater made before v2.0.0.
+        var source = triton.ValueSources!["steamUpdater"];
         foreach (var d in new[] { a, b }) Directory.CreateDirectory(Path.GetDirectoryName(Cfg(d))!);
         Directory.CreateDirectory(bare);
         const string Shipped = "MUST_UPDATE_TRITON_FW_TS:6A18D057\r\nMUST_UPDATE_PROTEUS_FW_TS:6A18D053\r\n"
@@ -881,8 +890,8 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                         if (cfgA == null) File.Delete(Cfg(a));
                         else File.WriteAllText(Cfg(a), cfgA);
 
-                        string? install = SteamHardwareUpdater.InstallDirectory();
-                        string? updater = SteamHardwareUpdater.UpdaterDirectory();
+                        var (install, file) = ValueSources.Locate(source);
+                        string? updater = file == null || !Directory.Exists(Path.GetDirectoryName(file)) ? null : Path.GetDirectoryName(file);
                         string Label(string? path)
                         {
                             if (path == null) return "none";
@@ -890,7 +899,7 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                             foreach (var (label, dir) in new[] { ("A", a), ("B", b), ("Bare", bare) })
                             {
                                 if (string.Equals(full, dir, StringComparison.OrdinalIgnoreCase)) return label;
-                                if (string.Equals(full, Path.Combine(dir, SteamHardwareUpdater.RelativeDirectory), StringComparison.OrdinalIgnoreCase)) return label + "-updater";
+                                if (string.Equals(full, Path.Combine(dir, UpdaterRelativeDirectory), StringComparison.OrdinalIgnoreCase)) return label + "-updater";
                             }
                             throw new InvalidOperationException($"State {name}: the lookup left the case's folders. Stopped.");
                         }
@@ -898,14 +907,14 @@ internal sealed class Case4UsbipFeatures : IOracleCase
                         o.AddRange(System.Text.Encoding.ASCII.GetBytes($"{Label(install)}|{Label(updater)}|"));
                         foreach (string key in new[] { "TRITON_FW_TS", "PROTEUS_FW_TS", "NEREID_FW_TS" })
                         {
-                            uint? v = SteamHardwareUpdater.CurrentStamp(key);
+                            uint? v = ValueSources.ReadFile(source) is string text ? ValueSources.ParseKeyedHex(text, key) : null;
                             var e = new byte[5];
                             e[0] = (byte)(v.HasValue ? 1 : 0);
                             BinaryPrimitives.WriteUInt32LittleEndian(e.AsSpan(1), v ?? 0);
                             o.AddRange(e);
                         }
                         g.Out($"state.{name}", o.ToArray());
-                        g.Out($"answer-83.{name}", FeatureStubTable.From(triton)?.Lookup(0x83, 64) ?? Array.Empty<byte>());
+                        g.Out($"answer-83.{name}", FeatureStubTable.From(triton, 0, null)?.Lookup(0x83, 64) ?? Array.Empty<byte>());
                     }
 
                     // Steam writes SteamPath with forward slashes in lower case
@@ -945,9 +954,11 @@ internal sealed class Case4UsbipFeatures : IOracleCase
 
     /// <summary>FeatureStubTable.From refuses a stamp on an echoed answer, a
     /// blank key, and an offset whose four bytes are not inside the data
-    /// (FeatureStubTable.cs:84-91). Each on a copy of steam-controller-2
-    /// whose 0x83 entry is changed, with the edges that pass beside them.
-    /// The exception's type and message, or the 0x83 answer the table
+    /// (FeatureStubTable.cs:84-91 at 9bd6279). From v2.0.0 the stamp is a
+    /// patch from a keyedHexFile source, refused for the same edits
+    /// (ValueSources.Validate). Each on a copy of steam-controller-2 whose
+    /// 0x83 entry is changed, with the edges that pass beside them. The
+    /// exception's type and message, or the 0x83 answer the table
     /// built.</summary>
     static void StampRefusal(GoldenCase g, ControllerProfile triton)
     {
@@ -957,24 +968,24 @@ internal sealed class Case4UsbipFeatures : IOracleCase
             ("as-shipped", r => { }),
             ("echo", r => r.Echo = true),
             ("echo-no-data", r => { r.Echo = true; r.Data = null; }),
-            ("key-empty", r => r.SteamFirmwareStamp!.Key = ""),
-            ("key-blank", r => r.SteamFirmwareStamp!.Key = "   "),
-            ("offset-negative", r => r.SteamFirmwareStamp!.Offset = -1),
-            ("offset-zero", r => r.SteamFirmwareStamp!.Offset = 0),
-            ("offset-last-four", r => r.SteamFirmwareStamp!.Offset = r.Data!.Length / 2 - 4),
-            ("offset-past-data", r => r.SteamFirmwareStamp!.Offset = r.Data!.Length / 2 - 3),
-            ("offset-in-padding", r => r.SteamFirmwareStamp!.Offset = 60),
+            ("key-empty", r => r.Patch![0].Key = ""),
+            ("key-blank", r => r.Patch![0].Key = "   "),
+            ("offset-negative", r => r.Patch![0].At = -1),
+            ("offset-zero", r => r.Patch![0].At = 0),
+            ("offset-last-four", r => r.Patch![0].At = r.Data!.Length / 2 - 4),
+            ("offset-past-data", r => r.Patch![0].At = r.Data!.Length / 2 - 3),
+            ("offset-in-padding", r => r.Patch![0].At = 60),
             ("no-data", r => r.Data = null),
         };
         foreach (var (name, edit) in cases)
         {
             var json = JsonSerializer.Serialize(triton, HMJsonContext.Default.ControllerProfile);
             var p = JsonSerializer.Deserialize(json, HMJsonContext.Default.ControllerProfile)!;
-            var entry = p.FeatureStubs!.Reports.First(r => r.IdByte == 0x83 && r.SteamFirmwareStamp != null);
+            var entry = p.FeatureStubs!.Reports.First(r => r.IdByte == 0x83 && r.Patch != null);
             edit(entry);
             try
             {
-                var table = FeatureStubTable.From(p, k => k == "TRITON_FW_TS" ? 0x6A628345u : null);
+                var table = FeatureStubTable.From(p, 0, null, _ => "TRITON_FW_TS:6A628345");
                 g.Out($"ok.{name}", table?.Lookup(0x83, 64) ?? Array.Empty<byte>());
             }
             catch (Exception e)

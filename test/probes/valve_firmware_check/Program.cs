@@ -35,12 +35,14 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using HIDMaestro;
+using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
 
 internal static class Program
 {
     const string ProfileId = "steam-controller-2";
     const string StampKey = "TRITON_FW_TS";
+    const string UpdaterExe = "hardwareupdater.exe";
     const uint CapturedBuild = 0x6A18D057;
 
     static int s_total, s_failures;
@@ -55,17 +57,21 @@ internal static class Program
     static int Main()
     {
         Console.WriteLine("=== Triton persona against Steam's firmware updater (issue #62) ===");
-        string? dir = SteamHardwareUpdater.UpdaterDirectory();
-        string? exe = dir == null ? null : Path.Combine(dir, SteamHardwareUpdater.ExeName);
+        // The updater's folder and config, found as the persona's own value
+        // source finds them (valueSources.steamUpdater).
+        var source = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == ProfileId).ValueSources!["steamUpdater"];
+        var (_, cfg) = ValueSources.Locate(source);
+        string? dir = cfg == null ? null : Path.GetDirectoryName(cfg);
+        string? exe = dir == null ? null : Path.Combine(dir, UpdaterExe);
         if (exe == null || !File.Exists(exe))
         {
             Console.WriteLine("[SKIP] no Steam hardware updater on this machine.");
             return 2;
         }
-        uint? steamBuild = SteamHardwareUpdater.CurrentStamp(StampKey);
+        uint? steamBuild = ValueSources.ReadFile(source) is string text ? ValueSources.ParseKeyedHex(text, StampKey) : null;
         if (steamBuild == null)
         {
-            Console.WriteLine($"[SKIP] Steam's {SteamHardwareUpdater.ConfigName} names no {StampKey}.");
+            Console.WriteLine($"[SKIP] Steam's {Path.GetFileName(cfg)} names no {StampKey}.");
             return 2;
         }
         Console.WriteLine($"  updater: {exe}");
@@ -79,7 +85,7 @@ internal static class Program
 
         // The serial the updater reports is the unit serial the persona
         // serves at string index 1.
-        var served = FeatureStubTable.From(profile.Inner, _ => null)?.Lookup(0xAE, 1, 64);
+        var served = FeatureStubTable.From(profile.Inner, 0, null, _ => null)?.Lookup(0xAE, 1, 64);
         string serial = served == null ? "" : Ascii(served, 4);
         Check("the persona serves a unit serial", serial.Length > 0, serial);
         if (serial.Length == 0) return Finish();
@@ -163,7 +169,7 @@ internal static class Program
         var root = JsonNode.Parse(src)!;
         root["id"] = variantId;
         foreach (var r in root["featureStubs"]!["reports"]!.AsArray())
-            r!.AsObject().Remove("steamFirmwareStamp");
+            r!.AsObject().Remove("patch");
 
         Directory.CreateDirectory(tmp);
         File.WriteAllText(Path.Combine(tmp, variantId + ".json"), root.ToJsonString());

@@ -38,35 +38,45 @@ internal sealed class FeatureStubTable
     // answers the message whatever parameter it carried.
     private readonly Dictionary<(byte Key, int Param), Entry> _reports = new();
 
-    /// <summary>The build Steam ships for a config key, or null. The product
-    /// reads Steam's own config, and a check supplies a fixed answer.</summary>
-    private readonly Func<string, uint?> _steamStamp;
+    /// <summary>The controller's values the patches read (mechanism 5).</summary>
+    private readonly ValueSources.Values _values;
 
-    private readonly record struct Entry(byte[] Data, int Size, bool Echo, int StampOffset, string? StampKey);
+    /// <summary>An answer: its bytes padded to the report's size with every
+    /// patch from the index and the serial already written, and the patches
+    /// read from a file, which are written as the answer is asked for.</summary>
+    private readonly record struct Entry(byte[] Data, int Size, bool Echo, AnswerPatchSpec[]? FilePatches);
 
-    private FeatureStubTable(bool matchesLastMessage, int messageByte, Func<string, uint?> steamStamp)
+    private FeatureStubTable(bool matchesLastMessage, int messageByte, ValueSources.Values values)
     {
         MatchesLastMessage = matchesLastMessage;
         MessageByte = messageByte;
-        _steamStamp = steamStamp;
+        _values = values;
     }
 
-    /// <summary>Build the table for a profile, or null when it declares
-    /// none (every profile shipping before #56).</summary>
-    public static FeatureStubTable? From(ControllerProfile profile) =>
-        From(profile, SteamHardwareUpdater.CurrentStamp);
+    /// <summary>Build the table for one controller of a profile, or null
+    /// when the profile declares none (every profile shipping before #56).
+    /// <paramref name="serial"/> is the serial the device serves, which a
+    /// <c>serial</c> patch writes.</summary>
+    public static FeatureStubTable? From(ControllerProfile profile, int index, string? serial) =>
+        From(profile, index, serial, ValueSources.ReadFile);
 
-    /// <summary>Build the table with a given source for Steam's firmware
-    /// builds, so a check can exercise an answer with Steam present and
-    /// absent on any machine.</summary>
-    internal static FeatureStubTable? From(ControllerProfile profile, Func<string, uint?> steamStamp)
+    /// <summary>Build the table with a given reader for the files value
+    /// sources read, so a check can exercise an answer with Steam present
+    /// and absent on any machine.</summary>
+    internal static FeatureStubTable? From(ControllerProfile profile, int index, string? serial, ValueSources.FileReader files)
     {
         var spec = profile.FeatureStubs;
         if (spec?.Reports == null || spec.Reports.Count == 0) return null;
+        try { Validate(profile); }
+        catch (ProfileDefectException e)
+        {
+            throw new InvalidOperationException($"Profile '{profile.Id}': {e.JsonPath}: {e.Reason}", e);
+        }
 
+        var values = new ValueSources.Values(index, serial, profile.ValueSources, files);
         var table = new FeatureStubTable(
             string.Equals(spec.Match, "lastMessage", StringComparison.OrdinalIgnoreCase),
-            spec.MessageByte, steamStamp);
+            spec.MessageByte, values);
         foreach (var r in spec.Reports)
         {
             if (string.IsNullOrEmpty(r.Data) && !r.Echo) continue;
@@ -76,24 +86,44 @@ internal sealed class FeatureStubTable
             // usually shorter because the tail is zeros, exactly as the
             // real device pads its 64-byte feature reports.
             int size = r.Size > 0 ? r.Size : bytes.Length;
-            if (bytes.Length > size)
-                throw new InvalidOperationException(
-                    $"Profile '{profile.Id}' featureStub {r.Id}: {bytes.Length} bytes of data " +
-                    $"exceed the declared {size}-byte report size.");
-
-            // A tracked stamp replaces four captured bytes, so it has to lie
-            // inside them, and an echoed answer has none to replace.
-            var stamp = r.SteamFirmwareStamp;
-            if (stamp != null && (r.Echo || string.IsNullOrWhiteSpace(stamp.Key)
-                                  || stamp.Offset < 0 || stamp.Offset + 4 > bytes.Length))
-                throw new InvalidOperationException(
-                    $"Profile '{profile.Id}' featureStub {r.Id}: steamFirmwareStamp needs a key and " +
-                    $"four bytes of data at offset {stamp.Offset}, in an answer that is not echoed.");
-
-            table._reports[(r.IdByte, r.Param ?? -1)] =
-                new Entry(bytes, size, r.Echo, stamp?.Offset ?? -1, stamp?.Key);
+            var full = new byte[size];
+            bytes.CopyTo(full, 0);
+            List<AnswerPatchSpec>? filePatches = null;
+            foreach (var p in r.Patch ?? new List<AnswerPatchSpec>())
+            {
+                if (ValueSources.ReadsFile(p)) (filePatches ??= new()).Add(p);
+                else ValueSources.Apply(full, p, values);
+            }
+            table._reports[(r.IdByte, r.Param ?? -1)] = new Entry(full, size, r.Echo, filePatches?.ToArray());
         }
         return table._reports.Count > 0 ? table : null;
+    }
+
+    /// <summary>The checks a profile's answers meet when it loads: each
+    /// answer's data is hex no longer than its size, and its value sources
+    /// and patches fit (<see cref="ValueSources.Validate"/>). Throws
+    /// <see cref="ProfileDefectException"/> with the JSON path.</summary>
+    internal static void Validate(ControllerProfile profile)
+    {
+        var spec = profile.FeatureStubs;
+        if (spec?.Reports != null)
+            for (int i = 0; i < spec.Reports.Count; i++)
+            {
+                var r = spec.Reports[i] ?? throw new ProfileDefectException($"$.featureStubs.reports[{i}]", "is null.");
+                string at = $"$.featureStubs.reports[{i}]";
+                try { _ = r.IdByte; }
+                catch (Exception e) when (e is FormatException or OverflowException)
+                {
+                    throw new ProfileDefectException(at + ".id", $"\"{r.Id}\" is not a hex byte.");
+                }
+                byte[] bytes;
+                try { bytes = string.IsNullOrEmpty(r.Data) ? Array.Empty<byte>() : Convert.FromHexString(r.Data); }
+                catch (FormatException) { throw new ProfileDefectException(at + ".data", "is not whole hex bytes."); }
+                int size = r.Size > 0 ? r.Size : bytes.Length;
+                if (bytes.Length > size)
+                    throw new ProfileDefectException(at + ".data", $"{bytes.Length} bytes of data exceed the declared {size}-byte report size.");
+            }
+        ValueSources.Validate(profile.ValueSources, spec, profile.RequiresUsbipBackend);
     }
 
     /// <summary>The answer for a key, padded to the declared report size and
@@ -117,10 +147,10 @@ internal sealed class FeatureStubTable
         var full = new byte[entry.Size];
         ReadOnlySpan<byte> body = entry.Echo && written.Length > 0 ? written : entry.Data;
         body[..Math.Min(body.Length, full.Length)].CopyTo(full);
-        // Issue #62. Answer with the build Steam currently ships, so its
-        // updater sees a unit that has already taken the update it offers.
-        if (entry.StampKey != null && _steamStamp(entry.StampKey) is uint current)
-            BinaryPrimitives.WriteUInt32LittleEndian(full.AsSpan(entry.StampOffset, 4), current);
+        // Issue #62. A value read from a file follows the file, so Steam's
+        // updater sees a unit that has already taken the build it offers.
+        if (entry.FilePatches != null)
+            foreach (var p in entry.FilePatches) ValueSources.Apply(full, p, _values);
         if (wLength >= full.Length) return full;
         var cut = new byte[wLength];
         Array.Copy(full, cut, wLength);

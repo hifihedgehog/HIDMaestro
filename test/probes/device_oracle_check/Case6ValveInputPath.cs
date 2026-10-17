@@ -322,7 +322,7 @@ internal sealed class Case6ValveInputPath : IOracleCase
             OracleProtocol.Set(dev, p, descriptors, 0);
             Set("<Descriptors>k__BackingField", descriptors);
             Set("_index", 0);
-            Set("_stubs", FeatureStubTable.From(p, _ => null));
+            Set("_stubs", FeatureStubTable.From(p, 0, descriptors.SerialString, _ => null));
             Set("_lastFeatureParam", -1);
             Set("_lastFeaturePayload", Array.Empty<byte>());
             inEndpoint = 0;

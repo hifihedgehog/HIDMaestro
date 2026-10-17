@@ -176,7 +176,7 @@ internal static class Program
 
         // ── 4. Feature stubs: Steam's interrogation ─────────────────────
         Console.WriteLine("\n-- feature stubs --");
-        var stubs = FeatureStubTable.From(inner);
+        var stubs = FeatureStubTable.From(inner, 0, null, _ => null);
         Check("profile declares a feature-stub table", stubs != null);
         if (stubs != null)
         {
@@ -373,7 +373,7 @@ internal static class Program
               set.ConfigurationDescriptor.Length == 0x54,
               $"0x{set.ConfigurationDescriptor.Length:X}");
 
-        var stubs = FeatureStubTable.From(inner);
+        var stubs = FeatureStubTable.From(inner, 0, null, _ => null);
         Check("answers ID_GET_ATTRIBUTES_VALUES, which SDL reads before it trusts the pad",
               stubs != null && stubs.Lookup(0x83, 64) != null);
         if (stubs == null) return;
@@ -445,7 +445,7 @@ internal static class Program
 
         // Built with no source for Steam's firmware, the Steam-absent case,
         // so the capture checks below read the same on every machine.
-        var stubs = FeatureStubTable.From(inner, _ => null);
+        var stubs = FeatureStubTable.From(inner, 0, null, _ => null);
         Check("declares the command-channel answers", stubs != null);
         if (stubs == null) return;
         Check("keyed by payload byte 1, the byte after Triton's feature report id",
@@ -474,11 +474,13 @@ internal static class Program
         // differs from the TRITON_FW_TS its config names, so with Steam
         // present the build follows that value and nothing else moves.
         const uint SteamBuild = 0x6A628345;
-        var spec = inner.FeatureStubs!.Reports.First(r => r.IdByte == 0x83).SteamFirmwareStamp;
-        Check("the tracked stamp is the tag-4 record's value, keyed TRITON_FW_TS",
-              spec != null && spec.Key == "TRITON_FW_TS" && a != null && a[spec.Offset - 1] == 0x04,
-              spec == null ? "not declared" : $"offset {spec.Offset}, key {spec.Key}");
-        var withSteam = FeatureStubTable.From(inner, k => k == "TRITON_FW_TS" ? SteamBuild : null);
+        var spec = inner.FeatureStubs!.Reports.First(r => r.IdByte == 0x83).Patch?.FirstOrDefault();
+        Check("the tracked stamp is the tag-4 record's value, a patch keyed TRITON_FW_TS from Steam's updater config",
+              spec != null && spec.Key == "TRITON_FW_TS" && spec.Encoding == "uint32-le" && spec.Length == 4
+              && inner.ValueSources?.TryGetValue(spec.Source, out var src) == true && src.Kind == "keyedHexFile"
+              && src.Path == @"bin\hardwareupdater\hardwareupdater.cfg" && a != null && a[spec.At - 1] == 0x04,
+              spec == null ? "not declared" : $"at {spec.At}, key {spec.Key}, source {spec.Source}");
+        var withSteam = FeatureStubTable.From(inner, 0, null, _ => "TRITON_FW_TS:6A628345");
         var b = withSteam?.Lookup(0x83, 64);
         Check("with Steam present, the firmware build is Steam's TRITON_FW_TS",
               b != null && Attr(b, 3, 25, 0x04) == SteamBuild,
@@ -489,7 +491,7 @@ internal static class Program
         Check("a short read carries Steam's build as well",
               withSteam?.Lookup(0x83, 23) is byte[] shortB && shortB.Length == 23
               && BitConverter.ToUInt32(shortB, 19) == SteamBuild);
-        var otherFamily = FeatureStubTable.From(inner, k => k == "PROTEUS_FW_TS" ? 0x6A628359u : null)?.Lookup(0x83, 64);
+        var otherFamily = FeatureStubTable.From(inner, 0, null, _ => "PROTEUS_FW_TS:6A628359")?.Lookup(0x83, 64);
         Check("a build Steam names only for another family leaves the capture",
               otherFamily != null && Attr(otherFamily, 3, 25, 0x04) == 0x6A18D057);
 
@@ -497,14 +499,14 @@ internal static class Program
         const string Cfg = "MUST_UPDATE_TRITON_FW_TS:6A18D057\r\nMUST_UPDATE_PROTEUS_FW_TS:6A18D053\r\n"
                          + "TRITON_FW_TS:6A628345\r\nPROTEUS_FW_TS:6A628359";
         Check("reads TRITON_FW_TS, never the MUST_UPDATE line that ends in the same key",
-              SteamHardwareUpdater.ParseStamp(Cfg, "TRITON_FW_TS") == 0x6A628345u);
+              ValueSources.ParseKeyedHex(Cfg, "TRITON_FW_TS") == 0x6A628345u);
         Check("reads the last line, which has no line end",
-              SteamHardwareUpdater.ParseStamp(Cfg, "PROTEUS_FW_TS") == 0x6A628359u);
-        Check("an absent key reads as none", SteamHardwareUpdater.ParseStamp(Cfg, "NEREID_FW_TS") == null);
+              ValueSources.ParseKeyedHex(Cfg, "PROTEUS_FW_TS") == 0x6A628359u);
+        Check("an absent key reads as none", ValueSources.ParseKeyedHex(Cfg, "NEREID_FW_TS") == null);
         Check("a value that is not a nonzero 32-bit hex number reads as none",
-              SteamHardwareUpdater.ParseStamp("TRITON_FW_TS:zz", "TRITON_FW_TS") == null
-              && SteamHardwareUpdater.ParseStamp("TRITON_FW_TS:123456789", "TRITON_FW_TS") == null
-              && SteamHardwareUpdater.ParseStamp("TRITON_FW_TS:0", "TRITON_FW_TS") == null);
+              ValueSources.ParseKeyedHex("TRITON_FW_TS:zz", "TRITON_FW_TS") == null
+              && ValueSources.ParseKeyedHex("TRITON_FW_TS:123456789", "TRITON_FW_TS") == null
+              && ValueSources.ParseKeyedHex("TRITON_FW_TS:0", "TRITON_FW_TS") == null);
 
         // ID_GET_STRING_ATTRIBUTE takes an index and answers a different
         // string for each, so the persona declares one entry per index.

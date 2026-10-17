@@ -252,7 +252,7 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             // A device that builds its reports starts from a pad at rest.
             if (protocol.BuildsReports) _engine.SetStateBlock(profile.StateBlockAtRest());
         }
-        _stubs = FeatureStubTable.From(profile);
+        _stubs = FeatureStubTable.From(profile, index, Descriptors.SerialString);
         _primaryInEndpoint = 0;
         foreach (var kv in Descriptors.Endpoints)
         {

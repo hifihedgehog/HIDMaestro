@@ -325,6 +325,12 @@ public sealed class ControllerProfile
     [JsonPropertyName("featureStubs")]
     public FeatureStubSpec? FeatureStubs { get; set; }
 
+    /// <summary>v2.0.0: the named per-controller values a feature answer's
+    /// patches read beyond the built-in <c>index</c> and <c>serial</c>, such
+    /// as a <c>keyedHexFile</c> (<see cref="ValueSourceSpec"/>).</summary>
+    [JsonPropertyName("valueSources")]
+    public Dictionary<string, ValueSourceSpec>? ValueSources { get; set; }
+
     /// <summary>True when this profile is a composite USB persona and
     /// therefore takes the USB/IP create path rather than the UMDF2
     /// one.</summary>
@@ -485,6 +491,7 @@ public sealed class ControllerProfile
     /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).</summary>
     internal void ValidateAtLoad()
     {
+        Usbip.FeatureStubTable.Validate(this);
         if (!HasDescriptor) return;
         ValidateDeviceModel();
         _ = GetOrBuildReportBuilder();
@@ -973,33 +980,108 @@ public sealed class FeatureStubReport
     [JsonPropertyName("echo")]
     public bool Echo { get; set; }
 
-    /// <summary>Issue #62. A firmware build stamp inside <see cref="Data"/>
-    /// that has to match the firmware Steam currently ships rather than the
-    /// captured one. Absent for every answer whose bytes are fixed.</summary>
+    /// <summary>v2.0.0: bytes of the answer that differ per controller,
+    /// each from a value source (<see cref="AnswerPatchSpec"/>). Absent for
+    /// every answer whose bytes are fixed.</summary>
+    [JsonPropertyName("patch")]
+    public List<AnswerPatchSpec>? Patch { get; set; }
+
+    /// <summary>The key v1.9.1 to v1.13.0 used for Steam's firmware stamp,
+    /// read only so a profile that carries it is refused naming its
+    /// replacement, a <see cref="Patch"/> from a keyedHexFile value
+    /// source.</summary>
+    [JsonInclude]
     [JsonPropertyName("steamFirmwareStamp")]
-    public SteamFirmwareStampSpec? SteamFirmwareStamp { get; set; }
+    internal JsonElement? RemovedSteamFirmwareStamp { get; set; }
 
     /// <summary>Why this answer is what it is. Documentation only.</summary>
     [JsonPropertyName("comment")]
     public string? Comment { get; set; }
 }
 
-/// <summary>Issue #62. Where a little-endian u32 firmware build stamp sits in
-/// a feature answer, and which key of Steam's <c>hardwareupdater.cfg</c>
-/// names the build Steam ships for that device family. With Steam installed
-/// the answer carries that build, which is what a real unit reports once it
-/// has taken the update Steam offers. Without Steam the captured bytes
-/// stand.</summary>
-public sealed class SteamFirmwareStampSpec
+/// <summary>v2.0.0: bytes of a feature answer that differ per controller
+/// (design note, mechanism 5). <see cref="Source"/> names <c>index</c>, the
+/// controller's transport index, <c>serial</c>, the serial the device
+/// serves, or a value source the profile's <c>valueSources</c> declares.
+/// The value is written at <see cref="At"/> in <see cref="Encoding"/>, over
+/// <see cref="Length"/> bytes of the answer's data.</summary>
+public sealed class AnswerPatchSpec
 {
-    /// <summary>Byte offset of the stamp in the answer, report id
-    /// included.</summary>
-    [JsonPropertyName("offset")]
-    public int Offset { get; set; }
+    /// <summary>The first byte written, counted from byte 0 of the answer,
+    /// which is the report ID for a descriptor that declares report IDs.</summary>
+    [JsonPropertyName("at")]
+    public int At { get; set; }
 
-    /// <summary>The config key, such as <c>TRITON_FW_TS</c>.</summary>
+    /// <summary>The bytes written: 1, 2 and 4 for <c>uint8</c>,
+    /// <c>uint16-le</c> and <c>uint32-le</c>, any count for the two text
+    /// encodings.</summary>
+    [JsonPropertyName("length")]
+    public int Length { get; set; }
+
+    /// <summary><c>uint8</c>, <c>uint16-le</c>, <c>uint32-le</c>, <c>ascii</c>
+    /// (a text value, zero padded or cut to the length) or
+    /// <c>ascii-decimal</c> (a number's decimal digits, zero padded or cut
+    /// to the length).</summary>
+    [JsonPropertyName("encoding")]
+    public string Encoding { get; set; } = "";
+
+    /// <summary><c>index</c>, <c>serial</c> or a <c>valueSources</c>
+    /// name.</summary>
+    [JsonPropertyName("source")]
+    public string Source { get; set; } = "";
+
+    /// <summary>The value's key in a <c>keyedHexFile</c> source, such as
+    /// <c>TRITON_FW_TS</c>.</summary>
     [JsonPropertyName("key")]
-    public string Key { get; set; } = "";
+    public string? Key { get; set; }
+
+    /// <summary>A number added to a numeric value before it is written,
+    /// such as 0x30 for a MAC whose last byte is 0x30 plus the index.</summary>
+    [JsonPropertyName("add")]
+    public long Add { get; set; }
+}
+
+/// <summary>v2.0.0: a value a profile's patches read by name (design note,
+/// mechanism 5). <c>keyedHexFile</c> is a value read from a
+/// <c>KEY:HEX</c> line of a file found under the first of
+/// <see cref="Roots"/> that exists, as Steam's own updater reads its
+/// config. It is read when an answer is asked for, through a cache keyed on
+/// the file's last write time, so a value that changes on disk is followed
+/// without recreating the device.</summary>
+public sealed class ValueSourceSpec
+{
+    /// <summary>The one kind: <c>keyedHexFile</c>.</summary>
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "";
+
+    /// <summary>Folders to look in, first that exists wins.</summary>
+    [JsonPropertyName("roots")]
+    public List<ValueRootSpec>? Roots { get; set; }
+
+    /// <summary>The file, relative to the root found.</summary>
+    [JsonPropertyName("path")]
+    public string? Path { get; set; }
+}
+
+/// <summary>A folder a value source looks in: a registry value that holds a
+/// folder, or a known folder with a path under it.</summary>
+public sealed class ValueRootSpec
+{
+    /// <summary>A registry key, <c>HKCU\...</c> or <c>HKLM\...</c>, whose
+    /// <see cref="Value"/> names a folder.</summary>
+    [JsonPropertyName("registry")]
+    public string? Registry { get; set; }
+
+    [JsonPropertyName("value")]
+    public string? Value { get; set; }
+
+    /// <summary>A <see cref="Environment.SpecialFolder"/> name, such as
+    /// <c>ProgramFilesX86</c>, with <see cref="Path"/> under it.</summary>
+    [JsonPropertyName("knownFolder")]
+    public string? KnownFolder { get; set; }
+
+    [JsonPropertyName("path")]
+    public string? Path { get; set; }
 }
 
 /// <summary>v1.3.5: fixed-byte overlay applied to the legacy input report
