@@ -1729,13 +1729,14 @@ internal static partial class DeviceOrchestrator
         returnedId = mainInstanceId ?? companionId;
         return returnedId;
         }
-        catch (HMResourceInUseException)
+        catch (Exception e) when (RefusedBeforeDevices(e))
         {
             // A refusal: a running program started on this index during
-            // the create (SharedMemoryIO.EnsureInputMapping), or holds the
+            // the create (SharedMemoryIO.EnsureInputMapping), holds the
             // ParentIdPrefix this identity derives
-            // (DeviceManager.ClearParentIdPrefixRivals). Both come before
-            // this create made a device. Only what this call wrote goes.
+            // (DeviceManager.ClearParentIdPrefixRivals), or holds an older
+            // driver the deploy gate will not replace. Each comes before this
+            // create made a device. Only what this call wrote goes.
             // TeardownController would remove every device and the
             // configuration on the index, and those can be the other
             // program's.
@@ -1754,6 +1755,15 @@ internal static partial class DeviceOrchestrator
     // ════════════════════════════════════════════════════════════════════
     //  v2.0.0: the start and the driver's half of the version contract
     // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>A refusal that comes before a create makes any device: a
+    /// resource another running program holds, or the deploy gate's
+    /// refusal of an older driver programs hold. Its cleanup takes back
+    /// what the create wrote and never removes devices by the index, which
+    /// can be another program's.</summary>
+    internal static bool RefusedBeforeDevices(Exception e) =>
+        e is HMResourceInUseException
+        || e is HMDriverVersionException { Problem: HMDriverVersionProblem.HeldOlderDriver };
 
     /// <summary>How a wait for a device ended.</summary>
     internal enum StartWait { Done, Failed, TimedOut }

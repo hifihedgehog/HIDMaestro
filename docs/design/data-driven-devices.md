@@ -588,7 +588,7 @@ What a create does on an older driver that live v1 controllers hold is the owner
 
 Alternative A refuses every create on that driver.
 
-- Every UMDF2 create of a v2.0.0 program throws `HMDriverVersionException`, whatever the profile. Its `Blockers` name the devnodes and "a running program built on HIDMaestro 1.12.0" (`DriverDeploy.cs:314-331`), and `MinimumVersion` reads 2.0.0.
+- Every UMDF2 create of a v2.0.0 program throws `HMDriverVersionException`, whatever the profile. The refused create made no device, so it takes back only what it wrote, its section, configuration and record entry, as a create refused for a resource another program holds does, and removes no device on its index, which can be the v1 program's. Its `Blockers` name the devnodes and "a running program built on HIDMaestro 1.12.0" (`DriverDeploy.cs:314-331`), and `MinimumVersion` reads 2.0.0.
 - USB/IP creates go on: they do not run on the HIDMaestro driver, the deploy gate is on the UMDF2 path (`HMContext.cs:457-458`, `DeviceOrchestrator.cs:1309`), and the policy's census leaves USB/IP controllers out (`DriverDeploy.cs:197`). The 8 USB/IP catalog personas create beside PadForge.
 - No v2.0.0 controller ever runs on a driver older than 2.0.0, so the post-start check requires protocol 4 on every create.
 - The coexistence headline changes: while a v1.12.0 program's controllers are up, PadForge's included, no v2.0.0 program creates a UMDF2 controller, until that program moves to v2.0.0 or its controllers go. E1's generic create expects the exception, and the Compatibility paragraph says so.

@@ -651,11 +651,13 @@ public sealed class HMContext : IDisposable
                 lock (_lock) _controllers[slot] = controller;
                 return controller;
             }
-            catch (HMResourceInUseException)
+            catch (Exception e) when (Internal.DeviceOrchestrator.RefusedBeforeDevices(e))
             {
                 // SetupController refused before it made a device and took
-                // back what it wrote. The index's devices and configuration
-                // can be another running program's.
+                // back what it wrote: a resource another running program
+                // holds, or the deploy gate's refusal of an older driver
+                // programs hold. The index's devices and configuration can
+                // be another running program's.
                 throw;
             }
             catch

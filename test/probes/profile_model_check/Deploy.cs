@@ -39,6 +39,7 @@ internal static class Deploy
         Section(c, "the start", Start);
         Section(c, "the deploy lock", LockHandle);
         Section(c, "what HMDriverVersionException says", Cases);
+        Section(c, "a refused create", RefusedCreate);
         return c.Failures;
     }
 
@@ -455,6 +456,32 @@ internal static class Deploy
             var e = Half(2, 3, new Version(1, 13, 0));
             return (e is HMDriverVersionException v && Problem(v) == "ProtocolNotServed" && v.Message.Contains("InstallDriver", StringComparison.Ordinal),
                     e == null ? "passed" : $"{e.Message}");
+        });
+    }
+
+    /// <summary>A create the deploy gate refuses made no device, so its
+    /// cleanup takes back only what it wrote, as for a resource another
+    /// program holds, and never sweeps the devices on its index, which can
+    /// be another program's. At 57447d6c the context's catch ran
+    /// TeardownController for it, whose backstop removes every HIDMaestro
+    /// devnode carrying the index. A start failure made a device, and its
+    /// teardown stays.</summary>
+    static void RefusedCreate(Checks c)
+    {
+        var f = typeof(DeviceOrchestrator).GetMethod("RefusedBeforeDevices", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        bool Refused(Exception e) => f == null ? throw new MissingMethodException("DeviceOrchestrator", "RefusedBeforeDevices") : (bool)f.Invoke(null, new object[] { e })!;
+        HMDriverVersionException Gate()
+        {
+            var m = new FakeMachine().Holding(Stamp(1, 12, 0)).HeldByV1();
+            try { On(m, DriverDeploy.CoexistenceRule.RefuseEveryCreate, () => DriverDeploy.EnsureForCreate("HM_0001", false)); }
+            catch (HMDriverVersionException e) { return e; }
+            throw new InvalidOperationException("the gate passed");
+        }
+        c.Run("the gate's refusal is a refusal before any device: cleanup takes back this create's writes alone", () => (Refused(Gate()), ""));
+        c.Run("a start failure is not: the create's own device is torn down", () =>
+        {
+            var error = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1), () => DeviceOrchestrator.StartError(Node, 3));
+            return (!Refused(error), error.GetType().Name);
         });
     }
 }
