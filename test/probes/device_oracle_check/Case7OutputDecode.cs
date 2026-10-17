@@ -18,7 +18,9 @@
 //
 // Beside the SDK's events, each packet's line from the test client's own
 // decode, HIDMaestroTest's DecodeOutputPacket (test/Program.cs:871-910),
-// which keys its rumble labels on vendor IDs and report IDs. It is loaded
+// which keys its rumble labels on vendor IDs and report IDs, and, where the
+// test client prints OutputDecoded (its DecodedLine, lane DD-6 on), its line
+// for each OutputDecoded event. It is loaded
 // from the test client's build (test\bin\Release\<tfm>\win-x64), so that project is
 // built before this case runs. Each gets its output report at every length from empty to two
 // bytes past its size, zeroed, all 0xFF, each byte alone at 0x80 and 0xFF,
@@ -57,6 +59,7 @@ internal sealed class Case7OutputDecode : IOracleCase
     {
         var all = ProfileDatabase.LoadEmbedded().All;
         var testDecode = TestClientDecode();
+        var testDecoded = TestClientDecodedLine();
         var profiles = all.Where(p => p.ExtendedOutputReport != null
                                       || p.Id is "switch-pro" or "xbox-360-wired" or "xbox-360-wireless")
                           .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
@@ -83,7 +86,13 @@ internal sealed class Case7OutputDecode : IOracleCase
                     events.Enqueue(("rx", o));
                     events.Enqueue(("testapp", Encoding.UTF8.GetBytes(testDecode(hp, pkt))));
                 };
-                c.OutputDecoded += (_, e) => events.Enqueue(("decoded", Decoded(e)));
+                c.OutputDecoded += (_, e) =>
+                {
+                    events.Enqueue(("decoded", Decoded(e)));
+                    // The test client's line for the same event, where its
+                    // build prints OutputDecoded (lane DD-6 on).
+                    if (testDecoded != null) events.Enqueue(("testapp-decoded", Encoding.UTF8.GetBytes(testDecoded(e))));
+                };
                 foreach (var port in c.Ports)
                 {
                     var pt = port;
@@ -224,6 +233,18 @@ internal sealed class Case7OutputDecode : IOracleCase
         var m = asm.GetType("HIDMaestroTest.Program")?.GetMethod("DecodeOutputPacket", BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new MissingMethodException("HIDMaestroTest's Program.DecodeOutputPacket changed: update case 7.");
         return (profile, pkt) => (string)m.Invoke(null, new object[] { profile, pkt })!;
+    }
+
+    /// <summary>HIDMaestroTest's DecodedLine, its line for an OutputDecoded
+    /// event, or null for a test client that prints none (9bd6279's).</summary>
+    static Func<HMOutputDecodedEventArgs, string>? TestClientDecodedLine()
+    {
+        string root = Path.GetFullPath(Path.Combine(ProbeDir(), "..", "..", ".."));
+        string dll = Path.Combine(root, "test", "bin", "Release", "net10.0-windows10.0.26100.0", "win-x64", "HIDMaestroTest.dll");
+        var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(dll);
+        var m = asm.GetType("HIDMaestroTest.Program")?.GetMethod("DecodedLine", BindingFlags.Static | BindingFlags.NonPublic,
+                                                                  new[] { typeof(HMOutputDecodedEventArgs) });
+        return m == null ? null : e => (string)m.Invoke(null, new object[] { e })!;
     }
 
     static string ProbeDir() =>

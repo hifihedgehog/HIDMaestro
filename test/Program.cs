@@ -876,13 +876,22 @@ partial class Program
             for (int i = 0; i < n; i++) { if (i > 0) raw.Append(' '); raw.Append(dbg[i].ToString("X2")); }
             Console.WriteLine($"  [out{idx} {label}] {pkt.Source} id=0x{pkt.ReportId:X2} raw[{dbg.Length}B]={raw} | {decoded}");
         };
+        // The named values, from the controller's own decode: the profile's
+        // extendedOutputReport, the Switch decoders and the ports' fields
+        // all arrive here, so the test app prints what a program receives.
+        ctrl.OutputDecoded += (_, e) =>
+        {
+            string label = ctrl.Profile.Inner.DeviceDescription
+                           ?? ctrl.Profile.Inner.ProductString
+                           ?? ctrl.Profile.Id;
+            Console.WriteLine($"  [out{idx} {label}] decoded id=0x{e.ReportId:X2} {DecodedLine(e)}");
+        };
     }
 
-    /// <summary>One-line decode of an output packet. An XInput rumble packet
-    /// is read by its source. A HID output report the profile's
-    /// extendedOutputReport describes is decoded with that spec, the decode
-    /// that raises <see cref="HMController.OutputDecoded"/>, so each field is
-    /// read where the profile says it is. Anything else is a hex dump.</summary>
+    /// <summary>One-line view of an output packet as it arrives: an XInput
+    /// rumble packet by its source, anything else as a hex dump. The values
+    /// a profile's decode gives come through OutputDecoded
+    /// (<see cref="DecodedLine"/>).</summary>
     static string DecodeOutputPacket(HMProfile profile, in HMOutputPacket pkt)
     {
         var data = pkt.Data.Span;
@@ -890,26 +899,6 @@ partial class Program
         // XInput rumble: 5 bytes [0x00, 0x00, lo, hi, 0x00] (xusb22 GET_STATE response format)
         if (pkt.Source == HMOutputSource.XInput && data.Length >= 5)
             return $"XInput rumble lo={data[2]} hi={data[3]}";
-
-        var spec = profile.Inner.ExtendedOutputReport;
-        if (pkt.Source == HMOutputSource.HidOutput && spec != null && pkt.ReportId == spec.ReportIdByte)
-        {
-            // The codec reads the report with its ID at byte 0, as the
-            // controller hands it over (HMController's output thread).
-            var full = new byte[data.Length + 1];
-            full[0] = pkt.ReportId;
-            data.CopyTo(full.AsSpan(1));
-            try
-            {
-                var (fields, _) = VendorBlobCodec.Decode(spec, full);
-                return DecodedLine(fields, full.Length);
-            }
-            catch (Exception)
-            {
-                // The controller swallows any decode that fails and raises no
-                // OutputDecoded. The hex dump below stands in for it.
-            }
-        }
 
         // Fallback: hex dump first 16 bytes
         int n = Math.Min(data.Length, 16);
@@ -921,10 +910,12 @@ partial class Program
     }
 
     /// <summary>The fields OutputDecoded carries for one report: the two
-    /// motors as "rumble left= right=" when the profile names them, then
+    /// motors as "rumble left= right=" when the decode names them, then
     /// every other field by name.</summary>
-    static string DecodedLine(IReadOnlyDictionary<string, object> fields, int length)
+    static string DecodedLine(HMOutputDecodedEventArgs e)
     {
+        var fields = e.Fields;
+        int length = e.RawBytes.Length;
         var sb = new System.Text.StringBuilder();
         if (fields.TryGetValue("leftMotor", out var l) && fields.TryGetValue("rightMotor", out var r))
             sb.Append($"rumble left={l} right={r} ");
