@@ -650,8 +650,18 @@ internal static partial class Program
                 // squatter's, owned by the user. Measured, v1.12.0 holds the
                 // mutex 34 ms at most (p95 29 ms over 23 holds). The hold here
                 // is 150 ms so the wait stands out from the sweep's own time.
+                const int briefHoldMs = 150;
                 IntPtr legacy = Native.OpenMutexW(Native.SYNCHRONIZE | 0x0001 /* MUTEX_MODIFY_STATE */, false, name);
                 sq.Dispose();
+                // The same program's sweep with nobody holding the mutex. A
+                // sweep that skips the wait below but takes longer than the
+                // hold on its own would still answer after the release, so
+                // the order check holds only beside a baseline well under it.
+                var briefWarm = Stopwatch.StartNew();
+                string briefWarmReply = p.Send("sweep", 60_000);
+                long briefBaseline = briefWarm.ElapsedMilliseconds;
+                Check($"X2: with the mutex free, a sweep takes well under the writer's {briefHoldMs} ms hold",
+                      Ok(briefWarmReply) && briefBaseline < briefHoldMs / 2, $"{briefBaseline} ms: {briefWarmReply}");
                 bool holding = legacy != IntPtr.Zero && Native.WaitForSingleObject(legacy, 1000) is 0 or 0x80;
                 Check("X2: after the squatter leaves, a writer holds its mutex as a v1.12.0 program would", holding,
                       holding ? "" : legacy == IntPtr.Zero ? "the mutex did not open" : "not taken");
@@ -660,12 +670,15 @@ internal static partial class Program
                     // A sweep that answers while the writer still holds the
                     // mutex wrote beside it.
                     p.Post("sweep");
-                    string during = p.Receive("sweep, while the writer holds the mutex", 150);
+                    string during = p.Receive("sweep, while the writer holds the mutex", briefHoldMs);
+                    long releasedBrief = Stopwatch.GetTimestamp();
                     Native.ReleaseMutex(legacy);
                     bool waited = during.StartsWith("ERR timeout", StringComparison.Ordinal);
                     string third = waited ? p.Receive("sweep, once the writer let go", 60_000) : during;
+                    long arrivedBrief = p.LastArrival;
                     Check("X2: the next sweep waits for that brief hold instead of writing beside it",
-                          waited && Ok(third), waited ? third : $"answered while held: {during}");
+                          waited && Ok(third) && arrivedBrief > releasedBrief && briefBaseline < briefHoldMs / 2,
+                          waited ? $"{third}, {ReplyOrder(arrivedBrief, releasedBrief)}, baseline {briefBaseline} ms" : $"answered while held: {during}");
                 }
                 if (legacy != IntPtr.Zero) Native.CloseHandle(legacy);
             }
@@ -691,14 +704,17 @@ internal static partial class Program
         }) { IsBackground = true };
         holder.Start();
         held.Wait(10_000);
-        var sw = Stopwatch.StartNew();
         p.Post("sweep");
         Thread.Sleep(3000);
+        // Stamped before the holder lets go, so a sweep that waited for the
+        // release always answers after the stamp.
+        long released = Stopwatch.GetTimestamp();
         release.Set();
         string r2 = p.Receive("sweep", 30_000);
-        long ms = sw.ElapsedMilliseconds;
+        long arrived = p.LastArrival;
         holder.Join(5000);
-        Check($"X2: a sweep still waits while an elevated program holds {name}", Ok(r2) && ms >= 2500, $"{ms} ms: {r2}");
+        Check($"X2: a sweep still waits while an elevated program holds {name}",
+              Ok(r2) && arrived > released, $"{ReplyOrder(arrived, released)}: {r2}");
 
         // A name whose DACL grants SYNCHRONIZE and MUTEX_MODIFY_STATE and
         // nothing else. A v1.12.0 program's new Mutex asks for just those
@@ -707,9 +723,14 @@ internal static partial class Program
         // same way and wait out a hold instead of writing beside it.
         // The peer sweeps twice before the squatter comes, so its sweeps
         // are warm, and the second one's time is the baseline. The writer
-        // holds the mutex 1 s, and the held sweep must answer no sooner
-        // than that, while the baseline must stay under half of it, so the
-        // check tells a wait from a sweep that is merely slow.
+        // holds the mutex 1 s, and the held sweep's reply must arrive after
+        // the writer lets go and none before, while the baseline must stay
+        // under half of the hold, so the check tells a wait from a sweep
+        // that is merely slow. The reply is ordered against the release,
+        // not timed against the hold: the wait for the reply can end a
+        // timer period short of its bound (3 of 9 sandbox runs answered
+        // 993 to 998 ms after the post), which says nothing about the
+        // sweep.
         const string noReadControl = "D:(A;;0x100001;;;WD)(A;;0x0;;;OW)";
         const int holdMs = 1000;
         using var p2 = PeerProcess.Start("X2-noread");
@@ -734,22 +755,30 @@ internal static partial class Program
                   holding ? "" : legacy == IntPtr.Zero ? "the mutex did not open" : "not taken");
             if (holding)
             {
-                var heldClock = Stopwatch.StartNew();
                 p2.Post("sweep");
                 string during = p2.Receive("sweep, while the writer holds the mutex", holdMs);
+                // Stamped before the release, so a reply that waited for it
+                // always arrives after the stamp.
+                long releasedNoRead = Stopwatch.GetTimestamp();
                 Native.ReleaseMutex(legacy);
                 bool waited = during.StartsWith("ERR timeout", StringComparison.Ordinal);
                 string after = waited ? p2.Receive("sweep, once the writer let go", 60_000) : during;
-                long answeredMs = heldClock.ElapsedMilliseconds;
+                long arrivedNoRead = p2.LastArrival;
                 Check("X2: the sweep waits for a hold on a mutex that refuses it READ_CONTROL",
-                      waited && Ok(after) && answeredMs >= holdMs,
-                      $"{(waited ? after : $"answered while held: {during}")}, answered after {answeredMs} ms, warm baseline {baseline} ms");
+                      waited && Ok(after) && arrivedNoRead > releasedNoRead,
+                      $"{(waited ? after : $"answered while held: {during}")}, {ReplyOrder(arrivedNoRead, releasedNoRead)}, warm baseline {baseline} ms");
             }
             if (legacy != IntPtr.Zero) Native.CloseHandle(legacy);
         }
         finally { sq2.Dispose(); }
         Check("X2: nothing the second squatter made is left", Native.OpenMutexW(Native.SYNCHRONIZE, false, name) == IntPtr.Zero);
     }
+
+    /// <summary>Where a reply arrived against a step the probe stamped,
+    /// both Stopwatch timestamps, for a check's detail.</summary>
+    static string ReplyOrder(long arrived, long stamped) =>
+        arrived == 0 ? "no reply arrived"
+        : FormattableString.Invariant($"the reply arrived {Math.Abs(arrived - stamped) * 1000.0 / Stopwatch.Frequency:F1} ms {(arrived > stamped ? "after" : "before")} the release");
 
     /// <summary>The claim pipes.</summary>
     static void SectionX3()

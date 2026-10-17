@@ -389,9 +389,16 @@ internal static partial class Program
             using (var second = Process.Start(new ProcessStartInfo(planted) { UseShellExecute = false, CreateNoWindow = true })!)
             {
                 string r2 = peer.Send("zinstallers 30000", 60_000);
+                // Read as the reply comes: an install that went on without
+                // waiting answers while the 6 s installer still runs. The
+                // lower bound is the installer's: one that ended at once, on a
+                // loader failure, leaves nothing to wait for, and the 3 s it
+                // allows against the installer's 6 s is no race.
+                bool endedFirst = second.HasExited;
                 long ms = LongField(r2, "ms");
                 Check("Z6: an install waits for the running installer to end, and goes on",
-                      PeerProcess.Field(r2, "result") == "True" && second.HasExited && ms >= 3000 && ms < 20_000, r2);
+                      PeerProcess.Field(r2, "result") == "True" && endedFirst && ms >= 3000 && ms < 20_000,
+                      $"{r2}, the installer {(endedFirst ? "had ended" : "still ran")} when the reply came");
                 second.WaitForExit(20_000);
             }
             string r3 = peer.Send("zinstallers 1000");
@@ -408,7 +415,7 @@ internal static partial class Program
         using var p = PeerProcess.Start("Z7");
         string r = p.Send("zwinusbsweep 3000", 60_000);
         long ledger = LongField(r, "ledgerms");
-        Check("Z7: the sweep's WinUSB restore waits for the binding's locks", LongField(r, "sweepms") >= 2500, r);
+        Check("Z7: the sweep's WinUSB restore waits for the binding's locks", PeerProcess.Field(r, "order") == "after", r);
         Check("Z7: the ledger's lock is free while it waits", ledger >= 0 && ledger < 1000, r);
         Check("Z7: the entry stays until its restore is done", PeerProcess.Field(r, "during") == "True", r);
         Check("Z7: then the entry is gone", PeerProcess.Field(r, "after") == "False", r);
@@ -969,7 +976,8 @@ internal static partial class Program
 ///   zinstallers &lt;ms&gt;      UsbipDriverInstaller.WaitForRunningInstallers
 ///   zwinusbsweep &lt;ms&gt;     a WinUSB ledger entry for a devnode that does
 ///                         not exist, swept while another thread holds the
-///                         binding's locks &lt;ms&gt;
+///                         binding's locks &lt;ms&gt;. order=after when the
+///                         sweep ended after the hold let go
 ///   zfollow queue|claim|check|end  the follow-up's decision: queue holds
 ///                         the WinUSB lock on a thread, claims the entry,
 ///                         and runs the full cleanup, which leaves the entry
@@ -1253,6 +1261,7 @@ internal static class PeerZ
             object binding = Sdk.GetType("HIDMaestro.Internal.WinUsbBinding")!.GetField("s_lock", Any)!.GetValue(null)!;
             string devnodes = AdminName("WinUsb");
             using var held = new ManualResetEventSlim();
+            long releasedAt = 0, sweptAt = 0;
             var holder = new Thread(() =>
             {
                 using var m = new Mutex(false, devnodes);
@@ -1261,6 +1270,9 @@ internal static class PeerZ
                 {
                     held.Set();
                     Thread.Sleep(holdMs);
+                    // Stamped before either lock goes, so a restore that
+                    // waited for them always ends after the stamp.
+                    releasedAt = Stopwatch.GetTimestamp();
                 }
                 m.ReleaseMutex();
             });
@@ -1272,6 +1284,7 @@ internal static class PeerZ
             var sweeper = new Thread(() =>
             {
                 M(Ledger, "PruneDead").Invoke(null, null);
+                sweptAt = Stopwatch.GetTimestamp();
                 sweepMs = sweepSw.ElapsedMilliseconds;
             });
             sweeper.Start();
@@ -1286,7 +1299,9 @@ internal static class PeerZ
             holder.Join();
             bool after;
             using (var k = Registry.LocalMachine.OpenSubKey(path)) after = k != null;
-            return $"OK zwinusbsweep ledgerms={ledgerMs} during={during} after={after} sweepms={sweepMs}";
+            // Both threads are joined, so both stamps are written.
+            string order = sweptAt > releasedAt ? "after" : "before";
+            return $"OK zwinusbsweep ledgerms={ledgerMs} during={during} after={after} sweepms={sweepMs} order={order}";
         }
         finally
         {

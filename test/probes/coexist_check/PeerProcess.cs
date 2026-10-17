@@ -11,12 +11,17 @@ using System.Threading;
 internal sealed class PeerProcess : IDisposable
 {
     readonly Process _p;
-    readonly BlockingCollection<string> _lines = new();
+    /// <summary>Each line with the Stopwatch timestamp of its arrival on
+    /// the reader, so a check can order a reply against a step of its own.</summary>
+    readonly BlockingCollection<(string Line, long At)> _lines = new();
     public string Name { get; }
     public int Pid => _p.Id;
     /// <summary>The SDK assembly version the peer reported when it started.</summary>
     public string SdkVersion { get; private set; } = "";
     public bool Exited => _p.HasExited;
+    /// <summary>When the line the last Send or Receive returned arrived, as
+    /// a Stopwatch timestamp, or 0 when it returned no line.</summary>
+    public long LastArrival { get; private set; }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern uint SetErrorMode(uint mode);
@@ -32,7 +37,7 @@ internal sealed class PeerProcess : IDisposable
     {
         Name = name;
         _p = p;
-        _p.OutputDataReceived += (_, e) => { if (e.Data != null) _lines.Add(e.Data); else _lines.CompleteAdding(); };
+        _p.OutputDataReceived += (_, e) => { if (e.Data != null) _lines.Add((e.Data, Stopwatch.GetTimestamp())); else _lines.CompleteAdding(); };
         _p.ErrorDataReceived += (_, e) => { if (e.Data != null) Console.WriteLine($"    ({name} stderr) {e.Data}"); };
         _p.BeginOutputReadLine();
         _p.BeginErrorReadLine();
@@ -69,9 +74,12 @@ internal sealed class PeerProcess : IDisposable
 
     string Read(int timeoutMs)
     {
+        LastArrival = 0;
         try
         {
-            return _lines.TryTake(out string? line, timeoutMs) ? line : $"ERR timeout after {timeoutMs} ms";
+            if (!_lines.TryTake(out var line, timeoutMs)) return $"ERR timeout after {timeoutMs} ms";
+            LastArrival = line.At;
+            return line.Line;
         }
         catch (InvalidOperationException) { return "ERR peer exited"; }
     }

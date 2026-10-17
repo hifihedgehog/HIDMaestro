@@ -1130,14 +1130,17 @@ internal static partial class Program
         held.Wait(10_000);
         p.Post("create pad F0F5 -");
         Thread.Sleep(3000);
+        // The lock is held for 3 s from just before the create was sent.
+        // Stamped before the holder lets go, so a create that waited for
+        // the lock always answers after the stamp, and one that did not
+        // answered before it.
+        long released = Stopwatch.GetTimestamp();
         release.Set();
         string c = p.Receive("create");
+        long arrived = p.LastArrival;
         holder.Join(5000);
-        // The create's own time, as the program measured it: the lock was
-        // held for 3 s from just before the create was sent.
-        int ms = int.TryParse(PeerProcess.Field(c, "ms"), out int v) ? v : -1;
         Check("Q: a create waits for the deploy lock another program holds, then succeeds",
-              Ok(c) && ms >= 2500, $"CreateController took {ms} ms: {c}");
+              Ok(c) && arrived > released, $"{ReplyOrder(arrived, released)}: {c}");
 
         // Q2. The public DriverBuilder.SignDrivers() signs in the package
         // directory a deploy uses, so it waits for the lock too.
@@ -1155,12 +1158,13 @@ internal static partial class Program
         held2.Wait(10_000);
         p.Post("builderstep SignDrivers");
         Thread.Sleep(3000);
+        long released2 = Stopwatch.GetTimestamp();
         release2.Set();
         string s = p.Receive("SignDrivers");
+        long arrived2 = p.LastArrival;
         holder2.Join(5000);
-        int sms = int.TryParse(PeerProcess.Field(s, "ms"), out int sv) ? sv : -1;
         Check("Q2: the public DriverBuilder.SignDrivers() waits for the deploy lock, then signs",
-              Ok(s) && sms >= 2500, $"SignDrivers took {sms} ms: {s}");
+              Ok(s) && arrived2 > released2, $"{ReplyOrder(arrived2, released2)}: {s}");
 
         // Q3. GenerateCatalogs() catalogs the binaries SignDrivers() signed,
         // rather than staging and signing them again, and InstallDrivers()
