@@ -164,6 +164,7 @@ typedef struct HmSection {
     HmObj    o;
     size_t   size;
     uint8_t *buf;
+    int      views;           /* the process's mapped views of it */
 } HmSection;
 
 typedef struct HmThread {
@@ -243,6 +244,8 @@ typedef struct HmQueue {
     PFN_WDF_IO_QUEUE_IO_DEVICE_CONTROL ioctl;
     HmRequest *head, *tail;
     int        count;
+    int        powerManaged;  /* as the framework decides it (fxioqueue.cpp:397-414) */
+    int        purged;        /* WdfIoQueuePurgeSynchronously ran: new requests fail */
 } HmQueue;
 
 typedef struct HmMemory {
@@ -265,6 +268,7 @@ struct HmRequest {
     int        noAccess;     /* a write request: outLen is the report id, out a no-access page */
     ULONG_PTR  info;
     int        completed;
+    int        refused;      /* a purged queue failed it before the driver saw it */
     uint32_t   serial;
     char       tag[24];
     HmMemory   outMem;
@@ -276,6 +280,7 @@ typedef struct HmTimer {
     PFN_WDF_TIMER fn;
     ULONG      period;
     int        started;
+    int        disposed;      /* the device's removal ran its rundown */
 } HmTimer;
 
 typedef struct HmWdfKey {
@@ -348,6 +353,12 @@ struct HmDevice {
     HmRegKey  *hwKey;         /* PLUGPLAY_REGKEY_DEVICE */
     HmRegKey  *hwSubKey;      /* the same with WDF_REGKEY_DEVICE_SUBKEY */
     int        removed;
+    int        filter;        /* WdfFdoInitSetFilter ran before the create */
+    WDF_PNPPOWER_EVENT_CALLBACKS pnp;   /* WdfDeviceInitSetPnpPowerEventCallbacks */
+    int        started;       /* IRP_MN_START_DEVICE completed */
+    int        stopped;       /* a rebalance stop, not yet restarted */
+    int        surprised;     /* IRP_MN_SURPRISE_REMOVAL processed */
+    int        smioStarted;   /* the self-managed I/O machine left Created */
 };
 
 void      WdfInit(void);
@@ -358,8 +369,43 @@ extern HmRegKey *g_nextHwSubKey;
 /* DriverEntry then the add callback, as the framework calls them. NULL
  * when the add failed. The status is recorded either way. */
 HmDevice *DeviceAdd(int companion);
-/* Context cleanup, as the framework runs it after it has purged the
- * queues. */
+/* The PnP IRPs, each as the framework turns it into driver callbacks for
+ * a started FDO (Windows-Driver-Frameworks, src/framework/shared/
+ * irphandlers/pnp). Only the callbacks a driver registered run. The power
+ * policy owner's idle settings are not modeled: no device here idles.
+ *
+ * DeviceStart: IRP_MN_START_DEVICE. EvtDevicePrepareHardware, then
+ * EvtDeviceD0Entry from WdfPowerDeviceD3Final, then the self-managed I/O
+ * machine's Init on the first start and Restart after a stop
+ * (selfmanagediostatemachine.cpp:38-60).
+ *
+ * DeviceStop: IRP_MN_QUERY_STOP_DEVICE and IRP_MN_STOP_DEVICE, the
+ * rebalance. EvtDeviceSelfManagedIoSuspend, EvtDeviceD0ExitPreInterrupts-
+ * Disabled and EvtDeviceD0Exit to WdfPowerDeviceD3Final
+ * (powerstatemachine.cpp:2562-2632), EvtDeviceReleaseHardware
+ * (pnpstatemachine.cpp:2542). No flush, no purge, no cleanup.
+ *
+ * DeviceSurpriseRemove: IRP_MN_SURPRISE_REMOVAL on a started device.
+ * EvtDeviceSurpriseRemoval (pnpstatemachine.cpp:2779), the same power
+ * down as a stop, EvtDeviceReleaseHardware (:2871), then
+ * PnpCleanupForRemove: the power-managed queues purged and their requests
+ * waited for, then EvtDeviceSelfManagedIoFlush (:2256-2264). The device
+ * object stays. Nothing more runs until an IRP_MN_REMOVE_DEVICE.
+ *
+ * DeviceRemove: IRP_MN_REMOVE_DEVICE. On a started device not surprise
+ * removed, the power down, EvtDeviceReleaseHardware and PnpCleanupForRemove
+ * first (pnpstatemachine.cpp:2325-2339). Then, for every device,
+ * PnpEventRemovedCommonCode (:1995-2058): the queues that are not power
+ * managed purged, EvtDeviceSelfManagedIoCleanup, then the early dispose,
+ * which runs every child's rundown, a timer's stop among them
+ * (fxtimer.cpp:478-498), before the device's context cleanup callback
+ * (fxobjectstatemachine.cpp:1183-1215). A device never started runs only
+ * the purge and the cleanup, which is all a device the scenarios do not
+ * start sees. The canceled requests are the framework's work, not the
+ * driver's, and are not recorded. */
+void      DeviceStart(HmDevice *dev);
+void      DeviceStop(HmDevice *dev);
+void      DeviceSurpriseRemove(HmDevice *dev);
 void      DeviceRemove(HmDevice *dev);
 /* A request as MsHidUmdf delivers it, dispatched to the device's default
  * queue. The output buffer starts as outInit (outLen bytes) or zeros. */
@@ -512,6 +558,15 @@ void CaseSonyVersion(void);
 void CaseSwitchVersion(void);
 void CaseDs3Version(void);
 void CaseXusbVersion(void);
+/* The --lifecycle mode (hm_case_lifecycle.c): surprise removal with no
+ * removal after it, a rebalance stop and restart, and a removal after a
+ * surprise removal, each checked against what the driver holds. Returns
+ * the number of checks that failed. */
+int  CaseLifecycle(void);
+/* What the process holds, for the lifecycle checks: one entry per handle to
+ * a named object (a pipe client by its server's name) and per mapped view
+ * of a section, written to out. Returns the count. */
+int  HeldObjects(char *out, size_t cap);
 
 /* Companion entry point: companion.c is compiled with
  * /DDriverEntry=CompanionDriverEntry so both drivers link into one exe. */

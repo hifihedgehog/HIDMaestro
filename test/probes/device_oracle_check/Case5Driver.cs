@@ -49,6 +49,13 @@
 // the stale plan twice, with the left values and without them, and fail
 // the case when any stream differs between the two runs: under the version
 // contract no v1 controller's driver reads a left value.
+//
+// Replay also runs the tree's harness in its lifecycle mode on the same
+// plan (hm_case_lifecycle.c), which checks rather than records: after a
+// surprise removal with no removal after it, both drivers hold nothing of
+// their index and their threads and timer have ended, a rebalance stop and
+// restart leaves the device working, and nothing is closed twice. Record
+// does not run it: 9bd6279's drivers keep everything until the removal.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -186,6 +193,8 @@ internal sealed class Case5Driver : IOracleCase
         RunHarness(exe, plan, output, options.Seed);
         NativeStreamReader.ReadInto(output, golden);
         RunStale(golden, options, work, exe);
+        if (options.Replay)
+            RunHarness(exe, plan, Path.Combine(work, "lifecycle.bin"), options.Seed, "--lifecycle", lastLineOnly: true);
     }
 
     void RunStale(GoldenCase golden, Options options, string work, string exe)
@@ -301,8 +310,10 @@ internal sealed class Case5Driver : IOracleCase
 
     /// <summary>The harness as a child process with no window. The error
     /// mode is set first, so a fault or a loader failure ends in an exit
-    /// code rather than a dialog. The child inherits it.</summary>
-    internal static void RunHarness(string exe, string plan, string output, ulong seed, string? mode = null)
+    /// code rather than a dialog. The child inherits it. With
+    /// lastLineOnly the console gets the summary line alone, not a line per
+    /// check.</summary>
+    internal static void RunHarness(string exe, string plan, string output, ulong seed, string? mode = null, bool lastLineOnly = false)
     {
         SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
         var psi = new ProcessStartInfo(exe)
@@ -324,7 +335,9 @@ internal sealed class Case5Driver : IOracleCase
         string err = stderr.Result.Trim();
         if (p.ExitCode != 0)
             throw new InvalidOperationException($"{Path.GetFileName(exe)} exited {p.ExitCode}: {(err.Length > 0 ? err : stdout.Trim())}");
-        Console.WriteLine($"    {Path.GetFileName(exe)}: {stdout.Trim()}");
+        string shown = stdout.Trim();
+        if (lastLineOnly) shown = shown[(shown.LastIndexOf('\n') + 1)..].Trim();
+        Console.WriteLine($"    {Path.GetFileName(exe)}: {shown}");
     }
 
     internal static void DeleteDirectory(string dir)

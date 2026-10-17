@@ -562,7 +562,9 @@ HANDLE WINAPI HmOpenFileMappingW(DWORD dwDesiredAccess, BOOL bInheritHandle, LPC
 }
 
 /* Each view of a section is its one buffer. A view keeps no reference of
- * its own here: the scenario holds every section for the stream. */
+ * its own here: the scenario holds every section for the stream. The
+ * section counts its views, so an unmap of a view no longer mapped stops
+ * the run and HeldObjects lists a view still mapped. */
 LPVOID WINAPI HmMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, DWORD dwFileOffsetHigh,
                               DWORD dwFileOffsetLow, SIZE_T dwNumberOfBytesToMap)
 {
@@ -574,14 +576,52 @@ LPVOID WINAPI HmMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, 
         g_lastError = ERROR_ACCESS_DENIED;
         return NULL;
     }
+    s->views++;
     return s->buf;
 }
 
 BOOL WINAPI HmUnmapViewOfFile(LPCVOID lpBaseAddress)
 {
     for (HmObj *o = g_allObjs; o; o = o->nextAll)
-        if (o->kind == HK_SECTION && ((HmSection *)o)->buf == lpBaseAddress) return TRUE;
+        if (o->kind == HK_SECTION && ((HmSection *)o)->buf == lpBaseAddress) {
+            if (((HmSection *)o)->views <= 0) HmFail("UnmapViewOfFile of a view already unmapped");
+            ((HmSection *)o)->views--;
+            return TRUE;
+        }
     HmFail("UnmapViewOfFile of an address that is no view");
+}
+
+/* Appends one entry to out, "; " between entries, keeping it terminated. */
+static void HeldLine(char *out, size_t cap, size_t *at, const char *what, const WCHAR *name)
+{
+    if (*at >= cap) return;
+    int n = _snprintf_s(out + *at, cap - *at, _TRUNCATE, "%s%s %ls", *at ? "; " : "", what, name);
+    *at = n < 0 ? cap : *at + (size_t)n;
+}
+
+int HeldObjects(char *out, size_t cap)
+{
+    size_t at = 0;
+    int count = 0;
+    if (cap) out[0] = 0;
+    for (int i = 0; i < HANDLE_SLOTS; i++) {
+        HmObj *o = g_handles[i];
+        if (!o) continue;
+        if (o->kind == HK_PIPE_CLIENT) {
+            HeldLine(out, cap, &at, "pipe client of", ((HmPipeClient *)o)->server->o.name);
+            count++;
+        } else if (o->name[0]) {
+            HeldLine(out, cap, &at, o->kind == HK_SECTION ? "section handle" : "event handle", o->name);
+            count++;
+        }
+    }
+    for (HmObj *o = g_allObjs; o; o = o->nextAll)
+        if (o->kind == HK_SECTION)
+            for (int v = 0; v < ((HmSection *)o)->views; v++) {
+                HeldLine(out, cap, &at, "mapped view of", o->name);
+                count++;
+            }
+    return count;
 }
 
 /* ------------------------------------------------------------------ */
@@ -875,9 +915,16 @@ HLOCAL WINAPI HmLocalFree(HLOCAL hMem)
 
 /* A critical section here is a hold count in its own RecursionCount.
  * Nothing contends on one thread, and a fiber switch while it is held
- * stops the run (ThreadRun, FiberWait). */
+ * stops the run (ThreadRun, FiberWait). A deleted one is marked in its
+ * SpinCount, and any later use of it stops the run. */
+#define HM_CS_DELETED ((ULONG_PTR)0xDE1E7EDu)
 VOID WINAPI HmInitializeCriticalSection(LPCRITICAL_SECTION cs) { memset(cs, 0, sizeof(*cs)); }
-VOID WINAPI HmEnterCriticalSection(LPCRITICAL_SECTION cs) { cs->RecursionCount++; g_locksHeld++; }
+VOID WINAPI HmEnterCriticalSection(LPCRITICAL_SECTION cs)
+{
+    if (cs->SpinCount == HM_CS_DELETED) HmFail("EnterCriticalSection after DeleteCriticalSection");
+    cs->RecursionCount++;
+    g_locksHeld++;
+}
 VOID WINAPI HmLeaveCriticalSection(LPCRITICAL_SECTION cs)
 {
     if (cs->RecursionCount <= 0) HmFail("LeaveCriticalSection without Enter");
@@ -886,7 +933,9 @@ VOID WINAPI HmLeaveCriticalSection(LPCRITICAL_SECTION cs)
 }
 VOID WINAPI HmDeleteCriticalSection(LPCRITICAL_SECTION cs)
 {
+    if (cs->SpinCount == HM_CS_DELETED) HmFail("DeleteCriticalSection twice");
     if (cs->RecursionCount != 0) HmFail("DeleteCriticalSection while held");
+    cs->SpinCount = HM_CS_DELETED;
 }
 
 ULONGLONG WINAPI HmGetTickCount64(VOID) { return g_clockMs; }

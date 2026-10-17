@@ -170,7 +170,7 @@ static NTSTATUS WDFAPI HmWdfDeviceCreate(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT 
                                          PWDF_OBJECT_ATTRIBUTES attrs, WDFDEVICE *Device)
 {
     (void)g;
-    Expect(*DeviceInit, WK_INIT, "WdfDeviceCreate");
+    HmDeviceInit *init = (HmDeviceInit *)Expect(*DeviceInit, WK_INIT, "WdfDeviceCreate");
     HmDevice *dev = g_addingDevice;
     if (!dev || dev->context) HmFail("WdfDeviceCreate outside a device add, or twice");
     if (!attrs || !attrs->ContextTypeInfo) HmFail("WdfDeviceCreate without a context type");
@@ -179,9 +179,23 @@ static NTSTATUS WDFAPI HmWdfDeviceCreate(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT 
     dev->context = calloc(1, attrs->ContextTypeInfo->ContextSize);
     if (!dev->context) HmFail("out of memory");
     dev->cleanup = attrs->EvtCleanupCallback;
+    dev->filter = init->filter;
     *DeviceInit = NULL;
     *Device = (WDFDEVICE)dev;
     return STATUS_SUCCESS;
+}
+
+/* The callbacks the framework keeps for the device the init becomes,
+ * copied up to the size the caller's structure states. */
+static VOID WDFAPI HmWdfDeviceInitSetPnpPowerEventCallbacks(PWDF_DRIVER_GLOBALS g, PWDFDEVICE_INIT DeviceInit,
+                                                            PWDF_PNPPOWER_EVENT_CALLBACKS callbacks)
+{
+    (void)g;
+    Expect(DeviceInit, WK_INIT, "WdfDeviceInitSetPnpPowerEventCallbacks");
+    HmDevice *dev = g_addingDevice;
+    if (!dev || dev->context) HmFail("WdfDeviceInitSetPnpPowerEventCallbacks outside a device add, or after the create");
+    memset(&dev->pnp, 0, sizeof(dev->pnp));
+    memcpy(&dev->pnp, callbacks, callbacks->Size < sizeof(dev->pnp) ? callbacks->Size : sizeof(dev->pnp));
 }
 
 static PVOID WDFAPI HmWdfObjectGetTypedContextWorker(PWDF_DRIVER_GLOBALS g, WDFOBJECT Handle, PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo)
@@ -436,6 +450,9 @@ static NTSTATUS WDFAPI HmWdfIoQueueCreate(PWDF_DRIVER_GLOBALS g, WDFDEVICE Devic
     q->dev = dev;
     q->type = Config->DispatchType;
     q->ioctl = Config->EvtIoDeviceControl;
+    /* WdfUseDefault: power managed unless the device is a filter. */
+    q->powerManaged = Config->PowerManaged == WdfTrue
+        || (Config->PowerManaged == WdfUseDefault && !dev->filter);
     if (Config->DefaultQueue) {
         if (dev->defaultQueue) HmFail("two default queues");
         dev->defaultQueue = q;
@@ -474,6 +491,7 @@ static NTSTATUS WDFAPI HmWdfRequestForwardToIoQueue(PWDF_DRIVER_GLOBALS g, WDFRE
     HmRequest *r = (HmRequest *)Expect(Request, WK_REQUEST, "WdfRequestForwardToIoQueue");
     HmQueue *q = (HmQueue *)Expect(Dest, WK_QUEUE, "WdfRequestForwardToIoQueue");
     if (r->completed) HmFail("forward of a completed request");
+    if (q->purged) HmFail("a forward to a purged queue is not modeled");
     QueueAppend(q, r, 0);
     return STATUS_SUCCESS;
 }
@@ -492,6 +510,29 @@ static NTSTATUS WDFAPI HmWdfIoQueueRetrieveNextRequest(PWDF_DRIVER_GLOBALS g, WD
     r->inQueue = 0;
     *Out = (WDFREQUEST)r;
     return STATUS_SUCCESS;
+}
+
+/* Cancels what waits in the queue, which is the framework's work and not
+ * recorded. */
+static void QueueCancelAll(HmQueue *q)
+{
+    for (HmRequest *r = q->head; r; r = r->next) { r->inQueue = 0; r->completed = 1; }
+    q->head = q->tail = NULL;
+    q->count = 0;
+}
+
+/* "Sets the queue state to fail incoming requests, cancels all the
+ * pending requests, cancels in-flights requests (if they are marked
+ * cancelable), and waits for all the requests to complete before
+ * returning" (fxioqueueapi.cpp:1162-1206). One thread runs at a time
+ * here, so no request is in flight. */
+static VOID WDFAPI HmWdfIoQueuePurgeSynchronously(PWDF_DRIVER_GLOBALS g, WDFQUEUE Queue)
+{
+    (void)g;
+    HmQueue *q = (HmQueue *)Expect(Queue, WK_QUEUE, "WdfIoQueuePurgeSynchronously");
+    if (q->dev->removed) HmFail("a purge of a queue the removal disposed");
+    QueueCancelAll(q);
+    q->purged = 1;
 }
 
 static NTSTATUS WDFAPI HmWdfRequestRequeue(PWDF_DRIVER_GLOBALS g, WDFREQUEST Request)
@@ -718,6 +759,8 @@ void WdfInit(void)
     SET(WdfTimerStart, PFN_WDFTIMERSTART, HmWdfTimerStart);
     SET(WdfTimerStop, PFN_WDFTIMERSTOP, HmWdfTimerStop);
     SET(WdfTimerGetParentObject, PFN_WDFTIMERGETPARENTOBJECT, HmWdfTimerGetParentObject);
+    SET(WdfDeviceInitSetPnpPowerEventCallbacks, PFN_WDFDEVICEINITSETPNPPOWEREVENTCALLBACKS, HmWdfDeviceInitSetPnpPowerEventCallbacks);
+    SET(WdfIoQueuePurgeSynchronously, PFN_WDFIOQUEUEPURGESYNCHRONOUSLY, HmWdfIoQueuePurgeSynchronously);
 }
 
 /* ------------------------------------------------------------------ */
@@ -757,19 +800,95 @@ HmDevice *DeviceAdd(int companion)
     return dev;
 }
 
+/* The power-managed queues, or the others, purged as the framework purges
+ * them for removal (FxIoStopProcessingForPowerPurgeManaged and
+ * PurgeNonManaged, fxioqueue.cpp:5940-5971). */
+static void PurgeQueues(HmDevice *dev, int powerManaged)
+{
+    for (int i = 0; i < dev->queueCount; i++)
+        if (dev->queues[i]->powerManaged == powerManaged) {
+            QueueCancelAll(dev->queues[i]);
+            dev->queues[i]->purged = 1;
+        }
+}
+
+/* The power down a stop and a surprise removal share: the self-managed
+ * I/O suspend, then D0 exit to WdfPowerDeviceD3Final, then the release of
+ * the hardware. The power-managed queues are held meanwhile with their
+ * requests in them, which matters only to a request sent while stopped,
+ * and no scenario sends one. */
+static void PowerDownAndRelease(HmDevice *dev)
+{
+    WDFDEVICE h = (WDFDEVICE)dev;
+    if (dev->smioStarted && dev->pnp.EvtDeviceSelfManagedIoSuspend)
+        dev->pnp.EvtDeviceSelfManagedIoSuspend(h);
+    if (dev->pnp.EvtDeviceD0ExitPreInterruptsDisabled)
+        dev->pnp.EvtDeviceD0ExitPreInterruptsDisabled(h, WdfPowerDeviceD3Final);
+    if (dev->pnp.EvtDeviceD0Exit) dev->pnp.EvtDeviceD0Exit(h, WdfPowerDeviceD3Final);
+    if (dev->pnp.EvtDeviceReleaseHardware) dev->pnp.EvtDeviceReleaseHardware(h, NULL);
+}
+
+/* PnpCleanupForRemove (pnpstatemachine.cpp:2234-2264): the power-managed
+ * queues purged, then the flush, which the self-managed I/O machine
+ * takes from its Stopped state (selfmanagediostatemachine.cpp:55-60). */
+static void CleanupForRemove(HmDevice *dev)
+{
+    PurgeQueues(dev, 1);
+    if (dev->smioStarted && dev->pnp.EvtDeviceSelfManagedIoFlush)
+        dev->pnp.EvtDeviceSelfManagedIoFlush((WDFDEVICE)dev);
+}
+
+void DeviceStart(HmDevice *dev)
+{
+    WDFDEVICE h = (WDFDEVICE)dev;
+    if (dev->removed || dev->surprised || (dev->started && !dev->stopped)) HmFail("a start of a device that is not stopped");
+    if (dev->pnp.EvtDevicePrepareHardware && !NT_SUCCESS(dev->pnp.EvtDevicePrepareHardware(h, NULL, NULL)))
+        HmFail("EvtDevicePrepareHardware failed");
+    if (dev->pnp.EvtDeviceD0Entry && !NT_SUCCESS(dev->pnp.EvtDeviceD0Entry(h, WdfPowerDeviceD3Final)))
+        HmFail("EvtDeviceD0Entry failed");
+    if (!dev->started && dev->pnp.EvtDeviceSelfManagedIoInit && !NT_SUCCESS(dev->pnp.EvtDeviceSelfManagedIoInit(h)))
+        HmFail("EvtDeviceSelfManagedIoInit failed");
+    if (dev->started && dev->pnp.EvtDeviceSelfManagedIoRestart && !NT_SUCCESS(dev->pnp.EvtDeviceSelfManagedIoRestart(h)))
+        HmFail("EvtDeviceSelfManagedIoRestart failed");
+    dev->started = 1;
+    dev->stopped = 0;
+    dev->smioStarted = 1;
+}
+
+void DeviceStop(HmDevice *dev)
+{
+    if (!dev->started || dev->stopped || dev->surprised || dev->removed) HmFail("a stop of a device that is not running");
+    if (dev->pnp.EvtDeviceQueryStop && !NT_SUCCESS(dev->pnp.EvtDeviceQueryStop((WDFDEVICE)dev)))
+        HmFail("EvtDeviceQueryStop refused the stop");
+    PowerDownAndRelease(dev);
+    dev->stopped = 1;
+}
+
+void DeviceSurpriseRemove(HmDevice *dev)
+{
+    if (!dev->started || dev->surprised || dev->removed) HmFail("a surprise removal the harness does not model");
+    if (dev->pnp.EvtDeviceSurpriseRemoval) dev->pnp.EvtDeviceSurpriseRemoval((WDFDEVICE)dev);
+    if (!dev->stopped) PowerDownAndRelease(dev);
+    CleanupForRemove(dev);
+    dev->surprised = 1;
+}
+
 void DeviceRemove(HmDevice *dev)
 {
     if (dev->removed) return;
-    dev->removed = 1;
-    /* The framework purges the queues before the cleanup callback. The
-     * canceled requests are the framework's work, not the driver's, and
-     * are not recorded. */
-    for (int i = 0; i < dev->queueCount; i++) {
-        HmQueue *q = dev->queues[i];
-        for (HmRequest *r = q->head; r; r = r->next) { r->inQueue = 0; r->completed = 1; }
-        q->head = q->tail = NULL;
-        q->count = 0;
+    if (dev->started && !dev->surprised) {
+        if (!dev->stopped) PowerDownAndRelease(dev);
+        CleanupForRemove(dev);
     }
+    dev->removed = 1;
+    /* A device never started has every queue purged here, as before the
+     * lifecycle scenarios. */
+    PurgeQueues(dev, 0);
+    if (!dev->started) PurgeQueues(dev, 1);
+    if (dev->smioStarted && dev->pnp.EvtDeviceSelfManagedIoCleanup)
+        dev->pnp.EvtDeviceSelfManagedIoCleanup((WDFDEVICE)dev);
+    if (dev->started)
+        for (int i = 0; i < dev->timerCount; i++) { dev->timers[i]->started = 0; dev->timers[i]->disposed = 1; }
     if (dev->cleanup) dev->cleanup((WDFOBJECT)dev);
     RecOut("device.removed", NULL, 0);
 }
@@ -824,6 +943,14 @@ HmRequest *Ioctl(HmDevice *dev, const char *tag, ULONG code,
     if (outInit && outInitLen) memcpy(r->out, outInit, outInitLen < outLen ? outInitLen : outLen);
     HmQueue *q = dev->defaultQueue;
     if (!q || !q->ioctl) HmFail("the device has no default queue with a device-control callback");
+    if (q->purged) {
+        /* A purged queue accepts nothing: the framework completes the
+         * request with STATUS_INVALID_DEVICE_STATE and the driver never
+         * sees it (fxioqueue.cpp:2317-2335). Not recorded. */
+        r->refused = 1;
+        r->completed = 1;
+        return r;
+    }
     q->ioctl((WDFQUEUE)q, (WDFREQUEST)r, outLen, inLen, code);
     return r;
 }
