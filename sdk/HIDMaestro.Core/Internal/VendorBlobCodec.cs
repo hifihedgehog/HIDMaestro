@@ -320,7 +320,7 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.I16:
                 {
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    // A calibrated value or a repeated field: its own method,
+                    // A calibrated, repeated or offset field: its own method,
                     // so the few profiles that set them keep this loop short.
                     if (f.Extras != null) { WriteCalibratedI16(in f, in state, buffer); break; }
                     short v = f.Source switch
@@ -962,9 +962,10 @@ internal static class VendorBlobCodec
         return p != 0 ? p : down ? (byte)255 : (byte)0;
     }
 
-    /// <summary>An int16-le field with a scale or a repeat: a calibrated
-    /// value as counts by the one arithmetic (WireArith.Scaled), or a raw
-    /// one, written in each motion frame the repeat gives.</summary>
+    /// <summary>An int16-le field with a scale, a repeat or a center: a
+    /// calibrated value as counts by the one arithmetic (WireArith.Scaled),
+    /// or a raw one, offset by the center and written in each motion frame
+    /// the repeat gives.</summary>
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void WriteCalibratedI16(in VendorBlobProgram.CompiledField f, in HMGamepadState state, byte[] buffer)
     {
@@ -996,12 +997,14 @@ internal static class VendorBlobCodec
                 _ => (short)0,
             };
         }
-        // A report that carries several motion frames of one sample writes
-        // it in each (repeat).
+        // A center offsets the value on the wire: 32768 gives offset binary,
+        // zero at 0x8000. A report that carries several motion frames of one
+        // sample writes it in each (repeat).
+        int w = v + f.Center;
         for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
         {
-            buffer[at]     = (byte)(v & 0xFF);
-            buffer[at + 1] = (byte)((v >> 8) & 0xFF);
+            buffer[at]     = (byte)(w & 0xFF);
+            buffer[at + 1] = (byte)((w >> 8) & 0xFF);
         }
     }
 

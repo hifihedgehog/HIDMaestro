@@ -171,7 +171,7 @@ internal sealed class VendorBlobProgram
         public readonly int BitLo;          // bit range (defaulted 0..7)
         public readonly int BitHi;
         public readonly bool HasBits;       // whether the spec declared "bits"
-        public readonly int Center;         // uint8-axis center (default 128)
+        public readonly int Center;         // uint8-axis center (default 128), uint10-be zero (512), int16-le offset (0)
         public readonly int Neutral;        // hat neutral (default 8)
         public readonly byte Initial;
         public readonly int Stride;
@@ -532,7 +532,7 @@ internal sealed class VendorBlobProgram
             accumulates |= accumulate;
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
-                f.Center ?? (op == FieldOp.U10BE ? 512 : 128), f.NeutralValue ?? 8,
+                f.Center ?? (op == FieldOp.U10BE ? 512 : op == FieldOp.I16 ? 0 : 128), f.NeutralValue ?? 8,
                 (byte)(f.Initial ?? 0), f.Stride ?? 1,
                 crcDst, rollKey, buttonBits, flagKinds,
                 (uint)divisor, fullValue,
@@ -544,8 +544,11 @@ internal sealed class VendorBlobProgram
                 CounterSlot = counterSlot,
                 Accumulate = accumulate,
                 Levels = f.Levels?.ConvertAll(x => (byte)x).ToArray(),
+                // An int16-le field with a center writes offset binary out of
+                // line too, so the encode loop stays as it was for the rest.
                 Extras = f.Scale == null && f.Negate == null && f.Repeat == null && f.Levels == null
-                         && f.ChargingValue == null && op != FieldOp.PackedUint ? null : new FieldExtras
+                         && f.ChargingValue == null && op != FieldOp.PackedUint
+                         && !(op == FieldOp.I16 && f.Center != null) ? null : new FieldExtras
                 {
                     ScaleNumerator = f.Scale?.Numerator ?? 0,
                     ScaleDenominator = f.Scale?.Denominator ?? 1,
@@ -794,6 +797,10 @@ internal sealed class VendorBlobProgram
         }
         else if (calibrated && !output)
             throw new InvalidOperationException($"{at}.semantic '{src.Semantic}' is a calibrated value: give scale, its counts per unit.");
+        // int16-le's center is the wire value of a zero reading: a sensor
+        // that sends offset binary, unsigned with zero at 0x8000, sets 32768.
+        if (f.Op == FieldOp.I16 && src.Center != null && (src.Center < 0 || src.Center > 65535))
+            throw new InvalidOperationException($"{at}.center {src.Center}: an int16-le field's center is a 16-bit wire value, 0 to 65535.");
         if ((src.Negate != null || src.Repeat != null) && src.Scale == null)
             throw new InvalidOperationException($"{at}.negate and .repeat go with scale.");
         if (src.Repeat != null)

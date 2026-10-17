@@ -324,7 +324,7 @@
         },
         "center": {
           "type": "integer",
-          "description": "uint8-axis: the wire value at rest, the range then running center - 127 to center + 127. uint10-be: the wire value at zero."
+          "description": "uint8-axis: the wire value at rest, the range then running center - 127 to center + 127. uint10-be: the wire value at zero. int16-le: the wire value at zero, 0 to 65535, so 32768 writes offset binary."
         },
         "min": {
           "type": "integer",

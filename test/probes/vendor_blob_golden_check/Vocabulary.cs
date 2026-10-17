@@ -16,6 +16,11 @@
 //     48 bytes and Switch2ProPacker.BuildBody's 24 bytes on random states:
 //     "#n" buttons, the resolved d-pad, min and max, invert, and scaled,
 //     negated and repeated motion
+//   - an int16-le field's center offsets its value on the wire, 32768
+//     giving offset binary (the PS Move's motion words, psmove.c
+//     psmove_decode_16bit at 97d97e9), on the encode loop's own path and
+//     with a scale and repeat, without one the bytes stay two's
+//     complement, and a center outside 0 to 65535 is refused
 //   - packed-uint output fields reproduce SwitchProPacker's and
 //     Switch2ProPacker's rumble decodes on every input the first reads and
 //     a million random reports for the second, boxed as byte
@@ -55,6 +60,7 @@ internal static class Vocabulary
         Run("the Switch Pro rumble", SwitchProRumble);
         Run("the Switch 2 Pro rumble", Switch2ProRumble);
         Run("the Triton timestamp", () => TritonTimestamp(db["steam-controller-2"]));
+        Run("the int16 center", Int16Center);
         Console.WriteLine($"=== vocabulary: {(s_fail == 0 ? "PASS" : $"{s_fail} FAIL")} ===");
         return s_fail;
     }
@@ -247,6 +253,44 @@ internal static class Vocabulary
         var slots = new float[6];
         for (int i = 0; i < 6; i++) slots[i] = Math.Clamp(Axis(), 0f, 1f);
         return (s, slots);
+    }
+
+    /// <summary>An int16-le center: the wire value of a zero reading. With
+    /// 32768 the word is offset binary, unsigned with zero at 0x8000, as the
+    /// PS Move ZCM1 sends its accelerometer and gyro (psmove.c
+    /// psmove_decode_16bit at 97d97e9 subtracts 0x8000).</summary>
+    static void Int16Center()
+    {
+        var spec = Spec(9,
+            """{"byte":1,"type":"int16-le","semantic":"accelX","center":32768}""",
+            """{"byte":3,"type":"int16-le","semantic":"accelY"}""",
+            """{"byte":5,"type":"int16-le","semantic":"accelGZ","scale":1000,"center":32768,"repeat":[2,2]}""");
+        VendorBlobProgram.Check(spec, spec.Size, "int16 center", output: false, portBlock: false);
+        var buf = new byte[spec.Size];
+        var enc = new VendorBlobCodec.EncoderState();
+        var bad = new List<string>();
+        foreach (short v in new short[] { -32768, -1000, -1, 0, 1, 1000, 32767 })
+        {
+            var s = new HMGamepadState { AccelX = v, AccelY = v, AccelGZ = v / 1000f };
+            Array.Clear(buf);
+            VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, enc);
+            int offset = buf[1] | buf[2] << 8, plain = buf[3] | buf[4] << 8;
+            int g1 = buf[5] | buf[6] << 8, g2 = buf[7] | buf[8] << 8;
+            if (offset != (ushort)(v + 32768)) bad.Add($"accelX {v}: 0x{offset:X4}");
+            if (plain != (ushort)v) bad.Add($"accelY {v}: 0x{plain:X4}");
+            if (g1 != (ushort)(v + 32768) || g2 != g1) bad.Add($"accelGZ {v}: 0x{g1:X4} 0x{g2:X4}");
+        }
+        Check("center 32768 writes offset binary, on the loop's path and with a scale and repeat, and no center stays two's complement",
+              bad.Count == 0, string.Join(", ", bad));
+        string? refused = null;
+        try
+        {
+            var wide = Spec(3, """{"byte":1,"type":"int16-le","semantic":"accelX","center":65536}""");
+            VendorBlobProgram.Check(wide, wide.Size, "int16 center", output: false, portBlock: false);
+        }
+        catch (InvalidOperationException e) { refused = e.Message; }
+        Check("an int16-le center outside 0 to 65535 is refused, naming the field",
+              refused != null && refused.Contains("fields[0].center", StringComparison.Ordinal), refused ?? "accepted");
     }
 
     /// <summary>The Switch Pro's 48-byte body as field lists: its buttons by
