@@ -39,6 +39,11 @@
  * (review finding 1). */
 #include "hm_scenario.h"
 
+/* The flavor's driver.h tag (build.ps1 driver_tag.c): 0 and no function for
+ * 9bd6279's, which has none. */
+extern int HmDriverHasIdentityTag;
+unsigned long long HmDriverIdentityTag(const unsigned short *token);
+
 PlanProfile *g_nextDevnodeProfile;
 int g_nextDevnodeIndex;
 
@@ -142,6 +147,14 @@ void CaseIdentity(void)
         if (tag != vectors[i].tag) HmFail("identity tag of %ls is %016llx, the note gives %016llx", vectors[i].token,
                                           (unsigned long long)tag, (unsigned long long)vectors[i].tag);
         RecOut("tag.vector", &tag, 8);
+        /* The driver's own HmIdentityTag (driver.h), compiled from the
+         * flavor's driver.h by build.ps1, where it has one. */
+        if (HmDriverHasIdentityTag) {
+            uint64_t d = HmDriverIdentityTag((const unsigned short *)vectors[i].token);
+            if (d != vectors[i].tag) HmFail("driver.h's HmIdentityTag of %ls is %016llx, the note gives %016llx", vectors[i].token,
+                                            (unsigned long long)d, (unsigned long long)vectors[i].tag);
+            RecOut("tag.driver", &d, 8);
+        }
     }
     static const int indexes[] = { 0, 1, 15 };
     for (int i = 0; i < (int)ARRAYSIZE(indexes); i++) {
@@ -150,6 +163,11 @@ void CaseIdentity(void)
         uint64_t tag = IdentityTag(token);
         RecOut("token", token, (uint32_t)(wcslen(token) * sizeof(WCHAR)));
         RecOut("tag", &tag, 8);
+        if (HmDriverHasIdentityTag) {
+            uint64_t d = HmDriverIdentityTag((const unsigned short *)token);
+            if (d != tag) HmFail("driver.h's HmIdentityTag of %ls is %016llx, the harness's %016llx", token,
+                                 (unsigned long long)d, (unsigned long long)tag);
+        }
     }
     StreamBegin("identity/query");
     InstanceIdProbe(L"SWD\\HIDMAESTRO\\HM_0000");

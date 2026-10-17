@@ -154,15 +154,27 @@ foreach ($f in $flavors) {
     $companionC = Join-Path $f.Dir 'companion.c'
     $harnessList = ($harnessFiles | ForEach-Object { '"' + $_.FullName + '"' }) -join ' '
     $symbols = Join-Path $work 'symbols.txt'
+    # The identity tag as the flavor's own driver.h computes it, for the
+    # harness's vector stream (hm_case_identity.c). 9bd6279's driver.h has
+    # no tag, and its unit says so.
+    $tagC = Join-Path $work 'driver_tag.c'
+    $hasTag = (Get-Content (Join-Path $f.Dir 'driver.h') -Raw) -match 'HmIdentityTag'
+    $tagSource = if ($hasTag) {
+        "#include `"driver.h`"`nint HmDriverHasIdentityTag = 1;`nunsigned long long HmDriverIdentityTag(const unsigned short *t) { return HmIdentityTag((const WCHAR *)t); }`n"
+    } else {
+        "int HmDriverHasIdentityTag = 0;`nunsigned long long HmDriverIdentityTag(const unsigned short *t) { (void)t; return 0; }`n"
+    }
+    [IO.File]::WriteAllText($tagC, $tagSource, (New-Object System.Text.ASCIIEncoding))
     # Both drivers define DriverEntry, so the companion's is renamed.
     $cmd = @"
 @echo off
 call "$vcvars" >nul || exit /b 1
 cl $driverFlags "/Fo$work\driver.obj" /c "$driverC" || exit /b 1
 cl $driverFlags /DDriverEntry=CompanionDriverEntry "/Fo$work\companion.obj" /c "$companionC" || exit /b 1
+cl $driverFlags "/I$($f.Dir)" "/Fo$work\driver_tag.obj" /c "$tagC" || exit /b 1
 dumpbin /nologo /symbols "$work\driver.obj" "$work\companion.obj" > "$symbols" || exit /b 1
 cl $harnessFlags "/Fo$work\\" /c $harnessList || exit /b 1
-link /nologo /SUBSYSTEM:CONSOLE "/OUT:$exe" "$work\driver.obj" "$work\companion.obj" $(($harnessFiles | ForEach-Object { '"' + (Join-Path $work ($_.BaseName + '.obj')) + '"' }) -join ' ') kernel32.lib advapi32.lib || exit /b 1
+link /nologo /SUBSYSTEM:CONSOLE "/OUT:$exe" "$work\driver.obj" "$work\companion.obj" "$work\driver_tag.obj" $(($harnessFiles | ForEach-Object { '"' + (Join-Path $work ($_.BaseName + '.obj')) + '"' }) -join ' ') kernel32.lib advapi32.lib || exit /b 1
 "@
     $cmdPath = Join-Path $work 'build.cmd'
     Set-Content -Path $cmdPath -Value $cmd -Encoding ascii
