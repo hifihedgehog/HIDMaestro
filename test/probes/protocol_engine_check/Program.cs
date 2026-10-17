@@ -475,12 +475,20 @@ internal static class Clock
             public long NotBefore = 0;
             public readonly List<(long Due, long At)> Ticks = new();
             public int Ends;
+            /// <summary>The tick that holds the clock's thread for
+            /// StallMs, as a preemption would, or -1.</summary>
+            public int StallAt = -1, StallMs;
         }
         public Box B;
         public bool Running(out long origin) { origin = Volatile.Read(ref B.Origin); return B.Running; }
         public long Period => Volatile.Read(ref B.Period);
         public long NotBefore => Volatile.Read(ref B.NotBefore);
-        public void Tick(long due) { lock (B.Ticks) B.Ticks.Add((due, Stopwatch.GetTimestamp())); }
+        public void Tick(long due)
+        {
+            int n;
+            lock (B.Ticks) { B.Ticks.Add((due, Stopwatch.GetTimestamp())); n = B.Ticks.Count; }
+            if (n - 1 == B.StallAt) Thread.Sleep(B.StallMs);
+        }
         public void RunEnded() => Interlocked.Increment(ref B.Ends);
     }
 
@@ -505,44 +513,61 @@ internal static class Clock
         Check("a 1.25 ms period runs 800 ticks in one second of Stopwatch time", Math.Abs(due - f) <= 800, $"{due} against {f}");
 
         Console.WriteLine("-- the device clock running: start, stop and restart");
-        var box = new Probe.Box { Period = f / 500 };    // 2 ms
+        // Each check holds however the threads are scheduled: a wait is for
+        // a condition, with a long timeout, and a preempted clock thread may
+        // skip grid points (owe, checked above) but never ticks off its grid,
+        // early, twice on one point or more often than the grid allows.
+        // The fifth tick holds the thread 7 ms, over three periods.
+        var box = new Probe.Box { Period = f / 500, StallAt = 4, StallMs = 7 };    // 2 ms
         var clock = new DeviceClock<Probe>(new Probe { B = box }, MissedTick.Owe, "engine check clock");
         clock.Start();
         Thread.Sleep(30);
         Check("a clock whose run has not started ticks nothing", box.Ticks.Count == 0);
+        static bool Until(Func<bool> done, int ms = 5000)
+        {
+            var sw = Stopwatch.StartNew();
+            while (!done()) { if (sw.ElapsedMilliseconds > ms) return false; Thread.Sleep(1); }
+            return true;
+        }
+        int Count() { lock (box.Ticks) return box.Ticks.Count; }
         long origin = Stopwatch.GetTimestamp();
         box.Origin = origin; box.Running = true;
         clock.Wake();
-        Thread.Sleep(100);
+        bool ticked = Until(() => Count() >= 20);
         box.Running = false;
         long stopped = Stopwatch.GetTimestamp();
         clock.Wake();
-        Thread.Sleep(30);
+        bool ended = Until(() => Volatile.Read(ref box.Ends) == 1);
         List<(long Due, long At)> run1;
-        lock (box.Ticks) { run1 = box.Ticks.ToList(); box.Ticks.Clear(); }
+        lock (box.Ticks) { run1 = box.Ticks.ToList(); box.Ticks.Clear(); box.StallAt = -1; }
         bool onGrid = run1.All(t => (t.Due - origin) % box.Period == 0 && t.Due > origin);
         bool notEarly = run1.All(t => t.At >= t.Due);
         bool increasing = run1.Zip(run1.Skip(1)).All(x => x.Second.Due > x.First.Due);
-        // Every grid point from one period after the origin to the stop, give
-        // or take the one the stop raced.
         long points = (stopped - origin) / box.Period;
-        Check("a run ticks on its grid, one period after the origin and then every period, skipping none",
-            onGrid && increasing && run1.Count >= points - 1 && run1.Count <= points + 1 && run1.Count > 0 && run1[0].Due == origin + box.Period,
-            $"{run1.Count} ticks for {points} grid points");
+        Check("a run ticks within five seconds of its start", ticked, $"{run1.Count} ticks");
+        Check("a run's first tick is one period after the origin", run1.Count > 0 && run1[0].Due == origin + box.Period);
+        Check("a run ticks on its grid, each grid point at most once and in order", onGrid && increasing, $"{run1.Count} ticks");
+        Check("a run never ticks more often than its grid allows", run1.Count <= points + 1, $"{run1.Count} ticks for {points} grid points");
+        // Owe: the grid point the stall made late is owed and sent at once,
+        // and the points after it that passed during the stall are skipped.
+        bool owed = run1.Count > 6 && run1[5].Due == run1[4].Due + box.Period;
+        long gap = run1.Count > 6 ? (run1[6].Due - run1[5].Due) / box.Period : 0;
+        Check("a tick held up over three periods owes one report and skips the grid points that passed, with no burst",
+            owed && gap >= 3 && run1[6].Due > run1[5].At, $"owed {owed}, then {gap} periods on");
         Check("no tick runs before its time", notEarly);
-        Check("the end of a run is seen once", box.Ends == 1, $"{box.Ends}");
+        Check("the end of a run is seen once", ended && box.Ends == 1, $"{box.Ends}");
         Thread.Sleep(20);
-        Check("a stopped run ticks nothing", box.Ticks.Count == 0);
+        Check("a stopped run ticks nothing", Count() == 0);
         long origin2 = Stopwatch.GetTimestamp() + f / 1000 * 7 / 10;  // a grid offset from the first run's
         box.Origin = origin2; box.Running = true;
         clock.Wake();
-        Thread.Sleep(60);
+        bool ticked2 = Until(() => Count() >= 15);
         box.Running = false;
         clock.Wake();
-        Thread.Sleep(20);
+        Until(() => Volatile.Read(ref box.Ends) == 2);
         List<(long Due, long At)> run2;
         lock (box.Ticks) run2 = box.Ticks.ToList();
-        Check("a restart runs on its own origin's grid", run2.Count >= 15 && run2.All(t => (t.Due - origin2) % box.Period == 0 && t.Due > origin2), $"{run2.Count} ticks");
+        Check("a restart runs on its own origin's grid", ticked2 && run2.Count >= 15 && run2.All(t => (t.Due - origin2) % box.Period == 0 && t.Due > origin2), $"{run2.Count} ticks");
         clock.Stop(1000);
         Check("Stop ends the clock's thread", !clock.Thread.IsAlive);
 
