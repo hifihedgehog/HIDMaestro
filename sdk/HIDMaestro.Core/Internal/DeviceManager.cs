@@ -385,6 +385,33 @@ public static partial class DeviceManager
     /// time. pnp_notify_check's offline part sets it with
     /// <see cref="PnpLockHook"/>. Null outside it.</summary>
     internal static Func<int, IDisposable?>? PnpLockTryHook;
+    /// <summary>Stands in for the PnP work RemoveDeviceLocked does itself,
+    /// beside <see cref="LocateHook"/> and <see cref="RemovedHook"/>: the
+    /// children of a devnode, each removal call, a software device's close
+    /// and the pnputil and devcon fallbacks, which never start while it is
+    /// set. With it set, RemoveDeviceLocked locates through
+    /// <see cref="LocateHook"/>, so pnp_notify_check's offline part runs the
+    /// removal's own order on recorded sequences. Null outside it.</summary>
+    internal static RemovalCalls? RemovalCallsHook;
+
+    /// <summary>The calls <see cref="RemovalCallsHook"/> answers, each by
+    /// instance id.</summary>
+    internal sealed class RemovalCalls
+    {
+        /// <summary>A devnode's children, as GetAllChildDeviceIds lists
+        /// them.</summary>
+        public Func<string, IReadOnlyList<string>> Children = _ => Array.Empty<string>();
+        /// <summary>SetupDiRemoveDevice (DifRemoveDevice).</summary>
+        public Func<string, bool> Remove = _ => true;
+        /// <summary>CM_Disable_DevNode and CM_Uninstall_DevNode
+        /// (DisableAndUninstall).</summary>
+        public Func<string, bool> Uninstall = _ => true;
+        /// <summary>A software device's close (SwdDeviceFactory.Remove),
+        /// as its HRESULT.</summary>
+        public Func<string, int> Close = _ => 0;
+        /// <summary>The pnputil and devcon runs.</summary>
+        public Action<string> Fallbacks = _ => { };
+    }
 
     static uint Locate(string instanceId, uint flags)
     {
@@ -1838,8 +1865,15 @@ public static partial class DeviceManager
     static RemovalOutcome RemoveDeviceLocked(string instanceId, int timeoutMs, bool fast, bool forceFallbacks, out bool removed)
     {
         removed = true;
-        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != CR_SUCCESS &&
-            CM_Locate_DevNodeW(out devInst, instanceId, 1) != CR_SUCCESS)
+        // With the hook set every locate goes through LocateHook, and the
+        // devnode handles below are never used.
+        var calls = RemovalCallsHook;
+        uint Find(string id, uint flags) => calls != null ? Locate(id, flags) : CM_Locate_DevNodeW(out _, id, flags);
+        uint devInst = 0;
+        bool known = calls != null
+            ? Find(instanceId, 0) == CR_SUCCESS || Find(instanceId, 1) == CR_SUCCESS
+            : CM_Locate_DevNodeW(out devInst, instanceId, 0) == CR_SUCCESS || CM_Locate_DevNodeW(out devInst, instanceId, 1) == CR_SUCCESS;
+        if (!known)
             return RemovalOutcome.Removed;
 
         // In fast mode (used by cleanup paths), each devnode goes by
@@ -1885,7 +1919,7 @@ public static partial class DeviceManager
         // Post-fix: parent close first (~55ms), child-survivor sweep is
         // a fast no-op for the typical case where Windows already
         // cascade-removed them with the SwD parent.
-        var childIds = GetAllChildDeviceIds(devInst);
+        IReadOnlyList<string> childIds = calls?.Children(instanceId) ?? GetAllChildDeviceIds(devInst);
         bool goneAfterDif = false;
 
         // For SWD parents that are PHANTOM-only (registry residue, no live
@@ -1897,7 +1931,7 @@ public static partial class DeviceManager
         // failure while PHANTOM (mode 1) succeeds: the early-bail at the
         // top of this function only fires when BOTH fail, so we still got
         // here for phantom-only entries.
-        bool isLive = CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS;
+        bool isLive = Find(instanceId, 0) == CR_SUCCESS;
         if (isSwdParent && !fast && !isLive)
         {
             DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) SKIPPED (phantom-only registry residue)");
@@ -1922,7 +1956,7 @@ public static partial class DeviceManager
             // sweep below remains as belt-and-braces for survivors.
             var swFastSw = System.Diagnostics.Stopwatch.StartNew();
             int hrFast = 0;
-            closeOutcome = parent.Step(() => { hrFast = SwdDeviceFactory.Remove(instanceId); return true; },
+            closeOutcome = parent.Step(() => { hrFast = calls?.Close(instanceId) ?? SwdDeviceFactory.Remove(instanceId); return true; },
                                        uninstalls: false, parentBudget);
             DeviceOrchestrator.LogDiag(
                 $"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hrFast:X8} " +
@@ -1956,7 +1990,7 @@ public static partial class DeviceManager
             // 56 ms hr=0x0).
             var swSw = System.Diagnostics.Stopwatch.StartNew();
             using var closeWatch = RemovalWatch.Start(instanceId);
-            int hr = SwdDeviceFactory.Remove(instanceId);
+            int hr = calls?.Close(instanceId) ?? SwdDeviceFactory.Remove(instanceId);
             // Block until the kernel actually fires the device-removed
             // notification: or the timeout expires. Use the caller's
             // timeoutMs budget so callers explicitly choose how long to
@@ -1976,8 +2010,8 @@ public static partial class DeviceManager
         {
             // Skip if the SwD-parent close already cascaded this child away.
             if (isSwdParent && !fast
-                && CM_Locate_DevNodeW(out _, childId, 0) != CR_SUCCESS
-                && CM_Locate_DevNodeW(out _, childId, 1) != CR_SUCCESS)
+                && Find(childId, 0) != CR_SUCCESS
+                && Find(childId, 1) != CR_SUCCESS)
                 continue;
 
             if (fast)
@@ -1988,17 +2022,19 @@ public static partial class DeviceManager
                 // the UMDF host still holds handles after a force-kill. A
                 // keyboard refuses the disable and takes SetupDiRemoveDevice
                 // instead (DisableAndUninstall), before its parent is tried.
-                if (CM_Locate_DevNodeW(out uint ci, childId, 0) == CR_SUCCESS
-                 || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
+                uint ci = 0;
+                if (calls != null
+                    ? Find(childId, 0) == CR_SUCCESS || Find(childId, 1) == CR_SUCCESS
+                    : CM_Locate_DevNodeW(out ci, childId, 0) == CR_SUCCESS || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
                 {
                     using var childWatch = RemovalWatch.Start(childId);
-                    childWatch.Wait(uninstalls: true, DisableAndUninstall(ci, childId) ? QuickRemovalMs : 0);
+                    childWatch.Wait(uninstalls: true, (calls?.Uninstall(childId) ?? DisableAndUninstall(ci, childId)) ? QuickRemovalMs : 0);
                 }
             }
             else
             {
                 using var childWatch = RemovalWatch.Start(childId);
-                childWatch.Wait(uninstalls: true, DifRemoveDevice(childId) ? QuickRemovalMs : 0);
+                childWatch.Wait(uninstalls: true, (calls?.Remove(childId) ?? DifRemoveDevice(childId)) ? QuickRemovalMs : 0);
             }
         }
 
@@ -2010,7 +2046,7 @@ public static partial class DeviceManager
         if (fast)
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
-            parentOutcome = Then(closeOutcome, parent.Step(() => DisableAndUninstall(devInst, instanceId),
+            parentOutcome = Then(closeOutcome, parent.Step(() => calls?.Uninstall(instanceId) ?? DisableAndUninstall(devInst, instanceId),
                                                            uninstalls: !isSwdParent, parentBudget));
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      fast removal of {instanceId}: {parentOutcome} after {waitSw.ElapsedMilliseconds}ms");
@@ -2020,7 +2056,7 @@ public static partial class DeviceManager
             // Already removed at the top of the function. Re-check in case
             // a survivor sweep above kicked the parent into a transient
             // state.
-            if (CM_Locate_DevNodeW(out _, instanceId, 0) == CR_SUCCESS)
+            if (Find(instanceId, 0) == CR_SUCCESS)
                 parentOutcome = RemovalOutcome.NotGone;
             else if (parentOutcome == RemovalOutcome.Pending)
                 parentOutcome = RemovalOutcome.Removed;
@@ -2029,7 +2065,7 @@ public static partial class DeviceManager
         else
         {
             var waitSw = System.Diagnostics.Stopwatch.StartNew();
-            parentOutcome = parent.Step(() => DifRemoveDevice(instanceId), uninstalls: true, parentBudget);
+            parentOutcome = parent.Step(() => calls?.Remove(instanceId) ?? DifRemoveDevice(instanceId), uninstalls: true, parentBudget);
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      WaitForDeviceRemoval({instanceId}, {timeoutMs}ms): {parentOutcome} after {waitSw.ElapsedMilliseconds}ms");
         }
@@ -2055,7 +2091,9 @@ public static partial class DeviceManager
         {
             // The parent's watch from step 2 goes on.
             parent.Begin();
-            bool stillPhantom = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
+            // On the hook no process starts: the hook stands in for both runs.
+            calls?.Fallbacks(instanceId);
+            bool stillPhantom = calls == null && CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
             if (stillPhantom)
             {
                 try
@@ -2104,7 +2142,7 @@ public static partial class DeviceManager
             // tears the node out cleanly in most of those cases. Only run if
             // devcon is locatable: it ships with the WDK, not the OS, so
             // users without the WDK silently skip this step.
-            bool stillPhantom2 = CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
+            bool stillPhantom2 = calls == null && CM_Locate_DevNodeW(out _, instanceId, 1) == CR_SUCCESS;
             if (stillPhantom2)
             {
                 string? devcon = TryLocateDevcon();
@@ -2157,8 +2195,7 @@ public static partial class DeviceManager
         }
 
         // Step 4: Final check
-        removed = CM_Locate_DevNodeW(out _, instanceId, 0) != CR_SUCCESS
-               && CM_Locate_DevNodeW(out _, instanceId, 1) != CR_SUCCESS;
+        removed = Find(instanceId, 0) != CR_SUCCESS && Find(instanceId, 1) != CR_SUCCESS;
         return parentOutcome;
     }
 

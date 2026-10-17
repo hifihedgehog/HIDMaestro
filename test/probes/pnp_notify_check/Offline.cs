@@ -251,6 +251,98 @@ internal static class Offline
         finally { s.End(); }
     }
 
+    const string ChildId = @"HID\PNP_NOTIFY_CHECK_OFFLINE\1&7e57&0&0000";
+
+    /// <summary>Devnodes for a run of DeviceManager.RemoveDevice itself,
+    /// each id on its own sequence, which begins when the SDK makes that
+    /// id's removal call (RemovalCallsHook). An id not listed has no
+    /// devnode and no record. Records the calls in order and how many
+    /// REMOVED registrations were open at once.</summary>
+    sealed class Tree
+    {
+        public readonly Dictionary<string, Sequence> Ids = new(StringComparer.OrdinalIgnoreCase);
+        public readonly Dictionary<string, string[]> ChildrenOf = new(StringComparer.OrdinalIgnoreCase);
+        public readonly List<string> Calls = new();
+        public int Fallbacks, Open, MostOpen;
+        readonly Sequence _none = new() { AbsentBefore = true };
+
+        public Sequence Of(string id) => Ids.TryGetValue(id, out var s) ? s : _none;
+
+        public bool Call(string kind, string id)
+        {
+            lock (Calls) Calls.Add($"{kind} {id}");
+            var s = Of(id);
+            if (s.Now < 0) s.Begin();
+            return true;
+        }
+
+        public IDisposable? Register(string id, Action onRemoved)
+        {
+            var r = Of(id).Register(id, onRemoved);
+            if (r == null) return null;
+            lock (Calls)
+            {
+                Open++;
+                MostOpen = Math.Max(MostOpen, Open);
+            }
+            return new Counted(this, r);
+        }
+
+        sealed class Counted : IDisposable
+        {
+            readonly Tree _t;
+            IDisposable? _r;
+            public Counted(Tree t, IDisposable r) { _t = t; _r = r; }
+            public void Dispose()
+            {
+                if (_r == null) return;
+                _r.Dispose();
+                _r = null;
+                lock (_t.Calls) _t.Open--;
+            }
+        }
+    }
+
+    sealed class StandInLock : IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    /// <summary>DeviceManager.RemoveDevice on <paramref name="parentId"/>
+    /// through the hooks, so the removal runs in RemoveDeviceLocked's own
+    /// order. Returns its answer, when it returned from the call, and what
+    /// it added to the counts S77 reads.</summary>
+    static (bool Removed, long Ms, long On, long Without, long NotGone) RunRemoval(Tree tree, string parentId,
+        bool fast = false, int timeoutMs = 5000)
+    {
+        long on0 = DeviceManager.RemovalsOnNotification, without0 = DeviceManager.RemovalsWithoutNotification,
+             notGone0 = DeviceManager.RemovalsNotGone;
+        DeviceManager.LocateHook = (id, flags) => tree.Of(id).Locate(id, flags);
+        DeviceManager.RemovedHook = tree.Register;
+        DeviceManager.PnpLockHook = () => new StandInLock();
+        DeviceManager.RemovalCallsHook = new DeviceManager.RemovalCalls
+        {
+            Children = id => tree.ChildrenOf.TryGetValue(id, out var c) ? c : Array.Empty<string>(),
+            Remove = id => tree.Call("remove", id),
+            Uninstall = id => tree.Call("uninstall", id),
+            Close = id => tree.Call("close", id) ? 0 : 1,
+            Fallbacks = _ => Interlocked.Increment(ref tree.Fallbacks),
+        };
+        try
+        {
+            var clock = Stopwatch.StartNew();
+            bool removed = DeviceManager.RemoveDevice(parentId, timeoutMs, fast);
+            return (removed, clock.ElapsedMilliseconds,
+                    DeviceManager.RemovalsOnNotification - on0, DeviceManager.RemovalsWithoutNotification - without0,
+                    DeviceManager.RemovalsNotGone - notGone0);
+        }
+        finally
+        {
+            foreach (var s in tree.Ids.Values) s.End();
+            DeviceManager.RemovalCallsHook = null;
+        }
+    }
+
     /// <summary>Removals, prefix checks and install waits seen while the
     /// stand-in lock was held, over every gate run.</summary>
     static int s_underLock;
@@ -1225,6 +1317,31 @@ internal static class Offline
         Check("the removal counts: 6 on the notification, 1 without it, 2 not gone, 1 unregistered",
               dOn == 6 && dWithout == 1 && dNotGone == 2 && dUnreg == 1,
               $"{dOn}, {dWithout}, {dNotGone}, {dUnreg}");
+
+        // RemoveDevice itself, through the hooks, so the checks reach
+        // RemoveDeviceLocked's own order: a ROOT parent and its HID child,
+        // each REMOVED shortly after its own removal call.
+        Tree Pair()
+        {
+            var t = new Tree();
+            t.Ids[Id] = new Sequence { LeavesTree = 12, RemovedAt = 12, RecordGoneAt = 12 };
+            t.Ids[ChildId] = new Sequence { LeavesTree = 0, RecordGoneAt = 0, RemovedAt = 20 };
+            t.ChildrenOf[Id] = new[] { ChildId };
+            return t;
+        }
+        var pairTree = Pair();
+        var pair = RunRemoval(pairTree, Id);
+        Check("RemoveDevice through the hooks: the child's removal call, then the parent's, each once, no fallback, removed",
+              pair.Removed && pairTree.Calls.SequenceEqual(new[] { $"remove {ChildId}", $"remove {Id}" }) && pairTree.Fallbacks == 0,
+              $"{string.Join(", ", pairTree.Calls)}, {pairTree.Fallbacks} fallback run(s), {pair.Ms} ms");
+        Check("RemoveDevice through the hooks: one REMOVED registration open at a time, one for each devnode",
+              pairTree.MostOpen == 1 && pairTree.Ids[Id].Registrations == 1 && pairTree.Ids[ChildId].Registrations == 1,
+              $"at most {pairTree.MostOpen} open, parent {pairTree.Ids[Id].Registrations}, child {pairTree.Ids[ChildId].Registrations}");
+        var fastTree = Pair();
+        var fastPair = RunRemoval(fastTree, Id, fast: true);
+        Check("fast RemoveDevice through the hooks: the child uninstalled, then the parent, one REMOVED registration open at a time",
+              fastPair.Removed && fastTree.Calls.SequenceEqual(new[] { $"uninstall {ChildId}", $"uninstall {Id}" }) && fastTree.MostOpen == 1,
+              $"{string.Join(", ", fastTree.Calls)}, at most {fastTree.MostOpen} open, {fastPair.Ms} ms");
 
         // WaitRemovalComplete, the sweeps' and the exit's one test, keeps its
         // budget whole, the notification's bound inside it, and with 0 looks
