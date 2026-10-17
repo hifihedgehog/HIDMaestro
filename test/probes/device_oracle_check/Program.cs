@@ -263,6 +263,7 @@ internal static class Program
         foreach (var c in selected)
         {
             var sw = Stopwatch.StartNew();
+            int pumps = Case1Submit.IdlePumps.Count;
             var g = new GoldenCase(c.Name, seed, dump: true);
             try
             {
@@ -274,6 +275,15 @@ internal static class Program
                 try { c.Record(g, options); }
                 finally { g.CloseDump(); }
                 Console.WriteLine($"  {c.Name}: {g.Streams.Count} streams, {g.Outputs} outputs, {sw.Elapsed.TotalSeconds:F1} s");
+                // No controller of the case ran an idle pump, whose frames
+                // would follow the wall clock (Case1Submit.NoIdlePump).
+                if (Case1Submit.IdlePumps.Count != pumps)
+                {
+                    Console.WriteLine($"  [FAIL] {c.Name}: {Case1Submit.IdlePumps.Count - pumps} controller(s) started an idle pump: " +
+                                      string.Join(", ", Case1Submit.IdlePumps.Skip(pumps)) + ". Case1Submit.NoIdlePump must stop the key that starts it");
+                    failures++;
+                    continue;
+                }
                 if (mode == "record")
                 {
                     recorded.Add(g);

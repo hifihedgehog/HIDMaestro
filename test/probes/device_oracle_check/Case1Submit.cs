@@ -19,7 +19,8 @@
 //
 // Four things decide timing, not bytes, and are fixed so a run repeats:
 // the idle-frame pump of a Valve profile, which Create keeps from starting
-// without changing the catalog's profile (WithoutIdlePump),
+// without changing the catalog's profile (NoIdlePump) and checks did not
+// start (IdlePumps),
 // the keyboard and mouse delivery pacing (HMController._deliverEvery, which
 // waits 1 ms between frames), the codec's own clock, which stamps a report
 // whose state carries no sensor timestamp (each such state gets the stamp a
@@ -40,6 +41,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
 using HIDMaestro.Internal.Usbip;
@@ -316,7 +318,19 @@ internal sealed class Case1Submit : IOracleCase
             typeof(HMContext), typeof(int), typeof(HMProfile), typeof(string), typeof(UsbipBackendHandle), typeof(string),
         }) ?? throw new MissingMethodException("HMController's private constructor changed: update case 1.");
         var context = (HMContext)RuntimeHelpers.GetUninitializedObject(typeof(HMContext));
-        var c = (HMController)ctor.Invoke(new object?[] { context, index, new HMProfile(WithoutIdlePump(p)), null, usbip, null });
+        var c = (HMController)ctor.Invoke(new object?[] { context, index, new HMProfile(NoIdlePump(p)), null, usbip, null });
+        // The constructor sets _idleThread when it starts an idle pump. One
+        // that did is a profile key NoIdlePump does not stop: counted, for
+        // the run to fail the case, and stopped so it records nothing more.
+        var idleThread = typeof(HMController).GetField("_idleThread", Instance)
+            ?? throw new MissingFieldException(nameof(HMController), "_idleThread");
+        if (idleThread.GetValue(c) is Thread pump)
+        {
+            lock (IdlePumps) IdlePumps.Add($"{p.Id} ({pump.Name})");
+            (typeof(HMController).GetField("_idleCts", Instance)?.GetValue(c) as CancellationTokenSource)?.Cancel();
+            pump.Join(1000);
+            idleThread.SetValue(c, null);
+        }
         // Keyboard and mouse pacing waits a millisecond between frames, a
         // timing rule the frames' bytes do not depend on.
         typeof(HMController).GetField("_deliverEvery", Instance)!.SetValue(c, false);
@@ -326,15 +340,21 @@ internal sealed class Case1Submit : IOracleCase
 
     static readonly MethodInfo s_clone = typeof(object).GetMethod("MemberwiseClone", Instance)!;
 
+    /// <summary>The profiles whose controller started an idle pump in
+    /// Create. Every case's run must leave this as it found it.</summary>
+    internal static readonly List<string> IdlePumps = new();
+
     /// <summary>The profile the controller is built from: the catalog's,
     /// or for a profile with an idle-frame interval a copy of it whose
     /// extended report has none, so the constructor starts no idle pump and
-    /// the case calls the repeat itself. The catalog's profile is never
+    /// the case calls the repeat itself. Every key that starts a pump is
+    /// stopped here and only here: a tree that adds one adds it to this
+    /// helper, or Create counts the pump and the case fails. The catalog's profile is never
     /// changed. Its report is compiled first, from the catalog's own values,
     /// and the copy shares that compiled program, so the encoder carries
     /// the real interval wherever it reads one (an accumulating timestamp's
     /// nominal step) however late a tree compiles.</summary>
-    internal static ControllerProfile WithoutIdlePump(ControllerProfile p)
+    internal static ControllerProfile NoIdlePump(ControllerProfile p)
     {
         if (p.ExtendedReport is not { IdleFrameIntervalMs: > 0 } spec) return p;
         VendorBlobProgram.Get(spec);
