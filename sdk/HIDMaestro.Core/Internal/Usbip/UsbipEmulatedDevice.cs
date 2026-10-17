@@ -264,7 +264,6 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
             }
         }
         Devid = (1u << 16) | (uint)(index + 1);
-        if (runner != null) CreateLayoutClock(runner);
 
         _builder = profile.GetOrBuildReportBuilder();
         int expectedSize = _builder.InputReportByteSize > 0 ? _builder.InputReportByteSize : 17;
@@ -289,6 +288,10 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
 
         try
         {
+            // The device clock owns a timer and an event, which the catch
+            // releases if anything after this throws.
+            if (runner != null) CreateLayoutClock(runner);
+
             // Sections and events first, so both this device and the
             // HMController constructed after it see the same objects.
             _inputView = SharedMemoryIO.EnsureInputMapping(index);

@@ -35,6 +35,7 @@ if (Environment.GetEnvironmentVariable("HIDMAESTRO_DIAG") is { Length: > 0 })
 Console.WriteLine("=== protocol_engine_check: the protocol engine and the device clock, offline ===");
 Engine.Run();
 Clock.Run();
+DeviceLifetime.Run();
 Console.WriteLine(Checks.Failed == 0 ? "protocol_engine_check: PASS" : $"protocol_engine_check: {Checks.Failed} FAILED");
 return Checks.Failed == 0 ? 0 : 1;
 
