@@ -3,8 +3,9 @@
 //
 // FromProfile copies the whole profile, its own model keys and the model it
 // names included, and not what an identity default gave it, which the copy
-// resolves again under its own identity. A copy whose descriptor no longer
-// fits its model is refused at Build with the JSON path. ClearDeviceModel
+// resolves again under its own identity. Replacing the descriptor drops
+// every key the old descriptor's report format governs, so a copy of every
+// catalog profile builds with any valid descriptor. ClearDeviceModel
 // drops the keys tied to the descriptor's reports and the model the
 // profile names, and keeps driverPid, after which the identity the builder
 // sets gives the model. The builder sets DriverPid and FeatureAnswers, and
@@ -62,17 +63,87 @@ internal static class Builder
             var copy = new HMProfileBuilder().FromProfile(P("dualsense")).Id("user-ds").Build();
             return (Sources(copy)["answers"] == "named:sony-dualsense", Sources(copy)["answers"]);
         });
-        c.Run("a copy of steam-controller-2 given ps-classic's descriptor, which declares no feature report, is refused with the path", () =>
+        // Replacing the descriptor of a builder that holds one drops every key
+        // the old descriptor's report format governs (HMProfileBuilder.Descriptor),
+        // so a copy given any valid descriptor builds. At 629cf512 a copy kept
+        // its layout, extended reports, answers and USB configuration, and
+        // Build refused most catalog sources (b22324e's copy dropped them,
+        // and built).
+        var all = ctx.AllProfiles.ToList();
+        foreach (var donor in new[] { "xbox-360-wired", "heusinkveld-ultimate-pedals" })
+            c.Run($"every one of the {all.Count} catalog profiles, copied and given {donor}'s descriptor, builds", () =>
+            {
+                string d = P(donor).DescriptorHex!;
+                var failed = new List<string>();
+                foreach (var src in all)
+                {
+                    try { new HMProfileBuilder().FromProfile(src).Id("user-copy").DescriptorHex(d).Build(); }
+                    catch (Exception e) { failed.Add($"{src.Id}: {(Api.ProfileError(e) is { } err ? $"{err.Path}: {err.Reason}" : e.Message)}"); }
+                }
+                return (failed.Count == 0, $"{failed.Count} refused" + string.Concat(failed.Take(6).Select(f => "\n      " + f)));
+            });
+        foreach (var id in new[] { "steam-controller-2", "dualsense-bt", "dualshock-3-full", "xbox-series-xs", "logitech-g29" })
+            c.Run($"a copy of {id} given another descriptor drops every key the old report format governs and keeps the rest", () =>
+            {
+                var src = P(id);
+                var q = new HMProfileBuilder().FromProfile(src).Id("user-copy").DescriptorHex(P("heusinkveld-ultimate-pedals").DescriptorHex!).Build().Inner;
+                var kept = new List<string>();
+                if (q.Layout != null) kept.Add("layout");
+                if (q.ExtendedReport != null) kept.Add("extendedReport");
+                if (q.ExtendedOutputReport != null) kept.Add("extendedOutputReport");
+                if (q.AxisCenters != null) kept.Add("axisCenters");
+                if (q.InputDefaults != null) kept.Add("inputDefaults");
+                if (q.SdlMapping != null) kept.Add("sdlMapping");
+                if (q.SixaxisCompatible == true) kept.Add("sixaxisCompatible");
+                if (q.NativeDescriptor != null) kept.Add("nativeDescriptor");
+                if (q.UsbConfiguration != null) kept.Add("usbConfiguration");
+                if (q.RequiresUsbipBackend) kept.Add("backend");
+                if (q.InputReportSize != null) kept.Add("inputReportSize");
+                if (q.DataReportId != null) kept.Add("dataReportId");
+                if (q.ButtonMap != null) kept.Add("buttonMap");
+                if (q.TriggerButtons != null) kept.Add("triggerButtons");
+                if (q.AxisMap != null) kept.Add("axisMap");
+                if (q.TriggerMode != null) kept.Add("triggerMode");
+                if (q.FeatureStubs != null) kept.Add("featureStubs");
+                if (q.ValueSources != null) kept.Add("valueSources");
+                var s0 = src.Inner;
+                bool rest = q.Name == s0.Name && q.Vid == s0.Vid && q.Pid == s0.Pid && q.ProductString == s0.ProductString
+                            && q.DriverMode == s0.DriverMode && q.DriverPid == s0.DriverPid && q.VersionNumber == s0.VersionNumber
+                            && q.DeviceModelFrom == s0.DeviceModelFrom && q.Connection == s0.Connection;
+                return (kept.Count == 0 && rest, kept.Count == 0 ? (rest ? "" : "an identity key changed") : "kept " + string.Join(", ", kept));
+            });
+        c.Run("a key set after the new descriptor is kept", () =>
+        {
+            var q = new HMProfileBuilder().FromProfile(P("dualsense")).Id("user-copy")
+                .DescriptorHex(P("heusinkveld-ultimate-pedals").DescriptorHex!).InputReportSize(20).Build().Inner;
+            return (q.InputReportSize == 20, $"{q.InputReportSize}");
+        });
+        c.Run("setting the descriptor a copy already holds drops nothing", () =>
+        {
+            var src = P("dualsense-bt");
+            var same = new HMProfileBuilder().FromProfile(src).DescriptorHex(src.DescriptorHex!).Build();
+            // The same bytes in another hex case are the same descriptor.
+            var upper = new HMProfileBuilder().FromProfile(src).DescriptorHex(src.DescriptorHex!.ToUpperInvariant()).Build();
+            return (Json(same.Inner) == Json(src.Inner) && upper.Inner.Layout != null && upper.Inner.ExtendedReport != null
+                    && (upper.Inner.FeatureStubs != null) == (src.Inner.FeatureStubs != null), "");
+        });
+        c.Run("a builder's first descriptor drops nothing set before it", () =>
+        {
+            var q = new HMProfileBuilder().Id("user-new").Vid(0x1234).Pid(0x5678).InputReportSize(9)
+                .DescriptorHex(P("heusinkveld-ultimate-pedals").DescriptorHex!).Build().Inner;
+            return (q.InputReportSize == 9, $"{q.InputReportSize}");
+        });
+        c.Run("answers set after a new descriptor that declares no feature report are refused with the path", () =>
         {
             try
             {
                 new HMProfileBuilder().FromProfile(P("steam-controller-2")).Id("user-triton-bad")
-                    .DescriptorHex(P("ps-classic").DescriptorHex!).Build();
+                    .DescriptorHex(P("ps-classic").DescriptorHex!).FeatureAnswers(P("steam-controller-2").Inner.FeatureStubs).Build();
                 return (false, "built");
             }
             catch (Exception e) when (Api.ProfileError(e) is { } err)
             {
-                return (err.Path.StartsWith("$.", StringComparison.Ordinal), $"{err.Path}: {err.Reason}");
+                return (err.Path.StartsWith("$.featureStubs", StringComparison.Ordinal), $"{err.Path}: {err.Reason}");
             }
         });
         c.Run("after ClearDeviceModel a copy of dualsense given PID 09CC takes sony-dualshock4 by identity", () =>

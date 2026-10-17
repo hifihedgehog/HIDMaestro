@@ -39,8 +39,8 @@ public sealed class HMProfileBuilder
     private string _id = "custom";
     private string _name = "Custom Controller";
     private string _vendor = "Custom";
-    private ushort _vid;
-    private ushort _pid;
+    private ushort? _vid;
+    private ushort? _pid;
     private string _productString = "HID-compliant game controller";
     private string? _manufacturerString;
     private string _type = "gamepad";
@@ -102,18 +102,80 @@ public sealed class HMProfileBuilder
     /// <summary>Set the Device Manager display name (falls back to ProductString if null).</summary>
     public HMProfileBuilder DeviceDescription(string? desc) { _deviceDescription = desc; return this; }
 
-    /// <summary>Set the HID report descriptor from raw bytes.</summary>
+    /// <summary>Set the HID report descriptor from raw bytes.
+    /// <para>Replacing a descriptor the builder already holds (from
+    /// <see cref="FromProfile"/> or an earlier call) with different bytes
+    /// drops every key the old descriptor's report format governs, since
+    /// each one describes that descriptor's reports and fields:
+    /// <c>inputReportSize</c> and <c>dataReportId</c> (the length and ID of
+    /// the input report a frame fills), <c>layout</c> (the axes and buttons
+    /// the descriptor declares), <c>buttonMap</c>, <c>triggerButtons</c>,
+    /// <c>axisMap</c> and <c>triggerMode</c> (indices, usages and the trigger
+    /// encoding of its fields), <c>axisCenters</c> (the wire value of its
+    /// axes at rest), <c>inputDefaults</c> (byte offsets in its input
+    /// report), <c>sdlMapping</c> (SDL's button and axis indices for it),
+    /// <c>extendedReport</c> and <c>extendedOutputReport</c> (its vendor
+    /// reports), <c>sixaxisCompatible</c> (the DualShock 3 reports it
+    /// carries), <c>featureStubs</c> and <c>valueSources</c> (answers for
+    /// its feature reports), <c>nativeDescriptor</c> (the real device's copy
+    /// of it), and <c>usbConfiguration</c> with <c>backend</c>, whose HID class
+    /// descriptor declares its length and which the usbip backend serves.
+    /// The identity, the presentation (<c>driverMode</c>, <c>driverPid</c>,
+    /// <c>versionNumber</c>, <c>companionOnly</c>) and the model the profile
+    /// names stay. Set any dropped key again after the descriptor. The same
+    /// bytes drop nothing, and a builder's first descriptor drops nothing
+    /// set before it.</para>
+    /// </summary>
     public HMProfileBuilder Descriptor(byte[] bytes)
     {
-        _descriptorHex = Convert.ToHexString(bytes).ToLowerInvariant();
+        SetDescriptor(Convert.ToHexString(bytes).ToLowerInvariant());
         return this;
     }
 
-    /// <summary>Set the HID report descriptor from a hex string (same format as profile JSON).</summary>
+    /// <summary>Set the HID report descriptor from a hex string (same format
+    /// as profile JSON). Replacing one drops the keys its report format
+    /// governs, as <see cref="Descriptor(byte[])"/> lists.</summary>
     public HMProfileBuilder DescriptorHex(string hex)
     {
-        _descriptorHex = hex;
+        SetDescriptor(hex);
         return this;
+    }
+
+    private void SetDescriptor(string hex)
+    {
+        if (_descriptorHex != null && !SameBytes(_descriptorHex, hex)) DropReportFormat();
+        _descriptorHex = hex;
+    }
+
+    private static bool SameBytes(string a, string b)
+    {
+        try { return Convert.FromHexString(a).AsSpan().SequenceEqual(Convert.FromHexString(b)); }
+        catch (FormatException) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+    }
+
+    /// <summary>The keys <see cref="Descriptor(byte[])"/> lists, dropped
+    /// from the builder and from the copy it holds.</summary>
+    private void DropReportFormat()
+    {
+        _inputReportSize = null;
+        _dataReportId = null;
+        _buttonMap = null;
+        _triggerButtons = null;
+        _axisMap = null;
+        _triggerMode = null;
+        _featureStubs = null;
+        _valueSources = null;
+        if (_copy == null) return;
+        _copy.Layout = null;
+        _copy.AxisCenters = null;
+        _copy.InputDefaults = null;
+        _copy.SdlMapping = null;
+        _copy.ExtendedReport = null;
+        _copy.ExtendedOutputReport = null;
+        _copy.SixaxisCompatible = null;
+        _copy.NativeDescriptor = null;
+        _copy.UsbConfiguration = null;
+        _copy.Backend = null;
     }
 
     /// <summary>Set the input report size in bytes.</summary>
@@ -134,6 +196,8 @@ public sealed class HMProfileBuilder
     /// ID 0 instead of the declared values).</summary>
     public HMProfileBuilder FromDescriptorBuilder(HidDescriptorBuilder builder)
     {
+        // Replacing a descriptor drops the keys its report format governs
+        // (Descriptor), the input size among them, which is set below.
         Descriptor(builder.Build());
         bool hasRid = builder.DescriptorContainsReportId();
         _inputReportSize = builder.InputReportByteSize + (hasRid ? 1 : 0);
@@ -178,11 +242,12 @@ public sealed class HMProfileBuilder
 
     /// <summary>Drops the device model keys tied to the descriptor's
     /// reports, the answers and their value sources, and the model the
-    /// profile names, and keeps the presentation (<c>driverPid</c>), which
-    /// describes the device node rather than its reports. The model the
-    /// identity the builder sets gives then applies, as for any profile
-    /// made outside the catalog. Call it before replacing the descriptor of
-    /// a copy whose model the new descriptor does not fit.</summary>
+    /// profile names or its "none", and keeps the presentation
+    /// (<c>driverPid</c>), which describes the device node rather than its
+    /// reports. The model the identity the builder sets gives then applies,
+    /// as for any profile made outside the catalog. Replacing the
+    /// descriptor drops the answers already (<see cref="Descriptor(byte[])"/>),
+    /// so call this to drop the named model too.</summary>
     public HMProfileBuilder ClearDeviceModel()
     {
         _featureStubs = null;
@@ -236,8 +301,10 @@ public sealed class HMProfileBuilder
     /// the descriptor lacks, or the device model does not compile.</exception>
     public HMProfile Build()
     {
-        if (_vid == 0) throw new HMProfileException(_id, null, "$.vid", "VID must be set (use .Vid(0x045E)).");
-        if (_pid == 0) throw new HMProfileException(_id, null, "$.pid", "PID must be set (use .Pid(0x028E)).");
+        // A copy carries its source's IDs, 0x0000 included, as moza-r16's PID
+        // is in the catalog. Only a builder no ID was given refuses.
+        if (_vid == null) throw new HMProfileException(_id, null, "$.vid", "VID must be set (use .Vid(0x045E)).");
+        if (_pid == null) throw new HMProfileException(_id, null, "$.pid", "PID must be set (use .Pid(0x028E)).");
 
         // A copy keeps every key of its source but the ones set here.
         var inner = _copy?.Clone() ?? new ControllerProfile();
