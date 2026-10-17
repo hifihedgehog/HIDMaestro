@@ -150,19 +150,25 @@ public static partial class DeviceManager
     /// the interface filter itself works. pnp_notify_check reads it.</summary>
     internal static long InterfaceNotificationsDelivered => Interlocked.Read(ref s_interfaceNotificationsDelivered);
 
-    private static long s_removalsOnNotification, s_removalsWithoutNotification, s_removalsNotGone, s_removalsUnregistered;
+    private static long s_removalsOnNotification, s_removalsWithParent, s_removalsWithoutNotification, s_removalsNotGone,
+                        s_removalsUnregistered;
 
     /// <summary>Removal tests of a devnode in the tree at their start,
     /// counted once each when the watch ends, by how they ended: on the
-    /// DEVICEINSTANCEREMOVED notification, gone without it past its bound,
-    /// not gone, or with the notification's registration refused. A removal
-    /// made in steps on one devnode is tested on one watch from its first
-    /// step to its last (<see cref="StepwiseRemoval"/>), so it counts once,
-    /// by how its last step ended, as present when its first step started.
+    /// DEVICEINSTANCEREMOVED notification, on its parent's (a child removed
+    /// while its parent's watch was open, which opens no registration of
+    /// its own, <see cref="SubtreeChildren"/>), gone without one past its
+    /// bound, not gone, or with the notification's registration refused. A
+    /// removal made in steps on one devnode is tested on one watch from its
+    /// first step to its last (<see cref="StepwiseRemoval"/>), so it counts
+    /// once, by how its last step ended, as present when its first step
+    /// started.
     /// The change that requires the notification rests on Windows sending
     /// it for every removal the SDK makes, and these counts are where a run
     /// shows it. pnp_notify_check reads them.</summary>
     internal static long RemovalsOnNotification => Interlocked.Read(ref s_removalsOnNotification);
+    /// <inheritdoc cref="RemovalsOnNotification"/>
+    internal static long RemovalsWithParent => Interlocked.Read(ref s_removalsWithParent);
     /// <inheritdoc cref="RemovalsOnNotification"/>
     internal static long RemovalsWithoutNotification => Interlocked.Read(ref s_removalsWithoutNotification);
     /// <inheritdoc cref="RemovalsOnNotification"/>
@@ -480,7 +486,16 @@ public static partial class DeviceManager
     /// is gone. The same 2 s RemoveDevice has given a child's removal since
     /// before v1.13.0. In the bench's diag log of 2026-10-14 and 10-15 the
     /// wait after a software device's close ended within 471 ms of the start
-    /// of the close in 688 of 688 removals, the hmswd.exe run included.</summary>
+    /// of the close in 688 of 688 removals, the hmswd.exe run included. It
+    /// applies to a devnode removed directly. A child removed while a ROOT
+    /// or HID parent's watch is open is not given it
+    /// (<see cref="SubtreeChildren"/>): in the Windows Sandbox runs of
+    /// 2026-10-16 no such HID child's notification came within the bound,
+    /// and the hypothesis is that its bus driver keeps its PDO until the
+    /// parent goes (<see cref="SubtreeChildComplete"/>). A software parent's
+    /// survivor, in the tree at its call and not proven by the parent's
+    /// notification, is held for it with no registration once it is
+    /// gone.</summary>
     internal const int RemovedBoundMs = 2000;
 
     /// <summary>How long a removal whose call finishes its work before it
@@ -527,6 +542,74 @@ public static partial class DeviceManager
         return removedOverdue ? RemovalOutcome.GoneWithoutRemoved : RemovalOutcome.Pending;
     }
 
+    /// <summary>The outcome of the removal of a child removed while its
+    /// parent's watch was open, decided once the parent's own removal test
+    /// has ended (<see cref="SubtreeChildren"/>).
+    /// <paramref name="parentRemoved"/>: the parent's DEVICEINSTANCEREMOVED
+    /// notification arrived after the child's removal call began. The child
+    /// has no registration of its own, so its own notification is not
+    /// watched: the parent's watch is the one registration open.
+    ///
+    /// <para>The orderly case. A bus driver given IRP_MN_REMOVE_DEVICE for
+    /// a child it still reports "Retains the PDO for the device until the
+    /// device has been physically removed" ("Removing a Device in a Bus
+    /// Driver"), and DEVICEINSTANCEREMOVED is "sent when a device instance
+    /// ... is no longer present" (CM_NOTIFY_ACTION). When the parent goes,
+    /// "If the bus driver handled a previous IRP_MN_REMOVE_DEVICE request
+    /// for the device, and there has been no subsequent
+    /// IRP_MN_SURPRISE_REMOVAL request, then the bus driver deletes the
+    /// child PDO. In this case, the PnP manager ensures that any function
+    /// and filter drivers have been removed from the child device ...
+    /// before it sends a remove IRP to the parent bus device. The child PDO
+    /// might still be present, so the bus driver must delete the child PDO
+    /// before it removes the bus device." ("Removing a Device in a Function
+    /// Driver", step 1). The parent's notification says the parent is no
+    /// longer present, so it comes after that remove IRP, inside which the
+    /// child's PDO was deleted. That last step is inference: no page orders
+    /// DEVICEINSTANCEREMOVED against the remove IRP, and the I/O system
+    /// frees a deleted PDO only when its reference count reaches zero.</para>
+    ///
+    /// <para>The exception, on the same page: "If the bus driver handled a
+    /// previous IRP_MN_SURPRISE_REMOVAL request for the child device, but
+    /// the driver has not yet received the subsequent IRP_MN_REMOVE_DEVICE
+    /// request, the bus driver leaves the child PDO intact. At some later
+    /// time, when all handles to the child device are closed, the PnP
+    /// manager will send the remove IRP for the child device". A HID child
+    /// surprise removed with a handle still open can keep its PDO past the
+    /// parent's notification, and this test counts it removed with its
+    /// parent once the locates no longer find it. No signal the SDK has
+    /// shows that case, as none did before this test.</para>
+    ///
+    /// <para>Without the parent's notification the child is gone without
+    /// one, at once, since the parent's test has already had its bound. The
+    /// locates decide as in <see cref="RemovalComplete"/>: in the tree, or
+    /// its record still there after an uninstall, is pending, and the
+    /// caller's budget ends it as not gone. A child out of the tree at its
+    /// call has no removal the parent's notification could prove, and its
+    /// record decides.</para></summary>
+    internal static RemovalOutcome SubtreeChildComplete(in RemovalObservation o, bool uninstalls, bool parentRemoved)
+    {
+        if (o.InTree || (uninstalls && o.Record)) return RemovalOutcome.Pending;
+        if (!o.PresentAtStart || parentRemoved) return RemovalOutcome.Removed;
+        return RemovalOutcome.GoneWithoutRemoved;
+    }
+
+    /// <summary>How the parent of a subtree child ended, for the child's
+    /// test and its diag line (<see cref="SubtreeChildren.Settle"/>).</summary>
+    internal enum ParentEnd
+    {
+        /// <summary>Its REMOVED notification arrived after the child's call
+        /// began: the proof the child's test takes.</summary>
+        RemovedAfterCall,
+        /// <summary>Its last REMOVED notification arrived before the child's
+        /// call began, so it says nothing of this child.</summary>
+        RemovedBeforeCall,
+        /// <summary>It left with no REMOVED notification.</summary>
+        GoneWithoutRemoved,
+        /// <summary>It was still there when its test ended.</summary>
+        NotGone,
+    }
+
     /// <summary>One instance's removal test. For a devnode in the tree it
     /// registers for the instance's DEVICEINSTANCEREMOVED notification and
     /// then looks at the devnode again, so a removal that ends between the
@@ -543,6 +626,21 @@ public static partial class DeviceManager
         private IntPtr _registration;
         private IDisposable? _hooked;
         private int _removed;
+        // When the latest REMOVED notification arrived, in Stopwatch ticks,
+        // 0 before. A child's test compares its parent's with the moment
+        // the child's removal call began (SubtreeChildren).
+        private long _removedTicks;
+        // A child of a subtree: no registration of its own, and a test run
+        // after its parent's (WaitAfterParent). The diag line names how it
+        // ended, with how its parent ended.
+        private bool _subtreeChild;
+        private ParentEnd _parentEnd;
+        // How long a software parent's survivor was held once gone, -1 when
+        // it was not (SubtreeChildren.Settle).
+        private long _heldMs = -1;
+        // The last observation a wait made, for the diag line of a removal
+        // that ended not gone.
+        private RemovalObservation _lastSeen;
         private bool _disposed;
         // When the devnode was first seen gone (and, for an uninstall, its
         // record), in Stopwatch ticks. The REMOVED bound runs from there, so
@@ -588,8 +686,47 @@ public static partial class DeviceManager
             return watch;
         }
 
+        /// <summary>A subtree child's watch: no REMOVED registration, and
+        /// whether the child is in the tree as its removal call is about to
+        /// begin. Its parent's watch is the one registration open
+        /// (SubtreeChildren).</summary>
+        internal static RemovalWatch StartUnregistered(string instanceId)
+        {
+            var watch = new RemovalWatch(instanceId, register: false) { _subtreeChild = true };
+            try { watch.PresentAtStart = Locate(instanceId, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS; }
+            catch
+            {
+                watch.Dispose();
+                throw;
+            }
+            return watch;
+        }
+
+        /// <summary>When the latest REMOVED notification arrived, in
+        /// Stopwatch ticks, or 0. A devnode that leaves, comes back and leaves
+        /// again is notified each time.</summary>
+        internal long RemovedTicks => Interlocked.Read(ref _removedTicks);
+
+        /// <summary>Wait up to <paramref name="timeoutMs"/> (scaled) for a
+        /// REMOVED notification that arrives at or after
+        /// <paramref name="since"/> (Stopwatch ticks), and say whether one
+        /// did.</summary>
+        internal bool WaitRemovedSince(long since, int timeoutMs)
+        {
+            long freq = System.Diagnostics.Stopwatch.Frequency;
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + Math.Max(0, TimeoutScale.Apply(timeoutMs)) * freq / 1000;
+            while (true)
+            {
+                if (RemovedTicks >= since && RemovedTicks != 0) return true;
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (deadline <= now) return false;
+                _signal.WaitOne((int)Math.Clamp((deadline - now) * 1000 / freq + 1, 1, RecheckMs));
+            }
+        }
+
         private void OnRemoved()
         {
+            Interlocked.Exchange(ref _removedTicks, System.Diagnostics.Stopwatch.GetTimestamp());
             Volatile.Write(ref _removed, 1);
             try { _signal.Set(); }
             catch (ObjectDisposedException) { }
@@ -623,7 +760,7 @@ public static partial class DeviceManager
             long removedTicks = Math.Max(0, removedMs) * freq / 1000;
             while (true)
             {
-                var o = Observe();
+                var o = _lastSeen = Observe();
                 long now = System.Diagnostics.Stopwatch.GetTimestamp();
                 bool gone = !o.InTree && !(uninstalls && o.Record);
                 if (gone && _goneAt == 0) _goneAt = now;
@@ -636,14 +773,78 @@ public static partial class DeviceManager
             }
         }
 
-        /// <summary>CM_Unregister_Notification "waits for pending callbacks
-        /// to finish" (Microsoft Learn), so the callback's handle is freed
-        /// only after it.</summary>
+        /// <summary>The test of a subtree child once its parent's own test
+        /// has ended (<see cref="SubtreeChildComplete"/>), proven by the
+        /// parent's notification when <paramref name="parentEnd"/> is
+        /// <see cref="ParentEnd.RemovedAfterCall"/>. Only a devnode still in
+        /// the tree, or a record an uninstall should have deleted, waits, for
+        /// <paramref name="budgetMs"/> (scaled), looking every
+        /// <see cref="RecheckMs"/>.</summary>
+        internal RemovalOutcome WaitAfterParent(bool uninstalls, int budgetMs, ParentEnd parentEnd)
+        {
+            _parentEnd = parentEnd;
+            long freq = System.Diagnostics.Stopwatch.Frequency;
+            long deadline = System.Diagnostics.Stopwatch.GetTimestamp() + Math.Max(0, TimeoutScale.Apply(budgetMs)) * freq / 1000;
+            while (true)
+            {
+                var o = _lastSeen = Observe();
+                var r = SubtreeChildComplete(o, uninstalls, parentRemoved: parentEnd == ParentEnd.RemovedAfterCall);
+                if (r != RemovalOutcome.Pending) return _last = r;
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (deadline <= now) return _last = RemovalOutcome.NotGone;
+                _signal.WaitOne((int)Math.Clamp((deadline - now) * 1000 / freq + 1, 1, RecheckMs));
+            }
+        }
+
+        /// <summary>The diag line of a subtree child's test: how it ended,
+        /// with how its parent ended, and how long it was held once gone
+        /// when it was (<paramref name="heldMs"/>, negative when not). Null
+        /// for a test that has not ended.</summary>
+        internal static string? SubtreeChildLine(string id, RemovalOutcome last, bool presentAtStart, ParentEnd parentEnd, bool inTree,
+                                                 long heldMs = -1)
+        {
+            if (last == RemovalOutcome.Pending) return null;
+            if (!presentAtStart) return $"      {id} was out of the tree at its removal call, its record decided: {last}";
+            string held = heldMs >= 0 ? $", held {heldMs} ms under the lock after it left" : "";
+            return last switch
+            {
+                RemovalOutcome.Removed => $"      {id} left with its parent's subtree, on the parent's REMOVED notification{held}",
+                RemovalOutcome.GoneWithoutRemoved => parentEnd switch
+                {
+                    ParentEnd.RemovedBeforeCall => $"      {id} left the tree, but its parent's REMOVED notification came before its removal call{held}",
+                    ParentEnd.NotGone => $"      {id} left the tree, its parent not gone{held}",
+                    _ => $"      {id} left the tree, with no REMOVED notification for its parent{held}",
+                },
+                _ => $"      {id} not gone after its parent's removal: "
+                     + (inTree ? "still in the tree" : "out of the tree, its record left"),
+            };
+        }
+
+        /// <summary>Notes how long a software parent's survivor was held
+        /// once gone, for its diag line (<see cref="SubtreeChildren.Settle"/>).</summary>
+        internal void Held(long ms) => _heldMs = ms;
+
+        /// <summary>Counts the test, writes to the diag log how a subtree
+        /// child's test ended and when any other ended without its
+        /// notification, and closes the registration.
+        /// CM_Unregister_Notification "waits for pending callbacks to finish"
+        /// (Microsoft Learn), so the callback's handle is freed only after
+        /// it.</summary>
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
-            if (PresentAtStart && _last != RemovalOutcome.Pending)
+            if (_subtreeChild)
+            {
+                // No registration: proven by the parent's notification, gone
+                // without one, or not gone.
+                if (PresentAtStart && _last == RemovalOutcome.Removed) Interlocked.Increment(ref s_removalsWithParent);
+                else if (PresentAtStart && _last == RemovalOutcome.GoneWithoutRemoved) Interlocked.Increment(ref s_removalsWithoutNotification);
+                else if (PresentAtStart && _last == RemovalOutcome.NotGone) Interlocked.Increment(ref s_removalsNotGone);
+                if (SubtreeChildLine(_id, _last, PresentAtStart, _parentEnd, _lastSeen.InTree, _heldMs) is { } line)
+                    DeviceOrchestrator.LogDiag(line);
+            }
+            else if (PresentAtStart && _last != RemovalOutcome.Pending)
             {
                 if (!Registered) Interlocked.Increment(ref s_removalsUnregistered);
                 else if (_last == RemovalOutcome.Removed) Interlocked.Increment(ref s_removalsOnNotification);
@@ -676,6 +877,19 @@ public static partial class DeviceManager
 
         internal StepwiseRemoval(string instanceId) => _id = instanceId;
 
+        /// <summary>When the devnode's latest REMOVED notification arrived on
+        /// the open watch, in Stopwatch ticks, or 0.</summary>
+        internal long RemovedTicks => _watch?.RemovedTicks ?? 0;
+
+        /// <summary>A watch is open, registered for the REMOVED notification
+        /// of a devnode that was in the tree when it started.</summary>
+        internal bool Watching => _watch is { Registered: true, PresentAtStart: true };
+
+        /// <summary>Wait on the open watch for a REMOVED notification at or
+        /// after <paramref name="since"/>, up to <paramref name="timeoutMs"/>
+        /// (scaled). False with no watch open.</summary>
+        internal bool WaitRemovedSince(long since, int timeoutMs) => _watch?.WaitRemovedSince(since, timeoutMs) ?? false;
+
         /// <summary>Start the watch, unless a step already did, before a
         /// step's call.</summary>
         internal void Begin() => _watch ??= RemovalWatch.Start(_id);
@@ -704,6 +918,126 @@ public static partial class DeviceManager
         }
 
         public void Dispose() => Finish();
+    }
+
+    /// <summary>The children of one removal, each removed by its own call.
+    /// While the parent's watch is open (<see cref="StepwiseRemoval.Watching"/>:
+    /// registered, with the parent in the tree when it started), a child goes
+    /// with the parent's subtree: it opens no registration of its own, so
+    /// the parent's is the one open, and its test runs after the parent's
+    /// (<see cref="Settle"/>), on the parent's REMOVED notification
+    /// (<see cref="SubtreeChildComplete"/>). The parent's watch decides both
+    /// at once: a child is deferred only while that watch is open, and the
+    /// same watch sees the parent leave, whenever and however it leaves.
+    /// With no parent watch open, a child is removed directly and tested at
+    /// its call on its own registration, with the REMOVED bound, as before:
+    /// a child whose parent was out of the tree when its watch started, or
+    /// whose parent's registration Windows refused. A software parent's
+    /// close keeps its watch open through its survivors' removals, so they
+    /// open none while the close's cascade may still be removing them.
+    /// When Windows refused the close's registration there is no watch to
+    /// keep, and each survivor registers its own at its call while the
+    /// cascade may still run, one at a time. A
+    /// survivor in the tree at its call that the parent's notification does
+    /// not prove is held under the lock for <see cref="RemovedBoundMs"/>
+    /// from the moment it is seen gone, with no registration, as long as
+    /// a child removed directly waits for its own notification. The
+    /// parent's notification ends the hold. One REMOVED registration at
+    /// most is open at a time (78e2848). Every test ends before the removal
+    /// returns, under the PnP lock the removal holds. Settle discards the
+    /// children's outcomes, as the test after each child's call did:
+    /// RemoveDevice answers for the parent.</summary>
+    internal sealed class SubtreeChildren : IDisposable
+    {
+        private readonly StepwiseRemoval _parent;
+        private readonly bool _holdForCascade;
+        private readonly List<(RemovalWatch Watch, long CalledAt, bool Issued)> _deferred = new();
+
+        /// <param name="parent">The parent's removal, whose watch decides
+        /// the deferral and gives the proof.</param>
+        /// <param name="holdForCascade">A software parent: its close starts a
+        /// cascade that runs on its own, and its children are called after
+        /// it, so a survivor's own notification would come after its call.
+        /// Each survivor in the tree at its call that the parent's
+        /// notification has not proven is held, once gone, for up to
+        /// <see cref="RemovedBoundMs"/>, as long as a child removed directly
+        /// waits for its own notification. The parent's notification
+        /// after the survivor's call, on the one registration open, ends the
+        /// hold and proves it. A ROOT or HID parent's children are called
+        /// before the parent's own removal and get no hold.</param>
+        internal SubtreeChildren(StepwiseRemoval parent, bool holdForCascade)
+        {
+            _parent = parent;
+            _holdForCascade = holdForCascade;
+        }
+
+        /// <summary>Remove one child: its watch, then <paramref name="call"/>.
+        /// Returns its outcome when it was tested at its call, or null when
+        /// its test waits for the parent's. A call that throws closes the
+        /// child's watch, registration included, and rethrows.</summary>
+        internal RemovalOutcome? Remove(string childId, Func<bool> call)
+        {
+            bool withParent = _parent.Watching;
+            var watch = withParent ? RemovalWatch.StartUnregistered(childId) : RemovalWatch.Start(childId);
+            long calledAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool issued;
+            try { issued = call(); }
+            catch
+            {
+                watch.Dispose();
+                throw;
+            }
+            if (withParent)
+            {
+                _deferred.Add((watch, calledAt, issued));
+                return null;
+            }
+            using (watch) return watch.Wait(uninstalls: true, issued ? QuickRemovalMs : 0);
+        }
+
+        /// <summary>Test every child that waits for its parent, once the
+        /// parent's test has ended with <paramref name="parentOutcome"/>. A
+        /// child is proven by the parent's latest REMOVED notification when it
+        /// arrived after the child's call began. A child whose call failed
+        /// gets one look, as a failed call does everywhere.</summary>
+        internal void Settle(RemovalOutcome parentOutcome)
+        {
+            foreach (var (watch, calledAt, issued) in _deferred)
+            {
+                ParentEnd End()
+                {
+                    long ticks = _parent.RemovedTicks;
+                    return ticks != 0 && ticks >= calledAt ? ParentEnd.RemovedAfterCall
+                         : ticks != 0 ? ParentEnd.RemovedBeforeCall
+                         : parentOutcome == RemovalOutcome.NotGone ? ParentEnd.NotGone
+                         : ParentEnd.GoneWithoutRemoved;
+                }
+                using (watch)
+                {
+                    var outcome = watch.WaitAfterParent(uninstalls: true, issued ? QuickRemovalMs : 0, End());
+                    // A software parent's survivor, in the tree at its call
+                    // and gone with no proof: held for the bound its own test
+                    // once waited on its own notification, which no
+                    // registration hears now, then looked at once more.
+                    if (_holdForCascade && outcome == RemovalOutcome.GoneWithoutRemoved)
+                    {
+                        var held = System.Diagnostics.Stopwatch.StartNew();
+                        _parent.WaitRemovedSince(calledAt, RemovedBoundMs);
+                        watch.Held(held.ElapsedMilliseconds);
+                        watch.WaitAfterParent(uninstalls: true, 0, End());
+                    }
+                }
+            }
+            _deferred.Clear();
+        }
+
+        /// <summary>A removal that ended before <see cref="Settle"/> (a
+        /// throw) closes its children's watches untested.</summary>
+        public void Dispose()
+        {
+            foreach (var d in _deferred) d.Watch.Dispose();
+            _deferred.Clear();
+        }
     }
 
     /// <summary>What the registration gate decided.</summary>
@@ -1890,16 +2224,25 @@ public static partial class DeviceManager
         // right before its devnode's removal call, so the REMOVED
         // notification of a devnode that leaves during the call is not
         // missed. The parent's steps share one watch (StepwiseRemoval), from
-        // its first removal call through the fallbacks' test. One
-        // registration at most is open at a time, except while a fast close
-        // that left the parent in the tree keeps its watch through the
-        // children's removals.
+        // its first removal call through the fallbacks' test. A ROOT or HID
+        // parent starts that watch before the first child's call, and a
+        // software parent's close starts it and keeps it through the children
+        // its cascade may still be removing. While it is open the children
+        // go with the parent's subtree (SubtreeChildren): they open no
+        // registration, and their tests run after the parent's, on the
+        // parent's REMOVED notification, a software parent's survivor held
+        // for it once gone. With no parent watch open (a parent out of the
+        // tree when its watch started, or one whose registration Windows
+        // refused, a close's included), a child is removed directly on its
+        // own registration. One registration at most is open at a time on
+        // every path.
         int parentBudget = ParentRemovalBudget(fast, timeoutMs);
         using var parent = new StepwiseRemoval(instanceId);
         var parentOutcome = RemovalOutcome.Pending;
         var closeOutcome = RemovalOutcome.Removed;
 
         bool isSwdParent = instanceId.StartsWith("SWD\\", StringComparison.OrdinalIgnoreCase);
+        using var subtree = new SubtreeChildren(parent, holdForCascade: isSwdParent);
         // Whether the pnputil and devcon fallbacks (step 3) take over a
         // parent that step 2 leaves not gone.
         bool fallbacks = (!fast || forceFallbacks) &&
@@ -1962,9 +2305,9 @@ public static partial class DeviceManager
                 $"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hrFast:X8} " +
                 $"(fast mode): {closeOutcome} in {swFastSw.ElapsedMilliseconds}ms");
             // Step 2 disables and uninstalls the devnode whatever the close
-            // did. A close that left it in the tree keeps its watch for that
-            // step. One that removed it is done with its watch.
-            if (closeOutcome != RemovalOutcome.NotGone) parent.Finish();
+            // did, on the close's watch. It stays open through the children's
+            // removals, so they open no registration of their own while the
+            // close's cascade may still be removing them (SubtreeChildren).
         }
         else if (isSwdParent && !fast)
         {
@@ -1989,23 +2332,30 @@ public static partial class DeviceManager
             // (verified in the 09:21:18 diag log: present=True after
             // 56 ms hr=0x0).
             var swSw = System.Diagnostics.Stopwatch.StartNew();
-            using var closeWatch = RemovalWatch.Start(instanceId);
-            int hr = calls?.Close(instanceId) ?? SwdDeviceFactory.Remove(instanceId);
+            int hr = 0;
             // Block until the kernel actually fires the device-removed
             // notification: or the timeout expires. Use the caller's
             // timeoutMs budget so callers explicitly choose how long to
             // wait. Live-swap callers pass 120_000 ms (the full BT
             // xinputhid cascade budget); cleanup paths may pass less.
             // SwDeviceClose leaves the instance's record, so the record is
-            // not waited for.
-            parentOutcome = closeWatch.Wait(uninstalls: false, timeoutMs);
+            // not waited for. The close's watch stays open through the
+            // children's removals, so a survivor opens no registration of its
+            // own while the cascade may still be removing it, and is held for
+            // the parent's REMOVED instead (SubtreeChildren). When Windows
+            // refused the close's registration, each survivor registers its
+            // own at its call, one at a time.
+            parentOutcome = parent.Step(() => { hr = calls?.Close(instanceId) ?? SwdDeviceFactory.Remove(instanceId); return true; },
+                                        uninstalls: false, timeoutMs);
             goneAfterDif = parentOutcome != RemovalOutcome.NotGone;
             DeviceOrchestrator.LogDiag($"      SwdDeviceFactory.Remove({instanceId}) hr=0x{hr:X8} confirmed_offline={goneAfterDif} after {swSw.ElapsedMilliseconds}ms");
         }
 
         // Step 1: Find and remove all children. For SWD parents this
         // typically becomes a no-op because the SwD close already
-        // cascade-removed them.
+        // cascade-removed them. A ROOT or HID parent's watch starts first,
+        // so it sees the parent leave from before the first child's call.
+        if (!isSwdParent) parent.Begin();
         foreach (string childId in childIds)
         {
             // Skip if the SwD-parent close already cascaded this child away.
@@ -2026,15 +2376,11 @@ public static partial class DeviceManager
                 if (calls != null
                     ? Find(childId, 0) == CR_SUCCESS || Find(childId, 1) == CR_SUCCESS
                     : CM_Locate_DevNodeW(out ci, childId, 0) == CR_SUCCESS || CM_Locate_DevNodeW(out ci, childId, 1) == CR_SUCCESS)
-                {
-                    using var childWatch = RemovalWatch.Start(childId);
-                    childWatch.Wait(uninstalls: true, (calls?.Uninstall(childId) ?? DisableAndUninstall(ci, childId)) ? QuickRemovalMs : 0);
-                }
+                    subtree.Remove(childId, () => calls?.Uninstall(childId) ?? DisableAndUninstall(ci, childId));
             }
             else
             {
-                using var childWatch = RemovalWatch.Start(childId);
-                childWatch.Wait(uninstalls: true, (calls?.Remove(childId) ?? DifRemoveDevice(childId)) ? QuickRemovalMs : 0);
+                subtree.Remove(childId, () => calls?.Remove(childId) ?? DifRemoveDevice(childId));
             }
         }
 
@@ -2193,6 +2539,11 @@ public static partial class DeviceManager
             // removal's.
             parentOutcome = parent.Wait(uninstalls: true, QuickRemovalMs);
         }
+
+        // The children removed while the parent's watch was open went with
+        // its subtree. Their tests run now, under the same PnP lock, on the
+        // parent's REMOVED notification.
+        subtree.Settle(parentOutcome);
 
         // Step 4: Final check
         removed = Find(instanceId, 0) != CR_SUCCESS && Find(instanceId, 1) != CR_SUCCESS;

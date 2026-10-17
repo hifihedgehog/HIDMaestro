@@ -47,25 +47,29 @@ internal static class Program
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}{(detail.Length > 0 ? "  " + detail : "")}");
     }
 
-    static (long On, long Without, long NotGone, long Unregistered) Removals() =>
-        (DeviceManager.RemovalsOnNotification, DeviceManager.RemovalsWithoutNotification,
+    static (long On, long WithParent, long Without, long NotGone, long Unregistered) Removals() =>
+        (DeviceManager.RemovalsOnNotification, DeviceManager.RemovalsWithParent, DeviceManager.RemovalsWithoutNotification,
          DeviceManager.RemovalsNotGone, DeviceManager.RemovalsUnregistered);
 
     /// <summary>Fails when a removal of the dispose ended with its devnode
     /// still there, or a devnode in the tree when its removal's first step
-    /// started left it without DEVICEINSTANCEREMOVED or with the
+    /// started left it without a DEVICEINSTANCEREMOVED notification, its own
+    /// or, for a child removed while its parent was in the tree, the
+    /// parent's (DeviceManager.SubtreeChildComplete), or with the
     /// notification's registration refused. A removal in steps counts once,
     /// by its last step: a step that ended not gone and that the fallbacks
     /// then completed, as after a fast removal's CM_Uninstall_DevNode, is no
-    /// failure.</summary>
-    static void CheckRemovals(string profile, (long On, long Without, long NotGone, long Unregistered) before)
+    /// failure. A child removed while its parent's watch was open has no
+    /// registration of its own, and counts on the parent's notification,
+    /// without one, or not gone.</summary>
+    static void CheckRemovals(string profile, (long On, long WithParent, long Without, long NotGone, long Unregistered) before)
     {
         var a = Removals();
-        long on = a.On - before.On, without = a.Without - before.Without, notGone = a.NotGone - before.NotGone,
-             unregistered = a.Unregistered - before.Unregistered;
-        Check($"{profile}: every removal of its dispose ended gone, each devnode in the tree on DEVICEINSTANCEREMOVED",
+        long on = a.On - before.On, withParent = a.WithParent - before.WithParent, without = a.Without - before.Without,
+             notGone = a.NotGone - before.NotGone, unregistered = a.Unregistered - before.Unregistered;
+        Check($"{profile}: every removal of its dispose ended gone, each devnode in the tree on DEVICEINSTANCEREMOVED, its own or, for a child, its parent's",
               on > 0 && without == 0 && notGone == 0 && unregistered == 0,
-              $"{on} on the notification, {without} without it, {notGone} not gone, {unregistered} unregistered");
+              $"{on} on the notification, {withParent} on the parent's, {without} without one, {notGone} not gone, {unregistered} unregistered");
     }
 
     static int Main(string[] args)
@@ -134,7 +138,8 @@ internal static class Program
         CheckRemovals("dualshock-4-v2", removalsBefore);
 
         // The removal test waits for DEVICEINSTANCEREMOVED for every devnode
-        // in the tree when its removal starts. Each kind of removal the SDK
+        // in the tree when its removal starts, a child removed while its
+        // parent is in the tree on the parent's. Each kind of removal the SDK
         // makes must end its test on it: a ROOT HID device and its child
         // (SetupDiRemoveDevice), an Xbox 360's ROOT device and its software
         // XUSB companion (SwDeviceClose through hmswd.exe), and an xinputhid

@@ -70,8 +70,14 @@ internal static partial class DeviceOrchestrator
                 FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096);
         });
 
+    /// <summary>Sees every diag line, whether or not HIDMAESTRO_DIAG is set.
+    /// pnp_notify_check's offline part sets it to read the lines a removal
+    /// writes. Null outside it.</summary>
+    internal static Action<string>? DiagTap;
+
     internal static void LogDiag(string message)
     {
+        DiagTap?.Invoke(message);
         if (!s_diagEnabled) return;
         lock (s_diagLock)
         {

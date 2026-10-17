@@ -59,6 +59,9 @@ internal static class Offline
         /// still there: a phantom.</summary>
         public bool OutOfTreeBefore;
         public long? LeavesTree = 0, RemovedAt, RecordGoneAt;
+        /// <summary>A second REMOVED, for a devnode that came back and left
+        /// again: delivered to every registration still open.</summary>
+        public long? RemovedAgainAt;
         public long? InstallsIdleAt = 0;
         public bool InstallWaitFails, RefuseRegistration;
         /// <summary>REMOVED registrations the SDK asked for.</summary>
@@ -75,7 +78,7 @@ internal static class Offline
         readonly object _lock = new();
         readonly List<Action> _subscribers = new();
         bool _fired;
-        Timer? _timer;
+        Timer? _timer, _timerAgain;
 
         public long Now => Clock.IsRunning ? Clock.ElapsedMilliseconds : -1;
 
@@ -84,6 +87,8 @@ internal static class Offline
             Clock.Start();
             if (RemovedAt is long at)
                 _timer = new Timer(_ => Fire(at), null, at, Timeout.Infinite);
+            if (RemovedAgainAt is long again)
+                _timerAgain = new Timer(_ => Fire(again), null, again, Timeout.Infinite);
         }
 
         /// <summary>The timer runs on another clock than <see cref="Clock"/>
@@ -183,6 +188,7 @@ internal static class Offline
             DeviceManager.InstallQueueHook = null;
             DeviceManager.PnpLockHook = null;
             _timer?.Dispose();
+            _timerAgain?.Dispose();
         }
     }
 
@@ -264,6 +270,20 @@ internal static class Offline
         public readonly Dictionary<string, string[]> ChildrenOf = new(StringComparer.OrdinalIgnoreCase);
         public readonly List<string> Calls = new();
         public int Fallbacks, Open, MostOpen;
+        /// <summary>How long an id's removal call takes to return, from
+        /// when its sequence begins: a call that returns once Windows has
+        /// finished with the devnode.</summary>
+        public readonly Dictionary<string, int> CallMs = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Ids whose sequences begin with another id's call: a
+        /// removal from outside that starts as this one runs.</summary>
+        public readonly Dictionary<string, string[]> BeginsWith = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Ids whose removal call throws.</summary>
+        public readonly HashSet<string> Throws = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The diag lines the removal wrote (DiagTap).</summary>
+        public readonly List<string> Lines = new();
+
+        public IEnumerable<string> LinesOf(string id) =>
+            Lines.Where(l => l.Contains(id + " ", StringComparison.OrdinalIgnoreCase)).Select(l => l.Trim());
         readonly Sequence _none = new() { AbsentBefore = true };
 
         public Sequence Of(string id) => Ids.TryGetValue(id, out var s) ? s : _none;
@@ -273,6 +293,11 @@ internal static class Offline
             lock (Calls) Calls.Add($"{kind} {id}");
             var s = Of(id);
             if (s.Now < 0) s.Begin();
+            if (BeginsWith.TryGetValue(id, out var others))
+                foreach (var o in others)
+                    if (Of(o).Now < 0) Of(o).Begin();
+            if (Throws.Contains(id)) throw new InvalidOperationException("the removal call of " + id + " threw");
+            if (CallMs.TryGetValue(id, out int ms)) while (s.Now < ms) Thread.Sleep(1);
             return true;
         }
 
@@ -308,18 +333,26 @@ internal static class Offline
         public void Dispose() { }
     }
 
+    /// <summary>Locates and REMOVED registrations answered by the tree, and
+    /// the stand-in lock.</summary>
+    static void Hook(Tree tree)
+    {
+        DeviceManager.LocateHook = (id, flags) => tree.Of(id).Locate(id, flags);
+        DeviceManager.RemovedHook = tree.Register;
+        DeviceManager.PnpLockHook = () => new StandInLock();
+    }
+
     /// <summary>DeviceManager.RemoveDevice on <paramref name="parentId"/>
     /// through the hooks, so the removal runs in RemoveDeviceLocked's own
     /// order. Returns its answer, when it returned from the call, and what
     /// it added to the counts S77 reads.</summary>
-    static (bool Removed, long Ms, long On, long Without, long NotGone) RunRemoval(Tree tree, string parentId,
+    static (bool Removed, long Ms, long On, long WithParent, long Without, long NotGone) RunRemoval(Tree tree, string parentId,
         bool fast = false, int timeoutMs = 5000)
     {
-        long on0 = DeviceManager.RemovalsOnNotification, without0 = DeviceManager.RemovalsWithoutNotification,
-             notGone0 = DeviceManager.RemovalsNotGone;
-        DeviceManager.LocateHook = (id, flags) => tree.Of(id).Locate(id, flags);
-        DeviceManager.RemovedHook = tree.Register;
-        DeviceManager.PnpLockHook = () => new StandInLock();
+        long on0 = DeviceManager.RemovalsOnNotification, with0 = DeviceManager.RemovalsWithParent,
+             without0 = DeviceManager.RemovalsWithoutNotification, notGone0 = DeviceManager.RemovalsNotGone;
+        Hook(tree);
+        DeviceOrchestrator.DiagTap = line => { lock (tree.Lines) tree.Lines.Add(line); };
         DeviceManager.RemovalCallsHook = new DeviceManager.RemovalCalls
         {
             Children = id => tree.ChildrenOf.TryGetValue(id, out var c) ? c : Array.Empty<string>(),
@@ -333,13 +366,14 @@ internal static class Offline
             var clock = Stopwatch.StartNew();
             bool removed = DeviceManager.RemoveDevice(parentId, timeoutMs, fast);
             return (removed, clock.ElapsedMilliseconds,
-                    DeviceManager.RemovalsOnNotification - on0, DeviceManager.RemovalsWithoutNotification - without0,
-                    DeviceManager.RemovalsNotGone - notGone0);
+                    DeviceManager.RemovalsOnNotification - on0, DeviceManager.RemovalsWithParent - with0,
+                    DeviceManager.RemovalsWithoutNotification - without0, DeviceManager.RemovalsNotGone - notGone0);
         }
         finally
         {
             foreach (var s in tree.Ids.Values) s.End();
             DeviceManager.RemovalCallsHook = null;
+            DeviceOrchestrator.DiagTap = null;
         }
     }
 
@@ -1334,14 +1368,253 @@ internal static class Offline
         Check("RemoveDevice through the hooks: the child's removal call, then the parent's, each once, no fallback, removed",
               pair.Removed && pairTree.Calls.SequenceEqual(new[] { $"remove {ChildId}", $"remove {Id}" }) && pairTree.Fallbacks == 0,
               $"{string.Join(", ", pairTree.Calls)}, {pairTree.Fallbacks} fallback run(s), {pair.Ms} ms");
-        Check("RemoveDevice through the hooks: one REMOVED registration open at a time, one for each devnode",
-              pairTree.MostOpen == 1 && pairTree.Ids[Id].Registrations == 1 && pairTree.Ids[ChildId].Registrations == 1,
+        Check("RemoveDevice through the hooks: one REMOVED registration open at a time, the parent's, the child opening none",
+              pairTree.MostOpen == 1 && pairTree.Ids[Id].Registrations == 1 && pairTree.Ids[ChildId].Registrations == 0,
               $"at most {pairTree.MostOpen} open, parent {pairTree.Ids[Id].Registrations}, child {pairTree.Ids[ChildId].Registrations}");
         var fastTree = Pair();
         var fastPair = RunRemoval(fastTree, Id, fast: true);
         Check("fast RemoveDevice through the hooks: the child uninstalled, then the parent, one REMOVED registration open at a time",
               fastPair.Removed && fastTree.Calls.SequenceEqual(new[] { $"uninstall {ChildId}", $"uninstall {Id}" }) && fastTree.MostOpen == 1,
               $"{string.Join(", ", fastTree.Calls)}, at most {fastTree.MostOpen} open, {fastPair.Ms} ms");
+
+        // A HID child removed while its parent runs, through RemoveDevice.
+        // The recorded shape of the Windows Sandbox runs of 2026-10-16: the
+        // child leaves the tree and its record goes at its call, its own
+        // REMOVED does not come, and the parent's REMOVED comes 12 ms after
+        // the parent's call. Before, the child's test waited its own 2 s
+        // bound first.
+        const string Kid2 = @"HID\PNP_NOTIFY_CHECK_OFFLINE\1&7e57&0&0001";
+        const string SwdId = @"SWD\HIDMAESTRO\PNP_NOTIFY_CHECK_OFFLINE";
+        Sequence KidGone() => new() { LeavesTree = 0, RecordGoneAt = 0, RemovedAt = null };
+        Sequence ParentAt(long at) => new() { LeavesTree = at, RemovedAt = at, RecordGoneAt = at };
+        Sequence Stays() => new() { LeavesTree = null, RemovedAt = null, RecordGoneAt = null };
+        Tree Shape(Sequence child, Sequence? parent = null, string parentId = Id, Sequence? child2 = null)
+        {
+            var t = new Tree();
+            t.Ids[parentId] = parent ?? ParentAt(12);
+            t.Ids[ChildId] = child;
+            if (child2 != null) t.Ids[Kid2] = child2;
+            t.ChildrenOf[parentId] = child2 == null ? new[] { ChildId } : new[] { ChildId, Kid2 };
+            return t;
+        }
+        const string OnParent = "left with its parent's subtree, on the parent's REMOVED notification";
+        bool Says(Tree t, string id, string text) => t.LinesOf(id).SequenceEqual(new[] { $"{id} {text}" });
+        // A software parent's survivor held once gone: its one line, the
+        // text, then how long it was held.
+        long HeldMs(Tree t, string id, string text)
+        {
+            var lines = t.LinesOf(id).ToList();
+            var m = lines.Count == 1 ? System.Text.RegularExpressions.Regex.Match(lines[0],
+                        "^" + System.Text.RegularExpressions.Regex.Escape($"{id} {text}") + @", held (\d+) ms under the lock after it left$") : null;
+            return m is { Success: true } ? long.Parse(m.Groups[1].Value) : -1;
+        }
+        string LinesText(Tree t) => string.Join(" | ", t.Lines.Select(l => l.Trim()));
+
+        var sh1 = Shape(KidGone());
+        var r1 = RunRemoval(sh1, Id);
+        Check("subtree: the child gone at its call with no REMOVED, the parent's REMOVED at +12 -> RemoveDevice returns at about 12 ms, the child on the parent's notification",
+              r1.Removed && Within(r1.Ms, 12) && r1.Ms < RemovedBoundMs / 4 && r1.On == 1 && r1.WithParent == 1 && r1.Without == 0 && r1.NotGone == 0
+              && Says(sh1, ChildId, OnParent),
+              $"{r1.Ms} ms, {r1.On} on the notification, {r1.WithParent} on the parent's, {r1.Without} without, {r1.NotGone} not gone, {LinesText(sh1)}");
+        Check("subtree: one REMOVED registration open at a time, the parent's, opened before the child's call: the child opens none",
+              sh1.MostOpen == 1 && sh1.Open == 0 && sh1.Ids[Id].Registrations == 1 && sh1.Ids[ChildId].Registrations == 0,
+              $"at most {sh1.MostOpen} open, {sh1.Open} left, parent {sh1.Ids[Id].Registrations}, child {sh1.Ids[ChildId].Registrations}");
+
+        // The guarantee the 0x139 investigation needs, on the child's own
+        // rule: the parent's notification does not end a child whose record
+        // an uninstall should delete. RemoveDevice, and the PnP lock it
+        // holds, waits for it.
+        var r2 = RunRemoval(Shape(new Sequence { LeavesTree = 0, RecordGoneAt = 300, RemovedAt = null }), Id);
+        Check("subtree: the child's record gone at 300, the parent's REMOVED at +12 -> RemoveDevice returns at 300, not before, the child on the parent's notification",
+              Within(r2.Ms, 300) && r2.WithParent == 1 && r2.Without == 0, $"{r2.Ms} ms, {r2.WithParent} on the parent's, {r2.Without} without");
+
+        // A child the locates still find after the parent's REMOVED keeps its
+        // 2 s budget and ends not gone, and its line says where it is.
+        var sh3 = Shape(Stays());
+        var r3 = RunRemoval(sh3, Id);
+        Check("subtree: the child still in the tree after the parent's REMOVED -> not gone when its 2 s budget ends, its line saying so",
+              r3.NotGone == 1 && r3.WithParent == 0 && Within(r3.Ms, 12 + DeviceManager.QuickRemovalMs)
+              && Says(sh3, ChildId, "not gone after its parent's removal: still in the tree"),
+              $"{r3.Ms} ms, {r3.NotGone} not gone, {LinesText(sh3)}");
+        var sh3b = Shape(new Sequence { LeavesTree = 0, RecordGoneAt = null, RemovedAt = null });
+        var r3b = RunRemoval(sh3b, Id);
+        Check("subtree: the child out of the tree with its record left after the parent's REMOVED -> not gone, its line saying so",
+              r3b.NotGone == 1 && Says(sh3b, ChildId, "not gone after its parent's removal: out of the tree, its record left"),
+              $"{r3b.Ms} ms, {r3b.NotGone} not gone, {LinesText(sh3b)}");
+
+        // No proof from the parent: its own bound runs out, and the child is
+        // gone without a notification at once, with no second bound.
+        var sh4 = Shape(KidGone(), new Sequence { LeavesTree = 12, RecordGoneAt = 12, RemovedAt = null });
+        var r4 = RunRemoval(sh4, Id);
+        Check("subtree: the parent's REMOVED never comes -> both gone without one when the parent's 2 s bound ends, at about 2,012 ms, not 4 s",
+              Within(r4.Ms, 12 + RemovedBoundMs) && r4.Without == 2 && r4.WithParent == 0
+              && Says(sh4, ChildId, "left the tree, with no REMOVED notification for its parent"),
+              $"{r4.Ms} ms, {r4.Without} without, {r4.WithParent} on the parent's, {LinesText(sh4)}");
+
+        // A parent that does not leave proves nothing, and its children's
+        // lines say so.
+        var sh4b = Shape(KidGone(), Stays());
+        var r4b = RunRemoval(sh4b, Id, timeoutMs: 300);
+        Check("subtree: the parent not gone after its 300 ms and the fallbacks' test -> the child gone without a notification and held for nothing, RemoveDevice returning within 300 ms and the fallbacks' 2 s, its line naming the parent not gone",
+              !r4b.Removed && r4b.Without == 1 && r4b.WithParent == 0 && Says(sh4b, ChildId, "left the tree, its parent not gone")
+              && r4b.Ms < 300 + DeviceManager.QuickRemovalMs + RemovedBoundMs / 4,
+              $"{r4b.Ms} ms, removed {r4b.Removed}, {r4b.Without} without, {LinesText(sh4b)}");
+
+        // The child's own notification is not watched: it has no
+        // registration while the parent's is open.
+        var sh5 = Shape(new Sequence { LeavesTree = 0, RecordGoneAt = 0, RemovedAt = 5 });
+        sh5.CallMs[ChildId] = 40;
+        var r5 = RunRemoval(sh5, Id);
+        Check("subtree: the child's own REMOVED at 5, during its 40 ms call -> not watched, the child on the parent's notification",
+              r5.WithParent == 1 && r5.On == 1 && sh5.MostOpen == 1 && sh5.Ids[ChildId].Registrations == 0,
+              $"{r5.Ms} ms, {r5.On} on the notification, {r5.WithParent} on the parent's, at most {sh5.MostOpen} open");
+
+        // The parent leaves from outside after the first child's call and
+        // before its own: its watch, open since before the first child's
+        // call, sees it, and both children are proven by it.
+        var sh6 = Shape(KidGone(), new Sequence { LeavesTree = 30, RemovedAt = 30, RecordGoneAt = 30 }, child2: KidGone());
+        sh6.BeginsWith[ChildId] = new[] { Id };
+        sh6.CallMs[Kid2] = 60;
+        var r6 = RunRemoval(sh6, Id);
+        Check("subtree: the parent leaving from outside at 30 ms, after the first child's call and before its own -> both children on its REMOVED, no proof lost",
+              r6.WithParent == 2 && r6.Without == 0 && Says(sh6, ChildId, OnParent) && Says(sh6, Kid2, OnParent) && sh6.MostOpen == 1,
+              $"{r6.Ms} ms, {r6.WithParent} on the parent's, {r6.Without} without, at most {sh6.MostOpen} open, {LinesText(sh6)}");
+
+        // A child out of the tree at its call: its record decides.
+        var sh7 = Shape(new Sequence { OutOfTreeBefore = true, RecordGoneAt = 0 });
+        var r7 = RunRemoval(sh7, Id);
+        Check("subtree: a child out of the tree at its call -> its record decides, and its line says so",
+              r7.Removed && Says(sh7, ChildId, "was out of the tree at its removal call, its record decided: Removed"),
+              $"{r7.Ms} ms, {LinesText(sh7)}");
+
+        // The fast path takes the same order.
+        var sh8 = Shape(KidGone());
+        var r8 = RunRemoval(sh8, Id, fast: true);
+        Check("subtree, fast: the child uninstalled, then the parent, the child on the parent's notification, one registration open at a time",
+              r8.WithParent == 1 && r8.Without == 0 && sh8.MostOpen == 1 && sh8.Calls.SequenceEqual(new[] { $"uninstall {ChildId}", $"uninstall {Id}" }),
+              $"{string.Join(", ", sh8.Calls)}, {r8.Ms} ms, {r8.WithParent} on the parent's, at most {sh8.MostOpen} open");
+
+        // Software parents. The close's watch stays open through the
+        // children, normal or fast, so a survivor opens no registration of
+        // its own while the close's cascade may still be removing it. A
+        // close that removed the parent proves nothing for children called
+        // after it. A survivor in the tree at its call and not proven is
+        // held under the lock for the REMOVED bound once gone, with no
+        // registration, as its own test held it for its own notification
+        // before: the parent's notification on the one registration open
+        // ends the hold. One registration open at a time on every path, none
+        // left open.
+        Sequence KidSeen() => new() { LeavesTree = 0, RecordGoneAt = 0, RemovedAt = 20 };
+        var sw1 = Shape(KidSeen(), ParentAt(20), SwdId, KidSeen());
+        var q1 = RunRemoval(sw1, SwdId);
+        var sw2 = Shape(KidGone(), Stays(), SwdId, KidGone());
+        var q2 = RunRemoval(sw2, SwdId, timeoutMs: 300);
+        var sw3 = Shape(KidSeen(), ParentAt(20), SwdId, KidSeen());
+        var q3 = RunRemoval(sw3, SwdId, fast: true);
+        var sw4 = Shape(KidGone(), ParentAt(500), SwdId, KidGone());
+        var q4 = RunRemoval(sw4, SwdId, fast: true, timeoutMs: 300);
+        var swTrees = new[] { sw1, sw2, sw3, sw4 };
+        Check("software parents: closed at 20 ms, normal and fast, and not gone at 300 ms, normal and fast -> one registration open at a time, the close's, the children opening none, none left open",
+              swTrees.All(t => t.MostOpen == 1 && t.Open == 0 && t.Ids[ChildId].Registrations == 0 && t.Ids[Kid2].Registrations == 0),
+              string.Join(" | ", swTrees.Select(t => $"most {t.MostOpen}, left {t.Open}, children {t.Ids[ChildId].Registrations} and {t.Ids[Kid2].Registrations}")));
+        const string BeforeCall = "left the tree, but its parent's REMOVED notification came before its removal call";
+        bool HeldBound(Tree t, string id, string text) => HeldMs(t, id, text) >= RemovedBoundMs - TimerSlack;
+        Check("software parent closed at 20 ms, normal and fast, two survivors in the tree at their calls -> each held under the lock for the REMOVED bound once gone, with no registration, then gone without one, about 4 s, each line naming the hold",
+              q1.Without == 2 && q3.Without == 2 && Within(q1.Ms, 20 + 2 * RemovedBoundMs) && Within(q3.Ms, 20 + 2 * RemovedBoundMs)
+              && HeldBound(sw1, ChildId, BeforeCall) && HeldBound(sw1, Kid2, BeforeCall)
+              && HeldBound(sw3, ChildId, BeforeCall) && HeldBound(sw3, Kid2, BeforeCall),
+              $"{q1.Ms} ms and {q3.Ms} ms, {q1.Without} and {q3.Without} without, {LinesText(sw1)}");
+        // The same survivors with their own REMOVED 1,500 ms after their
+        // calls: not heard, so the hold is the bound whenever it comes.
+        Sequence KidLate() => new() { LeavesTree = 0, RecordGoneAt = 0, RemovedAt = 1500 };
+        var sw1b = Shape(KidLate(), ParentAt(20), SwdId, KidLate());
+        var q1b = RunRemoval(sw1b, SwdId);
+        Check("software parent closed at 20 ms, survivors whose own REMOVED comes 1,500 ms after their calls -> each held the REMOVED bound, not its own notification, which no registration hears",
+              q1b.Without == 2 && Within(q1b.Ms, 20 + 2 * RemovedBoundMs) && sw1b.Ids[ChildId].Registrations == 0 && sw1b.MostOpen == 1
+              && HeldBound(sw1b, Kid2, BeforeCall),
+              $"{q1b.Ms} ms, {q1b.Without} without, child registrations {sw1b.Ids[ChildId].Registrations}, at most {sw1b.MostOpen} open, {LinesText(sw1b)}");
+        // The sandbox's shape (S77 at e79fac3, 2026-10-17): the close's cascade
+        // took the child out of the tree before its call and left its record.
+        // Its record decides, and nothing is held.
+        var swOut = Shape(new Sequence { OutOfTreeBefore = true, RecordGoneAt = 0 }, ParentAt(20), SwdId);
+        var qOut = RunRemoval(swOut, SwdId);
+        Check("software parent closed at 20 ms, its child out of the tree at its call with its record left -> its record decides at once, nothing held",
+              qOut.Ms < RemovedBoundMs / 4 && qOut.Without == 0 && Says(swOut, ChildId, "was out of the tree at its removal call, its record decided: Removed"),
+              $"{qOut.Ms} ms, {qOut.Without} without, {LinesText(swOut)}");
+        Check("software parent, normal, close not gone at 300 ms -> each survivor held its 2 s for the parent's REMOVED, as each child's own test held it before, then gone without one",
+              Within(q2.Ms, 300 + 2 * RemovedBoundMs) && q2.Without == 2 && q2.WithParent == 0
+              && sw2.Calls.SequenceEqual(new[] { $"close {SwdId}", $"remove {ChildId}", $"remove {Kid2}" })
+              && HeldBound(sw2, ChildId, "left the tree, its parent not gone"),
+              $"{string.Join(", ", sw2.Calls)}, {q2.Ms} ms, {q2.Without} without, {q2.WithParent} on the parent's, {LinesText(sw2)}");
+        var sw2b = Shape(KidGone(), new Sequence { LeavesTree = 1000, RemovedAt = 1000, RecordGoneAt = null }, SwdId, KidGone());
+        var q2b = RunRemoval(sw2b, SwdId, timeoutMs: 300);
+        Check("software parent, normal, close not gone at 300 ms, its cascade done at 1,000 ms -> both survivors on its REMOVED, at about 1,000 ms",
+              q2b.WithParent == 2 && q2b.Without == 0 && Within(q2b.Ms, 1000) && Says(sw2b, Kid2, OnParent),
+              $"{q2b.Ms} ms, {q2b.WithParent} on the parent's, {q2b.Without} without, {LinesText(sw2b)}");
+        Check("software parent, fast, close not gone at 300 ms, gone at 500 ms after its uninstall -> both children on its REMOVED",
+              q4.WithParent == 2 && q4.Without == 0 && Says(sw4, ChildId, OnParent) && Says(sw4, Kid2, OnParent),
+              $"{q4.Ms} ms, {q4.WithParent} on the parent's, {LinesText(sw4)}");
+
+        // A software parent's REMOVED during its fast close, which then
+        // stays until its uninstall: that notification came before the
+        // children's calls and proves nothing for them. When the parent then
+        // leaves with a second REMOVED, the latest one proves them.
+        var sw5 = Shape(KidGone(), new Sequence { LeavesTree = 600, RecordGoneAt = 600, RemovedAt = 100 }, SwdId, KidGone());
+        var q5 = RunRemoval(sw5, SwdId, fast: true, timeoutMs: 300);
+        Check("software parent, fast: its REMOVED at 100 ms during the close, gone at 600 -> the children held the bound each, then gone without one, their lines naming a REMOVED before their call",
+              q5.WithParent == 0 && q5.Without == 2 && Within(q5.Ms, 600 + 2 * RemovedBoundMs)
+              && HeldBound(sw5, ChildId, BeforeCall),
+              $"{q5.Ms} ms, {q5.WithParent} on the parent's, {q5.Without} without, {LinesText(sw5)}");
+        var sw6 = Shape(KidGone(), new Sequence { LeavesTree = 600, RecordGoneAt = 600, RemovedAt = 100, RemovedAgainAt = 600 }, SwdId, KidGone());
+        var q6 = RunRemoval(sw6, SwdId, fast: true, timeoutMs: 300);
+        Check("software parent, fast: REMOVED at 100 ms during the close, and again at 600 as it leaves -> both children on the latest",
+              q6.WithParent == 2 && q6.Without == 0 && Says(sw6, ChildId, OnParent),
+              $"{q6.Ms} ms, {q6.WithParent} on the parent's, {q6.Without} without, {LinesText(sw6)}");
+
+        // A close whose registration Windows refused leaves no watch to
+        // keep: each survivor registers its own at its call while the
+        // cascade may still run, one at a time, as before the subtree test.
+        var swRf = Shape(KidSeen(), new Sequence { LeavesTree = 20, RemovedAt = 20, RecordGoneAt = null, RefuseRegistration = true }, SwdId, KidSeen());
+        var qRf = RunRemoval(swRf, SwdId);
+        Check("software parent whose close's registration Windows refuses -> each survivor on its own registration at its call, one open at a time, none left open",
+              swRf.Ids[ChildId].Registrations == 1 && swRf.Ids[Kid2].Registrations == 1 && swRf.MostOpen == 1 && swRf.Open == 0
+              && qRf.WithParent == 0 && qRf.On == 2,
+              $"children {swRf.Ids[ChildId].Registrations} and {swRf.Ids[Kid2].Registrations}, at most {swRf.MostOpen} open, {swRf.Open} left, {qRf.On} on their own, {qRf.WithParent} on the parent's, {qRf.Ms} ms");
+
+        // A parent whose registration Windows refused has no watch to prove
+        // anything: its children are removed directly, each on its own.
+        var rf = Shape(KidSeen(), new Sequence { LeavesTree = 12, RemovedAt = 12, RecordGoneAt = 12, RefuseRegistration = true }, child2: KidSeen());
+        var qrf = RunRemoval(rf, Id);
+        Check("a parent whose registration is refused -> its children tested at their call, each on its own registration, one open at a time",
+              rf.Ids[ChildId].Registrations == 1 && rf.Ids[Kid2].Registrations == 1 && rf.MostOpen == 1 && qrf.On == 2 && qrf.WithParent == 0,
+              $"children {rf.Ids[ChildId].Registrations} and {rf.Ids[Kid2].Registrations}, at most {rf.MostOpen} open, {qrf.On} on their own, {qrf.WithParent} on the parent's");
+        // A removal call that throws closes the child's watch and its
+        // registration, deferred or tested at its call.
+        int ThrowsAndLeaves(Tree t, string parentId)
+        {
+            try { RunRemoval(t, parentId); }
+            catch (InvalidOperationException) { }
+            return t.Open;
+        }
+        var th1 = Shape(KidGone());
+        th1.Throws.Add(ChildId);
+        var th2 = Shape(KidGone(), new Sequence { LeavesTree = 12, RemovedAt = 12, RecordGoneAt = 12, RefuseRegistration = true });
+        th2.Throws.Add(ChildId);
+        int left1 = ThrowsAndLeaves(th1, Id), left2 = ThrowsAndLeaves(th2, Id);
+        Check("a child's removal call that throws, with the parent's watch open and with none (its registration refused) -> no registration left open",
+              left1 == 0 && left2 == 0 && th2.Ids[ChildId].Registrations == 1,
+              $"left {left1} and {left2}, the direct child registered {th2.Ids[ChildId].Registrations} time(s)");
+
+        // The replayed cost of the recorded shape, ten runs, from the call
+        // of RemoveDevice to its return. A replay of made-up times, no
+        // device: it shows the child's 2 s bound gone from this path.
+        var costs = new List<long>();
+        for (int i = 0; i < 10; i++)
+            costs.Add(RunRemoval(Shape(KidGone()), Id).Ms);
+        costs.Sort();
+        long p50 = costs[costs.Count / 2], p95 = costs[(int)Math.Ceiling(costs.Count * 0.95) - 1];
+        Check("subtree, replayed cost of the recorded shape, 10 runs: p95 under 200 ms",
+              p95 < 200, $"p50 {p50} ms, p95 {p95} ms, max {costs[^1]} ms");
 
         // WaitRemovalComplete, the sweeps' and the exit's one test, keeps its
         // budget whole, the notification's bound inside it, and with 0 looks
