@@ -137,7 +137,9 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
     {
         _stop = true;
         Wake();
-        if (_thread.ThreadState == System.Threading.ThreadState.Unstarted) Close();
+        // ThreadState is a set of flags, and the clock's thread is a
+        // background thread, so an unstarted one reads Unstarted | Background.
+        if ((_thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0) Close();
         else if (Thread.CurrentThread != _thread)
             try { _thread.Join(joinMs); } catch (ThreadStateException) { }
     }
