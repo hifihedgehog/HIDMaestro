@@ -202,8 +202,8 @@ internal static class Program
         {
             ExplainSession.Changes = changes;
             ExplainSession.Lane = lane;
-            ExplainRules.Active = ExplainRules.From(changes, lane);
-            Console.WriteLine($"  explain: lane {lane}, rules {ExplainRules.Active}");
+            ExplainRules.For(changes, lane);
+            Console.WriteLine($"  explain: lane {lane}, rules {ExplainRules.Active}, the base's {ExplainRules.Base}");
         }
         // What the replay gave for each stream, and for each that differs
         // from its golden file, for --write-changes.

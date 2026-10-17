@@ -181,7 +181,7 @@ internal static class SelfTest
         ExplainSession.Changes = changes;
         ExplainSession.Lane = lane;
         ExplainSession.Golden = new Dictionary<string, (long, string)> { ["s"] = Pin(golden) };
-        ExplainRules.Active = ExplainRules.From(changes, lane);
+        ExplainRules.For(changes, lane);
         GoldenCase.ExplainDir = dumps;
         ExplainSession.Earlier = s_earlier;
         try
@@ -198,7 +198,7 @@ internal static class SelfTest
         {
             GoldenCase.ExplainDir = null;
             ExplainSession.Earlier = false;
-            ExplainRules.Active = new ExplainRules();
+            ExplainRules.Clear();
         }
     }
 

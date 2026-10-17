@@ -103,7 +103,55 @@ internal sealed class ExplainRules
 
     public bool Any => Round || Imu || Rest || Nan != null || Centers.Count > 0 || Stamps.Count > 0;
 
+    /// <summary>The rules the lane states.</summary>
     public static ExplainRules Active { get; set; } = new();
+
+    /// <summary>The base's arithmetic: the rules of every lane before this
+    /// one, in the list's lane order, each later lane's over the earlier's.
+    /// A field's base bytes are checked against these.</summary>
+    public static ExplainRules Base { get; set; } = new();
+
+    /// <summary>The tree's arithmetic: the base's with the lane's rules
+    /// over them.</summary>
+    public static ExplainRules Now { get; set; } = new();
+
+    /// <summary><paramref name="over"/>'s rules on top of
+    /// <paramref name="under"/>'s.</summary>
+    public static ExplainRules Merge(ExplainRules under, ExplainRules over)
+    {
+        var r = new ExplainRules
+        {
+            Round = under.Round || over.Round,
+            Imu = under.Imu || over.Imu,
+            Rest = under.Rest || over.Rest,
+            Nan = over.Nan ?? under.Nan,
+        };
+        foreach (var (k, v) in under.Centers) r.Centers[k] = v;
+        foreach (var (k, v) in over.Centers) r.Centers[k] = v;
+        foreach (var (k, v) in under.Stamps) r.Stamps[k] = v;
+        foreach (var (k, v) in over.Stamps) r.Stamps[k] = v;
+        return r;
+    }
+
+    /// <summary>Sets the three rule sets for <paramref name="lane"/>.</summary>
+    public static void For(ChangeList list, string lane)
+    {
+        var before = new ExplainRules();
+        int order = list.LaneOrder(lane);
+        foreach (var earlier in list.Lanes.Where(l => l != lane && list.LaneOrder(l) < order))
+            before = Merge(before, From(list, earlier));
+        Active = From(list, lane);
+        Base = before;
+        Now = Merge(before, Active);
+    }
+
+    /// <summary>Back to no rules.</summary>
+    public static void Clear()
+    {
+        Active = new ExplainRules();
+        Base = new ExplainRules();
+        Now = new ExplainRules();
+    }
 
     public override string ToString()
     {
@@ -538,12 +586,13 @@ internal static class Arith
         throw new InvalidOperationException($"No 10-bit g decodes to {t}.");
     }
 
-    /// <summary>One linear site under the lane's rules: decision (a) on
-    /// [min, max] for a number, the nan rule for NaN, and
-    /// <paramref name="old"/> where no rule applies.</summary>
-    public static long Site(double v, long min, long max, bool invert, double rest, long old, out string? cat)
+    /// <summary>One linear site under a rule set: decision (a) on [min,
+    /// max] for a number, the nan rule for NaN, and <paramref name="old"/>,
+    /// master's arithmetic, where no rule applies. Called with the base's
+    /// rules for the value the base must hold, and with the tree's for the
+    /// value it must give.</summary>
+    public static long Site(ExplainRules r, double v, long min, long max, bool invert, double rest, long old, out string? cat)
     {
-        var r = ExplainRules.Active;
         if (double.IsNaN(v))
         {
             cat = "nan";
@@ -559,18 +608,16 @@ internal static class Arith
     }
 
     /// <summary>A calibrated motion value under the lane's rules.</summary>
-    public static short Motion(float v, double n, double d, short old, out string? cat)
+    public static short Motion(ExplainRules r, float v, double n, double d, short old, out string? cat)
     {
-        var r = ExplainRules.Active;
         if (float.IsNaN(v)) { cat = "nan"; return r.Nan != null ? (short)0 : old; }
         cat = "imu";
         return r.Imu ? Scaled(v, n, d) : old;
     }
 
     /// <summary>An 8-bit trigger's digital bit under the lane's rules.</summary>
-    public static bool Digital(double v, bool old, out string? cat)
+    public static bool Digital(ExplainRules r, double v, bool old, out string? cat)
     {
-        var r = ExplainRules.Active;
         cat = "digital";
         if (double.IsNaN(v)) return r.Nan != null ? false : old;
         return r.Round ? Linear(v, 0, 255, false) > 0 : old;
@@ -739,6 +786,10 @@ internal sealed class ScriptedClock
 /// an advance of 2^31 or more one nominal interval. A stamp of 0 after the
 /// switch adds the clock's time and moves the last stamp on by as much (the
 /// lane's statement, 3aaacb2).</summary>
+/// <summary>The accumulator under the base's stamp rule and under the
+/// tree's.</summary>
+internal readonly record struct StampAcc(ulong Base, ulong Now);
+
 internal sealed class Accumulator
 {
     bool _started, _consumer;
@@ -787,7 +838,7 @@ internal sealed class DescriptorPart
 {
     readonly HidReportBuilder _b;
     readonly HashSet<HMAxis> _sticks;
-    readonly Dictionary<HMAxis, int>? _centers;
+    readonly Dictionary<HMAxis, int>? _centersBase, _centersNow;
     readonly HashSet<int> _overlay = new();
     readonly HMAxis _canonLt, _canonRt;
     readonly List<(HMAxis Key, HidReportBuilder.InputField Field)> _axes;
@@ -798,7 +849,8 @@ internal sealed class DescriptorPart
         // The tree's sticks, read by name: absent at the base.
         _sticks = b.GetType().GetField("_stickAxes", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(b) is IEnumerable<HMAxis> s
             ? new HashSet<HMAxis>(s) : new HashSet<HMAxis>();
-        ExplainRules.Active.Centers.TryGetValue(p.Id, out _centers);
+        ExplainRules.Base.Centers.TryGetValue(p.Id, out _centersBase);
+        ExplainRules.Now.Centers.TryGetValue(p.Id, out _centersNow);
         if (p.InputDefaults != null) foreach (var d in p.InputDefaults) _overlay.Add(d.Byte);
         _canonLt = HMController.ResolveCanonicalAxis(b.AxisMap, "lefttrigger", HMAxis.Z);
         _canonRt = HMController.ResolveCanonicalAxis(b.AxisMap, "righttrigger", HMAxis.Rz);
@@ -812,22 +864,17 @@ internal sealed class DescriptorPart
     /// otherwise.</summary>
     public void Expect(byte[] before, byte[] expected, int idOffset, in HMGamepadState s, Tally t)
     {
-        var r = ExplainRules.Active;
         var axes = s.Axes;
-        // Each field's final write: its input at the base, the input the
-        // rules give it, whether it rests by the rest rule, its rest value,
-        // and whether it is a trigger the combined-Z synthesis writes.
-        var plan = new Dictionary<HidReportBuilder.InputField, (HMAxis Key, double Base, double Now, bool Rested, double RestV, bool Synth)>(ReferenceEqualityComparer.Instance);
+        // Each field's final write: its key, whether the state wrote it and
+        // with what, its unsigned default, whether it is a stick, and for a
+        // field the combined-Z synthesis writes, which one.
+        var plan = new Dictionary<HidReportBuilder.InputField, (HMAxis Key, bool Written, double Raw, double Def, bool Stick, Synth Synth)>(ReferenceEqualityComparer.Instance);
+        double lt = 0, rt = 0;
         foreach (var (key, f) in _axes)
         {
             float raw = 0f;
             bool written = axes != null && axes.TryGetValue(key, out raw);
-            double def = f.LogicalMin < 0 ? 0.5 : 0.0;
-            double vBase = written ? Math.Clamp(raw, 0f, 1f) : def;
-            bool stick = _sticks.Contains(key);
-            double rest = r.Rest && stick ? 0.5 : def;
-            bool rested = !written && r.Rest && stick && def != 0.5;
-            plan[f] = (key, vBase, rested ? 0.5 : vBase, rested, rest, false);
+            plan[f] = (key, written, written ? Math.Clamp(raw, 0f, 1f) : 0, f.LogicalMin < 0 ? 0.5 : 0.0, _sticks.Contains(key), Synth.None);
         }
         if (_b.CombinedTrigger != null && _b.LeftTrigger != null && _b.RightTrigger != null)
         {
@@ -842,17 +889,11 @@ internal sealed class DescriptorPart
                 }
                 return 0.0;
             }
-            double lt = Trigger(_canonLt, lk), rt = Trigger(_canonRt, rk);
-            double combined = Math.Clamp(0.5 + (rt - lt) * 0.5, 0.0, 1.0);
-            // Under rule nan to=rest a NaN trigger is at its rest, 0, before
-            // the combined axis is formed from the two, so the combined axis
-            // carries the other trigger.
-            double ltNow = r.Nan == "rest" && double.IsNaN(lt) ? 0.0 : lt;
-            double rtNow = r.Nan == "rest" && double.IsNaN(rt) ? 0.0 : rt;
-            double combinedNow = Math.Clamp(0.5 + (rtNow - ltNow) * 0.5, 0.0, 1.0);
-            plan[_b.CombinedTrigger] = (HMAxis.Z, combined, combinedNow, false, 0.5, true);
-            plan[_b.LeftTrigger] = (lk, lt, lt, false, 0.0, true);
-            plan[_b.RightTrigger] = (rk, rt, rt, false, 0.0, true);
+            lt = Trigger(_canonLt, lk);
+            rt = Trigger(_canonRt, rk);
+            plan[_b.CombinedTrigger] = (HMAxis.Z, true, 0, 0.5, false, Synth.Combined);
+            plan[_b.LeftTrigger] = (lk, true, lt, 0.0, false, Synth.Left);
+            plan[_b.RightTrigger] = (rk, true, rt, 0.0, false, Synth.Right);
         }
         foreach (var (f, w) in plan)
         {
@@ -861,39 +902,49 @@ internal sealed class DescriptorPart
             bool overlaid = false;
             for (int k = at >> 3; k <= (at + f.BitSize - 1) >> 3 && !overlaid; k++) overlaid = _overlay.Contains(k);
             if (overlaid) continue;
-            long old = Old.Descriptor(w.Base, f);
-            long now;
-            string? cat;
-            int c = 0;
-            bool centered = !w.Synth && _centers != null && _centers.TryGetValue(w.Key, out c);
-            if (double.IsNaN(w.Now))
+            // The field's input under a rule set: the state's value, an
+            // unwritten stick's rest, or the combined axis of the two
+            // triggers, a NaN trigger at its rest under rule nan to=rest.
+            double Input(ExplainRules r)
             {
-                cat = "nan";
-                now = r.Nan switch
+                if (w.Synth == Synth.Combined)
                 {
-                    "rest" => centered ? Arith.Centered(w.RestV, f.LogicalMin, c, f.LogicalMax, false) : Arith.Linear(w.RestV, f.LogicalMin, f.LogicalMax, false),
-                    "nearest-zero" => Arith.NearestZero(f.LogicalMin, f.LogicalMax),
-                    _ => old,
-                };
+                    double l = r.Nan == "rest" && double.IsNaN(lt) ? 0.0 : lt;
+                    double g = r.Nan == "rest" && double.IsNaN(rt) ? 0.0 : rt;
+                    return Math.Clamp(0.5 + (g - l) * 0.5, 0.0, 1.0);
+                }
+                return w.Written ? w.Raw : r.Rest && w.Stick ? 0.5 : w.Def;
             }
-            else if (centered)
+            double RestOf(ExplainRules r) => w.Synth == Synth.Combined ? 0.5 : w.Synth != Synth.None ? 0.0 : r.Rest && w.Stick ? 0.5 : w.Def;
+            Dictionary<HMAxis, int>? Centers(ExplainRules r) => ReferenceEquals(r, ExplainRules.Base) ? _centersBase : _centersNow;
+            long Value(ExplainRules r, double v)
             {
-                cat = "centered";
-                now = Arith.Centered(w.Now, f.LogicalMin, c, f.LogicalMax, false);
+                int c = 0;
+                bool centered = w.Synth == Synth.None && Centers(r) is { } cs && cs.TryGetValue(w.Key, out c);
+                if (double.IsNaN(v))
+                    return r.Nan switch
+                    {
+                        "rest" => centered ? Arith.Centered(RestOf(r), f.LogicalMin, c, f.LogicalMax, false) : Arith.Linear(RestOf(r), f.LogicalMin, f.LogicalMax, false),
+                        "nearest-zero" => Arith.NearestZero(f.LogicalMin, f.LogicalMax),
+                        _ => Old.Descriptor(v, f),
+                    };
+                if (centered) return Arith.Centered(v, f.LogicalMin, c, f.LogicalMax, false);
+                return r.Round ? Arith.Linear(v, f.LogicalMin, f.LogicalMax, false) : Old.Descriptor(v, f);
             }
-            else
-            {
-                cat = "round";
-                now = r.Round ? Arith.Linear(w.Now, f.LogicalMin, f.LogicalMax, false) : Old.Descriptor(w.Now, f);
-            }
+            double vBase = Input(ExplainRules.Base), vNow = Input(ExplainRules.Now);
+            long old = Value(ExplainRules.Base, vBase);
+            long now = Value(ExplainRules.Now, vNow);
             // A field whose input was NaN counts as nan whatever the rule
             // made of it: the combined axis of a NaN trigger under rule nan
             // to=rest carries the other trigger, a number.
-            if (double.IsNaN(w.Base)) cat = "nan";
-            if (w.Rested) cat = "rest";
-            Bits.Field(before, expected, at, f.BitSize, old, now, cat, t, $"descriptor axis {w.Key}", w.Base);
+            bool nan = w.Synth == Synth.Combined ? double.IsNaN(lt) || double.IsNaN(rt) : double.IsNaN(Input(new ExplainRules()));
+            bool centeredNow = w.Synth == Synth.None && _centersNow != null && _centersNow.ContainsKey(w.Key);
+            string cat = !w.Written && vNow != vBase ? "rest" : nan ? "nan" : centeredNow ? "centered" : "round";
+            Bits.Field(before, expected, at, f.BitSize, old, now, cat, t, $"descriptor axis {w.Key}", vBase);
         }
     }
+
+    enum Synth { None, Combined, Left, Right }
 }
 
 /// <summary>A report the codec encodes from an extendedReport: each
@@ -903,13 +954,17 @@ internal sealed class CodecPart
 {
     readonly VendorBlobProgram _prog;
     readonly ExtendedReportSpec _spec;
-    readonly StampRule? _stamp;
+    readonly StampRule? _stampBase, _stampNow;
 
     public CodecPart(ExtendedReportSpec spec, string profileId, bool stamped)
     {
         _spec = spec;
         _prog = VendorBlobProgram.Get(spec);
-        if (stamped) ExplainRules.Active.Stamps.TryGetValue(profileId, out _stamp);
+        if (stamped)
+        {
+            ExplainRules.Base.Stamps.TryGetValue(profileId, out _stampBase);
+            ExplainRules.Now.Stamps.TryGetValue(profileId, out _stampNow);
+        }
     }
 
     public int Size => _spec.Size;
@@ -918,7 +973,7 @@ internal sealed class CodecPart
     /// fields limited to bytes [lo, hi] when given (a port block's data
     /// bytes).</summary>
     public void Expect(byte[] before, byte[] expected, int at, in HMGamepadState s, float lx, float ly, float rx, float ry,
-                       float lt, float rt, ulong acc, Tally t, int lo = 0, int hi = int.MaxValue)
+                       float lt, float rt, StampAcc acc, Tally t, int lo = 0, int hi = int.MaxValue)
     {
         int size = _spec.Size;
         var fields = _prog.Fields;
@@ -941,11 +996,14 @@ internal sealed class CodecPart
                         VendorBlobProgram.SrcOp.RightStickY => ry,
                         _ => 0.5f,
                     };
-                    long old = Old.U8Axis(v, f.Center, f.Invert);
-                    string? cat;
-                    long now = f.Center == 128
-                        ? Arith.Site(v, 0, 255, f.Invert, 0.5, old, out cat)
-                        : Math.Clamp(Arith.Site(v, f.Center - 127, f.Center + 127, f.Invert, 0.5, old, out cat), 0, 255);
+                    long o = Old.U8Axis(v, f.Center, f.Invert);
+                    int center = f.Center;
+                    bool inv = f.Invert;
+                    long Under(ExplainRules r, out string? c) => center == 128
+                        ? Arith.Site(r, v, 0, 255, inv, 0.5, o, out c)
+                        : Math.Clamp(Arith.Site(r, v, center - 127, center + 127, inv, 0.5, o, out c), 0, 255);
+                    long old = Under(ExplainRules.Base, out _);
+                    long now = Under(ExplainRules.Now, out var cat);
                     Bits.Field(before, expected, bit, 8, old, now, cat, t, "codec uint8-axis", v);
                     break;
                 }
@@ -957,8 +1015,9 @@ internal sealed class CodecPart
                         VendorBlobProgram.SrcOp.RightTrigger => rt,
                         _ => 0f,
                     };
-                    long old = Old.U8Trigger(v);
-                    long now = Arith.Site(v, 0, 255, false, 0.0, old, out var cat);
+                    long o = Old.U8Trigger(v);
+                    long old = Arith.Site(ExplainRules.Base, v, 0, 255, false, 0.0, o, out _);
+                    long now = Arith.Site(ExplainRules.Now, v, 0, 255, false, 0.0, o, out var cat);
                     Bits.Field(before, expected, bit, 8, old, now, cat, t, "codec uint8-trigger", v);
                     break;
                 }
@@ -966,9 +1025,10 @@ internal sealed class CodecPart
                 {
                     bool right = f.Source == VendorBlobProgram.SrcOp.RightStick;
                     float vx = right ? rx : lx, vy = right ? ry : ly;
-                    long ox = Old.Stick12(vx), oy = Old.Stick12(vy);
-                    long nx = Arith.Site(vx, 0, 4095, false, 0.5, ox, out var cx);
-                    long ny = Arith.Site(vy, 0, 4095, false, 0.5, oy, out var cy);
+                    long ox = Arith.Site(ExplainRules.Base, vx, 0, 4095, false, 0.5, Old.Stick12(vx), out _);
+                    long oy = Arith.Site(ExplainRules.Base, vy, 0, 4095, false, 0.5, Old.Stick12(vy), out _);
+                    long nx = Arith.Site(ExplainRules.Now, vx, 0, 4095, false, 0.5, Old.Stick12(vx), out var cx);
+                    long ny = Arith.Site(ExplainRules.Now, vy, 0, 4095, false, 0.5, Old.Stick12(vy), out var cy);
                     Bits.Field(before, expected, bit, 12, ox, nx, cx, t, "codec stick12-pair x", vx);
                     Bits.Field(before, expected, bit + 12, 12, oy, ny, cy, t, "codec stick12-pair y", vy);
                     break;
@@ -984,8 +1044,9 @@ internal sealed class CodecPart
                         _ => 0.5f,
                     };
                     bool y = f.Source is VendorBlobProgram.SrcOp.LeftStickY or VendorBlobProgram.SrcOp.RightStickY;
-                    long old = Old.I16Axis(sv, y);
-                    long now = Arith.Site(sv, -32767, 32767, y, 0.5, old, out var cat);
+                    long o = Old.I16Axis(sv, y);
+                    long old = Arith.Site(ExplainRules.Base, sv, -32767, 32767, y, 0.5, o, out _);
+                    long now = Arith.Site(ExplainRules.Now, sv, -32767, 32767, y, 0.5, o, out var cat);
                     Bits.Field(before, expected, bit, 16, old, now, cat, t, "codec int16-axis", sv);
                     break;
                 }
@@ -1007,8 +1068,9 @@ internal sealed class CodecPart
                     else if (f.Op == VendorBlobProgram.FieldOp.I16PadOrStick)
                     {
                         float sv = isLeft ? (isY ? ly : lx) : (isY ? ry : rx);
-                        long old = Old.I16Axis(sv, isY);
-                        long now = Arith.Site(sv, -32767, 32767, isY, 0.5, old, out var cat);
+                        long o = Old.I16Axis(sv, isY);
+                        long old = Arith.Site(ExplainRules.Base, sv, -32767, 32767, isY, 0.5, o, out _);
+                        long now = Arith.Site(ExplainRules.Now, sv, -32767, 32767, isY, 0.5, o, out var cat);
                         Bits.Field(before, expected, bit, 16, old, now, cat, t, "codec pad-or-stick", sv);
                     }
                     break;
@@ -1021,8 +1083,9 @@ internal sealed class CodecPart
                         VendorBlobProgram.SrcOp.RightTrigger => rt,
                         _ => 0f,
                     };
-                    long old = Old.U16Trigger(tv);
-                    long now = Arith.Site(tv, 0, 32767, false, 0.0, old, out var cat);
+                    long o = Old.U16Trigger(tv);
+                    long old = Arith.Site(ExplainRules.Base, tv, 0, 32767, false, 0.0, o, out _);
+                    long now = Arith.Site(ExplainRules.Now, tv, 0, 32767, false, 0.0, o, out var cat);
                     Bits.Field(before, expected, bit, 16, old, now, cat, t, "codec uint16-trigger", tv);
                     break;
                 }
@@ -1032,8 +1095,9 @@ internal sealed class CodecPart
                         ulong b = f.ButtonBits[i];
                         if (b != VendorBlobProgram.ButtonLtDigital && b != VendorBlobProgram.ButtonRtDigital) continue;
                         float v = b == VendorBlobProgram.ButtonLtDigital ? lt : rt;
-                        bool old = Old.TriggerByte(v) > 0;
-                        bool now = Arith.Digital(v, old, out var cat);
+                        bool o = Old.TriggerByte(v) > 0;
+                        bool old = Arith.Digital(ExplainRules.Base, v, o, out _);
+                        bool now = Arith.Digital(ExplainRules.Now, v, o, out var cat);
                         Bits.Field(before, expected, (at + f.B) * 8 + f.BitLo + i, 1, old ? 1 : 0, now ? 1 : 0, cat, t, "codec trigger bit", v);
                     }
                     break;
@@ -1042,10 +1106,16 @@ internal sealed class CodecPart
                     break;
             }
         }
-        if (_stamp != null)
+        static long Field(StampRule r, ulong acc) => (long)(r.Width == 32 ? acc / r.Divisor % (1UL << 32) : acc / r.Divisor % (1UL << 16));
+        if (_stampNow != null)
         {
-            ulong field = _stamp.Width == 32 ? acc / _stamp.Divisor % (1UL << 32) : acc / _stamp.Divisor % (1UL << 16);
-            Bits.Replace(before, expected, (at + _stamp.Byte) * 8, _stamp.Width, (long)field, "stamp", t);
+            // A base whose own lane accumulated holds its stamp, which is
+            // checked. Otherwise the field held something else at the base,
+            // and the rule replaces it.
+            if (_stampBase != null && _stampBase.Byte == _stampNow.Byte && _stampBase.Width == _stampNow.Width)
+                Bits.Field(before, expected, (at + _stampNow.Byte) * 8, _stampNow.Width, Field(_stampBase, acc.Base), Field(_stampNow, acc.Now), "stamp", t, "codec stamp", 0);
+            else
+                Bits.Replace(before, expected, (at + _stampNow.Byte) * 8, _stampNow.Width, Field(_stampNow, acc.Now), "stamp", t);
         }
         // CRCs last, over the bytes the fields above left.
         foreach (int fi in crcs)
@@ -1086,16 +1156,18 @@ internal static class SwitchProBody
         for (int frame = 0; frame < 3; frame++)
             foreach (var (i, scale, n, d) in Motion)
             {
-                short old = Old.Imu(values[i], scale);
-                short now = Arith.Motion(values[i], n, d, old, out var cat);
+                short o = Old.Imu(values[i], scale);
+                short old = Arith.Motion(ExplainRules.Base, values[i], n, d, o, out _);
+                short now = Arith.Motion(ExplainRules.Now, values[i], n, d, o, out var cat);
                 Bits.Field(before, expected, (at + 12 + frame * 12 + i * 2) * 8, 16, (ushort)old, (ushort)now, cat, t, "switch-pro motion", values[i]);
             }
     }
 
     static void Stick(byte[] before, byte[] expected, int bit, double v, bool invert, Tally t)
     {
-        long old = Old.SwitchStick(v, invert);
-        long now = Arith.Site(v, 0x200, 0xE00, invert, 0.5, old, out var cat);
+        long o = Old.SwitchStick(v, invert);
+        long old = Arith.Site(ExplainRules.Base, v, 0x200, 0xE00, invert, 0.5, o, out _);
+        long now = Arith.Site(ExplainRules.Now, v, 0x200, 0xE00, invert, 0.5, o, out var cat);
         Bits.Field(before, expected, bit, 12, old, now, cat, t, "switch-pro stick", v);
     }
 }
@@ -1128,22 +1200,25 @@ internal static class Switch2Body
 
     static void Digital(byte[] before, byte[] expected, int at, uint mask, double v, Tally t)
     {
-        bool old = Old.Switch2TriggerByte(v) > 0;
-        bool now = Arith.Digital(v, old, out var cat);
+        bool o = Old.Switch2TriggerByte(v) > 0;
+        bool old = Arith.Digital(ExplainRules.Base, v, o, out _);
+        bool now = Arith.Digital(ExplainRules.Now, v, o, out var cat);
         Bits.Field(before, expected, at * 8 + System.Numerics.BitOperations.TrailingZeroCount(mask), 1, old ? 1 : 0, now ? 1 : 0, cat, t, "switch2 trigger bit", v);
     }
 
     static void Stick(byte[] before, byte[] expected, int at, double v, bool invert, Tally t)
     {
-        long old = Old.Switch2Stick(v, invert);
-        long now = Arith.Site(v, 0, 4095, invert, 0.5, old, out var cat);
+        long o = Old.Switch2Stick(v, invert);
+        long old = Arith.Site(ExplainRules.Base, v, 0, 4095, invert, 0.5, o, out _);
+        long now = Arith.Site(ExplainRules.Now, v, 0, 4095, invert, 0.5, o, out var cat);
         Bits.Field(before, expected, at * 8, 16, old, now, cat, t, "switch2 stick", v);
     }
 
     static void Motion(byte[] before, byte[] expected, int at, float v, float oldScale, double n, double d, Tally t)
     {
-        short old = Old.Imu(v, oldScale);
-        short now = Arith.Motion(v, n, d, old, out var cat);
+        short o = Old.Imu(v, oldScale);
+        short old = Arith.Motion(ExplainRules.Base, v, n, d, o, out _);
+        short now = Arith.Motion(ExplainRules.Now, v, n, d, o, out var cat);
         Bits.Field(before, expected, at * 8, 16, (ushort)old, (ushort)now, cat, t, "switch2 motion", v);
     }
 }
@@ -1166,8 +1241,9 @@ internal static class XusbSlice
     /// <summary>companion.c reads X as g - 32768.</summary>
     static void ThumbX(byte[] before, byte[] expected, int at, double v, Tally t)
     {
-        long old = Old.GipStick(v);
-        long now = Arith.Site(v, 0, 65535, false, 0.5, old, out var cat);
+        long o = Old.GipStick(v);
+        long old = Arith.Site(ExplainRules.Base, v, 0, 65535, false, 0.5, o, out _);
+        long now = Arith.Site(ExplainRules.Now, v, 0, 65535, false, 0.5, o, out var cat);
         Bits.Field(before, expected, at * 8, 16, old, now, cat, t, "xusb thumb x", v);
     }
 
@@ -1175,19 +1251,23 @@ internal static class XusbSlice
     /// on [-32768, 32767], and the slice carries 32767 - sThumbY.</summary>
     static void ThumbY(byte[] before, byte[] expected, int at, double v, Tally t)
     {
-        long old = Old.GipStick(v);
-        long thumb = Arith.Site(v, -32768, 32767, true, 0.5, 32767 - old, out var cat);
+        long o = Old.GipStick(v);
+        long old = 32767 - Arith.Site(ExplainRules.Base, v, -32768, 32767, true, 0.5, 32767 - o, out _);
+        long thumb = Arith.Site(ExplainRules.Now, v, -32768, 32767, true, 0.5, 32767 - o, out var cat);
         Bits.Field(before, expected, at * 8, 16, old, 32767 - thumb, cat, t, "xusb thumb y", v);
     }
 
     static void Trigger(byte[] before, byte[] expected, int at, double v, Tally t)
     {
-        long old = Old.GipTrigger(v);
-        var r = ExplainRules.Active;
-        long now;
-        string? cat;
-        if (double.IsNaN(v)) { cat = "nan"; now = r.Nan != null ? 0 : old; }
-        else { cat = "xusb"; now = r.Round ? Arith.XusbG(Arith.Linear(v, 0, 255, false)) : old; }
+        long o = Old.GipTrigger(v);
+        long Under(ExplainRules r, out string c)
+        {
+            if (double.IsNaN(v)) { c = "nan"; return r.Nan != null ? 0 : o; }
+            c = "xusb";
+            return r.Round ? Arith.XusbG(Arith.Linear(v, 0, 255, false)) : o;
+        }
+        long old = Under(ExplainRules.Base, out _);
+        long now = Under(ExplainRules.Now, out var cat);
         Bits.Field(before, expected, at * 8, 16, old, now, cat, t, "xusb trigger", v);
     }
 }
@@ -1204,8 +1284,8 @@ internal sealed class ControllerParts
     public readonly CodecPart? PortBlock;
     public readonly bool SwitchPro, Switch2, Gip;
     readonly ScriptedClock? _clock;
-    readonly Accumulator _acc = new();
-    readonly uint _nominal;
+    readonly Accumulator _accBase = new(), _accNow = new();
+    readonly uint _nominalBase, _nominalNow;
     static readonly FieldInfo? s_armed = typeof(HMController).GetField("_extendedModeArmed", Instance);
 
     public ControllerParts(HMController c)
@@ -1225,8 +1305,10 @@ internal sealed class ControllerParts
         }
         _clock = ScriptedClock.Of(typeof(HMController).GetField("_extEncoderState", Instance)?.GetValue(c));
         // The nominal interval is the stamp rule's, not the tree's profile.
-        if (ExplainRules.Active.Stamps.TryGetValue(P.Id, out var stamp))
-            _nominal = (uint)Math.Clamp((long)stamp.IntervalMs * 3000, 0, uint.MaxValue);
+        if (ExplainRules.Base.Stamps.TryGetValue(P.Id, out var stampBase))
+            _nominalBase = (uint)Math.Clamp((long)stampBase.IntervalMs * 3000, 0, uint.MaxValue);
+        if (ExplainRules.Now.Stamps.TryGetValue(P.Id, out var stampNow))
+            _nominalNow = (uint)Math.Clamp((long)stampNow.IntervalMs * 3000, 0, uint.MaxValue);
     }
 
     public bool Armed => s_armed?.GetValue(C) is true;
@@ -1234,11 +1316,15 @@ internal sealed class ControllerParts
     /// <summary>Advances the accumulator over each clock read since the last
     /// output, one read per encode, with the state's stamp, and returns
     /// it.</summary>
-    public ulong Stamp(in HMGamepadState s)
+    public StampAcc Stamp(in HMGamepadState s)
     {
         if (_clock != null)
-            while (_clock.TryTake(out long now)) _acc.Advance(s.SensorTimestamp, now, ScriptedClock.Frequency, _nominal);
-        return _acc.Value;
+            while (_clock.TryTake(out long now))
+            {
+                _accBase.Advance(s.SensorTimestamp, now, ScriptedClock.Frequency, _nominalBase);
+                _accNow.Advance(s.SensorTimestamp, now, ScriptedClock.Frequency, _nominalNow);
+            }
+        return new StampAcc(_accBase.Value, _accNow.Value);
     }
 
     /// <summary>The six slots as the base resolved them. The base passed a
@@ -1290,7 +1376,7 @@ internal sealed class FrameExplainer : IExplainer
 
     public void Expect(string tag, byte[] before, byte[] expected, ExplainInput input, Tally t)
     {
-        ulong acc = input.Set ? _c.Stamp(in input.State) : 0;
+        StampAcc acc = input.Set ? _c.Stamp(in input.State) : default;
         if (!input.Set || tag.EndsWith("throw", StringComparison.Ordinal)) return;
         if (before.Length < 4 + 14 + _tail) return;
         int dataLen = before[0] | (before[1] << 8);
@@ -1331,7 +1417,7 @@ internal sealed class FrameExplainer : IExplainer
     }
 
     void State(byte[] before, byte[] expected, int dataLen, int ext, int extLen, int gip, in HMGamepadState s,
-               float lx, float ly, float rx, float ry, float lt, float rt, ulong acc, Tally t)
+               float lx, float ly, float rx, float ry, float lt, float rt, StampAcc acc, Tally t)
     {
         if (dataLen > 0)
         {
@@ -1362,10 +1448,10 @@ internal sealed class FrameExplainer : IExplainer
                 if (_c.Ports.DataLo < 0 && _c.Ports.StatusByte >= 0)
                 {
                     // Every byte but the status byte: the two runs around it.
-                    if (_c.Ports.StatusByte > lo) _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, 0, t, lo, _c.Ports.StatusByte - 1);
-                    if (_c.Ports.StatusByte < hi) _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, 0, t, _c.Ports.StatusByte + 1, hi);
+                    if (_c.Ports.StatusByte > lo) _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, default, t, lo, _c.Ports.StatusByte - 1);
+                    if (_c.Ports.StatusByte < hi) _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, default, t, _c.Ports.StatusByte + 1, hi);
                 }
-                else _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, 0, t, lo, hi);
+                else _c.PortBlock.Expect(before, expected, block, in s, lx, ly, rx, ry, lt, rt, default, t, lo, hi);
             }
             else if (_c.Codec != null && _c.Armed) _c.Codec.Expect(before, expected, ext, in s, lx, ly, rx, ry, lt, rt, acc, t);
         }
@@ -1396,7 +1482,7 @@ internal sealed class UsbipReportExplainer : IExplainer
 
     public void Expect(string tag, byte[] before, byte[] expected, ExplainInput input, Tally t)
     {
-        ulong acc = input.Set ? _c.Stamp(in input.State) : 0;
+        StampAcc acc = input.Set ? _c.Stamp(in input.State) : default;
         if (!input.Set) return;
         var s = input.State;
         _c.Slots(in s, out float lx, out float ly, out float rx, out float ry, out float lt, out float rt);
