@@ -1809,9 +1809,11 @@ internal static partial class DeviceOrchestrator
     {
         var half = DriverHalf(controllerIndex);
         if (half.ConfigError != 0)
-            return new HMDriverVersionException(
+            return new HMDriverVersionException(HMDriverVersionProblem.ValueNotRead,
                 $"The HIDMaestro driver {half.Version?.ToString() ?? "(no version written)"} could not read the value " +
-                $"{ConfigErrorValue(half.ConfigError)} this create wrote for {instanceId}, so the device did not start.",
+                $"{ConfigErrorValue(half.ConfigError)} this create wrote for {instanceId}, so the device did not start " +
+                "and the create removed it. This SDK and that driver disagree on the value's format: InstallDriver puts " +
+                "this SDK's driver in place once nothing runs on the installed one.",
                 half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
         var (_, _, problem) = DevnodeStatus(instanceId);
         return new InvalidOperationException($"The device {instanceId} failed its start, problem code {problem}.");
@@ -1831,9 +1833,14 @@ internal static partial class DeviceOrchestrator
         if (half.Protocol == 0 && acceptNoSection) return;
         if (half.ProtocolMin <= SharedMemoryIO.SDK_PROTOCOL && SharedMemoryIO.SDK_PROTOCOL <= half.Protocol) return;
         string range = half.Protocol == 0 ? "wrote no protocol" : $"serves protocols {half.ProtocolMin} to {half.Protocol}";
-        throw new HMDriverVersionException(
+        // A driver whose oldest protocol is past this SDK's is newer, and a
+        // newer driver is never replaced by an older SDK's.
+        string advice = half.ProtocolMin > SharedMemoryIO.SDK_PROTOCOL
+            ? "That driver is newer and is never replaced by this SDK's: use an SDK of its release."
+            : "InstallDriver puts this SDK's driver in place once nothing runs on the installed one.";
+        throw new HMDriverVersionException(HMDriverVersionProblem.ProtocolNotServed,
             $"The HIDMaestro driver {half.Version?.ToString() ?? "of an older release"} on {instanceId} {range}, " +
-            $"and this SDK speaks protocol {SharedMemoryIO.SDK_PROTOCOL}. Install this SDK's driver with InstallDriver.",
+            $"and this SDK speaks protocol {SharedMemoryIO.SDK_PROTOCOL}. The create removed the device. {advice}",
             half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
     }
 

@@ -38,6 +38,7 @@ internal static class Deploy
         Section(c, "the predicate", Predicate);
         Section(c, "the start", Start);
         Section(c, "the deploy lock", LockHandle);
+        Section(c, "what HMDriverVersionException says", Cases);
         return c.Failures;
     }
 
@@ -359,6 +360,52 @@ internal static class Deploy
             var hold = (IDisposable)Activator.CreateInstance(held, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public, null, new object[] { m }, null)!;
             hold.Dispose();
             return (m.SafeWaitHandle.IsClosed, m.SafeWaitHandle.IsClosed ? "" : "the handle is still open");
+        });
+    }
+
+    /// <summary>HMDriverVersionException is thrown for three things, and says
+    /// which: an older driver that programs hold, a started driver that does
+    /// not serve protocol 4, and a value the driver could not read. At
+    /// dcf14ca2 it had no way to tell them apart, and its message told a
+    /// program whose driver was newer to install this SDK's, which never
+    /// replaces a newer one.</summary>
+    static void Cases(Checks c)
+    {
+        static string Problem(Exception e) => Api.Prop(e, "Problem")!.ToString()!;
+        Exception? Half(int min, int max, Version? version)
+        {
+            Exception? e = null;
+            With(_ => (true, Started, 0u), _ => null, _ => (max, min, version, 0), () =>
+            {
+                try { DeviceOrchestrator.CheckDriverHalf(3, Node, acceptNoSection: false); }
+                catch (Exception x) { e = x; }
+                return 0;
+            });
+            return e;
+        }
+        c.Run("a held older driver: Problem HeldOlderDriver, and Blockers are what holds it", () =>
+        {
+            var m = new FakeMachine().Holding(Stamp(1, 12, 0)).HeldByV1();
+            try { On(m, DriverDeploy.CoexistenceRule.RefuseEveryCreate, () => DriverDeploy.EnsureForCreate("HM_0001", false)); return (false, "passed"); }
+            catch (HMDriverVersionException e) { return (Problem(e) == "HeldOlderDriver", Problem(e)); }
+        });
+        c.Run("a value the driver could not read: Problem ValueNotRead, Blockers the create's own device, and no older-driver advice", () =>
+        {
+            var error = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1), () => DeviceOrchestrator.StartError(Node, 3));
+            return (error is HMDriverVersionException v && Problem(v) == "ValueNotRead" && v.Blockers.SequenceEqual(new[] { Node })
+                    && !v.Message.Contains("older", StringComparison.Ordinal), $"{(error is HMDriverVersionException x ? Problem(x) : error.GetType().Name)}: {error.Message}");
+        });
+        c.Run("a newer driver that dropped protocol 4: Problem ProtocolNotServed, and the message does not ask for InstallDriver", () =>
+        {
+            var e = Half(5, 5, new Version(3, 0, 0));
+            return (e is HMDriverVersionException v && Problem(v) == "ProtocolNotServed" && !v.Message.Contains("InstallDriver", StringComparison.Ordinal),
+                    e == null ? "passed" : $"{e.Message}");
+        });
+        c.Run("an older driver that serves protocols 2 to 3: Problem ProtocolNotServed, and the message asks for InstallDriver", () =>
+        {
+            var e = Half(2, 3, new Version(1, 13, 0));
+            return (e is HMDriverVersionException v && Problem(v) == "ProtocolNotServed" && v.Message.Contains("InstallDriver", StringComparison.Ordinal),
+                    e == null ? "passed" : $"{e.Message}");
         });
     }
 }
