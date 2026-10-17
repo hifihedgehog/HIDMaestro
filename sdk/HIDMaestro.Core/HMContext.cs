@@ -46,6 +46,10 @@ public sealed class HMContext : IDisposable
     private readonly HashSet<int> _pendingSlots = new();
     private readonly List<HMProfile> _profiles = new();
     private readonly Dictionary<string, HMProfile> _profilesById = new(StringComparer.OrdinalIgnoreCase);
+    // v2.0.0: what each loaded profile was read from, so a second file with
+    // its id is refused by name, and every file a load refused.
+    private readonly Dictionary<string, string> _profileSources = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<HMProfileLoadIssue> _loadIssues = new();
     private bool _disposed;
 
     /// <summary>Create a new SDK context. Loading profiles and creating
@@ -367,10 +371,27 @@ public sealed class HMContext : IDisposable
             return _profilesById.TryGetValue(id, out var p) ? p : null;
     }
 
+    /// <summary>Every profile file a load refused, and every profile that
+    /// loaded with a model problem, with the file, the JSON path and the
+    /// reason, in the order the loads read them. A file that does not
+    /// parse, a key the schema lacks, a key written twice, a value a check
+    /// refuses and an id already loaded each refuse the file, and a file
+    /// with no id is not a profile. A program whose own loader swallows
+    /// exceptions can show these to say why a profile is missing.</summary>
+    public IReadOnlyList<HMProfileLoadIssue> ProfileLoadIssues
+    {
+        get { ThrowIfDisposed(); lock (_lock) return _loadIssues.ToArray(); }
+    }
+
     /// <summary>Load profiles from a directory containing .json files
-    /// matching the HIDMaestro profile schema. Profiles loaded from
-    /// multiple sources are merged by ID; later loads override earlier
-    /// ones. Schema files (schema.json) are ignored.</summary>
+    /// matching the HIDMaestro profile schema, recursively. schema.json and
+    /// the <c>models</c> folder at the directory's top are not read as
+    /// profiles. Files load in ordinal order of their paths. A file whose
+    /// id is already loaded, from an earlier load or an earlier file, is
+    /// refused and names where the id came from, so a user's edited copy of
+    /// a catalog profile needs an id of its own. Every refused file is
+    /// listed in <see cref="ProfileLoadIssues"/>. Returns the number of
+    /// profiles added.</summary>
     public int LoadProfilesFromDirectory(string profilesDir)
     {
         if (profilesDir == null) throw new ArgumentNullException(nameof(profilesDir));
@@ -378,41 +399,47 @@ public sealed class HMContext : IDisposable
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        var db = ProfileDatabase.Load(profilesDir);
-        int added = 0;
-        lock (_lock)
-        {
-            foreach (var inner in db.All)
-            {
-                if (_profilesById.ContainsKey(inner.Id)) continue; // skip dupes
-                var pub = new HMProfile(inner);
-                _profiles.Add(pub);
-                _profilesById[inner.Id] = pub;
-                added++;
-            }
-            _profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
-        }
-        return added;
+        return Add(ProfileDatabase.Load(profilesDir));
     }
 
     /// <summary>Load the default profile catalog embedded in the SDK
     /// assembly. The catalog ships with every supported controller: Xbox
     /// 360, Xbox One/Series, DualShock 4, DualSense, Stadia, common
     /// third-party gamepads: so consumers don't need to ship profile JSONs
-    /// alongside their app.</summary>
+    /// alongside their app. Loading it again adds nothing.</summary>
     public int LoadDefaultProfiles()
     {
         ThrowIfDisposed();
-        var db = ProfileDatabase.LoadEmbedded();
+        return Add(ProfileDatabase.LoadEmbedded());
+    }
+
+    /// <summary>Adds a database's profiles and issues. A profile whose id is
+    /// loaded from another file is refused, and one loaded from the same
+    /// file, as when the catalog loads twice, is the same profile and adds
+    /// nothing.</summary>
+    private int Add(ProfileDatabase db)
+    {
         int added = 0;
         lock (_lock)
         {
+            foreach (var issue in db.Issues)
+                if (!_loadIssues.Any(x => x.File == issue.File && x.JsonPath == issue.JsonPath && x.Reason == issue.Reason))
+                    _loadIssues.Add(issue);
             foreach (var inner in db.All)
             {
-                if (_profilesById.ContainsKey(inner.Id)) continue;
+                string source = inner.SourceFile ?? inner.Id;
+                if (_profileSources.TryGetValue(inner.Id, out var earlier))
+                {
+                    if (string.Equals(earlier, source, StringComparison.OrdinalIgnoreCase)) continue;
+                    _loadIssues.Add(new HMProfileLoadIssue(source, inner.Id, "$.id",
+                        $"the id '{inner.Id}' is already loaded from {earlier}. Give the profile an id of its own.",
+                        HMProfileLoadIssueKind.Refused));
+                    continue;
+                }
                 var pub = new HMProfile(inner);
                 _profiles.Add(pub);
                 _profilesById[inner.Id] = pub;
+                _profileSources[inner.Id] = source;
                 added++;
             }
             _profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
@@ -441,19 +468,14 @@ public sealed class HMContext : IDisposable
     /// </para>
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
-    /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
-    /// <exception cref="InvalidOperationException">The profile's device
-    /// model does not compile: an extended report, a port block, the USB/IP
-    /// protocol or the WinUSB package is mis-authored, and most messages
-    /// name the field. That refusal comes before the create takes anything
-    /// machine-wide. Also thrown when this build lacks the profile's payload
-    /// (<see cref="HMPayloadMissingException"/>), the driver install failed,
-    /// or the device node creation failed.</exception>
-    /// <exception cref="FormatException">A hex string of the profile, its
-    /// HID descriptor or a descriptor under usbConfiguration, holds a
-    /// character that is not a hex digit or an odd number of digits. The
-    /// HID descriptor's refusal names the profile and comes before the
-    /// create takes anything machine-wide.</exception>
+    /// <exception cref="HMProfileException">A defect of the profile itself:
+    /// it has no descriptor, its layout names an axis or button the
+    /// descriptor lacks, or its device model does not compile. The exception
+    /// names the profile's file and the JSON path. That refusal comes before
+    /// the create takes anything machine-wide.</exception>
+    /// <exception cref="InvalidOperationException">This build lacks the
+    /// profile's payload (<see cref="HMPayloadMissingException"/>), the
+    /// driver install failed, or the device node creation failed.</exception>
     public HMController CreateController(HMProfile profile) => CreateController(profile, null);
 
     /// <summary>Create a new virtual controller with a durable identity
@@ -481,7 +503,11 @@ public sealed class HMContext : IDisposable
     /// before creating the second. A different profile at the same key
     /// keeps the identity and refreshes the descriptor.</para></summary>
     /// <exception cref="ArgumentNullException"><paramref name="profile"/> is null.</exception>
-    /// <exception cref="ArgumentException">The profile has no descriptor and isn't deployable.</exception>
+    /// <exception cref="HMProfileException">A defect of the profile itself:
+    /// it has no descriptor, its layout names an axis or button the
+    /// descriptor lacks, or its device model does not compile. The exception
+    /// names the profile's file and the JSON path. That refusal comes before
+    /// the create takes anything machine-wide.</exception>
     /// <exception cref="HMResourceInUseException">A create whose key another
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.
@@ -493,23 +519,15 @@ public sealed class HMContext : IDisposable
     /// closed program left does not refuse its own key: the create takes
     /// that device back. A controller of a context this process dropped
     /// without disposing holds its key until the process exits.</exception>
-    /// <exception cref="InvalidOperationException">The profile's device
-    /// model does not compile: an extended report, a port block, the USB/IP
-    /// protocol or the WinUSB package is mis-authored, and most messages
-    /// name the field. That refusal comes before the create takes anything
-    /// machine-wide. Also thrown when this build lacks the profile's payload
-    /// (<see cref="HMPayloadMissingException"/>), the driver install failed,
-    /// or the device node creation failed.</exception>
-    /// <exception cref="FormatException">A hex string of the profile, its
-    /// HID descriptor or a descriptor under usbConfiguration, holds a
-    /// character that is not a hex digit or an odd number of digits. The
-    /// HID descriptor's refusal names the profile and comes before the
-    /// create takes anything machine-wide.</exception>
+    /// <exception cref="InvalidOperationException">This build lacks the
+    /// profile's payload (<see cref="HMPayloadMissingException"/>), the
+    /// driver install failed, or the device node creation failed.</exception>
     public HMController CreateController(HMProfile profile, string? identityKey)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
-            throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
+            throw new HMProfileException(profile.Id, profile.Inner.SourceFile, "$.descriptor",
+                "the profile has no HID descriptor and cannot be deployed.");
         ThrowIfDisposed();
 
         // The lowest slot free in this context. Linear scan from 0, no
@@ -534,8 +552,13 @@ public sealed class HMContext : IDisposable
     {
         // A profile whose device model does not compile, and a payload this
         // build lacks, refuse the create before the lease, so the refusal
-        // touches nothing machine-wide.
-        profile.Inner.ValidateDeviceModel();
+        // touches nothing machine-wide. The profile's checks are the ones it
+        // met at load, run again for a profile built or changed since.
+        try { profile.Inner.ValidateAtLoad(); }
+        catch (Exception e) when (Internal.ProfileDefects.IsDefect(e))
+        {
+            throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
+        }
         if (profile.RequiresUsbipBackend)
             HMBuildInfo.ThrowIfMissing(HMPayload.UsbipTransport,
                 $"Profile '{profile.Id}' is a composite persona, which rides the USB/IP transport.");
@@ -671,7 +694,7 @@ public sealed class HMContext : IDisposable
     /// <exception cref="InvalidOperationException">If the slot is already
     /// in use by another live controller of this context, and for the
     /// reasons <see cref="CreateController(HMProfile)"/> gives.</exception>
-    /// <exception cref="FormatException">As for
+    /// <exception cref="HMProfileException">As for
     /// <see cref="CreateController(HMProfile)"/>.</exception>
     public HMController CreateControllerAt(int index, HMProfile profile) => CreateControllerAt(index, profile, null);
 
@@ -683,7 +706,7 @@ public sealed class HMContext : IDisposable
     /// <exception cref="InvalidOperationException">If the slot is already
     /// in use by another live controller of this context, and for the
     /// reasons <see cref="CreateController(HMProfile)"/> gives.</exception>
-    /// <exception cref="FormatException">As for
+    /// <exception cref="HMProfileException">As for
     /// <see cref="CreateController(HMProfile)"/>.</exception>
     /// <exception cref="HMResourceInUseException">A create whose key another
     /// program's cleanup holds, while it removes a device a closed program
@@ -700,7 +723,8 @@ public sealed class HMContext : IDisposable
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
         if (!profile.IsDeployable)
-            throw new ArgumentException($"Profile '{profile.Id}' has no HID descriptor and cannot be deployed.", nameof(profile));
+            throw new HMProfileException(profile.Id, profile.Inner.SourceFile, "$.descriptor",
+                "the profile has no HID descriptor and cannot be deployed.");
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
         ThrowIfDisposed();
 

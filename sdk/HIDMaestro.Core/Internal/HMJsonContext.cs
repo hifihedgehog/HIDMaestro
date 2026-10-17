@@ -23,7 +23,7 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
 /// here, and there is no reflection resolver behind it. A type missing from
 /// this list does not fail the build: the layout converter looks each
 /// concrete layout up at run time, so the analyzers never see the
-/// dependency, and both loaders drop a profile that fails to parse. An enum
+/// dependency, and both loaders refuse a profile that fails to parse. An enum
 /// without a converter in the list below also builds, and reads and writes
 /// as a number. json_parity_check (S76) fails when a type the profile model
 /// can deserialize has no metadata here (check G) or an enum the contract
@@ -33,12 +33,19 @@ internal sealed class SnakeCaseEnumConverter<TEnum> : JsonStringEnumConverter<TE
 /// v1.12.0: camelCase property names read case-insensitively, comments and
 /// trailing commas allowed, <see cref="HMAxis"/> by its own converter, every
 /// other enum it reaches as a snake_case string (each is listed below), and
-/// <see cref="HMLayout"/> by the <c>kind</c> converter.</para></summary>
+/// <see cref="HMLayout"/> by the <c>kind</c> converter.</para>
+///
+/// <para>v2.0.0 reads strictly: a key no type maps and a key written twice
+/// in one object are refused, with the JSON path in the exception. Through
+/// v1.13.0 the first was dropped and the second replaced the first, so a
+/// misspelled key left a profile without what it meant to say.</para></summary>
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true,
     ReadCommentHandling = JsonCommentHandling.Skip,
     AllowTrailingCommas = true,
+    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    AllowDuplicateProperties = false,
     Converters = new[]
     {
         typeof(HMAxisJsonConverter),

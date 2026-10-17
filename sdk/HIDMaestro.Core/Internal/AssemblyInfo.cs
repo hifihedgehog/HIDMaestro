@@ -61,3 +61,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("DeviceOracleCheck")]
 [assembly: InternalsVisibleTo("ArithRoundtripCheck")]
 [assembly: InternalsVisibleTo("CaptureFidelityCheck")]
+[assembly: InternalsVisibleTo("ProfileModelCheck")]

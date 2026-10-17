@@ -122,6 +122,12 @@ public sealed class ControllerProfile
     [JsonPropertyName("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>The descriptor read from the real device, kept beside the
+    /// one the profile presents when the two differ. A record for the
+    /// profile's author: no code reads it.</summary>
+    [JsonPropertyName("nativeDescriptor")]
+    public string? NativeDescriptor { get; set; }
+
     /// <summary>Optional button remapping table. Maps HMButton bit positions
     /// (index) to descriptor button indices (value). When present, BuildReport
     /// uses this to place semantic buttons (A, B, X, Y, LB, RB, etc.) at the
@@ -461,6 +467,27 @@ public sealed class ControllerProfile
                     $"{where}.fields[{i}] ('{prog.Fields[i].Src.Type}') at bytes {lo}-{hi} ends past byte {OutputRingData}. " +
                     $"An output report reaches the SDK with at most {OutputRingData} bytes after its report ID.");
         }
+    }
+
+    /// <summary>The file the profile was loaded from, for its load issues
+    /// and <see cref="HIDMaestro.HMProfileException"/>: a path, or
+    /// <c>catalog:&lt;path&gt;</c> for the embedded catalog. Null for a
+    /// profile built in code.</summary>
+    [JsonIgnore]
+    internal string? SourceFile { get; set; }
+
+    /// <summary>v2.0.0: every check a profile meets when it loads, when
+    /// <see cref="HIDMaestro.HMProfileBuilder"/> builds it and again before a
+    /// create: the descriptor's hex, the device model
+    /// (<see cref="ValidateDeviceModel"/>) and the layout against the
+    /// descriptor, which until v2.0.0 a create checked only once it built
+    /// its first report. Throws what the failing check throws, with the
+    /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).</summary>
+    internal void ValidateAtLoad()
+    {
+        if (!HasDescriptor) return;
+        ValidateDeviceModel();
+        _ = GetOrBuildReportBuilder();
     }
 
     /// <summary>v1.13.0: compile everything the profile declares about its
@@ -876,6 +903,11 @@ public sealed class ExtendedReportSpec
     [JsonPropertyName("ports")]
     public PortsSpec? Ports { get; set; }
 
+    /// <summary>Why the report is laid out as it is. Documentation only,
+    /// as on a feature answer.</summary>
+    [JsonPropertyName("comment")]
+    public string? Comment { get; set; }
+
     [JsonIgnore]
     public byte ReportIdByte => ReportIds.Parse(ReportId);
 }
@@ -1191,50 +1223,149 @@ public sealed class CrcScope
 }
 
 /// <summary>
-/// Loads and queries controller profiles from the profiles/ directory.
+/// Loads and queries controller profiles from a directory or the catalog
+/// embedded in the SDK.
+///
+/// <para>v2.0.0 loads strictly and in a fixed order. Files are read in
+/// ordinal order of their paths. A file that does not parse, carries a key
+/// the schema lacks or a key written twice, or fails a check the profile
+/// meets at load (<see cref="ControllerProfile.ValidateAtLoad"/>) is
+/// refused, a file with no <c>id</c> is not a profile, and a second file
+/// with an id already read is refused and names the first. Each becomes an
+/// entry of <see cref="Issues"/> with the file, the JSON path and the
+/// reason. Through v1.13.0 such a file was skipped without a word.</para>
 /// </summary>
 public sealed class ProfileDatabase
 {
     private readonly List<ControllerProfile> _profiles = new();
+    private readonly List<HIDMaestro.HMProfileLoadIssue> _issues = new();
 
     public IReadOnlyList<ControllerProfile> All => _profiles;
 
+    /// <summary>Every file this load refused, in the order it read
+    /// them.</summary>
+    internal IReadOnlyList<HIDMaestro.HMProfileLoadIssue> Issues => _issues;
+
+    /// <summary>The prefix of the catalog's files in their labels.</summary>
+    internal const string CatalogLabel = "catalog:";
+
     /// <summary>
-    /// Loads all .json profile files from the given directory (recursively).
-    /// Skips schema.json and any files that fail to parse.
+    /// Loads every .json profile file under the given directory, recursively,
+    /// but schema.json and the <c>models</c> folder at its top, whose files
+    /// are models and not profiles.
     /// </summary>
     public static ProfileDatabase Load(string profilesDir)
     {
-        var db = new ProfileDatabase();
-
         if (!Directory.Exists(profilesDir))
             throw new DirectoryNotFoundException($"Profiles directory not found: {profilesDir}");
 
-        // v1.3.0: parallel parse mirroring LoadEmbedded. Disk reads are
-        // serialized at the kernel level on most filesystems, but JSON
-        // parse is CPU-bound and benefits from cores. For a directory
-        // with hundreds of profiles, this matters more than the embedded
-        // case because disk-load amortization dominates.
-        var files = Directory.EnumerateFiles(profilesDir, "*.json", SearchOption.AllDirectories)
-            .Where(f => !Path.GetFileName(f).Equals("schema.json", StringComparison.OrdinalIgnoreCase))
+        string root = Path.GetFullPath(profilesDir);
+        string models = Path.Combine(root, "models") + Path.DirectorySeparatorChar;
+        var files = Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories)
+            .Where(f => !Path.GetFileName(f).Equals("schema.json", StringComparison.OrdinalIgnoreCase)
+                        && !f.StartsWith(models, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => f, StringComparer.Ordinal)
             .ToArray();
-        var parsed = new System.Collections.Concurrent.ConcurrentBag<ControllerProfile>();
-        System.Threading.Tasks.Parallel.ForEach(files, file =>
+        // JSON parse and the load checks are CPU-bound, so they run in
+        // parallel. The results are taken in path order.
+        var read = new Parsed[files.Length];
+        System.Threading.Tasks.Parallel.For(0, files.Length, i =>
         {
-            try
+            string text;
+            try { text = File.ReadAllText(files[i]); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                var profile = ControllerProfile.Parse(File.ReadAllBytes(file));
-                if (profile != null && !string.IsNullOrEmpty(profile.Id))
-                    parsed.Add(profile);
+                read[i] = new Parsed(files[i], null, new HIDMaestro.HMProfileLoadIssue(
+                    files[i], null, "$", $"the file cannot be read: {e.Message}", HIDMaestro.HMProfileLoadIssueKind.Refused));
+                return;
             }
-            catch
-            {
-                // A single malformed JSON shouldn't take down the whole load
-                // pass. Caller's profile lookups will simply miss this entry.
-            }
+            read[i] = Parse(files[i], text);
         });
+        return Assemble(read);
+    }
 
-        db._profiles.AddRange(parsed);
+    /// <summary>One file's result: the profile, or the issue that refused
+    /// it.</summary>
+    internal readonly record struct Parsed(string File, ControllerProfile? Profile, HIDMaestro.HMProfileLoadIssue? Issue);
+
+    /// <summary>Reads one profile file strictly and runs the load checks.</summary>
+    internal static Parsed Parse(string file, string text)
+    {
+        ControllerProfile? profile;
+        try
+        {
+            profile = JsonSerializer.Deserialize(text, HMJsonContext.Default.ControllerProfile);
+        }
+        catch (JsonException e)
+        {
+            // A JSON file with no id is not a profile, whatever else it
+            // carries: the catalog's folder keeps descriptor collections
+            // beside the profiles.
+            var (id, isObject) = PeekId(text);
+            if (isObject && id == null)
+                return new Parsed(file, null, NotAProfile(file));
+            var (path, reason) = ProfileDefects.Locate(e);
+            return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
+                file, id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+        }
+        if (profile == null || string.IsNullOrEmpty(profile.Id))
+            return new Parsed(file, null, NotAProfile(file));
+        profile.SourceFile = file;
+        try
+        {
+            profile.ValidateAtLoad();
+        }
+        catch (Exception e) when (ProfileDefects.IsDefect(e))
+        {
+            var (path, reason) = ProfileDefects.Locate(e);
+            return new Parsed(file, null, new HIDMaestro.HMProfileLoadIssue(
+                file, profile.Id, path, reason, HIDMaestro.HMProfileLoadIssueKind.Refused));
+        }
+        return new Parsed(file, profile, null);
+    }
+
+    private static HIDMaestro.HMProfileLoadIssue NotAProfile(string file) =>
+        new(file, null, "$.id", "the file has no id, so it is not a profile", HIDMaestro.HMProfileLoadIssueKind.NotAProfile);
+
+    /// <summary>The id of a file that did not deserialize, when it is
+    /// plain JSON with a string id, and whether it is a JSON object at
+    /// all.</summary>
+    private static (string? Id, bool IsObject) PeekId(string text)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, false);
+            return (doc.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
+                    && id.GetString() is { Length: > 0 } s ? s : null, true);
+        }
+        catch (JsonException) { return (null, false); }
+    }
+
+    /// <summary>The profiles and issues of files read in path order. A
+    /// second file with an id the first already took is refused.</summary>
+    private static ProfileDatabase Assemble(Parsed[] read)
+    {
+        var db = new ProfileDatabase();
+        var first = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in read)
+        {
+            if (r.Issue != null) { db._issues.Add(r.Issue); continue; }
+            var p = r.Profile!;
+            if (first.TryGetValue(p.Id, out var earlier))
+            {
+                db._issues.Add(new HIDMaestro.HMProfileLoadIssue(r.File, p.Id, "$.id",
+                    $"the id '{p.Id}' is already loaded from {earlier}. Give the profile an id of its own.",
+                    HIDMaestro.HMProfileLoadIssueKind.Refused));
+                continue;
+            }
+            first[p.Id] = r.File;
+            db._profiles.Add(p);
+        }
         db._profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
         return db;
     }
@@ -1264,43 +1395,34 @@ public sealed class ProfileDatabase
 
     private static ProfileDatabase LoadEmbeddedFresh()
     {
-        var db = new ProfileDatabase();
         var asm = typeof(ProfileDatabase).Assembly;
         const string prefix = "HIDMaestro.Profiles.";
 
         // Collect resource names first so we can parse in parallel. The
-        // serial JSON parse over 224 profiles is the dominant fresh-launch
-        // cost in HMContext init: Parallel.ForEach across 4–16 cores
-        // drops it from 200–500 ms cold to 50–150 ms.
+        // serial JSON parse over the catalog is the dominant fresh-launch
+        // cost in HMContext init: Parallel.For across 4 to 16 cores drops
+        // it from 200 to 500 ms cold to 50 to 150 ms.
         var names = asm.GetManifestResourceNames()
             .Where(n => n.StartsWith(prefix, StringComparison.Ordinal)
-                     && n.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                     && n.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                     && !n.Equals(prefix + "schema.json", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        var parsed = new System.Collections.Concurrent.ConcurrentBag<ControllerProfile>();
-        System.Threading.Tasks.Parallel.ForEach(names, name =>
+        var read = new Parsed[names.Length];
+        System.Threading.Tasks.Parallel.For(0, names.Length, i =>
         {
-            try
+            string label = CatalogLabel + names[i].Substring(prefix.Length).Replace('\\', '/');
+            using var s = asm.GetManifestResourceStream(names[i]);
+            if (s == null)
             {
-                using var s = asm.GetManifestResourceStream(name);
-                if (s == null) return;
-                using var ms = new MemoryStream();
-                s.CopyTo(ms);
-                var profile = ControllerProfile.Parse(ms.GetBuffer().AsMemory(0, (int)ms.Length));
-                if (profile != null && !string.IsNullOrEmpty(profile.Id))
-                    parsed.Add(profile);
+                read[i] = new Parsed(label, null, new HIDMaestro.HMProfileLoadIssue(
+                    label, null, "$", "the embedded resource cannot be opened", HIDMaestro.HMProfileLoadIssueKind.Refused));
+                return;
             }
-            catch
-            {
-                // Silent: embedded resources should always parse, but if a
-                // future profile has bad JSON we don't want to take down
-                // every consumer.
-            }
+            using var reader = new StreamReader(s);
+            read[i] = Parse(label, reader.ReadToEnd());
         });
-
-        db._profiles.AddRange(parsed);
-        db._profiles.Sort((a, b) => string.Compare(a.Id, b.Id, StringComparison.Ordinal));
-        return db;
+        return Assemble(read);
     }
-
 }

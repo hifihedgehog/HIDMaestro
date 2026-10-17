@@ -330,6 +330,7 @@ internal static class Rules
         new("ScaleSpec.*", "the counts per unit of FieldSpec.Scale, a number or a ratio"),
         new("FieldSpec.Negate", "an int16-le field's calibrated motion on an axis the device counts the other way. ps-move sets it, and the Switch Pro's report 0x30 is the second device, whose X and Z words run against SDL's frame (vendor_blob_golden_check's Switch Pro field lists)"),
         new("FieldSpec.Repeat", "an int16-le field written in each motion frame a report carries. ps-move sets it for its two half-frames, and the Switch Pro's report 0x30 is the second device, three frames 12 bytes apart (vendor_blob_golden_check's Switch Pro field lists)"),
+        new("ExtendedReportSpec.Comment", "documentation on a report, read by no code, as on a feature answer"),
         new("HM*Layout.*", "the layout vocabulary of a layout kind (HMLayout.cs), which every profile of that kind fills"),
         new("HMImu.Magnetometer", "the layout vocabulary's IMU description (HMLayout.cs)"),
         new("HMTriggerButton.*", "the layout vocabulary's trigger description (HMLayout.cs)"),

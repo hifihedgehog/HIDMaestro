@@ -176,11 +176,15 @@ public sealed class HMProfileBuilder
     }
 
     /// <summary>Build the <see cref="HMProfile"/>. The returned profile can be
-    /// passed directly to <see cref="HMContext.CreateController(HMProfile)"/>.</summary>
+    /// passed directly to <see cref="HMContext.CreateController(HMProfile)"/>.
+    /// The profile meets the checks a profile file meets when it loads.</summary>
+    /// <exception cref="HMProfileException">VID or PID is not set, the
+    /// descriptor's hex does not parse, the layout names an axis or button
+    /// the descriptor lacks, or the device model does not compile.</exception>
     public HMProfile Build()
     {
-        if (_vid == 0) throw new InvalidOperationException("VID must be set (use .Vid(0x045E)).");
-        if (_pid == 0) throw new InvalidOperationException("PID must be set (use .Pid(0x028E)).");
+        if (_vid == 0) throw new HMProfileException(_id, null, "$.vid", "VID must be set (use .Vid(0x045E)).");
+        if (_pid == 0) throw new HMProfileException(_id, null, "$.pid", "PID must be set (use .Pid(0x028E)).");
 
         var inner = new ControllerProfile
         {
@@ -206,6 +210,11 @@ public sealed class HMProfileBuilder
             BuiltInCode = true,
         };
 
+        try { inner.ValidateAtLoad(); }
+        catch (Exception e) when (ProfileDefects.IsDefect(e))
+        {
+            throw ProfileDefects.ToProfileException(inner, e);
+        }
         return new HMProfile(inner);
     }
 }

@@ -111,7 +111,7 @@
         "string",
         "null"
       ],
-      "description": "Record-keeping only: the original captured descriptor hex, preserved verbatim when the shipped 'descriptor' was edited. Not deserialized by the loader."
+      "description": "Record-keeping only: the descriptor read from the real device, kept verbatim beside the one the profile presents when the two differ. The loader reads it and no code uses it."
     },
     "layout": {
       "type": [

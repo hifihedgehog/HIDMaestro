@@ -2187,6 +2187,16 @@ function Scenario-Arith-Roundtrip {
                  -Message 'a catalog conversion changes in a way the design note''s table does not list (see probe stdout for the conversion)'
 }
 
+# S92: profiles as data, the SDK side. profile_model_check loads the catalog
+# and a user's directory strictly: every defect a file can carry is refused
+# at its JSON path and listed in HMContext.ProfileLoadIssues, a create and a
+# build meet one exception type for a bad profile, and the catalog files of
+# every earlier v1.x tag load but for the removed spellings. Offline.
+function Scenario-Profile-Model {
+    Invoke-Probe -Dir 'profile_model_check' -Exe 'ProfileModelCheck.exe' -Arguments 'check' `
+                 -Message 'a profile loads, resolves or answers otherwise than the data-driven design states (see probe stdout for the check)'
+}
+
 # ====================================================================
 #  Runner
 # ====================================================================
@@ -2284,7 +2294,8 @@ $scenarios = @(
     @{ Name = 'S91_Vendor_Blob_Golden';          Body = ${function:Scenario-Vendor-Blob-Golden} },
     @{ Name = 'S94_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
     @{ Name = 'S95_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
-    @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} }
+    @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} },
+    @{ Name = 'S92_Profile_Model';               Body = ${function:Scenario-Profile-Model} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
