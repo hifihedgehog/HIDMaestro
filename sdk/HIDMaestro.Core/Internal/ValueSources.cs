@@ -106,6 +106,8 @@ internal static class ValueSources
                     if (p.Key != null) throw new ProfileDefectException(at + ".key", "only a keyedHexFile source takes a key.");
                     continue;
                 }
+                if (p.Source == null)
+                    throw new ProfileDefectException(at + ".source", "is null. Name index, serial or a valueSources entry.");
                 if (sources == null || !sources.ContainsKey(p.Source))
                     throw new ProfileDefectException(at + ".source", $"\"{p.Source}\" is not index, serial or a valueSources name.");
                 if (string.IsNullOrWhiteSpace(p.Key))

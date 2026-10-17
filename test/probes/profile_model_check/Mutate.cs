@@ -18,7 +18,7 @@
 //            by null, -1, "zz", 100000, [], {} and "", each loaded as a
 //            directory loads it: no exception leaves a load, and no file is
 //            refused by the loader's catch-all for an exception no check
-//            placed (about 95,000 loads, 3 s)
+//            placed, and none at $ (about 95,000 loads, 5 s)
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -193,6 +193,7 @@ internal static class Mutate
         long loads = 0, loaded = 0, refused = 0;
         var escaped = new ConcurrentDictionary<string, (long Count, string Example)>();
         var backstop = new ConcurrentDictionary<string, (long Count, string Example)>();
+        var unplaced = new ConcurrentDictionary<string, (long Count, string Example)>();
         var sw = Stopwatch.StartNew();
         Parallel.ForEach(ids, id =>
         {
@@ -221,6 +222,10 @@ internal static class Mutate
                     // something no check placed: a site still to fix.
                     if (issue.Reason.StartsWith(Backstop, StringComparison.Ordinal))
                         backstop.AddOrUpdate(issue.Reason.Split(':')[0], _ => (1, $"{id} {path} := {v}: {issue.Reason}"), (_, o) => (o.Count + 1, o.Example));
+                    // Every value replaced here has a path of its own, so a
+                    // refusal at $ names no place in the file.
+                    else if (issue.Path == "$")
+                        unplaced.AddOrUpdate(issue.Reason.Split(':')[0], _ => (1, $"{id} {path} := {v}: {issue.Reason}"), (_, o) => (o.Count + 1, o.Example));
                 }
             }
         });
@@ -229,6 +234,8 @@ internal static class Mutate
             string.Join("", escaped.OrderByDescending(kv => kv.Value.Count).Select(kv => $"\n      {kv.Value.Count}x {kv.Key}\n        e.g. {kv.Value.Example}")));
         c.Check("no refusal comes from the loader's catch-all, which only an unchecked failure reaches", backstop.IsEmpty,
             string.Join("", backstop.OrderByDescending(kv => kv.Value.Count).Select(kv => $"\n      {kv.Value.Count}x {kv.Key}\n        e.g. {kv.Value.Example}")));
+        c.Check("every refused file is refused at a path inside it, never at $", unplaced.IsEmpty,
+            string.Join("", unplaced.OrderByDescending(kv => kv.Value.Count).Select(kv => $"\n      {kv.Value.Count}x {kv.Key}\n        e.g. {kv.Value.Example}")));
     }
 
     /// <summary>How the loader words a refusal for an exception that no

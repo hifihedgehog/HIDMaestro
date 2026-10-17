@@ -292,6 +292,14 @@ internal static class Strict
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
             return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
         }, "$.ExtendedReport.Fields[0]");
+        // A VID or PID that is no 16-bit hex number is refused at load at its
+        // key. At 08fd21f3 the identity match met the bad VID first and
+        // refused the file at $, and a bad PID loaded and failed at create.
+        Add("a VID that is not hex", BaseId, o => { o["vid"] = "0xZZZZ"; return o.ToJsonString(); }, "$.vid");
+        Add("a VID past 16 bits", BaseId, o => { o["vid"] = "0x12345"; return o.ToJsonString(); }, "$.vid");
+        Add("a PID that is not hex", BaseId, o => { o["pid"] = "0x1G"; return o.ToJsonString(); }, "$.pid");
+        Add("no VID", BaseId, o => { o.Remove("vid"); return o.ToJsonString(); }, "$.vid");
+        Add("an empty PID, spelled PID", BaseId, o => { o.Remove("pid"); o["PID"] = ""; return o.ToJsonString(); }, "$.PID");
         foreach (var (name, text, path) in cases)
         {
             c.Run($"{name}: refused at {path}, and the reason does not repeat the path", () =>

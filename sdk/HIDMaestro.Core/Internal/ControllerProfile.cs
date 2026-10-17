@@ -541,12 +541,28 @@ public sealed class ControllerProfile
     /// JSON path in its message (<see cref="ProfileDefects.Locate"/>).</summary>
     internal void ValidateAtLoad()
     {
+        // The identity first: the identity defaults match on it below.
+        CheckHexId(Vid, "$.vid");
+        CheckHexId(Pid, "$.pid");
         AnswerModels.Validate(this, global::HIDMaestro.Internal.DeviceModel.OwnOf(this), taken: false, new List<string>());
         if (DeviceModel != null && DeviceModel != "none")
             throw new ProfileDefectException("$.deviceModel", $"\"{DeviceModel}\" is not a value it takes. The one value is \"none\".");
         if (!HasDescriptor) return;
         ValidateDeviceModel();
         _ = GetOrBuildReportBuilder();
+    }
+
+    /// <summary>A VID or PID as <see cref="VendorId"/> and <see cref="ProductId"/>
+    /// read it: hex, at most 16 bits, "0x" optional.</summary>
+    private static void CheckHexId(string? value, string path)
+    {
+        if (string.IsNullOrEmpty(value))
+            throw new ProfileDefectException(path, "is required, a 16-bit hex ID such as \"0x045E\".");
+        try { _ = Convert.ToUInt16(value, 16); }
+        catch (Exception e) when (e is FormatException or OverflowException or ArgumentException)
+        {
+            throw new ProfileDefectException(path, $"\"{value}\" is not a 16-bit hex ID such as \"0x045E\".");
+        }
     }
 
     /// <summary>v1.13.0: compile everything the profile declares about its
