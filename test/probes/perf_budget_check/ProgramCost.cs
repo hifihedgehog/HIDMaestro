@@ -236,8 +236,12 @@ internal static unsafe class ProgramCost
         var c = Offline(p, index, view);
         c.SubmitState(new HMGamepadState { Buttons = HMButton.A });
         // Past the tiered JIT's recompiles of the repeat path, so the window
-        // reads the steady state.
-        Thread.Sleep(3000);
+        // reads the steady state: 200 repeats, well past the call-count
+        // threshold of 30, and a second for the background recompile. Three
+        // seconds settled the short periods. At 101 ms a 3-second settle left
+        // the recompiles in the window, 8.5 Mcycles/s against 0.75 with the
+        // tiered JIT off.
+        Thread.Sleep(TimeSpan.FromMilliseconds(Math.Max(3000, 200 * periodMs + 1000)));
         IntPtr self = GetCurrentProcess();
         uint seq0 = (uint)Marshal.ReadInt32(view);
         QueryProcessCycleTime(self, out ulong cycles0);
