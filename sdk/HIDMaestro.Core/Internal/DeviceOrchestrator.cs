@@ -1541,14 +1541,12 @@ internal static partial class DeviceOrchestrator
             }
         }
         // v2.0.0: the driver that started the device serves this SDK's
-        // protocol (decision (c)). It wrote its half at add, before HID
-        // class made the child. A failed check throws, and the create's
+        // protocol (decision (c)). A failed check throws, and the create's
         // cleanup removes the device.
         {
             string? parentId = mainInstanceId ?? companionId;
-            if (parentId != null && childSeen)
-                CheckDriverHalf(controllerIndex, parentId,
-                    acceptNoSection: DriverDeploy.Coexistence == DriverDeploy.CoexistenceRule.AllowModelFreeProfiles && profile.RunsOnOlderDriver);
+            if (parentId != null)
+                CheckStartedDriver(controllerIndex, parentId, childSeen, profile);
         }
 
         // Post-WaitForDeviceStarted name re-application: by this point the
@@ -1856,6 +1854,16 @@ internal static partial class DeviceOrchestrator
             $"and this SDK speaks protocol {SharedMemoryIO.SDK_PROTOCOL}. The create removed the device. {advice}",
             half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
     }
+
+    /// <summary>The protocol check of a started create. The driver writes its
+    /// half at add, before HID class makes the child, so with the child seen
+    /// a driver that wrote nothing is an older one. With no child seen
+    /// within the wait the add may not have run yet: an empty section
+    /// passes, and a written range without protocol 4 still fails.</summary>
+    internal static void CheckStartedDriver(int controllerIndex, string parentId, bool childSeen, ControllerProfile profile) =>
+        CheckDriverHalf(controllerIndex, parentId,
+            acceptNoSection: !childSeen
+                || DriverDeploy.Coexistence == DriverDeploy.CoexistenceRule.AllowModelFreeProfiles && profile.RunsOnOlderDriver);
 
     /// <summary>
     /// Polls for a HID child PDO to appear under the given parent devnode.

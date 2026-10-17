@@ -345,6 +345,26 @@ internal static class Deploy
             long ms = sw.ElapsedMilliseconds;
             return (!child && ms < 1000, $"{child} in {ms} ms");
         });
+        // The protocol check runs when the HID child is slow too. At
+        // 6cf274b6 a create whose child did not appear within its 10 s wait
+        // finished with no check, as b22324e did. With no child the driver
+        // may not have written its half yet, so an empty section passes, and
+        // a written range without 4 still fails the create.
+        foreach (var (childSeen, min, max, ok) in new[] { (false, 5, 5, false), (false, 0, 0, true), (false, 4, 4, true), (true, 0, 0, false) })
+            c.Run($"the start's protocol check with the child {(childSeen ? "seen" : "not seen")} and protocols {min} to {max} {(ok ? "passes" : "fails the create")}", () =>
+            {
+                var check = typeof(DeviceOrchestrator).GetMethod("CheckStartedDriver", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                    ?? throw new MissingMethodException("DeviceOrchestrator", "CheckStartedDriver");
+                var p = ProfileDatabase.LoadEmbedded().All.First(x => x.Id == "heusinkveld-ultimate-pedals");
+                Exception? e = null;
+                With(_ => (true, Started, 0u), _ => null, _ => (max, min, max == 0 ? null : new Version(2, 0, 0), 0), () =>
+                {
+                    try { check.Invoke(null, new object[] { 3, Node, childSeen, p }); }
+                    catch (System.Reflection.TargetInvocationException x) { e = x.InnerException; }
+                    return 0;
+                });
+                return (ok ? e == null : e is HMDriverVersionException, e == null ? "passed" : e.Message);
+            });
         c.Run("a devnode still being installed (problem 28) does not end the wait, and its child ends it", () =>
         {
             int polls = 0;
