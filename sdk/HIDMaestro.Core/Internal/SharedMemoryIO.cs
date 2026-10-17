@@ -209,6 +209,31 @@ internal static partial class SharedMemoryIO
         }
     }
 
+    /// <summary>v2.0.0: the driver's half of the version section: the
+    /// protocols it serves, from <c>DriverProtocolMin</c> to
+    /// <c>DriverProtocol</c>, its version, and its error word, which names
+    /// the value it could not read when it failed a start
+    /// (<c>HIDMAESTRO_CONFIG_ERROR_*</c> in driver.h). All zero, and the
+    /// version null, until a driver writes it, as a driver older than 2.0.0
+    /// never does.</summary>
+    public static (int Protocol, int ProtocolMin, Version? Version, int ConfigError) DriverHalf(int controllerIndex)
+    {
+        lock (s_inputViews)
+        {
+            if (!s_versionViews.TryGetValue(controllerIndex, out IntPtr v) || v == IntPtr.Zero) return (0, 0, null, 0);
+            int error = Marshal.ReadInt32(v, VERSION_OFFSET_DRIVER_CONFIG_ERROR);
+            int protocol = Marshal.ReadInt32(v, VERSION_OFFSET_DRIVER_PROTOCOL);
+            if (protocol == 0) return (0, 0, null, error);
+            Thread.MemoryBarrier();
+            int min = Marshal.ReadInt32(v, VERSION_OFFSET_DRIVER_PROTOCOL_MIN);
+            var version = new Version(
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 0),
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 2),
+                (ushort)Marshal.ReadInt16(v, VERSION_OFFSET_DRIVER_VERSION + 4));
+            return (protocol, min, version, error);
+        }
+    }
+
     /// <summary>v2.0.0: writes the controller's identity tag into its
     /// version section, which <see cref="EnsureInputMapping"/> made. A
     /// driver reads the controller's v2.0.0 values only when the tag is

@@ -52,10 +52,19 @@ public sealed class HMDriverVersionException : InvalidOperationException
     public IReadOnlyList<string> Blockers { get; }
 
     internal HMDriverVersionException(Version installed, Version minimum, IReadOnlyList<string> blockers)
-        : base($"The installed HIDMaestro driver {installed} is older than {minimum}, the oldest this SDK runs on, " +
+        : this($"The installed HIDMaestro driver {installed} is older than {minimum}, the oldest this SDK runs on, " +
                $"and it cannot be replaced while these use it: {string.Join("; ", blockers)}. " +
                "Close those programs, or remove their controllers with " +
-               "HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true), and call InstallDriver again.")
+               "HMContext.RemoveAllVirtualControllers(HMCleanupScope.Everything, preserveInstall: true), and call InstallDriver again.",
+               installed, minimum, blockers)
+    {
+    }
+
+    /// <summary>v2.0.0: a driver that started a create's device and does
+    /// not serve this SDK's protocol, or failed the start over a value it
+    /// could not read. <see cref="Blockers"/> names the device.</summary>
+    internal HMDriverVersionException(string message, Version installed, Version minimum, IReadOnlyList<string> blockers)
+        : base(message)
     {
         InstalledVersion = installed;
         MinimumVersion = minimum;

@@ -951,8 +951,9 @@ internal static partial class DeviceOrchestrator
 
             // Poll for HID child PDO to be created by HIDClass below our parent.
             // On fast machines this takes <100ms; the old Thread.Sleep(2000) was
-            // wasting 1900+ms on every creation.
-            WaitForHidChild(gpInstId, timeoutMs: 5000);
+            // wasting 1900+ms on every creation. A failed start fails the
+            // create in step 4.
+            WaitForHidChild(gpInstId, controllerIndex, timeoutMs: 5000);
         }
 
         return gpInstId;
@@ -1474,6 +1475,7 @@ internal static partial class DeviceOrchestrator
         }
 
         // ── Step 4: wait for HID child + name finalization ───────────────
+        bool childSeen = false;
         //    Old: Thread.Sleep(3000): fixed worst-case wait for PnP async install.
         //    New: poll for the HID child PDO to appear, then finalize names.
         //    On a warm-start machine this exits in <500ms instead of 3000ms.
@@ -1483,8 +1485,10 @@ internal static partial class DeviceOrchestrator
             if (parentId != null)
             {
                 var hidSw = Stopwatch.StartNew();
-                bool gotChild = WaitForHidChild(parentId, timeoutMs: 10000);
+                var gotChild = WaitForHidChild(parentId, controllerIndex, timeoutMs: 10000);
                 LogDiag($"    WaitForHidChild({parentId}) -> {gotChild} in {hidSw.ElapsedMilliseconds}ms");
+                if (gotChild == StartWait.Failed) throw StartError(parentId, controllerIndex);
+                childSeen = gotChild == StartWait.Done;
             }
         }
         string displayName = profile.DeviceDescription ?? profile.ProductString ?? "Controller";
@@ -1516,7 +1520,8 @@ internal static partial class DeviceOrchestrator
                 string? hidChildId = DeviceManager.GetHidChildId(parentId);
                 if (hidChildId != null)
                 {
-                    WaitForDeviceStarted(hidChildId, timeoutMs: 5000);
+                    if (WaitForDeviceStarted(hidChildId, parentId, controllerIndex, timeoutMs: 5000) == StartWait.Failed)
+                        throw StartError(parentId, controllerIndex);
 
                     // Write ControllerIndex directly to the HID child's HW key
                     // so any future HID-child filter can read it without having
@@ -1535,6 +1540,17 @@ internal static partial class DeviceOrchestrator
                 }
             }
         }
+        // v2.0.0: the driver that started the device serves this SDK's
+        // protocol (decision (c)). It wrote its half at add, before HID
+        // class made the child. A failed check throws, and the create's
+        // cleanup removes the device.
+        {
+            string? parentId = mainInstanceId ?? companionId;
+            if (parentId != null && childSeen)
+                CheckDriverHalf(controllerIndex, parentId,
+                    acceptNoSection: DriverDeploy.Coexistence == DriverDeploy.CoexistenceRule.AllowModelFreeProfiles && profile.RunsOnOlderDriver);
+        }
+
         // Post-WaitForDeviceStarted name re-application: by this point the
         // HID class driver has bound and may have stomped on FriendlyName /
         // DeviceDesc with INF defaults; re-applying makes our names stick.
@@ -1609,12 +1625,15 @@ internal static partial class DeviceOrchestrator
                 bool childBack = false;
                 if (restarted)
                 {
-                    childBack = WaitForHidChild(mainInstanceId, timeoutMs: 10000);
+                    var back = WaitForHidChild(mainInstanceId, controllerIndex, timeoutMs: 10000);
+                    if (back == StartWait.Failed) throw StartError(mainInstanceId, controllerIndex);
+                    childBack = back == StartWait.Done;
                     if (childBack)
                     {
                         string? hidChildId2 = DeviceManager.GetHidChildId(mainInstanceId);
-                        if (hidChildId2 != null)
-                            WaitForDeviceStarted(hidChildId2, timeoutMs: 5000);
+                        if (hidChildId2 != null
+                            && WaitForDeviceStarted(hidChildId2, mainInstanceId, controllerIndex, timeoutMs: 5000) == StartWait.Failed)
+                            throw StartError(mainInstanceId, controllerIndex);
                     }
                 }
                 LogDiag($"    restart_main_for_wgi restarted={restarted} childBack={childBack} in {rsSw.ElapsedMilliseconds}ms");
@@ -1734,13 +1753,98 @@ internal static partial class DeviceOrchestrator
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    //  v2.0.0: the start and the driver's half of the version contract
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>How a wait for a device ended.</summary>
+    internal enum StartWait { Done, Failed, TimedOut }
+
+    /// <summary>A devnode's presence, status and problem number
+    /// (CM_Get_DevNode_Status). A check replaces it to give the waits a
+    /// device of its own.</summary>
+    internal static Func<string, (bool Present, uint Status, uint Problem)> DevnodeStatus = ReadDevnodeStatus;
+
+    /// <summary>The HID child a parent devnode has, or null.</summary>
+    internal static Func<string, string?> HidChildOf = DeviceManager.GetHidChildId;
+
+    /// <summary>The driver's half of an index's version section
+    /// (<see cref="SharedMemoryIO.DriverHalf"/>).</summary>
+    internal static Func<int, (int Protocol, int ProtocolMin, Version? Version, int ConfigError)> DriverHalf = SharedMemoryIO.DriverHalf;
+
+    private static (bool Present, uint Status, uint Problem) ReadDevnodeStatus(string instanceId)
+    {
+        if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) != 0) return (false, 0, 0);
+        return CM_Get_DevNode_Status(out uint status, out uint problem, devInst, 0) == 0 ? (true, status, problem) : (false, 0, 0);
+    }
+
+    // Problem numbers a failed add or start leaves (cfg.h): the device
+    // stays down until something restarts it, so a wait need not run out.
+    private const uint CM_PROB_FAILED_START = 10, CM_PROB_FAILED_ADD = 31, CM_PROB_FAILED_DRIVER_ENTRY = 37;
+
+    /// <summary>The device's driver failed its add or start: the devnode
+    /// reports one of the problems above, or the driver set its error word
+    /// in the controller's version section.</summary>
+    private static bool StartFailed(string instanceId, int controllerIndex)
+    {
+        if (DriverHalf(controllerIndex).ConfigError != 0) return true;
+        var (present, status, problem) = DevnodeStatus(instanceId);
+        return present && (status & DN_HAS_PROBLEM) != 0
+            && problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY;
+    }
+
+    /// <summary>The value a driver's error word names (driver.h
+    /// HIDMAESTRO_CONFIG_ERROR_*).</summary>
+    internal static string ConfigErrorValue(int error) => error switch
+    {
+        1 => "FeatureAnswers",
+        2 => "CachedInputReportIds",
+        _ => $"error {error}",
+    };
+
+    /// <summary>What a failed start throws: an
+    /// <see cref="HMDriverVersionException"/> naming the value when the
+    /// driver set its error word, else the devnode's problem.</summary>
+    internal static Exception StartError(string instanceId, int controllerIndex)
+    {
+        var half = DriverHalf(controllerIndex);
+        if (half.ConfigError != 0)
+            return new HMDriverVersionException(
+                $"The HIDMaestro driver {half.Version?.ToString() ?? "(no version written)"} could not read the value " +
+                $"{ConfigErrorValue(half.ConfigError)} this create wrote for {instanceId}, so the device did not start.",
+                half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
+        var (_, _, problem) = DevnodeStatus(instanceId);
+        return new InvalidOperationException($"The device {instanceId} failed its start, problem code {problem}.");
+    }
+
+    /// <summary>After the device started: its driver must serve this SDK's
+    /// protocol, <see cref="SharedMemoryIO.SDK_PROTOCOL"/>, within its range
+    /// from <c>DriverProtocolMin</c> to <c>DriverProtocol</c>, so a
+    /// mis-stamped driver or a later one that dropped protocol 4 is refused
+    /// rather than passing a check of the maximum alone. A driver that wrote
+    /// no section passes only for a profile alternative B lets run on an
+    /// older driver (<paramref name="acceptNoSection"/>).</summary>
+    internal static void CheckDriverHalf(int controllerIndex, string instanceId, bool acceptNoSection)
+    {
+        var half = DriverHalf(controllerIndex);
+        if (half.ConfigError != 0) throw StartError(instanceId, controllerIndex);
+        if (half.Protocol == 0 && acceptNoSection) return;
+        if (half.ProtocolMin <= SharedMemoryIO.SDK_PROTOCOL && SharedMemoryIO.SDK_PROTOCOL <= half.Protocol) return;
+        string range = half.Protocol == 0 ? "wrote no protocol" : $"serves protocols {half.ProtocolMin} to {half.Protocol}";
+        throw new HMDriverVersionException(
+            $"The HIDMaestro driver {half.Version?.ToString() ?? "of an older release"} on {instanceId} {range}, " +
+            $"and this SDK speaks protocol {SharedMemoryIO.SDK_PROTOCOL}. Install this SDK's driver with InstallDriver.",
+            half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
+    }
+
     /// <summary>
     /// Polls for a HID child PDO to appear under the given parent devnode.
     /// Replaces fixed Thread.Sleep calls with an event-driven poll that exits
     /// as soon as the condition is met. On fast machines this returns in
-    /// &lt;100ms; on slow machines it adapts up to the timeout.
+    /// &lt;100ms; on slow machines it adapts up to the timeout. v2.0.0: it
+    /// also ends at once when the parent's driver failed its start.
     /// </summary>
-    private static bool WaitForHidChild(string parentInstanceId, int timeoutMs)
+    internal static StartWait WaitForHidChild(string parentInstanceId, int controllerIndex, int timeoutMs)
     {
         // v1.3.0 wip 12 kept this poll after the diag log showed
         // DeviceManager.WaitForHidChild returning False at once. That was
@@ -1753,19 +1857,23 @@ internal static partial class DeviceOrchestrator
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < budget)
         {
-            if (DeviceManager.GetHidChildId(parentInstanceId) != null)
-                return true;
+            if (HidChildOf(parentInstanceId) != null)
+                return StartWait.Done;
+            if (StartFailed(parentInstanceId, controllerIndex))
+                return StartWait.Failed;
             Thread.Sleep(25);
         }
-        return false;
+        return StartWait.TimedOut;
     }
 
     /// <summary>
     /// Polls for a device to reach DN_STARTED status (driver fully bound and
     /// device functional). Replaces fixed Thread.Sleep calls that waited for
-    /// xinputhid or other upper filters to finish binding.
+    /// xinputhid or other upper filters to finish binding. v2.0.0: it also
+    /// ends at once on a failed start of the device or of its parent's
+    /// driver.
     /// </summary>
-    private static bool WaitForDeviceStarted(string instanceId, int timeoutMs)
+    internal static StartWait WaitForDeviceStarted(string instanceId, string parentInstanceId, int controllerIndex, int timeoutMs)
     {
         // A poll loop. Windows does report a start
         // (CM_NOTIFY_ACTION_DEVICEINSTANCESTARTED), but this poll carries the
@@ -1777,15 +1885,14 @@ internal static partial class DeviceOrchestrator
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < budget)
         {
-            if (CM_Locate_DevNodeW(out uint devInst, instanceId, 0) == 0)
-            {
-                if (CM_Get_DevNode_Status(out uint status, out _, devInst, 0) == 0
-                    && (status & DN_STARTED) != 0)
-                    return true;
-            }
+            var (present, status, _) = DevnodeStatus(instanceId);
+            if (present && (status & DN_STARTED) != 0)
+                return StartWait.Done;
+            if (StartFailed(instanceId, controllerIndex) || StartFailed(parentInstanceId, controllerIndex))
+                return StartWait.Failed;
             Thread.Sleep(25);
         }
-        return false;
+        return StartWait.TimedOut;
     }
 
     /// <summary>Count XInput slots currently reporting connected. Used by

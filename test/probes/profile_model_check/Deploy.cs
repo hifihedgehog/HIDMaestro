@@ -12,6 +12,13 @@
 // identity default matches and which has no XUSB companion or xinputhid
 // parent, run there. DriverDeploy.Coexistence holds the choice.
 //
+// After the deploy step the create waits for the device to start. The wait
+// also ends at once when the driver failed its add or start, by the
+// devnode's problem or the driver's error word, and the create then throws
+// HMDriverVersionException naming the value the driver could not read. A
+// device that started is checked for a driver whose range of protocols
+// holds 4.
+//
 // The checks run the gate on machines of their own (DriverDeploy.Machine):
 // a driver store, a census and a lock the check gives, the deploy steps
 // recorded. Nothing touches the real store. The base runs the policy only
@@ -29,6 +36,7 @@ internal static class Deploy
         var c = new Checks("deploy");
         Section(c, "the gate", Gate);
         Section(c, "the predicate", Predicate);
+        Section(c, "the start", Start);
         return c.Failures;
     }
 
@@ -221,5 +229,72 @@ internal static class Deploy
         c.Check($"of {umdf2.Count} UMDF2 catalog profiles, {umdf2.Count - refused.Count} pass alternative B's predicate and the {refused.Count} the golden list names do not",
                 refused.SequenceEqual(Refused.OrderBy(x => x, StringComparer.Ordinal)),
                 string.Join(", ", refused.Except(Refused).Select(x => "+" + x).Concat(Refused.Except(refused).Select(x => "-" + x))));
+    }
+
+    // ── The start ────────────────────────────────────────────────────────
+
+    /// <summary>The waits and the post-start check on a devnode the check
+    /// gives (DeviceOrchestrator's DevnodeStatus, HidChildOf and
+    /// DriverHalf), the real ones put back after.</summary>
+    static T With<T>(Func<string, (bool, uint, uint)> status, Func<string, string?> child,
+                     Func<int, (int, int, Version?, int)> half, Func<T> body)
+    {
+        var (s0, c0, h0) = (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf);
+        DeviceOrchestrator.DevnodeStatus = id => status(id);
+        DeviceOrchestrator.HidChildOf = child;
+        DeviceOrchestrator.DriverHalf = i => half(i);
+        try { return body(); }
+        finally { (DeviceOrchestrator.DevnodeStatus, DeviceOrchestrator.HidChildOf, DeviceOrchestrator.DriverHalf) = (s0, c0, h0); }
+    }
+
+    const uint HasProblem = 0x400, Started = 0x8;
+    const string Node = @"ROOT\HIDCLASS\HM_0003";
+
+    static void Start(Checks c)
+    {
+        c.Run("a devnode whose driver failed its start and set its error word: the wait ends within one 25 ms poll and the create throws HMDriverVersionException naming FeatureAnswers", () =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var (wait, error) = With(_ => (true, HasProblem, 10u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1), () =>
+                (DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000), DeviceOrchestrator.StartError(Node, 3)));
+            long ms = sw.ElapsedMilliseconds;
+            return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error is HMDriverVersionException v
+                    && v.Message.Contains("FeatureAnswers", StringComparison.Ordinal) && v.Blockers.SequenceEqual(new[] { Node }),
+                    $"{wait} in {ms} ms: {error.GetType().Name}: {error.Message}");
+        });
+        c.Run("a failed add with no error word ends the wait as well, and names the problem", () =>
+        {
+            var (wait, error) = With(_ => (true, HasProblem, 31u), _ => null, _ => (0, 0, null, 0), () =>
+                (DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000), DeviceOrchestrator.StartError(Node, 3)));
+            return (wait == DeviceOrchestrator.StartWait.Failed && error is not HMDriverVersionException
+                    && error.Message.Contains("problem code 31", StringComparison.Ordinal), $"{wait}: {error.Message}");
+        });
+        c.Run("a devnode still being installed (problem 28) does not end the wait, and its child ends it", () =>
+        {
+            int polls = 0;
+            var wait = With(_ => (true, HasProblem, 28u), _ => ++polls >= 3 ? @"HID\HM_0003\1" : null, _ => (0, 0, null, 0), () =>
+                DeviceOrchestrator.WaitForHidChild(Node, 3, 10_000));
+            return (wait == DeviceOrchestrator.StartWait.Done && polls == 3, $"{wait} after {polls} polls");
+        });
+        c.Run("the HID child's wait ends on its parent driver's error word", () =>
+        {
+            var wait = With(id => id == Node ? (true, 0u, 0u) : (true, 0u, 0u), _ => null, _ => (4, 4, new Version(2, 0, 0), 2), () =>
+                DeviceOrchestrator.WaitForDeviceStarted(@"HID\HM_0003\1", Node, 3, 10_000));
+            return (wait == DeviceOrchestrator.StartWait.Failed, wait.ToString());
+        });
+        foreach (var (min, max, none, ok) in new[] { (3, 3, false, false), (5, 5, false, false), (4, 4, false, true), (4, 5, false, true),
+                                                     (0, 0, false, false), (0, 0, true, true) })
+            c.Run($"a started driver serving protocols {min} to {max}{(none ? ", for a profile alternative B runs on an older driver" : "")} {(ok ? "passes" : "fails the create with HMDriverVersionException")}", () =>
+            {
+                Exception? e = null;
+                With(_ => (true, Started, 0u), _ => null, _ => (max, min, max == 0 ? null : new Version(2, 0, 0), 0), () =>
+                {
+                    try { DeviceOrchestrator.CheckDriverHalf(3, Node, acceptNoSection: none); }
+                    catch (Exception x) { e = x; }
+                    return 0;
+                });
+                return (ok ? e == null : e is HMDriverVersionException v && v.Blockers.SequenceEqual(new[] { Node }),
+                        e == null ? "passed" : $"{e.GetType().Name}: {e.Message}");
+            });
     }
 }
