@@ -146,8 +146,7 @@ internal sealed partial class UsbipEmulatedDevice
             var packet = payload.Slice(off, Math.Min(size, payload.Length - off));
             var result = engine.HandleCommand(packet, now);
             effect |= result.Effect;
-            if (!engine.Protocol.ConsumesCommands && !result.Consume)
-                PublishOutput(SourceHidOutput, packet[0], packet[1..]);
+            PublishCommand(result, packet);
             if ((effect & ProtocolEngine.Effect.Halted) != 0) break;
         }
         ProtocolApply(effect);
@@ -168,9 +167,25 @@ internal sealed partial class UsbipEmulatedDevice
             report = report[1..];
         if (report.Length == 0) return;
         var result = _engine!.HandleCommand(report, Stopwatch.GetTimestamp());
-        if (!_engine.Protocol.ConsumesCommands && !result.Consume)
-            PublishOutput(SourceHidOutput, report[0], report[1..]);
+        PublishCommand(result, report);
         ProtocolApply(result.Effect);
+    }
+
+    /// <summary>A command to the output ring: as the host sent it, as the
+    /// report its rule emits in its place, or not at all when the protocol
+    /// or its rule consumes it.</summary>
+    private void PublishCommand(ProtocolEngine.CommandResult result, ReadOnlySpan<byte> command)
+    {
+        var engine = _engine!;
+        if (engine.Protocol.ConsumesCommands || result.Consume || command.Length == 0) return;
+        if (result.Emit < 0)
+        {
+            PublishOutput(SourceHidOutput, command[0], command[1..]);
+            return;
+        }
+        Span<byte> emitted = stackalloc byte[Programs.ProgramForm.MaxReport];
+        int n = engine.BuildEmit(result.Emit, command, emitted);
+        PublishOutput(SourceHidOutput, emitted[0], emitted[1..n]);
     }
 
     /// <summary>What a command did: a halt fails every parked read, and any

@@ -78,6 +78,30 @@ internal sealed unsafe class DecoderRunner
     }
 }
 
+/// <summary>One program, bound: its generated kernel through a function
+/// pointer, or its interpreted program, for a report built off the clock,
+/// such as a command's emitted report or a live feature report.</summary>
+internal sealed unsafe class BoundProgram
+{
+    private readonly delegate*<byte*, byte*, uint*, uint*, void> _kernel;
+    private readonly ReportProgram? _interpreted;
+    public ValidProgram Program { get; }
+    public bool Generated => _kernel != null;
+
+    public BoundProgram(ValidProgram program, delegate*<byte*, byte*, uint*, uint*, void> kernel)
+    {
+        Program = program;
+        _kernel = kernel;
+        _interpreted = kernel == null ? new ReportProgram(program) : null;
+    }
+
+    public void Run(byte* s, byte* d, uint* r, uint* c)
+    {
+        if (_kernel != null) _kernel(s, d, r, c);
+        else _interpreted!.Run(s, d, r, c);
+    }
+}
+
 /// <summary>Looks a compiled program's hash up in the kernels the build step
 /// generated from the catalog, and builds the code that runs it, once per
 /// controller. A program no generated kernel matches, from a profile outside
@@ -107,6 +131,11 @@ internal static unsafe class ProgramBinder
     /// <paramref name="hash"/>, or null.</summary>
     public static delegate*<byte*, byte*, uint*, uint*, void> Kernel(string hash) =>
         CatalogKernels.ByHash.TryGetValue(hash, out nint fn) ? (delegate*<byte*, byte*, uint*, uint*, void>)fn : null;
+
+    /// <summary>One program, bound to its generated kernel or to the
+    /// interpreter.</summary>
+    public static BoundProgram Bind(ValidProgram program, bool interpretOnly = false) =>
+        new(program, interpretOnly ? null : Kernel(program.Hash));
 
     public static DecoderRunner[] BindDecoders(CompiledModel model, bool interpretOnly = false)
     {

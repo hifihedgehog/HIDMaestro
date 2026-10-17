@@ -158,7 +158,7 @@ internal static class ModelCompiler
                 int state = rule.MinLength ?? 0;
                 if (state < 1) throw new FormException($"$.protocol.commands.rules[{i}].minLength", "a rule that emits a report reads its command, so it needs a minLength");
                 int id = ByteValue(e.ReportId, path + ".reportId");
-                emits.Add(new EmitForm(id, e.Size, Program("emit", e.Size, state, regs, counterNames, e.Program, path + ".program", path + ".size")));
+                emits.Add(new EmitForm(id, e.Size, Program("emit", e.Size, state, regs, counterNames, e.Program, path + ".program", path + ".size", reportId: id)));
             }
         }
 
@@ -171,8 +171,10 @@ internal static class ModelCompiler
             {
                 string path = $"$.liveFeatureReports[{i}]";
                 var spec = g.LiveFeatureReports[i] ?? throw new FormException(path, "the entry is null");
-                liveIds.Add(ByteValue(spec.ReportId, path + ".reportId"));
-                live.Add(Program("feature", spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size"));
+                int id = ByteValue(spec.ReportId, path + ".reportId");
+                if (liveIds.Contains(id)) throw new FormException(path + ".reportId", $"0x{id:X2} names two live feature reports");
+                liveIds.Add(id);
+                live.Add(Program("feature", spec.Size, stateSize, regs, counterNames, spec.Program, path + ".program", path + ".size", reportId: id));
             }
         }
 

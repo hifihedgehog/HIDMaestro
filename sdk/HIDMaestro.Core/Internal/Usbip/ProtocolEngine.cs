@@ -61,6 +61,10 @@ internal sealed unsafe class ProtocolEngine
     // A device that sends the SDK's report.
     private readonly byte[] _report;
     private int _reportLength;
+    private readonly BoundProgram?[] _emits;
+    private readonly byte[] _emitState;
+    private readonly BoundProgram[] _live;
+    private readonly byte[] _built;
     // With a source poll: the report as the device's latest read of its
     // controllers found it, and when the SDK last wrote one. A read between
     // that write and a host poll found the latest report. Otherwise the
@@ -139,6 +143,20 @@ internal sealed unsafe class ProtocolEngine
 
         _state = GC.AllocateArray<byte>(Math.Max(1, _m.StateSize) + ProgramForm.Slack + 1, pinned: true);
         _runner = runner;
+        // The reports built off the clock: a command's emitted report, read
+        // from the command, and a live feature report, read from the state
+        // block.
+        _emits = new BoundProgram?[_m.RuleEmits.Length];
+        int emitState = 1;
+        for (int i = 0; i < _emits.Length; i++)
+            if (_m.RuleEmits[i] is { } e)
+            {
+                _emits[i] = ProgramBinder.Bind(e.Program, runner is { Generated: false });
+                emitState = Math.Max(emitState, e.Program.Spec.StateSize);
+            }
+        _emitState = GC.AllocateArray<byte>(emitState + ProgramForm.Slack + 1, pinned: true);
+        _live = Array.ConvertAll(_m.LiveFeatures, v => ProgramBinder.Bind(v, runner is { Generated: false }));
+        _built = GC.AllocateArray<byte>(ProgramForm.MaxReport, pinned: true);
         int largest = 1;
         foreach (var l in _m.Layouts) largest = Math.Max(largest, l.Size);
         _peek = GC.AllocateArray<byte>(largest, pinned: true);
@@ -354,6 +372,9 @@ internal sealed unsafe class ProtocolEngine
     /// keep it from OutputReceived, raise a translated report, or decode it.</summary>
     public readonly record struct CommandResult(Effect Effect, int Rule, bool Consume, int Emit, int Decoder);
 
+    /// <summary>A command no rule ran on: nothing consumed, emitted or decoded.</summary>
+    private static readonly CommandResult NoRule = new(Effect.None, -1, false, -1, -1);
+
     /// <summary>Run one command through the rules, logged first. The first
     /// rule that matches applies, and a command none matches changes nothing.
     /// A rule's reply is built from the registers before the rule sets
@@ -367,9 +388,9 @@ internal sealed unsafe class ProtocolEngine
         lock (_sync)
         {
             LogLocked(command, timestamp);
-            if (HaltedLocked() || command.Length == 0) return default;
+            if (HaltedLocked() || command.Length == 0) return NoRule;
             int ri = MatchLocked(command);
-            if (ri < 0) return new CommandResult(Effect.None, -1, false, -1, -1);
+            if (ri < 0) return NoRule;
             var rule = _p.Rules[ri];
 
             var effect = Effect.None;
@@ -649,6 +670,48 @@ internal sealed unsafe class ProtocolEngine
     {
         if (block.Length != _m.StateSize) return;
         lock (_sync) block.CopyTo(_state);
+    }
+
+    /// <summary>The report a command's rule emits in place of the command:
+    /// its program over the command's bytes, the registers and the counters,
+    /// report ID first. Returns its length.</summary>
+    public int BuildEmit(int emit, ReadOnlySpan<byte> command, Span<byte> dst)
+    {
+        var bound = _emits[emit]!;
+        int stateSize = bound.Program.Spec.StateSize, size = bound.Program.Spec.Size;
+        lock (_sync)
+        {
+            Array.Clear(_emitState);
+            command[..Math.Min(command.Length, stateSize)].CopyTo(_emitState);
+            UpdateClockCountersLocked();
+            fixed (byte* s = _emitState)
+            fixed (byte* d = _built)
+            fixed (uint* r = _regs, c = _counters)
+                bound.Run(s, d, r, c);
+            _built.AsSpan(0, size).CopyTo(dst);
+        }
+        return size;
+    }
+
+    /// <summary>The live feature report of <paramref name="reportId"/>, built
+    /// now from the state block, the registers and the counters, report ID
+    /// first, or -1 when the profile declares none for it.</summary>
+    public int BuildLiveFeature(byte reportId, Span<byte> dst)
+    {
+        int i = Array.IndexOf(_m.LiveFeatureIds, reportId);
+        if (i < 0) return -1;
+        var bound = _live[i];
+        int size = bound.Program.Spec.Size;
+        lock (_sync)
+        {
+            UpdateClockCountersLocked();
+            fixed (byte* s = _state)
+            fixed (byte* d = _built)
+            fixed (uint* r = _regs, c = _counters)
+                bound.Run(s, d, r, c);
+            _built.AsSpan(0, Math.Min(size, dst.Length)).CopyTo(dst);
+        }
+        return size;
     }
 
     /// <summary>The state block as it stands.</summary>

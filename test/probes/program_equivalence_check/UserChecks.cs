@@ -59,6 +59,29 @@ internal static unsafe class UserChecks
                 Layouts(p, m, authored, runner, data);
                 Engine(p, m, authored, runner, data);
             }
+            // Emitted and live feature reports, through the program the engine
+            // binds for them, against the naive evaluator.
+            foreach (var (v, naive, what) in authored.Where(x => x.What.StartsWith("emitted", StringComparison.Ordinal) || x.What.StartsWith("live", StringComparison.Ordinal)))
+            {
+                var bound = ProgramBinder.Bind(v);
+                var s = new byte[v.Spec.StateSize + Checks.StatePad];
+                var a = new byte[ProgramForm.MaxReport]; var c = new byte[ProgramForm.MaxReport];
+                var regs = new uint[Checks.Registers]; var ctr = new uint[Checks.Counters];
+                int diff = 0;
+                for (int n = 0; n < 20000; n++)
+                {
+                    data.NextBytes(s);
+                    Checks.DrawRegisters(data, regs, ctr, n);
+                    Array.Fill(a, (byte)0xA5); Array.Fill(c, (byte)0xC3);
+                    fixed (byte* ps = s, pa = a)
+                    fixed (uint* pr = regs, pc = ctr)
+                        bound.Run(ps, pa, pr, pc);
+                    naive(s, c, regs, ctr);
+                    if (!a.AsSpan(0, v.Spec.Size).SequenceEqual(c.AsSpan(0, v.Spec.Size))) diff++;
+                }
+                if (diff == 0) Console.WriteLine($"{p.Id} {what}: {(bound.Generated ? "generated" : "interpreted")}, 0 of 20000 differ from the naive evaluator");
+                else Fail($"{p.Id} {what}: {diff} of 20000 differ from the naive evaluator");
+            }
             foreach (var dec in ProgramBinder.BindDecoders(m))
             {
                 var v = dec.Form.Program;

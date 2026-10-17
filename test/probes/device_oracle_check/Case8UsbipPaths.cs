@@ -109,6 +109,89 @@ internal sealed class Case8UsbipPaths : IOracleCase
 
         // A check beside the recording, which adds nothing to the streams.
         using (var host = new Host(sock)) LayoutEndpoint(host);
+        using (var host = new Host(sock)) EmitAndLiveFeature(host);
+    }
+
+    /// <summary>The composite's JSON, from the SDK's embedded catalog.</summary>
+    static JsonObject CompositeJson()
+    {
+        var asm = typeof(HMContext).Assembly;
+        foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+        {
+            using var st = asm.GetManifestResourceStream(res)!;
+            using var sr = new StreamReader(st, Encoding.UTF8);
+            if (JsonNode.Parse(sr.ReadToEnd()) is JsonObject o && (string?)o["id"] == Switch2Id) return o;
+        }
+        throw new InvalidOperationException($"No catalog profile {Switch2Id}.");
+    }
+
+    /// <summary>A rule's emitOutput and a live feature report on USB/IP, a
+    /// check beside the recording that adds nothing to the streams. On a copy
+    /// of the composite that raises its commands, a bulk command 7E goes to
+    /// the output ring as report 0x31 built from the command's bytes 1 to 3,
+    /// in place of the command, and any other command as the host sent it.
+    /// A GET_REPORT(Feature) of 0x32 answers report 0x32 built from the state
+    /// block's first four bytes as it stands. Throws on any other result.</summary>
+    static void EmitAndLiveFeature(Host host)
+    {
+        var json = CompositeJson();
+        json["id"] = "emit-live-check";
+        var commands = json["protocol"]!["commands"]!.AsObject();
+        commands["consume"] = false;
+        commands["rules"]!.AsArray().Insert(0, JsonNode.Parse(
+            "{\"match\":\"7E\",\"minLength\":8,\"emitOutput\":{\"reportId\":\"0x31\",\"size\":4,\"program\":[{\"const\":{\"0\":\"31\"}},{\"copy\":\"1-3\",\"to\":1}]}}"));
+        json["liveFeatureReports"] = JsonNode.Parse(
+            "[{\"reportId\":\"0x32\",\"size\":5,\"program\":[{\"const\":{\"0\":\"32\"}},{\"copy\":\"0-3\",\"to\":1}]}]");
+        var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json.ToJsonString()))!;
+        p.ValidateDeviceModel();
+
+        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        try
+        {
+            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out _);
+            (byte Source, byte Id, byte[] Data) Last()
+            {
+                uint head = (uint)Marshal.ReadInt32(ring);
+                if (head == 0) return (0, 0, Array.Empty<byte>());
+                int slot = SharedMemoryIO.OUTPUT_HEADER_SIZE + (int)((head - 1) % SharedMemoryIO.OUTPUT_RING_SLOTS) * SharedMemoryIO.OUTPUT_SLOT_SIZE;
+                int size = Marshal.ReadInt16(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SIZE);
+                var data = new byte[size];
+                Marshal.Copy(ring + slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_DATA, data, 0, size);
+                return (Marshal.ReadByte(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_SOURCE), Marshal.ReadByte(ring, slot + SharedMemoryIO.OUTPUT_SLOT_OFFSET_REPORT_ID), data);
+            }
+            string Show((byte Source, byte Id, byte[] Data) x) => $"source {x.Source}, report 0x{x.Id:X2}, {Convert.ToHexString(x.Data)}";
+
+            host.Submit(dev, 0x02, isIn: false, 8, Convert.FromHexString("7E0102030405AABB"));
+            host.DrainReplies();
+            var emitted = Last();
+            if (emitted.Id != 0x31 || Convert.ToHexString(emitted.Data) != "010203")
+                throw new InvalidOperationException($"emitOutput check: the ring holds {Show(emitted)}, where it must hold report 0x31 with 010203 in place of the command.");
+            host.Submit(dev, 0x02, isIn: false, 16, Convert.FromHexString("0391000D000800000100FFFFFFFFFFFF"));
+            host.DrainReplies();
+            var raw = Last();
+            if (raw.Id != 0x03 || Convert.ToHexString(raw.Data) != "91000D000800000100FFFFFFFFFFFF")
+                throw new InvalidOperationException($"emitOutput check: a command no rule emits for reaches the ring as {Show(raw)}, not as the host sent it.");
+
+            var engine = dev.Protocol!;
+            var block = new byte[engine.Protocol.Model.StateSize];
+            for (int i = 0; i < block.Length; i++) block[i] = (byte)(0xC0 + i);
+            engine.SetStateBlock(block);
+            uint seq = host.Submit(dev, 0x00, isIn: true, 64, ReadOnlySpan<byte>.Empty,
+                setup: Setup(0xA1, 0x01, (ushort)((3 << 8) | 0x32), dev.Descriptors.HidInterfaceNumber, 64));
+            var got = host.DrainReplies().Where(x => x.Kind == UsbipProtocol.RetSubmit && x.Seq == seq).ToList();
+            string answer = got.Count == 1 ? Convert.ToHexString(got[0].Data) : "nothing";
+            if (got.Count != 1 || got[0].Status != 0 || answer != "32C0C1C2C3")
+                throw new InvalidOperationException($"liveFeatureReports check: GET_REPORT(Feature 0x32) answered {answer} (status {(got.Count == 1 ? got[0].Status : 0)}), where it must answer 32C0C1C2C3.");
+            dev.Dispose();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(view);
+            Marshal.FreeHGlobal(ring);
+        }
     }
 
     /// <summary>A device that builds its reports serves them on the endpoint
@@ -119,15 +202,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
     /// answers anything else.</summary>
     static void LayoutEndpoint(Host host)
     {
-        var asm = typeof(HMContext).Assembly;
-        JsonObject? json = null;
-        foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
-        {
-            using var st = asm.GetManifestResourceStream(res)!;
-            using var sr = new StreamReader(st, Encoding.UTF8);
-            if (JsonNode.Parse(sr.ReadToEnd()) is JsonObject o && (string?)o["id"] == Switch2Id) { json = o; break; }
-        }
-        if (json == null) throw new InvalidOperationException($"No catalog profile {Switch2Id}.");
+        var json = CompositeJson();
         json["id"] = "layout-endpoint-check";
         var cfg = json["usbConfiguration"]!.AsObject();
         string hex = (string)cfg["configurationDescriptor"]!;

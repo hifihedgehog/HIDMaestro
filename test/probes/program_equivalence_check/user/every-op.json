@@ -275,6 +275,19 @@
       "extendedProperties": "8e0000000001050001008400000001000000280044006500760069006300650049006e007400650072006600610063006500470055004900440000004e0000007b00360046003100330037003200350045002d0045004600300045002d0034004600440033002d0041004500350046002d004200320044004500390038003900450043003800320035007d000000"
     }
   },
+  "liveFeatureReports": [
+    {
+      "reportId": "0x32",
+      "size": 8,
+      "program": [
+        { "const": { "0": "32" } },
+        { "copy": "0-1", "to": 1 },
+        { "hat8": [{ "word": 16 }, { "word": 18 }], "center": 32768, "deadzone": 4000, "yUp": true, "table": "000102030405060708", "to": 3 },
+        { "pack12": [4, 6], "to": 4 },
+        { "when": "featureEnabled&0x20", "ops": [{ "const": { "7": "AA" } }] }
+      ]
+    }
+  ],
   "stateBlock": {
     "size": 24,
     "fields": [
@@ -1113,6 +1126,20 @@
           "match": "18",
           "status": "00",
           "reply": []
+        },
+        {
+          "match": "7E",
+          "minLength": 8,
+          "emitOutput": {
+            "reportId": "0x31",
+            "size": 6,
+            "program": [
+              { "const": { "0": "31" } },
+              { "field": { "bit": 12, "bits": 12 }, "center": 2048, "scale": [3, 4], "offset": 128, "to": 1 },
+              { "swap16": "2-3", "to": 2 },
+              { "counter": "reportsSent", "at": 4, "width": 16, "order": "be" }
+            ]
+          }
         },
         {
           "match": "..",

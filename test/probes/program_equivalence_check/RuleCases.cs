@@ -64,7 +64,7 @@ internal static partial class RuleChecks
         yield return E("a state block of 0 bytes", "$.stateBlock.size", Set("$.stateBlock.size", "0"));
         yield return E("layouts with no state block", "$.inputReports", Remove("$.stateBlock"));
         yield return E("a decoder on the report extendedOutputReport decodes", "$.protocol.decoders.rumble.reports[0]", Set("$.extendedOutputReport", "{\"reportId\":\"0x02\",\"size\":33,\"fields\":[{\"byte\":1,\"type\":\"uint8\",\"semantic\":\"first\"}]}"));
-        yield return E("a state block that no layout or live feature report reads", "$.stateBlock", All(Remove("$.inputReports"), Remove("$.protocol.input.clock"), Remove("$.protocol.getReport")));
+        yield return E("a state block that no layout or live feature report reads", "$.stateBlock", All(Remove("$.inputReports"), Remove("$.liveFeatureReports"), Remove("$.protocol.input.clock"), Remove("$.protocol.getReport")));
         yield return E("an empty layout list", "$.inputReports", Set("$.inputReports", "[]"));
         yield return E("a null layout", "$.inputReports[0]", Set(L0, "null"));
         yield return E("a layout with no name", "$.inputReports[0].name", Set($"{L0}.name", "\"\""));
@@ -84,7 +84,7 @@ internal static partial class RuleChecks
         yield return E("two layouts on one ID whose conditions hold together", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""), Set("$.inputReports[1].while", "\"featureEnabled!=0\"")));
         yield return E("two layouts on one ID testing 24 bits", "$.inputReports[1].while", All(Set("$.inputReports[1].reportId", "\"0x09\""), Set("$.inputReports[1].program[0].const[\"0\"]", "\"09\""),
             Set($"{L0}.while", "\"featureMask!=0 && playerLeds!=0\""), Set("$.inputReports[1].while", "\"featureEnabled==0\"")));
-        yield return E("layouts with no protocol", "$.inputReports", All(Remove("$.protocol"), Set("$.inputReports", "[{\"name\":\"pro\",\"reportId\":\"0x09\",\"size\":2,\"program\":[{\"const\":{\"0\":\"09\"}}]}]")));
+        yield return E("layouts with no protocol", "$.inputReports", All(Remove("$.protocol"), Remove("$.liveFeatureReports"), Set("$.inputReports", "[{\"name\":\"pro\",\"reportId\":\"0x09\",\"size\":2,\"program\":[{\"const\":{\"0\":\"09\"}}]}]")));
         yield return E("a state block with no fields", "$.stateBlock.fields", Remove("$.stateBlock.fields"));
 
         // ── Ops as a profile writes them ─────────────────────────────────
@@ -190,6 +190,8 @@ internal static partial class RuleChecks
         yield return E("live feature reports with no state block", "$.liveFeatureReports", All(Remove("$.stateBlock"), Remove("$.inputReports"), Set("$.liveFeatureReports", "[{\"reportId\":\"0x01\",\"size\":2,\"program\":[{\"copy\":\"0\",\"to\":1}]}]")));
         yield return E("a null live feature report", "$.liveFeatureReports[0]", Set("$.liveFeatureReports", "[null]"));
         yield return E("a live feature report ID that is not a byte", "$.liveFeatureReports[0].reportId", Set("$.liveFeatureReports", "[{\"reportId\":\"0x1FF\",\"size\":2,\"program\":[{\"copy\":\"0\",\"to\":1}]}]"));
+        yield return E("two live feature reports on one ID", "$.liveFeatureReports[1].reportId", Set("$.liveFeatureReports", "[{\"reportId\":\"0x32\",\"size\":2,\"program\":[{\"const\":{\"0\":\"32\"}},{\"copy\":\"0\",\"to\":1}]},{\"reportId\":\"0x32\",\"size\":2,\"program\":[{\"const\":{\"0\":\"32\"}},{\"copy\":\"1\",\"to\":1}]}]"));
+        yield return E("an emitted report whose byte 0 is not its ID", "$.protocol.commands.rules[0].emitOutput.program", Rule("{\"match\":\"7E\",\"minLength\":4,\"emitOutput\":{\"reportId\":\"0x31\",\"size\":2,\"program\":[{\"copy\":\"1\",\"to\":1}]}}"));
 
         foreach (var c in ProtocolCases()) yield return c;
         foreach (var c in StreamCases()) yield return c;

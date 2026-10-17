@@ -240,8 +240,7 @@ internal sealed partial class UsbipEmulatedDevice
             if ((result.Effect & ProtocolEngine.Effect.InputOpened) != 0)
                 lock (_hidLock) _reportOwed = false;
         }
-        if (!engine.Protocol.ConsumesCommands && !result.Consume && command.Length > 0)
-            PublishOutput(SourceHidOutput, command[0], command[1..]);
+        PublishCommand(result, command);
         SendRetSubmit(seqnum, 0, command.Length, null);
         CompleteBulkIn();
         if (result.Effect != ProtocolEngine.Effect.None) WakeLayoutClock();

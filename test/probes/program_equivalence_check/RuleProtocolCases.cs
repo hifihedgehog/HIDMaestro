@@ -36,7 +36,7 @@ internal static partial class RuleChecks
         yield return G("an endpoint on input-channel replies", $"{Pr}.replies.endpoint", Set($"{Pr}.replies.endpoint", "\"0x81\""));
         yield return E("2,000 pending replies", $"{Pr}.replies.pending", Set($"{Pr}.replies.pending", "2000"));
         yield return E("an overflow rule that is not one", $"{Pr}.replies.overflow", Set($"{Pr}.replies.overflow", "\"block\""));
-        yield return E("a reply with no input endpoint to send it on", Cm, All(Remove(In), Remove("$.inputReports"), Remove("$.stateBlock"), Set($"{Pr}.replies", "{\"channel\":\"input\"}"), Remove($"{Pr}.getReport")));
+        yield return E("a reply with no input endpoint to send it on", Cm, All(Remove(In), Remove("$.inputReports"), Remove("$.liveFeatureReports"), Remove("$.stateBlock"), Set($"{Pr}.replies", "{\"channel\":\"input\"}"), Remove($"{Pr}.getReport")));
 
         // Commands.
         yield return E("a command endpoint that is IN", $"{Cm}.endpoint", Set($"{Cm}.endpoint", "\"0x81\""));

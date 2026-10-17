@@ -1019,6 +1019,20 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                     SendRetSubmit(cmd.Seqnum, 0, n, snapshot.AsSpan(0, n).ToArray());
                     return;
                 }
+                if (reportType == 0x03 && _engine != null)
+                {
+                    // A live feature report: its program over the state
+                    // block as it stands, built for this read.
+                    Span<byte> live = stackalloc byte[Internal.Programs.ProgramForm.MaxReport];
+                    int size = _engine.BuildLiveFeature(reportId, live);
+                    if (size >= 0)
+                    {
+                        PublishOutput(SourceHidFeatureRead, reportId, ReadOnlySpan<byte>.Empty);
+                        int n = Math.Min(size, wLength);
+                        SendRetSubmit(cmd.Seqnum, 0, n, live[..n].ToArray());
+                        return;
+                    }
+                }
                 if (reportType == 0x03)
                 {
                     var stub = BuildFeatureStub(reportId, wLength);
@@ -1050,8 +1064,15 @@ internal sealed partial class UsbipEmulatedDevice : IDisposable
                 // the data stage as one command too, report ID first, and the
                 // device answers and publishes it as before: the answer table
                 // keeps a feature report, and the ring gets both kinds.
-                if (_engine is { Protocol.Source: CommandSource.SetReport })
-                    _engine.HandleCommand(payload, System.Diagnostics.Stopwatch.GetTimestamp());
+                // A rule that emits a report puts it on the ring in place of
+                // the command.
+                if (_engine is { Protocol.Source: CommandSource.SetReport }
+                    && _engine.HandleCommand(payload, System.Diagnostics.Stopwatch.GetTimestamp()) is { Emit: >= 0 } emitting)
+                {
+                    PublishCommand(emitting, payload);
+                    SendRetSubmit(cmd.Seqnum, 0, payload.Length, null);
+                    return;
+                }
                 byte rid = payload.Length > 0 ? payload[0] : reportId;
                 var data = payload.Length > 0 ? payload[1..] : ReadOnlySpan<byte>.Empty;
                 // A protocol whose feature reports carry no report id (the
