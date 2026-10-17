@@ -247,6 +247,11 @@ internal static class Program
             var g = new GoldenCase(c.Name, seed, dump: true);
             try
             {
+                // --explain holds each base stream to its golden pin where no
+                // entry before the lane pins it.
+                if (GoldenCase.ExplainDir != null)
+                    ExplainSession.Golden = GoldenCase.Parse(GoldenStore.ReadVerified(golden, c.Name)).Streams
+                        .ToDictionary(s => s.Name, s => (s.Count, s.Digest), StringComparer.Ordinal);
                 try { c.Record(g, options); }
                 finally { g.CloseDump(); }
                 Console.WriteLine($"  {c.Name}: {g.Streams.Count} streams, {g.Outputs} outputs, {sw.Elapsed.TotalSeconds:F1} s");

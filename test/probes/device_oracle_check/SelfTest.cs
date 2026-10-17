@@ -9,6 +9,8 @@
 //   chain    Load refuses a lane that names a stream twice, an entry that
 //            follows a later lane's, and one that pins its predecessor's
 //            bytes.
+//   base     --explain refuses a base dump whose stream is not what the list
+//            pinned before the lane, or the golden file where nothing did.
 // Exit 0 when every check passes, 1 otherwise.
 using System;
 using System.Collections.Generic;
@@ -37,6 +39,7 @@ internal static class SelfTest
         {
             Writer(dir);
             Chain(dir);
+            Base(dir);
         }
         finally
         {
@@ -106,6 +109,68 @@ internal static class SelfTest
         lines = Write(dir, List(dir, w3, other), lane: "X", (2, B));
         Check(lines.Count == 3 && lines[0] == w3 && lines[1] == other && lines[2] == $"stream c/s count 2 digest {B} | X | ?",
               "writer puts the new entry at the end of the list, after every earlier lane's entries");
+    }
+
+    // Streams of one case, written as a base dump and replayed against it.
+    static readonly (string Tag, byte[] Data)[] B0 = { ("o", new byte[] { 1, 2 }), ("o", new byte[] { 3 }) };
+    static readonly (string Tag, byte[] Data)[] T1 = { ("o", new byte[] { 1, 9 }), ("o", new byte[] { 3 }) };
+    static readonly (string Tag, byte[] Data)[] T2 = { ("o", new byte[] { 7, 9 }), ("o", new byte[] { 3 }) };
+
+    static (long Count, string Digest) Pin((string Tag, byte[] Data)[] outputs)
+    {
+        var s = new GoldenStream("s");
+        foreach (var (t, d) in outputs) s.Add(t, d);
+        return (s.Count, s.Digest);
+    }
+
+    static string Entry((string Tag, byte[] Data)[] outputs, string lane, string fields = "") =>
+        $"stream c/s count {Pin(outputs).Count} digest {Pin(outputs).Digest}{fields} | {lane} | r";
+
+    /// <summary>Writes <paramref name="base"/> as case c's dump, replays
+    /// <paramref name="tree"/> against it under --explain --lane, and
+    /// returns the failures.</summary>
+    static int Explain(string dir, (string Tag, byte[] Data)[] @base, (string Tag, byte[] Data)[] tree,
+                       (string Tag, byte[] Data)[] golden, string lane, params string[] list)
+    {
+        string dumps = Path.Combine(dir, "dump");
+        GoldenCase.DumpDir = dumps;
+        var b = new GoldenCase("c", 1, dump: true);
+        b.Stream("s");
+        foreach (var (t, d) in @base) b.Out(t, d);
+        b.CloseDump();
+        GoldenCase.DumpDir = null;
+        var changes = List(dir, list);
+        ExplainSession.Changes = changes;
+        ExplainSession.Lane = lane;
+        ExplainSession.Golden = new Dictionary<string, (long, string)> { ["s"] = Pin(golden) };
+        ExplainRules.Active = ExplainRules.From(changes, lane);
+        GoldenCase.ExplainDir = dumps;
+        try
+        {
+            var g = new GoldenCase("c", 1, dump: true);
+            g.Stream("s");
+            foreach (var (t, d) in tree) g.Out(t, d);
+            g.CloseDump();
+            var ex = g.Explained!;
+            foreach (var line in ex.Lines) Console.WriteLine("    " + line.Trim());
+            return ex.Failures;
+        }
+        finally
+        {
+            GoldenCase.ExplainDir = null;
+            ExplainRules.Active = new ExplainRules();
+        }
+    }
+
+    static void Base(string dir)
+    {
+        Check(Explain(dir, B0, B0, golden: B0, "X") == 0, "base: a dump equal to the golden file passes");
+        Check(Explain(dir, T1, T1, golden: B0, "X", Entry(T1, "X", " other=1")) > 0,
+              "base: a dump of the lane's own tree fails, though the lane's entry pins its bytes");
+        Check(Explain(dir, T1, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) == 0,
+              "base: a dump equal to lane W3's pin before lane X passes");
+        Check(Explain(dir, B0, T2, golden: B0, "X", Entry(T1, "W3"), Entry(T2, "X", " other=1")) > 0,
+              "base: a dump from before lane W3's pin fails");
     }
 
     static void Chain(string dir)

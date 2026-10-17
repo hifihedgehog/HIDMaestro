@@ -163,14 +163,20 @@ internal sealed class ExplainRules
 internal sealed record StampRule(int Byte, int Width, uint Divisor);
 
 /// <summary>The base dump of one case read in step with the tree's outputs,
-/// each output recomputed by the lane's rules, and each stream's counts held
-/// against its entry in the change list.</summary>
+/// each output recomputed by the lane's rules, and each stream held twice
+/// against the change list: the base's bytes against what the list pinned
+/// before the lane, and the lane's counts against its entry.</summary>
 internal sealed class ExplainSession
 {
     /// <summary>The change list and the lane whose entries --explain holds
     /// each moved stream to.</summary>
     public static ChangeList? Changes { get; set; }
     public static string Lane { get; set; } = "";
+
+    /// <summary>The golden file's count and digest of each stream of the
+    /// case, for a stream no entry before the lane pins.</summary>
+    public static IReadOnlyDictionary<string, (long Count, string Digest)> Golden { get; set; } =
+        new Dictionary<string, (long, string)>();
 
     /// <summary>What one stream did against the base: its outputs by
     /// category, "other" counting those the rules do not account
@@ -188,6 +194,9 @@ internal sealed class ExplainSession
     public readonly Dictionary<string, StreamResult> Results = new(StringComparer.Ordinal);
     public int Failures { get; private set; }
 
+    // The base stream as read, hashed as the golden file hashes a stream.
+    GoldenStream? _baseStream;
+
     public ExplainSession(string dir, string caseName)
     {
         _case = caseName;
@@ -204,6 +213,7 @@ internal sealed class ExplainSession
         if (kind != 'S') { Fail($"stream {name}: the base has record {(char)kind} here"); throw new InvalidDataException("The replay and the base dump fell out of step."); }
         string baseName = Encoding.ASCII.GetString(_base.ReadBytes(_base.ReadUInt16()));
         if (baseName != name) { Fail($"stream {name}: the base has stream {baseName} here"); throw new InvalidDataException("The replay and the base dump fell out of step."); }
+        _baseStream = new GoldenStream(name);
     }
 
     public void Out(string tag, ReadOnlySpan<byte> data, IExplainer? explainer, ExplainInput input)
@@ -212,8 +222,9 @@ internal sealed class ExplainSession
         if (kind != 'O') { Fail($"{_stream}: output {tag}, the base has record {(char)kind} here"); throw new InvalidDataException("The replay and the base dump fell out of step."); }
         string baseTag = Encoding.ASCII.GetString(_base.ReadBytes(_base.ReadByte()));
         byte[] before = _base.ReadBytes(checked((int)_base.ReadUInt32()));
-        bool same = baseTag == tag && data.SequenceEqual(before);
+        _baseStream!.Add(baseTag, before);
         bool rules = ExplainRules.Active.Any;
+        bool same = baseTag == tag && data.SequenceEqual(before);
         if (same && (!rules || explainer == null)) { _same++; return; }
         string why;
         if (baseTag != tag) why = $"tag {baseTag} became {tag}";
@@ -258,32 +269,50 @@ internal sealed class ExplainSession
         (explainer as INoteReader)?.Note(tag, before, data.ToArray());
     }
 
-    /// <summary>Holds the stream's counts against the last entry naming it:
-    /// a stream that moved against the base, or that the rules move and the
-    /// tree does not, needs one of this lane whose categories equal the
-    /// counts. "other" counts the outputs the rules do not account for,
-    /// whose bytes only the entry's digest states.</summary>
+    /// <summary>The pin a stream had before this lane: the last entry of a
+    /// lane before it in the list, or the golden file's.</summary>
+    (long Count, string Digest, string Where) PinBefore(List<ChangeList.Entry> chain)
+    {
+        int order = Changes?.LaneOrder(Lane) ?? int.MaxValue;
+        var e = chain.LastOrDefault(x => x.Lane != Lane && Changes!.LaneOrder(x.Lane) < order);
+        if (e != null) return (e.Count, e.Digest, $"{e.Source} (lane {e.Lane})");
+        var (n, d) = Golden.TryGetValue(_stream, out var g) ? g : (0, "none");
+        return (n, d, "the golden file");
+    }
+
+    /// <summary>Holds the stream to the list. Its base must be what the list
+    /// pinned before this lane, so a dump of another tree fails at its
+    /// first moved stream. A stream that moved against the base, or that
+    /// the rules move and the tree does not, needs an entry of this lane,
+    /// the stream's last, whose categories equal the counts, "other"
+    /// counting the outputs the rules do not give.</summary>
     void Flush()
     {
         if (_stream.Length == 0) return;
+        string where = $"{_case}/{_stream}";
+        var chain = Changes?.Chain(where) ?? new List<ChangeList.Entry>();
+        var before = PinBefore(chain);
+        if (_baseStream!.Count != before.Count || _baseStream.Digest != before.Digest)
+        {
+            Lines.Add($"  [FAIL] {where}: the base dump holds count {_baseStream.Count} digest {Short(_baseStream.Digest)}, " +
+                      $"and {before.Where} pins count {before.Count} digest {Short(before.Digest)} before lane {Lane}: the dump is not this lane's base");
+            Failures++;
+        }
         var counts = new SortedDictionary<string, long>(_categories, StringComparer.Ordinal);
         if (_unexplainedCount > 0) counts["other"] = _unexplainedCount;
-        var result = new StreamResult(_same, _changed, counts);
-        string where = $"{_case}/{_stream}";
         string tally = $"{_same} identical, {_changed} changed ({string.Join(", ", counts.Select(kv => $"{kv.Key} {kv.Value}"))})"
                      + (_raw == 0 ? "" : $", {_raw} carrying raw bytes");
         if (_changed > 0 || _unexplainedCount > 0)
         {
-            Results[_stream] = result;
-            var e = Changes?.Peek(_case, _stream);
-            string verdict;
+            Results[_stream] = new StreamResult(_same, _changed, counts);
+            var e = chain.LastOrDefault();
             string? problem = null;
             if (e == null || e.Lane != Lane)
-                problem = e == null ? $"no entry names it" : $"its last entry, {e.Source}, is lane {e.Lane}'s";
+                problem = e == null ? "no entry names it" : $"its last entry, {e.Source}, is lane {e.Lane}'s";
             else if (!counts.SequenceEqual(e.Categories))
                 problem = $"{e.Source} claims {(e.Fields.Count == 0 ? "no categories" : string.Join(" ", e.Fields.Select(kv => $"{kv.Key}={kv.Value}")))}";
-            if (problem != null) { verdict = "FAIL"; Failures++; }
-            else verdict = _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
+            string verdict = problem != null ? "FAIL" : _unexplainedCount == 0 ? "EXPLAINED" : "CLAIMED";
+            if (problem != null) Failures++;
             Lines.Add($"  [{verdict}] {where}: {tally}{(problem == null ? "" : $". {problem}")}");
             foreach (var u in _unexplained) Lines.Add("      " + u);
         }
@@ -291,6 +320,8 @@ internal sealed class ExplainSession
         _categories.Clear();
         _unexplained.Clear();
     }
+
+    static string Short(string digest) => digest.Length > 16 ? digest[..16] : digest;
 
     void Fail(string what)
     {
