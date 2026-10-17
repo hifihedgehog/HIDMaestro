@@ -36,6 +36,12 @@ internal static partial class RuleChecks
         yield return new("a file that is not JSON", EO, "$", Text: t => t[..(t.Length / 2)]) { Shared = true };
         yield return new("a model group written twice", EO, "$.stateBlock", Text: t => t.Replace("\"stateBlock\":", "\"stateBlock\":{\"size\":1},\"stateBlock\":"));
         yield return E("a key a group does not define", "$.inputReports[0].sise", Set($"{L0}.sise", "1"));
+        // The SDK's own context reads a profile's keys in any case and skips
+        // the four group keys, so a case variant must be refused here.
+        yield return new Case("a group key written InputReports", EO, "$.InputReports", Text: t => t.Replace("\"inputReports\":", "\"InputReports\":")) { Tool = true };
+        yield return new Case("a group key written PROTOCOL", EO, "$.PROTOCOL", Text: t => t.Replace("\"protocol\":", "\"PROTOCOL\":")) { Tool = true };
+        yield return new Case("a group key written Stateblock", EO, "$.Stateblock", Text: t => t.Replace("\"stateBlock\":", "\"Stateblock\":")) { Tool = true };
+        yield return new Case("a group key written LiveFeatureReports", EO, "$.LiveFeatureReports", Set("$.LiveFeatureReports", "[]")) { Tool = true };
 
         // ── Registers and counters ───────────────────────────────────────
         yield return E("33 registers", "$.protocol.state", Set($"{Pr}.state", "[" + string.Join(",", Enumerable.Range(0, 33).Select(i => $"{{\"name\":\"r{i}\"}}")) + "]"));

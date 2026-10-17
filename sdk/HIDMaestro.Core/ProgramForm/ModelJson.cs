@@ -70,7 +70,16 @@ public static class ProfilePrograms
         foreach (var prop in root.EnumerateObject())
         {
             string key = prop.Name;
-            if (Array.IndexOf(GroupKeys, key) < 0) continue;
+            if (Array.IndexOf(GroupKeys, key) < 0)
+            {
+                // The SDK's context reads a profile's keys in any case and
+                // skips these four, so a case variant would load as a profile
+                // without the group.
+                foreach (var g in GroupKeys)
+                    if (string.Equals(key, g, StringComparison.OrdinalIgnoreCase))
+                        throw new FormException("$." + key, $"the key is spelled \"{key}\", and the model group is \"{g}\"");
+                continue;
+            }
             if (!seen.Add(key)) throw new FormException("$." + key, "the key is written twice");
             try
             {
