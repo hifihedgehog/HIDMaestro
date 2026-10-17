@@ -104,8 +104,27 @@ switch (args[0])
 Console.Error.WriteLine($"unknown mode {args[0]}");
 return 2;
 
+// To a file beside the output, then moved over it, so a tool stopped during
+// the write leaves the old output, older than its inputs, and the next build
+// runs the tool again. A cut-short output newer than its inputs would skip
+// the step in every later build.
 static void Write(string path, string text)
 {
-    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+    string full = Path.GetFullPath(path);
+    Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+    string temp = full + ".tmp";
+    WriteFile(temp, text);
+    File.Move(temp, full, overwrite: true);
+}
+
+// The file write itself. HM_KERNELGEN_STOP_MIDWRITE=1 stops the tool halfway
+// through it, as a canceled build kills the tool, for the build step's test.
+static void WriteFile(string path, string text)
+{
+    if (Environment.GetEnvironmentVariable("HM_KERNELGEN_STOP_MIDWRITE") == "1")
+    {
+        File.WriteAllText(path, text[..(text.Length / 2)]);
+        Environment.Exit(3);
+    }
     File.WriteAllText(path, text);
 }
