@@ -969,8 +969,10 @@ internal static class VendorBlobCodec
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static void WriteCalibratedI16(in VendorBlobProgram.CompiledField f, in HMGamepadState state, byte[] buffer)
     {
+        // Every field here has its extras: read them once.
+        var x = f.Extras!;
         short v;
-        if (f.ScaleNumerator != 0)
+        if (x.ScaleNumerator != 0)
         {
             float g = f.Source switch
             {
@@ -982,7 +984,7 @@ internal static class VendorBlobCodec
                 VendorBlobProgram.SrcOp.GyroDpsZ => state.GyroDpsZ,
                 _ => 0f,
             };
-            v = WireArith.Scaled(f.Negate ? -g : g, f.ScaleNumerator, f.ScaleDenominator);
+            v = WireArith.Scaled(x.Negate ? -g : g, x.ScaleNumerator, x.ScaleDenominator);
         }
         else
         {
@@ -1001,8 +1003,8 @@ internal static class VendorBlobCodec
         // zero at 0x8000. Such a word is unsigned, so it clamps to 0 to 65535,
         // as uint10-be clamps to its range. A report that carries several
         // motion frames of one sample writes it in each (repeat).
-        int w = f.Extras!.OffsetBinary ? Math.Clamp(v + f.Center, 0, 65535) : v;
-        for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
+        int w = x.OffsetBinary ? Math.Clamp(v + f.Center, 0, 65535) : v;
+        for (int k = 0, at = f.B, n = x.RepeatCount, stride = x.RepeatStride; k < n && at + 1 < buffer.Length; k++, at += stride)
         {
             buffer[at]     = (byte)(w & 0xFF);
             buffer[at + 1] = (byte)((w >> 8) & 0xFF);

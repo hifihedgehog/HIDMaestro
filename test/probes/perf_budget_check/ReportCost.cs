@@ -5,7 +5,8 @@
 // One launch measures, interleaved run by run so load elsewhere on the
 // machine lands on every variant alike, at high process priority:
 //   - BuildReportInto, the descriptor path, on four profiles
-//   - EncodeInput, the codec, on four profiles
+//   - EncodeInput, the codec, on four profiles, and on ps-move where it
+//     carries a codec report
 //   - SubmitState on the budget table's profiles, through the SDK's own
 //     controller built offline on a buffer of this probe's, as
 //     device_oracle_check's case 1 builds it: the descriptor path, the XUSB
@@ -80,6 +81,8 @@ internal static class ReportCost
         {
             ("dualshock-4-v2", false), ("xbox-360-wired", false), ("dualsense-bt", true), ("steam-controller-2", false),
             ("switch2-pro-controller-composite", false), ("gamecube-adapter", false), ("amazon-luna-usb", false), ("amazon-luna-ble", false),
+            // The two profiles that carry a captured descriptor (lane DD-6).
+            ("ps-move", false), ("xbox-360-flight-stick", false),
         })
         {
             var p = db[id];
@@ -108,6 +111,27 @@ internal static class ReportCost
                 Cache("s_outputViews").Remove(at);
                 Marshal.FreeHGlobal(view);
             });
+        }
+
+        // ps-move's codec report, from lane DD-6 on, with random motion in
+        // every calibrated field it writes. Its own generator, so the other
+        // variants' inputs are those of a tree without it.
+        if (db["ps-move"].ExtendedReport is { } moveSpec)
+        {
+            var moveRng = new Random(20261017);
+            var states = new HMGamepadState[1024];
+            for (int i = 0; i < states.Length; i++)
+            {
+                states[i] = RandomState(moveRng);
+                states[i].AccelGX = (float)(moveRng.NextDouble() * 4 - 2);
+                states[i].AccelGZ = (float)(moveRng.NextDouble() * 4 - 2);
+                states[i].GyroDpsY = (float)(moveRng.NextDouble() * 400 - 200);
+                states[i].GyroDpsZ = (float)(moveRng.NextDouble() * 400 - 200);
+            }
+            var buf = new byte[moveSpec.Size];
+            var enc = new VendorBlobCodec.EncoderState();
+            variants.Add(("EncodeInput,ps-move", i => VendorBlobCodec.EncodeInput(moveSpec, in states[i & 1023],
+                0.5f, 0.5f, 0.5f, 0.5f, (float)(i & 255) / 255f, 0f, buf, enc)));
         }
 
         var times = variants.Select(_ => new List<double>()).ToList();
