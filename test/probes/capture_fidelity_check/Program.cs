@@ -14,6 +14,10 @@
 //              twice. No catalog string carries that damage: a U+00C2 or
 //              U+00C3 followed by a character from U+0080 to U+00BF, which
 //              is a UTF-8 lead and continuation byte read one by one.
+//   descriptors  A profile whose notes name a captured descriptor carries
+//              that capture byte for byte, and the SDK reads from it the
+//              reports, sizes and top-level usage the capture declares,
+//              each worked out by hand from the capture's items.
 //
 // Exit 0 PASS, 1 FAIL.
 using System;
@@ -40,6 +44,7 @@ internal static partial class Program
         Console.WriteLine("=== capture_fidelity_check: catalog data and driver text against their sources ===");
         InfText();
         CatalogStrings();
+        CapturedDescriptors();
         Console.WriteLine();
         Console.WriteLine($"capture_fidelity_check: {(s_failures == 0 ? "PASS" : "FAIL")}, {s_total - s_failures} of {s_total} checks pass");
         return s_failures == 0 ? 0 : 1;
@@ -132,5 +137,52 @@ internal static partial class Program
         var sb = new StringBuilder("\"");
         foreach (char c in s) sb.Append(c is >= ' ' and <= '~' ? c.ToString() : $"\\u{(int)c:X4}");
         return sb.Append('"').ToString();
+    }
+
+    // ── descriptors ──────────────────────────────────────────────────────
+
+    /// <summary>A captured descriptor: the profile that carries it, the
+    /// bytes, where they come from, the top-level usage, and every report
+    /// as kind, ID and length with the ID byte.</summary>
+    sealed record Capture(string Profile, string Hex, string Source, ushort Page, ushort Usage,
+                          (HidReportKind Kind, byte Id, int Bytes)[] Reports);
+
+    static readonly Capture[] Captures =
+    {
+        // ControllersInfo bfc11b8 xbox360/xusb_flightstick_hid_report_descriptor.bin,
+        // 127 bytes, the descriptor the XUSB driver presents for a flight
+        // stick: Joystick, 8-bit Z and Rz, 16-bit X and Y, 16-bit Rx and
+        // Ry, 10 buttons, a 4-bit hat and 2 bits of padding, no report ID.
+        // 1 + 1 + 4 + 4 bytes, then 16 bits: 12 bytes.
+        new("xbox-360-flight-stick",
+            "05010904a10105010932150026ff0095017508810205010935150026ff0095017508810205010901a10009300931150026ffff350046ffff950275108102c0a10009330934150026ffff350046ffff950275108102c005091901290a950a7501810205010939150125083500463b10660e00750495018142750295018103c0",
+            "ControllersInfo bfc11b8 xbox360/xusb_flightstick_hid_report_descriptor.bin", 0x01, 0x04,
+            new[] { (HidReportKind.Input, (byte)0, 12) }),
+    };
+
+    static void CapturedDescriptors()
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- descriptors: profiles carry the descriptors their sources capture ---");
+        var db = ProfileDatabase.LoadEmbedded();
+        foreach (var c in Captures)
+        {
+            var p = db.All.FirstOrDefault(x => x.Id == c.Profile);
+            byte[]? d = p?.GetDescriptorBytes();
+            byte[] want = Convert.FromHexString(c.Hex);
+            Check($"{c.Profile}: descriptor is the {want.Length}-byte capture ({c.Source})",
+                  d != null && d.AsSpan().SequenceEqual(want),
+                  d == null ? "no descriptor" : $"carries {d.Length} bytes");
+            if (d == null) continue;
+            var map = HidReportMap.Parse(d);
+            var top = map.Collections.FirstOrDefault();
+            Check($"{c.Profile}: top-level usage {c.Page:X4}:{c.Usage:X4}", top != null && top.Is(c.Page, c.Usage),
+                  top == null ? "no collection" : $"reads {top.UsagePage:X4}:{top.Usage:X4}");
+            string Table(IEnumerable<(HidReportKind Kind, byte Id, int Bytes)> r) =>
+                string.Join(" ", r.OrderBy(x => x.Kind).ThenBy(x => x.Id).Select(x => $"{x.Kind}:{x.Id:X2}:{x.Bytes}"));
+            string got = Table(map.Reports.Select(r => (r.Kind, r.ReportId, r.FrameBytes)));
+            string expected = Table(c.Reports);
+            Check($"{c.Profile}: reports {expected}", got == expected, got == expected ? "" : $"reads {got}");
+        }
     }
 }

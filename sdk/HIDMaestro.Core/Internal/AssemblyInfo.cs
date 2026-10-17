@@ -58,3 +58,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("PerfBudgetCheck")]
 [assembly: InternalsVisibleTo("DeviceOracleCheck")]
 [assembly: InternalsVisibleTo("ArithRoundtripCheck")]
+[assembly: InternalsVisibleTo("CaptureFidelityCheck")]

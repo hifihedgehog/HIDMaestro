@@ -222,7 +222,7 @@
   {"profile": "vrs-dfp-pedals", "source": "descriptor", "sha256": "AFC469567E517A6D1C156CB6B4DC934A05E6D12D25BEE00EA3F6701053EEB2DD", "input": {"1": 64, "101": 64}, "output": {"100": 64}, "feature": {}},
   {"profile": "xbox-360-arcade-stick", "source": "descriptor", "sha256": "05473B9774A946A83A71E9A2604D7233F5D1249E523AA1E662323FE6D9DD87E9", "input": {"0": 4}, "output": {}, "feature": {}},
   {"profile": "xbox-360-dance-pad", "source": "descriptor", "sha256": "05473B9774A946A83A71E9A2604D7233F5D1249E523AA1E662323FE6D9DD87E9", "input": {"0": 4}, "output": {}, "feature": {}},
-  {"profile": "xbox-360-flight-stick", "source": "descriptor", "sha256": "DFD5567C48B96FFE43E8CCE0C73F8184D990937EDD95E7038FB89334477D3B8B", "input": {"0": 10}, "output": {}, "feature": {}},
+  {"profile": "xbox-360-flight-stick", "source": "descriptor", "sha256": "5F7EE3C919278D22674BFD3F10FB452D614BB84315C679477A52B7B7B43B5EFB", "input": {"0": 12}, "output": {}, "feature": {}},
   {"profile": "xbox-360-guitar-v1", "source": "descriptor", "sha256": "B4AB1228D733AF44AC44C56FB1F8CE3EF53D23B4D26899ED05076D7273A9B0FD", "input": {"0": 10}, "output": {}, "feature": {}},
   {"profile": "xbox-360-guitar-v2", "source": "descriptor", "sha256": "9483AC1B2CB95AF72DB555BB90B5780BCE1D79595347B17D5EED76BA5DBE84C7", "input": {"0": 10}, "output": {}, "feature": {}},
   {"profile": "xbox-360-type2", "source": "descriptor", "sha256": "350981CD95CDC5F66E4489FEB68E21DE5B478CCF6C89F7772C93C813086DD459", "input": {"0": 18}, "output": {}, "feature": {}},
