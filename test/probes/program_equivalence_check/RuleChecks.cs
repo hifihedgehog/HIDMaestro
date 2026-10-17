@@ -62,6 +62,9 @@ internal static partial class RuleChecks
         var m = ProfileMessage().Match(message);
         if (!m.Success) return ("(no path)", message, e);
         string path = m.Groups[1].Value;
+        // "fields[3].repeat's last frame": the possessive is prose, not a
+        // step, as DD-2's Locate reads it.
+        if (path.EndsWith("'s", StringComparison.Ordinal)) path = path[..^2];
         return (path.StartsWith('$') ? path : "$." + path, m.Groups[2].Value, e);
     }
 

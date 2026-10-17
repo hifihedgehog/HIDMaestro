@@ -40,6 +40,12 @@ internal static partial class RuleChecks
         yield return Bound("a decoder read over 2^31-1 frames", $"{D0}.frames", Set($"{D0}.frames", $"[{Max},5]"));
         yield return Bound("a decoder frame stride whose bit offset wraps", $"{D0}.frames", Set($"{D0}.frames", "[2,268435456]"));
         yield return Bound("a decoder read over several frames of stride 0", $"{D0}.frames", Set($"{D0}.frames", "[3,0]"));
+        // The state block's codec fields, which the codec's check refuses at
+        // create. The build tool does not run that check, so these are not
+        // held to the tool.
+        yield return E("a state block field at byte 2^31-1", "$.stateBlock.fields[3]", Set("$.stateBlock.fields[3]", $"{{\"byte\":{Max},\"type\":\"int16-le\"}}"));
+        yield return E("a state block field repeated over a stride of 2^31-1", "$.stateBlock.fields[3].repeat",
+            Set("$.stateBlock.fields[3]", $"{{\"byte\":4,\"type\":\"int16-le\",\"semantic\":\"accelGX\",\"scale\":1,\"repeat\":[3,{Max}]}}"));
     }
 
     /// <summary>The same bounds on programs built in code, where no parse

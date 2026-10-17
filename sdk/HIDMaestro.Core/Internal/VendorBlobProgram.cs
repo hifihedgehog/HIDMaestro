@@ -860,7 +860,7 @@ internal sealed class VendorBlobProgram
         {
             if (src.Repeat.Count != 2 || f.RepeatCount < 1 || f.RepeatStride < 2)
                 throw new InvalidOperationException($"{at}.repeat is [count, stride]: one or more frames, at least 2 bytes apart.");
-            int last = f.B + (f.RepeatCount - 1) * f.RepeatStride + 1;
+            long last = f.B + (long)(f.RepeatCount - 1) * f.RepeatStride + 1;
             if (f.B >= 0 && last >= size)
                 throw new InvalidOperationException($"{at}.repeat's last frame ends at byte {last}, past the {size}-byte report.");
         }
@@ -970,7 +970,7 @@ internal sealed class VendorBlobProgram
                 return (-1, -1);
         }
         if (f.B < 0) return (-1, -1);
-        int width = f.Op switch
+        long width = f.Op switch
         {
             FieldOp.I16 or FieldOp.I16Axis or FieldOp.I16Pad or FieldOp.I16PadOrStick
                 or FieldOp.U16 or FieldOp.U16Trigger or FieldOp.U16Pressure or FieldOp.U10BE => 2,
@@ -979,9 +979,11 @@ internal sealed class VendorBlobProgram
             FieldOp.ButtonMask => f.BitHi / 8 + 1,
             _ => 1,
         };
-        // A repeated motion field's extent runs to its last frame.
-        if (f.RepeatCount > 1) width += (f.RepeatCount - 1) * f.RepeatStride;
-        return (f.B, f.B + width - 1);
+        // A repeated motion field's extent runs to its last frame. In long,
+        // held to int.MaxValue: an offset near it must not wrap back inside
+        // the report and pass the check.
+        if (f.RepeatCount > 1) width += (long)(f.RepeatCount - 1) * f.RepeatStride;
+        return (f.B, (int)Math.Min(int.MaxValue, f.B + width - 1));
     }
 
     /// <summary>The semantics an input field of type <paramref name="op"/>
