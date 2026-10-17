@@ -130,6 +130,32 @@ internal sealed unsafe class BoundProgram
     }
 }
 
+/// <summary>A state program, bound once per controller: its generated
+/// kernel through a function pointer, or the interpreter.</summary>
+internal sealed unsafe class StateRunner
+{
+    private readonly delegate*<in HMGamepadState, float*, byte*, uint*, void> _kernel;
+    private readonly StateProgram? _interpreted;
+    public ValidProgram Program { get; }
+    public bool Generated => _kernel != null;
+
+    public StateRunner(ValidProgram program, delegate*<in HMGamepadState, float*, byte*, uint*, void> kernel)
+    {
+        Program = program;
+        _kernel = kernel;
+        _interpreted = kernel == null ? new StateProgram(program) : null;
+    }
+
+    /// <summary>Builds the state block into <paramref name="d"/> from
+    /// <paramref name="st"/> and the six slots.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Run(in HMGamepadState st, float* sl, byte* d)
+    {
+        if (_kernel != null) _kernel(in st, sl, d, null);
+        else _interpreted!.Run(in st, sl, d, null);
+    }
+}
+
 /// <summary>Looks a compiled program's hash up in the kernels the build step
 /// generated from the catalog, and builds the code that runs it, once per
 /// controller. A program no generated kernel matches, from a profile outside
@@ -164,6 +190,12 @@ internal static unsafe class ProgramBinder
     /// interpreter.</summary>
     public static BoundProgram Bind(ValidProgram program, bool interpretOnly = false) =>
         new(program, interpretOnly ? null : Kernel(program.Hash));
+
+    /// <summary>A state program, bound to its generated kernel or to the
+    /// interpreter.</summary>
+    public static StateRunner BindState(ValidProgram program, bool interpretOnly = false) =>
+        new(program, interpretOnly || !CatalogKernels.StateByHash.TryGetValue(program.Hash, out nint fn)
+            ? null : (delegate*<in HMGamepadState, float*, byte*, uint*, void>)fn);
 
     public static DecoderRunner[] BindDecoders(CompiledModel model, bool interpretOnly = false)
     {

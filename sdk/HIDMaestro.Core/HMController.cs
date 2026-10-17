@@ -305,6 +305,9 @@ public sealed partial class HMController : IDisposable
     private readonly DecoderRunner[]? _decoders;
     private readonly byte[]? _decodeInput;
     private readonly byte[]? _decodeOutput;
+    // The state block's program, generated or interpreted, null for a block
+    // the codec encodes.
+    private readonly Internal.StateRunner? _stateRunner;
 
     // The protocol a USB/IP device runs, whose registers a stream's
     // condition and a codec field's holdWhile read.
@@ -619,6 +622,10 @@ public sealed partial class HMController : IDisposable
             _stateBlockSpec = profile.Inner.StateBlockSpecForCodec();
             _stateBlockBuffer = new byte[_stateBlockSpec.Size];
             _stateBlockEncoder = new VendorBlobCodec.EncoderState();
+            // The block's fields as a state program, bound once: the kernel
+            // the build generated from the same JSON, or the interpreter. A
+            // block the program form cannot say stays with the codec.
+            if (model.StateProgram is { } stateProgram) _stateRunner = Internal.ProgramBinder.BindState(stateProgram);
         }
         if (model.Decoders.Length > 0)
         {
@@ -824,8 +831,13 @@ public sealed partial class HMController : IDisposable
         // for byte.
         if (_stateBlockSpec != null)
         {
-            VendorBlobCodec.EncodeInput(_stateBlockSpec, in state, (float)mlx, (float)mly, (float)mrx, (float)mry,
-                (float)mlt, (float)mrt, _stateBlockBuffer!, _stateBlockEncoder!);
+            if (_stateRunner is { } runner)
+                RunStateProgram(runner, in state, (float)mlx, (float)mly, (float)mrx, (float)mry, (float)mlt, (float)mrt);
+            else
+            {
+                VendorBlobCodec.EncodeInput(_stateBlockSpec, in state, (float)mlx, (float)mly, (float)mrx, (float)mry,
+                    (float)mlt, (float)mrt, _stateBlockBuffer!, _stateBlockEncoder!);
+            }
             SharedMemoryIO.WriteInputFrame(
                 _inputView, _inputEvent, ref _inputSeqNo,
                 Array.Empty<byte>(), 0, null,
@@ -1974,6 +1986,17 @@ public sealed partial class HMController : IDisposable
         {
             doorbell?.Dispose();
         }
+    }
+
+    /// <summary>The state block from the state program, the six slots in
+    /// the order the program reads them.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private unsafe void RunStateProgram(Internal.StateRunner runner, in HMGamepadState state,
+        float lx, float ly, float rx, float ry, float lt, float rt)
+    {
+        float* slots = stackalloc float[6];
+        slots[0] = lx; slots[1] = ly; slots[2] = rx; slots[3] = ry; slots[4] = lt; slots[5] = rt;
+        fixed (byte* block = _stateBlockBuffer!) runner.Run(in state, slots, block);
     }
 
     /// <summary>Decodes one output report, its ID and

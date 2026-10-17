@@ -324,7 +324,7 @@ internal static partial class RuleChecks
                      .Concat(Round5Cases.RefusedOverTemplate.Select(x => (x.program.Name, x.program, x.path))))
             try { ProgramForm.Validate(p); }
             catch (FormException e) { Record(e); }
-        foreach (var (rule, p, path) in FormNegatives().Concat(BoundsNegatives()))
+        foreach (var (rule, p, path) in FormNegatives().Concat(BoundsNegatives()).Concat(StateChecks.Negatives()))
             try { ProgramForm.Validate(p); Fail($"accepted: {rule}"); }
             catch (FormException e)
             {

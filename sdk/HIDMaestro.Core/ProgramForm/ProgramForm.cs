@@ -66,8 +66,12 @@ internal static class ProgramForm
 
     public static ValidProgram Validate(ProgramSpec p)
     {
-        if (p.Size < 1 || p.Size > MaxReport) throw new FormException("$.size", $"{p.Size} is outside 1 to {MaxReport}");
-        if (p.StateSize < 1 || p.StateSize > MaxState) throw new FormException("$.stateSize", $"{p.StateSize} is outside 1 to {MaxState}");
+        // A state program builds a state block, up to MaxState bytes, and
+        // reads no state block of its own.
+        int maxSize = p.Gamepad ? MaxState : MaxReport;
+        if (p.Size < 1 || p.Size > maxSize) throw new FormException("$.size", $"{p.Size} is outside 1 to {maxSize}");
+        if (p.Gamepad ? p.StateSize != 0 : p.StateSize < 1 || p.StateSize > MaxState)
+            throw new FormException("$.stateSize", p.Gamepad ? "a state program reads no state block" : $"{p.StateSize} is outside 1 to {MaxState}");
         if (p.RegisterBits.Length > MaxRegisters) throw new FormException("$.registers", $"{p.RegisterBits.Length} registers is past the {MaxRegisters} a program reads");
         for (int i = 0; i < p.RegisterBits.Length; i++)
             if (p.RegisterBits[i] < 1 || p.RegisterBits[i] > 32) throw new FormException($"$.registers[{i}]", "a register is 1 to 32 bits");
@@ -129,8 +133,51 @@ internal static class ProgramForm
         for (int i = 0; i < p.Ops.Length; i++)
         {
             string path = $"$.ops[{i}]";
+            // A state program's ops read HMGamepadState, and its template is
+            // its only state-free op. A report program reads its state block.
+            bool gamepadOp = p.Ops[i] is GpButtonsOp or GpFlagsOp or GpLinearOp or GpScaledOp;
+            if (p.Gamepad && !gamepadOp && p.Ops[i] is not ConstOp)
+                throw new FormException(path, "a state program reads HMGamepadState: buttons, flags, linear and scaled values over a template");
+            if (!p.Gamepad && gamepadOp)
+                throw new FormException(path, "a report program reads its state block, not HMGamepadState");
             switch (p.Ops[i])
             {
+                case GpButtonsOp gb:
+                    if (gb.Moves.Length == 0 || (gb.Moves.Length & 1) != 0) throw new FormException(path + ".moves", "moves come in pairs");
+                    for (int k = 0; k < gb.Moves.Length; k += 2)
+                    {
+                        if (gb.Moves[k] < 0 || gb.Moves[k] > 31) throw new FormException($"{path}.moves[{k}]", "an HMButton bit is 0 to 31");
+                        if (gb.Moves[k + 1] < 0 || gb.Moves[k + 1] >= p.Size * 8) throw new FormException($"{path}.moves[{k + 1}]", "the report bit is outside the block");
+                        TakeBits($"{path}.moves[{k + 1}]", gb.Moves[k + 1] >> 3, (byte)(1 << (gb.Moves[k + 1] & 7)));
+                    }
+                    unconditional.Add(gb);
+                    break;
+                case GpFlagsOp gf:
+                    if (gf.Flags.Length == 0 || gf.Flags.Length != gf.Bits.Length) throw new FormException(path + ".bits", "one report bit per flag");
+                    for (int k = 0; k < gf.Flags.Length; k++)
+                    {
+                        if (!Enum.IsDefined(gf.Flags[k])) throw new FormException($"{path}.flags[{k}]", "no such flag");
+                        if (gf.Bits[k] < 0 || gf.Bits[k] >= p.Size * 8) throw new FormException($"{path}.bits[{k}]", "the report bit is outside the block");
+                        TakeBits($"{path}.bits[{k}]", gf.Bits[k] >> 3, (byte)(1 << (gf.Bits[k] & 7)));
+                    }
+                    unconditional.Add(gf);
+                    break;
+                case GpLinearOp gl:
+                    if (!Enum.IsDefined(gl.Src) || gl.Src > GpFloat.RightTrigger) throw new FormException(path + ".src", "a linear value reads one of the six slots");
+                    if (!Enum.IsDefined(gl.Store)) throw new FormException(path + ".store", "no such store");
+                    if (!(gl.Rest >= 0 && gl.Rest <= 1)) throw new FormException(path + ".rest", "the rest value is in [0, 1]");
+                    TakeWhole(path, gl.Dst, gl.Store == GpStore.Word ? 2 : 1);
+                    unconditional.Add(gl);
+                    break;
+                case GpScaledOp gs:
+                    if (!Enum.IsDefined(gs.Src) || gs.Src < GpFloat.AccelGX) throw new FormException(path + ".src", "a scaled value reads a calibrated motion value");
+                    if (!double.IsFinite(gs.Num) || !double.IsFinite(gs.Den) || gs.Den == 0 || gs.Num == 0)
+                        throw new FormException(path + ".scale", "the scale is a finite ratio, neither term 0");
+                    if (gs.Count < 1 || (gs.Count > 1 && gs.Stride < 2)) throw new FormException(path + ".repeat", "one write or more, two bytes or more apart");
+                    if (gs.Dst < 0 || gs.Dst + (long)(gs.Count - 1) * gs.Stride + 2 > p.Size) throw new FormException(path + ".repeat", $"the writes pass the {p.Size}-byte block");
+                    for (int k = 0; k < gs.Count; k++) TakeWhole(path, gs.Dst + k * gs.Stride, 2);
+                    unconditional.Add(gs);
+                    break;
                 case ConstOp c:
                     Range(path, c.At, c.Bytes.Length, p.Size, "report bytes");
                     for (int k = 0; k < c.Bytes.Length; k++)
@@ -315,6 +362,9 @@ internal static class ProgramForm
     public static string Canonicalize(ProgramSpec p)
     {
         var sb = new StringBuilder();
+        // A state program says so first. A report program's text is as it
+        // was before state programs, so its hash and kernel stay.
+        if (p.Gamepad) sb.Append("src=gamepad;");
         sb.Append(I, $"size={p.Size};state={p.StateSize};regs={Ints(p.RegisterBits)};");
         foreach (var op in p.Ops) { Op(sb, op); sb.Append(';'); }
         return sb.ToString();
@@ -323,6 +373,8 @@ internal static class ProgramForm
     static readonly CultureInfo I = CultureInfo.InvariantCulture;
     static string Ints(IEnumerable<int> v) => string.Join(",", v.Select(x => x.ToString(I)));
     static string Hex(byte[] b) => Convert.ToHexString(b);
+    /// <summary>A double in the shortest text that reads back as it.</summary>
+    static string D(double d) => d.ToString("R", I);
     static string S(Src s) => string.Create(I, $"{s.BitOffset}:{s.Bits}:{(s.BigEndianWord ? 1 : 0)}");
 
     static void Op(StringBuilder sb, Op op)
@@ -330,6 +382,10 @@ internal static class ProgramForm
         switch (op)
         {
             case CopyOp c: sb.Append(I, $"copy({c.Src},{c.Dst},{c.Len})"); break;
+            case GpButtonsOp g: sb.Append(I, $"gpbuttons({Ints(g.Moves)})"); break;
+            case GpFlagsOp g: sb.Append(I, $"gpflags({string.Join(",", g.Flags.Select(f => ((int)f).ToString(I)))};{Ints(g.Bits)})"); break;
+            case GpLinearOp g: sb.Append(I, $"gplinear({(int)g.Src},{g.Min},{g.Max},{(g.Invert ? 1 : 0)},{D(g.Rest)},{(int)g.Store},{g.Dst})"); break;
+            case GpScaledOp g: sb.Append(I, $"gpscaled({(int)g.Src},{D(g.Num)},{D(g.Den)},{(g.Negate ? 1 : 0)},{g.Dst},{g.Count},{g.Stride})"); break;
             case ConstOp c: sb.Append(I, $"const({c.At},{Hex(c.Bytes)})"); break;
             case BitsOp b: sb.Append(I, $"bits({Ints(b.Moves)})"); break;
             case XorOp x: sb.Append(I, $"xor({x.Src},{x.Dst},{x.Len},{x.Mask})"); break;

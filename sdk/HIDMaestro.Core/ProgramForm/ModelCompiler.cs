@@ -72,6 +72,12 @@ internal sealed class CompiledModel
     public required ValidProgram[] LiveFeatures { get; init; }
     public required int[] LiveFeatureIds { get; init; }
 
+    /// <summary>The state block's codec fields lowered into a state program,
+    /// which SubmitState runs in place of the codec, or null with
+    /// <see cref="StateCodecReason"/> when the block stays with the codec.</summary>
+    public ValidProgram? StateProgram { get; init; }
+    public string StateCodecReason { get; init; } = "";
+
     /// <summary>The layouts as one set, in their order, for the clock that
     /// sends them.</summary>
     public ProgramSet? LayoutSet => Layouts.Length == 0 ? null : new ProgramSet(Layouts.Select(l => l.Program).ToArray());
@@ -95,11 +101,21 @@ internal static class ModelCompiler
         var (counterNames, counterBits, counterOn, counterPeriod, counterInitial) = Counters(g.Protocol);
 
         int stateSize = 0;
+        ValidProgram? stateProgram = null;
+        string stateReason = "";
         if (g.StateBlock != null)
         {
             stateSize = g.StateBlock.Size;
             if (stateSize < 1 || stateSize > ProgramForm.MaxState)
                 throw new FormException("$.stateBlock.size", $"{stateSize} is outside 1 to {ProgramForm.MaxState}");
+            // The block's fields as a state program, when the program form
+            // says what each one writes. Otherwise SubmitState runs the codec
+            // on them, as it does for any extendedReport.
+            if (g.StateBlock.Fields is { } fields && StateLowering.Lower(fields, stateSize, out stateReason) is { } spec)
+            {
+                try { stateProgram = ProgramForm.Validate(spec); }
+                catch (FormException e) { stateReason = e.Message; }
+            }
         }
 
         // A state block is what a device's own reports are built from. With
@@ -188,6 +204,8 @@ internal static class ModelCompiler
             RuleEmits = emits.ToArray(),
             LiveFeatures = live.ToArray(),
             LiveFeatureIds = liveIds.ToArray(),
+            StateProgram = stateProgram,
+            StateCodecReason = stateReason,
         };
     }
 

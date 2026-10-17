@@ -238,11 +238,30 @@ internal static class Emitter
             blockLines.Add("        }");
         }
 
-        // The template in 16-byte stores, then 8, 4, 2 and 1, skipping bytes
-        // an unconditional whole-byte write covers. ORed bytes fold their
-        // template bits into one store.
+        var head = Head(v.Template, size, whole, orTerms, mutation);
+
+        sb.Append(string.Join("\n", head)).Append('\n');
+        if (mutation == PathMutation.BlocksFirst)
+        {
+            sb.Append(string.Join("\n", blockLines)).Append('\n');
+            sb.Append(string.Join("\n", body)).Append('\n');
+        }
+        else
+        {
+            sb.Append(string.Join("\n", body)).Append('\n');
+            sb.Append(string.Join("\n", blockLines)).Append('\n');
+        }
+        sb.AppendLine("    }");
+        foreach (var t in tables) sb.AppendLine(t);
+        return sb.ToString();
+    }
+
+    /// <summary>The template in 16-byte stores, then 8, 4, 2 and 1, skipping
+    /// bytes an unconditional whole-byte write covers. ORed bytes fold their
+    /// template bits into one store.</summary>
+    static List<string> Head(byte[] template, int size, bool[] whole, List<string>?[] orTerms, PathMutation mutation)
+    {
         var head = new List<string>();
-        var template = v.Template;
         if (mutation == PathMutation.ZeroTemplateSkipped)
         {
             // The planted defect: one store per nonzero template byte, and
@@ -282,22 +301,140 @@ internal static class Emitter
         for (int i = 0; i < size; i++)
             if (orTerms[i] is { } terms)
                 head.Add(F($"        d[{i}] = (byte)(0x{template[i]:X2} | {string.Join(" | ", terms)});"));
+        return head;
+    }
 
-        sb.Append(string.Join("\n", head)).Append('\n');
-        if (mutation == PathMutation.BlocksFirst)
+    /// <summary>A state program's kernel: the template and the ORed bits of
+    /// the buttons and flags, then each linear and scaled value, through
+    /// WireArith, the arithmetic the codec calls, with the field's constants
+    /// in place.</summary>
+    public static string EmitStateKernel(ValidProgram v, string? name = null)
+    {
+        name ??= v.KernelName;
+        int size = v.Spec.Size;
+        var orTerms = new List<string>?[size];
+        var whole = new bool[size];
+        var body = new List<string>();
+        bool buttons = false, hat = false;
+        void AddOr(int dst, string term) => (orTerms[dst] ??= new List<string>()).Add(term);
+        foreach (var op in v.Unconditional)
         {
-            sb.Append(string.Join("\n", blockLines)).Append('\n');
-            sb.Append(string.Join("\n", body)).Append('\n');
+            switch (op)
+            {
+                case GpButtonsOp g:
+                {
+                    buttons = true;
+                    // One masked shift per report byte and distance.
+                    var groups = new SortedDictionary<(int dst, int shift), int>();
+                    for (int i = 0; i < g.Moves.Length; i += 2)
+                    {
+                        int k = g.Moves[i], r = g.Moves[i + 1];
+                        var key = (r >> 3, k - (r & 7));
+                        groups[key] = (groups.TryGetValue(key, out var m) ? m : 0) | (1 << (r & 7));
+                    }
+                    foreach (var ((dst, shift), mask) in groups)
+                        AddOr(dst, shift > 0 ? F($"((b >> {shift}) & 0x{mask:X2}u)")
+                                 : shift < 0 ? F($"((b << {-shift}) & 0x{mask:X2}u)")
+                                 : F($"(b & 0x{mask:X2}u)"));
+                    break;
+                }
+                case GpFlagsOp g:
+                    for (int i = 0; i < g.Flags.Length; i++)
+                    {
+                        hat |= g.Flags[i] is GpFlag.DpadUp or GpFlag.DpadDown or GpFlag.DpadLeft or GpFlag.DpadRight;
+                        AddOr(g.Bits[i] >> 3, F($"({Flag(g.Flags[i])} ? 0x{1 << (g.Bits[i] & 7):X2}u : 0u)"));
+                    }
+                    break;
+                case GpLinearOp g:
+                    whole[g.Dst] = true;
+                    if (g.Store == GpStore.Word) whole[g.Dst + 1] = true;
+                    body.Add(F($"        {{ int v = global::HIDMaestro.Internal.WireArith.Linear(sl[{(int)g.Src}], {g.Min}, {g.Max}, {(g.Invert ? "true" : "false")}, {D(g.Rest)});"));
+                    body.Add(g.Store switch
+                    {
+                        GpStore.ByteClamped => F($"          d[{g.Dst}] = (byte)Math.Clamp(v, 0, 255); }}"),
+                        GpStore.Byte => F($"          d[{g.Dst}] = (byte)v; }}"),
+                        _ => F($"          d[{g.Dst}] = (byte)v; d[{g.Dst + 1}] = (byte)(v >> 8); }}"),
+                    });
+                    break;
+                case GpScaledOp g:
+                {
+                    // WireArith.Scaled with the ratio in place. A divisor of 1
+                    // leaves the product as it is, and one that is a power of
+                    // two is the same correctly rounded value as a product by
+                    // its reciprocal. The value is clamped before it is
+                    // rounded, which rounds the same: the int16 bounds are
+                    // whole, and a value past one rounds to it or past it.
+                    // Inside the bounds, the bias 1.5 x 2^52 rounds to nearest
+                    // with ties to even, as Math.Round does. A NaN writes 0.
+                    string src = F($"{(g.Negate ? "-" : "")}st.{g.Src}");
+                    string product = g.Den == 1 ? F($"(double)f * {D(g.Num)}")
+                        : IsPowerOfTwo(Math.Abs(g.Den)) ? F($"(double)f * {D(g.Num)} * {D(1 / g.Den)}")
+                        : F($"(double)f * {D(g.Num)} / {D(g.Den)}");
+                    body.Add(F($"        {{ float f = {src};"));
+                    body.Add(F($"          int v = f != f ? 0 : (int)BitConverter.DoubleToInt64Bits(Math.Min(Math.Max({product}, -32768.0), 32767.0) + 6755399441055744.0);"));
+                    for (int k = 0; k < g.Count; k++)
+                    {
+                        int at = g.Dst + k * g.Stride;
+                        whole[at] = whole[at + 1] = true;
+                        body.Add(F($"          d[{at}] = (byte)v; d[{at + 1}] = (byte)(v >> 8);"));
+                    }
+                    body.Add("        }");
+                    break;
+                }
+                default:
+                    throw new InvalidOperationException("no state emission for " + op.GetType().Name);
+            }
         }
-        else
-        {
-            sb.Append(string.Join("\n", body)).Append('\n');
-            sb.Append(string.Join("\n", blockLines)).Append('\n');
-        }
+        var sb = new StringBuilder();
+        sb.AppendLine(F($"    {Slashes} {v.Spec.Name}, a state program"));
+        // Called through a function pointer, never inlined, so it is compiled
+        // optimized at its first call rather than tiered: a submit never runs
+        // it as Tier0 code while a background recompile waits.
+        sb.AppendLine("    [MethodImpl(MethodImplOptions.AggressiveOptimization)]");
+        sb.AppendLine(F($"    public static unsafe void {name}(in global::HIDMaestro.HMGamepadState st, float* sl, byte* d, uint* c)"));
+        sb.AppendLine("    {");
+        if (buttons) sb.AppendLine("        uint b = (uint)st.Buttons;");
+        if (hat) sb.AppendLine("        uint h = (byte)st.Hat;");
+        sb.Append(string.Join("\n", Head(v.Template, size, whole, orTerms, PathMutation.None))).Append('\n');
+        sb.Append(string.Join("\n", body)).Append('\n');
         sb.AppendLine("    }");
-        foreach (var t in tables) sb.AppendLine(t);
         return sb.ToString();
     }
+
+    /// <summary>A flag as a bool expression over st, sl and the hat h. A
+    /// direction holds for its hat values, N 1 to NW 8, and for none past 8.</summary>
+    static string Flag(GpFlag f) => f switch
+    {
+        GpFlag.LeftTriggerOn => "(sl[4] * 255.0 > 0.5)",
+        GpFlag.RightTriggerOn => "(sl[5] * 255.0 > 0.5)",
+        GpFlag.DpadUp => F($"(h < 9u && ((0x{HatMask(1, 2, 8):X}u >> (int)h) & 1u) != 0)"),
+        GpFlag.DpadDown => F($"(h < 9u && ((0x{HatMask(4, 5, 6):X}u >> (int)h) & 1u) != 0)"),
+        GpFlag.DpadLeft => F($"(h < 9u && ((0x{HatMask(6, 7, 8):X}u >> (int)h) & 1u) != 0)"),
+        GpFlag.DpadRight => F($"(h < 9u && ((0x{HatMask(2, 3, 4):X}u >> (int)h) & 1u) != 0)"),
+        GpFlag.Finger0Active => "st.TouchpadFinger0Active",
+        GpFlag.Finger1Active => "st.TouchpadFinger1Active",
+        GpFlag.BatteryCharging => "st.BatteryCharging",
+        GpFlag.BatteryFull => "st.BatteryFull",
+        GpFlag.MicMuted => "st.MicMuted",
+        GpFlag.HeadphonesConnected => "st.HeadphonesConnected",
+        GpFlag.CableConnected => "(st.BatteryCharging || st.BatteryFull)",
+        _ => throw new InvalidOperationException("no flag " + f),
+    };
+
+    static int HatMask(params int[] values) => values.Aggregate(0, (m, x) => m | (1 << x));
+
+    /// <summary>True for a power of two, whose reciprocal is exact.</summary>
+    static bool IsPowerOfTwo(double d)
+    {
+        if (!double.IsFinite(d) || d <= 0) return false;
+        long bits = BitConverter.DoubleToInt64Bits(d);
+        return (bits & 0xFFFFFFFFFFFFFL) == 0 && ((bits >> 52) & 0x7FF) is > 0 and < 0x7FF;
+    }
+
+    static string D(double d) => d.ToString("R", Inv);
+
+    /// <summary>A comment's two slashes in emitted code.</summary>
+    const string Slashes = "/" + "/";
 
     static string Read(Src s)
     {
@@ -335,8 +472,9 @@ internal static class Emitter
     /// builds the generic code for a set's key. Mutants, when given, go in a
     /// table of their own, keyed by hash and mutation, never in the binder's.</summary>
     public static string EmitFile(IEnumerable<ValidProgram> programs, IEnumerable<ProgramSet> sets, string nameSpace, string cls,
-        IEnumerable<(ValidProgram program, PathMutation mutation)>? mutants = null)
+        IEnumerable<(ValidProgram program, PathMutation mutation)>? mutants = null, IEnumerable<ValidProgram>? states = null)
     {
+        var stateList = (states ?? Enumerable.Empty<ValidProgram>()).GroupBy(p => p.Hash).Select(g => g.First()).OrderBy(p => p.Hash, StringComparer.Ordinal).ToList();
         var list = programs.GroupBy(p => p.Hash).Select(g => g.First()).OrderBy(p => p.Hash, StringComparer.Ordinal).ToList();
         var setList = sets.GroupBy(s => s.Key).Select(g => g.First()).OrderBy(s => s.Key, StringComparer.Ordinal).ToList();
         foreach (var set in setList)
@@ -359,6 +497,12 @@ internal static class Emitter
         sb.AppendLine("{");
         foreach (var v in list) sb.Append(EmitKernel(v));
         foreach (var (v, m) in mutantList) sb.Append(EmitKernel(v, m, F($"{v.KernelName}_{m}")));
+        foreach (var v in stateList) sb.Append(EmitStateKernel(v));
+        sb.AppendLine(F($"    {Slashes}/ <summary>Each state program's kernel by the SHA-256 of its canonical form.</summary>"));
+        sb.AppendLine("    public static readonly Dictionary<string, nint> StateByHash = new()");
+        sb.AppendLine("    {");
+        foreach (var v in stateList) sb.AppendLine(F($"        [\"{v.Hash}\"] = (nint)(delegate*<in global::HIDMaestro.HMGamepadState, float*, byte*, uint*, void>)&{v.KernelName},"));
+        sb.AppendLine("    };");
         sb.AppendLine("    /// <summary>Each program's kernel by the SHA-256 of its canonical form.</summary>");
         sb.AppendLine("    public static readonly Dictionary<string, nint> ByHash = new()");
         sb.AppendLine("    {");

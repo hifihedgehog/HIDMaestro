@@ -136,7 +136,28 @@ internal static unsafe class ProgramCost
                     }
                 }));
             }
-        variants.Add(("s2-body", n =>
+        // The state block as SubmitState builds it: the six slots as floats,
+        // then the state program the profile's fields lower into, bound as a
+        // controller binds it, generated and interpreted.
+        foreach (bool interpret in new[] { false, true })
+        {
+            var runner = ProgramBinder.BindState(model.StateProgram!, interpret);
+            var pinned = GC.AllocateArray<byte>(24, pinned: true);
+            variants.Add(("s2-body" + (interpret ? "-interpreted" : ""), n =>
+            {
+                float* sl = stackalloc float[6];
+                fixed (byte* d = pinned)
+                    for (int i = 0; i < n; i++)
+                    {
+                        int j = i & 63;
+                        sl[0] = (float)slots[j * 6]; sl[1] = (float)slots[j * 6 + 1]; sl[2] = (float)slots[j * 6 + 2];
+                        sl[3] = (float)slots[j * 6 + 3]; sl[4] = (float)slots[j * 6 + 4]; sl[5] = (float)slots[j * 6 + 5];
+                        runner.Run(in states[j], sl, d);
+                    }
+            }));
+        }
+        // The codec over the same fields, which the state program replaces.
+        variants.Add(("s2-body-codec", n =>
         {
             for (int i = 0; i < n; i++)
             {

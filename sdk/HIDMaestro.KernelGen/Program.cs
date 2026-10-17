@@ -30,6 +30,7 @@ switch (args[0])
         // so a change of content, an added file or a removed one changes the
         // file this step depends on.
         var programs = new List<ValidProgram>();
+        var states = new List<ValidProgram>();
         var sets = new List<ProgramSet>();
         int files = 0;
         var lines = File.ReadAllLines(args[2]);
@@ -51,6 +52,7 @@ switch (args[0])
             {
                 var model = ModelCompiler.Compile(ProfilePrograms.Read(File.ReadAllBytes(path)));
                 programs.AddRange(model.AllPrograms);
+                if (model.StateProgram is { } state) states.Add(state);
                 if (model.LayoutSet is { } set) sets.Add(set);
             }
             catch (FormException e)
@@ -72,7 +74,7 @@ switch (args[0])
         string text;
         if (args[0] == "catalog")
         {
-            text = Emitter.EmitFile(programs, sets, "HIDMaestro.Internal.Programs", "CatalogKernels");
+            text = Emitter.EmitFile(programs, sets, "HIDMaestro.Internal.Programs", "CatalogKernels", states: states);
         }
         else
         {
@@ -81,13 +83,13 @@ switch (args[0])
             var mutants = ProbeCorpus.PathMutations.Where(m => m.Gen != PathMutation.None)
                 .Select(m => (ProgramForm.Validate(m.Program), m.Gen)).ToList();
             mutants.Add((ProgramForm.Validate(ProbeCorpus.NotInlined), PathMutation.NotInlined));
-            text = Emitter.EmitFile(programs, sets, "HIDMaestro.Internal.Programs", "ProbeKernels", mutants)
+            text = Emitter.EmitFile(programs, sets, "HIDMaestro.Internal.Programs", "ProbeKernels", mutants, states)
                 + "/// <summary>The seed the build drew the random programs from.</summary>\n"
                 + "internal static partial class ProbeCorpusSeed\n{\n"
                 + $"    public const int Value = {seed.ToString(System.Globalization.CultureInfo.InvariantCulture)};\n}}\n";
         }
         Write(args[1], text);
-        Console.WriteLine($"HIDMaestro.KernelGen {args[0]}: {files} files, {programs.Select(p => p.Hash).Distinct().Count()} programs, {sets.Count} layout sets{(args[0] == "probe" ? $", corpus seed {seed}" : "")}");
+        Console.WriteLine($"HIDMaestro.KernelGen {args[0]}: {files} files, {programs.Select(p => p.Hash).Distinct().Count()} programs, {states.Select(p => p.Hash).Distinct().Count()} state programs, {sets.Count} layout sets{(args[0] == "probe" ? $", corpus seed {seed}" : "")}");
         return 0;
     }
     case "check-file":

@@ -107,5 +107,8 @@ internal sealed record Condition(Term[][] Groups)
 }
 
 /// <summary>A report program: the report it builds, the state block it reads,
-/// the width of each register its conditions test, and its ops.</summary>
-internal sealed record ProgramSpec(string Name, int Size, int StateSize, int[] RegisterBits, Op[] Ops);
+/// the width of each register its conditions test, and its ops. A
+/// <see cref="Gamepad"/> program is a state program: it reads HMGamepadState
+/// and the six slots, not a state block, and builds a state block of
+/// <see cref="Size"/> bytes.</summary>
+internal sealed record ProgramSpec(string Name, int Size, int StateSize, int[] RegisterBits, Op[] Ops, bool Gamepad = false);

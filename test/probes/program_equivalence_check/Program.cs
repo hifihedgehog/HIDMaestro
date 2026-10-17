@@ -24,6 +24,7 @@ switch (mode)
     case "check":
         failures += Checks.Run();
         failures += CatalogChecks.Run();
+        failures += StateChecks.Run();
         failures += RuleChecks.Run();
         failures += UserChecks.Run(UserChecks.DefaultDir());
         failures += InlineCheck.Run();

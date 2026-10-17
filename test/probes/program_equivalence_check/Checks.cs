@@ -371,6 +371,15 @@ internal static unsafe class Checks
         {
             var kinds = typeof(Op).Assembly.GetTypes().Where(t => t.IsSubclassOf(typeof(Op)) && !t.IsAbstract).Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var sampled = samples.Select(s => s.op.GetType().Name).ToHashSet();
+            // A state program's ops: an emission and a stage each, and
+            // StateChecks holds the paths to the codec on the programs it
+            // lowers.
+            foreach (var (name, program) in StateChecks.OpSamples())
+            {
+                var v = ProgramForm.Validate(program);
+                try { Emitter.EmitStateKernel(v); _ = new StateProgram(v); sampled.Add(program.Ops[^1].GetType().Name); Console.WriteLine($"{name}: emitted and staged as a state program"); }
+                catch (InvalidOperationException e) { Fail($"{name}: {e.Message}"); }
+            }
             foreach (var k in kinds.Where(k => !sampled.Contains(k)))
                 Fail($"{k}: an op kind of the form with no sample here, so nothing shows the two paths both run it");
             Console.WriteLine($"op kinds of the form: {string.Join(", ", kinds)}, each sampled");
