@@ -373,11 +373,14 @@ public static partial class DeviceManager
 
     /// <summary>
     /// Waits for a HID device interface to appear for the given device instance ID.
-    /// Returns true when the HID child is ready, false on timeout or when
-    /// <paramref name="failed"/>, re-checked every 25 ms, says the start
-    /// failed.
+    /// Returns true when the HID child is ready, false on timeout.
     /// </summary>
-    public static bool WaitForHidChild(string parentInstanceId, int timeoutMs = 5000, Func<bool>? failed = null)
+    public static bool WaitForHidChild(string parentInstanceId, int timeoutMs = 5000) =>
+        WaitForHidChild(parentInstanceId, timeoutMs, null);
+
+    /// <summary>The same wait, which also ends when <paramref name="failed"/>,
+    /// re-checked every 25 ms, says the device's start failed.</summary>
+    public static bool WaitForHidChild(string parentInstanceId, int timeoutMs, Func<bool>? failed)
     {
         static bool HasChild(string parent) =>
             CM_Locate_DevNodeW(out uint p, parent, 0) == CR_SUCCESS && CM_Get_Child(out uint _, p, 0) == CR_SUCCESS;

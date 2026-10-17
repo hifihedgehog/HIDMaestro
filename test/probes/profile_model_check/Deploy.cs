@@ -341,6 +341,16 @@ internal static class Deploy
             return (error.Message.Contains("FeatureAnswers", StringComparison.Ordinal) && error.Message.Contains("problem code 43", StringComparison.Ordinal),
                     error.Message);
         });
+        // The public wait keeps the form v1.13.0 had, so a caller built
+        // against it still binds. At de87fa90 a third optional parameter
+        // replaced it.
+        c.Run("DeviceManager.WaitForHidChild keeps its (string, int) form beside the one with a failure test", () =>
+        {
+            var t = typeof(DeviceManager);
+            bool old = t.GetMethod("WaitForHidChild", new[] { typeof(string), typeof(int) }) != null;
+            bool now = t.GetMethod("WaitForHidChild", new[] { typeof(string), typeof(int), typeof(Func<bool>) }) != null;
+            return (old && now, $"two-argument {old}, with a failure test {now}");
+        });
         // The ROOT path's own wait for the HID child, inside
         // DeviceNodeCreator.CreateDeviceNode, ends on a failed start too.
         // At bde72499 it waited for a child alone, 5 s, before step 4 saw the
