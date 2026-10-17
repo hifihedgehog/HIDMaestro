@@ -316,6 +316,35 @@ internal static class Deploy
             return (wait == DeviceOrchestrator.StartWait.Failed && error is not HMDriverVersionException
                     && error.Message.Contains("problem code 31", StringComparison.Ordinal), $"{wait}: {error.Message}");
         });
+        // Every code a failed driver leaves ends the wait, and the error
+        // names it: 10, 31 and 37 (cfg.h:77, 98, 104), 39 for a driver that
+        // did not load (106), and 43 for a driver that failed after its
+        // start, as a crashed UMDF host leaves it (110). At bde72499 39 and
+        // 43 waited out the budget.
+        foreach (uint code in new uint[] { 10, 31, 37, 39, 43 })
+            c.Run($"problem {code} ends the wait within one poll, and the error names it", () =>
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var (wait, error) = With(_ => (true, HasProblem, code), _ => null, _ => (0, 0, null, 0), () =>
+                    (DeviceOrchestrator.WaitForHidChild(Node, 3, 2_000), DeviceOrchestrator.StartError(Node, 3)));
+                long ms = sw.ElapsedMilliseconds;
+                return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error.Message.Contains($"problem code {code}", StringComparison.Ordinal),
+                        $"{wait} in {ms} ms: {error.Message}");
+            });
+        // The ROOT path's own wait for the HID child, inside
+        // DeviceNodeCreator.CreateDeviceNode, ends on a failed start too.
+        // At bde72499 it waited for a child alone, 5 s, before step 4 saw the
+        // failure.
+        c.Run("the ROOT path's wait for the HID child ends within one poll on a failed start", () =>
+        {
+            var wait = typeof(DeviceOrchestrator).GetField("RootChildWait", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)
+                ?? throw new MissingMemberException("DeviceOrchestrator", "RootChildWait");
+            var f = (Func<string, int, bool>)wait.GetValue(null)!;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool child = With(_ => (true, HasProblem, 31u), _ => null, _ => (0, 0, null, 0), () => f(@"ROOT\HIDCLASS\HM_7777", 3));
+            long ms = sw.ElapsedMilliseconds;
+            return (!child && ms < 1000, $"{child} in {ms} ms");
+        });
         c.Run("a devnode still being installed (problem 28) does not end the wait, and its child ends it", () =>
         {
             int polls = 0;

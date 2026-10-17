@@ -373,9 +373,11 @@ public static partial class DeviceManager
 
     /// <summary>
     /// Waits for a HID device interface to appear for the given device instance ID.
-    /// Returns true when the HID child is ready, false on timeout.
+    /// Returns true when the HID child is ready, false on timeout or when
+    /// <paramref name="failed"/>, re-checked every 25 ms, says the start
+    /// failed.
     /// </summary>
-    public static bool WaitForHidChild(string parentInstanceId, int timeoutMs = 5000)
+    public static bool WaitForHidChild(string parentInstanceId, int timeoutMs = 5000, Func<bool>? failed = null)
     {
         static bool HasChild(string parent) =>
             CM_Locate_DevNodeW(out uint p, parent, 0) == CR_SUCCESS && CM_Get_Child(out uint _, p, 0) == CR_SUCCESS;
@@ -393,8 +395,13 @@ public static partial class DeviceManager
             if (action == CM_NOTIFY_ACTION_DEVICEINSTANCEENUMERATED) signal.Set();
             return 0u;
         };
-        return WithNotification(RegisterAllInstanceEvents, callback,
-            () => WaitUntil(() => HasChild(parentInstanceId), signal, timeoutMs));
+        // A failed start enumerates nothing, so with a failure test the wait
+        // re-checks every 25 ms, the orchestrator's poll, and ends there.
+        bool child = false;
+        WithNotification(RegisterAllInstanceEvents, callback,
+            () => WaitUntil(() => (child = HasChild(parentInstanceId)) || failed?.Invoke() == true, signal, timeoutMs,
+                            failed != null ? 25 : RecheckMs));
+        return child;
     }
 
     /// <summary>

@@ -439,7 +439,7 @@ internal static partial class DeviceNodeCreator
 
             if (devInstId != null)
             {
-                DeviceManager.WaitForHidChild(devInstId);
+                DeviceOrchestrator.RootChildWait(devInstId, controllerIndex);
             }
 
             // Apply the friendly name directly to the device we just created

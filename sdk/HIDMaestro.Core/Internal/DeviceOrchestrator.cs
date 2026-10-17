@@ -1780,7 +1780,11 @@ internal static partial class DeviceOrchestrator
 
     // Problem numbers a failed add or start leaves (cfg.h): the device
     // stays down until something restarts it, so a wait need not run out.
-    private const uint CM_PROB_FAILED_START = 10, CM_PROB_FAILED_ADD = 31, CM_PROB_FAILED_DRIVER_ENTRY = 37;
+    // cfg.h:77, 98, 104, 106 and 110: a failed start, add or DriverEntry, a
+    // driver that did not load, and one that failed after it started, as a
+    // crashed UMDF host leaves its device.
+    private const uint CM_PROB_FAILED_START = 10, CM_PROB_FAILED_ADD = 31, CM_PROB_FAILED_DRIVER_ENTRY = 37,
+        CM_PROB_DRIVER_FAILED_LOAD = 39, CM_PROB_FAILED_POST_START = 43;
 
     /// <summary>The device's driver failed its add or start: the devnode
     /// reports one of the problems above, or the driver set its error word
@@ -1790,8 +1794,17 @@ internal static partial class DeviceOrchestrator
         if (DriverHalf(controllerIndex).ConfigError != 0) return true;
         var (present, status, problem) = DevnodeStatus(instanceId);
         return present && (status & DN_HAS_PROBLEM) != 0
-            && problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY;
+            && problem is CM_PROB_FAILED_START or CM_PROB_FAILED_ADD or CM_PROB_FAILED_DRIVER_ENTRY
+                or CM_PROB_DRIVER_FAILED_LOAD or CM_PROB_FAILED_POST_START;
     }
+
+    /// <summary>The ROOT path's wait for its HID child, inside
+    /// <see cref="DeviceNodeCreator.CreateDeviceNode"/>: Windows' enumeration
+    /// notification wakes it as the child appears, and a failed start ends it
+    /// within one 25 ms re-check, so step 4 meets the failure at once. True
+    /// when the child appeared. A field, so a check gives it a machine.</summary>
+    internal static Func<string, int, bool> RootChildWait = (instanceId, controllerIndex) =>
+        DeviceManager.WaitForHidChild(instanceId, 5000, () => StartFailed(instanceId, controllerIndex));
 
     /// <summary>The value a driver's error word names (driver.h
     /// HIDMAESTRO_CONFIG_ERROR_*).</summary>
