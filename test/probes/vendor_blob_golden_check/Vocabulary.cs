@@ -18,9 +18,11 @@
 //     negated and repeated motion
 //   - an int16-le field's center offsets its value on the wire, 32768
 //     giving offset binary (the PS Move's motion words, psmove.c
-//     psmove_decode_16bit at 97d97e9), on the encode loop's own path and
-//     with a scale and repeat, without one the bytes stay two's
-//     complement, and a center outside 0 to 65535 is refused
+//     psmove_decode_16bit at 97d97e9), on a raw field and on a scaled,
+//     repeated one, both out of the encode loop, a word past 0 or 65535
+//     clamped as uint10-be clamps, without a center the bytes stay two's
+//     complement, and a center outside 0 to 65535, or on an output field,
+//     is refused
 //   - packed-uint output fields reproduce SwitchProPacker's and
 //     Switch2ProPacker's rumble decodes on every input the first reads and
 //     a million random reports for the second, boxed as byte
@@ -280,8 +282,37 @@ internal static class Vocabulary
             if (plain != (ushort)v) bad.Add($"accelY {v}: 0x{plain:X4}");
             if (g1 != (ushort)(v + 32768) || g2 != g1) bad.Add($"accelGZ {v}: 0x{g1:X4} 0x{g2:X4}");
         }
-        Check("center 32768 writes offset binary, on the loop's path and with a scale and repeat, and no center stays two's complement",
+        Check("center 32768 writes offset binary on a raw field and on a scaled, repeated one, and no center stays two's complement",
               bad.Count == 0, string.Join(", ", bad));
+
+        // A center other than 32768 can carry a short past the word: it
+        // clamps, where a wrap would turn a full swing into a small one.
+        var off = Spec(5,
+            """{"byte":1,"type":"int16-le","semantic":"accelX","center":40000}""",
+            """{"byte":3,"type":"int16-le","semantic":"accelY","center":1000}""");
+        VendorBlobProgram.Check(off, off.Size, "int16 center", output: false, portBlock: false);
+        var clamps = new List<string>();
+        foreach (short v in new short[] { -32768, -1001, -1000, 0, 25535, 25536, 32767 })
+        {
+            var s = new HMGamepadState { AccelX = v, AccelY = v };
+            var b = new byte[off.Size];
+            VendorBlobCodec.EncodeInput(off, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, b, enc);
+            int hi = b[1] | b[2] << 8, lo = b[3] | b[4] << 8;
+            if (hi != Math.Clamp(v + 40000, 0, 65535)) clamps.Add($"center 40000, {v}: 0x{hi:X4}");
+            if (lo != Math.Clamp(v + 1000, 0, 65535)) clamps.Add($"center 1000, {v}: 0x{lo:X4}");
+        }
+        Check("a centered word past 0 or 65535 clamps there", clamps.Count == 0, string.Join(", ", clamps));
+
+        string? outRefused = null;
+        try
+        {
+            var outSpec = Spec(3, """{"byte":1,"type":"int16-le","semantic":"x","center":32768}""");
+            VendorBlobProgram.Check(outSpec, outSpec.Size, "int16 center", output: true, portBlock: false);
+        }
+        catch (InvalidOperationException e) { outRefused = e.Message; }
+        Check("an output int16-le field with a center, which its decode ignores, is refused naming it",
+              outRefused != null && outRefused.Contains("fields[0]", StringComparison.Ordinal) && outRefused.Contains("center", StringComparison.Ordinal),
+              outRefused ?? "accepted");
         string? refused = null;
         try
         {

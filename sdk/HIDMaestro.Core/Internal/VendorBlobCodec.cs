@@ -998,9 +998,10 @@ internal static class VendorBlobCodec
             };
         }
         // A center offsets the value on the wire: 32768 gives offset binary,
-        // zero at 0x8000. A report that carries several motion frames of one
-        // sample writes it in each (repeat).
-        int w = v + f.Center;
+        // zero at 0x8000. Such a word is unsigned, so it clamps to 0 to 65535,
+        // as uint10-be clamps to its range. A report that carries several
+        // motion frames of one sample writes it in each (repeat).
+        int w = f.Extras!.OffsetBinary ? Math.Clamp(v + f.Center, 0, 65535) : v;
         for (int k = 0, at = f.B; k < f.RepeatCount && at + 1 < buffer.Length; k++, at += f.RepeatStride)
         {
             buffer[at]     = (byte)(w & 0xFF);

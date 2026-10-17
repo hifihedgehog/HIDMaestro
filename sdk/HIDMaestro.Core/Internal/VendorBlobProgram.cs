@@ -158,6 +158,9 @@ internal sealed class VendorBlobProgram
         public int RepeatStride;
         public int ChargingValue = -1;
         public PackedPart[]? Parts;
+        /// <summary>An int16-le field with a center: its words are unsigned,
+        /// clamped to 0 to 65535 as uint10-be clamps to its range.</summary>
+        public bool OffsetBinary;
     }
 
     public readonly struct CompiledField
@@ -556,6 +559,7 @@ internal sealed class VendorBlobProgram
                     RepeatCount = f.Repeat is { Count: 2 } r ? r[0] : 1,
                     RepeatStride = f.Repeat is { Count: 2 } s ? s[1] : 0,
                     ChargingValue = f.ChargingValue ?? -1,
+                    OffsetBinary = op == FieldOp.I16 && f.Center != null,
                     Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
                 },
             };
@@ -801,6 +805,8 @@ internal sealed class VendorBlobProgram
         // that sends offset binary, unsigned with zero at 0x8000, sets 32768.
         if (f.Op == FieldOp.I16 && src.Center != null && (src.Center < 0 || src.Center > 65535))
             throw new InvalidOperationException($"{at}.center {src.Center}: an int16-le field's center is a 16-bit wire value, 0 to 65535.");
+        if (output && f.Op == FieldOp.I16 && src.Center != null)
+            throw new InvalidOperationException($"{at} ('{src.Type}').center: an output int16-le field reads two's complement and ignores a center.");
         if ((src.Negate != null || src.Repeat != null) && src.Scale == null)
             throw new InvalidOperationException($"{at}.negate and .repeat go with scale.");
         if (src.Repeat != null)
