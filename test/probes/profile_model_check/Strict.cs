@@ -401,6 +401,19 @@ internal static class Strict
                 "{\"reportId\":\"0x01\",\"size\":8,\"fields\":[{\"byte\":1,\"type\":\"uint16-trigger\",\"semantic\":\"leftTrigger\"}]}");
             return o.ToJsonString().Replace("\"extendedReport\"", "\"ExtendedReport\"").Replace("\"fields\"", "\"Fields\"");
         }, "$.ExtendedReport.Fields[0]");
+        // An axisMap names each usage once, with a name a slot takes. At
+        // c3697a89 a second spelling of 0x32 put the field in two slots,
+        // and a name no slot takes left it in none.
+        Add("a second spelling of an axisMap usage", "dualsense", o =>
+        {
+            o["axisMap"]!.AsObject()["0X32"] = "leftTrigger";
+            return o.ToJsonString();
+        }, "$.axisMap.0X32");
+        Add("an axisMap name no slot takes", "dualsense", o =>
+        {
+            o["axisMap"]!["0x32"] = "rightStickx2";
+            return o.ToJsonString();
+        }, "$.axisMap.0x32");
         // A usbConfiguration the descriptor set cannot hold is refused at
         // load on a persona with no protocol or WinUSB package too. At
         // 8debad63 it loaded and failed at create, after the lease.

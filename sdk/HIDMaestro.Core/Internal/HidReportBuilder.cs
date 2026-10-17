@@ -356,6 +356,9 @@ public class HidReportBuilder
         }
     }
 
+    /// <summary>The names an axisMap value takes, in any case.</summary>
+    static readonly string[] AxisMapNames = { "leftStickX", "leftStickY", "rightStickX", "rightStickY", "leftTrigger", "rightTrigger" };
+
     /// <summary>Override semantic axis assignments from an explicit map.
     /// Keys are hex usage codes (e.g. "0x32"), values are semantic names
     /// (leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger,
@@ -363,16 +366,27 @@ public class HidReportBuilder
     /// there are no duplicates.</summary>
     void ApplyAxisMap(Dictionary<string, string> map)
     {
-        // A profile's axisMap: each key a hex usage, each value a name.
+        // A profile's axisMap: each key a hex usage, named once, each value
+        // one of the six names the assignment below reads. An unknown name
+        // left its usage in no slot at all, and two spellings of one usage
+        // put it in two.
+        var keyOf = new Dictionary<ushort, string>();
         foreach (var kvp in map)
         {
             if (kvp.Value == null)
-                throw new ProfileDefectException($"$.axisMap.{kvp.Key}", "is null. Name the semantic the usage takes, or leave the key out.");
-            try { _ = Convert.ToUInt16(kvp.Key, 16); }
+                throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key), "is null. Name the semantic the usage takes, or leave the key out.");
+            ushort usage;
+            try { usage = Convert.ToUInt16(kvp.Key, 16); }
             catch (Exception e) when (e is FormatException or OverflowException or ArgumentException)
             {
-                throw new ProfileDefectException($"$.axisMap.{kvp.Key}", $"the key is not a 16-bit hex usage such as \"0x32\": {e.Message}");
+                throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key), $"the key is not a 16-bit hex usage such as \"0x32\": {e.Message}");
             }
+            if (keyOf.TryGetValue(usage, out var first))
+                throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key), $"names usage 0x{usage:X2}, which the key \"{first}\" names too.");
+            keyOf[usage] = kvp.Key;
+            if (!Array.Exists(AxisMapNames, n => string.Equals(n, kvp.Value, StringComparison.OrdinalIgnoreCase)))
+                throw new ProfileDefectException(HMLayoutValidator.Member("$.axisMap", kvp.Key),
+                    $"\"{kvp.Value}\" is not one of {string.Join(", ", AxisMapNames)}.");
         }
         // Build a lookup from usage code → InputField
         var fieldByUsage = new Dictionary<ushort, InputField>();
