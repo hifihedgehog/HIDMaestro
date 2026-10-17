@@ -321,6 +321,7 @@ internal static class Rules
         new("ControllerProfile.ConfigurationString", "the configuration's string descriptor, served verbatim (UsbDescriptorSet.cs:201)"),
         new("ControllerProfile.DataReportId", "the input report a profile's data frames fill, any input report its descriptor declares, checked against the descriptor at load (ControllerProfile.ValidateDataReport). One catalog profile sets it today"),
         new("ControllerProfile.SdlMapping", "a mapping string handed to programs (HMProfile.cs:202), read by no device code"),
+        new("ControllerProfile.BluetoothVendorIdSource", "the Device ID's vendor ID source in a Bluetooth device's hardware IDs (PresentationPlan.BluetoothIds), for any Bluetooth device whose VID the Bluetooth SIG assigned: the Luna's 0x0171 today, and Apple's Bluetooth keyboards and mice under 0x004C (Linux hid-ids.h:98, hid-apple.c:1084)"),
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.Levels", "the uint8-level-map codec op's table (VendorBlobProgram.cs). dualshock-3-full sets it, and the PS Move on Bluetooth is the second device: levels 0 to 5, 0xEE charging and 0xEF full (psmoveapi include/psmove.h:194-203 at 97d97e9). The catalog's ps-move is a Move on USB, which sends only 0xEE and 0xEF (moveonpc Input report, Battery level), so its table is 0xEE at every level"),
