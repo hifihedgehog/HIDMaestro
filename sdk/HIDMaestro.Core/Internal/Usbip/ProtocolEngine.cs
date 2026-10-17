@@ -214,12 +214,6 @@ internal sealed unsafe class ProtocolEngine
         _sampledLength = _reportLength;
     }
 
-    /// <summary>The state at attach and after a port reset: the declared
-    /// initial registers and counters, no reply waiting, nothing half sent.
-    /// The ports keep what the SDK last wrote, as the controllers stay
-    /// plugged in, and each held port's snapshots are taken again from it.
-    /// The state block keeps the consumer's last frame, and the command log
-    /// keeps its history.</summary>
     /// <summary>An attach: power on, every register at its initial value.</summary>
     public void Reset() => Reset(portReset: false);
 
@@ -227,6 +221,12 @@ internal sealed unsafe class ProtocolEngine
     /// profile marks keepOnPortReset keeps its value.</summary>
     public void ResetPort() => Reset(portReset: true);
 
+    /// <summary>The state at attach and after a port reset: the declared
+    /// initial registers and counters, no reply waiting, nothing half sent.
+    /// The ports keep what the SDK last wrote, as the controllers stay
+    /// plugged in, and each held port's snapshots are taken again from it.
+    /// The state block keeps the consumer's last frame, and the command log
+    /// keeps its history.</summary>
     private void Reset(bool portReset)
     {
         lock (_sync)
