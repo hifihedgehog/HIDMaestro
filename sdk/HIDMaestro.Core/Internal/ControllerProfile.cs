@@ -507,6 +507,16 @@ public sealed class ControllerProfile
     [JsonIgnore]
     internal string? ResolvedDriverPid => Resolved.Model.DriverPid;
 
+    /// <summary>The predicate of the design note's decision (c),
+    /// alternative B: the profile reaches none of the device code a driver
+    /// older than 2.0.0 carries, so a create of it may run on such a driver
+    /// that other programs hold. Its resolved model is empty in every
+    /// group, no identity default's entry matches it, and it has no XUSB
+    /// companion and no xinputhid parent. Read only when
+    /// <see cref="DriverDeploy.Coexistence"/> is alternative B.</summary>
+    internal bool RunsOnOlderDriver =>
+        Resolved.Model.IsEmpty && !Resolved.IdentityMatched && !RequiresXusbCompanion && !UsesUpperFilter;
+
     /// <summary>True when the profile carries keys of its own in a model
     /// group, names a model, or says it takes none: a profile
     /// <see cref="HIDMaestro.HMDeviceExtractor.ResolveDeviceModel"/> leaves

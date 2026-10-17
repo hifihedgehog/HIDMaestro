@@ -101,6 +101,11 @@ internal sealed class ResolvedModel
     /// named model or a catalog profile. Null when none matched.</summary>
     public string? IdentityModel { get; init; }
 
+    /// <summary>An identity default's entry matches the profile, whether
+    /// or not it filled a group, <c>deviceModel: "none"</c> included. The
+    /// entries are the gates a driver older than 2.0.0 keys on.</summary>
+    public bool IdentityMatched { get; init; }
+
     /// <summary>Why a model the profile names, or its identity gives, was
     /// not taken. Null when nothing went wrong.</summary>
     public string? Problem { get; init; }
@@ -495,7 +500,8 @@ internal sealed class ModelRegistry
 
         DeviceModel? identity = null;
         string? identityLabel = null, identityModel = null;
-        if (!none && registry.MatchIdentity(p, outsideCatalog) is { } hit)
+        var matched = registry.MatchIdentity(p, outsideCatalog);
+        if (!none && matched is { } hit)
         {
             identityLabel = hit.Label;
             identityModel = hit.Entry.Model;
@@ -543,6 +549,7 @@ internal sealed class ModelRegistry
             Sources = sources,
             IdentityEntry = none ? null : identityLabel,
             IdentityModel = none ? null : identityModel,
+            IdentityMatched = matched != null,
             Problem = problem,
             Notes = notes,
         };

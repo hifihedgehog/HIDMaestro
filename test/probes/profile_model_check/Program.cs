@@ -21,6 +21,9 @@
 //   contract   the SDK's half of the version contract: the identity tag,
 //              protocol 4, and the configuration and identity entry each
 //              create writes anew, in a hive the check owns (Contract.cs)
+//   deploy     the deploy floor at 2.0.0 through the create's gate on a
+//              machine the check gives, under alternatives A and B, and B's
+//              predicate against a golden list (Deploy.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -47,6 +50,7 @@ internal static class Program
             ("resolve", Resolve.Run),
             ("answers", Answers.Run),
             ("contract", Contract.Run),
+            ("deploy", Deploy.Run),
         };
         int fail = 0;
         if (mode == "check")

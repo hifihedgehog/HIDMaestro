@@ -487,6 +487,10 @@ public sealed class HMContext : IDisposable
     /// descriptor lacks, or its device model does not compile. The exception
     /// names the profile's file and the JSON path. That refusal comes before
     /// the create takes anything machine-wide.</exception>
+    /// <exception cref="HMDriverVersionException">A UMDF2 create met an
+    /// installed driver older than 2.0.0 that other programs' controllers
+    /// keep from being replaced. The deploy gate refuses it before any PnP
+    /// work, and the exception names the holders.</exception>
     /// <exception cref="InvalidOperationException">This build lacks the
     /// profile's payload (<see cref="HMPayloadMissingException"/>), the
     /// driver install failed, or the device node creation failed.</exception>
@@ -522,6 +526,10 @@ public sealed class HMContext : IDisposable
     /// descriptor lacks, or its device model does not compile. The exception
     /// names the profile's file and the JSON path. That refusal comes before
     /// the create takes anything machine-wide.</exception>
+    /// <exception cref="HMDriverVersionException">A UMDF2 create met an
+    /// installed driver older than 2.0.0 that other programs' controllers
+    /// keep from being replaced. The deploy gate refuses it before any PnP
+    /// work, and the exception names the holders.</exception>
     /// <exception cref="HMResourceInUseException">A create whose key another
     /// program's cleanup holds, while it removes a device a closed program
     /// left under that key, first waits up to 120 seconds for that cleanup.

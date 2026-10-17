@@ -629,12 +629,27 @@ internal static partial class Program
             var treeOld = Native.Subtree(instOld);
 
             using var nu = PeerProcess.Start("E1-new");
+            // v2.0.0 runs on no driver older than 2.0.0 (decision (c)). What
+            // a create does on one that a live program holds is the rule
+            // DriverDeploy.Coexistence holds: alternative A refuses every
+            // create, alternative B runs a profile with no model there.
+            bool ruleB = PeerProcess.Field(nu.Send("coexistence"), "rule") == "AllowModelFreeProfiles";
             string ri = nu.Send("install");
-            Check("E1: beside a live v1.12.0 program the new SDK keeps the installed driver",
-                  PeerProcess.Field(ri, "outcome") == "KeptInUse", ri);
+            Check("E1: beside a live v1.12.0 program the new SDK's InstallDriver refuses the held driver with HMDriverVersionException",
+                  ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException"), ri);
             string cn = nu.Send("create pad F0E1 coexist-e-new");
-            Check("E1: the new program creates", Ok(cn), cn);
-            if (Ok(cn))
+            if (!ruleB)
+                Check("E1: under alternative A the new program's generic create is refused, naming the v1.12.0 program",
+                      cn.StartsWith("ERR create", StringComparison.Ordinal) && cn.Contains("HMDriverVersionException")
+                      && cn.Contains("a running program built on HIDMaestro 1.12.0"), cn);
+            else
+            {
+                Check("E1: under alternative B the new program creates a generic pad", Ok(cn), cn);
+                string cs = nu.Send("create profile dualsense-bt coexist-e-sony");
+                Check("E1: under alternative B its dualsense-bt create is refused with HMDriverVersionException",
+                      cs.StartsWith("ERR create", StringComparison.Ordinal) && cs.Contains("HMDriverVersionException"), cs);
+            }
+            if (ruleB && Ok(cn))
             {
                 string instNew = PeerProcess.Field(cn, "instance")!;
                 Check("E1: the new program's controller runs on the installed v1.12.0 driver",
@@ -1086,8 +1101,10 @@ internal static partial class Program
             {
                 using var nu = PeerProcess.Start("N1-new");
                 string ri = nu.Send("install");
-                Check("N1: a running program's controller with no device yet keeps the older driver",
-                      PeerProcess.Field(ri, "outcome") == "KeptInUse", ri);
+                // The older driver is v1.12.0, below the 2.0.0 floor
+                // (decision (c)), so a holder refuses the install.
+                Check("N1: a running program's controller with no device yet holds the older driver, and the install is refused naming it",
+                      ri.StartsWith("ERR install", StringComparison.Ordinal) && ri.Contains("HMDriverVersionException") && ri.Contains("HM_0042"), ri);
             }
             using (var nu = PeerProcess.Start("N2-new"))
             {

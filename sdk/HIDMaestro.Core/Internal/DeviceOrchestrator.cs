@@ -1440,7 +1440,7 @@ internal static partial class DeviceOrchestrator
         using (var _ts = new TimingScope(controllerIndex, profile.Id, "2.driver_install_check"))
         {
             var driverSw = Stopwatch.StartNew();
-            bool deployed = DriverDeploy.EnsureForCreate(identity.Token);
+            bool deployed = DriverDeploy.EnsureForCreate(identity.Token, profile.RunsOnOlderDriver);
             LogDiag($"    driver install check (deployed={deployed}) in {driverSw.ElapsedMilliseconds}ms");
         }
 
