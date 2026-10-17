@@ -1,5 +1,5 @@
-// capture_fidelity_check: the PS Move's prepared feature answers, and both
-// new descriptors against the dumps they come from.
+// capture_fidelity_check: the PS Move's motion, its prepared feature
+// answers, and both new descriptors against the dumps they come from.
 //
 //   answers    ps-move-feature-answers.json, the table prepared for lane
 //              DD-2's answer tables: 0x10's three pages are the moveonpc
@@ -9,6 +9,10 @@
 //              message's hidraw printout for ps-move, as printed, and
 //              ControllersInfo's .bin for the flight stick, read from the
 //              clone beside the repository ([SKIP] without it).
+//   motion     ps-move's motion words, decoded as psmoveapi decodes them
+//              with the calibration the profile's feature answers serve,
+//              give back the state's g and degrees per second, each on the
+//              axis RPCS3 says the word measures.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -191,4 +195,90 @@ d6 91 59 81 e0 01 a1 7f 2c 80 a6 95 89 07 36 0c
         Check($"xbox-360-flight-stick's descriptor is {Path.GetFileName(bin)} byte for byte, {dump.Length} bytes",
               fs?.GetDescriptorBytes() is { } fd && fd.AsSpan().SequenceEqual(dump), bin);
     }
+    // ── motion ───────────────────────────────────────────────────────────
+
+    /// <summary>psmoveapi's mapping of a ZCM1's calibration blob
+    /// (psmove_calibration.c at 97d97e9): the accelerometer's -1 g and +1 g
+    /// readings per word (270-290), g = 2 (raw - low) / (high - low) - 1
+    /// (466-503), and the gyro's 80 rpm readings less the bias at 0x2A
+    /// (316-336), rad/s = raw x 80 x 2 pi / 60 / reading (539-554). raw is
+    /// the word less 0x8000 (psmove_decode_16bit, psmove.c:139-144).</summary>
+    sealed class PsMoveCalibration
+    {
+        readonly double[] _low = new double[3], _high = new double[3], _rpm80 = new double[3];
+
+        public PsMoveCalibration(byte[] blob)
+        {
+            int U(int o) => (blob[o] | blob[o + 1] << 8) - 0x8000;
+            _low[0] = U(0x04 + 6 * 1); _low[1] = U(0x04 + 6 * 5 + 2); _low[2] = U(0x04 + 6 * 2 + 4);
+            _high[0] = U(0x04 + 6 * 3); _high[1] = U(0x04 + 6 * 4 + 2); _high[2] = U(0x04 + 6 * 0 + 4);
+            _rpm80[0] = U(0x46) - U(0x2A);
+            _rpm80[1] = U(0x46 + 8 + 2) - U(0x2A + 2);
+            _rpm80[2] = U(0x46 + 16 + 4) - U(0x2A + 4);
+        }
+
+        public double G(int word, int wire) => 2.0 * (wire - 0x8000 - _low[word]) / (_high[word] - _low[word]) - 1.0;
+        public double Dps(int word, int wire) => (wire - 0x8000) * 80.0 * 360.0 / 60.0 / _rpm80[word];
+    }
+
+    static void PsMoveMotion(ControllerProfile p, VendorBlobCodec.EncoderState enc)
+    {
+        var pages = FeatureAnswers()?.Pages;
+        var blob = pages == null ? null : CalibrationBlob(pages);
+        Check("the prepared 0x10 answers assemble to a calibration blob", blob != null);
+        if (blob == null) return;
+        var cal = new PsMoveCalibration(blob);
+        static int Word(byte[] r, int at) => r[at] | r[at + 1] << 8;
+
+        // The device's axes, by RPCS3's reading of each word
+        // (ps_move_handler.cpp:651-656 at c82221f): byte 13 grows as the Move
+        // rolls left, 15 as it pitches up, 17 as it moves up, 25 as it
+        // pitches up, 27 as it rolls right, 29 as it yaws left. In the SDK's
+        // frame (HMGamepadState: +X right, +Y up, +Z toward the player, gyro
+        // by the right-hand rule, pitch up, yaw left and roll left positive)
+        // that is +X, -Z and +Y for the accelerometer, pitch, -roll and yaw
+        // for the gyro.
+        var cases = new (string What, HMGamepadState State, float[] Accel, float[] Gyro)[]
+        {
+            ("flat at rest", new HMGamepadState { AccelGY = 1 }, new[] { 0f, 1f, 0f }, new[] { 0f, 0f, 0f }),
+            ("rolled left", new HMGamepadState { AccelGX = 0.5f, AccelGY = 0.866f }, new[] { 0.5f, 0.866f, 0f }, new[] { 0f, 0f, 0f }),
+            ("pitched up", new HMGamepadState { AccelGY = 0.6f, AccelGZ = -0.8f }, new[] { 0f, 0.6f, -0.8f }, new[] { 0f, 0f, 0f }),
+            ("turning", new HMGamepadState { AccelGX = -0.25f, AccelGY = 1.5f, AccelGZ = 0.75f, GyroDpsX = 120f, GyroDpsY = -45.5f, GyroDpsZ = 300f },
+                new[] { -0.25f, 1.5f, 0.75f }, new[] { 120f, -45.5f, 300f }),
+        };
+        foreach (var (what, state, a, g) in cases)
+        {
+            var r = MoveReport(p, state, enc)!;
+            // Back from the words: accelerometer x = word 0, y = word 2,
+            // z = -word 1, gyro pitch = word 0, yaw = word 2, roll = -word 1.
+            double ax = cal.G(0, Word(r, 13)), ay = cal.G(2, Word(r, 17)), az = -cal.G(1, Word(r, 15));
+            double gx = cal.Dps(0, Word(r, 25)), gy = cal.Dps(2, Word(r, 29)), gz = -cal.Dps(1, Word(r, 27));
+            bool accelOk = Math.Abs(ax - a[0]) < 0.0005 && Math.Abs(ay - a[1]) < 0.0005 && Math.Abs(az - a[2]) < 0.0005;
+            bool gyroOk = Math.Abs(gx - g[0]) < 0.1 && Math.Abs(gy - g[1]) < 0.1 && Math.Abs(gz - g[2]) < 0.1;
+            bool halves = Enumerable.Range(0, 3).All(k => Word(r, 13 + 2 * k) == Word(r, 19 + 2 * k) && Word(r, 25 + 2 * k) == Word(r, 31 + 2 * k));
+            Check($"motion {what}: psmoveapi reads the state back from the served calibration, each half-frame alike",
+                  accelOk && gyroOk && halves,
+                  $"accel {ax:F4} {ay:F4} {az:F4} g, gyro {gx:F2} {gy:F2} {gz:F2} dps, words {Convert.ToHexString(r, 13, 24)}");
+        }
+
+        // One axis at a time against RPCS3's comments, from the flat pose.
+        var flat = MoveReport(p, new HMGamepadState { AccelGY = 1 }, enc)!;
+        var moves = new (string What, HMGamepadState State, int Byte)[]
+        {
+            ("rolling left raises byte 13", new HMGamepadState { AccelGX = 0.3f, AccelGY = 1 }, 13),
+            ("pitching up raises byte 15", new HMGamepadState { AccelGZ = -0.3f, AccelGY = 1 }, 15),
+            ("moving up raises byte 17", new HMGamepadState { AccelGY = 1.3f }, 17),
+            ("pitching up raises byte 25", new HMGamepadState { AccelGY = 1, GyroDpsX = 50 }, 25),
+            ("rolling right raises byte 27", new HMGamepadState { AccelGY = 1, GyroDpsZ = -50 }, 27),
+            ("yawing left raises byte 29", new HMGamepadState { AccelGY = 1, GyroDpsY = 50 }, 29),
+        };
+        foreach (var (what, state, at) in moves)
+        {
+            var r = MoveReport(p, state, enc)!;
+            var others = new[] { 13, 15, 17, 25, 27, 29 }.Where(b => b != at);
+            Check($"motion: {what} and no other word", Word(r, at) > Word(flat, at) && others.All(b => Word(r, b) == Word(flat, b)),
+                  $"{Word(flat, at):X4} to {Word(r, at):X4}");
+        }
+    }
+
 }

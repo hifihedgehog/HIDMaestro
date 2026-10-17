@@ -21,11 +21,10 @@
 //   psmove     ps-move's input report, written whole from its extendedReport,
 //              puts each control where psmoveapi and the moveonpc wiki read
 //              a real Move ZCM1's: the T trigger at bytes 5 and 6 with the T
-//              bit, the buttons in bytes 1 to 4, 0x7F in bytes 7 to 10, the
-//              battery in byte 12 and offset-binary motion in 13 to 36.
+//              bit, the buttons in bytes 1 to 4, 0x7F in bytes 7 to 10, bytes
+//              11 and 37 to 48 zero, the battery 0xEE or 0xEF as on USB,
+//              and motion in 13 to 36 (PsMoveSources.cs).
 //   answers, dumps  in PsMoveSources.cs.
-//   answers, dumps  in PsMoveSources.cs.
-//   answers    in PsMoveSources.cs.
 //
 // Exit 0 PASS, 1 FAIL.
 using System;
@@ -57,9 +56,6 @@ internal static partial class Program
         PsMoveReport();
         PsMoveAnswers();
         DescriptorDumps();
-        PsMoveAnswers();
-        DescriptorDumps();
-        PsMoveAnswers();
         Console.WriteLine();
         Console.WriteLine($"capture_fidelity_check: {(s_failures == 0 ? "PASS" : "FAIL")}, {s_total - s_failures} of {s_total} checks pass");
         return s_failures == 0 ? 0 : 1;
@@ -249,17 +245,14 @@ internal static partial class Program
         static string Hex(byte[] r, int from, int count) => Convert.ToHexString(r, from, count);
 
         // At rest: no button, no trigger, 0x7F7F7F7F at 7 to 10 (moveonpc
-        // "always 0x7F7F7F7F"), every motion word 0x8000, zero in offset
-        // binary (psmove_decode_16bit subtracts 0x8000), the timestamp's high
-        // byte 11 and bytes 37 to 48 (temperature, magnetometer, the
-        // timestamp's low byte, EXT data) zero, and the battery 0xEE,
-        // charging, the value a real Move on USB sends with 0xEF (moveonpc
-        // Input report, Battery level).
+        // "always 0x7F7F7F7F"), the timestamp's high byte 11 and bytes 37 to
+        // 48 (temperature, magnetometer, the timestamp's low byte, EXT data)
+        // zero, and the battery 0xEE, charging, the value a real Move on USB
+        // sends with 0xEF (moveonpc Input report, Battery level).
         bool restOk = rest[1] == 0 && rest[2] == 0 && rest[3] == 0 && (rest[4] & 0xF0) == 0 && rest[5] == 0 && rest[6] == 0
                       && Hex(rest, 7, 4) == "7F7F7F7F" && rest[11] == 0 && rest[12] == 0xEE
-                      && Enumerable.Range(0, 12).All(k => rest[13 + 2 * k] == 0x00 && rest[14 + 2 * k] == 0x80)
                       && Enumerable.Range(37, 12).All(k => rest[k] == 0);
-        Check("at rest: no button or trigger, 0x7F at bytes 7 to 10, every motion word 0x8000, battery 0xEE, bytes 11 and 37 to 48 zero", restOk, Hex(rest, 0, 49));
+        Check("at rest: no button or trigger, 0x7F at bytes 7 to 10, battery 0xEE, bytes 11 and 37 to 48 zero", restOk, Hex(rest, 0, 49));
 
         var axes = new Dictionary<HMAxis, float> { [HMAxis.Z] = 1.0f };
         var pulled = MoveReport(p!, new HMGamepadState { Axes = axes }, enc)!;
@@ -287,16 +280,13 @@ internal static partial class Program
         bool steps = Enumerable.Range(1, seq.Count - 1).All(k => seq[k] == ((seq[k - 1] + 1) & 0x0F));
         Check("byte 4's low nibble is a sequence number that adds 1 a report and wraps at 16", steps, string.Join(",", seq));
 
-        var motion = new HMGamepadState { AccelX = 100, AccelY = -2, AccelZ = 32767, GyroPitch = -32768, GyroYaw = 1, GyroRoll = -1 };
-        var m = MoveReport(p!, motion, enc)!;
-        string want = "6480FE7FFFFF" + "6480FE7FFFFF" + "00000180FF7F" + "00000180FF7F";
-        Check("motion as offset binary, accelerometer x y z at 13 and 19, gyro at 25 and 31", Hex(m, 13, 24) == want, Hex(m, 13, 24));
-
         var levels = Enumerable.Range(0, 11).Select(l => MoveReport(p!, new HMGamepadState { BatteryLevel = (byte)l }, enc)![12]).ToArray();
         var charging = MoveReport(p!, new HMGamepadState { BatteryLevel = 5, BatteryCharging = true }, enc)![12];
         var full = MoveReport(p!, new HMGamepadState { BatteryLevel = 10, BatteryCharging = true, BatteryFull = true }, enc)![12];
         Check("battery: 0xEE, charging, at every level and when charging, 0xEF when full, as a real Move on USB sends",
               levels.All(b => b == 0xEE) && charging == 0xEE && full == 0xEF,
               $"{Convert.ToHexString(levels)} {charging:X2} {full:X2}");
+
+        PsMoveMotion(p!, enc);
     }
 }
