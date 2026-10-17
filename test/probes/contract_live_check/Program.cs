@@ -29,6 +29,14 @@
 //                profile must name the model its identity gives it, with
 //                the answers the device gave.
 //   check        the three, the default.
+// Each create that throws is a named failure with the exception, the
+// driver's half of its index's version section and the problem code
+// Windows gave the device, and the checks after it go on. A create whose
+// device misbehaves names the device's problem code beside the check. The
+// controllers each lane creates are disposed whatever happens, and the
+// context's disposal at the end takes what is left. If the driver cannot
+// read its instance ID before its device exists, every create here fails
+// its start, and identity's first check names that.
 // Exit 0 PASS, 1 FAIL, 3 not elevated (nothing created).
 using System;
 using System.Collections.Generic;
@@ -105,6 +113,36 @@ internal static class Program
 
     static string Key() => "contract-live-" + Guid.NewGuid().ToString("N");
 
+    /// <summary>A create, or a named failure: the exception, the driver's
+    /// half of the index's version section, and what the index's device
+    /// reported.</summary>
+    static HMController? Create(HMContext ctx, int index, HMProfile profile, string what)
+    {
+        try { return ctx.CreateControllerAt(index, profile, Key()); }
+        catch (Exception e)
+        {
+            Check($"{what}: the create", false,
+                  $"{e.GetType().Name}: {e.Message} | driver's half {SharedMemoryIO.DriverHalf(index)}");
+            return null;
+        }
+    }
+
+    /// <summary>The device a controller made, as Windows reports it.</summary>
+    static string Node(HMController c)
+    {
+        if (c.InstanceId is not { } id) return "no device";
+        var (present, status, problem) = DeviceOrchestrator.DevnodeStatus(id);
+        return present ? $"{id} status 0x{status:X} problem {problem}" : $"{id} not present";
+    }
+
+    /// <summary>A lane runs to its end: an exception it did not expect is a
+    /// named failure, and its usings dispose what it created.</summary>
+    static void Lane(string name, Action body)
+    {
+        try { body(); }
+        catch (Exception e) { Check($"{name}: runs to its end", false, $"{e.GetType().Name}: {e.Message}"); }
+    }
+
     static int Main(string[] args)
     {
         if (!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
@@ -116,9 +154,9 @@ internal static class Program
         using var ctx = new HMContext();
         ctx.LoadDefaultProfiles();
         ctx.InstallDriver();
-        if (mode is "identity" or "check") Identity(ctx);
-        if (mode is "unnumbered" or "check") Unnumbered(ctx);
-        if (mode is "extract" or "check") Extract(ctx);
+        if (mode is "identity" or "check") Lane("identity", () => Identity(ctx));
+        if (mode is "unnumbered" or "check") Lane("unnumbered", () => Unnumbered(ctx));
+        if (mode is "extract" or "check") Lane("extract", () => Extract(ctx));
         Console.WriteLine($"contract_live_check {mode}: {(s_failures == 0 ? "PASS" : $"FAIL, {s_failures}")}");
         return s_failures == 0 ? 0 : 1;
     }
@@ -127,26 +165,36 @@ internal static class Program
     {
         var pad = new HMProfileBuilder().Id("contract-live-pad").Vid(0xBEEF).Pid(0xF0C0)
             .DescriptorHex(ctx.GetProfile("heusinkveld-ultimate-pedals")!.DescriptorHex!).Build();
-        using var c0 = ctx.CreateControllerAt(0, pad, Key());
-        Check("a generic pad at index 0 starts on a driver of protocols 4 to 4",
-              SharedMemoryIO.DriverHalf(0) is { Protocol: 4, ProtocolMin: 4 }, $"{SharedMemoryIO.DriverHalf(0)}");
-
-        using (var c1 = ctx.CreateControllerAt(1, ctx.GetProfile("dualsense")!, Key()))
+        // The first create names the instance-ID read: a driver that cannot
+        // read it before its device exists has no token, matches no section
+        // and fails the start of every create here.
+        using (var c0 = Create(ctx, 0, pad, "a generic pad at index 0, whose driver must read its instance ID before its device exists"))
         {
-            var half = SharedMemoryIO.DriverHalf(1);
-            Check("a fresh-token dualsense at index 1 on the ROOT path: its driver wrote protocols 4 to 4 into index 1's section at its first add",
-                  half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half}");
-            using var h = Open(Find(1));
-            var r = h == null ? null : Get(h, 0x09, 20);
-            Check("its report 0x09 carries index 1 in its MAC, from index 1's FeatureAnswers",
-                  r != null && r[6] == 1, r == null ? "no answer" : Convert.ToHexString(r));
+            if (c0 != null)
+                Check("a generic pad at index 0 starts on a driver of protocols 4 to 4",
+                      SharedMemoryIO.DriverHalf(0) is { Protocol: 4, ProtocolMin: 4 }, $"{SharedMemoryIO.DriverHalf(0)} | {Node(c0)}");
         }
 
-        using (var c2 = ctx.CreateControllerAt(2, ctx.GetProfile("xbox-one-s")!, Key()))
+        using (var c1 = Create(ctx, 1, ctx.GetProfile("dualsense")!, "a fresh-token dualsense at index 1 on the ROOT path"))
         {
+            if (c1 != null)
+            {
+                var half = SharedMemoryIO.DriverHalf(1);
+                Check("a fresh-token dualsense at index 1 on the ROOT path: its driver wrote protocols 4 to 4 into index 1's section at its first add",
+                      half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c1)}");
+                using var h = Open(Find(1));
+                var r = h == null ? null : Get(h, 0x09, 20);
+                Check("its report 0x09 carries index 1 in its MAC, from index 1's FeatureAnswers",
+                      r != null && r[6] == 1, r == null ? $"no answer | {Node(c1)}" : Convert.ToHexString(r));
+            }
+        }
+
+        using (var c2 = Create(ctx, 2, ctx.GetProfile("xbox-one-s")!, "a fresh-token xbox-one-s at index 2 on the SWD xinputhid path"))
+        {
+            if (c2 == null) return;
             var half = SharedMemoryIO.DriverHalf(2);
             Check("a fresh-token xbox-one-s at index 2 on the SWD xinputhid path: its driver wrote protocols 4 to 4 into index 2's section at its first add",
-                  half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half}");
+                  half is { Protocol: 4, ProtocolMin: 4, ConfigError: 0 }, $"{half} | {Node(c2)}");
             var state = new HMGamepadState { Buttons = HMButton.A | HMButton.Y };
             var sw = Stopwatch.StartNew();
             bool seen = false;
@@ -157,7 +205,7 @@ internal static class Program
                     seen = XInputGetState(s, out var st) == 0 && (st.Buttons & 0x9000) == 0x9000;
                 Thread.Sleep(20);
             }
-            Check("its input reaches XInput, which reads index 2's section", seen, $"{sw.ElapsedMilliseconds} ms");
+            Check("its input reaches XInput, which reads index 2's section", seen, $"{sw.ElapsedMilliseconds} ms | {Node(c2)}");
         }
     }
 
@@ -166,9 +214,10 @@ internal static class Program
         var deck = ctx.GetProfile("steam-deck-composite")!;
         var p = new HMProfileBuilder().Id("contract-live-unnumbered").Vid(0x28DE).Pid(0x1205)
             .DescriptorHex(deck.DescriptorHex!).FeatureAnswers(System.Text.Json.JsonSerializer.Serialize(deck.Inner.FeatureStubs!, HMJsonContext.Default.FeatureStubSpec)).Build();
-        using var c = ctx.CreateControllerAt(3, p, Key());
+        using var c = Create(ctx, 3, p, "the unnumbered profile at index 3");
+        if (c == null) return;
         using var h = Open(Find(3));
-        if (h == null) { Check("the unnumbered profile's HID device opens", false); return; }
+        if (h == null) { Check("the unnumbered profile's HID device opens", false, Node(c)); return; }
         // The caller writes report 0's leading 0 as SDL does, and HID class
         // leaves it out of the minidriver's buffer in both directions (Wine
         // 2df1ee2 hidclass.sys device.c:485, vhidmini2 197ba21
@@ -201,9 +250,10 @@ internal static class Program
         foreach (var p in ctx.AllProfiles.Where(x => !x.Inner.RequiresUsbipBackend && x.HasDeviceModel && x.Inner.Resolved.Model.FeatureStubs != null)
                      .OrderBy(x => x.Id, StringComparer.Ordinal))
         {
-            using var c = ctx.CreateControllerAt(0, p, Key());
+            using var c = Create(ctx, 0, p, p.Id);
+            if (c == null) continue;
             var d = Find(0);
-            if (d == null) { Check($"{p.Id}: its HID device is listed", false); continue; }
+            if (d == null) { Check($"{p.Id}: its HID device is listed", false, Node(c)); continue; }
             var x = HMDeviceExtractor.Extract(d);
             string? named = x.Inner.DeviceModelFrom;
             var model = x.Inner.Resolved.Model.FeatureStubs;

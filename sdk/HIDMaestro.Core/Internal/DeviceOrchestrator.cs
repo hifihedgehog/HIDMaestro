@@ -1829,14 +1829,17 @@ internal static partial class DeviceOrchestrator
     internal static Exception StartError(string instanceId, int controllerIndex)
     {
         var half = DriverHalf(controllerIndex);
+        // The device's problem code goes in either message, the record of
+        // which failure Windows saw (cfg.h).
+        var (_, _, problem) = DevnodeStatus(instanceId);
         if (half.ConfigError != 0)
             return new HMDriverVersionException(HMDriverVersionProblem.ValueNotRead,
                 $"The HIDMaestro driver {half.Version?.ToString() ?? "(no version written)"} could not read the value " +
                 $"{ConfigErrorValue(half.ConfigError)} this create wrote for {instanceId}, so the device did not start " +
+                $"(problem code {problem}) " +
                 "and the create removed it. This SDK and that driver disagree on the value's format: InstallDriver puts " +
                 "this SDK's driver in place once nothing runs on the installed one.",
                 half.Version ?? new Version(0, 0, 0), DriverDeploy.MinimumDriverVersion, new[] { instanceId });
-        var (_, _, problem) = DevnodeStatus(instanceId);
         return new InvalidOperationException($"The device {instanceId} failed its start, problem code {problem}.");
     }
 

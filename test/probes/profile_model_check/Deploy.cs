@@ -332,6 +332,15 @@ internal static class Deploy
                 return (wait == DeviceOrchestrator.StartWait.Failed && ms < 1000 && error.Message.Contains($"problem code {code}", StringComparison.Ordinal),
                         $"{wait} in {ms} ms: {error.Message}");
             });
+        // A value the driver could not read names the device's problem code
+        // too, the record a live run keeps of what Windows saw. At fe9134b9
+        // only a failure with no error word named it.
+        c.Run("a failed start with the error word set names the value and the problem code", () =>
+        {
+            var error = With(_ => (true, HasProblem, 43u), _ => null, _ => (4, 4, new Version(2, 0, 0), 1), () => DeviceOrchestrator.StartError(Node, 3));
+            return (error.Message.Contains("FeatureAnswers", StringComparison.Ordinal) && error.Message.Contains("problem code 43", StringComparison.Ordinal),
+                    error.Message);
+        });
         // The ROOT path's own wait for the HID child, inside
         // DeviceNodeCreator.CreateDeviceNode, ends on a failed start too.
         // At bde72499 it waited for a child alone, 5 s, before step 4 saw the
