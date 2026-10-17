@@ -488,12 +488,14 @@ internal static class Clock
             public long NotBefore = 0;
             public readonly List<(long Due, long At)> Ticks = new();
             public int Ends;
+            /// <summary>How often the clock read Running.</summary>
+            public int Looks;
             /// <summary>The tick that holds the clock's thread for
             /// StallMs, as a preemption would, or -1.</summary>
             public int StallAt = -1, StallMs;
         }
         public Box B;
-        public bool Running(out long origin) { origin = Volatile.Read(ref B.Origin); return B.Running; }
+        public bool Running(out long origin) { Interlocked.Increment(ref B.Looks); origin = Volatile.Read(ref B.Origin); return B.Running; }
         public long Period => Volatile.Read(ref B.Period);
         public long NotBefore => Volatile.Read(ref B.NotBefore);
         public void Tick(long due)
@@ -584,6 +586,21 @@ internal static class Clock
         clock.Stop(1000);
         Check("Stop ends the clock's thread", !clock.Thread.IsAlive);
 
+        // A clock that every change wakes waits for its next tick in one
+        // wait. Waits capped at 100 ms would look at a 500 ms tick six
+        // times a period, 18 or more times for three ticks.
+        var slow = new Probe.Box { Period = f / 2 };
+        var slowClock = new DeviceClock<Probe>(new Probe { B = slow }, MissedTick.Owe, "engine check slow clock", everyChangeWakes: true);
+        slowClock.Start();
+        slow.Origin = Stopwatch.GetTimestamp(); slow.Running = true;
+        slowClock.Wake();
+        bool slowTicked = Until(() => { lock (slow.Ticks) return slow.Ticks.Count >= 3; });
+        int looks = Volatile.Read(ref slow.Looks);
+        slow.Running = false;
+        slowClock.Stop(1000);
+        Check("a clock that every change wakes looks at a 500 ms tick a few times a period, not every 100 ms",
+            slowTicked && looks <= 12, $"{looks} looks for three ticks");
+
         Console.WriteLine("-- the idle repeat's clock (stream)");
         Stream();
     }
@@ -621,6 +638,8 @@ internal static class Clock
         var plain = ControllerProfile.Parse(Encoding.UTF8.GetBytes(o.ToJsonString()))!;
         var ps = StreamClock.Compile(plain, plain.GetOrCompileModel().Registers)!;
         Check("a stream without timestamps holds them, as the idle repeat before v2.0.0 did", !ps.AdvanceTimestamps);
+        Check("a stream with a condition or a period register keeps the clock's capped wait", s.ReadsRegisters);
+        Check("a stream that reads no register waits for its next repeat in one wait", !ps.ReadsRegisters);
 
         // The catalog's idle repeats: cadence.json's recommended interval for
         // each profile whose real device streams at rest. dualshock-4-v2-bt

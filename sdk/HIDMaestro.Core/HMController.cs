@@ -668,7 +668,8 @@ public sealed partial class HMController : IDisposable
                 _lastSubmitted = new HMGamepadState();
             var tick = new StreamTick(_stream, _protocolEngine?.RegisterWords, RepeatLastFrameFromClock,
                 () => Volatile.Read(ref _lastSubmitTimestamp));
-            var clock = new DeviceClock<StreamTick>(tick, MissedTick.Drop, $"HMIdleFrames_{index}");
+            var clock = new DeviceClock<StreamTick>(tick, MissedTick.Drop, $"HMIdleFrames_{index}",
+                everyChangeWakes: !_stream.ReadsRegisters);
             _idleClock = clock;
             _idleThread = clock.Thread;
             clock.Start();

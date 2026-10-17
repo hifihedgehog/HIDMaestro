@@ -86,15 +86,22 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
     private readonly MissedTick _missed;
     private readonly AutoResetEvent _wake = new(false);
     private readonly IntPtr _timer;
+    private readonly uint _waitCapMs;
     private readonly Thread _thread;
     private readonly object _lifetime = new();
     private volatile bool _stop;
     private bool _closed;
 
-    public DeviceClock(TTick tick, MissedTick missed, string threadName)
+    /// <param name="everyChangeWakes">Every change to what the tick reads
+    /// calls <see cref="Wake"/>, so the clock waits for its next tick in one
+    /// wait. Otherwise a wait lasts at most 100 ms, which bounds how late the
+    /// clock sees a change nothing woke it for. At a 250 ms period the cap
+    /// is three wakes a period, each about 50,000 cycles.</param>
+    public DeviceClock(TTick tick, MissedTick missed, string threadName, bool everyChangeWakes = false)
     {
         _tick = tick;
         _missed = missed;
+        _waitCapMs = everyChangeWakes ? INFINITE : 100;
         _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         _thread = new Thread(Loop)
         {
@@ -201,7 +208,7 @@ internal sealed class DeviceClock<TTick> : IDeviceClock where TTick : struct, IC
                     {
                         long rel = -Math.Max(1, wait * 10_000_000L / freq); // relative, 100 ns units
                         if (SetWaitableTimer(_timer, ref rel, 0, IntPtr.Zero, IntPtr.Zero, false)
-                            && WaitForMultipleObjects(2, waits, false, 100) != WAIT_FAILED)
+                            && WaitForMultipleObjects(2, waits, false, _waitCapMs) != WAIT_FAILED)
                             continue;
                     }
                     // No high-resolution timer (Windows 10 before 1803) or a
@@ -239,6 +246,7 @@ internal static partial class ClockNative
     public const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
     public const uint TIMER_ALL_ACCESS = 0x1F0003;
     public const uint WAIT_FAILED = 0xFFFFFFFF;
+    public const uint INFINITE = 0xFFFFFFFF;
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     public static partial IntPtr CreateWaitableTimerExW(IntPtr attrs, IntPtr name, uint flags, uint access);
