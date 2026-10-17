@@ -698,14 +698,13 @@ internal static partial class DeviceOrchestrator
 
         string instancePath = RegPathForIndex(controllerIndex);
         using var key = Registry.LocalMachine.CreateSubKey(instancePath);
-        string instanceSuffix = controllerIndex > 0 ? $"\\{controllerIndex:D4}" : "\\0000";
-        key.SetValue("DeviceInstanceId",
-            $@"ROOT\VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4}&IG_00{instanceSuffix}",
-            RegistryValueKind.String);
-        key.SetValue("FunctionMode", funcMode ? 1 : 0, RegistryValueKind.DWord);
-        key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
+        // The identity first: another program's sweep reads VendorId and
+        // ProductId from a configuration a create may still be writing
+        // (OwnerCensus.GameInputKeysInUse).
         key.SetValue("VendorId", (int)profile.VendorId, RegistryValueKind.DWord);
         key.SetValue("ProductId", (int)profile.ProductId, RegistryValueKind.DWord);
+        key.SetValue("FunctionMode", funcMode ? 1 : 0, RegistryValueKind.DWord);
+        key.SetValue("ReportDescriptor", descriptor, RegistryValueKind.Binary);
         // v1.3.5: VersionNumber default 0x0100 (real Sony USB convention).
         // BT profiles that emulate a real Sony controller need 0 here so
         // Chromium's Dualshock4Controller::BusTypeFromVersionNumber routes

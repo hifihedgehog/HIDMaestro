@@ -792,6 +792,9 @@ internal sealed partial class OwnerCensus
                 accounted.Add(n);
                 if (c.GetValue("VendorId") is int vid && c.GetValue("ProductId") is int pid)
                     keys.Add(GameInputMapping.KeyName((ushort)vid, (ushort)pid));
+                // Through v1.12.0 a create wrote DeviceInstanceId before
+                // VendorId and ProductId, so an older program's create can be
+                // caught here with only that value written.
                 else if (c.GetValue("DeviceInstanceId") is string instance && TryParseVidPid(instance, out ushort v, out ushort p))
                     keys.Add(GameInputMapping.KeyName(v, p));
                 else
