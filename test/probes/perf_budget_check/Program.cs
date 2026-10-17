@@ -24,6 +24,10 @@
 //                  decode and state block, each variant's median ns per call
 //                  (ProgramCost.cs). Built with -p:HmDd4Base=true
 //                  against the tree before, the code they replace
+//   encode [runs] [calls]
+//                  offline: the codec's encode of the budget table's
+//                  codec-encoded input reports, each median ns per call
+//                  (EncodeCost.cs). It builds against older trees as is
 //   idle <periodMs> [seconds]
 //                  offline: the process's CPU time per second with one
 //                  dualsense-bt's idle repeat at the period and nothing else
@@ -118,6 +122,11 @@ internal static class Program
         if (mode == "report")
         {
             ReportCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
+            return 0;
+        }
+        if (mode == "encode")
+        {
+            EncodeCost.Run(runs, args.Length > 2 && int.TryParse(args[2], out int calls) ? calls : 100_000);
             return 0;
         }
         if (mode == "program")

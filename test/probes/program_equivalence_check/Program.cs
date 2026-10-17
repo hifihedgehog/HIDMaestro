@@ -12,6 +12,9 @@ using HIDMaestro.Internal.Programs;
 //   user [dir]          the profiles of a directory, on the interpreter
 //   parse-file <file>   one file through the run-time loader, printed as the
 //                       build tool's check-file prints it
+//   state-cost [runs] [calls]
+//                       the budget table's codec reports as generated state
+//                       programs, timed on perf_budget_check's encode states
 //   inline              the generated programs inline into BuildNext, read
 //                       from the JIT's listing of a child process
 string mode = args.Length > 0 ? args[0] : "check";
@@ -29,6 +32,9 @@ switch (mode)
         failures += UserChecks.Run(UserChecks.DefaultDir());
         failures += InlineCheck.Run();
         break;
+    case "state-cost":
+        return StateCost.Run(args.Length > 1 && int.TryParse(args[1], out int costRuns) ? costRuns : 9,
+                             args.Length > 2 && int.TryParse(args[2], out int costCalls) ? costCalls : 100_000);
     case "inline":
         failures += InlineCheck.Run();
         break;

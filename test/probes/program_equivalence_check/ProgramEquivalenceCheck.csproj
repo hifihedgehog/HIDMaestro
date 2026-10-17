@@ -22,6 +22,9 @@
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
     <Compile Remove="bin\**;obj\**" />
     <None Update="user\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The states perf_budget_check's encode mode times the codec on, for
+         state-cost to time the state programs on. -->
+    <Compile Include="..\perf_budget_check\EncodeCost.cs" Link="EncodeCost.cs" />
     <!-- The catalog's files, whose codec reports the build tool lowers into
          state programs of the probe's own (mode probe). -->
     <KernelGenJson Include="..\..\..\profiles\**\*.json" Exclude="..\..\..\profiles\schema.json" />
