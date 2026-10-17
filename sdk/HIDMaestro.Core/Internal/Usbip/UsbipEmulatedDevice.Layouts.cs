@@ -14,6 +14,10 @@ internal sealed partial class UsbipEmulatedDevice
 {
     private LayoutRunner? _layoutRunner;
     private IDeviceClock? _layoutClock;
+    /// <summary>The interrupt IN endpoint the protocol names, where the
+    /// device's own reports go: its reads park and complete in this queue,
+    /// whichever interface holds it.</summary>
+    private byte _layoutInEndpoint;
     private OwedReport? _owedReport;
     private SubmitReport? _submitReport;
 
@@ -86,6 +90,7 @@ internal sealed partial class UsbipEmulatedDevice
         foreach (var l in _engine!.Protocol.Model.Layouts) largest = Math.Max(largest, l.Size);
         _layoutReport = GC.AllocateArray<byte>(largest, pinned: true);
         _layoutRunner = runner;
+        _layoutInEndpoint = _engine.Protocol.InputEndpoint;
         _owedReport = new OwedReport(this);
         _submitReport = new SubmitReport(this);
         _layoutClock = runner.Visit(new LayoutClockFactory(this));
@@ -111,7 +116,7 @@ internal sealed partial class UsbipEmulatedDevice
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out long since) || since != run) return;
-                var pending = PendingFor(_primaryInEndpoint);
+                var pending = PendingFor(_layoutInEndpoint);
                 if (pending.Count == 0)
                 {
                     if (engine.TickWouldSend(ref set)) _reportOwed = true;
@@ -129,8 +134,8 @@ internal sealed partial class UsbipEmulatedDevice
     private void CountCompletion()
     {
         if (DiagPath != null)
-            _completionsPerEp[_primaryInEndpoint] =
-                _completionsPerEp.TryGetValue(_primaryInEndpoint, out var cc) ? cc + 1 : 1;
+            _completionsPerEp[_layoutInEndpoint] =
+                _completionsPerEp.TryGetValue(_layoutInEndpoint, out var cc) ? cc + 1 : 1;
     }
 
     /// <summary>An interrupt IN read on the endpoint the device reports on.
@@ -146,11 +151,11 @@ internal sealed partial class UsbipEmulatedDevice
             lock (_hidLock)
             {
                 if (DiagPath != null)
-                    _readsPerEp[_primaryInEndpoint] =
-                        _readsPerEp.TryGetValue(_primaryInEndpoint, out var rc) ? rc + 1 : 1;
+                    _readsPerEp[_layoutInEndpoint] =
+                        _readsPerEp.TryGetValue(_layoutInEndpoint, out var rc) ? rc + 1 : 1;
                 if (!_reportOwed || !engine.InputOpenSince(out _))
                 {
-                    PendingFor(_primaryInEndpoint).Enqueue(seqnum);
+                    PendingFor(_layoutInEndpoint).Enqueue(seqnum);
                     return;
                 }
                 _reportOwed = false;
@@ -159,7 +164,7 @@ internal sealed partial class UsbipEmulatedDevice
                 {
                     // The report changed back to the one last sent, or the
                     // layout turned to one that goes out on submit.
-                    PendingFor(_primaryInEndpoint).Enqueue(seqnum);
+                    PendingFor(_layoutInEndpoint).Enqueue(seqnum);
                     return;
                 }
                 CountCompletion();
@@ -182,7 +187,7 @@ internal sealed partial class UsbipEmulatedDevice
             lock (_hidLock)
             {
                 if (!engine.InputOpenSince(out _)) return;
-                var pending = PendingFor(_primaryInEndpoint);
+                var pending = PendingFor(_layoutInEndpoint);
                 if (pending.Count == 0)
                 {
                     _reportOwed = true;

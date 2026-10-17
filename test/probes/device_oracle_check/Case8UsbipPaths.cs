@@ -53,6 +53,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
 using HIDMaestro;
 using HIDMaestro.Internal;
@@ -104,6 +105,75 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 using (var r = new CompositeRig(golden, host, Get(id), index++)) OtherComposite(golden, r, id);
             using (var r = new CompositeRig(golden, host, s2, index++)) Report02Sources(golden, r, rng3);
             using (var r = new CompositeRig(golden, host, s2, index++, claimed: false)) AttachDetach(golden, host, r);
+        }
+
+        // A check beside the recording, which adds nothing to the streams.
+        using (var host = new Host(sock)) LayoutEndpoint(host);
+    }
+
+    /// <summary>A device that builds its reports serves them on the endpoint
+    /// its protocol names, here an interrupt IN endpoint 0x83 added to the
+    /// composite's vendor interface. A read parked on the HID interface's
+    /// 0x81 waits for a frame of the SDK's, which such a device never
+    /// queues, and a tick answers the read on 0x83. Throws when a tick
+    /// answers anything else.</summary>
+    static void LayoutEndpoint(Host host)
+    {
+        var asm = typeof(HMContext).Assembly;
+        JsonObject? json = null;
+        foreach (var res in asm.GetManifestResourceNames().Where(n => n.StartsWith("HIDMaestro.Profiles.", StringComparison.Ordinal)))
+        {
+            using var st = asm.GetManifestResourceStream(res)!;
+            using var sr = new StreamReader(st, Encoding.UTF8);
+            if (JsonNode.Parse(sr.ReadToEnd()) is JsonObject o && (string?)o["id"] == Switch2Id) { json = o; break; }
+        }
+        if (json == null) throw new InvalidOperationException($"No catalog profile {Switch2Id}.");
+        json["id"] = "layout-endpoint-check";
+        var cfg = json["usbConfiguration"]!.AsObject();
+        string hex = (string)cfg["configurationDescriptor"]!;
+        // wTotalLength 0x50 to 0x57, interface 1's bNumEndpoints 2 to 3, and
+        // an interrupt IN endpoint 0x83 of 64 bytes at interval 4 after its
+        // two bulk endpoints.
+        const string Iface1 = "0904010002ff000006";
+        if (!hex.StartsWith("0902500002", StringComparison.OrdinalIgnoreCase) || hex.IndexOf(Iface1, StringComparison.OrdinalIgnoreCase) < 0)
+            throw new InvalidOperationException("The composite's configuration descriptor changed: update the layout endpoint check.");
+        hex = "0902570002" + hex[10..];
+        hex = hex.Replace(Iface1, "0904010003ff000006", StringComparison.OrdinalIgnoreCase) + "07058303400004";
+        cfg["configurationDescriptor"] = hex;
+        json["usbConfiguration"]!["interfaces"]![1]!["altSettings"]![0]!["endpoints"]!.AsArray()
+            .Add(JsonNode.Parse("{\"address\": 131, \"transferType\": \"interrupt\", \"maxPacketSize\": 64, \"interval\": 4}"));
+        json["protocol"]!["input"]!["endpoint"] = "0x83";
+        var p = ControllerProfile.Parse(Encoding.UTF8.GetBytes(json.ToJsonString()))!;
+        p.ValidateDeviceModel();
+
+        IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
+        IntPtr ring = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
+        Marshal.Copy(new byte[SharedMemoryIO.SHARED_OUTPUT_SIZE], 0, ring, SharedMemoryIO.SHARED_OUTPUT_SIZE);
+        try
+        {
+            var dev = CompositeRig.NewDevice(p, view, ring, IntPtr.Zero, host.Connection, out byte hidIn);
+            var clock = (IDeviceClock)typeof(UsbipEmulatedDevice).GetField("_layoutClock", Instance)!.GetValue(dev)!;
+            host.Submit(dev, 0x02, isIn: false, 16, Convert.FromHexString("0391000D000800000100FFFFFFFFFFFF"));
+            host.DrainReplies();
+            uint onHid = host.Submit(dev, (byte)(hidIn & 0x0F), isIn: true, 64, ReadOnlySpan<byte>.Empty);
+            uint onLayout = host.Submit(dev, 0x03, isIn: true, 64, ReadOnlySpan<byte>.Empty);
+            var before = host.DrainReplies();
+            if (before.Count != 0)
+                throw new InvalidOperationException($"Layout endpoint check: {before.Count} read(s) answered before any tick.");
+            if (!clock.TickNow())
+                throw new InvalidOperationException("Layout endpoint check: the clock does not tick with reports on and a read parked.");
+            var got = host.DrainReplies().Where(x => x.Kind == UsbipProtocol.RetSubmit).ToList();
+            if (got.Count != 1 || got[0].Seq != onLayout || got[0].Data.Length == 0 || got[0].Data[0] != 0x09)
+                throw new InvalidOperationException(
+                    $"Layout endpoint check: a tick answered {string.Join(", ", got.Select(x => $"seq {x.Seq} ({x.Data.Length} bytes)"))}, " +
+                    $"where it must answer the read on 0x83 (seq {onLayout}) with report 0x09 and leave the read on 0x{hidIn:X2} (seq {onHid}).");
+            dev.Dispose();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(view);
+            Marshal.FreeHGlobal(ring);
         }
     }
 
@@ -476,7 +546,7 @@ internal sealed class Case8UsbipPaths : IOracleCase
         /// isochronous transfer and ends at Dispose, and for 057E:2069 the
         /// bulk IN endpoint, the responder and the report buffer (293-304,
         /// 326), the gate the constructor applies.</summary>
-        static UsbipEmulatedDevice NewDevice(ControllerProfile p, IntPtr view, IntPtr ring, IntPtr ev,
+        internal static UsbipEmulatedDevice NewDevice(ControllerProfile p, IntPtr view, IntPtr ring, IntPtr ev,
                                              UsbipServer.Connection? connection, out byte inEndpoint)
         {
             var t = typeof(UsbipEmulatedDevice);
