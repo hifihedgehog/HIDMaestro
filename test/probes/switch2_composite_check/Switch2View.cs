@@ -38,6 +38,8 @@ internal sealed class Switch2View
     public byte FeatureEnabled => (byte)_e.GetRegister(_enabled);
     public byte PlayerLeds => (byte)_e.GetRegister(_leds);
     public uint ReportsSent => _e.GetCounter(_sent);
+    /// <summary>The state block the device builds its reports from.</summary>
+    public byte[] StateBlock => _e.CopyStateBlock();
 
     public List<byte[]> SnapshotBulkLog() => _e.SnapshotLog().Select(x => x.Command).ToList();
     public List<(long Ticks, byte[] Payload)> SnapshotBulkLogTimed() => _e.SnapshotLog();

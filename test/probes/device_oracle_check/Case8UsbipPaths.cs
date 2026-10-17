@@ -726,8 +726,38 @@ internal sealed class Case8UsbipPaths : IOracleCase
                 var b = new byte[len];
                 for (int i = 0; i < len; i++) b[i] = (byte)(i + 1);
                 Try($"raw.{len}", () => _c.SubmitRawReport(b));
-                Try($"raw-ext.{len}", () => _c.SubmitRawExtendedReport(b));
+                ReachesStateBlock(b, "SubmitRawReport");
+                // Other bytes for the second path, so a block left from the
+                // first cannot pass for it.
+                var e = new byte[len];
+                for (int i = 0; i < len; i++) e[i] = (byte)(0x80 | i);
+                Try($"raw-ext.{len}", () => _c.SubmitRawExtendedReport(e));
+                if (ReachesStateBlock(e, "SubmitRawExtendedReport"))
+                {
+                    // The block the recording had at 9bd6279's raw-ext
+                    // submit, back before anything after it is recorded.
+                    _c.SubmitRawExtendedReport(b);
+                    ReachesStateBlock(b, "SubmitRawExtendedReport");
+                }
             }
+        }
+
+        /// <summary>A check beside the recording, which adds nothing to the
+        /// stream: a raw submit the composite takes is its state block, byte
+        /// for byte, once the device's input pump has read it. A path that
+        /// wrote another lane, another length or nothing fails the case.</summary>
+        bool ReachesStateBlock(byte[] block, string path)
+        {
+            if (_s2 == null || block.Length != _s2.Protocol.Model.StateSize) return false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (!BodyIs(block))
+            {
+                if (sw.ElapsedMilliseconds > 5000)
+                    throw new InvalidOperationException(
+                        $"{path} of {Convert.ToHexString(block)}: the composite's state block is {Convert.ToHexString(_s2.CopyStateBlock())} after 5 s.");
+                Thread.Yield();
+            }
+            return true;
         }
 
         void Try(string tag, Action a)
