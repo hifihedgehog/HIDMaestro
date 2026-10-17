@@ -150,6 +150,8 @@ internal static class Program
         if (mode == "compare-live")
             return CompareLive.Run(args[1..], Path.Combine(ProbeDir(), "golden"), Path.Combine(AppContext.BaseDirectory, "native"));
         if (mode != "record" && mode != "replay") return Usage();
+        // The change list's own rules first, as selftest runs them.
+        bool selfTestFailed = mode == "replay" && SelfTest.RunQuiet() != 0;
 
         ulong seed = DefaultSeed;
         string golden = Path.Combine(ProbeDir(), "golden");
@@ -248,7 +250,7 @@ internal static class Program
         // cache, so a case that changed a profile would change what every
         // case after it records. None may: checked after the last case.
         var catalog = CatalogText();
-        int failures = 0, skipped = 0;
+        int failures = selfTestFailed ? 1 : 0, skipped = 0;
         // No lane changes another lane's line (ChangeHistory.cs).
         if (mode == "replay" && File.Exists(defaultChanges))
         {

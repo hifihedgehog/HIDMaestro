@@ -22,7 +22,8 @@
 //            the same stream: it rebuilds the lane's bytes from the base and
 //            holds them to the lane's own pin. Without --earlier the stream
 //            is read from the tree, and fails.
-// Exit 0 when every check passes, 1 otherwise.
+// Exit 0 when every check passes, 1 otherwise. Every replay runs them first,
+// so the battery's replay (S89) fails on a failing check.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -32,10 +33,29 @@ internal static class SelfTest
 {
     static int s_failures;
 
+    static int s_checks;
+
     static void Check(bool ok, string what)
     {
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {what}");
+        s_checks++;
         if (!ok) s_failures++;
+    }
+
+    /// <summary>The checks as every replay runs them first: only a failing
+    /// check and one line are printed.</summary>
+    public static int RunQuiet()
+    {
+        var saved = Console.Out;
+        var log = new StringWriter();
+        Console.SetOut(log);
+        int code;
+        try { code = Run(); }
+        finally { Console.SetOut(saved); }
+        foreach (var line in log.ToString().Split('\n'))
+            if (line.StartsWith("  [FAIL]", StringComparison.Ordinal)) Console.WriteLine(line.TrimEnd());
+        Console.WriteLine($"  [{(code == 0 ? "PASS" : "FAIL")}] selftest: {s_checks - s_failures} of {s_checks} checks of the change list's own rules");
+        return code;
     }
 
     const string A = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -44,7 +64,7 @@ internal static class SelfTest
 
     public static int Run()
     {
-        s_failures = 0;
+        s_checks = s_failures = 0;
         string dir = Path.Combine(Path.GetTempPath(), $"hmoracle-selftest-{Environment.ProcessId}");
         Directory.CreateDirectory(dir);
         try
