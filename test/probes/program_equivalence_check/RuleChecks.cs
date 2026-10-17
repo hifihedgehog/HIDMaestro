@@ -350,6 +350,15 @@ internal static partial class RuleChecks
             Record(r.Value.Error);
             if (r.Value.Path == c.Expect) Console.WriteLine($"refused: {c.Rule}: {r.Value.Path}: {r.Value.Reason}");
             else Fail($"{c.Rule}: refused at {r.Value.Path}, not {c.Expect}: {r.Value.Reason}");
+            // What a load filter written as lane DD-2's reads from the same
+            // exception: a defect, at this path.
+            if (!c.Shared)
+            {
+                var err = r.Value.Error;
+                if (!Dd2View.IsDefect(err)) Fail($"{c.Rule}: {err.GetType().Name} is not a profile defect to DD-2's load");
+                else if (Dd2View.Locate(err) is var at && at != Dd2View.Reachable(c.Expect))
+                    Fail($"{c.Rule}: DD-2's load reads the path {at}, not {Dd2View.Reachable(c.Expect)}: {err.Message}");
+            }
             if (c.Tool && LoadShared(text) is var t && t?.Path != c.Expect)
                 Fail($"{c.Rule}: the build tool's parse gives {(t == null ? "no refusal" : $"{t.Value.Path}: {t.Value.Reason}")}, not a refusal at {c.Expect}");
         }

@@ -29,11 +29,11 @@ internal sealed class StreamClock
     {
         int idleMs = profile.ExtendedReport?.IdleFrameIntervalMs ?? 0;
         var s = profile.Stream;
-        string Where(string key) => $"Profile '{profile.Id}': $.stream.{key}";
+        string Where(string key) => $"Profile '{profile.Id}': stream.{key}";
         if (s == null)
             return idleMs > 0 ? new StreamClock(Ticks(idleMs), -1, 0, null, advance: false) : null;
         if (idleMs > 0)
-            throw new InvalidOperationException($"Profile '{profile.Id}': $.stream and $.extendedReport.idleFrameIntervalMs both set the idle repeat. Give one.");
+            throw new InvalidOperationException($"Profile '{profile.Id}': stream and extendedReport.idleFrameIntervalMs both set the idle repeat. Give one.");
         // From a microframe, the shortest period a USB host polls, to a
         // minute.
         if (s.PeriodMs is not double ms || !(ms >= 0.125) || !(ms <= 60_000))
@@ -51,7 +51,7 @@ internal sealed class StreamClock
         if (s.While != null)
         {
             try { when = ConditionParser.Parse(s.While.Text, registers, "$.stream.while"); }
-            catch (FormException e) { throw new InvalidOperationException($"Profile '{profile.Id}': {e.Path}: {e.Reason}", e); }
+            catch (FormException e) { throw new InvalidOperationException(e.ForProfile(profile.Id), e); }
         }
         bool advance = s.Timestamps switch
         {

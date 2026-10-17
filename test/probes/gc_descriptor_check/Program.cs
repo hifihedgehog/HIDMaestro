@@ -306,7 +306,7 @@ internal static class Program
             "extendedOutputReport.fields[0] ('uint8') at bytes 2-2 overlaps the port blocks at bytes 1-4"),
         ("an output field past the OUT endpoint's packet",
             j => { Out(j)["size"] = 6; Out(j)["fields"] = Arr("""{"byte":5,"type":"uint8","semantic":"x"}"""); },
-            "$.extendedOutputReport.fields[0] ('uint8') ends at byte 6, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
+            "extendedOutputReport.fields[0] ('uint8') ends at byte 6, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
 
         ("a port count that wraps an int",
             j =>
@@ -331,7 +331,7 @@ internal static class Program
             "extendedOutputReport.ports end at byte 281. An output report reaches the SDK with at most 256 bytes after its report ID"),
         ("an output report whose ports pass the OUT endpoint's packet",
             j => { Out(j)["size"] = 9; OutPorts(j)["stride"] = 2; },
-            "$.extendedOutputReport.ports end at byte 9, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
+            "extendedOutputReport.ports end at byte 9, past the 5-byte packets $.protocol.commands.endpoint 0x02 delivers"),
         ("more ports than the protocol tracks",
             j =>
             {
@@ -344,7 +344,7 @@ internal static class Program
                 ports["fields"] = Arr("""{"byte":1,"type":"uint8-axis","semantic":"leftStickX"}""");
                 Rule(j, 2)["reply"]![1]!["bytes"] = "1-1";
             },
-            "$.extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
+            "extendedReport.ports.count 33: a device with a protocol has at most 32 ports"),
         ("a low-speed copy with a 37-byte interrupt endpoint",
             j => j["usbConfiguration"]!["busSpeed"] = "low",
             "usbConfiguration.busSpeed \"low\": interface 0 alternate setting 0 endpoint 0x81 has wMaxPacketSize 0x0025, over the 8 bytes a low-speed interrupt endpoint carries"),
@@ -407,53 +407,53 @@ internal static class Program
         // A command rule longer than the OUT endpoint's packets.
         ("a rule match longer than a packet",
             j => Rule(j, 0)["match"] = "110000000000",
-            "$.protocol.commands.rules[0].match ends at byte 6, past the 5-byte packets endpoint 0x02 delivers"),
+            "protocol.commands.rules[0].match ends at byte 6, past the 5-byte packets endpoint 0x02 delivers"),
         ("a rule minLength longer than a packet",
             j => Rule(j, 0)["minLength"] = 6,
-            "$.protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
+            "protocol.commands.rules[0].minLength 6 is longer than the 5-byte packets endpoint 0x02 delivers"),
         ("a report ID strip with no SET_REPORT commands",
             j => Protocol(j)["commands"]!["setReport"] = false,
-            "$.protocol.commands.setReportStripsId applies only to commands from SET_REPORT"),
+            "protocol.commands.setReportStripsId applies only to commands from SET_REPORT"),
 
         // Protocol values outside their range.
         ("no replies allowed to wait",
             j => Protocol(j)["replies"]!["pending"] = 0,
-            "$.protocol.replies.pending 0 is outside 1 to 1024"),
+            "protocol.replies.pending 0 is outside 1 to 1024"),
         ("a GET_REPORT answer that is not defined",
             j => Protocol(j)["getReport"] = "stal",
-            "$.protocol.getReport \"stal\" is not one of input, reportId, deviceReport"),
+            "protocol.getReport \"stal\" is not one of input, reportId, deviceReport"),
 
         // A null where a value belongs.
         ("a null match",
             j => Rule(j, 3)["match"] = null,
-            "$.protocol.commands.rules[3].match is empty"),
+            "protocol.commands.rules[3].match is empty"),
         ("a null in a while list",
             j => Protocol(j)["input"]!["while"] = Arr("\"polling\"", "null"),
-            Load + "$.protocol.input.while: A condition's list holds strings"),
+            Load + "protocol.input.while: A condition's list holds strings"),
         ("a null halt.while",
             j => Protocol(j)["halt"]!["while"] = null,
-            "$.protocol.halt.while names no register"),
+            "protocol.halt.while names no register"),
         ("a null reply part",
             j => Rule(j, 2)["reply"] = Arr("""{"hex":"22"}""", "null"),
-            "$.protocol.commands.rules[2].reply[1] is null"),
+            "protocol.commands.rules[2].reply[1] is null"),
         ("a null rule",
             j => Protocol(j)["commands"]!["rules"] = Arr("null"),
-            "$.protocol.commands.rules[0] is null"),
+            "protocol.commands.rules[0] is null"),
         ("null rules",
             j => Protocol(j)["commands"]!["rules"] = null,
-            "$.protocol.commands.rules is null"),
+            "protocol.commands.rules is null"),
         ("a null state",
             j => Protocol(j)["state"]![0] = null,
-            "$.protocol.state[0]: the entry is null"),
+            "protocol.state[0]: the entry is null"),
         ("null state",
             j => Protocol(j)["state"] = null,
-            "$.protocol.input.while: 'polling' is not a register protocol.state declares"),
+            "protocol.input.while: 'polling' is not a register protocol.state declares"),
         ("a null input endpoint",
             j => Protocol(j)["input"]!["endpoint"] = null,
-            "$.protocol.input.endpoint is missing"),
+            "protocol.input.endpoint is missing"),
         ("a null portsConnected",
             j => Protocol(j)["input"]!["clock"]!["sourcePollRules"]![0]!["portsConnected"] = null,
-            "$.protocol.input.clock.sourcePollRules[0].portsConnected is null"),
+            "protocol.input.clock.sourcePollRules[0].portsConnected is null"),
         ("a null connection value",
             j => Ports(j)["status"]!["connections"]![1]!["value"] = null,
             "extendedReport.ports.status.connections[1].value is missing"),
@@ -646,7 +646,7 @@ internal static class Program
         try
         {
             Probe.Check("CreateController refuses a malformed profile, naming it",
-                outcome.StartsWith($"InvalidOperationException: Profile '{id}': $.protocol.commands.rules[0].match", StringComparison.Ordinal),
+                outcome.StartsWith($"InvalidOperationException: Profile '{id}': protocol.commands.rules[0].match", StringComparison.Ordinal),
                 outcome);
             // Read before any dispose. A device a create made arrives
             // asynchronously, so give it the time the device part gives a
@@ -791,7 +791,7 @@ internal static class Program
                     try { parse.Invoke(null, new object[] { (ReadOnlyMemory<byte>)File.ReadAllBytes(Path.Combine(dir, $"{id}.json")) }); }
                     catch (TargetInvocationException ex) { message = ex.InnerException?.Message ?? "?"; }
                     Probe.Check($"refused at load: {title}",
-                        ctx.GetProfile(id) == null && message.StartsWith(expect[Load.Length..], StringComparison.Ordinal), message);
+                        ctx.GetProfile(id) == null && message.StartsWith($"Profile '{id}': " + expect[Load.Length..], StringComparison.Ordinal), message);
                     continue;
                 }
                 var p = ctx.GetProfile(id);

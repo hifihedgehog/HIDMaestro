@@ -194,7 +194,7 @@ internal sealed class CompiledProtocol
 
         Ports = PortLayout.Of(profile.ExtendedReport, $"Profile '{profile.Id}': extendedReport", output: false);
         if (Ports != null && Ports.Count > MaxPorts)
-            throw Fail($"$.extendedReport.ports.count {Ports.Count}: a device with a protocol has at most {MaxPorts} ports.");
+            throw Fail($"extendedReport.ports.count {Ports.Count}: a device with a protocol has at most {MaxPorts} ports.");
         SnapshotNames = Ports != null ? new List<string>(Ports.Snapshots).ToArray() : Array.Empty<string>();
         ReportId = profile.ExtendedReport?.ReportIdByte ?? 0;
         ReportSize = profile.ExtendedReport?.Size ?? profile.GetOrBuildReportBuilder().InputReportByteSize;
@@ -306,7 +306,7 @@ internal sealed class CompiledProtocol
             string at = $"{root}.commands";
             if (commands.Endpoint != null)
             {
-                byte address = PortLayout.ParseByte(commands.Endpoint, $"Profile '{ProfileId}': {at}.endpoint");
+                byte address = PortLayout.ParseByte(commands.Endpoint, FormException.ProfileText(ProfileId, $"{at}.endpoint"));
                 if (!descriptors.Endpoints.TryGetValue(address, out var ep) || ep.IsIn || ep.TransferType is not (2 or 3))
                     throw Fail($"{at}.endpoint 0x{address:X2} is not an interrupt or bulk OUT endpoint of the configuration descriptor.");
                 CommandEndpoint = address;
@@ -369,7 +369,7 @@ internal sealed class CompiledProtocol
                     && descriptors.Endpoints[CommandEndpoint].InterfaceNumber == descriptors.HidInterfaceNumber;
                 if (noWholeReport && outPorts != null && outPorts.BlockAt(outPorts.Count) > CommandPacketSize)
                     throw Fail(
-                        $"$.extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
+                        $"extendedOutputReport.ports end at byte {outPorts.BlockAt(outPorts.Count)}, past the " +
                         $"{CommandPacketSize}-byte packets {at}.endpoint 0x{CommandEndpoint:X2} delivers, " +
                         "and setReportStripsId drops a SET_REPORT's report ID.");
                 if (noWholeReport && profile.ExtendedOutputReport is { } outSpec)
@@ -382,7 +382,7 @@ internal sealed class CompiledProtocol
                         int end = VendorBlobProgram.Extent(in f, outSpec.Size).Hi + 1;
                         if (end > CommandPacketSize)
                             throw Fail(
-                                $"$.extendedOutputReport.fields[{i}] ('{f.Src.Type}') ends at byte {end}, past the " +
+                                $"extendedOutputReport.fields[{i}] ('{f.Src.Type}') ends at byte {end}, past the " +
                                 $"{CommandPacketSize}-byte packets {at}.endpoint 0x{CommandEndpoint:X2} delivers, " +
                                 "and setReportStripsId drops a SET_REPORT's report ID.");
                     }
@@ -447,7 +447,7 @@ internal sealed class CompiledProtocol
         if (profile.Protocol == null) return null;
         CompiledModel model;
         try { model = profile.GetOrCompileModel(); }
-        catch (FormException e) { throw new InvalidOperationException($"Profile '{profile.Id}': {e.Path}: {e.Reason}", e); }
+        catch (FormException e) { throw new InvalidOperationException(e.ForProfile(profile.Id), e); }
         return new CompiledProtocol(profile, descriptors, model);
     }
 
@@ -911,7 +911,7 @@ internal sealed class CompiledProtocol
 
     private byte Endpoint(UsbDescriptorSet d, string hex, string at, bool wantIn, int transferType)
     {
-        byte address = PortLayout.ParseByte(hex, $"Profile '{ProfileId}': {at}");
+        byte address = PortLayout.ParseByte(hex, FormException.ProfileText(ProfileId, at));
         if (!d.Endpoints.TryGetValue(address, out var ep))
             throw Fail($"{at} 0x{address:X2} is not an endpoint of the configuration descriptor.");
         if (ep.TransferType != transferType || ep.IsIn != wantIn)
@@ -932,5 +932,5 @@ internal sealed class CompiledProtocol
     private byte[] Bytes(string? text, string at) =>
         ModelText.TryParseBytes(text, out var b) ? b : throw Fail($"{at} \"{text}\" is not hex bytes.");
 
-    private InvalidOperationException Fail(string message, Exception? inner = null) => new($"Profile '{ProfileId}': {message}", inner);
+    private InvalidOperationException Fail(string message, Exception? inner = null) => new(FormException.ProfileText(ProfileId, message), inner);
 }

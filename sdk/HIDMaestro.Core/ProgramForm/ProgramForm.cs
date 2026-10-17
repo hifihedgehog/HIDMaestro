@@ -15,6 +15,17 @@ internal sealed class FormException : Exception
     public string Path { get; }
     public string Reason { get; }
     public FormException(string path, string reason, Exception? inner = null) : base($"{path}: {reason}", inner) { Path = path; Reason = reason; }
+
+    /// <summary>The refusal as the SDK words a profile defect.</summary>
+    public string ForProfile(string profileId) => ProfileText(profileId, $"{Path}: {Reason}");
+
+    /// <summary>"Profile 'id': " and <paramref name="message"/>, its leading
+    /// JSON path written from the root without "$.", the form a profile
+    /// check's message has always carried and a load issue reads its path
+    /// from. A message about the whole file ("$: ...") names no path.</summary>
+    public static string ProfileText(string profileId, string message) =>
+        $"Profile '{profileId}': " + (message.StartsWith("$.", StringComparison.Ordinal) ? message[2..]
+            : message.StartsWith("$: ", StringComparison.Ordinal) ? message[3..] : message);
 }
 
 /// <summary>The one validated form the generated and interpreted paths start

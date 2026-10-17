@@ -300,7 +300,9 @@ public sealed class ControllerProfile
         utf8 = ProfilePrograms.WithoutBom(utf8);
         var profile = JsonSerializer.Deserialize(utf8.Span, HMJsonContext.Default.ControllerProfile);
         if (profile == null) return null;
-        var groups = ProfilePrograms.Read(utf8);
+        DeviceModelGroups groups;
+        try { groups = ProfilePrograms.Read(utf8); }
+        catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(profile.Id), e); }
         profile.Protocol = groups.Protocol;
         profile.StateBlock = groups.StateBlock;
         profile.InputReports = groups.InputReports;
@@ -492,15 +494,15 @@ public sealed class ControllerProfile
     {
         CompiledModel model;
         try { model = GetOrCompileModel(); }
-        catch (Programs.FormException e) { throw new InvalidOperationException($"Profile '{Id}': {e.Path}: {e.Reason}", e); }
+        catch (Programs.FormException e) { throw new InvalidOperationException(e.ForProfile(Id), e); }
         if (StateBlock != null)
         {
             if (StateBlockFields == null)
-                throw new InvalidOperationException($"Profile '{Id}': $.stateBlock.fields is missing: the state block's fields say what SubmitState writes.");
-            VendorBlobProgram.Check(StateBlockSpecForCodec(), StateBlock.Size, $"Profile '{Id}': $.stateBlock", output: false, portBlock: false);
+                throw new InvalidOperationException($"Profile '{Id}': stateBlock.fields is missing: the state block's fields say what SubmitState writes.");
+            VendorBlobProgram.Check(StateBlockSpecForCodec(), StateBlock.Size, $"Profile '{Id}': stateBlock", output: false, portBlock: false);
         }
         if (BuildsItsOwnReports && Protocol == null)
-            throw new InvalidOperationException($"Profile '{Id}': $.inputReports: a device that builds its reports needs a protocol that says when it sends them.");
+            throw new InvalidOperationException($"Profile '{Id}': inputReports: a device that builds its reports needs a protocol that says when it sends them.");
         if (Stream != null) StreamClock.Compile(this, model.Registers);
     }
 
