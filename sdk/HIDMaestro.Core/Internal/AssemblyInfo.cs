@@ -62,3 +62,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("ArithRoundtripCheck")]
 [assembly: InternalsVisibleTo("CaptureFidelityCheck")]
 [assembly: InternalsVisibleTo("ProfileModelCheck")]
+[assembly: InternalsVisibleTo("ContractLiveCheck")]

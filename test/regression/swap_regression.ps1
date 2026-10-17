@@ -2192,11 +2192,24 @@ function Scenario-Arith-Roundtrip {
 # at its JSON path and listed in HMContext.ProfileLoadIssues, a create and a
 # build meet one exception type for a bad profile, and the catalog files of
 # every earlier v1.x tag load but for the removed spellings. A feature
-# answer's per-controller bytes come from its value sources and patches.
-# Offline.
+# answer's per-controller bytes come from its value sources and patches,
+# each entry of an answer table matches by its own rule, the SDK writes
+# its half of the version contract, the deploy floor is 2.0.0, and
+# FromProfile copies the whole profile. Offline.
 function Scenario-Profile-Model {
     Invoke-Probe -Dir 'profile_model_check' -Exe 'ProfileModelCheck.exe' -Arguments 'check' `
                  -Message 'a profile loads, resolves or answers otherwise than the data-driven design states (see probe stdout for the check)'
+}
+
+# S93: the version contract on the live UMDF2 driver. A fresh-token
+# controller's driver reads its index from the identity entry before its
+# first start, on the ROOT path and on the SWD xinputhid path, a device
+# without report IDs answers its message after HID class's leading 0, and
+# each catalog profile with a model, read back by HMDeviceExtractor, names
+# the model its identity gives it with the answers the device gave.
+function Scenario-Contract-Live {
+    Invoke-Probe -Dir 'contract_live_check' -Exe 'ContractLiveCheck.exe' -Arguments 'check' `
+                 -Message 'the live driver does not hold the version contract or FeatureAnswers as the design states (see probe stdout for the check)'
 }
 
 # ====================================================================
@@ -2297,7 +2310,8 @@ $scenarios = @(
     @{ Name = 'S94_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
     @{ Name = 'S95_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} },
-    @{ Name = 'S92_Profile_Model';               Body = ${function:Scenario-Profile-Model} }
+    @{ Name = 'S92_Profile_Model';               Body = ${function:Scenario-Profile-Model} },
+    @{ Name = 'S93_Contract_Live';               Body = ${function:Scenario-Contract-Live} }
 )
 
 $totalSw = [System.Diagnostics.Stopwatch]::StartNew()
