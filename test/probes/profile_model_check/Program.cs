@@ -32,6 +32,8 @@
 //              places a null reached a check, and every node of every
 //              catalog profile set to each of seven values leaves no
 //              exception out of a load (Mutate.cs)
+//   edits      a profile edited after it loads creates with its edited
+//              values: the load keeps no compile (Edits.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
@@ -63,6 +65,7 @@ internal static class Program
             ("deploy", Deploy.Run),
             ("builder", Builder.Run),
             ("mutate", Mutate.Run),
+            ("edits", Edits.Run),
         };
         int fail = 0;
         if (mode == "check")

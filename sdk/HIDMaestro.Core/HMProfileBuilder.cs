@@ -381,7 +381,11 @@ public sealed class HMProfileBuilder
         {
             inner.ValidateAtLoad();
             inner.Registry = _registry ?? ModelRegistry.Catalog;
+            inner.OutsideCatalog = true;
             inner.ResolvedCache = ModelRegistry.Resolve(inner, inner.Registry, outsideCatalog: true);
+            // As a load does: the profile's public objects stay editable
+            // until its first create, which compiles them.
+            inner.ForgetCompiled();
         }
         catch (Exception e) when (ProfileDefects.IsDefect(e))
         {

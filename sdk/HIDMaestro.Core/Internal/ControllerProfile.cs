@@ -504,6 +504,41 @@ public sealed class ControllerProfile
     [JsonIgnore]
     internal ModelRegistry? Registry { get; set; }
 
+    /// <summary>Whether <see cref="Registry"/>'s identity defaults for
+    /// profiles outside the catalog apply: false for a catalog profile.</summary>
+    [JsonIgnore]
+    internal bool OutsideCatalog { get; set; } = true;
+
+    /// <summary>Resolves the device model again from what the profile holds
+    /// now, under the registry it loaded with, for a create: a program can
+    /// edit a loaded profile before it creates, and the create serves what
+    /// the profile then holds. Throws for a defect of the profile's own
+    /// keys, as the load does.</summary>
+    internal void ResolveForCreate() =>
+        ResolvedCache = ModelRegistry.Resolve(this, Registry ?? ModelRegistry.Catalog, OutsideCatalog);
+
+    /// <summary>Drops everything compiled from the profile's keys: the
+    /// parsed descriptor, its report map, the report builder, the keyboard
+    /// and mouse packer, and the programs and port layouts of the extended
+    /// reports. The load's checks compile them to refuse a bad file, and
+    /// keep none of it, so the first create compiles from what the profile
+    /// holds then, edits since the load included, as it did through
+    /// v1.13.0.</summary>
+    internal void ForgetCompiled()
+    {
+        _cachedKbmPacker = null;
+        _cachedReportMap = null;
+        _cachedDescriptor = null;
+        _descriptorCached = false;
+        _cachedReportBuilder = null;
+        foreach (var spec in new[] { ExtendedReport, ExtendedOutputReport })
+        {
+            if (spec == null) continue;
+            spec.CompiledProgramCache = null;
+            spec.PortLayoutCache = null;
+        }
+    }
+
     /// <summary>The device model the profile runs with: its own keys, the
     /// model it names, or its identity default's, group by group.</summary>
     [JsonIgnore]
@@ -1653,6 +1688,7 @@ public sealed class ProfileDatabase
             try
             {
                 p.Registry = registry;
+                p.OutsideCatalog = outsideCatalog;
                 p.ResolvedCache = ModelRegistry.Resolve(p, registry, outsideCatalog);
             }
             catch (Exception e)
@@ -1687,6 +1723,9 @@ public sealed class ProfileDatabase
         }
         foreach (var p in refused) _profiles.Remove(p);
         _texts.Clear();
+        // The checks compiled each profile. A program can still edit it
+        // before its first create, which compiles it again.
+        foreach (var p in _profiles) p.ForgetCompiled();
     }
 
     /// <summary>One file's result: the profile, or the issue that refused

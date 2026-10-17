@@ -586,7 +586,11 @@ public sealed class HMContext : IDisposable
         // build lacks, refuse the create before the lease, so the refusal
         // touches nothing machine-wide. The profile's checks are the ones it
         // met at load, run again for a profile built or changed since.
-        try { profile.Inner.ValidateAtLoad(); }
+        try
+        {
+            profile.Inner.ValidateAtLoad();
+            profile.Inner.ResolveForCreate();
+        }
         catch (Exception e) when (Internal.ProfileDefects.IsDefect(e))
         {
             throw Internal.ProfileDefects.ToProfileException(profile.Inner, e);
