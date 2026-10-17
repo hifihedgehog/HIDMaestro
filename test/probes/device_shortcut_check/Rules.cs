@@ -265,6 +265,8 @@ internal static class Rules
 
     const string Companion = "the companion's own hardware IDs, which only HIDMaestro devnodes carry. They came from the WGI experiments, no code reads the MatchingDeviceId they set, and the wireless profile's companion keeps PID_0719 when its HID child moves to 0x02A1";
 
+    const string XInputIds = "the IDs and flags an XUSB companion reports apart from its HID child's (PresentationPlan, XusbAnswers.Compile), for any pad behind a receiver: xbox-360-wireless today, and every wireless XUSB device PlasticBand captured (ProductId 0 with WIRELESS, the receiver's 045E:0719 in GET_INFORMATION), the Microsoft Wireless Racing Wheel among them (Microsoft Wireless Racing Wheel.txt:1-17)";
+
     // Profile properties one catalog profile sets that the check allows:
     // general mechanisms, and data a second device of the same form uses
     // with no new code. Property is Type.Property, * matching any run.
@@ -321,6 +323,10 @@ internal static class Rules
         new("ControllerProfile.ConfigurationString", "the configuration's string descriptor, served verbatim (UsbDescriptorSet.cs:201)"),
         new("ControllerProfile.DataReportId", "the input report a profile's data frames fill, any input report its descriptor declares, checked against the descriptor at load (ControllerProfile.ValidateDataReport). One catalog profile sets it today"),
         new("ControllerProfile.SdlMapping", "a mapping string handed to programs (HMProfile.cs:202), read by no device code"),
+        new("XInputSpec.Information", XInputIds),
+        new("XInputSpec.Capabilities", XInputIds),
+        new("XInputIdSpec.*", XInputIds),
+        new("XInputCapabilitiesSpec.*", XInputIds),
         new("ControllerProfile.BluetoothVendorIdSource", "the Device ID's vendor ID source in a Bluetooth device's hardware IDs (PresentationPlan.BluetoothIds), for any Bluetooth device whose VID the Bluetooth SIG assigned: the Luna's 0x0171 today, and Apple's Bluetooth keyboards and mice under 0x004C (Linux hid-ids.h:98, hid-apple.c:1084)"),
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),

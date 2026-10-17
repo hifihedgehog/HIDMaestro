@@ -1,3 +1,10 @@
 # Bytes of the XUSB companion's answers the tree gives on purpose where 9bd6279
 # gave others (XusbContract.cs). One line each:
 #   <profile> 0x<ioctl> <offset>=<byte> | <lane> | <reason>
+
+# DD-3: the wheels' subtype and the wireless pad's capability reply.
+xbox-360-wheel-v1 0x8000E004 3=02 | DD-3 | XINPUT_DEVSUBTYPE_WHEEL in both capability forms: the one capture of a real first-party wheel reports subtype 2 (PlasticBand Microsoft Wireless Racing Wheel.txt:4), and the profile's descriptor is ControllersInfo's xusb_wheel1
+xbox-360-wheel-v2 0x8000E004 3=02 | DD-3 | XINPUT_DEVSUBTYPE_WHEEL in both capability forms: the one capture of a real first-party wheel reports subtype 2 (PlasticBand Microsoft Wireless Racing Wheel.txt:4), and the profile's descriptor is ControllersInfo's xusb_wheel2
+xbox-360-wireless 0x8000E004 4=0E | DD-3 | the 36-byte reply's flags carry WIRELESS beside today's voice and PMD bits: every PlasticBand wireless XUSB capture sets it, and SDL maps PID 0 with WIRELESS back to 0x02A1 (SDL_xinputjoystick.c:112-116 at 3.4.18)
+xbox-360-wireless 0x8000E004 8=00 | DD-3 | the 36-byte reply's ProductId is 0, as every PlasticBand wireless XUSB capture reports (Microsoft Wireless Racing Wheel.txt:7)
+xbox-360-wireless 0x8000E004 9=00 | DD-3 | the 36-byte reply's ProductId is 0, as every PlasticBand wireless XUSB capture reports (Microsoft Wireless Racing Wheel.txt:7)

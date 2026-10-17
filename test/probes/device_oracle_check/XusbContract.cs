@@ -66,6 +66,7 @@ internal static class XusbContract
             var profiles = ctx.AllProfiles.Select(p => p.Inner).Where(p => PresentationPlan.Of(p).XusbCompanion)
                 .OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
             var changes = LoadChanges(Path.Combine(probeDir, "xusb-answer-changes.txt"));
+            s_keptIds = KeptIds(Path.Combine(probeDir, "golden", "case5-plan.txt"));
             int fails = 0;
             void Check(string name, bool ok, string detail = "")
             {
@@ -243,11 +244,34 @@ internal static class XusbContract
         return fails;
     }
 
+    /// <summary>The VendorId and ProductId values 9bd6279's SDK wrote for each
+    /// profile, from the kept plan (golden\case5-plan.txt), which the oracle
+    /// companion answers from: a profile whose identity this release
+    /// changes is compared with what 9bd6279 gave the profile as it was.</summary>
+    static Dictionary<string, (string Vid, string Pid)> s_keptIds = new();
+
+    static Dictionary<string, (string Vid, string Pid)> KeptIds(string path)
+    {
+        var d = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
+        string? id = null, vid = null, pid = null;
+        foreach (var line in File.ReadAllLines(path))
+        {
+            string[] w = line.Split(' ');
+            if (w[0] == "profile") { id = w[2]; vid = pid = null; }
+            else if (w[0] == "value" && w[1] == "VendorId") vid = w[3];
+            else if (w[0] == "value" && w[1] == "ProductId") pid = w[3];
+            else if (w[0] == "end" && id != null && vid != null && pid != null) d[id] = (vid, pid);
+        }
+        return d;
+    }
+
     static void PlanProfile(StringBuilder plan, string id, ControllerProfile p, int index, byte[] answers, int companion)
     {
         plan.Append($"profile xusb {id}\n");
-        plan.Append($"value VendorId 4 {Convert.ToHexString(BitConverter.GetBytes((uint)p.VendorId))}\n");
-        plan.Append($"value ProductId 4 {Convert.ToHexString(BitConverter.GetBytes((uint)p.ProductId))}\n");
+        var kept = s_keptIds.TryGetValue(p.Id, out var k) ? k
+            : (Convert.ToHexString(BitConverter.GetBytes((uint)p.VendorId)), Convert.ToHexString(BitConverter.GetBytes((uint)p.ProductId)));
+        plan.Append($"value VendorId 4 {kept.Item1}\n");
+        plan.Append($"value ProductId 4 {kept.Item2}\n");
         plan.Append($"value XusbAnswers 3 {Convert.ToHexString(answers)}\n");
         plan.Append($"value XusbCompanion 4 {Convert.ToHexString(BitConverter.GetBytes((uint)companion))}\n");
         plan.Append("end\n");
