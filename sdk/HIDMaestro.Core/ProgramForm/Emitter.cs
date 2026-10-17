@@ -458,7 +458,7 @@ internal static class Emitter
                         : IsPowerOfTwo(Math.Abs(g.Den)) ? F($"(double)f * {D(g.Num)} * {D(1 / g.Den)}")
                         : F($"(double)f * {D(g.Num)} / {D(g.Den)}");
                     body.Add(F($"        {{ float f = {src};"));
-                    body.Add(F($"          int v = f != f ? 0 : (int)BitConverter.DoubleToInt64Bits(Math.Min(Math.Max({product}, -32768.0), 32767.0) + 6755399441055744.0);"));
+                    body.Add(F($"          int v = float.IsNaN(f) ? 0 : (int)BitConverter.DoubleToInt64Bits(Math.Min(Math.Max({product}, -32768.0), 32767.0) + 6755399441055744.0);"));
                     for (int k = 0; k < g.Count; k++)
                     {
                         int at = g.Dst + k * g.Stride;
