@@ -10,7 +10,12 @@
 // driver_harness_tree.exe, built from the repository's driver sources,
 // instead, which holds the tree's driver to the live 9bd6279 answers. The profile configuration is
 // the plan case 5 recorded with (case5-plan.txt in the golden directory),
-// so the harness runs the values the SDK writes.
+// so the harness runs the values the SDK writes. v2.0.0: the live S46 run's
+// SDK writes each controller's FeatureAnswers for its index and its
+// version section under the contract (decision (c)), so each S46 stream
+// runs under the harness's tag-own parameter, on a plan profile that
+// carries the tree's SDK's values with the FeatureAnswers of that index
+// (ContractPlan).
 //
 // Usage:
 //   compare-live <out dir> [--golden <dir>] [--native <dir>] [--driver oracle|tree]
@@ -845,12 +850,36 @@ internal static class CompareLive
     static IEnumerable<FeatureGroup> DrivenGroups(List<FeatureGroup> groups, Dictionary<string, PlanProfile> plan) =>
         groups.Where(g => plan.ContainsKey(g.Profile) && g.StartProblem == null).GroupBy(g => g.Head, StringComparer.Ordinal).Select(x => x.First());
 
+    /// <summary>The plan profile an S46 group runs on under the contract.</summary>
+    static string ContractName(FeatureGroup g) => $"{g.Profile}#idx{g.Index}";
+
+    /// <summary>The kept plan, and for each S46 group a profile of its
+    /// own: the instance configuration the tree's SDK writes for the
+    /// catalog profile, with the FeatureAnswers it writes for the group's
+    /// index (DeviceOrchestrator.FeatureAnswersBlob).</summary>
+    static string ContractPlan(string keptPlan, Live live, Dictionary<string, PlanProfile> plan, string work)
+    {
+        var catalog = HIDMaestro.Internal.ProfileDatabase.LoadEmbedded().All;
+        var groups = DrivenGroups(live.Features, plan).ToList();
+        var profiles = groups.Select(g => catalog.First(p => p.Id == g.Profile)).DistinctBy(p => p.Id).ToList();
+        var config = Case5Driver.InstanceConfig(profiles, work);
+        var sb = new StringBuilder(keptPlan.EndsWith('\n') ? keptPlan : keptPlan + "\n");
+        foreach (var g in groups)
+        {
+            var p = catalog.First(x => x.Id == g.Profile);
+            var values = config[p.Id].Where(v => v.Name != "FeatureAnswers")
+                .Append(new Case5Driver.RegValue("FeatureAnswers", 3, HIDMaestro.Internal.DeviceOrchestrator.FeatureAnswersBlob(p, g.Index))).ToList();
+            Case5Driver.AddProfile(sb, plan[g.Profile].Group, p, values, ContractName(g));
+        }
+        return sb.ToString();
+    }
+
     static void ScriptFeatures(StringBuilder sc, List<FeatureGroup> groups, Dictionary<string, PlanProfile> plan)
     {
         foreach (var g in DrivenGroups(groups, plan))
         {
             var p = Profile(plan, g.Profile);
-            sc.Append($"stream live/s46/{g.Profile}/index{g.Index}\ndevice {g.Profile} {g.Index} driver\n");
+            sc.Append($"stream live/s46/{g.Profile}/index{g.Index}\nversion tag-own\ndevice {ContractName(g)} {g.Index} driver\n");
             int k = 0;
             foreach (var (_, calls) in g.Ids)
                 foreach (var call in calls)
@@ -1648,13 +1677,16 @@ internal static class CompareLive
         {
             string script = Path.Combine(work, "live-script.txt");
             File.WriteAllText(script, Script(live, plan), new UTF8Encoding(false));
-            return RunHarness(exe, planPath, script, work).ToDictionary(s => s.Name, StringComparer.Ordinal);
+            string contractPlan = Path.Combine(work, "live-plan.txt");
+            File.WriteAllText(contractPlan, ContractPlan(File.ReadAllText(planPath, Encoding.UTF8), live, plan, work), new UTF8Encoding(false));
+            return RunHarness(exe, contractPlan, script, work).ToDictionary(s => s.Name, StringComparer.Ordinal);
         }
         finally
         {
-            foreach (var f in new[] { "live-script.txt", "harness.bin" })
-                if (File.Exists(Path.Combine(work, f))) File.Delete(Path.Combine(work, f));
-            Directory.Delete(work);
+            // The directory is this run's own. The hive case 5's
+            // InstanceConfig loaded in it can stay locked a moment after
+            // its key closes, which DeleteDirectory waits out.
+            Case5Driver.DeleteDirectory(work);
         }
     }
 
