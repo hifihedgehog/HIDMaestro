@@ -11,7 +11,7 @@ using HIDMaestro;
 using HIDMaestro.Internal;
 using Microsoft.Win32.SafeHandles;
 
-internal static class Live
+internal static partial class Live
 {
     static int s_total, s_failures;
 
@@ -49,6 +49,7 @@ internal static class Live
                 // Y is 8 bits at bit 16 of the 5-byte report: 0.8 of 255.
                 return (st, r => r.Length >= 5 && r[2] == 204, "the 5-byte report with Y 204 at byte 2");
             });
+            CapturedDescriptors(ctx);
         }
         catch (Exception ex) { Check("the live part ran without throwing", false, ex.Message); }
         finally

@@ -36,7 +36,11 @@
 // data-only frame must arrive as its keyboard report 0x01, seen through
 // Raw Input as F24. Then logitech-wingman-formula-gp must arrive as its
 // 5-byte report with Y whole at byte 2, where it was 3 bytes with Y one
-// bit. Exit 0 PASS, 1 FAIL, 2 not elevated.
+// bit. Then ps-move and xbox-360-flight-stick, which carry captured
+// descriptors (LiveCaptured.cs): HidP_GetCaps of every collection Windows
+// makes of each, what the driver answers for each declared feature, printed
+// and not asserted, and the input report with the trigger and a button
+// where the capture puts them. Exit 0 PASS, 1 FAIL, 2 not elevated.
 
 using System;
 using System.Collections.Generic;

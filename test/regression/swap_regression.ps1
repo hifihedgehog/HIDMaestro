@@ -1439,7 +1439,10 @@ function Scenario-Axis-Addressing-Check {
 # need no device. Last, live, with three controllers read in one window:
 # genesis-nso as 0x3F, never 0x21, and microsoft-designer-keyboard's raw
 # frame as its keyboard report 0x01 (Raw Input), beside dualshock-4-v2's
-# unchanged 0x01. Then the 5-byte wingman report.
+# unchanged 0x01. Then the 5-byte wingman report. Then ps-move and
+# xbox-360-flight-stick: each collection's HidP_GetCaps against the
+# captured descriptor, and the input report with the trigger where the
+# capture puts it.
 function Scenario-Layout-Audit-Check {
     Invoke-Probe -Dir 'layout_audit_check' -Exe 'LayoutAuditCheck.exe' `
                  -Message 'layout schema/descriptor mismatch (see probe stdout)'
