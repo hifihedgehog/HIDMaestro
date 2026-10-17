@@ -241,6 +241,20 @@ internal static class StateLowering
     /// in each.</summary>
     public static ProgramSpec? Lower(JsonElement fields, int size, int reportId, bool allowFeeds, out StateFeed[] feeds, out string reason)
     {
+        // The lowering reads fields the codec's check has not seen yet: a
+        // value no JSON read gives as the lowering asks leaves the block to
+        // the codec, whose check refuses it with its path.
+        try { return LowerFields(fields, size, reportId, allowFeeds, out feeds, out reason); }
+        catch (Exception e) when (e is InvalidOperationException or FormatException or OverflowException)
+        {
+            feeds = Array.Empty<StateFeed>();
+            reason = $"a field holds a value the lowering cannot read ({e.Message})";
+            return null;
+        }
+    }
+
+    private static ProgramSpec? LowerFields(JsonElement fields, int size, int reportId, bool allowFeeds, out StateFeed[] feeds, out string reason)
+    {
         reason = "";
         feeds = Array.Empty<StateFeed>();
         if (fields.ValueKind != JsonValueKind.Array) { reason = "the fields are not a list"; return null; }
@@ -294,11 +308,16 @@ internal static class StateLowering
             {
                 if (!keys.TryGetValue("scope", out var scope) || scope.ValueKind != JsonValueKind.Object) continue;
                 int dst = Str(keys, "bytes") is string bytes ? (TryBitRange(bytes, out int lo, out _) ? lo : -1) : Int(keys, "byte") ?? size - 4;
-                var sk = scope.EnumerateObject().ToDictionary(x => x.Name, x => x.Value, StringComparer.OrdinalIgnoreCase);
+                var sk = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+                foreach (var x in scope.EnumerateObject())
+                {
+                    if (sk.ContainsKey(x.Name)) { reason = $"{where}.scope writes a key twice"; return null; }
+                    sk[x.Name] = x.Value;
+                }
                 var prefix = sk.TryGetValue("prefix", out var pr) && pr.ValueKind == JsonValueKind.Array ? pr.EnumerateArray().Select(x => (byte)x.GetInt32()).ToArray() : Array.Empty<byte>();
                 int from = sk.TryGetValue("from", out var fr) && fr.ValueKind == JsonValueKind.Number ? fr.GetInt32() : 0;
                 int to = Math.Min(sk.TryGetValue("to", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt32() : 0, size - 1);
-                if (dst < 0 || dst + 4 > size || from < 0 || (from <= to && dst <= to && from <= dst + 3)) { reason = $"{where} covers its own bytes or passes the block"; return null; }
+                if (dst < 0 || (long)dst + 4 > size || from < 0 || (from <= to && dst <= to && from <= dst + 3)) { reason = $"{where} covers its own bytes or passes the block"; return null; }
                 if (!ClaimBytes(dst, 4)) { reason = $"{where} writes bytes another field writes"; return null; }
                 ops.Add(new GpCrc32Op(prefix, from, to, dst));
                 crcSeen = true;
@@ -307,6 +326,9 @@ internal static class StateLowering
             // A field with no byte writes nothing, as in the codec.
             if (Int(keys, "byte") is not int b) continue;
             if (b < 0) { reason = $"{where}.byte"; return null; }
+            // Past the block: the codec's check refuses it. Every offset
+            // below is under the block's size, so no sum of one wraps.
+            if (b >= size) { reason = $"{where}.byte {b} is past the {size}-byte block"; return null; }
             switch (type)
             {
                 case "button-mask":
@@ -400,10 +422,13 @@ internal static class StateLowering
                     }
                     // The codec writes each repeat that fits the block.
                     int fits = 0;
-                    for (int k = 0, at = b; k < count && at + 1 < size; k++, at += stride) fits++;
+                    // In long: a stride near int.MaxValue would wrap the
+                    // offset of the frame after it back inside the block.
+                    long next = b;
+                    for (int k = 0; k < count && next + 1 < size; k++, next += stride) fits++;
                     if (fits == 0) continue;
-                    for (int k = 0, at = b; k < fits; k++, at += stride)
-                        if (!ClaimBytes(at, 2)) { reason = $"{where} writes bytes another field writes"; return null; }
+                    for (int k = 0; k < fits; k++)
+                        if (!ClaimBytes(b + k * stride, 2)) { reason = $"{where} writes bytes another field writes"; return null; }
                     ops.Add(new GpScaledOp(src.Value, num, den, Bool(keys, "negate") ?? false, b, fits, stride));
                     break;
                 }

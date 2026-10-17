@@ -55,6 +55,16 @@ internal static unsafe class StateChecks
             }
             else Console.WriteLine($"{name}: stays with the codec: {reason}");
         }
+
+        // A repeat whose stride would wrap an int frame offset lowers to the
+        // frames inside the block, the ones the codec's loop writes, and the
+        // codec's check refuses it at create.
+        using (var doc = JsonDocument.Parse("""[ {"byte":0,"type":"int16-le","semantic":"accelGX","scale":1,"repeat":[3,2147483647]} ]"""))
+        {
+            var spec = StateLowering.Lower(doc.RootElement, 4, out string why);
+            if (spec is { Ops: [GpScaledOp { Count: 1, Dst: 0 }] }) Console.WriteLine("a repeat whose stride wraps an int offset: one frame, inside the block");
+            else Fail($"a repeat whose stride wraps an int offset lowers to {(spec == null ? why : string.Join(", ", spec.Ops.Select(o => o.ToString())))}, where it must write one frame at byte 0");
+        }
         return Checks.Failures - before;
     }
 
@@ -394,6 +404,16 @@ internal static unsafe class StateChecks
         yield return ("a raw motion value in repeats", """[ {"byte":0,"type":"int16-le","semantic":"gyroPitch","repeat":[2,2]} ]""", 4);
         yield return ("a button name the codec reads as a number", """[ {"byte":0,"type":"button-mask","buttons":["3"]} ]""", 4);
         yield return ("an axis on a trigger's slot", """[ {"byte":0,"type":"uint8-axis","semantic":"leftTrigger"} ]""", 4);
+        // Reads that wrap in int or that a JSON number cannot give: the
+        // lowering leaves them to the codec, whose check refuses them at
+        // create, and never throws.
+        yield return ("a CRC scope that names a key twice in two cases", """[ {"byte":2,"type":"crc32-le","scope":{"from":0,"From":1,"to":1}} ]""", 6);
+        yield return ("a CRC at byte 2^31-1", """[ {"byte":2147483647,"type":"crc32-le","scope":{"from":0,"to":1}} ]""", 6);
+        yield return ("a CRC scope bound past int", """[ {"byte":2,"type":"crc32-le","scope":{"from":0,"to":3000000000}} ]""", 6);
+        yield return ("a field at byte 2^31-1", """[ {"byte":2147483647,"type":"int16-le"} ]""", 4);
+        yield return ("a field at byte 2^31-1 with a semantic", """[ {"byte":2147483647,"type":"uint8-axis","semantic":"leftStickX"} ]""", 4);
+        yield return ("a repeat count past int", """[ {"byte":0,"type":"int16-le","semantic":"accelGX","scale":1,"repeat":[3000000000,2]} ]""", 4);
+        yield return ("a level past int", """[ {"byte":0,"type":"uint8-level-map","semantic":"batteryLevel","levels":[3000000000,1,2,3,4,5,6,7,8,9,10]} ]""", 4);
     }
 }
 
