@@ -54,6 +54,7 @@ internal static class Vocabulary
         Run("the Switch 2 Pro body", Switch2ProBody);
         Run("the Switch Pro rumble", SwitchProRumble);
         Run("the Switch 2 Pro rumble", Switch2ProRumble);
+        Run("the Triton timestamp", () => TritonTimestamp(db["steam-controller-2"]));
         Console.WriteLine($"=== vocabulary: {(s_fail == 0 ? "PASS" : $"{s_fail} FAIL")} ===");
         return s_fail;
     }
@@ -165,6 +166,51 @@ internal static class Vocabulary
         Check("charging gives 0xEE, full gives 0xEF, and both give 0xEF, full first as ds3-battery put it",
             Encode(5, true, false) == 0xEE && Encode(5, false, true) == 0xEF && Encode(5, true, true) == 0xEF,
             $"{Encode(5, true, false):X2} {Encode(5, false, true):X2} {Encode(5, true, true):X2}");
+    }
+
+    /// <summary>steam-controller-2's report 0x42 bytes 30 to 33, the IMU
+    /// timestamp in microseconds, through the accumulator with a clock the
+    /// check drives (design note, mechanism 1). The clock is set by name,
+    /// so the check also builds on a tree without it, where it fails.</summary>
+    static void TritonTimestamp(ControllerProfile triton)
+    {
+        var spec = triton.ExtendedReport!;
+        var enc = new VendorBlobCodec.EncoderState();
+        long now = 1_000_000;
+        var clock = typeof(VendorBlobCodec.EncoderState).GetField("TimestampClock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        // 3,000,000 clock ticks a second: one tick is one 1/3 microsecond.
+        clock?.SetValue(enc, (Func<long>)(() => now));
+        typeof(VendorBlobCodec.EncoderState).GetField("TimestampFrequency", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(enc, 3_000_000L);
+        var buf = new byte[spec.Size];
+        uint Frame(uint stamp, long advanceTicks)
+        {
+            now += advanceTicks;
+            var s = new HMGamepadState { SensorTimestamp = stamp };
+            VendorBlobCodec.EncodeInput(spec, in s, 0.5f, 0.5f, 0.5f, 0.5f, 0, 0, buf, enc);
+            return BitConverter.ToUInt32(buf, 30);
+        }
+        // The controller's clock, 1 ms a frame, from 0.
+        var clockRun = new[] { Frame(0, 0), Frame(0, 3000), Frame(0, 3000) };
+        Check("before any consumer stamp the timestamp counts the controller's clock in microseconds", clockRun.SequenceEqual(new uint[] { 0, 1000, 2000 }), string.Join(" ", clockRun));
+        // The first nonzero stamp: the clock's 2 ms since the last frame,
+        // not a jump to the stamp's own value.
+        uint sw = Frame(3_000_000, 6000);
+        Check("the frame that switches to the consumer's stamps adds the clock's time since the last frame and no jump", sw == 4000, sw.ToString());
+        uint same = Frame(3_000_000, 3000);
+        Check("an idle repeat of the last state, the same stamp again, adds nothing", same == 4000, same.ToString());
+        uint step = Frame(3_000_000 + 12_000, 0);
+        Check("a later stamp adds its advance", step == 8000, step.ToString());
+        uint back = Frame(3_000_000, 3000);
+        Check("a stamp that runs backward adds one nominal interval, the 4 ms idleFrameIntervalMs", back == 12_000, back.ToString());
+        uint zero = Frame(0, 3000);
+        Check("a stamp of 0 after the switch adds the clock's time", zero == 13_000, zero.ToString());
+        uint after = Frame(3_000_000 + 6000, 0);
+        Check("and the last stamp moves on with it, so the next stamp adds only its own advance", after == 14_000, after.ToString());
+        Frame(0xFFFF_FF00u, 0);
+        uint before = BitConverter.ToUInt32(buf, 30);
+        uint wrap = Frame(0x0000_0100u, 0);
+        Check("a stamp through the 32-bit wrap adds its true advance, 512 ticks", wrap - before == 512 / 3, $"{before} then {wrap}");
     }
 
     static FieldSpec Field(string json) => JsonSerializer.Deserialize(json, HMJsonContext.Default.FieldSpec)

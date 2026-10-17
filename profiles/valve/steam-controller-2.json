@@ -231,10 +231,10 @@
       },
       {
         "byte": 30,
-        "type": "uint32-rolling",
+        "type": "uint32-le",
         "semantic": "sensorTimestamp",
-        "initial": 1,
-        "stride": 4000
+        "divisor": 3,
+        "clock": "accumulate"
       },
       {
         "byte": 34,

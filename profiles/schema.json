@@ -473,6 +473,13 @@
         "divisor": {
           "type": "integer"
         },
+        "clock": {
+          "type": "string",
+          "enum": [
+            "accumulate"
+          ],
+          "description": "uint16-le, uint32-le sensorTimestamp: the field carries the codec's accumulator over divisor, modulo its width. The accumulator counts the controller's clock in 1/3 microsecond ticks until the first nonzero consumer stamp and the consumer's stamps from then on, adds the report's idleFrameIntervalMs for a stamp that restarted or ran backward, and the clock's time for a stamp of 0. It needs idleFrameIntervalMs."
+        },
         "resolution": {
           "type": "integer"
         },

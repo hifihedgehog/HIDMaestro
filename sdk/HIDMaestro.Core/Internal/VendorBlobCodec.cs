@@ -72,6 +72,69 @@ internal static class VendorBlobCodec
             double us = (now - _clockOrigin) * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
             return unchecked((uint)(ulong)(us * 3.0));
         }
+
+        // v2.0.0: the accumulator of a "clock": "accumulate" timestamp
+        // field, one per controller, in the 1/3 microsecond ticks of
+        // HMGamepadState.SensorTimestamp (design note, mechanism 1).
+        private bool _accStarted, _accConsumer;
+        private long _accOrigin, _accPrevTicks;
+        private uint _accPrevStamp;
+        private ulong _acc;
+
+        /// <summary>The clock the accumulator reads before a consumer stamp
+        /// arrives, a Stopwatch-style timestamp, and its ticks per second.
+        /// Null reads the Stopwatch. A test sets its own.</summary>
+        internal Func<long>? TimestampClock;
+        internal long TimestampFrequency = System.Diagnostics.Stopwatch.Frequency;
+
+        /// <summary>Advances the accumulator by one frame whose consumer
+        /// stamp is <paramref name="stamp"/> and returns it. The source is
+        /// chosen once: the clock until the first nonzero stamp, then the
+        /// consumer's stamps for the rest of the controller's life. The frame
+        /// that switches adds the clock's time since the previous frame. A
+        /// later frame adds the stamp's advance modulo 2^32, and an advance of
+        /// 2^31 or more, a consumer clock that restarted or ran backward,
+        /// adds <paramref name="nominalTicks"/> instead. A stamp of 0 after
+        /// the switch is no stamp this frame: it adds the clock's time, and
+        /// the last stamp moves on by that much. A repeat of the last state
+        /// carries the same stamp and adds nothing.</summary>
+        internal ulong AdvanceTimestamp(uint stamp, uint nominalTicks)
+        {
+            long now = TimestampClock?.Invoke() ?? System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!_accStarted)
+            {
+                _accStarted = true;
+                _accOrigin = now;
+            }
+            // The clock's ticks since the origin, computed from the origin on
+            // every frame so no remainder is lost, in 1/3 microseconds.
+            long elapsed = Math.Max(0, now - _accOrigin);
+            long f = TimestampFrequency;
+            long ticks = elapsed / f * 3_000_000 + elapsed % f * 3_000_000 / f;
+            ulong clock = (ulong)Math.Max(0, ticks - _accPrevTicks);
+            _accPrevTicks = Math.Max(ticks, _accPrevTicks);
+            if (!_accConsumer)
+            {
+                _acc += clock;
+                if (stamp != 0)
+                {
+                    _accConsumer = true;
+                    _accPrevStamp = stamp;
+                }
+            }
+            else if (stamp == 0)
+            {
+                _acc += clock;
+                _accPrevStamp = unchecked(_accPrevStamp + (uint)clock);
+            }
+            else
+            {
+                uint d = unchecked(stamp - _accPrevStamp);
+                _acc += d >= 0x8000_0000u ? nominalTicks : d;
+                _accPrevStamp = stamp;
+            }
+            return _acc;
+        }
     }
 
     // ── Input encoder: HMGamepadState → bytes ─────────────────────────────
@@ -104,6 +167,9 @@ internal static class VendorBlobCodec
         var prog = VendorBlobProgram.Get(spec);
         var fields = prog.Fields;
         var counters = prog.CounterInitials.Length > 0 ? encState.CountersFor(prog) : null;
+        // One advance of the timestamp accumulator per frame, for a program
+        // with a "clock": "accumulate" field.
+        ulong acc = prog.Accumulates ? encState.AdvanceTimestamp(state.SensorTimestamp, prog.NominalTicks) : 0;
         // The d-pad from HatDegrees, HatHundredths, HatRaw or Hat, once per
         // frame for a program that reads it.
         bool dUp = false, dDown = false, dLeft = false, dRight = false;
@@ -200,8 +266,9 @@ internal static class VendorBlobCodec
                     // because 2^32 / 16 is a multiple of 2^16 the 16-bit
                     // value still wraps cleanly when the 32-bit source does.
                     if (f.B < 0 || f.B + 1 >= buffer.Length) break;
-                    uint u16 = f.Source == VendorBlobProgram.SrcOp.SensorTimestamp
-                        ? encState.SensorTicks(state.SensorTimestamp) / f.Divisor : 0u;
+                    uint u16 = f.Source != VendorBlobProgram.SrcOp.SensorTimestamp ? 0u
+                        : f.Accumulate ? (uint)(acc / f.Divisor)
+                        : encState.SensorTicks(state.SensorTimestamp) / f.Divisor;
                     buffer[f.B]     = (byte)(u16 & 0xFF);
                     buffer[f.B + 1] = (byte)((u16 >> 8) & 0xFF);
                     break;
@@ -414,8 +481,11 @@ internal static class VendorBlobCodec
                 case VendorBlobProgram.FieldOp.U32:
                 {
                     if (f.B < 0 || f.B + 3 >= buffer.Length) break;
-                    uint v = f.Source == VendorBlobProgram.SrcOp.SensorTimestamp
-                        ? state.SensorTimestamp : 0u;
+                    // With "clock": "accumulate", the accumulator over the
+                    // divisor, modulo 2^32. Otherwise the consumer's stamp.
+                    uint v = f.Source != VendorBlobProgram.SrcOp.SensorTimestamp ? 0u
+                        : f.Accumulate ? unchecked((uint)(acc / f.Divisor))
+                        : state.SensorTimestamp;
                     buffer[f.B]     = (byte)(v        & 0xFF);
                     buffer[f.B + 1] = (byte)((v >>  8) & 0xFF);
                     buffer[f.B + 2] = (byte)((v >> 16) & 0xFF);

@@ -1031,6 +1031,17 @@ public sealed class FieldSpec
     /// value of every part and frame is the field's.</summary>
     [JsonPropertyName("parts")]
     public List<PackedPartSpec>? Parts { get; set; }
+
+    /// <summary>v2.0.0: <c>"accumulate"</c> on a <c>uint16-le</c> or
+    /// <c>uint32-le</c> sensorTimestamp: the field carries the encoder's
+    /// accumulator over <see cref="Divisor"/>, modulo its width. The
+    /// accumulator counts the controller's clock until the first nonzero
+    /// consumer stamp and the consumer's stamps from then on, and adds the
+    /// report's idleFrameIntervalMs for a stamp that restarted or ran
+    /// backward. Without it a uint32-le carries the consumer's stamp as
+    /// is.</summary>
+    [JsonPropertyName("clock")]
+    public string? Clock { get; set; }
 }
 
 /// <summary>v2.0.0: a <c>scale</c> as JSON writes it, a number or an exact

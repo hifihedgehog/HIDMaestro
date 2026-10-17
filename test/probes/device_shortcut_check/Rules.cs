@@ -288,6 +288,7 @@ internal static class Rules
         new("FieldSpec.Resolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.SourceResolution", "a parameter of the u10be codec op, for any 10-bit sensor (VendorBlobProgram.cs:363)"),
         new("FieldSpec.Levels", "the uint8-level-map codec op's table (VendorBlobProgram.cs). dualshock-3-full sets it, and the PS Move's battery byte is the second device: levels 0 to 5, 0xEE charging and 0xEF full (psmoveapi include/psmove.h:194-203 at 97d97e9)"),
+        new("FieldSpec.Clock", "the timestamp accumulator of a uint16-le or uint32-le sensorTimestamp (VendorBlobCodec.cs, EncoderState.AdvanceTimestamp). steam-controller-2 sets it, and the Switch 2 Pro's report 0x05 carries the second device's: a 32-bit IMU timestamp that advances with time, which SDL calibrates against its 4 ms report period (SDL_hidapi_switch2.c:1148-1157 at 804cf65)"),
         new("FieldSpec.ChargingValue", "the uint8-level-map codec op's charging byte (VendorBlobProgram.cs), 0xEE on the DualShock 3 and on the PS Move (psmoveapi include/psmove.h:201 at 97d97e9)"),
         new("HM*Layout.*", "the layout vocabulary of a layout kind (HMLayout.cs), which every profile of that kind fills"),
         new("HMImu.Magnetometer", "the layout vocabulary's IMU description (HMLayout.cs)"),

@@ -193,6 +193,9 @@ internal sealed class VendorBlobProgram
         /// state's counters, -1 for any other field.</summary>
         public int CounterSlot { get; init; }
         public PackedPart[]? Parts { get; init; }
+        /// <summary>A sensor timestamp written from the encoder state's
+        /// accumulator (<c>"clock": "accumulate"</c>).</summary>
+        public bool Accumulate { get; init; }
 
         public CompiledField(FieldSpec src, FieldOp op, SrcOp source, int b,
                              int rangeLo, int rangeHi, int bitLo, int bitHi, bool hasBits,
@@ -209,7 +212,7 @@ internal sealed class VendorBlobProgram
             Resolution = resolution; SourceResolution = sourceResolution; Invert = invert;
             Min = 0; Max = 0; ScaleNumerator = 0; ScaleDenominator = 1; Negate = false;
             RepeatCount = 1; RepeatStride = 0; DpadResolved = false; Levels = null;
-            ChargingValue = -1; CounterSlot = -1; Parts = null;
+            ChargingValue = -1; CounterSlot = -1; Parts = null; Accumulate = false;
         }
     }
 
@@ -228,12 +231,24 @@ internal sealed class VendorBlobProgram
     /// resolves it once.</summary>
     public readonly bool ResolvesDpad;
 
-    private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount, uint[] counterInitials, bool resolvesDpad)
+    /// <summary>True when a field accumulates the sensor timestamp, so an
+    /// encode advances the accumulator once.</summary>
+    public readonly bool Accumulates;
+
+    /// <summary>The accumulator's nominal interval in 1/3 microsecond
+    /// ticks, the report's idleFrameIntervalMs, added for a consumer stamp
+    /// that restarted or ran backward.</summary>
+    public readonly uint NominalTicks;
+
+    private VendorBlobProgram(CompiledField[] fields, int decodeFieldCount, uint[] counterInitials, bool resolvesDpad,
+                              bool accumulates, uint nominalTicks)
     {
         Fields = fields;
         DecodeFieldCount = decodeFieldCount;
         CounterInitials = counterInitials;
         ResolvesDpad = resolvesDpad;
+        Accumulates = accumulates;
+        NominalTicks = nominalTicks;
     }
 
     /// <summary>Get (or build) the compiled program for a spec. The spec is
@@ -253,7 +268,7 @@ internal sealed class VendorBlobProgram
         int decodeCount = 0;
         var counterSlots = new Dictionary<(string Key, bool Wide), int>();
         var counterInitials = new List<uint>();
-        bool resolvesDpad = false;
+        bool resolvesDpad = false, accumulates = false;
         for (int i = 0; i < spec.Fields.Count; i++)
         {
             var f = spec.Fields[i];
@@ -492,6 +507,8 @@ internal sealed class VendorBlobProgram
             var (defMin, defMax) = DefaultRange(op);
             bool dpad = f.Dpad == "resolved";
             resolvesDpad |= dpad;
+            bool accumulate = f.Clock == "accumulate";
+            accumulates |= accumulate;
             fields[i] = new CompiledField(f, op, source, b, rangeLo, rangeHi,
                 bitLo, bitHi, hasBits,
                 f.Center ?? (op == FieldOp.U10BE ? 512 : 128), f.NeutralValue ?? 8,
@@ -512,6 +529,7 @@ internal sealed class VendorBlobProgram
                 ChargingValue = f.ChargingValue ?? -1,
                 CounterSlot = counterSlot,
                 Parts = op == FieldOp.PackedUint ? CompileParts(f, i) : null,
+                Accumulate = accumulate,
             };
 
             // Mirror of Decode's per-type "produces a dict entry" predicate,
@@ -527,7 +545,8 @@ internal sealed class VendorBlobProgram
             };
             if (producesEntry) decodeCount++;
         }
-        return new VendorBlobProgram(fields, decodeCount, counterInitials.ToArray(), resolvesDpad);
+        return new VendorBlobProgram(fields, decodeCount, counterInitials.ToArray(), resolvesDpad,
+            accumulates, (uint)Math.Clamp((long)spec.IdleFrameIntervalMs * 3000, 0, uint.MaxValue));
     }
 
     /// <summary>The wire values at the SDK's 0 and 1 a type takes when its
@@ -614,6 +633,16 @@ internal sealed class VendorBlobProgram
                         $"{where}.fields[{i}] ('{src.Type}').bits \"{src.Bits}\" reaches bit {f.BitHi}. This type holds bits 0 to {maxBit}.");
             }
             CheckVocabulary(in f, i, size, where, output);
+            if (src.Clock != null)
+            {
+                if (src.Clock != "accumulate")
+                    throw new InvalidOperationException($"{where}.fields[{i}].clock \"{src.Clock}\": the one value is \"accumulate\".");
+                if (output || f.Op is not (FieldOp.U16 or FieldOp.U32) || f.Source != SrcOp.SensorTimestamp)
+                    throw new InvalidOperationException($"{where}.fields[{i}].clock: only an input uint16-le or uint32-le sensorTimestamp accumulates.");
+                if (spec.IdleFrameIntervalMs < 1)
+                    throw new InvalidOperationException(
+                        $"{where}.fields[{i}].clock \"accumulate\" needs the report's idleFrameIntervalMs, the interval it adds for a consumer stamp that runs backward.");
+            }
 
             if (f.Op == FieldOp.PackedUint) continue;
             var (lo, hi) = Extent(in f, size);
