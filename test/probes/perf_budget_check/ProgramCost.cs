@@ -2,7 +2,7 @@
 // and state block, offline, each through the code this tree runs: the
 // protocol engine's BuildNext over the bound set, generated and interpreted,
 // the profile's rumble decoder, and the codec over the profile's state block.
-// Built with -p:DefineConstants=DD4_BASE against the tree before lane DD-4,
+// Built with -p:HmDd4Base=true against the tree before lane DD-4,
 // the same names measure the code they replace: Switch2ProDevice.BuildNextReport,
 // Switch2ProPacker.DecodeRumble and Switch2ProPacker.BuildBody. One launch
 // prints each variant's median ns per call and the bytes the thread

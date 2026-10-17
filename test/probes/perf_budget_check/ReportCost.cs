@@ -87,7 +87,9 @@ internal static class ReportCost
         {
             var p = db[id];
             if (p.ExtendedReport != null) p.ExtendedReport.IdleFrameIntervalMs = 0;
+#if !DD4_BASE
             p.Stream = null;
+#endif
             IntPtr view = Marshal.AllocHGlobal(SharedMemoryIO.SHARED_INPUT_SIZE);
             Marshal.Copy(new byte[SharedMemoryIO.SHARED_INPUT_SIZE], 0, view, SharedMemoryIO.SHARED_INPUT_SIZE);
             int at = index++;

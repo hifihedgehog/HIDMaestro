@@ -22,7 +22,7 @@
 //   program [runs] [calls]
 //                  offline: the Switch 2 Pro composite's reports, rumble
 //                  decode and state block, each variant's median ns per call
-//                  (ProgramCost.cs). Built with -p:DefineConstants=DD4_BASE
+//                  (ProgramCost.cs). Built with -p:HmDd4Base=true
 //                  against the tree before, the code they replace
 //   idle <periodMs> [seconds]
 //                  offline: the process's CPU time per second with one

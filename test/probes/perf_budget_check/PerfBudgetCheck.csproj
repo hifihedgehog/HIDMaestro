@@ -8,6 +8,10 @@
     <!-- -p:HmBase=true builds against a b4d29d9 tree for the "before"
          measurements, leaving out what b4d29d9 lacks. -->
     <DefineConstants Condition="'$(HmBase)' == 'true'">$(DefineConstants);HM_BASE</DefineConstants>
+    <!-- -p:HmDd4Base=true builds against the tree before lane DD-4 for
+         ProgramCost's "before" measurements. A property of this project
+         only, where -p:DefineConstants would reach the SDK's build too. -->
+    <DefineConstants Condition="'$(HmDd4Base)' == 'true'">$(DefineConstants);DD4_BASE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\..\sdk\HIDMaestro.Core\HIDMaestro.Core.csproj" />
