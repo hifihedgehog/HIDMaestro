@@ -338,6 +338,14 @@ public sealed class HMProfileBuilder
     /// <exception cref="HMProfileException">VID or PID is not set, the
     /// descriptor's hex does not parse, the layout names an axis or button
     /// the descriptor lacks, or the device model does not compile.</exception>
+    /// <summary>A value read again from its JSON, so the profile and the
+    /// builder share no object.</summary>
+    private static T CopyOf<T>(T value) where T : class
+    {
+        var info = (System.Text.Json.Serialization.Metadata.JsonTypeInfo<T>)HMJsonContext.Default.GetTypeInfo(typeof(T))!;
+        return System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(value, info), info)!;
+    }
+
     public HMProfile Build()
     {
         // A copy carries its source's IDs, 0x0000 included, as moza-r16's PID
@@ -345,7 +353,8 @@ public sealed class HMProfileBuilder
         if (_vid == null) throw new HMProfileException(_id, null, "$.vid", "VID must be set (use .Vid(0x045E)).");
         if (_pid == null) throw new HMProfileException(_id, null, "$.pid", "PID must be set (use .Pid(0x028E)).");
 
-        // A copy keeps every key of its source but the ones set here.
+        // A copy keeps every key of its source but the ones set here, read
+        // again from the source's JSON so two builds share no object.
         var inner = _copy?.Clone() ?? new ControllerProfile();
         inner.Id = _id;
         inner.Name = _name;
@@ -363,17 +372,18 @@ public sealed class HMProfileBuilder
         inner.DataReportId = _dataReportId;
         inner.DeviceDescription = _deviceDescription;
         inner.Notes = _notes;
-        inner.ButtonMap = _buttonMap;
-        inner.TriggerButtons = _triggerButtons;
-        inner.AxisMap = _axisMap;
+        // The values this builder holds are copied, so a caller that edits
+        // the array or map it passed, or builds again, shares nothing with
+        // this profile. A JSON round trip of the whole profile did this and
+        // cost a program's first Build about 70 ms of serializer start-up.
+        inner.ButtonMap = (int[]?)_buttonMap?.Clone();
+        inner.TriggerButtons = (int[]?)_triggerButtons?.Clone();
+        inner.AxisMap = _axisMap == null ? null : new Dictionary<string, string>(_axisMap, _axisMap.Comparer);
         inner.DeviceModelFrom = _deviceModelFrom;
         inner.DeviceModel = _deviceModel;
         inner.DriverPid = _driverPid;
-        inner.FeatureStubs = _featureStubs;
-        inner.ValueSources = _valueSources;
-        // Read again from its JSON, so two profiles built from one builder,
-        // and a builder's caller, share no object with the profile.
-        inner = inner.Clone();
+        inner.FeatureStubs = _featureStubs == null ? null : CopyOf(_featureStubs);
+        inner.ValueSources = _valueSources == null ? null : CopyOf(_valueSources);
         inner.SourceFile = null;
         inner.MarkBuiltInCode(true);
 

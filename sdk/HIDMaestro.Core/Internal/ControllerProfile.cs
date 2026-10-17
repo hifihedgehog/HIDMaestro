@@ -840,11 +840,14 @@ public sealed class ControllerProfile
     /// field.</exception>
     public byte[]? GetDescriptorBytes()
     {
-        if (_descriptorCached) return _cachedDescriptor;
+        // The flag is read and written with acquire and release order: a
+        // load resolves profiles in parallel, and one profile's resolution
+        // can read a profile it names while that one resolves.
+        if (System.Threading.Volatile.Read(ref _descriptorCached)) return _cachedDescriptor;
         if (string.IsNullOrEmpty(Descriptor))
         {
             _cachedDescriptor = null;
-            _descriptorCached = true;
+            System.Threading.Volatile.Write(ref _descriptorCached, true);
             return null;
         }
         var hex = Descriptor.Replace(" ", "").Replace("-", "");
@@ -861,7 +864,7 @@ public sealed class ControllerProfile
             throw new FormatException($"Profile '{Id}': descriptor holds a character that is not a hex digit.");
         }
         _cachedDescriptor = bytes;
-        _descriptorCached = true;
+        System.Threading.Volatile.Write(ref _descriptorCached, true);
         return bytes;
     }
 
@@ -1683,29 +1686,35 @@ public sealed class ProfileDatabase
     {
         Registry = registry;
         var refused = new List<ControllerProfile>();
-        foreach (var p in _profiles)
+        // Each profile resolves on its own, in parallel: the registry is
+        // read-only here. The issues are listed in the profiles' order.
+        var failed = new Exception?[_profiles.Count];
+        System.Threading.Tasks.Parallel.For(0, _profiles.Count, i =>
         {
-            try
-            {
-                p.Registry = registry;
-                p.OutsideCatalog = outsideCatalog;
-                p.ResolvedCache = ModelRegistry.Resolve(p, registry, outsideCatalog);
-            }
-            catch (Exception e)
+            var q = _profiles[i];
+            q.Registry = registry;
+            q.OutsideCatalog = outsideCatalog;
+            try { q.ResolvedCache = ModelRegistry.Resolve(q, registry, outsideCatalog); }
+            catch (Exception e) { failed[i] = e; }
+        });
+        for (int i = 0; i < _profiles.Count; i++)
+        {
+            var p = _profiles[i];
+            if (failed[i] is Exception refusal)
             {
                 // Whatever a check throws refuses this profile alone.
-                var (path, reason) = ProfileDefects.LocateAny(e);
+                var (path, reason) = ProfileDefects.LocateAny(refusal);
                 if (_texts.TryGetValue(p, out var text)) path = ProfileDefects.Spell(text, path);
                 _issues.Add(new HIDMaestro.HMProfileLoadIssue(p.SourceFile ?? p.Id, p.Id, path, reason,
                     HIDMaestro.HMProfileLoadIssueKind.Refused));
                 refused.Add(p);
                 continue;
             }
-            if (p.ResolvedCache.Problem != null)
+            var r = p.ResolvedCache!;
+            if (r.Problem != null)
             {
                 // The value that went wrong where its file holds it: the
                 // profile's own deviceModelFrom, or the key of a model file.
-                var r = p.ResolvedCache;
                 string path = r.ProblemPath;
                 if (r.ProblemFile == null && _texts.TryGetValue(p, out var own)) path = ProfileDefects.Spell(own, path);
                 else if (r.ProblemFile != null && File.Exists(r.ProblemFile))
@@ -1840,6 +1849,17 @@ public sealed class ProfileDatabase
     private static ProfileDatabase? s_cachedEmbedded;
     private static readonly object s_cachedEmbeddedLock = new();
 
+    /// <summary>The catalog profile with this id, the catalog loaded if it
+    /// is not yet. Null for an id the catalog lacks. Never called by the
+    /// catalog's own load, which resolves over the profiles it read.</summary>
+    internal static ControllerProfile? EmbeddedProfile(string id)
+    {
+        var db = LoadEmbedded();
+        return db._byId.TryGetValue(id, out var p) ? p : null;
+    }
+
+    private readonly Dictionary<string, ControllerProfile> _byId = new(StringComparer.OrdinalIgnoreCase);
+
     public static ProfileDatabase LoadEmbedded()
     {
         if (s_cachedEmbedded != null) return s_cachedEmbedded;
@@ -1885,6 +1905,7 @@ public sealed class ProfileDatabase
         // The catalog's own registry, over the profiles just read: a catalog
         // profile names a model the SDK carries or another catalog profile.
         db.ResolveAll(ModelRegistry.ForCatalog(db._profiles), outsideCatalog: false);
+        foreach (var p in db._profiles) db._byId[p.Id] = p;
         return db;
     }
 }

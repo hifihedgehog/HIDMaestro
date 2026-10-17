@@ -36,6 +36,9 @@
 //              values: the load keeps no compile (Edits.cs)
 //   check      every mode above, the battery's run (S92), the default
 //
+//   startup    one launch's cold first Build and catalog load (Startup.cs),
+//              outside check
+//
 // Creates no device, opens no section and needs no elevation. Exit 0 PASS,
 // 1 FAIL.
 using System;
@@ -55,6 +58,7 @@ internal static class Program
         string mode = args.Length > 0 ? args[0] : "check";
         // A measurement with no verdict, outside check.
         if (mode == "cost") return Cost.Run();
+        if (mode == "startup") return Startup.Run(args.Length > 1 ? args[1] : null);
         var modes = new (string Name, Func<int> Run)[]
         {
             ("strict", Strict.Run),

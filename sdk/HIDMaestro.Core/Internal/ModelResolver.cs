@@ -269,6 +269,17 @@ internal sealed class ModelRegistry
     internal static ModelRegistry ForCatalog(IReadOnlyList<ControllerProfile> catalog)
     {
         var byId = catalog.ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
+        var (models, tables) = s_embedded.Value;
+        return new ModelRegistry(models, tables, id => byId.TryGetValue(id, out var p) ? p : null);
+    }
+
+    /// <summary>The SDK's embedded models and identity table, read once.</summary>
+    private static readonly Lazy<(Dictionary<string, (DeviceModelFile File, string Source)> Models,
+                                  List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)> Tables)> s_embedded =
+        new(ReadEmbedded, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static (Dictionary<string, (DeviceModelFile File, string Source)>, List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>) ReadEmbedded()
+    {
         var models = new Dictionary<string, (DeviceModelFile File, string Source)>(StringComparer.OrdinalIgnoreCase);
         var tables = new List<(string Label, IdentityDefaultsFile Table, bool OutsideCatalogOnly)>();
         var asm = typeof(ModelRegistry).Assembly;
@@ -291,7 +302,7 @@ internal sealed class ModelRegistry
             if (!models.TryAdd(file.Id, (file, label)))
                 throw new InvalidOperationException($"{label}: the model id '{file.Id}' repeats one the SDK already carries.");
         }
-        return new ModelRegistry(models, tables, id => byId.TryGetValue(id, out var p) ? p : null);
+        return (models, tables);
     }
 
     /// <summary>This registry with a directory's models folder added: its
@@ -427,12 +438,16 @@ internal sealed class ModelRegistry
         if (m.Connection != null && !string.Equals(m.Connection, p.Connection, StringComparison.OrdinalIgnoreCase)) return false;
         if (m.Keys is { Count: > 0 })
         {
-            // The profile as its JSON, read only for an entry that matches on
-            // keys, at load.
-            var json = JsonSerializer.SerializeToNode(p, HMJsonContext.Default.ControllerProfile)!.AsObject();
+            // Each key's value as the profile's JSON writes it, read through
+            // the key's own property alone: serializing the whole profile
+            // for every entry cost the catalog's load about 13 ms.
+            var info = HMJsonContext.Default.ControllerProfile;
             foreach (var (key, want) in m.Keys)
             {
-                var have = json.FirstOrDefault(kv => string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+                var prop = info.Properties.FirstOrDefault(x => string.Equals(x.Name, key, StringComparison.OrdinalIgnoreCase));
+                object? value = prop?.Get?.Invoke(p);
+                if (value == null) return false;
+                var have = JsonSerializer.SerializeToNode(value, HMJsonContext.Default.GetTypeInfo(prop!.PropertyType)!);
                 if (have == null || !JsonNode.DeepEquals(have, JsonNode.Parse(want.GetRawText()))) return false;
             }
         }
@@ -580,8 +595,19 @@ internal sealed class ModelRegistry
     /// <summary>The catalog's registry, built once with the embedded
     /// catalog. Profiles built in code and profiles a program constructs
     /// resolve against it.</summary>
-    internal static ModelRegistry Catalog => ProfileDatabase.LoadEmbedded().Registry
-        ?? throw new InvalidOperationException("The embedded catalog has no model registry.");
+    internal static ModelRegistry Catalog => s_catalog.Value;
+
+    /// <summary>The catalog's registry for profiles outside the catalog:
+    /// the embedded models and identity table, and the catalog profiles a
+    /// name can take, which load only when a name asks for one. A profile
+    /// built in code, whose identity names no catalog profile, resolves
+    /// without loading the catalog, where its first Build once paid the
+    /// catalog's whole load.</summary>
+    private static readonly Lazy<ModelRegistry> s_catalog = new(() =>
+    {
+        var (models, tables) = s_embedded.Value;
+        return new ModelRegistry(models, tables, id => ProfileDatabase.EmbeddedProfile(id));
+    }, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
 }
 
 /// <summary>The checks a device model's keys meet, the profile's own when
