@@ -24,6 +24,7 @@
 //              bit, the buttons in bytes 1 to 4, 0x7F in bytes 7 to 10, the
 //              battery in byte 12 and offset-binary motion in 13 to 36.
 //   answers, dumps  in PsMoveSources.cs.
+//   answers, dumps  in PsMoveSources.cs.
 //   answers    in PsMoveSources.cs.
 //
 // Exit 0 PASS, 1 FAIL.
@@ -54,6 +55,8 @@ internal static partial class Program
         CatalogStrings();
         CapturedDescriptors();
         PsMoveReport();
+        PsMoveAnswers();
+        DescriptorDumps();
         PsMoveAnswers();
         DescriptorDumps();
         PsMoveAnswers();
@@ -247,11 +250,16 @@ internal static partial class Program
 
         // At rest: no button, no trigger, 0x7F7F7F7F at 7 to 10 (moveonpc
         // "always 0x7F7F7F7F"), every motion word 0x8000, zero in offset
-        // binary (psmove_decode_16bit subtracts 0x8000).
+        // binary (psmove_decode_16bit subtracts 0x8000), the timestamp's high
+        // byte 11 and bytes 37 to 48 (temperature, magnetometer, the
+        // timestamp's low byte, EXT data) zero, and the battery 0xEE,
+        // charging, the value a real Move on USB sends with 0xEF (moveonpc
+        // Input report, Battery level).
         bool restOk = rest[1] == 0 && rest[2] == 0 && rest[3] == 0 && (rest[4] & 0xF0) == 0 && rest[5] == 0 && rest[6] == 0
-                      && Hex(rest, 7, 4) == "7F7F7F7F"
-                      && Enumerable.Range(0, 12).All(k => rest[13 + 2 * k] == 0x00 && rest[14 + 2 * k] == 0x80);
-        Check("at rest: no button or trigger, 0x7F at bytes 7 to 10, every motion word 0x8000", restOk, Hex(rest, 0, 37));
+                      && Hex(rest, 7, 4) == "7F7F7F7F" && rest[11] == 0 && rest[12] == 0xEE
+                      && Enumerable.Range(0, 12).All(k => rest[13 + 2 * k] == 0x00 && rest[14 + 2 * k] == 0x80)
+                      && Enumerable.Range(37, 12).All(k => rest[k] == 0);
+        Check("at rest: no button or trigger, 0x7F at bytes 7 to 10, every motion word 0x8000, battery 0xEE, bytes 11 and 37 to 48 zero", restOk, Hex(rest, 0, 49));
 
         var axes = new Dictionary<HMAxis, float> { [HMAxis.Z] = 1.0f };
         var pulled = MoveReport(p!, new HMGamepadState { Axes = axes }, enc)!;
@@ -285,10 +293,10 @@ internal static partial class Program
         Check("motion as offset binary, accelerometer x y z at 13 and 19, gyro at 25 and 31", Hex(m, 13, 24) == want, Hex(m, 13, 24));
 
         var levels = Enumerable.Range(0, 11).Select(l => MoveReport(p!, new HMGamepadState { BatteryLevel = (byte)l }, enc)![12]).ToArray();
-        Check("battery 0 to 10 gives psmoveapi's 0 to 5, at least 20 percent a step (Batt_MIN to Batt_MAX)",
-              Convert.ToHexString(levels) == "0000010102020303040405", Convert.ToHexString(levels));
         var charging = MoveReport(p!, new HMGamepadState { BatteryLevel = 5, BatteryCharging = true }, enc)![12];
         var full = MoveReport(p!, new HMGamepadState { BatteryLevel = 10, BatteryCharging = true, BatteryFull = true }, enc)![12];
-        Check("charging gives 0xEE and full gives 0xEF (Batt_CHARGING, Batt_CHARGING_DONE)", charging == 0xEE && full == 0xEF, $"{charging:X2} {full:X2}");
+        Check("battery: 0xEE, charging, at every level and when charging, 0xEF when full, as a real Move on USB sends",
+              levels.All(b => b == 0xEE) && charging == 0xEE && full == 0xEF,
+              $"{Convert.ToHexString(levels)} {charging:X2} {full:X2}");
     }
 }
