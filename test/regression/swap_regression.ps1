@@ -2132,7 +2132,7 @@ function Scenario-Vendor-Blob-Golden {
                  -Message 'a vendor-blob report no longer encodes or decodes to its golden bytes, or the codec vocabulary no longer reproduces the code it replaces (see probe stdout)'
 }
 
-# S92: every report program three ways. program_equivalence_check runs each
+# S94: every report program three ways. program_equivalence_check runs each
 # catalog program, decoder and layout set through its generated kernel, the
 # interpreter and a naive evaluator written from the design note, on random
 # states and on DD-0's recorded inputs, then the review cases, the domain
@@ -2150,7 +2150,7 @@ function Scenario-Program-Equivalence {
                  -Message 'under NativeAOT, a report program gives different bytes or binds no generated kernel (see probe stdout)'
 }
 
-# S93: the protocol engine and the device clock, offline: conditions with ||,
+# S95: the protocol engine and the device clock, offline: conditions with ||,
 # != and in on 16-bit registers, two layouts on one report ID, masked
 # matches, store, storeRecord, or and andNot, memory, bitmap, prefix and
 # status replies, bulk replies in read-sized chunks, the three overflow
@@ -2282,8 +2282,8 @@ $scenarios = @(
     @{ Name = 'S89_Device_Oracle';               Body = ${function:Scenario-Device-Oracle} },
     @{ Name = 'S90_Arith_Roundtrip';             Body = ${function:Scenario-Arith-Roundtrip} },
     @{ Name = 'S91_Vendor_Blob_Golden';          Body = ${function:Scenario-Vendor-Blob-Golden} },
-    @{ Name = 'S92_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
-    @{ Name = 'S93_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
+    @{ Name = 'S94_Program_Equivalence';         Body = ${function:Scenario-Program-Equivalence} },
+    @{ Name = 'S95_Protocol_Engine';             Body = ${function:Scenario-Protocol-Engine} },
     @{ Name = 'S96_Capture_Fidelity';            Body = ${function:Scenario-Capture-Fidelity} }
 )
 

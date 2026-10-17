@@ -104,7 +104,7 @@ for /d %%p in (test\probes\*) do (
         )
     )
 )
-rem program_equivalence_check (S92) draws its 1,000 random programs at
+rem program_equivalence_check (S94) draws its 1,000 random programs at
 rem build time. Each run draws them from a new seed, printed here and by the
 rem probe, so a failing corpus can be built again with the same seed.
 set /a HM_CORPUS_SEED=%RANDOM% * 32768 + %RANDOM%
