@@ -54,12 +54,16 @@ public class HidReportBuilder
     }
 
     // The per-axis pass, compiled when the builder is parsed and again when
-    // the profile sets its sticks, both at create, so no frame builds it:
-    // each declared analog field with the value it rests at when the
-    // consumer leaves it out or writes NaN.
-    private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest);
+    // the profile sets its sticks or its centers, all at create, so no
+    // frame builds it: each declared analog field with the value it rests
+    // at when the consumer leaves it out or writes NaN and, for a field its
+    // profile centers, the center and the two slopes WireArith.Centered
+    // takes.
+    private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest,
+                                             bool IsCentered, int Center, double SlopeLow, double SlopeStep);
     private AxisWrite[]? _axisWrites;
     private HashSet<HMAxis>? _stickAxes;
+    private Dictionary<HMAxis, int>? _axisCenters;
 
     /// <summary>The axes the profile's layout names as sticks. One that the
     /// consumer leaves out of <see cref="HMGamepadState.Axes"/> rests at
@@ -72,6 +76,27 @@ public class HidReportBuilder
         _axisWrites = CompileAxisWrites();
     }
 
+    /// <summary>The profile's <c>axisCenters</c>: for a device whose hosts
+    /// read a stick at rest somewhere other than its field's midpoint, the
+    /// wire value at 0.5 per axis. Each must name an analog field of this
+    /// descriptor and lie inside its logical range. Throws
+    /// <see cref="InvalidOperationException"/> naming the axis
+    /// otherwise.</summary>
+    public void SetAxisCenters(IReadOnlyDictionary<HMAxis, int>? centers)
+    {
+        if (centers != null)
+            foreach (var (axis, c) in centers)
+            {
+                if (!AxisFields.TryGetValue(axis, out var f))
+                    throw new InvalidOperationException($"axisCenters.{axis}: the descriptor declares no analog field for this axis.");
+                if (c < f.LogicalMin || c > f.LogicalMax)
+                    throw new InvalidOperationException(
+                        $"axisCenters.{axis} {c} is outside the field's logical range {f.LogicalMin}..{f.LogicalMax}.");
+            }
+        _axisCenters = centers == null ? null : new Dictionary<HMAxis, int>(centers);
+        _axisWrites = CompileAxisWrites();
+    }
+
     private AxisWrite[] CompileAxisWrites()
     {
         var writes = new AxisWrite[AxisFields.Count];
@@ -79,7 +104,16 @@ public class HidReportBuilder
         foreach (var (key, field) in AxisFields)
         {
             bool stick = _stickAxes != null && _stickAxes.Contains(key);
-            writes[i++] = new AxisWrite(key, field, stick || field.LogicalMin < 0 ? 0.5 : 0.0);
+            double rest = stick || field.LogicalMin < 0 ? 0.5 : 0.0;
+            if (_axisCenters != null && _axisCenters.TryGetValue(key, out int c))
+            {
+                var (low, step) = WireArith.Slopes(field.LogicalMin, c, field.LogicalMax);
+                writes[i++] = new AxisWrite(key, field, rest, true, c, low, step);
+            }
+            else
+            {
+                writes[i++] = new AxisWrite(key, field, rest, false, 0, 0, 0);
+            }
         }
         return writes;
     }
@@ -766,7 +800,12 @@ public class HidReportBuilder
         for (int i = 0; i < axisWrites.Length; i++)
         {
             ref readonly var w = ref axisWrites[i];
-            WriteField(w.Field, GetAxisValue(w.Key, w.Rest));
+            double v = GetAxisValue(w.Key, w.Rest);
+            if (w.IsCentered)
+                WriteBits(report, w.Field.BitOffset + idOffset, w.Field.BitSize,
+                          WireArith.Centered(v, w.Field.LogicalMin, w.Center, w.Field.LogicalMax, w.SlopeLow, w.SlopeStep, invert: false));
+            else
+                WriteField(w.Field, v);
         }
 
         // Combined-Z trigger synthesis (Xbox 360 wired with Vx/Vy hidden pair):

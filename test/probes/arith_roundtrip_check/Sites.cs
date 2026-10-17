@@ -30,7 +30,23 @@ internal static class NewArith
         typeof(HMController).Assembly.GetType("HIDMaestro.Internal.WireArith")?.GetMethod("Scaled", Any)
             ?.CreateDelegate<Func<float, double, double, short>>();
 
+    static readonly Func<double, int, int, int, double, double, bool, int>? s_centered =
+        typeof(HMController).Assembly.GetType("HIDMaestro.Internal.WireArith")?.GetMethod("Centered", Any)
+            ?.CreateDelegate<Func<double, int, int, int, double, double, bool, int>>();
+    static readonly Func<int, int, int, (double, double)>? s_slopes =
+        typeof(HMController).Assembly.GetType("HIDMaestro.Internal.WireArith")?.GetMethod("Slopes", Any)
+            ?.CreateDelegate<Func<int, int, int, (double, double)>>();
+
     public static bool Present => s_linear != null && s_xusbTrigger != null && s_scaled != null;
+    public static bool CenteredPresent => s_centered != null && s_slopes != null;
+
+    /// <summary>WireArith.Centered with the field's own slopes, for a double
+    /// input the SDK's float axes cannot carry.</summary>
+    public static int Centered(double v, int min, int center, int max)
+    {
+        var (low, step) = s_slopes!(min, center, max);
+        return s_centered!(v, min, center, max, low, step, false);
+    }
 
     // The round trip sends no NaN, so the rest value never applies.
     public static int Linear(double v, int min, int max, bool invert) => s_linear!(v, min, max, invert, 0.5);
@@ -137,6 +153,13 @@ internal static class Sites
         $"hid-descriptor[{min}..{max}]",
         v => Old.Descriptor(v, min, max),
         v => NewArith.Linear(v, min, max, false),
+        min, max, r => (r - min, max - min), Id);
+
+    /// <summary>A descriptor field its profile centers (axisCenters).</summary>
+    public static Site DescriptorCentered(int min, int center, int max) => new(
+        $"hid-descriptor[{min}..{max}] centered {center}",
+        v => Old.Descriptor(v, min, max),
+        v => NewArith.Centered(v, min, center, max),
         min, max, r => (r - min, max - min), Id);
 
     public static Site U8Axis(int center, bool invert) => new(
@@ -284,11 +307,17 @@ internal static class Inventory
             {
                 var b = p.GetOrBuildReportBuilder();
                 int idOff = b.InputReportId != 0 ? 8 : 0;
+                // Read by name, so the inventory also runs on a tree from
+                // before axisCenters.
+                var centers = typeof(ControllerProfile).GetProperty("AxisCenters")?.GetValue(p) as Dictionary<string, int>;
                 var seen = new HashSet<HidReportBuilder.InputField>(ReferenceEqualityComparer.Instance);
                 string path = armOn ? "descriptor (until armed)" : "descriptor";
                 foreach (var (key, f) in b.AxisFields)
                     if (seen.Add(f))
-                        Add(p.Id, path, Sites.Descriptor(f.LogicalMin, f.LogicalMax),
+                        Add(p.Id, path,
+                            centers != null && centers.TryGetValue(key.ToString(), out int c)
+                                ? Sites.DescriptorCentered(f.LogicalMin, c, f.LogicalMax)
+                                : Sites.Descriptor(f.LogicalMin, f.LogicalMax),
                             $"report {b.InputReportId:X2} byte {(f.BitOffset + idOff) / 8} bits {f.BitSize} ({key})");
                 foreach (var f in new[] { b.CombinedTrigger, b.LeftTrigger, b.RightTrigger })
                     if (f != null && seen.Add(f))

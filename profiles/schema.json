@@ -147,6 +147,16 @@
       ],
       "description": "Maps HID usage (hex-string key) to a role name (e.g. 'leftTrigger'), overriding descriptor-derived axis roles."
     },
+    "axisCenters": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "description": "The wire value a descriptor-path axis carries at 0.5, by axis name (X, Y, Z, Rz and the other HMAxis names), for a device whose hosts read its sticks at rest somewhere other than the field's midpoint. Each value lies inside its field's logical range. The field runs from its logical minimum at 0 through the center at 0.5 to its logical maximum at 1, each half on its own slope, rounded once as a distance from the center. The two Luna profiles set it, because SDL reads a Luna stick byte of exactly 0x7F as zero."
+    },
     "sdlMapping": {
       "type": [
         "string",

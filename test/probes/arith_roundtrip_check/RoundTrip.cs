@@ -46,7 +46,87 @@ internal static class RoundTrip
             if (!ok) fail++;
             Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] imu {imu.Key} | {values} | {string.Join(", ", misses)} | {(first == int.MinValue ? "-" : first.ToString())}");
         }
+        fail += Centered();
         Console.WriteLine(fail == 0 ? "roundtrip: PASS, every raw value returns" : $"roundtrip: FAIL, {fail} conversion(s) lose raw values");
+        return fail;
+    }
+
+    /// <summary>The centered descriptor axes, through the Luna profiles' own
+    /// report builders and their axisCenters: 0..255 around 0x7F and
+    /// 0..65535 around 0x7FFF. Each raw value normalized four ways: float
+    /// division and the float reciprocal of the whole span and each half by
+    /// its own span, through the builder, and double division through the
+    /// SDK's WireArith.Centered with the field's own slopes, since a double
+    /// reaches the builder only as the float HMGamepadState.Axes holds,
+    /// which is float division's value (design note, decision (a) and
+    /// mechanism 1).</summary>
+    static int Centered()
+    {
+        int fail = 0;
+        Console.WriteLine("roundtrip: centered axes, through the profile's own report builder");
+        if (!NewArith.CenteredPresent)
+        {
+            Console.WriteLine("  [FAIL] this SDK has no WireArith.Centered: no centered axes");
+            return 1;
+        }
+        foreach (var (id, center) in new[] { ("amazon-luna-usb", 0x7F), ("amazon-luna-ble", 0x7FFF) })
+        {
+            var b = ProfileDatabase.LoadEmbedded().All.First(p => p.Id == id).GetOrBuildReportBuilder();
+            var f = b.AxisFields[HMAxis.X];
+            int min = f.LogicalMin, max = f.LogicalMax, span = max - min;
+            var report = new byte[b.InputReportByteSize];
+            var axes = new Dictionary<HMAxis, float> { [HMAxis.X] = 0 };
+            int off = f.BitOffset + (b.InputReportId != 0 ? 8 : 0);
+            int Tree(float v)
+            {
+                axes[HMAxis.X] = v;
+                b.BuildReportInto(report, axes);
+                int raw = 0;
+                for (int i = 0; i < f.BitSize; i++)
+                    if (((report[(off + i) >> 3] >> ((off + i) & 7)) & 1) != 0) raw |= 1 << i;
+                return raw;
+            }
+            var misses = new List<int>[4];
+            for (int k = 0; k < 4; k++) misses[k] = new List<int>();
+            bool oneLow = true;
+            for (int r = min; r <= max; r++)
+            {
+                int k = r - min;
+                float halves = r <= center
+                    ? (float)(0.5 * (r - min) / (center - min))
+                    : (float)(0.5 + 0.5 * (r - center) / (max - center));
+                float[] n = { 0, k / (float)span, k * (1f / span), halves };
+                for (int j = 0; j < 4; j++)
+                {
+                    int got = j == 0 ? NewArith.Centered((double)k / span, min, center, max) : Tree(n[j]);
+                    if (got == r) continue;
+                    misses[j].Add(r);
+                    if (got != r - 1) oneLow = false;
+                }
+            }
+            // At 16 bits a float normalization lands a hair under the rounding
+            // point for values just above the center, whose slope is 65536 where
+            // the consumer's is 65535: float division misses the 64 even values
+            // 32768 to 32894, the reciprocal the 65 even values 32768 to 32896.
+            var even = (int count) => Enumerable.Range(0, count).Select(i => 32768 + 2 * i).ToList();
+            bool wide = span > 255;
+            bool ok = misses[0].Count == 0 && misses[3].Count == 0 && oneLow
+                && misses[1].SequenceEqual(wide ? even(64) : new List<int>())
+                && misses[2].SequenceEqual(wide ? even(65) : new List<int>());
+            if (!ok) fail++;
+            string List(List<int> m) => m.Count == 0 ? "0" : $"{m.Count} ({m[0]}..{m[^1]})";
+            Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {id} X {min}..{max} around {center} | {span + 1} | double {List(misses[0])}, float {List(misses[1])}, reciprocal {List(misses[2])}, per half {List(misses[3])}, every miss one count low: {oneLow}");
+            // 0.5 and PadForge's centered 0.5000076 (32768 / 65535) rest on the
+            // center. Rounding the wire value itself, the form decision (a)
+            // gives an uncentered field, sends the second to the count above
+            // at 16 bits.
+            float padForge = 32768f / 65535f;
+            int atHalf = Tree(0.5f), atPad = Tree(padForge);
+            int plain = min + (int)Math.Round((double)padForge * span);
+            bool rest = atHalf == center && atPad == center && (!wide || plain != center);
+            if (!rest) fail++;
+            Console.WriteLine($"  [{(rest ? "PASS" : "FAIL")}] {id} X at 0.5 gives {atHalf} and at {padForge:R} gives {atPad}, center {center}; rounding the wire value itself gives {plain}");
+        }
         return fail;
     }
 

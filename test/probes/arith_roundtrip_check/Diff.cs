@@ -52,6 +52,11 @@ internal static class Diff
         ["hid-descriptor[0..3]"] = (13981013, 1, 2),
         ["hid-descriptor[0..4095]"] = (58706944, 2047, 2048),
         ["hid-descriptor[0..65535]"] = (75496896, 32767, 32768),
+        // The Luna sticks with axisCenters. The note's table counts them
+        // under the rows above, as they were before the key, and requires
+        // them unchanged at 0.5. The counts are this check's.
+        ["hid-descriptor[0..255] centered 127"] = (33422783, 127, 127),
+        ["hid-descriptor[0..65535] centered 32767"] = (67108287, 32767, 32767),
         ["hid-descriptor[0..768]"] = (47535317, 384, 384),
         ["hid-descriptor[1..255]"] = (41711863, 128, 128),
         ["hid-descriptor[1..32767]"] = (71300351, 16384, 16384),

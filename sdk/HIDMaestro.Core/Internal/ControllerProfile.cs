@@ -153,6 +153,17 @@ public sealed class ControllerProfile
     [JsonPropertyName("axisMap")]
     public Dictionary<string, string>? AxisMap { get; set; }
 
+    /// <summary>v2.0.0: the wire value a descriptor-path axis carries at
+    /// 0.5, by axis name (<c>"X"</c>, <c>"Rz"</c>), for a device whose hosts
+    /// read its sticks at rest somewhere other than the field's midpoint.
+    /// The field then runs from its logical minimum at 0 through the center
+    /// at 0.5 to its logical maximum at 1, each half on its own slope. SDL's
+    /// Luna driver reads a stick byte of exactly 0x7F as zero
+    /// (SDL_hidapi_luna.c), so the two Luna profiles center their sticks
+    /// there. Absent, an axis has no center of its own.</summary>
+    [JsonPropertyName("axisCenters")]
+    public Dictionary<string, int>? AxisCenters { get; set; }
+
     /// <summary>Optional SDL gamepad mapping body for profiles SDL's own
     /// database does not cover.
     ///
@@ -607,8 +618,27 @@ public sealed class ControllerProfile
             b.ApplyLayoutSemantics(Layout);
         }
         b.SetStickAxes(StickAxesOf(Layout, b));
+        try { b.SetAxisCenters(ParseAxisCenters()); }
+        catch (InvalidOperationException e) { throw new InvalidOperationException($"Profile '{Id}': {e.Message}", e); }
         _cachedReportBuilder = b;
         return b;
+    }
+
+    private Dictionary<HMAxis, int>? ParseAxisCenters()
+    {
+        if (AxisCenters == null) return null;
+        var centers = new Dictionary<HMAxis, int>(AxisCenters.Count);
+        foreach (var (name, center) in AxisCenters)
+        {
+            // TryParse also reads a number and a comma list, which no axis
+            // name is.
+            if (name.Length == 0 || !char.IsLetter(name[0]) || name.Contains(',')
+                || !Enum.TryParse<HMAxis>(name, ignoreCase: true, out var axis) || axis == HMAxis.None || !Enum.IsDefined(axis))
+                throw new InvalidOperationException($"axisCenters.{name}: not an axis name such as X, Y, Z or Rz.");
+            if (!centers.TryAdd(axis, center))
+                throw new InvalidOperationException($"axisCenters.{name}: the axis {axis} is named twice.");
+        }
+        return centers;
     }
 
     /// <summary>The axes the layout names as sticks, whose fields rest at
