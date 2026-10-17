@@ -606,8 +606,35 @@ public sealed class ControllerProfile
             HMLayoutValidator.Validate(Layout, b);
             b.ApplyLayoutSemantics(Layout);
         }
+        b.SetStickAxes(StickAxesOf(Layout, b));
         _cachedReportBuilder = b;
         return b;
+    }
+
+    /// <summary>The axes the layout names as sticks, whose fields rest at
+    /// their center when a consumer leaves them unwritten. A layout of a
+    /// kind with sticks names them. A profile with no layout takes the
+    /// sticks the descriptor's classifier found, as
+    /// <see cref="HMProfile.Sticks"/> lists them. Wheels, pedals and the
+    /// other kinds name none.</summary>
+    internal static List<HMAxis> StickAxesOf(HMLayout? layout, HidReportBuilder b)
+    {
+        var axes = new List<HMAxis>();
+        void Add(HMStick s) { axes.Add(s.XAxis); axes.Add(s.YAxis); }
+        void Slot(HidReportBuilder.InputField? f) { if (f != null) axes.Add((HMAxis)((f.UsagePage << 8) | f.Usage)); }
+        switch (layout)
+        {
+            case HMGamepadLayout g: foreach (var s in g.Sticks) Add(s); break;
+            case HMJoystickLayout j: Add(j.Stick); break;
+            case HMFlightStickLayout f: Add(f.Stick); break;
+            case HMHotasLayout h: Add(h.Stick); break;
+            case null:
+            case HMUnspecifiedLayout:
+                Slot(b.LeftStickX); Slot(b.LeftStickY); Slot(b.RightStickX); Slot(b.RightStickY);
+                Slot(b.ThirdStickX); Slot(b.ThirdStickY); Slot(b.FourthStickX); Slot(b.FourthStickY);
+                break;
+        }
+        return axes;
     }
 }
 

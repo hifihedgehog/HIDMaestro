@@ -53,6 +53,37 @@ public class HidReportBuilder
         set { _axisMap = value; _canonicalTriggersResolved = false; }
     }
 
+    // The per-axis pass, compiled when the builder is parsed and again when
+    // the profile sets its sticks, both at create, so no frame builds it:
+    // each declared analog field with the value it rests at when the
+    // consumer leaves it out or writes NaN.
+    private readonly record struct AxisWrite(HMAxis Key, InputField Field, double Rest);
+    private AxisWrite[]? _axisWrites;
+    private HashSet<HMAxis>? _stickAxes;
+
+    /// <summary>The axes the profile's layout names as sticks. One that the
+    /// consumer leaves out of <see cref="HMGamepadState.Axes"/> rests at
+    /// 0.5, its center, as a real stick at rest does. Other axes rest as
+    /// before: 0.5 for a signed field and 0 for an unsigned one. Null, the
+    /// default, treats only signed fields as centered.</summary>
+    public void SetStickAxes(IEnumerable<HMAxis>? sticks)
+    {
+        _stickAxes = sticks == null ? null : new HashSet<HMAxis>(sticks);
+        _axisWrites = CompileAxisWrites();
+    }
+
+    private AxisWrite[] CompileAxisWrites()
+    {
+        var writes = new AxisWrite[AxisFields.Count];
+        int i = 0;
+        foreach (var (key, field) in AxisFields)
+        {
+            bool stick = _stickAxes != null && _stickAxes.Contains(key);
+            writes[i++] = new AxisWrite(key, field, stick || field.LogicalMin < 0 ? 0.5 : 0.0);
+        }
+        return writes;
+    }
+
     /// <summary>Optional button remapping table. Maps HMButton bit positions
     /// (index) to descriptor button indices (value). When set, BuildReport
     /// uses this to place semantic buttons at the correct descriptor positions
@@ -154,6 +185,7 @@ public class HidReportBuilder
             builder.AxisMap = axisMap;
             builder.ApplyAxisMap(axisMap);
         }
+        builder._axisWrites = builder.CompileAxisWrites();
         return builder;
     }
 
@@ -635,7 +667,8 @@ public class HidReportBuilder
     /// state.Axes keyed by HID usage; the encoder iterates every declared
     /// analog input field in the descriptor, reads the dict, and writes
     /// the report. Axes the consumer doesn't write default to centered
-    /// (signed axes) or released (unsigned axes) automatically.
+    /// (sticks and signed axes) or released (other unsigned axes)
+    /// automatically.
     /// All values are <c>[0.0..1.0]</c> normalized.</summary>
     /// <summary>v1.3.9: convenience: build an axes dict from the canonical
     /// 6-slot convention (leftStickX/Y, rightStickX/Y, leftTrigger,
@@ -679,8 +712,9 @@ public class HidReportBuilder
     ///
     /// <para>The encoder iterates every analog input field declared in
     /// the descriptor and reads its value from <paramref name="axes"/>:
-    /// signed-centered axes default to 0.5 (centered) when not in the
-    /// dict; unsigned axes default to 0.0 (released). Combined-Z trigger
+    /// sticks (<see cref="SetStickAxes"/>) and signed axes default to 0.5
+    /// (centered) when not in the dict, and other unsigned axes to 0.0
+    /// (released). Combined-Z trigger
     /// synthesis, hat priority chain (HatDegrees &gt; HatHundredths &gt;
     /// HatRaw &gt; Hat), trigger-to-button derivation, Guide routing, and
     /// button packing all run as before: only the axis-write path
@@ -724,12 +758,15 @@ public class HidReportBuilder
         }
 
         // Per-axis pass: write every declared analog input from the dict.
-        // Auto-default: signed-centered axes (LogicalMin < 0) → 0.5 (centered);
-        // unsigned axes → 0.0 (released).
-        foreach (var (key, field) in AxisFields)
+        // An axis the dict leaves out, or gives NaN, rests at 0.5 when it is
+        // a stick or a signed field, and at 0.0 otherwise (CompileAxisWrites).
+        // Until v2.0.0 an unsigned stick left out rested at 0, full left or
+        // up. A builder made other than by Parse compiles here, once.
+        var axisWrites = _axisWrites ??= CompileAxisWrites();
+        for (int i = 0; i < axisWrites.Length; i++)
         {
-            double def = field.LogicalMin < 0 ? 0.5 : 0.0;
-            WriteField(field, GetAxisValue(key, def));
+            ref readonly var w = ref axisWrites[i];
+            WriteField(w.Field, GetAxisValue(w.Key, w.Rest));
         }
 
         // Combined-Z trigger synthesis (Xbox 360 wired with Vx/Vy hidden pair):

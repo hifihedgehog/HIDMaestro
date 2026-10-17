@@ -2125,7 +2125,7 @@ function Scenario-Device-Oracle {
 }
 
 function Scenario-Arith-Roundtrip {
-    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'roundtrip' `
+    Invoke-Probe -Dir 'arith_roundtrip_check' -Exe 'ArithRoundtripCheck.exe' -Arguments 'check' `
                  -Message 'a raw value a consumer reads from a device no longer returns through the SDK as that value (see probe stdout for the conversion)'
     # Every float in [0, 1] through each catalog conversion, against the
     # design note's table: a range a descriptor brings in, or a change of
